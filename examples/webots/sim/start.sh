@@ -11,6 +11,16 @@
 # Stop with Ctrl-C, or from another terminal: `docker compose -f compose.yaml down`.
 set -euo pipefail
 
+# Sim container / compose-project names — overridable via ROBONIX_SIM_CONTAINER
+# / ROBONIX_SIM_PROJECT so a CI / parallel deploy brings up its OWN isolated
+# Webots container instead of the shared default. Exported so the compose files
+# (`name:`, `container_name:`) interpolate the same values. Stream ports are
+# similarly offset via ROBONIX_SIM_STREAM_PORT / ROBONIX_SIM_VIEWER_PORT, and
+# GPU via ROBONIX_GPU_ID. Defaults preserve existing single-deploy behaviour.
+export ROBONIX_SIM_CONTAINER="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+export ROBONIX_SIM_PROJECT="${ROBONIX_SIM_PROJECT:-robonix_tiago_sim}"
+SIM_CT="$ROBONIX_SIM_CONTAINER"
+
 # Resolve the script's own directory ONCE in absolute form. We cd into
 # it below; afterwards `$(dirname "$0")` no longer points anywhere
 # usable (it's relative to the *original* CWD, which is gone). The
@@ -101,7 +111,7 @@ docker compose "${CF[@]}" up --build -d
 # publishing /scanner /odom /head_front_camera/* etc."
 echo "[sim/start] waiting for sim ros topics..."
 for _ in $(seq 1 60); do
-    n=$(docker exec robonix_tiago_sim bash -c \
+    n=$(docker exec "$SIM_CT" bash -c \
         'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | wc -l' 2>/dev/null || echo 0)
     if [[ "${n:-0}" -gt 20 ]]; then
         echo "[sim/start] ros up ($n topics)"

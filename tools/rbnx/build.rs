@@ -21,6 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let contracts_root = repo_root.join("capabilities");
     let proto_out = PathBuf::from(std::env::var("OUT_DIR")?);
 
+    clean_generated_proto_dir(&proto_out)?;
+
     println!("cargo:rerun-if-changed={}", idl_root.display());
     println!("cargo:rerun-if-changed={}", contracts_root.display());
     println!("cargo:rerun-if-changed=build.rs");
@@ -130,20 +132,11 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
         .unwrap_or_else(|| "unknown".to_string());
     let builder = format!("{user}@{host}");
 
-    // Build time — UTC ISO-8601, second precision. SOURCE_DATE_EPOCH (the
-    // Reproducible Builds standard) overrides the wallclock for repro
-    // builds.
-    let build_time = if let Ok(s) = std::env::var("SOURCE_DATE_EPOCH")
-        && let Ok(secs) = s.parse::<i64>()
-    {
-        format_unix_utc(secs)
-    } else {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        format_unix_utc(secs)
-    };
+    // Build time in the build host's LOCAL timezone (e.g.
+    // 2026-06-29T09:09:22+0800), matching the usual kernel/dev banner — a bare
+    // UTC `Z` is confusing on a machine running local time. SOURCE_DATE_EPOCH
+    // (Reproducible Builds) still selects the instant when set.
+    let build_time = local_build_time();
 
     // Compiler version — `rustc -V` (e.g. "rustc 1.95.0 (abc123 2026-04-15)").
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
@@ -165,14 +158,65 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
     println!("cargo:rustc-env=ROBONIX_RUSTC={rustc_ver}");
     println!("cargo:rustc-env=ROBONIX_TARGET={target}");
 
-    // Rerun if any of these inputs change. The repo's HEAD ref is the
-    // most useful signal — covers commits and branch switches.
-    let head = repo_root.join(".git").join("HEAD");
+    // Rerun if the repo's commit changes. Watching only `.git/HEAD` is NOT
+    // enough: on a branch, HEAD stays "ref: refs/heads/<branch>" across
+    // commits — the file that actually changes is the ref it points to (and
+    // `.git/logs/HEAD`). Without these the embedded sha/build-time go stale
+    // after committing on the same branch (the binary recompiles from changed
+    // sources, but build.rs is not re-run, so the banner shows an old commit).
+    let git_dir = repo_root.join(".git");
+    let head = git_dir.join("HEAD");
     if head.exists() {
         println!("cargo:rerun-if-changed={}", head.display());
+        if let Ok(contents) = std::fs::read_to_string(&head)
+            && let Some(refpath) = contents.strip_prefix("ref:").map(str::trim)
+        {
+            let ref_file = git_dir.join(refpath);
+            if ref_file.exists() {
+                println!("cargo:rerun-if-changed={}", ref_file.display());
+            }
+        }
+    }
+    // logs/HEAD updates on every commit / checkout / reset — reliable catch-all
+    // (also covers the packed-refs case where the loose ref file is absent).
+    let logs_head = git_dir.join("logs").join("HEAD");
+    if logs_head.exists() {
+        println!("cargo:rerun-if-changed={}", logs_head.display());
     }
     println!("cargo:rerun-if-env-changed=ROBONIX_GIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+}
+
+/// Build timestamp in the host's local timezone, e.g.
+/// `2026-06-29T09:09:22+0800`. Shells out to `date` so we get the host TZ
+/// without a tz crate in the build-deps (build.rs already shells to `hostname`
+/// / `rustc`). SOURCE_DATE_EPOCH selects the instant for reproducible builds;
+/// otherwise "now". Falls back to UTC via `format_unix_utc` if `date` is
+/// unavailable or non-GNU (e.g. the `-d@` form is GNU-specific).
+fn local_build_time() -> String {
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    let mut cmd = std::process::Command::new("date");
+    if let Some(secs) = epoch {
+        cmd.arg(format!("-d@{secs}"));
+    }
+    cmd.arg("+%Y-%m-%dT%H:%M:%S%z");
+    if let Some(out) = cmd.output().ok().filter(|o| o.status.success())
+        && let Ok(s) = String::from_utf8(out.stdout)
+    {
+        let t = s.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let secs = epoch.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    });
+    format_unix_utc(secs)
 }
 
 /// Format a unix epoch (seconds) as `YYYY-MM-DDTHH:MM:SSZ`. Lifted out
@@ -200,4 +244,28 @@ fn format_unix_utc(secs: i64) -> String {
     let y_civ = y + i64::from(m_civ <= 2);
 
     format!("{y_civ:04}-{m_civ:02}-{d:02}T{h:02}:{m:02}:{sec:02}Z")
+}
+
+/// Removes stale generated proto/Rust files from OUT_DIR before regenerating.
+///
+/// Side effect: deletes only files with `.proto` or `.rs` extensions in the
+/// current crate build output directory. This keeps renamed IDL packages from
+/// being compiled alongside their previous generated names during incremental
+/// builds and rust-analyzer checks.
+fn clean_generated_proto_dir(
+    proto_out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !proto_out.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(proto_out)? {
+        let path = entry?.path();
+        let Some(ext) = path.extension().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        if matches!(ext, "proto" | "rs") {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }

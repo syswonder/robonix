@@ -4,6 +4,7 @@
 use anyhow::Result;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::warn;
 
 /// LLM-facing tool name = `<area>_<leaf>` of a contract_id, where
 /// `<area>` is the segment immediately before the leaf.
@@ -34,34 +35,76 @@ pub fn llm_name(contract_id: &str) -> String {
     }
 }
 
-/// One row per registered capability, summarised for the LLM-facing
-/// "## Capability docs (lazy-load via read_file)" block in pilot's
-/// system prompt. Includes only providers that registered with a non-empty
-/// `capability_md_path`. The path is what we hand the LLM verbatim;
-/// the executor's `read_file` builtin resolves it (it must be readable
-/// from the executor's host workspace).
+/// One row per provider that registered a CAPABILITY.md, summarised for the
+/// LLM-facing "## Capability docs" block in pilot's system prompt. We expose
+/// the `provider_id` (what the LLM passes to `read_capability_doc`), the
+/// package `kind` (from atlas's authoritative `CapabilityProvider.kind`, so
+/// skills can be flagged read-first), and a one-line `description` lifted from
+/// the CAPABILITY.md frontmatter — enough for the model to judge relevance
+/// without reading the full manual. The internal `namespace` and any
+/// filesystem path are deliberately NOT exposed.
 pub struct CapDoc {
     pub provider_id: String,
-    pub namespace: String,
-    pub md_path: String,
+    pub kind: String,
+    pub description: String,
 }
 
-/// Returns a `CapDoc` per capability that has a non-empty
-/// `capability_md_path`. Pilot lists these in the system prompt and
-/// the LLM read_files them lazily.
+/// Pull `description` from a CAPABILITY.md YAML frontmatter block.
+///
+/// The package-level frontmatter is a leading `---` … `---` fence with a single
+/// `description: <one line>` key (see the CAPABILITY.md format spec). The
+/// provider *kind* is deliberately NOT read here — it comes from atlas's
+/// authoritative `CapabilityProvider.kind` (set at registration via
+/// `Primitive`/`Service`/`Skill`), so the hand-written markdown can never drift
+/// from it. Returns an empty string when there is no frontmatter or no
+/// `description:` key, which is non-fatal: the provider still appears in the
+/// index, just without a one-line description until its CAPABILITY.md is updated.
+fn parse_description(md: &str) -> String {
+    let t = md.trim_start();
+    let Some(rest) = t.strip_prefix("---") else {
+        return String::new();
+    };
+    let Some(end) = rest.find("\n---") else {
+        return String::new();
+    };
+    for line in rest[..end].lines() {
+        if let Some(v) = line.trim().strip_prefix("description:") {
+            return v.trim().trim_matches('"').to_string();
+        }
+    }
+    String::new()
+}
+
+/// Map atlas's `CapabilityProvider.kind` enum to the lowercase label the prompt
+/// uses. Atlas is the source of truth for a provider's kind.
+fn kind_label(kind: i32) -> String {
+    match atlas_pb::Kind::try_from(kind) {
+        Ok(atlas_pb::Kind::Primitive) => "primitive",
+        Ok(atlas_pb::Kind::Service) => "service",
+        Ok(atlas_pb::Kind::Skill) => "skill",
+        _ => "",
+    }
+    .to_string()
+}
+
+/// Returns a `CapDoc` per provider that registered non-empty CAPABILITY.md
+/// *content*. Pilot lists these in the system prompt and instructs the LLM to
+/// pull the full text on demand via the `read_capability_doc` builtin.
 pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
     let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
         .await?;
     let mut out = Vec::new();
     for provider in providers {
-        if provider.capability_md_path.is_empty() {
+        if provider.capability_md.trim().is_empty() {
             continue;
         }
+        let kind = kind_label(provider.kind);
+        let description = parse_description(&provider.capability_md);
         out.push(CapDoc {
             provider_id: provider.id,
-            namespace: provider.namespace,
-            md_path: provider.capability_md_path,
+            kind,
+            description,
         });
     }
     Ok(out)
@@ -89,10 +132,9 @@ pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::
                 Some(atlas_pb::transport_params::Kind::Mcp(_))
             );
             if !has_mcp {
-                log::warn!(
+                warn!(
                     "[pilot/discovery] provider='{}' contract='{}' has no MCP params; skipping",
-                    provider.id,
-                    cap.contract_id
+                    provider.id, cap.contract_id
                 );
                 continue;
             }

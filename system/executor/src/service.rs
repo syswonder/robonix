@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// gRPC contract handler: RobonixSystemExecutor.Execute(Plan) → stream CapabilityCallEvent.
+// gRPC contract handlers for executor plan execution and cancellation.
 
-use crate::dispatch;
-use crate::exec_wire;
-use crate::pb::contracts::robonix_system_executor_server::RobonixSystemExecutor;
-use crate::pb::executor::CapabilityCallEvent;
-use crate::pb::pilot::{CapabilityCall, Plan};
+use crate::dispatch::{async_poll, async_registry};
+use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
+use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
+use crate::pb::executor::{CancelAllResponse, RtdlEvent};
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
+use crate::plan_runtime::{PlanRuntime, StopWhen};
+use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
+use robonix_scribe::{info, warn};
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -32,17 +37,22 @@ pub struct ExecutorServiceImpl {
     ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
     provider_id: String,
+    runtime: PlanRuntime,
 }
 
 impl ExecutorServiceImpl {
     pub fn new(atlas: AtlasClient, provider_id: String) -> Self {
-        Self { atlas, provider_id }
+        Self {
+            atlas,
+            provider_id,
+            runtime: PlanRuntime::default(),
+        }
     }
 }
 
 #[tonic::async_trait]
-impl RobonixSystemExecutor for ExecutorServiceImpl {
-    type ExecuteStream = ReceiverStream<Result<CapabilityCallEvent, Status>>;
+impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
+    type ExecuteStream = ReceiverStream<Result<RtdlEvent, Status>>;
 
     async fn execute(
         &self,
@@ -53,20 +63,32 @@ impl RobonixSystemExecutor for ExecutorServiceImpl {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
+        let runtime = self.runtime.clone();
 
         tokio::spawn(async move {
             let plan_id = plan.plan_id.clone();
             let plan = Arc::new(plan);
+            runtime.register_plan(&plan_id).await;
+            runtime.record_plan_ops(&plan).await;
+            let _ = tx.send(Ok(rtdl_wire::plan_started(plan_id.clone()))).await;
             let any_failed = execute_node(
                 Arc::clone(&plan),
                 plan.root_index as usize,
                 tx.clone(),
                 atlas,
                 provider_id,
+                runtime.clone(),
             )
             .await;
+            let cancelled = runtime.is_cancelled(&plan_id).await;
+            runtime.complete_plan(&plan_id).await;
 
-            let _ = tx.send(Ok(exec_wire::complete(plan_id, any_failed))).await;
+            let _ = tx
+                .send(Ok(rtdl_wire::plan_complete(
+                    plan_id,
+                    any_failed || cancelled,
+                )))
+                .await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -78,26 +100,80 @@ type ExecuteNodeFuture = Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
 fn execute_node(
     plan: Arc<Plan>,
     node_index: usize,
-    tx: Sender<Result<CapabilityCallEvent, Status>>,
+    tx: Sender<Result<RtdlEvent, Status>>,
     atlas: AtlasClient,
     provider_id: String,
+    runtime: PlanRuntime,
 ) -> ExecuteNodeFuture {
     Box::pin(async move {
         let node = &plan.nodes[node_index];
-        match node.node_kind {
+        let node_ctx = node_event_context(&plan, node_index);
+        let op_id = node.op_id.clone();
+        if runtime.is_cancelled(&plan.plan_id).await {
+            if is_operator_node(node.node_kind) {
+                send_operator_terminal(
+                    &tx,
+                    &node_ctx,
+                    RtdlNodeStateEnum::Canceled as u32,
+                    "canceled",
+                    &runtime,
+                )
+                .await;
+            }
+            return true;
+        }
+        if runtime
+            .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnEnter)
+            .await
+        {
+            let mut atlas = atlas;
+            runtime
+                .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
+                .await;
+            send_stop_on_enter(&tx, &node_ctx, &runtime).await;
+            return true;
+        }
+        let mut atlas_after = atlas.clone();
+        let failed = match node.node_kind {
             RTDL_SEQUENCE => {
                 let mut any_failed = false;
+                let mut cancelled = false;
                 for child in &node.children {
+                    if runtime.is_cancelled(&plan.plan_id).await {
+                        cancelled = true;
+                        any_failed = true;
+                        break;
+                    }
                     any_failed |= execute_node(
                         Arc::clone(&plan),
                         *child as usize,
                         tx.clone(),
                         atlas.clone(),
                         provider_id.clone(),
+                        runtime.clone(),
                     )
                     .await;
+                    if any_failed {
+                        break;
+                    }
                 }
-                any_failed
+                let cancelled = cancelled || runtime.is_cancelled(&plan.plan_id).await;
+                let state = if cancelled {
+                    RtdlNodeStateEnum::Canceled as u32
+                } else if any_failed {
+                    RtdlNodeStateEnum::Failed as u32
+                } else {
+                    RtdlNodeStateEnum::Succeeded as u32
+                };
+                let reason = if cancelled {
+                    "canceled before remaining children could run"
+                } else if any_failed {
+                    "failed because a child node failed"
+                } else {
+                    "completed successfully"
+                };
+                send_operator_terminal(&tx, &node_ctx, state, reason, &runtime).await;
+                any_failed || cancelled
             }
             RTDL_PARALLEL => {
                 let mut handles = Vec::with_capacity(node.children.len());
@@ -106,6 +182,7 @@ fn execute_node(
                     let child_tx = tx.clone();
                     let child_atlas = atlas.clone();
                     let child_provider_id = provider_id.clone();
+                    let child_runtime = runtime.clone();
                     let child_index = *child as usize;
                     handles.push(tokio::spawn(async move {
                         execute_node(
@@ -114,6 +191,7 @@ fn execute_node(
                             child_tx,
                             child_atlas,
                             child_provider_id,
+                            child_runtime,
                         )
                         .await
                     }));
@@ -124,72 +202,263 @@ fn execute_node(
                         Ok(child_failed) => any_failed |= child_failed,
                         Err(e) => {
                             any_failed = true;
-                            log::warn!("[executor] parallel branch task failed: {e}");
+                            warn!("[executor] parallel branch task failed: {e}");
                         }
                     }
                 }
-                any_failed
+                let cancelled = runtime.is_cancelled(&plan.plan_id).await;
+                let state = if cancelled {
+                    RtdlNodeStateEnum::Canceled as u32
+                } else if any_failed {
+                    RtdlNodeStateEnum::Failed as u32
+                } else {
+                    RtdlNodeStateEnum::Succeeded as u32
+                };
+                let reason = if cancelled {
+                    "canceled"
+                } else if any_failed {
+                    "failed because one or more child nodes failed"
+                } else {
+                    "completed successfully"
+                };
+                send_operator_terminal(&tx, &node_ctx, state, reason, &runtime).await;
+                any_failed || cancelled
             }
             RTDL_DO => {
                 let call = node
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                execute_call(call, tx, atlas, provider_id).await
+                execute_call(
+                    call,
+                    node_ctx,
+                    tx,
+                    atlas,
+                    provider_id.clone(),
+                    runtime.clone(),
+                )
+                .await
             }
             _ => {
-                log::warn!(
+                warn!(
                     "[executor] invalid node_kind={} reached after validation",
                     node.node_kind
                 );
                 true
             }
+        };
+        if runtime
+            .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnComplete)
+            .await
+        {
+            runtime
+                .trigger_stop(&plan.plan_id, &provider_id, &mut atlas_after)
+                .await;
         }
+        failed
     })
 }
 
-/// Dispatch one RTDL `do` node and stream its started/result events.
+/// Build the wire context copied into every node_state event.
+fn node_event_context(plan: &Plan, node_index: usize) -> NodeEventContext {
+    let node = &plan.nodes[node_index];
+    NodeEventContext {
+        plan_id: plan.plan_id.clone(),
+        node_index: node_index as u32,
+        node_kind: node.node_kind,
+        op_id: node.op_id.clone(),
+        description: node.description.clone(),
+    }
+}
+
+/// Return whether a node kind is an RTDL operator rather than a leaf call.
+fn is_operator_node(node_kind: u32) -> bool {
+    matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
+}
+
+/// Emit the terminal event for an `on_enter` stop point on any RTDL node.
+async fn send_stop_on_enter(
+    tx: &Sender<Result<RtdlEvent, Status>>,
+    node: &NodeEventContext,
+    runtime: &PlanRuntime,
+) {
+    let detail = format!("stopped on entering op_id={}: plan cancelled", node.op_id);
+    runtime
+        .record_op_state(
+            &node.plan_id,
+            &node.op_id,
+            RtdlNodeStateEnum::Canceled as u32,
+        )
+        .await;
+    if is_operator_node(node.node_kind) {
+        let _ = tx
+            .send(Ok(rtdl_wire::operator_node_state(
+                node,
+                RtdlNodeStateEnum::Canceled as u32,
+                detail,
+            )))
+            .await;
+    } else {
+        let _ = tx
+            .send(Ok(rtdl_wire::node_state(
+                node,
+                RtdlNodeStateEnum::Canceled as u32,
+                detail,
+                None,
+            )))
+            .await;
+    }
+}
+
+/// Stream the terminal event for a non-leaf RTDL operator node, and record the
+/// state so `get_plan_status` reflects it.
+async fn send_operator_terminal(
+    tx: &Sender<Result<RtdlEvent, Status>>,
+    node: &NodeEventContext,
+    state: u32,
+    reason: &str,
+    runtime: &PlanRuntime,
+) {
+    let op = match node.node_kind {
+        RTDL_SEQUENCE => "sequence",
+        RTDL_PARALLEL => "parallel",
+        _ => "operator",
+    };
+    let detail = format!(
+        "RTDL {op} op_id={} {reason}: {}",
+        node.op_id, node.description
+    );
+    runtime
+        .record_op_state(&node.plan_id, &node.op_id, state)
+        .await;
+    let _ = tx
+        .send(Ok(rtdl_wire::operator_node_state(node, state, detail)))
+        .await;
+}
+
+/// Dispatch one RTDL `do` node and stream node_state events.
 async fn execute_call(
     call: &CapabilityCall,
-    tx: Sender<Result<CapabilityCallEvent, Status>>,
-    atlas: AtlasClient,
+    node: NodeEventContext,
+    tx: Sender<Result<RtdlEvent, Status>>,
+    mut atlas: AtlasClient,
     provider_id: String,
+    runtime: PlanRuntime,
 ) -> bool {
-    // `tokio::sync::mpsc::Sender` is concurrency-safe when cloned (parallel branches).
-    // Outbound events ride the Execute server-stream to the gRPC client (Pilot).
-    let _ = tx
-        .send(Ok(exec_wire::started(
-            call.call_id.clone(),
-            call.provider_id.clone(),
-            call.contract_id.clone(),
-        )))
+    // Log the args too (bounded) so the log shows what each call requested —
+    // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
+    // and any cap call. Truncated to keep large payloads (images, file content)
+    // from bloating the log.
+    let args_preview: String = call.args_json.chars().take(256).collect();
+    let args_ellipsis = if call.args_json.len() > 256 {
+        "…"
+    } else {
+        ""
+    };
+    info!(
+        "[executor] dispatching call_id={} provider='{}' contract='{}' args={}{}",
+        call.call_id, call.provider_id, call.contract_id, args_preview, args_ellipsis,
+    );
+
+    // Mark the op running so get_plan_status shows the in-flight node; the
+    // terminal state below (or async_poll for async caps) overwrites it.
+    runtime
+        .record_op_state(
+            &node.plan_id,
+            &node.op_id,
+            RtdlNodeStateEnum::Running as u32,
+        )
         .await;
 
-    log::info!(
-        "[executor] dispatching call_id={} provider='{}' contract='{}'",
-        call.call_id,
-        call.provider_id,
-        call.contract_id,
-    );
-    let mut atlas_for_call = atlas.clone();
-    let result = dispatch::dispatch(call, &provider_id, &mut atlas_for_call).await;
+    let async_group = if call.provider_id == provider_id {
+        Ok(None)
+    } else {
+        async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id).await
+    };
+
+    let result = match async_group {
+        Err(error) => {
+            let r = CapabilityCallResult {
+                call_id: call.call_id.clone(),
+                provider_id: call.provider_id.clone(),
+                contract_id: call.contract_id.clone(),
+                success: false,
+                output: String::new(),
+                error,
+            };
+            runtime
+                .record_op_state(&node.plan_id, &node.op_id, RtdlNodeStateEnum::Failed as u32)
+                .await;
+            let _ = tx
+                .send(Ok(rtdl_wire::node_state_from_result(
+                    &node,
+                    r.clone(),
+                    RtdlNodeStateEnum::Failed as u32,
+                )))
+                .await;
+            r
+        }
+        Ok(Some(group)) => {
+            async_poll::run_until_terminal(
+                call,
+                &group,
+                &provider_id,
+                &mut atlas,
+                &tx,
+                &node,
+                &runtime,
+            )
+            .await
+        }
+        Ok(None) => {
+            let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
+            let state = if r.success {
+                RtdlNodeStateEnum::Succeeded as u32
+            } else {
+                RtdlNodeStateEnum::Failed as u32
+            };
+            runtime
+                .record_op_state(&node.plan_id, &node.op_id, state)
+                .await;
+            let _ = tx
+                .send(Ok(rtdl_wire::node_state_from_result(
+                    &node,
+                    r.clone(),
+                    state,
+                )))
+                .await;
+            r
+        }
+    };
     let failed = !result.success;
 
     if result.success {
-        let preview: String = result.output.chars().take(120).collect();
-        let ellipsis = if result.output.len() > 120 { "..." } else { "" };
-        log::info!(
+        let preview: String = result.output.chars().take(512).collect();
+        let ellipsis = if result.output.len() > 512 { "..." } else { "" };
+        info!(
             "[executor] '{}' ok: {}{}",
-            call.contract_id,
-            preview,
-            ellipsis
+            call.contract_id, preview, ellipsis
         );
     } else {
-        log::warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
+        warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
     }
 
-    let _ = tx.send(Ok(exec_wire::result(result))).await;
     failed
+}
+
+#[tonic::async_trait]
+impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
+    async fn cancel_all(
+        &self,
+        _request: Request<crate::pb::executor::CancelAllRequest>,
+    ) -> Result<Response<CancelAllResponse>, Status> {
+        let mut atlas = self.atlas.clone();
+        let success = self
+            .runtime
+            .cancel_all_plans(&self.provider_id, &mut atlas)
+            .await;
+        Ok(Response::new(CancelAllResponse { success }))
+    }
 }
 
 /// Validate Plan arena shape before spawning execution work.
@@ -206,7 +475,18 @@ fn validate_plan(plan: &Plan) -> Result<(), String> {
         ));
     }
 
+    let mut op_ids = HashSet::new();
     for (idx, node) in plan.nodes.iter().enumerate() {
+        let op_id = node.op_id.trim();
+        if op_id.is_empty() {
+            return Err(format!("node {idx} op_id must not be empty"));
+        }
+        if !op_ids.insert(op_id.to_string()) {
+            return Err(format!("node {idx} has duplicate op_id '{op_id}'"));
+        }
+        if node.description.trim().is_empty() {
+            return Err(format!("node {idx} description must not be empty"));
+        }
         match node.node_kind {
             RTDL_SEQUENCE | RTDL_PARALLEL => {
                 for child in &node.children {
@@ -280,8 +560,13 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, validate_plan};
+    use super::{
+        PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
+        send_operator_terminal, send_stop_on_enter, validate_plan,
+    };
+    use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
+    use crate::rtdl_wire::NodeEventContext;
 
     fn call(id: &str) -> CapabilityCall {
         CapabilityCall {
@@ -293,10 +578,22 @@ mod tests {
     }
 
     fn node(kind: u32, children: Vec<u32>, call: Option<CapabilityCall>) -> RtdlNode {
+        node_with_identity("op", "test node", kind, children, call)
+    }
+
+    fn node_with_identity(
+        op_id: &str,
+        description: &str,
+        kind: u32,
+        children: Vec<u32>,
+        call: Option<CapabilityCall>,
+    ) -> RtdlNode {
         RtdlNode {
             node_kind: kind,
             children,
             call,
+            op_id: op_id.to_string(),
+            description: description.to_string(),
         }
     }
 
@@ -314,15 +611,51 @@ mod tests {
     fn validates_sequence_and_parallel_nodes() {
         let p = plan(
             vec![
-                node(RTDL_SEQUENCE, vec![1, 2], None),
-                node(RTDL_DO, vec![], Some(call("p:0"))),
-                node(RTDL_PARALLEL, vec![3, 4], None),
-                node(RTDL_DO, vec![], Some(call("p:1"))),
-                node(RTDL_DO, vec![], Some(call("p:2"))),
+                node_with_identity("op_1", "run sequence", RTDL_SEQUENCE, vec![1, 2], None),
+                node_with_identity("op_2", "call first cap", RTDL_DO, vec![], Some(call("p:0"))),
+                node_with_identity("op_3", "run parallel", RTDL_PARALLEL, vec![3, 4], None),
+                node_with_identity(
+                    "op_4",
+                    "call second cap",
+                    RTDL_DO,
+                    vec![],
+                    Some(call("p:1")),
+                ),
+                node_with_identity("op_5", "call third cap", RTDL_DO, vec![], Some(call("p:2"))),
             ],
             0,
         );
         validate_plan(&p).unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_op_id() {
+        let p = plan(
+            vec![node_with_identity("", "root", RTDL_SEQUENCE, vec![], None)],
+            0,
+        );
+        assert!(validate_plan(&p).unwrap_err().contains("op_id"));
+    }
+
+    #[test]
+    fn rejects_empty_description() {
+        let p = plan(
+            vec![node_with_identity("op_1", "", RTDL_SEQUENCE, vec![], None)],
+            0,
+        );
+        assert!(validate_plan(&p).unwrap_err().contains("description"));
+    }
+
+    #[test]
+    fn rejects_duplicate_op_id() {
+        let p = plan(
+            vec![
+                node_with_identity("op_1", "root", RTDL_SEQUENCE, vec![1], None),
+                node_with_identity("op_1", "child", RTDL_DO, vec![], Some(call("p:0"))),
+            ],
+            0,
+        );
+        assert!(validate_plan(&p).unwrap_err().contains("duplicate op_id"));
     }
 
     #[test]
@@ -341,8 +674,8 @@ mod tests {
     fn rejects_cycle() {
         let p = plan(
             vec![
-                node(RTDL_SEQUENCE, vec![1], None),
-                node(RTDL_PARALLEL, vec![0], None),
+                node_with_identity("op_1", "root", RTDL_SEQUENCE, vec![1], None),
+                node_with_identity("op_2", "child", RTDL_PARALLEL, vec![0], None),
             ],
             0,
         );
@@ -357,5 +690,60 @@ mod tests {
                 .unwrap_err()
                 .contains("must contain a call")
         );
+    }
+
+    #[tokio::test]
+    async fn operator_terminal_event_carries_node_identity() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let node = NodeEventContext {
+            plan_id: "p".to_string(),
+            node_index: 0,
+            node_kind: RTDL_SEQUENCE,
+            op_id: "op_1".to_string(),
+            description: "run the ordered checks".to_string(),
+        };
+
+        let runtime = PlanRuntime::default();
+        send_operator_terminal(
+            &tx,
+            &node,
+            RtdlNodeStateEnum::Succeeded as u32,
+            "completed successfully",
+            &runtime,
+        )
+        .await;
+
+        let event = rx.recv().await.unwrap().unwrap();
+        let ns = event.node_state.unwrap();
+        assert_eq!(event.event_kind, RtdlEventEnum::NodeState as u32);
+        assert_eq!(ns.op_id, "op_1");
+        assert_eq!(ns.description, "run the ordered checks");
+        assert_eq!(ns.state, RtdlNodeStateEnum::Succeeded as u32);
+        assert!(ns.leaf_result.is_none());
+        assert!(ns.operator_detail.contains("RTDL sequence op_id=op_1"));
+    }
+
+    #[tokio::test]
+    async fn stop_on_enter_event_supports_operator_nodes() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let runtime = PlanRuntime::default();
+        runtime.register_plan("p").await;
+        let node = NodeEventContext {
+            plan_id: "p".to_string(),
+            node_index: 0,
+            node_kind: RTDL_PARALLEL,
+            op_id: "op_1".to_string(),
+            description: "run branches".to_string(),
+        };
+
+        send_stop_on_enter(&tx, &node, &runtime).await;
+
+        let event = rx.recv().await.unwrap().unwrap();
+        let ns = event.node_state.unwrap();
+        assert_eq!(event.event_kind, RtdlEventEnum::NodeState as u32);
+        assert_eq!(ns.op_id, "op_1");
+        assert_eq!(ns.state, RtdlNodeStateEnum::Canceled as u32);
+        assert!(ns.leaf_result.is_none());
+        assert!(ns.operator_detail.contains("stopped on entering"));
     }
 }

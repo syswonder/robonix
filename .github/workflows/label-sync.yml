@@ -1,0 +1,24 @@
+name: Label sync
+
+# Create/update the repo's canonical labels from .github/labels.yml whenever it
+# changes on dev (or on manual dispatch). skip-delete keeps any pre-existing
+# labels that are not listed in the file.
+
+on:
+  push:
+    branches: [dev]
+    paths: [".github/labels.yml"]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crazy-max/ghaction-github-labeler@v5
+        with:
+          yaml-file: .github/labels.yml
+          skip-delete: true

@@ -7,15 +7,15 @@
 // is. Missing providers are silently tolerated — memory is never load-bearing.
 
 use crate::discovery;
-use crate::history::decode_string_output;
-use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
+use crate::pb::executor::rtdl_event::RtdlEventEnum;
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
 use crate::planner::ExecutorConn;
 use robonix_atlas::client::AtlasClient;
+use robonix_scribe::debug;
 use tonic::Request;
 use uuid::Uuid;
 
-/// Executor `CapabilityCallEvent.event_kind` for "tool result".
-const EX_RESULT: u32 = 1;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_DO: u32 = 2;
 
@@ -29,11 +29,15 @@ fn single_call_plan(plan_id: String, session_id: String, round: u32, call: Capab
                 node_kind: RTDL_SEQUENCE,
                 children: vec![1],
                 call: None,
+                op_id: "memory_prefetch_sequence".to_string(),
+                description: "Run memory prefetch before planning".to_string(),
             },
             RtdlNode {
                 node_kind: RTDL_DO,
                 children: Vec::new(),
                 call: Some(call),
+                op_id: "memory_prefetch_search".to_string(),
+                description: "Search memory for context relevant to the user request".to_string(),
             },
         ],
         root_index: 0,
@@ -61,6 +65,7 @@ pub async fn prefetch(
         },
     );
 
+    let submitted_plan = plan.clone();
     let mut stream = executor
         .graph
         .execute(Request::new(plan))
@@ -68,12 +73,14 @@ pub async fn prefetch(
         .ok()?
         .into_inner();
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT
-            && let Some(r) = event.result
+        if event.event_kind == RtdlEventEnum::NodeState as u32
+            && let Some(ns) = event.node_state
+            && is_terminal_executor_state(ns.state)
         {
-            let out = decode_string_output(&r.output);
+            let r = executor_node_state_to_result(&submitted_plan, ns);
+            let out = r.output;
             if r.success && !out.contains("No relevant memories") && !out.is_empty() {
-                log::debug!("[pilot] memory prefetch: {out}");
+                debug!("[pilot] memory prefetch: {out}");
                 return Some(out);
             }
             return None;
@@ -88,7 +95,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
     let providers = match discovery::discover(atlas).await {
         Ok(c) => c,
         Err(e) => {
-            log::debug!("[pilot] compact_memory: discovery failed: {e}");
+            debug!("[pilot] compact_memory: discovery failed: {e}");
             return;
         }
     };
@@ -111,6 +118,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         },
     );
 
+    let submitted_plan = plan.clone();
     let Ok(mut stream) = executor
         .graph
         .execute(Request::new(plan))
@@ -120,16 +128,56 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         return;
     };
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT
-            && let Some(r) = event.result
+        if event.event_kind == RtdlEventEnum::NodeState as u32
+            && let Some(ns) = event.node_state
+            && is_terminal_executor_state(ns.state)
         {
-            let out = decode_string_output(&r.output);
+            let r = executor_node_state_to_result(&submitted_plan, ns);
+            let out = r.output;
             if r.success {
-                log::debug!("[pilot] compact_memory: {out}");
+                debug!("[pilot] compact_memory: {out}");
             } else {
-                log::debug!("[pilot] compact_memory failed: {out}");
+                debug!("[pilot] compact_memory failed: {out}");
             }
             return;
         }
+    }
+}
+
+fn is_terminal_executor_state(state: u32) -> bool {
+    matches!(
+        RtdlNodeStateEnum::try_from(state as i32),
+        Ok(RtdlNodeStateEnum::Succeeded
+            | RtdlNodeStateEnum::Failed
+            | RtdlNodeStateEnum::Canceled
+            | RtdlNodeStateEnum::Timeout)
+    )
+}
+
+/// Convert memory helper node events into the shared result record. `do` nodes
+/// carry a concrete capability result; operator detail is only a fallback.
+fn executor_node_state_to_result(
+    plan: &Plan,
+    ns: crate::pb::pilot::RtdlNodeState,
+) -> CapabilityCallResult {
+    if let Some(result) = ns.leaf_result {
+        return result;
+    }
+    let call = plan
+        .nodes
+        .get(ns.node_index as usize)
+        .and_then(|node| node.call.as_ref());
+    let success = ns.state == RtdlNodeStateEnum::Succeeded as u32;
+    CapabilityCallResult {
+        call_id: call.map(|c| c.call_id.clone()).unwrap_or_default(),
+        provider_id: call.map(|c| c.provider_id.clone()).unwrap_or_default(),
+        contract_id: call.map(|c| c.contract_id.clone()).unwrap_or_default(),
+        success,
+        output: ns.operator_detail.clone(),
+        error: if success {
+            String::new()
+        } else {
+            ns.operator_detail
+        },
     }
 }

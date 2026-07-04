@@ -1,0 +1,12 @@
+# Query the status of a previously issued navigation goal.
+# Async status contract for `robonix/service/navigation/navigate`.
+# ROS IDL: `lib/service/navigation/srv/GetNavigationStatus.srv` (optional run_id → known + state + detail).
+[contract]
+id      = "robonix/service/navigation/navigate/status"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/GetNavigationStatus.srv"
+description = "Read status for a previously accepted navigation run."
+
+[mode]
+type = "rpc"

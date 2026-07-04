@@ -36,10 +36,10 @@ scene = Service(id="scene", namespace="robonix/system/scene")
 
 from . import mcp_tools
 from . import web as web_ui
+from .ingest.capabilities import plan_perception
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
-    DEFAULT_WEBOTS_TIAGO_TOPICS,
     SubscribersHub,
     TopicSpec,
 )
@@ -48,6 +48,7 @@ from .state import (
     ObjectRegistry,
     Pose3D,
     RelationEngine,
+    SceneObject,
 )
 from .state.object_registry import now_unix
 
@@ -101,6 +102,7 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
     ("lidar3d",           "robonix/primitive/lidar/pointcloud",  "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
+    ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
     ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
     ("odom",              "robonix/service/map/odom",            "Odometry"),
     ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
@@ -323,6 +325,8 @@ class _SelfTracker:
 
 
 # ── Stale-tick: flip missing flag after grace period ───────────────────────
+
+
 async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> None:
     while True:
         async with registry.lock():
@@ -454,12 +458,16 @@ async def _start_ros_ingest(
         await asyncio.sleep(2.0)
 
     # ── perception ─────────────────────────────────────────────────────────
-    # ConceptGraphs path is *strongly* preferred: it owns metric-accurate
-    # depth-backprojected poses. The VLM path stays as a no-depth fallback
-    # but we log loudly when we fall into it because pose accuracy will
-    # suffer.
+    # Which perception tier the current hardware supports is decided by the
+    # capability probe, not inline here: `plan.detector` routes to the
+    # ConceptGraphs (metric), VLM (visual), or no (geometric) path. The
+    # metric path is strongly preferred — it owns depth-backprojected
+    # poses; the others are named, logged degradations, not silent ones.
+    plan = plan_perception(hub)
+    log.info("[scene] perception plan: %s", plan.summary())
+    intrinsics_fallback = _scene_intrinsics_fallback(config.get("intrinsics_fallback"))
     detector: Optional[Any] = None
-    if hub.has("rgb") and hub.has("depth"):
+    if plan.detector == "concept_graphs":
 
         def _rgb_msg() -> Optional[Any]:
             msg, stamp, _ = hub.latest("rgb")
@@ -473,14 +481,53 @@ async def _start_ros_ingest(
                 return None
             return msg
 
-        # Camera intrinsics: prefer a dedicated camera_info topic if a
-        # primitive ever publishes one (TODO: subscribe to camera_info as
-        # a separate kind). For now we fall back to the static webots
-        # tiago intrinsics — same as the VLM path used. If a deployment
-        # has different intrinsics it can override via
-        # SCENE_CAMERA_INTRINSICS=fx,fy,cx,cy,w,h.
+        # Prefer the live `primitive/camera/intrinsics` contract. Deployments
+        # without a reliable CameraInfo stream may opt in via an explicit
+        # `intrinsics_fallback` in the scene config. This still runs the real
+        # RGB-D ConceptGraphs path; it only supplies K for back-projection when
+        # the contract has not delivered a usable sample yet.
+        intrinsics_logged = {"ok": False, "bad": False, "fallback": False}
+
         def _cam_info() -> Optional[_CamIntrinsics]:
-            return _resolved_cam_intrinsics()
+            if hub.has("intrinsics"):
+                msg, stamp, _ = hub.latest("intrinsics")
+                if msg is not None and stamp > 0.0:
+                    k = _cam_info_to_intrinsics(msg)
+                    if k is not None:
+                        if not intrinsics_logged["ok"]:
+                            log.info(
+                                "[scene] camera intrinsics from contract: "
+                                "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
+                                k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                            )
+                            intrinsics_logged["ok"] = True
+                        return k
+                    # Contract is published but the CameraInfo K is zero/garbage —
+                    # distinct from "no contract"; warn once so a miscalibrated
+                    # publisher is visible rather than silently stalling perception.
+                    if not intrinsics_logged["bad"]:
+                        log.warning(
+                            "[scene] intrinsics contract published but CameraInfo K "
+                            "is unusable — detector will use configured fallback if available"
+                        )
+                        intrinsics_logged["bad"] = True
+            if intrinsics_fallback is not None:
+                source, k = intrinsics_fallback
+                if not intrinsics_logged["fallback"]:
+                    log.warning(
+                        "[scene] camera intrinsics fallback: %s "
+                        "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
+                        source, k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                    )
+                    intrinsics_logged["fallback"] = True
+                return k
+            return None
+
+        camera_frame = str(
+            config.get("camera_frame")
+            or os.environ.get("SCENE_CAMERA_FRAME")
+            or "camera_optical_frame"
+        )
 
         detector = ConceptGraphsDetector(
             rgb_fetcher_msg=_rgb_msg,
@@ -495,10 +542,17 @@ async def _start_ros_ingest(
             # `primitive/camera/extrinsics`). tf2 is reserved for the
             # legacy fallback path.
             hub=hub,
+            # Detection cadence. The default 0.6 s keeps objects fresh but runs
+            # YOLO+CLIP on the GPU continuously; on a shared Jetson GPU that
+            # starves co-located GPU work (e.g. FunASR ASR), making voice slow.
+            # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
+            # speech + perception together.
+            period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            camera_frame=camera_frame,
         )
         await detector.start()
         log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
-    elif hub.has("rgb"):
+    elif plan.detector == "vlm":
         log.warning(
             "[scene] perception: no depth stream — falling back to "
             "VLMObjectDetector. Object positions will be approximate. "
@@ -511,35 +565,136 @@ async def _start_ros_ingest(
                 return None
             return _image_msg_to_jpeg(msg)
 
+        # Use the contract K when it has already landed, else the same explicit
+        # deployment fallback accepted by the metric path. Do not invent a
+        # camera model here: even approximate VLM detections become misleading
+        # when projected through an unreviewed K.
+        vlm_intrinsics: Optional[_CamIntrinsics] = None
+        if hub.has("intrinsics"):
+            msg, stamp, _ = hub.latest("intrinsics")
+            if msg is not None and stamp > 0.0:
+                vlm_intrinsics = _cam_info_to_intrinsics(msg)
+        if vlm_intrinsics is None and intrinsics_fallback is not None:
+            _, vlm_intrinsics = intrinsics_fallback
+        log.info(
+            "[scene] VLM intrinsics: %s",
+            "configured" if vlm_intrinsics is not None else "unavailable",
+        )
+
         detector = VLMObjectDetector(
             rgb_fetcher=_rgb_jpeg,
             chassis_pose_fn=self_tracker.latest_xy_yaw,
             on_detections=lambda dets: _ingest_detections(registry, dets),
             period_s=4.0,
+            camera_frame_id=str(
+                config.get("camera_frame")
+                or os.environ.get("SCENE_CAMERA_FRAME")
+                or "camera_optical_frame"
+            ),
+            intrinsics=vlm_intrinsics,
         )
         await detector.start()
     else:
-        log.warning("[scene] perception: no RGB stream — detector disabled")
+        # geometric tier: no camera. Object detection is off, but the
+        # occupancy grid + goal_near BFS stay available, so navigation-
+        # style queries still work — this is a degraded mode, not a fault.
+        log.warning(
+            "[scene] perception: geometric tier — no camera wired; object "
+            "detection disabled (occupancy_grid + goal_near remain available)"
+        )
 
     return hub, detector, bg_tasks
 
 
-def _resolved_cam_intrinsics() -> _CamIntrinsics:
-    """Camera intrinsics for the ConceptGraphs detector. Default is
-    webots tiago head_front_camera at 640x480 (60° HFOV). Override
-    via SCENE_CAMERA_INTRINSICS=fx,fy,cx,cy,w,h."""
-    raw = os.environ.get("SCENE_CAMERA_INTRINSICS", "").strip()
-    if raw:
+def _scene_intrinsics_fallback(raw: Any) -> Optional[tuple[str, _CamIntrinsics]]:
+    """Return an explicitly configured camera intrinsics fallback.
+
+    Real hardware should publish `primitive/camera/intrinsics`. The fallback is
+    opt-in and must include the full K because an unreviewed calibration silently
+    moves 3D objects.
+    """
+    if raw in (None, "", False):
+        return None
+    if isinstance(raw, str):
+        if raw.lower() in {"none", "disabled", "false"}:
+            return None
+        log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
+        return None
+    if not isinstance(raw, dict):
+        log.warning("[scene] ignoring invalid intrinsics_fallback=%r", raw)
+        return None
+
+    cfg = raw
+    source = str(cfg.get("source") or cfg.get("name") or "configured")
+    if source.lower() in {"none", "disabled", "false"}:
+        return None
+    required = ("width", "height", "fx", "fy", "cx", "cy")
+    if any(cfg.get(name) is None for name in required):
+        log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
+        return None
+
+    def _num(name: str) -> float:
         try:
-            parts = [float(s) for s in raw.split(",")]
-            if len(parts) >= 4:
-                fx, fy, cx, cy = parts[:4]
-                w = int(parts[4]) if len(parts) > 4 else 640
-                h = int(parts[5]) if len(parts) > 5 else 480
-                return _CamIntrinsics(width=w, height=h, fx=fx, fy=fy, cx=cx, cy=cy)
-        except Exception:  # noqa: BLE001
-            pass
-    return _CamIntrinsics()
+            return float(cfg[name])
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _integer(name: str) -> int:
+        try:
+            return int(cfg[name])
+        except (TypeError, ValueError):
+            return 0
+
+    k = _CamIntrinsics(
+        width=_integer("width"),
+        height=_integer("height"),
+        fx=_num("fx"),
+        fy=_num("fy"),
+        cx=_num("cx"),
+        cy=_num("cy"),
+    )
+    if min(k.width, k.height, k.fx, k.fy, k.cx, k.cy) <= 0:
+        log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
+        return None
+    return source, k
+
+
+def _cam_info_to_intrinsics(msg: Any) -> Optional[_CamIntrinsics]:
+    """Convert a sensor_msgs/CameraInfo into _CamIntrinsics.
+
+    Reads the 3x3 row-major K matrix (`k[0]=fx`, `k[2]=cx`, `k[4]=fy`,
+    `k[5]=cy`) plus width/height. ROS2 exposes the field as lowercase
+    `k`; we also accept `K` for safety. Returns None when any of
+    fx/fy/cx/cy/width/height is non-positive — an all-zero or partially
+    populated CameraInfo carries no usable geometry, and the caller
+    treats None as "wait for valid intrinsics", never as "use a default".
+    The except is narrow on purpose: a genuinely unexpected error should
+    surface, not be swallowed as if intrinsics were merely missing."""
+    try:
+        # `k` is the row-major 3x3 intrinsics. rclpy delivers it as a numpy
+        # ndarray, so DON'T use `a or b` to pick the field — `bool(ndarray)`
+        # on a multi-element array raises ValueError ("truth value ...
+        # ambiguous"), which the except below would swallow as "no
+        # intrinsics", stalling perception forever on a perfectly valid K.
+        # Select the field with explicit None checks instead.
+        k_field = getattr(msg, "k", None)
+        if k_field is None:
+            k_field = getattr(msg, "K", None)
+        k = list(k_field) if k_field is not None else []
+        w = int(getattr(msg, "width", 0))
+        h = int(getattr(msg, "height", 0))
+        if len(k) < 6 or min(k[0], k[4], k[2], k[5]) <= 0 or w <= 0 or h <= 0:
+            return None
+        return _CamIntrinsics(
+            width=w,
+            height=h,
+            fx=float(k[0]),
+            fy=float(k[4]),
+            cx=float(k[2]),
+            cy=float(k[5]),
+        )
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None
 
 
 async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> None:
@@ -623,10 +778,11 @@ def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
 
 
 def _image_msg_to_jpeg(msg) -> Optional[bytes]:
-    """sensor_msgs/Image → JPEG bytes. Webots Tiago publishes
-    `bgr8` / `rgb8` for the head camera; we accept both. Falls back
-    to None on unknown encodings (rather than throwing — VLM tick
-    just skips that frame)."""
+    """sensor_msgs/Image -> JPEG bytes.
+
+    Accepts common RGB/BGR encodings and returns None on unknown encodings
+    rather than throwing; the VLM tick can skip that frame.
+    """
     try:
         import numpy as np  # noqa: F401
         from PIL import Image as PILImage
@@ -707,6 +863,44 @@ async def _run() -> None:
     relations = RelationEngine(registry, period_s=1.0)
     await relations.start()
     self_tracker = _SelfTracker(registry)
+
+    # Object persistence (warm restore across restarts). Created before
+    # perception so the registry is repopulated before the first detections
+    # arrive; the embedder is wired in later (only needed for writes). The
+    # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
+    # prior boot wrote rows — but writes are driven by the scene-graph builder.
+    obj_store = None
+    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
+        from .persistence import ObjectStore
+
+        db_path = os.environ.get(
+            "SCENE_OBJECT_MEMORY_DB", "/data/robonix/scene_memory/objects.db"
+        )
+        # Which SLAM map's objects to load/store. Deploy-controlled until
+        # mapping emits a real map identity — manifest `map_id` wins, else
+        # the SCENE_MAP_ID env, else "default". Object poses are only valid
+        # in their own map's frame, so persistence is scoped per map.
+        map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
+        try:
+            obj_store = ObjectStore(db_path, map_id=map_id)
+            restored = obj_store.load_all()
+            async with registry.lock():
+                for o in restored:
+                    registry.restore_object(o)
+            log.info(
+                "[scene-persist] restored %d objects (map_id=%s) from %s",
+                len(restored), obj_store.map_id, db_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Object memory is opted in (default on), so a failure here is not
+            # benign: persistence is OFF for the whole session — no warm
+            # restore now and no writes later. Log at error, not warning.
+            log.error(
+                "[scene-persist] object memory enabled but store init/restore "
+                "failed — persistence OFF for this session (no restore, no "
+                "writes): %s", e,
+            )
+            obj_store = None
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
     # supplied later in _start_ros_ingest); relations engine still runs
     # internally for ingest/web-UI but isn't exposed in the LLM tool
@@ -758,6 +952,13 @@ async def _run() -> None:
     # only; this one re-binds with the hub — attach_state is intentionally
     # cheap and idempotent.)
     mcp_tools.attach_state(registry=registry, hub=hub)
+
+    # Wire the persistence embedder to perception's loaded CLIP text encoder
+    # (same 512-d space as the per-object image features). The VLM-fallback
+    # detector has no `embed_text`; persistence then stores placeholder
+    # vectors (scalar state still restores fine).
+    if obj_store is not None:
+        obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
         # Background reconciler: keeps scene's hub adding subscriptions
@@ -800,6 +1001,7 @@ async def _run() -> None:
             relation_inferer=sg_inferer,
             store=sg_store,
             config=sg_cfg,
+            object_store=obj_store,
         )
         sg_stop = asyncio.Event()
         bg_tasks.append(
@@ -877,6 +1079,11 @@ async def _run() -> None:
 
     # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.
     scene._teardown()
+
+    # Release the milvus-lite lock so the next boot can re-open the .db.
+    if obj_store is not None:
+        with contextlib.suppress(Exception):
+            obj_store.close()
 
 
 def main() -> None:

@@ -3,14 +3,13 @@
 //
 // One call drives the full pipeline:
 //
-//   RobonixPrimitiveAudioMic.Stream  (record_seconds / VAD)
+//   RobonixPrimitiveAudioMic.Stream  (record_seconds)
+//       │
+//       ▼
+//   SystemSpeechAsr.Recognize    → transcript
 //       │
 //       ▼
 //   RobonixServiceVoiceprintIdentify.Identify → user_id  (graceful: hint fallback on absence)
-//       │
-//       ├─ access denied → stop before ASR / Pilot / TTS
-//       ▼
-//   RobonixServiceSpeechAsr.Recognize  → transcript
 //       │
 //       ▼
 //   Build pilot::Task { source=AUDIO, text=transcript, user_id, … }
@@ -32,7 +31,10 @@ use anyhow::Result;
 use futures::Stream;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -43,7 +45,7 @@ use crate::pb::audio::AudioChunk;
 use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
     robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
-    robonix_service_speech_asr_client::RobonixServiceSpeechAsrClient,
+    robonix_service_speech_asr_stream_client::RobonixServiceSpeechAsrStreamClient,
     robonix_service_speech_tts_client::RobonixServiceSpeechTtsClient,
     robonix_service_voiceprint_identify_client::RobonixServiceVoiceprintIdentifyClient,
     robonix_system_pilot_client::RobonixSystemPilotClient,
@@ -53,6 +55,7 @@ use crate::pb::pilot::{PilotEvent, Task};
 use crate::pb::tts;
 use crate::pb::voiceprint;
 use crate::{access, access::AccessControlConfig};
+use robonix_scribe::{info, warn};
 
 // ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
 
@@ -72,7 +75,7 @@ pub const KIND_ERROR: u32 = 10;
 /// Hard ceiling on a single voice turn. Real end-of-turn comes from
 /// the silence-VAD in the mic pump (see VAD_* below); this just keeps
 /// a stuck mic from monopolizing the session forever.
-const DEFAULT_RECORD_SECONDS: u32 = 30;
+const DEFAULT_RECORD_SECONDS: u32 = 10;
 
 /// Silence-VAD parameters. After we've heard a chunk above
 /// `VAD_SPEECH_RMS`, count consecutive sub-threshold chunks; once the
@@ -130,7 +133,7 @@ async fn resolve_endpoint(
         {
             Some(provider) => Some(provider),
             None => {
-                log::warn!(
+                warn!(
                     "[voice] pinned provider '{pin_provider_id}' for {contract_id} not in atlas; \
                      falling back to auto-pick. Available providers: {:?}",
                     providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
@@ -258,16 +261,15 @@ async fn run_session(
     // (FunASR's VAD ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
     // 30 s default. Whisper's old "record-then-recognize" pattern is
-    // gone; voice is recorded once, then sent to one-shot ASR after access
-    // control. This is more stable for cloud ASR providers than keeping a
-    // second streaming session open after the mic capture has already ended.
+    // gone; voice goes through `asr_stream` end-to-end.
     let max_seconds: u32 = if record_seconds == 0 {
         30
     } else {
         record_seconds.max(5)
     };
 
-    let audio_pcm = if mock {
+    let t_cap = std::time::Instant::now();
+    let (audio_pcm, transcript) = if mock {
         let canned = mock_transcript();
         let _ = tx
             .send(Ok(event_status(
@@ -283,26 +285,61 @@ async fn run_session(
                 &format!("mock transcript ready ({} bytes)", canned.len()),
             )))
             .await;
-        Vec::new()
+        let _ = tx
+            .send(Ok(event_text(KIND_ASR_FINAL, &session_id, &canned, 1.0)))
+            .await;
+        (Vec::new(), canned)
     } else {
-        capture_voice_for_access(&atlas, &req.mic_node_id, max_seconds, &session_id, &tx).await?
-    };
-
-    let hint_decision = access.authorize_voice(&req.client_user_id, None);
-    let decision = if matches!(hint_decision, access::AccessDecision::Allow { .. }) {
-        hint_decision
-    } else {
-        let identity = identify_user(
+        // Mic → AsrAudioChunk pump + asr_stream.RecognizeStream both
+        // run inside `stream_capture_and_recognize`. It returns once
+        // FunASR emits is_final, the user hits max_seconds, or the
+        // mic stream drops. Voiceprint still gets the accumulated PCM
+        // for downstream identification (currently fallback-only).
+        stream_capture_and_recognize(
             &atlas,
-            &req.voiceprint_node_id,
-            &audio_pcm,
-            &req.client_user_id,
+            &req.mic_node_id,
+            &req.asr_node_id,
+            &language,
+            max_seconds,
             &session_id,
             &tx,
         )
-        .await;
-        access.authorize_voice(&req.client_user_id, identity.response.as_ref())
+        .await?
     };
+
+    // [profile] record start → final transcript: covers mic-open + audio
+    // transfer + streaming ASR inference. Compare against the per-chunk mic
+    // timings above (transfer) and the speech service's [profile-asr] lines
+    // (inference) to see which dominates.
+    {
+        let secs = audio_pcm.len() as f64 / (DEFAULT_AUDIO_SAMPLE_RATE as f64 * 2.0);
+        info!(
+            "[profile] record→transcript {} ms (audio {:.2}s, {} pcm bytes, transcript {} chars)",
+            t_cap.elapsed().as_millis(),
+            secs,
+            audio_pcm.len(),
+            transcript.chars().count()
+        );
+    }
+
+    if transcript.trim().is_empty() {
+        anyhow::bail!("empty transcript — nothing to send to Pilot");
+    }
+
+    // 3. Voiceprint + access gate. ASR may already have produced a transcript,
+    // but no Pilot task, TTS, or action is allowed until the voice identity passes
+    // the Liaison access policy. Client hints cannot bypass voiceprint when the
+    // gate is enabled.
+    let identity = identify_user(
+        &atlas,
+        &req.voiceprint_node_id,
+        &audio_pcm,
+        &req.client_user_id,
+        &session_id,
+        &tx,
+    )
+    .await;
+    let decision = access.authorize_voice(&req.client_user_id, identity.response.as_ref());
     let (user_id, access_context) = match decision {
         access::AccessDecision::Allow {
             user_id,
@@ -310,7 +347,7 @@ async fn run_session(
             confidence,
             reason,
         } => {
-            log::info!(
+            info!(
                 "[liaison/access] voice allow user={user_id} via {method:?} confidence={confidence:.2}: {reason}"
             );
             let _ = tx
@@ -336,34 +373,12 @@ async fn run_session(
             confidence,
             reason,
         } => {
-            log::warn!(
+            warn!(
                 "[liaison/access] voice deny user={user_id} confidence={confidence:.2}: {reason}"
             );
             anyhow::bail!("access denied for voice user '{user_id}': {reason}");
         }
     };
-
-    let transcript = if mock {
-        let canned = mock_transcript();
-        let _ = tx
-            .send(Ok(event_text(KIND_ASR_FINAL, &session_id, &canned, 1.0)))
-            .await;
-        canned
-    } else {
-        recognize_recorded_audio(
-            &atlas,
-            &req.asr_node_id,
-            &language,
-            &audio_pcm,
-            &session_id,
-            &tx,
-        )
-        .await?
-    };
-
-    if transcript.trim().is_empty() {
-        anyhow::bail!("empty transcript — nothing to send to Pilot");
-    }
 
     // 4. Build Task and stream Pilot events.
     let pilot_endpoint = resolve_endpoint(&atlas, "robonix/system/pilot", "")
@@ -380,7 +395,15 @@ async fn run_session(
     );
 
     let mut accumulated_text = String::new();
-    let mut tts_pending_text = String::new();
+    // Track whether we've already spoken at least one per-plan answer, so the
+    // end-of-turn fallback below doesn't double-speak.
+    let mut spoke_any = false;
+    // [profile] pilot round-trip (submit → first event → turn done).
+    let t_pilot = std::time::Instant::now();
+    let mut first_pilot_logged = false;
+    // Per-narration-segment TTS buffer: text chunks accumulate here and flush
+    // to speech at each plan/batch/final boundary (see the stream loop below).
+    let mut seg = String::new();
 
     let pilot_stream_result = async {
         let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
@@ -396,33 +419,33 @@ async fn run_session(
             while let Some(item) = pilot_stream.next().await {
                 match item {
                     Ok(ev) => {
-                        let before_len = accumulated_text.len();
-                        accumulate_text(&ev, &mut accumulated_text);
-                        if req.tts_enabled && accumulated_text.len() > before_len {
-                            tts_pending_text.push_str(&accumulated_text[before_len..]);
-                            let sentences = drain_complete_sentences(&mut tts_pending_text);
-                            for sentence in sentences {
-                                if let Err(e) = synthesize_and_play(
-                                    &atlas,
-                                    &req.tts_node_id,
-                                    &req.speaker_node_id,
-                                    &language,
-                                    &sentence,
-                                    &session_id,
-                                    &tx,
-                                )
-                                .await
-                                {
-                                    let _ = tx
-                                        .send(Ok(event_status(
-                                            KIND_TTS_DONE,
-                                            &session_id,
-                                            &format!("tts skipped: {e:#}"),
-                                        )))
-                                        .await;
-                                }
-                            }
+                        if !first_pilot_logged {
+                            info!(
+                                "[profile] pilot: first event +{} ms (after transcript submit)",
+                                t_pilot.elapsed().as_millis()
+                            );
+                            first_pilot_logged = true;
                         }
+                        accumulate_text(&ev, &mut accumulated_text);
+                        // Speak each narration segment the moment it completes.
+                        // The model's per-plan answer streams as EVT_TEXT_CHUNK (0);
+                        // a PLAN (1) / BATCH_RESULT (2) / FINAL_TEXT (4) event marks
+                        // the end of that narration, so flush the buffered chunks to
+                        // TTS. This voices every plan's full answer live, instead of
+                        // only the tiny end-of-turn final_text.
+                        let kind = ev.event_kind;
+                        if kind == 0 {
+                            seg.push_str(&ev.text_chunk);
+                        }
+                        let is_boundary = matches!(kind, 1 | 2 | 4);
+                        let say = if is_boundary && req.tts_enabled && !seg.trim().is_empty() {
+                            Some(std::mem::take(&mut seg))
+                        } else {
+                            if is_boundary {
+                                seg.clear();
+                            }
+                            None
+                        };
                         let _ = tx
                             .send(Ok(VoiceEvent {
                                 event_kind: KIND_PILOT,
@@ -436,6 +459,35 @@ async fn run_session(
                                 timestamp_ms: now_ms(),
                             }))
                             .await;
+                        if let Some(s) = say {
+                            spoke_any = true;
+                            let t_tts = std::time::Instant::now();
+                            let say_chars = s.chars().count();
+                            if let Err(e) = synthesize_and_play(
+                                &atlas,
+                                &req.tts_node_id,
+                                &req.speaker_node_id,
+                                &language,
+                                &s,
+                                &session_id,
+                                &tx,
+                            )
+                            .await
+                            {
+                                let _ = tx
+                                    .send(Ok(event_status(
+                                        KIND_TTS_DONE,
+                                        &session_id,
+                                        &format!("tts skipped: {e:#}"),
+                                    )))
+                                    .await;
+                            }
+                            info!(
+                                "[profile] tts+play +{} ms ({} chars spoken)",
+                                t_tts.elapsed().as_millis(),
+                                say_chars
+                            );
+                        }
                     }
                     Err(e) => {
                         anyhow::bail!("Pilot stream error: {e}");
@@ -450,15 +502,29 @@ async fn run_session(
         }
     }
 
-    // 5. Optional TTS playback (non-fatal on any error).
+    info!(
+        "[profile] pilot: turn done +{} ms ({} chars of answer text)",
+        t_pilot.elapsed().as_millis(),
+        accumulated_text.chars().count()
+    );
+
+    // 5. Flush any trailing narration the loop buffered but never hit a
+    // boundary for (turn ended on chunks). Non-fatal on any error.
+    let tail = if !seg.trim().is_empty() {
+        std::mem::take(&mut seg)
+    } else if !spoke_any {
+        accumulated_text.clone()
+    } else {
+        String::new()
+    };
     if req.tts_enabled
-        && !tts_pending_text.trim().is_empty()
+        && !tail.trim().is_empty()
         && let Err(e) = synthesize_and_play(
             &atlas,
             &req.tts_node_id,
             &req.speaker_node_id,
             &language,
-            tts_pending_text.trim(),
+            &tail,
             &session_id,
             &tx,
         )
@@ -476,36 +542,50 @@ async fn run_session(
     Ok(())
 }
 
-// ── Mic capture + gated ASR ─────────────────────────────────────────────────
+// ── Mic capture + streaming ASR ─────────────────────────────────────────────
 //
-// Capture happens before ASR so access-denied voices never reach the speech
-// service. Once the access gate allows the speaker, the captured PCM is sent
-// to `robonix/service/speech/asr_stream` in the same AudioChunk shape the live
-// mic pump used previously.
+// Open the mic primitive AND `robonix/service/speech/asr_stream` (FunASR
+// paraformer-zh-streaming bidi) at the same time. Mic AudioChunks get
+// wrapped as AsrAudioChunk and pumped up the request side; the response
+// side yields RecognizeStreamEvents (PARTIAL → … → FINAL). On FINAL,
+// stop both streams and return `(accumulated_pcm, final_text)`.
+//
+// `max_seconds` is a hard ceiling — FunASR's VAD usually ends the turn
+// well before that, but we don't want to hang on a stuck mic.
 
 #[allow(clippy::too_many_arguments)]
-async fn capture_voice_for_access(
+async fn stream_capture_and_recognize(
     atlas: &Arc<Mutex<AtlasClient>>,
     mic_pin: &str,
+    asr_pin: &str,
+    language: &str,
     max_seconds: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, String)> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
         .ok_or_else(|| {
             anyhow::anyhow!("no RobonixPrimitiveAudioMic provider registered in Atlas")
         })?;
+    let asr_endpoint = resolve_endpoint(atlas, "robonix/service/speech/asr_stream", asr_pin)
+        .await
+        .ok_or_else(|| {
+            anyhow::anyhow!("no RobonixServiceSpeechAsrStream provider registered in Atlas")
+        })?;
 
     let mut mic_client = RobonixPrimitiveAudioMicClient::connect(mic_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect mic at {mic_endpoint}: {e}"))?;
+    let mut asr_client = RobonixServiceSpeechAsrStreamClient::connect(asr_endpoint.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("connect asr_stream at {asr_endpoint}: {e}"))?;
 
     let _ = tx
         .send(Ok(event_status(
             KIND_RECORDING_STARTED,
             session_id,
-            &format!("capturing mic {mic_endpoint} for access check"),
+            &format!("streaming mic {mic_endpoint} → asr_stream {asr_endpoint}"),
         )))
         .await;
 
@@ -515,112 +595,213 @@ async fn capture_voice_for_access(
         .map_err(|e| anyhow::anyhow!("mic rpc failed: {e}"))?
         .into_inner();
 
-    let mut pcm =
-        Vec::<u8>::with_capacity((DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
-    let mut has_spoken = false;
-    let mut silence_secs: f32 = 0.0;
+    // Buffered hand-off: mic-pump task drops AsrAudioChunks onto the
+    // mpsc; tonic forwards them up the bidi as the request stream.
+    let (asr_req_tx, asr_req_rx) = mpsc::channel::<crate::pb::asr::AsrAudioChunk>(64);
+    let asr_req_stream = ReceiverStream::new(asr_req_rx);
 
-    loop {
-        if tokio::time::Instant::now() >= deadline {
+    // Accumulator the mic-pump writes into; the outer task reads it
+    // back at the end so we can hand the raw PCM to identify_user.
+    let pcm_buf = Arc::new(Mutex::new(Vec::<u8>::with_capacity(
+        (DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize),
+    )));
+    let pcm_buf_for_pump = Arc::clone(&pcm_buf);
+    // Detect the mic's actual sample rate from the first chunk's
+    // data size ÷ duration — no env var or proto change needed.
+    let detected_rate: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    let detected_rate_pump = Arc::clone(&detected_rate);
+    let _language_owned = language.to_string();
+
+    // Mic pump — drains the mic gRPC stream into the asr_req sender,
+    // accumulates raw PCM, runs silence-VAD on each chunk, stops on
+    // (whichever first):
+    //   1. max_seconds hard ceiling
+    //   2. mic stream EOF / error
+    //   3. silence-VAD end-of-utterance (after speech then quiet)
+    //   4. outer task drops asr_req_rx (server already returned FINAL)
+    let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
+        // [profile] mic transfer: t_pump=request start; first-chunk latency is
+        // the audio-source startup (e.g. macOS bridge over the network); the
+        // chunk count + total audio vs wall time shows transfer throughput.
+        let t_pump = tokio::time::Instant::now();
+        let mut n_chunks: u32 = 0u32;
+        let mut audio_s: f32 = 0.0;
+        let mut logged_first = false;
+        let mut has_spoken = false;
+        let mut silence_secs: f32 = 0.0;
+        let mut first_chunk = true;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, mic_stream.message()).await {
+                Ok(Ok(Some(chunk))) => {
+                    if !logged_first {
+                        info!(
+                            "[profile] mic: first chunk +{} ms (audio-source startup / transfer)",
+                            t_pump.elapsed().as_millis()
+                        );
+                        logged_first = true;
+                    }
+                    n_chunks += 1;
+                    audio_s += chunk.duration_s.max(0.0);
+                    let dur = chunk.duration_s.max(0.0);
+                    // Detect sample rate from the first chunk:
+                    // rate ≈ data_bytes / (duration_s × bytes_per_sample)
+                    // For 16-bit mono: bytes_per_sample = 2.
+                    if first_chunk && dur > 0.0 && chunk.data.len() >= 2 {
+                        first_chunk = false;
+                        let est = (chunk.data.len() as f64 / (dur as f64 * 2.0)).round() as u32;
+                        if est >= 8000 {
+                            detected_rate_pump.store(est, Ordering::Relaxed);
+                        }
+                    }
+                    let rms = pcm_rms_s16le(&chunk.data);
+                    if rms >= VAD_SPEECH_RMS {
+                        has_spoken = true;
+                        silence_secs = 0.0;
+                    } else if has_spoken {
+                        silence_secs += dur;
+                    }
+                    pcm_buf_for_pump.lock().await.extend_from_slice(&chunk.data);
+                    let asr_chunk = crate::pb::asr::AsrAudioChunk { chunk: Some(chunk) };
+                    if asr_req_tx.send(asr_chunk).await.is_err() {
+                        break;
+                    }
+                    if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
+                        // Drops asr_req_tx → server sees stream EOF →
+                        // FunASR emits its is_final flush → outer loop
+                        // collects the final transcript and breaks.
+                        break;
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(_)) => break,
+                Err(_) => break,
+            }
+        }
+        let wall = t_pump.elapsed().as_millis();
+        info!(
+            "[profile] mic: pump done +{wall} ms, {n_chunks} chunks, {audio_s:.2}s audio \
+             (transfer realtime-factor {:.2}; >1 means audio arrived slower than realtime)",
+            (wall as f32 / 1000.0) / audio_s.max(0.001)
+        );
+    });
+
+    // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
+    // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
+    // request metadata, not the per-chunk message. Tonic-codegen
+    // doesn't surface a separate header field here, so we just rely on
+    // FunASR's auto-detection — paraformer-zh-streaming is zh-only so
+    // this is fine. If a multi-lingual backend is ever wired in, the
+    // contract needs an extra preamble message.
+    let asr_resp = asr_client
+        .recognize_stream(Request::new(asr_req_stream))
+        .await
+        .map_err(|e| anyhow::anyhow!("asr_stream rpc failed: {e}"))?;
+    let mut asr_events = asr_resp.into_inner();
+
+    // FunASR's paraformer-zh-streaming emits *incremental* partials —
+    // each event carries only the words decoded from the most recent
+    // chunk window, not a cumulative transcript. The is_final flush
+    // (`recognize_chunk(b"", is_final=True)`) emits the residual
+    // window's text the same way (sometimes empty).
+    //
+    // Strategy: append every non-empty event text into `accumulated`,
+    // and use the accumulator as the final transcript. The server's
+    // is_final flag only tells us when to stop the loop — it does
+    // NOT mean "this event's text is the whole utterance"; treating
+    // it that way drops every prior partial and leaves the user with
+    // just the last syllable.
+    let mut accumulated = String::new();
+    let mut last_confidence = 0.0_f32;
+    while let Some(ev_or_err) = asr_events.next().await {
+        let ev = ev_or_err.map_err(|e| anyhow::anyhow!("asr_stream recv: {e}"))?;
+        if !ev.error.is_empty() {
+            anyhow::bail!("asr error: {}", ev.error);
+        }
+        let is_final = ev.is_final || ev.event_type == 1;
+        let text = ev.text.clone();
+        if !text.is_empty() {
+            accumulated.push_str(&text);
+            last_confidence = ev.confidence;
+            if !is_final {
+                let _ = tx
+                    .send(Ok(event_text(
+                        KIND_ASR_PARTIAL,
+                        session_id,
+                        &text,
+                        ev.confidence,
+                    )))
+                    .await;
+            }
+        }
+        if is_final {
             break;
         }
-        let remaining = deadline - tokio::time::Instant::now();
-        match tokio::time::timeout(remaining, mic_stream.message()).await {
-            Ok(Ok(Some(chunk))) => {
-                let dur = chunk.duration_s.max(0.0);
-                let rms = pcm_rms_s16le(&chunk.data);
-                if rms >= VAD_SPEECH_RMS {
-                    has_spoken = true;
-                    silence_secs = 0.0;
-                } else if has_spoken {
-                    silence_secs += dur;
-                }
-                pcm.extend_from_slice(&chunk.data);
-                if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
-                    break;
-                }
-            }
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => anyhow::bail!("mic stream error: {e}"),
-            Err(_) => break,
-        }
     }
-
-    let _ = tx
-        .send(Ok(event_status(
-            KIND_RECORDING_DONE,
-            session_id,
-            &format!(
-                "captured {} bytes (~{:.2}s @ 16kHz mono s16le)",
-                pcm.len(),
-                pcm.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
-            ),
-        )))
-        .await;
-    Ok(pcm)
-}
-
-async fn recognize_recorded_audio(
-    atlas: &Arc<Mutex<AtlasClient>>,
-    asr_pin: &str,
-    language: &str,
-    audio_pcm: &[u8],
-    session_id: &str,
-    tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-) -> Result<String> {
-    let asr_endpoint = resolve_endpoint(atlas, "robonix/service/speech/asr", asr_pin)
-        .await
-        .ok_or_else(|| {
-            anyhow::anyhow!("no RobonixServiceSpeechAsr provider registered in Atlas")
-        })?;
-
-    let mut asr_client = RobonixServiceSpeechAsrClient::connect(asr_endpoint.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("connect asr at {asr_endpoint}: {e}"))?;
-
-    let _ = tx
-        .send(Ok(event_status(
-            KIND_ASR_PARTIAL,
-            session_id,
-            &format!("access allowed; sending captured audio to asr {asr_endpoint}"),
-        )))
-        .await;
-
-    let resp = asr_client
-        .recognize(Request::new(crate::pb::asr::RecognizeRequest {
-            audio_data: audio_pcm.to_vec(),
-            encoding: DEFAULT_AUDIO_ENCODING.to_string(),
-            sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
-            language: language.to_string(),
-        }))
-        .await
-        .map_err(|e| anyhow::anyhow!("asr rpc failed: {e}"))?
-        .into_inner();
-
-    if !resp.error.is_empty() {
-        anyhow::bail!("asr error: {}", resp.error);
-    }
-
-    let transcript = resp.text.trim().to_string();
+    let transcript = accumulated;
     if !transcript.is_empty() {
         let _ = tx
             .send(Ok(event_text(
                 KIND_ASR_FINAL,
                 session_id,
                 &transcript,
-                resp.confidence,
+                last_confidence,
             )))
             .await;
     }
-    Ok(transcript)
+
+    // Stop the mic pump (the outer task already dropped asr_req_rx by
+    // returning from the `while let` loop above, which closes the
+    // request stream).
+    pump_handle.abort();
+    let _ = pump_handle.await;
+
+    let pcm = std::mem::take(&mut *pcm_buf.lock().await);
+    let sample_rate = detected_rate.load(Ordering::Relaxed);
+    let sample_rate = if sample_rate > 0 {
+        sample_rate
+    } else {
+        DEFAULT_AUDIO_SAMPLE_RATE
+    };
+    if let Some(path) = save_voice_recording(session_id, &pcm, sample_rate) {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_RECORDING_DONE,
+                session_id,
+                &format!(
+                    "saved voice recording to {} ({} bytes, ~{:.2}s @ {}Hz) ; transcript={:?}",
+                    path.display(),
+                    pcm.len(),
+                    pcm.len() as f32 / (sample_rate as f32 * 2.0),
+                    sample_rate,
+                    transcript,
+                ),
+            )))
+            .await;
+    } else {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_RECORDING_DONE,
+                session_id,
+                &format!(
+                    "captured {} bytes (~{:.2}s @ {}Hz mono s16le); transcript={:?}",
+                    pcm.len(),
+                    pcm.len() as f32 / (sample_rate as f32 * 2.0),
+                    sample_rate,
+                    transcript,
+                ),
+            )))
+            .await;
+    }
+    Ok((pcm, transcript))
 }
 
 // ── Voiceprint ───────────────────────────────────────────────────────────────
 
-/// Result of the optional voiceprint RPC. `None` means the provider was absent
-/// or failed; when the gate is enabled, access control treats that as no voice
-/// match rather than granting access.
 struct VoiceIdentity {
     response: Option<voiceprint::IdentifyResponse>,
 }
@@ -656,13 +837,14 @@ async fn identify_user(
     {
         Some(ep) => ep,
         None => {
+            warn!("[voice] voiceprint provider unavailable; using hint {fallback}");
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     session_id,
                     &fallback,
                     0.0,
-                    "no RobonixServiceVoiceprintIdentify provider — using client hint",
+                    "voiceprint provider unavailable",
                 )))
                 .await;
             return VoiceIdentity { response: None };
@@ -672,74 +854,67 @@ async fn identify_user(
     let mut client = match RobonixServiceVoiceprintIdentifyClient::connect(endpoint.clone()).await {
         Ok(c) => c,
         Err(e) => {
+            warn!("[voice] connect voiceprint at {endpoint}: {e}; using hint {fallback}");
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     session_id,
                     &fallback,
                     0.0,
-                    &format!("voiceprint connect failed: {e} — using client hint"),
-                )))
-                .await;
-            return VoiceIdentity { response: None };
-        }
-    };
-    let resp = match client
-        .identify(Request::new(voiceprint::IdentifyRequest {
-            audio_data: audio_pcm.to_vec(),
-            encoding: DEFAULT_AUDIO_ENCODING.to_string(),
-            sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
-        }))
-        .await
-    {
-        Ok(r) => r.into_inner(),
-        Err(e) => {
-            let _ = tx
-                .send(Ok(event_user(
-                    KIND_USER_IDENTIFIED,
-                    session_id,
-                    &fallback,
-                    0.0,
-                    &format!("voiceprint rpc failed: {e} — using client hint"),
+                    "voiceprint connect failed",
                 )))
                 .await;
             return VoiceIdentity { response: None };
         }
     };
 
-    let user_id = if resp.is_known && !resp.user_id.is_empty() {
-        if resp.user_id.starts_with("voice:") {
-            resp.user_id.clone()
-        } else {
-            format!("voice:{}", resp.user_id)
+    let request = voiceprint::IdentifyRequest {
+        audio_data: audio_pcm.to_vec(),
+        encoding: DEFAULT_AUDIO_ENCODING.to_string(),
+        sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
+    };
+
+    match client.identify(Request::new(request)).await {
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            let user = if resp.user_id.is_empty() {
+                fallback.clone()
+            } else if resp.user_id.starts_with("voice:") || resp.user_id.starts_with("local:") {
+                resp.user_id.clone()
+            } else {
+                format!("voice:{}", resp.user_id)
+            };
+            let detail = if resp.is_known {
+                "voiceprint matched"
+            } else {
+                "voiceprint unknown speaker"
+            };
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &user,
+                    resp.confidence,
+                    detail,
+                )))
+                .await;
+            VoiceIdentity {
+                response: Some(resp),
+            }
         }
-    } else {
-        fallback.clone()
-    };
-    let label = if resp.is_known && !resp.user_name.is_empty() {
-        format!(
-            "matched {}={} ({:.2})",
-            resp.user_id, resp.user_name, resp.confidence
-        )
-    } else if resp.is_known {
-        format!("matched {} ({:.2})", resp.user_id, resp.confidence)
-    } else {
-        format!(
-            "unknown speaker (best={:.2}) — using fallback",
-            resp.confidence
-        )
-    };
-    let _ = tx
-        .send(Ok(event_user(
-            KIND_USER_IDENTIFIED,
-            session_id,
-            &user_id,
-            resp.confidence,
-            &label,
-        )))
-        .await;
-    VoiceIdentity {
-        response: Some(resp),
+        Err(e) => {
+            warn!("[voice] voiceprint RPC failed: {e}; using hint {fallback}");
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &fallback,
+                    0.0,
+                    "voiceprint rpc failed",
+                )))
+                .await;
+            VoiceIdentity { response: None }
+        }
     }
 }
 
@@ -869,52 +1044,16 @@ fn build_task(
     }
 }
 
-/// Fold Pilot streaming output into a single text buffer for optional TTS.
-/// Chunk events append directly; final-text events are appended when they
-/// are not already present so multi-round Pilot replies are all spoken.
 fn accumulate_text(ev: &PilotEvent, into: &mut String) {
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_FINAL_TEXT: u32 = 4;
     match ev.event_kind {
         EVT_TEXT_CHUNK => into.push_str(&ev.text_chunk),
-        EVT_FINAL_TEXT if !ev.final_text.is_empty() => {
-            if into.trim().is_empty() {
-                into.push_str(&ev.final_text);
-            } else if !into.contains(&ev.final_text) {
-                if !into.ends_with('\n') {
-                    into.push('\n');
-                }
-                into.push_str(&ev.final_text);
-            }
+        EVT_FINAL_TEXT if into.trim().is_empty() && !ev.final_text.is_empty() => {
+            into.push_str(&ev.final_text);
         }
         _ => {}
     }
-}
-
-/// Move completed sentences out of `pending` for low-latency TTS playback.
-/// Leaves an incomplete trailing phrase in place so it can be extended by
-/// later Pilot chunks or flushed at the end of the turn.
-fn drain_complete_sentences(pending: &mut String) -> Vec<String> {
-    let mut cut = 0;
-    for (idx, ch) in pending.char_indices() {
-        if matches!(ch, '。' | '！' | '？' | '!' | '?' | '；' | ';' | '\n') {
-            cut = idx + ch.len_utf8();
-        }
-    }
-    if cut == 0 {
-        return Vec::new();
-    }
-
-    let completed = pending[..cut].to_string();
-    let rest = pending[cut..].to_string();
-    *pending = rest;
-
-    completed
-        .split_inclusive(['。', '！', '？', '!', '?', '；', ';', '\n'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .collect()
 }
 
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
@@ -1005,6 +1144,52 @@ fn now_ns() -> u64 {
         .as_nanos() as u64
 }
 
+fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Option<PathBuf> {
+    let dump_dir = std::env::var("ROBONIX_LIAISON_VOICE_SAVE_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let dir = Path::new(&dump_dir);
+    if fs::create_dir_all(dir).is_err() {
+        return None;
+    }
+    let ts = now_ms();
+    let file_name = format!("voice_{}_{}.wav", session_id, ts);
+    let path = dir.join(file_name);
+    if write_wav(&path, pcm, sample_rate).is_ok() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::Error> {
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+    let data_size = pcm.len() as u32;
+    let file_size = 36 + data_size;
+    let byte_rate = sample_rate * CHANNELS as u32 * (BITS_PER_SAMPLE as u32) / 8;
+    let block_align = CHANNELS * BITS_PER_SAMPLE / 8;
+
+    let mut buf = Vec::with_capacity(44 + pcm.len());
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&CHANNELS.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    buf.extend_from_slice(pcm);
+
+    fs::write(path, buf)
+}
+
 /// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
 /// silence-VAD in the mic pump. Returns 0.0 on empty / odd-length input.
 fn pcm_rms_s16le(data: &[u8]) -> f32 {
@@ -1071,6 +1256,8 @@ mod tests {
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
+                node_state: None,
+                task_state: None,
             },
             &mut buf,
         );
@@ -1083,18 +1270,11 @@ mod tests {
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
+                node_state: None,
+                task_state: None,
             },
             &mut buf,
         );
         assert_eq!(buf, "hello world");
-    }
-
-    #[test]
-    fn drain_complete_sentences_keeps_trailing_fragment() {
-        let mut pending = "第一句。第二句！还有半句".to_string();
-        let sentences = drain_complete_sentences(&mut pending);
-
-        assert_eq!(sentences, vec!["第一句。", "第二句！"]);
-        assert_eq!(pending, "还有半句");
     }
 }

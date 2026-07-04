@@ -3,7 +3,7 @@
 This file defines repository-specific rules for AI coding agents working on
 Robonix. Read once at session start; obey throughout.
 
-## Concept and naming stability (v0.1 lock)
+## Concept and naming stability
 
 - `docs/src/developer-guide.md` is the source of truth for concepts and
   terminology. When code and the dev guide disagree, fix the code, not
@@ -19,32 +19,36 @@ Robonix. Read once at session start; obey throughout.
   confirmation in the conversation. If you find yourself about to
   introduce a noun or verb that is not already in the dev guide, **stop
   and ask** before writing code.
-- Wire format (`atlas.proto`, `Driver.srv`, contract TOML schema) and
-  `pylib/robonix-api/` public surface are frozen for v0.1. Changes
-  require an explicit discussion thread, not a patch.
 
 ## Project Structure & Module Organization
 
-Robonix is an **embodied AI operating system**: a monorepo with Rust binaries,
-Python service packages, capability contracts, and documentation. Rust code
-lives in `rust/crates/*`; shared protobuf sources are in `rust/proto/`. Python
-workspace packages are under `pylib/*` and `system/*`, managed by the root
-`pyproject.toml` and `uv.lock`. Capability schemas are TOML files under
-`capabilities/{primitive,service,system}/`. End-to-end examples live in
-`examples/`, Docker packaging in `docker/`, and the mdBook manual in
-`docs/src/`.
+Robonix is an **embodied AI operating system**: a monorepo with Rust system
+components, Python packages, capability contracts, IDL libraries, examples, and
+documentation. The Rust workspace lives at the repository root in `Cargo.toml`;
+current Rust members are `system/{atlas,executor,liaison,pilot}` and
+`tools/{rbnx,codegen}`. The twelve system component directories live under
+`system/`; several are documentation/planning components today, while
+`system/scene` is a Python package managed by uv. Python workspace packages are
+listed in the root `pyproject.toml`: shared libraries in `pylib/*`, reference
+services in `services/*`, and `system/scene`. Capability contracts are TOML
+files under `capabilities/{primitive,service,system}/`; reusable message and
+service IDL libraries live under `capabilities/lib/`. End-to-end and Webots
+examples live in `examples/`, Docker packaging in `docker/`, repo scripts in
+`scripts/`, image assets in
+`images/`, and the mdBook manual in `docs/src/`.
 
 ### Crate README maintenance
 
-When you add or change functionality in a crate under `rust/crates/*`, update
-that crate's `README.md` in the same contribution. If the crate has no
-`README.md`, add one. Each crate README should be concise and informative:
-what the package is, what it is for, and how to use it. For CLIs and similar
-tools, document subcommands, flags, and important environment variables.
+When you add or change functionality in a Rust workspace member under
+`system/*` or `tools/*`, update that member's `README.md` in the same
+contribution. If the member has no `README.md`, add one. Each README should be
+concise and informative: what the package is, what it is for, and how to use
+it. For CLIs and similar tools, document subcommands, flags, and important
+environment variables.
 
 ## Build, Test, and Development Commands
 
-Run Rust commands from `rust/` unless noted:
+Run Rust commands from the repository root unless noted:
 
 - `make build`: build all Rust workspace crates in debug mode.
 - `make release`: build all Rust crates with `--release`.
@@ -77,12 +81,20 @@ clippy, build, and `cargo test --workspace --all-targets`. For Python services,
 add package-local smoke tests or scripts when changing runtime behavior, and
 document required environment variables in the service README.
 
+Do not add production-code solely to make tests pass; if tests require
+production changes, those changes must improve real behavior, design clarity,
+diagnostics, or maintainability outside the test.
+
 ## Editing discipline
 
 - Never run `sed` (or equivalent multi-file replace) across more than one file
   at a time during a rename. Read each file before editing. Pattern variables
   that look identical at the string level can have different types; blanket
   replace breaks tuple destructures and loop variables.
+- Do not hand-edit generated documentation under `docs/src/reference/`
+  (including `idl.md` and `contracts.md`). Update the source contracts / IDL /
+  codegen inputs, then regenerate docs with the project tooling when generated
+  reference pages need to change.
 - `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`
   must be clean before any commit that touches Rust.
 - Don't commit without an end-to-end run when the change crosses process

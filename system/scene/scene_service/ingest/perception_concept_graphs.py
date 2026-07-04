@@ -65,7 +65,7 @@ log = logging.getLogger("scene.ingest.cg")
 
 from .perception_vlm import _CamIntrinsics, _canon_class
 from ..state.data_assoc import Detection
-from ..state.object_registry import BBox3D, ObjectRegistry, Pose3D
+from ..state.object_registry import BBox3D, ObjectRegistry, Pose3D, SceneObject
 
 
 # ── Open-vocab class list ────────────────────────────────────────────────
@@ -368,7 +368,7 @@ class ConceptGraphsDetector:
         # hardcoded camera mount — this matters once SLAM corrects
         # map→odom and the chassis_pose drifts out of map frame.
         hub: Any = None,
-        camera_frame: str = "head_front_camera_rgb_optical_frame",
+        camera_frame: str = "camera_optical_frame",
     ) -> None:
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
@@ -461,6 +461,29 @@ class ConceptGraphsDetector:
         if self._task is not None:
             await self._task
             self._task = None
+
+    # ── Text embedding (shared CLIP) ─────────────────────────────────
+    def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
+        """Encode `texts` with the already-loaded open_clip text encoder,
+        L2-normalized to match the per-object image features. Returns one
+        512-d vector per input, or None when CLIP isn't loaded (models
+        unavailable / detector not started) so the caller can fall back.
+
+        Reuses the model loaded in `start()` — no second model instance.
+        Runs synchronously under torch.no_grad on `self._device`."""
+        if self._clip_model is None or self._clip_tokenizer is None or not texts:
+            return None
+        try:
+            import torch
+
+            with self._inference_lock, torch.no_grad():
+                tokens = self._clip_tokenizer(texts).to(self._device)
+                feats = self._clip_model.encode_text(tokens)
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+                return feats.cpu().tolist()
+        except Exception as e:  # noqa: BLE001
+            log.warning("[scene-cg] embed_text failed: %s", e)
+            return None
 
     # ── External viz access ──────────────────────────────────────────
     # Web UI's `/3d` page calls into here every frame. Held under the
@@ -1584,10 +1607,17 @@ class ConceptGraphsDetector:
           - REUSE the existing registry record when the
             MapObjectList uuid is already mapped (just refresh
             pose / bbox / confidence / observation_count)
-          - INSERT a new record on first sighting
+          - RE-BIND a warm-restored object of the same class within
+            the merge-distance gate to a fresh detection before minting
+            a new id, so a remembered object keeps its stable id on
+            re-observation instead of churning a new suffix
+          - INSERT a new record only when nothing above matches
           - EVICT registry records whose uuid is no longer present in
             the latest MapObjectList (concept-graphs merged or
-            filtered them out)
+            filtered them out) — warm-restored records that have not yet
+            been re-bound are exempt (they were never in this process's
+            MapObjectList); if never re-seen, mark_stale keeps them
+            missing rather than deleting them
 
         The previous "drop everything, re-insert everything" approach
         churned object_ids on every tick (the visible `<cls>_NNN`
@@ -1606,6 +1636,12 @@ class ConceptGraphsDetector:
                     continue
                 src = obj.attributes.get("source")
                 if src not in ("concept_graphs", None):
+                    continue
+                # Warm-restored objects were never in this process's
+                # MapObjectList, so the uuid-membership rule below can't apply.
+                # The insert loop re-binds them by class+pose; if never re-seen,
+                # mark_stale keeps them missing instead of deleting them here.
+                if obj.attributes.get("restored"):
                     continue
                 cg_uuid = obj.attributes.get("cg_uuid")
                 if cg_uuid is None or cg_uuid not in live_uuids:
@@ -1628,6 +1664,20 @@ class ConceptGraphsDetector:
                 )
                 oid = self._uuid_to_oid.get(u) if u else None
                 existing = self._registry._objects.get(oid) if oid else None
+                if existing is None:
+                    # No uuid binding yet (first sighting this process). Before
+                    # minting a new id, try to adopt a warm-restored object of
+                    # the same class within the merge-distance gate: that is the
+                    # re-observation of a remembered object, so it keeps its old
+                    # id instead of churning a fresh suffix and orphaning the
+                    # persisted row. The match consumes the `restored` flag so a
+                    # restored object binds at most one detection per tick.
+                    existing = self._rebind_restored(s["cls"], pose)
+                    if existing is not None:
+                        existing.attributes.pop("restored", None)
+                        if u:
+                            existing.attributes["cg_uuid"] = u
+                            self._uuid_to_oid[u] = existing.object_id
                 if existing is not None:
                     # Update in place. Preserve oid + first_seen.
                     existing.pose = pose
@@ -1649,6 +1699,32 @@ class ConceptGraphsDetector:
                     if u:
                         obj.attributes["cg_uuid"] = u
                         self._uuid_to_oid[u] = obj.object_id
+
+    def _rebind_restored(self, cls: str, pose: Pose3D) -> Optional[SceneObject]:
+        """Nearest warm-restored, not-yet-rebound object of class `cls` whose
+        centroid is within the merge-distance gate of `pose`, or None.
+
+        Lets a live detection re-adopt a remembered object's stable id instead
+        of spawning a duplicate. Uses the same class + 3D-distance gate as the
+        concept-graphs merge (`max_merge_dist_m`), so re-binding is no looser
+        than same-tick merging. Caller must hold the registry lock; the caller
+        clears the matched object's `restored` flag so each restored object
+        binds at most one detection per tick."""
+        max_d = float(self.cfg.get("max_merge_dist_m", 1.5))
+        best: Optional[SceneObject] = None
+        best_d = max_d
+        for obj in self._registry._objects.values():
+            if not obj.attributes.get("restored") or obj.cls != cls:
+                continue
+            d = math.sqrt(
+                (obj.pose.x - pose.x) ** 2
+                + (obj.pose.y - pose.y) ** 2
+                + (obj.pose.z - pose.z) ** 2
+            )
+            if d <= best_d:
+                best_d = d
+                best = obj
+        return best
 
 
 # ── Geometry helpers ──────────────────────────────────────────────────────

@@ -4,8 +4,8 @@
 // robonix-executor — capability-call dispatch runtime.
 // On startup executor:
 //   1. Connects to atlas, registers as `com.robonix.system.executor`.
-//   2. Declares its gRPC Execute capability (Plan → CapabilityCallEvent stream).
-//   3. Declares 5 built-in capabilities under `robonix/system/executor/builtin/<op>`
+//   2. Declares its gRPC Execute and CancelAllPlans capabilities.
+//   3. Declares built-in capabilities under `robonix/system/executor/builtin/<op>`
 //      so pilot's atlas-driven discovery surfaces them to the LLM as plain
 //      capabilities. Calls hitting these contracts short-circuit to in-process
 //      handlers in `dispatch::builtin` — no MCP loopback.
@@ -14,30 +14,30 @@
 
 mod config;
 mod dispatch;
-mod exec_wire;
 mod pb;
+mod plan_runtime;
+mod rtdl_wire;
 mod service;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
-use log::info;
-use pb::contracts::robonix_system_executor_server::RobonixSystemExecutorServer;
+use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
+use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{info, warn};
 use service::ExecutorServiceImpl;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = Args::parse();
-    let log_filter = parsed
-        .log
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_executor=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+    // Apply the manifest's per-component `log:` level (delivered inside
+    // --config-json) to scribe's file sink before the first log line.
+    robonix_scribe::init_from_config("executor", parsed.config_json.as_deref());
+    info!("robonix-executor starting");
 
     let cfg = ExecutorConfig::resolve(parsed)?;
 
@@ -67,13 +67,28 @@ async fn main() -> Result<()> {
     atlas
         .declare_capability(
             &cfg.id,
-            "robonix/system/executor",
+            "robonix/system/executor/execute",
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
-                "capabilities/system/executor.v1.toml",
-                "robonix.contracts.RobonixSystemExecutor",
-                "/robonix.contracts.RobonixSystemExecutor/Execute",
+                "capabilities/system/executor/execute.v1.toml",
+                "robonix.contracts.RobonixSystemExecutorExecute",
+                "/robonix.contracts.RobonixSystemExecutorExecute/Execute",
+            ),
+        )
+        .await?;
+
+    // CancelAllPlans RPC: control path for cancelling every active RTDL plan.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/cancel_all_plans",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/cancel_all_plans.v1.toml",
+                "robonix.contracts.RobonixSystemExecutorCancelAllPlans",
+                "/robonix.contracts.RobonixSystemExecutorCancelAllPlans/CancelAll",
             ),
         )
         .await?;
@@ -98,7 +113,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("declare builtin '{}'", contract_id))?;
     }
     info!(
-        "declared RobonixSystemExecutor + {} builtin capabilities at {advertised}",
+        "declared executor gRPC capabilities + {} builtin capabilities at {advertised}",
         BUILTINS.len()
     );
 
@@ -109,7 +124,7 @@ async fn main() -> Result<()> {
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
-        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
+        warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
 
     // Atlas evicts providers after ~60s without a heartbeat. Send one every
@@ -123,18 +138,19 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(&provider_id).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });
     }
 
     let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
-    info!("RobonixSystemExecutor gRPC on {listen_addr}");
-    eprintln!("robonix-executor ready on {listen_addr}");
+    info!("executor gRPC on {listen_addr}");
+    info!("robonix-executor ready on {listen_addr}");
 
     tonic::transport::Server::builder()
-        .add_service(RobonixSystemExecutorServer::new(svc))
+        .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc))
         .serve(listen_addr)
         .await
         .context("executor gRPC server failed")?;

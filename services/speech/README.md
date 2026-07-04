@@ -12,6 +12,12 @@ Backends:
 
 Tencent Cloud mode:
 
+1. Open the Tencent Cloud ASR console and activate Automatic Speech Recognition.
+2. Open CAM / Access Management -> Access Key -> API Key Management and create
+   an API key. Save `SecretKey` immediately; Tencent Cloud only shows it when
+   the key is created. The same page/account information provides the AppID.
+3. Export the credentials on the operator machine before `rbnx boot`:
+
 ```bash
 export SPEECH_BACKEND=tencent
 export TENCENT_ASR_APPID=...

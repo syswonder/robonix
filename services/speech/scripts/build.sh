@@ -15,7 +15,7 @@
 #   rbnx-build/ws/install/setup.bash   rbnx-cli's PYTHONPATH stub (existing)
 
 set -euo pipefail
-# Use TUNA mirror for pip / uv when GFW-bound. Override via env.
+# Use TUNA mirror for pip / uv when on a domestic (CN) network. Override via env.
 : "${UV_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
 : "${PIP_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
 export UV_INDEX_URL PIP_INDEX_URL
@@ -42,9 +42,52 @@ if [[ ! -d "$VENV" ]]; then
     uv venv "$VENV"
 fi
 
+# This venv's site-packages (robust to the python minor version).
+SITEPKG="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null || echo "$VENV/lib/python3.10/site-packages")"
+
+# Jetson rebuild safety: a prior build (step 2b) may have left host-torch
+# SYMLINKS in this venv. Remove them BEFORE uv sync — otherwise uv, seeing the
+# deleted dist-info, reinstalls torch and writes THROUGH the symlink into the
+# host's shared JetPack torch tree, corrupting the system torch. Re-linked below.
+if [[ -f /etc/nv_tegra_release ]]; then
+    for _m in torch torchaudio torchvision torchgen functorch torio; do
+        [[ -L "$SITEPKG/$_m" ]] && rm -f "$SITEPKG/$_m"
+    done
+fi
+
 # ── 2. uv sync (deps from pyproject.toml + workspace uv.lock) ──────────────
 echo "[build] uv sync (pyproject.toml → $VENV)"
 VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
+
+# ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
+# On Jetson (aarch64), PyPI ships a torch built against a CUDA version that
+# does NOT match the JetPack driver (e.g. a cu130 wheel vs the CUDA 12.6
+# driver), so torch.cuda.is_available() is False and FunASR/Whisper silently
+# fall back to CPU — streaming ASR then emits each character with a long lag.
+# JetPack already provides a working CUDA torch on the host python; reuse it
+# by symlinking the torch family into this venv (all other deps stay from uv).
+# Generalised: resolve each module's dir from the host python, so it works
+# regardless of where JetPack / editable installs place them.
+# Disable with SPEECH_SKIP_JETSON_TORCH=1.
+if [[ -f /etc/nv_tegra_release && "${SPEECH_SKIP_JETSON_TORCH:-}" != "1" ]]; then
+    SP="$SITEPKG"
+    if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+        HOSTPY="${SPEECH_HOST_PYTHON:-python3}"
+        if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+            echo "[build] Jetson: venv torch is CPU-only — linking host JetPack CUDA torch"
+            for mod in torch torchaudio torchvision torchgen functorch torio; do
+                d="$("$HOSTPY" -c "import os,importlib.util as u; s=u.find_spec('$mod'); print(os.path.dirname(s.origin) if s and s.origin else '')" 2>/dev/null || true)"
+                [[ -n "$d" && -d "$d" ]] || continue
+                rm -rf "$SP/$mod" "$SP/$mod"-*.dist-info
+                ln -sfn "$d" "$SP/$mod"
+                echo "[build]   linked $mod ← $d"
+            done
+            "$VENV/bin/python" -c 'import torch; print("[build]   venv torch.cuda.is_available() =", torch.cuda.is_available())' || true
+        else
+            echo "[build] WARNING: on Jetson but host python has no CUDA torch; ASR will run on CPU (slow)." >&2
+        fi
+    fi
+fi
 
 # ── 3. Codegen (.proto + grpc stubs → rbnx-build/codegen/) ──────────────────
 FLAGS=(--mcp)
@@ -52,13 +95,12 @@ FLAGS=(--mcp)
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-# ── 4. Pre-download models (skip in CI / SKIP_MODEL_DOWNLOAD=1) ─────────────
-# Default HF_ENDPOINT to hf-mirror.com — direct huggingface.co is essentially
-# unreachable from CN networks (was failing with 0% throughput on partial
-# 1.6GB cache). Override by exporting HF_ENDPOINT before invoking build.sh.
+# ── 4. Pre-download models (skip with SKIP_MODEL_DOWNLOAD=1) ────────────────
+# Default HF_ENDPOINT to hf-mirror.com for runners where direct model downloads
+# are slow or unreliable. Override by exporting HF_ENDPOINT before invoking build.sh.
 : "${HF_ENDPOINT:=https://hf-mirror.com}"
 export HF_ENDPOINT
-if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
+if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
     # Whisper is opt-in: it's a 20+ GB pull (whisper-large-v3) that only
     # the one-shot `robonix/system/speech/asr` contract uses. The default
@@ -81,7 +123,7 @@ if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     "$PY" -c "from funasr import AutoModel; AutoModel(model='paraformer-zh-streaming')" \
         || echo "[build] WARNING: FunASR model download failed; streaming ASR backend will fail at runtime."
 else
-    echo "[build] skipping model download (CI mode or SKIP_MODEL_DOWNLOAD=1)."
+    echo "[build] skipping model download (SKIP_MODEL_DOWNLOAD=1)."
 fi
 
 echo "[build] done."

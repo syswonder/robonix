@@ -25,11 +25,13 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import signal
 import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from . import scribe_logger
 from ._lifecycle_internal import _set_lifecycle_state
 from .atlas import ATLAS
 from .atlas_types import (
@@ -55,31 +57,6 @@ from .tool import mcp_contract
 
 log = logging.getLogger("robonix_api.capability")
 
-
-def _install_simple_logger() -> None:
-    """Replace `rich`-installed RichHandler (from fastmcp / uvicorn) with
-    a plain stderr handler. Idempotent.
-
-    Called from `_do_bootstrap()` (NOT at module import) so a bare
-    `import robonix_api` does not wipe the host application's logging
-    config — only kicks in when the caller actually decides to run a
-    Primitive / Service / Skill."""
-    if getattr(_install_simple_logger, "_done", False):
-        return
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-            datefmt="%H:%M:%S",
-        )
-    )
-    root.addHandler(handler)
-    if root.level == logging.NOTSET or root.level > logging.INFO:
-        root.setLevel(logging.INFO)
-    _install_simple_logger._done = True  # type: ignore[attr-defined]
 
 # Transport-ENUM <-> contract.mode compatibility matrix (best-effort
 # check at declare_capability time).
@@ -403,6 +380,26 @@ class _ProviderBase:
                 return toks[i + 1]
         return None
 
+    def _advertise_host(self) -> str:
+        """The IP a provider publishes into atlas for its gRPC / MCP
+        endpoints. Must be reachable by a cross-host consumer (e.g. an
+        executor on another machine), so hardcoding 127.0.0.1 breaks any
+        deployment where consumer and provider are not co-located: atlas
+        would hand the consumer "127.0.0.1:<port>" and it would dial its
+        own loopback instead of this host.
+
+        Resolution order: ROBONIX_ADVERTISE_HOST (explicit override) ->
+        the local source IP that routes toward the atlas host (this is the
+        interface a remote consumer reaches us on, since the atlas is the
+        rendezvous both sides already share) -> 127.0.0.1 (same-host only,
+        when route resolution fails)."""
+        explicit = os.environ.get("ROBONIX_ADVERTISE_HOST")
+        if explicit:
+            return explicit
+        atlas = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
+        atlas_host = atlas.rsplit(":", 1)[0] if ":" in atlas else atlas
+        return self.resolve_host_ip(atlas_host) or "127.0.0.1"
+
     # -- Layer 2: ROS publisher / subscriber -------------------------------
 
     def create_publisher(
@@ -510,14 +507,27 @@ class _ProviderBase:
         if self._mcp_app is not None:
             return
         from mcp.server.fastmcp import FastMCP
+        from mcp.server.transport_security import TransportSecuritySettings
 
-        # Bind host="0.0.0.0" explicitly. FastMCP defaults to host="127.0.0.1",
-        # which makes the SDK auto-enable DNS-rebinding protection with
-        # allowed_hosts restricted to localhost. A cross-host consumer (e.g. a
-        # remote executor) dialing this provider by IP is then rejected with
-        # HTTP 421 "Invalid Host header". "0.0.0.0" skips that localhost-only
-        # restriction so the MCP endpoint is reachable cross-host.
-        self._mcp_app = FastMCP(self.id, host="0.0.0.0")
+        # Cross-host reachability. The MCP SDK auto-enables DNS-rebinding
+        # protection whenever the bound host is a loopback name
+        # (127.0.0.1 / localhost / ::1), pinning allowed_hosts to localhost.
+        # A consumer on another machine dialing this provider by LAN IP is
+        # then rejected with HTTP 421 "Misdirected Request" (Invalid Host
+        # header). Binding host="0.0.0.0" happens to sidestep that on the
+        # current SDK, but that is incidental — a newer SDK could enable the
+        # check for 0.0.0.0 too, and any provider that legitimately binds a
+        # loopback host would still 421. So disable the Host-header check
+        # explicitly: providers are reached through atlas-issued endpoints,
+        # not untrusted browser origins, so DNS-rebinding protection buys
+        # nothing here and only breaks cross-host dialing.
+        self._mcp_app = FastMCP(
+            self.id,
+            host="0.0.0.0",
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            ),
+        )
 
     def use_mcp_app(self, app) -> None:
         if self._mcp_app is not None and self._mcp_app is not app:
@@ -528,7 +538,7 @@ class _ProviderBase:
 
     @property
     def mcp_endpoint(self) -> str:
-        return f"http://127.0.0.1:{self._mcp_port}/mcp/"
+        return f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"
 
     # -- Layer 2: provides_grpc decorator + attach_grpc_servicer -----------
 
@@ -598,12 +608,14 @@ class _ProviderBase:
         raise NotImplementedError
 
     def _do_bootstrap(self) -> None:
-        # 0. swap the rich-installed RichHandler (if any) for our plain
-        # stderr handler. Deliberately deferred from import time so that
-        # `import robonix_api` is a no-op on the host application's
-        # logging — only kicks in once the caller is actually running a
-        # provider process.
-        _install_simple_logger()
+        # 0. Route ALL stdlib logging through Scribe under this provider's id
+        # (the same tag rbnx uses for its log file). This replaces any handler
+        # installed by imports — fastmcp/uvicorn's rich handler, a host app's
+        # own config — so the whole provider lifecycle (register, ready, Driver
+        # commands, on_init, ACTIVE) lands in `rbnx logs -t <id>` instead of a
+        # raw stderr that the unified log never sees. Deferred from import time
+        # so a bare `import robonix_api` does not touch the host's logging.
+        scribe_logger.install_stdlib_bridge(self.id)
 
         # 1. atlas register
         registered_ok = False
@@ -688,7 +700,7 @@ class _ProviderBase:
         log.info("Lifecycle gRPC serving on 0.0.0.0:%d", self._driver_port)
 
         # 3. atlas-declare every gRPC capability
-        endpoint = f"127.0.0.1:{self._driver_port}"
+        endpoint = f"{self._advertise_host()}:{self._driver_port}"
         if driver_decl is not None:
             driver_base, driver_method = driver_decl
             try:
@@ -758,7 +770,7 @@ class _ProviderBase:
         log.info("MCP HTTP serving on 0.0.0.0:%d", self._mcp_port)
 
     def _declare_mcp_handlers(self) -> None:
-        endpoint = f"http://127.0.0.1:{self._mcp_port}/mcp/"
+        endpoint = f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"
         for fn in self._mcp_handlers:
             cid = getattr(fn, "_robonix_contract_id", None)
             if cid is None:

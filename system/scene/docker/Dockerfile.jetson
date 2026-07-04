@@ -1,0 +1,150 @@
+# syntax=docker/dockerfile:1.7
+# SPDX-License-Identifier: MulanPSL-2.0
+# system/scene container — Jetson (arm64 / L4T) variant.
+#
+# Same shape as docker/Dockerfile, with ONE deliberate difference: the
+# torch / torchvision wheels come from NVIDIA's Jetson index (jetson-ai-lab,
+# JetPack 6 / CUDA 12.6) instead of the cu128 x86_64 wheels. The base stays
+# the multi-arch `ros:${ROS_DISTRO}-ros-base` (its arm64 manifest is what
+# `docker build` picks on a Jetson), so ROS 2 + the scene Python stack are
+# identical to the x86 image — only the CUDA wheels differ.
+#
+# IMPORTANT — run with the NVIDIA container runtime so the container can use
+# the GPU: scripts/start.sh adds `--runtime nvidia` on the jetson-docker path.
+# The Jetson's CUDA/cuDNN userspace libraries are bind-mounted from the host by
+# that runtime; the image itself only carries the torch python wheels.
+#
+# For most Jetsons the lighter `package_manifest.jetson-native.yaml` (host
+# ROS + host JetPack torch, no image build) is the recommended path; this
+# image exists for hosts that want a self-contained scene container.
+
+ARG ROS_DISTRO=humble
+FROM ros:${ROS_DISTRO}-ros-base
+
+# ── Build-time proxy helpers (identical to the x86 Dockerfile) ────────
+RUN cat > /usr/local/bin/with-build-proxy <<'EOF' \
+ && chmod +x /usr/local/bin/with-build-proxy \
+ && cat > /usr/local/bin/without-proxy <<'EOF2' \
+ && chmod +x /usr/local/bin/without-proxy
+#!/usr/bin/env sh
+set -eu
+export HTTP_PROXY="${HTTP_PROXY_HOST:-}"
+export HTTPS_PROXY="${HTTPS_PROXY_HOST:-}"
+export http_proxy="${HTTP_PROXY_HOST:-}"
+export https_proxy="${HTTPS_PROXY_HOST:-}"
+export NO_PROXY="${NO_PROXY_HOST:-}"
+export no_proxy="${NO_PROXY_HOST:-}"
+exec "$@"
+EOF
+#!/usr/bin/env sh
+set -eu
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+unset ALL_PROXY all_proxy NO_PROXY no_proxy
+exec "$@"
+EOF2
+
+# ── TUNA mirrors ───────────────────────────────────────────────────
+RUN set -eux; \
+    find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
+      | xargs -0 -r sed -i --follow-symlinks \
+          -e 's|http://packages\.ros\.org/ros2/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu|g' \
+          -e 's|^Types: deb deb-src$|Types: deb|'; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i --follow-symlinks \
+            -e 's|http://ports\.ubuntu\.com/ubuntu-ports/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' \
+            /etc/apt/sources.list; \
+    fi
+
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    HF_ENDPOINT=https://hf-mirror.com
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System packages we need at runtime (same set as the x86 image).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    without-proxy sh -c ' \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            python3-pip \
+            python3-cv-bridge \
+            python3-numpy \
+            ros-$ROS_DISTRO-tf2-ros \
+            ros-$ROS_DISTRO-tf-transformations \
+            ros-$ROS_DISTRO-rmw-zenoh-cpp \
+            ros-$ROS_DISTRO-zenoh-bridge-dds && \
+        rm -rf /var/lib/apt/lists/* \
+    '
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy python3 -m pip install --progress-bar on --timeout 60 --retries 3 --upgrade pip
+
+# torch + torchvision — JETSON wheels (JetPack 6 / L4T r36 / CUDA 12.6).
+# NVIDIA's jetson-ai-lab index serves CUDA-enabled aarch64 wheels; pin the
+# index via JETSON_PIP_INDEX to match a different JetPack (e.g. jp6/cu128).
+ARG JETSON_PIP_INDEX=https://pypi.jetson-ai-lab.dev/jp6/cu126
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy python3 -m pip install --progress-bar on --timeout 120 --retries 3 \
+        --index-url "${JETSON_PIP_INDEX}" \
+        torch torchvision
+
+# Generic scene deps + concept-graphs perception stack (same requirements as
+# the x86 image — torch is already satisfied above, so pip skips it).
+COPY requirements/scene-base.txt /tmp/requirements/scene-base.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy pip install -r /tmp/requirements/scene-base.txt --progress-bar on --timeout 60 --retries 3 \
+    && rm /tmp/requirements/scene-base.txt
+
+COPY requirements/scene-perception-core.txt /tmp/requirements/scene-perception-core.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy pip install -r /tmp/requirements/scene-perception-core.txt --progress-bar on --timeout 60 --retries 3 \
+    && rm /tmp/requirements/scene-perception-core.txt
+
+COPY requirements/scene-perception-heavy.txt /tmp/requirements/scene-perception-heavy.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy pip install -r /tmp/requirements/scene-perception-heavy.txt --progress-bar on --timeout 60 --retries 3 \
+    && rm /tmp/requirements/scene-perception-heavy.txt
+
+# ── Proxy-needed network layers ────────────────────────────────────
+ARG HTTP_PROXY_HOST
+ARG HTTPS_PROXY_HOST
+ARG NO_PROXY_HOST
+
+RUN set -eux; \
+    rm -rf /opt/concept-graphs; \
+    with-build-proxy git clone --depth 1 --branch ali-dev \
+        https://ghfast.top/https://github.com/concept-graphs/concept-graphs.git \
+        /opt/concept-graphs \
+    || ( rm -rf /opt/concept-graphs && \
+         with-build-proxy git clone --depth 1 --branch ali-dev \
+            https://github.com/concept-graphs/concept-graphs.git /opt/concept-graphs )
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy pip install --no-deps -e /opt/concept-graphs
+
+# Bake CV model weights into the image.
+ENV HF_HOME=/opt/models/hf
+RUN mkdir -p /opt/models /opt/models/hf /root/.cache/clip
+COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
+COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
+RUN with-build-proxy sh <<'EOF'
+set -eux
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HUB_DOWNLOAD_TIMEOUT=120
+python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
+python3 -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='/root/.cache/clip')"
+EOF
+
+ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
+    SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
+    SCENE_CLIP_MODEL=ViT-B-32 \
+    SCENE_CLIP_PRETRAINED=laion2b_s34b_b79k
+
+WORKDIR /scene
+COPY entrypoint.sh /entrypoint.sh
+COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
+RUN chmod +x /entrypoint.sh
+ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ENTRYPOINT ["/entrypoint.sh"]

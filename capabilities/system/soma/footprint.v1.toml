@@ -9,6 +9,7 @@ id      = "robonix/system/soma/footprint"
 version = "1"
 kind    = "service"
 idl     = "soma/srv/GetFootprint.srv"
+description = "Return the robot 2D collision footprint in the base frame."
 
 [mode]
 type = "rpc"

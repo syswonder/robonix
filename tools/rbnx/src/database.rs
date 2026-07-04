@@ -2,6 +2,7 @@
 // Package database for system-installed packages (~/.robonix/packages)
 
 use anyhow::{Context, Result};
+use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -105,7 +106,7 @@ impl PackageDatabase {
                     continue;
                 }
 
-                let manifest_path = match crate::manifest::detect_manifest_path(&path) {
+                let manifest_path = match crate::manifest::detect_manifest_path(&path, None) {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
@@ -116,7 +117,7 @@ impl PackageDatabase {
                 let package_name = match PackageInstaller::parse_manifest_name(&manifest_path) {
                     Ok(n) => n,
                     Err(e) => {
-                        log::warn!(
+                        warn!(
                             "Failed to parse manifest at {}: {}",
                             manifest_path.display(),
                             e
@@ -137,7 +138,7 @@ impl PackageDatabase {
                 {
                     Ok(s) => s,
                     Err(e) => {
-                        log::warn!("Failed to parse manifest at {}: {}", path.display(), e);
+                        warn!("Failed to parse manifest at {}: {}", path.display(), e);
                         continue;
                     }
                 };
@@ -146,7 +147,7 @@ impl PackageDatabase {
                 {
                     Ok(info) => db.add_package(info),
                     Err(e) => {
-                        log::warn!("Failed to create package info at {}: {}", path.display(), e)
+                        warn!("Failed to create package info at {}: {}", path.display(), e)
                     }
                 }
             }
@@ -156,7 +157,7 @@ impl PackageDatabase {
             if !found_packages.contains(&name)
                 && let Some(removed) = db.remove_package(&name)
             {
-                log::info!(
+                info!(
                     "Removed '{}' from database (not found: {})",
                     name,
                     removed.path.display()

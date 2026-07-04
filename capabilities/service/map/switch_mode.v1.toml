@@ -1,0 +1,13 @@
+# Flip the running SLAM between mapping (build/extend) and localization
+# (relocalize, read-only) on the CURRENT map at runtime — config's map_mode is
+# only the startup pre-selection.
+# ROS IDL: `lib/map/srv/SwitchMode.srv` (mode -> ok + detail).
+[contract]
+id      = "robonix/service/map/switch_mode"
+version = "1"
+kind    = "service"
+idl     = "map/srv/SwitchMode.srv"
+description = "Switch the running map service between mapping and localization modes."
+
+[mode]
+type = "rpc"

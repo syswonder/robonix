@@ -6,6 +6,7 @@ id      = "robonix/service/speech/dialog"
 version = "1"
 kind    = "service"
 idl     = "speech/srv/StartDialog.srv"
+description = "Run a voice dialog session that coordinates speech input and output."
 
 [mode]
 type = "rpc_server_stream"

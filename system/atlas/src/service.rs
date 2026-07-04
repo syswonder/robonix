@@ -11,7 +11,7 @@
 // implemented without a parallel state.
 
 use anyhow::{Context, Result};
-use log::{info, warn};
+use robonix_scribe::{info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -114,6 +114,10 @@ struct CapabilityProviderState {
     kind: pb::Kind,
     namespace: String,
     capability_md_path: String,
+    /// CAPABILITY.md content the provider sent at registration. Stored
+    /// verbatim and handed to consumers; unlike `capability_md_path` it is
+    /// portable across the provider's / consumer's filesystem boundaries.
+    capability_md: String,
     last_heartbeat_ms: u64,
     endpoints: Vec<DeclaredEndpoint>,
     /// Last value reported by SetLifecycleState. None for Providers
@@ -146,6 +150,7 @@ impl From<&CapabilityProviderState> for pb::CapabilityProvider {
             kind: provider.kind as i32,
             namespace: provider.namespace.clone(),
             capability_md_path: provider.capability_md_path.clone(),
+            capability_md: provider.capability_md.clone(),
             last_heartbeat_ms: provider.last_heartbeat_ms,
             capabilities: provider
                 .endpoints
@@ -315,6 +320,7 @@ impl AtlasRegistry {
         kind: pb::Kind,
         namespace: &str,
         capability_md_path: &str,
+        capability_md: &str,
     ) -> Result<String, Status> {
         let provider_id = if provider_id.trim().is_empty() {
             Self::assign_id()
@@ -337,6 +343,7 @@ impl AtlasRegistry {
             let prev_iface_count = existing.endpoints.len();
             existing.namespace = namespace;
             existing.capability_md_path = capability_md_path.trim().to_string();
+            existing.capability_md = capability_md.to_string();
             existing.last_heartbeat_ms = Self::now_ms();
             existing.endpoints.clear();
             existing.pushed_state = None;
@@ -355,6 +362,7 @@ impl AtlasRegistry {
                 kind,
                 namespace,
                 capability_md_path: capability_md_path.trim().to_string(),
+                capability_md: capability_md.to_string(),
                 last_heartbeat_ms: Self::now_ms(),
                 endpoints: Vec::new(),
                 pushed_state: None,
@@ -377,7 +385,8 @@ impl AtlasRegistry {
         let was_present = state.providers.remove(provider_id).is_some();
         let dropped = state.drop_channels_of(provider_id);
         info!(
-            "[atlas] unregister {provider_id} (was_present={was_present}, channels_dropped={dropped})"
+            "[atlas] unregister {provider_id} (was_present={was_present}, \
+             channels_dropped={dropped})"
         );
         was_present
     }
@@ -569,6 +578,7 @@ impl AtlasRegistry {
                 kind: provider.kind as i32,
                 namespace: provider.namespace.clone(),
                 capability_md_path: provider.capability_md_path.clone(),
+                capability_md: provider.capability_md.clone(),
                 last_heartbeat_ms: provider.last_heartbeat_ms,
                 state: provider.state() as i32,
                 state_detail: provider.state_detail.clone(),
@@ -650,30 +660,19 @@ impl AtlasRegistry {
         was_open
     }
 
-    /// Read the provider's CAPABILITY.md content. Returns "" when the provider
-    /// registered without a path.
+    /// Return the provider's CAPABILITY.md content as registered. Returns ""
+    /// when the provider registered without one. Serves the stored text
+    /// directly — never touches the filesystem, since `capability_md_path`
+    /// is only valid in the provider's own (possibly containerised) mount
+    /// namespace, not Atlas's.
     pub async fn capability_md(&self, provider_id: &str) -> Result<String, Status> {
         let provider_id = Self::require("provider_id", provider_id)?;
-        let path = {
-            let state = self.inner.read().await;
-            let provider = state
-                .providers
-                .get(provider_id)
-                .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
-            provider.capability_md_path.clone()
-        };
-        if path.is_empty() {
-            return Ok(String::new());
-        }
-        match tokio::fs::read_to_string(&path).await {
-            Ok(s) => Ok(s),
-            Err(e) => {
-                warn!("[atlas] {provider_id}: read CAPABILITY.md '{path}' failed: {e}");
-                Err(Status::internal(format!(
-                    "failed to read CAPABILITY.md for {provider_id}: {e}"
-                )))
-            }
-        }
+        let state = self.inner.read().await;
+        let provider = state
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
+        Ok(provider.capability_md.clone())
     }
 
     /// Debug-only JSON dump of the entire registry. Schema is unstable.
@@ -853,6 +852,7 @@ impl pb::atlas_server::Atlas for AtlasService {
                 pb::Kind::Primitive,
                 &r.namespace,
                 &r.capability_md_path,
+                &r.capability_md,
             )
             .await?;
         Ok(Response::new(pb::RegisterResponse { id }))
@@ -870,6 +870,7 @@ impl pb::atlas_server::Atlas for AtlasService {
                 pb::Kind::Service,
                 &r.namespace,
                 &r.capability_md_path,
+                &r.capability_md,
             )
             .await?;
         Ok(Response::new(pb::RegisterResponse { id }))
@@ -882,7 +883,13 @@ impl pb::atlas_server::Atlas for AtlasService {
         let r = req.into_inner();
         let id = self
             .registry
-            .register(&r.id, pb::Kind::Skill, &r.namespace, &r.capability_md_path)
+            .register(
+                &r.id,
+                pb::Kind::Skill,
+                &r.namespace,
+                &r.capability_md_path,
+                &r.capability_md,
+            )
             .await?;
         Ok(Response::new(pb::RegisterResponse { id }))
     }

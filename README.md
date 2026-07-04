@@ -36,20 +36,20 @@ skills, and the planner discover and talk to each other; it owns identity,
 configuration, time, transport, logging, health, body model, scene model,
 execution, and safety as named, replaceable components.
 
-| Component                        | Responsibility                                                                          | Status (v0.1)        |
-| -------------------------------- | --------------------------------------------------------------------------------------- | -------------------- |
-| **[atlas](system/atlas/)**       | Capability discovery: the catalog of every registered capability and its contract       | Implemented          |
-| **[chronos](system/chronos/)**   | Unified time source with PTP / IEEE-1588 alignment across sensors and hosts             | Stub                 |
-| **[executor](system/executor/)** | Plan execution: validates Pilot plans and dispatches each step to capability providers  | Implemented          |
-| **[keystone](system/keystone/)** | Body identity, persistent configuration, and policy                                     | Stub                 |
-| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 | Implemented          |
-| **[nexus](system/nexus/)**       | Transport libraries for gRPC / MCP / ROS 2 (a library, not a process)                   | Implemented          |
-| **[pilot](system/pilot/)**       | VLM-driven planning and decision making, memory, and world model                        | Implemented          |
-| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     | Implemented          |
-| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             | Stub                 |
-| **[sentinel](system/sentinel/)** | Safety supervision over capability calls                                                | Merged into executor |
-| **[soma](system/soma/)**         | Body model: device topology and primitive abstraction                                   | Stub                 |
-| **[vitals](system/vitals/)**     | Liveness and health aggregation across all running components                           | Partial (via atlas)  |
+| Component                        | Responsibility                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------- |
+| **[atlas](system/atlas/)**       | Capability registry and discovery: the catalog of every registered capability and its contract |
+| **[chronos](system/chronos/)**   | Unified clock and cross-sensor timestamp alignment (PTP / IEEE-1588)                     |
+| **[executor](system/executor/)** | RTDL plan execution and capability dispatch (`sequence` / `parallel` / `do`)             |
+| **[keystone](system/keystone/)** | User identity, persistent configuration, and access policy                              |
+| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 |
+| **[nexus](system/nexus/)**       | Communication libraries for gRPC / MCP / ROS 2 (not a standalone process)               |
+| **[pilot](system/pilot/)**       | VLM-driven planning and decision loop; emits RTDL plans for the executor                 |
+| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     |
+| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             |
+| **[sentinel](system/sentinel/)** | Rule-based safety gate checked before each capability dispatch                          |
+| **[soma](system/soma/)**         | Robot self-description (body model): device topology and primitive abstraction          |
+| **[vitals](system/vitals/)**     | Robot power and component-health monitoring                                             |
 
 On top of system, three open categories — provided as
 contracts (61 standard interfaces in `capabilities/`) and reference
@@ -92,6 +92,7 @@ ROS 2 distribution (Foxy / Humble / Jazzy); **Humble is recommended**.
 ```bash
 git clone --recursive https://github.com/syswonder/robonix
 cd robonix
+python3 -m pip install --user uv   # if uv is not already installed
 make install   # builds the Cargo workspace and installs
                # rbnx + robonix-{atlas,pilot,executor,liaison,codegen}
                # to ~/.cargo/bin, then registers this clone via `rbnx setup`
@@ -102,16 +103,41 @@ Two terminals — the simulator and Robonix itself.
 
 ```bash
 # (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
+export DISPLAY=:0
 bash examples/webots/sim/start.sh
 
-# (2) — Robonix: system services + Tiago primitives + Nav2 + scene
+# Optional for CI/headless debugging only; normal quickstart uses the Webots GUI above.
+# export ROBONIX_SIM_STREAM=1
+# export WEBOTS_HEADLESS_MODE=auto
+# bash examples/webots/sim/start.sh
+
+# (2) — Robonix: system services + Tiago primitives + Nav2 + scene.
+# Zenoh is the default ROS 2 RMW for this deploy.
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
 export VLM_MODEL=gpt-5.5
+
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
 rbnx boot
 ```
+
+Robonix keeps the ROS 2 middleware selectable, but the Webots deploy defaults to
+Zenoh RMW. Our CI and local Webots tests run a single-machine, multi-container
+ROS graph with high-rate TF, RGB-D, lidar, map, Nav2, and scene traffic. Fast
+DDS has been less stable in that topology, mainly around discovery and
+cross-container communication, and its DDS discovery/state overhead is heavier.
+Zenoh RMW keeps the ROS 2 APIs unchanged, uses a local `rmw_zenohd` router daemon
+for discovery and routed traffic, and can still use peer-to-peer data paths
+between nodes. The Webots sim container starts the router automatically when
+`RMW_IMPLEMENTATION=rmw_zenoh_cpp`; switch back explicitly with
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp` when comparing behavior.
+
+References: [`rmw_zenoh` design](https://github.com/ros2/rmw_zenoh/blob/rolling/docs/design.md),
+Chovet et al. ["Performance Comparison of ROS2 Middlewares for Multi-robot Mesh Networks in Planetary Exploration"](https://link.springer.com/article/10.1007/s10846-024-02211-2)
+(Table 4 reports Zenoh improving reachability by 146.93% / 58.17%, reducing per-message data overhead by 47.82% / 25.93%, and reducing CPU usage by 41.27% / 39.76%, with higher RAM usage), and Liang et al.
+["A Performance Study on the Throughput and Latency of Zenoh, MQTT, Kafka, and DDS"](https://arxiv.org/abs/2303.09419).
 
 Once `rbnx boot` reports the stack is up:
 
@@ -119,6 +145,17 @@ Once `rbnx boot` reports the stack is up:
 # (3)
 rbnx caps          # list registered capabilities + interfaces
 rbnx chat          # interactive TUI chat with the pilot
+```
+
+Keeping upstream packages fresh: some providers in the manifest are cloned
+from upstream git repos (e.g. `mapping`, `nav2`, `explore` declared with
+`url:`). They are cloned once and reused, so they don't advance on their own.
+`rbnx boot` and `rbnx build` print a notice when a local clone is behind its
+remote; sync to the latest upstream commit with `rbnx update`:
+
+```bash
+rbnx update                  # update every remote provider in this deploy (asks y/N)
+rbnx update -p <package dir>  # or just one package
 ```
 
 Tear-down:
@@ -162,34 +199,57 @@ Dive deeper:
 
 ## Ecosystem
 
-### Tools
+Robonix is built from small, swappable **packages**, each implementing one or
+more capability contracts under a `robonix/<kind>/<area>/*` namespace (browse
+them in the [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md)).
+Packages come in two flavours:
 
-* [**Robonix Skill Toolkit**](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
-  — a training toolkit for VLA-based Robonix skills: collect teleop data,
-  fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy it
-  on a real robotic arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)).
+- **Built-in reference packages** ship in this repo under [`services/`](services/) and deploy as-is.
+- **Community packages** live in their own repos and are pulled in at boot via the manifest's `url:` field — fork one as a template to add new hardware or behaviour.
 
-### Primitives
+### Built-in services — [`services/`](services/)
 
-* [**Agilex Ranger Mini v3 Chassis Robonix Primitive Package**](https://github.com/enkerewpo/ranger_chassis_rbnx)
-* [**Livox MID360 Lidar Robonix Primitive Package**](https://github.com/enkerewpo/mid360_lidar_rbnx)
-* [**Livox MID360 IMU Robonix Primitive Package**](https://github.com/enkerewpo/mid360_imu_rbnx)
-* [**Intel Realsense Camera Robonix Primitive Package**](https://github.com/enkerewpo/realsense_camera_rbnx)
+| Package | Namespace | What it does |
+|---|---|---|
+| [`memsearch`](services/memsearch) | `robonix/service/memory/*` | Long-term fact / preference memory; the planner queries it for relevant past context. |
+| [`speech`](services/speech) | `robonix/service/speech/*` | Voice I/O — ASR, TTS (incl. streaming), dialog, speaker listing. |
+| [`voiceprint`](services/voiceprint) | `robonix/service/voiceprint/*` | Speaker identification (ECAPA-TDNN) — enroll / identify / list / delete. |
 
-### Services
+> `scene` (3D scene graph) and the core runtime (`atlas`, `executor`, `pilot`, `liaison`) are **system** components under [`system/`](system/), not services.
 
-* [**SLAM Mapping Robonix Service Package**](https://github.com/enkerewpo/mapping_rbnx)
-  - With RTABMAP, FAST-LIO2 integration
-* [**Nav2 Robonix Service Package**](https://github.com/lhw2002426/nav2_wrapper_rbnx)
+### Community packages
 
-### Skills
+Standalone repos, cloned at boot via `url:` in the deploy manifest.
 
-* [**Environment Explorer Robonix Skill Package**](https://github.com/enkerewpo/explore_rbnx)
-  - A simple room exploration skill `robonix/skill/explore/*`
+**Primitives** — one hardware device per package:
 
-### Full Robot Deployment Examples
+| Package | Hardware | Namespace |
+|---|---|---|
+| [`ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx) | AgileX Ranger Mini v3 chassis | `robonix/primitive/chassis/*` |
+| [`mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx) | Livox MID-360 — point cloud | `robonix/primitive/lidar/*` |
+| [`mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx) | Livox MID-360 — IMU | `robonix/primitive/imu/*` |
+| [`realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx) | Intel RealSense camera | `robonix/primitive/camera/*` |
 
-* [**Deploy Manifest for AgileX Ranger Mini Robot at Syswonder Lab**](https://github.com/enkerewpo/ranger_mini_deploy)
+**Services** — robot-level algorithms:
+
+| Package | What it does | Namespace |
+|---|---|---|
+| [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) | SLAM mapping (RTAB-Map + FAST-LIO2) | `robonix/service/map/*` |
+| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
+
+**Skills** — LLM-triggered composite tasks:
+
+| Package | What it does | Namespace |
+|---|---|---|
+| [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx) | Autonomous frontier room exploration | `robonix/skill/explore/*` |
+| [`greet_rbnx`](https://github.com/enkerewpo/greet_rbnx) | Greet passers-by — YOLO person detection → VLM line → speak | `robonix/skill/greet/*` |
+
+**Tools & deployments:**
+
+| Repo | What it is |
+|---|---|
+| [Robonix Skill Toolkit](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit) | Train VLA-based skills: collect teleop data, fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, deploy on a real arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)). |
+| [ranger_mini_deploy](https://github.com/enkerewpo/ranger_mini_deploy) | Full deploy manifest for the AgileX Ranger Mini robot at Syswonder Lab. |
 
 ## Contributors
 
@@ -218,6 +278,7 @@ Thanks goes to these wonderful people:
     </tr>
     <tr>
       <td align="center" valign="top" width="20%"><a href="https://github.com/QingFeng34048"><img src="https://avatars.githubusercontent.com/u/202889188?v=4?s=80" width="80px;" alt="qingfeng123"/><br /><sub><b>qingfeng123</b></sub></a><br /><a href="#tool-QingFeng34048" title="Tools">🔧</a> <a href="#data-QingFeng34048" title="Data">🔣</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/ohhhHwH"><img src="https://avatars.githubusercontent.com/u/76088492?v=4?s=80" width="80px;" alt="longyunhou"/><br /><sub><b>longyunhou</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=ohhhHwH" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

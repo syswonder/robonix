@@ -1,8 +1,0 @@
-[contract]
-id      = "robonix/service/navigation/cancel"
-version = "1"
-kind    = "service"
-idl     = "navigation/srv/CancelNavigation.srv"
-
-[mode]
-type = "rpc"

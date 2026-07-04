@@ -20,6 +20,7 @@ use robonix_liaison::pb::contracts::robonix_system_pilot_server::{
     RobonixSystemPilot, RobonixSystemPilotServer,
 };
 use robonix_liaison::pb::pilot::{PilotEvent, Task};
+use robonix_scribe::{info, warn};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -73,7 +74,7 @@ impl RobonixSystemPilot for MockPilot {
         let (tx, rx) = mpsc::channel::<Result<PilotEvent, Status>>(8);
 
         if task_is_control(&task) {
-            log::info!(
+            info!(
                 "[mock-pilot] control task ({}); closing stream",
                 task.context_json
             );
@@ -85,7 +86,7 @@ impl RobonixSystemPilot for MockPilot {
             "[mock-pilot] received from user_id='{user_id}' source={} text='{}' ctx={}",
             task.source, task.text, task.context_json
         );
-        log::info!("{echo}");
+        info!("{echo}");
 
         tokio::spawn(async move {
             let chunk = PilotEvent {
@@ -96,6 +97,8 @@ impl RobonixSystemPilot for MockPilot {
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
+                node_state: None,
+                task_state: None,
             };
             let _ = tx.send(Ok(chunk)).await;
             tokio::time::sleep(Duration::from_millis(80)).await;
@@ -107,6 +110,8 @@ impl RobonixSystemPilot for MockPilot {
                 batch_result: None,
                 status: None,
                 final_text: format!("you said \"{}\"", task.text),
+                node_state: None,
+                task_state: None,
             };
             let _ = tx.send(Ok(final_ev)).await;
         });
@@ -117,7 +122,8 @@ impl RobonixSystemPilot for MockPilot {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    robonix_scribe::init("mock_pilot");
+    info!("mock pilot starting");
 
     let atlas = std::env::var("ROBONIX_ATLAS").unwrap_or_else(|_| "127.0.0.1:50051".to_string());
     let atlas_http = if atlas.starts_with("http") {
@@ -133,7 +139,7 @@ async fn main() -> Result<()> {
     let listen: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let advertised = format!("127.0.0.1:{port}");
 
-    log::info!("[mock-pilot] connecting to Atlas at {atlas_http}");
+    info!("[mock-pilot] connecting to Atlas at {atlas_http}");
     let mut atlas =
         AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
     atlas.register_service(CAPABILITY_ID, NAMESPACE, "").await?;
@@ -150,7 +156,7 @@ async fn main() -> Result<()> {
             ),
         )
         .await?;
-    log::info!("[mock-pilot] registered as '{CAPABILITY_ID}', listening on {advertised}");
+    info!("[mock-pilot] registered as '{CAPABILITY_ID}', listening on {advertised}");
     eprintln!("mock-pilot ready on :{port}");
 
     {
@@ -161,7 +167,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(CAPABILITY_ID).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });

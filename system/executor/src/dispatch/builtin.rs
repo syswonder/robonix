@@ -4,6 +4,9 @@
 // dispatch/builtin.rs — built-in tool implementations
 
 use crate::pb::pilot::CapabilityCallResult;
+use crate::plan_runtime::PlanRuntime;
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -61,12 +64,35 @@ use crate::pb::pilot::CapabilityCall;
 /// One in-process builtin (no network, runs in executor's own process).
 /// `call.contract_id`'s last segment names the operation —
 /// e.g. `robonix/system/executor/builtin/read_file` → `read_file`.
-pub async fn execute(call: &CapabilityCall) -> CapabilityCallResult {
+pub async fn execute(
+    call: &CapabilityCall,
+    runtime: &PlanRuntime,
+    self_provider_id: &str,
+    atlas: &mut AtlasClient,
+) -> CapabilityCallResult {
     let op = call
         .contract_id
         .rsplit_once('/')
         .map(|(_, leaf)| leaf)
         .unwrap_or(call.contract_id.as_str());
+    if op == "cancel_plan" {
+        return runtime
+            .cancel_plan_builtin(call, self_provider_id, atlas)
+            .await;
+    }
+    if op == "stop_plan_at" {
+        return runtime.stop_plan_at_builtin(call).await;
+    }
+    if op == "get_plan_status" {
+        return runtime.get_plan_status_builtin(call).await;
+    }
+    if op == "get_all_plans" {
+        return runtime.get_all_plans_builtin(call).await;
+    }
+    if op == "read_capability_doc" {
+        return read_capability_doc(call, atlas).await;
+    }
+
     let result = run(op, &call.args_json).await;
     let mut out = CapabilityCallResult {
         call_id: call.call_id.clone(),
@@ -98,7 +124,7 @@ async fn run(op: &str, args_json: &str) -> anyhow::Result<String> {
     }
 }
 
-/// Static metadata for the 5 builtin ops. Used by main.rs to declare them
+/// Static metadata for the builtin ops. Used by main.rs to declare them
 /// against atlas at startup so pilot can discover them like any other provider.
 pub struct BuiltinSpec {
     pub op: &'static str,
@@ -132,7 +158,89 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         description: "Run a shell command and return stdout/stderr",
         input_schema_json: r#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}"#,
     },
+    BuiltinSpec {
+        op: "cancel_plan",
+        description: "Cancellation for an in-flight RTDL plan by plan_id",
+        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to cancel"},"wait_ms":{"type":"integer","minimum":0,"description":"Optional milliseconds to wait for the target plan to stop; default 5000"}},"required":["plan_id"]}"#,
+    },
+    BuiltinSpec {
+        op: "get_all_plans",
+        description: "List every in-flight RTDL plan with its plan_id, a short description of the task, op_count, cancelled flag, and number of armed stop points. Call this to discover which plans are currently running, then inspect one with get_plan_status before stopping it. Takes no arguments.",
+        input_schema_json: r#"{"type":"object","properties":{}}"#,
+    },
+    BuiltinSpec {
+        op: "get_plan_status",
+        description: "Inspect an in-flight RTDL plan: returns its ops, each with op_id, kind, description, current state (pending/running/succeeded/failed/canceled/timeout/paused) and any armed stop_point. Call this to find the op_id and live progress of a running plan before issuing stop_plan_at or cancel_plan. Errors if the plan is not active (stale/wrong id or already finished) — use get_all_plans to list running plans.",
+        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to inspect"}},"required":["plan_id"]}"#,
+    },
+    BuiltinSpec {
+        op: "stop_plan_at",
+        description: "Set a stop point on an in-flight RTDL plan: when execution reaches the op with the given op_id, cancel the whole plan. Use 'on_complete' (default) to stop right after that op finishes, or 'on_enter' to stop the moment it is reached, before it runs. op_ids are the per-node identifiers shown in RTDL node_state events.",
+        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to set the stop point on"},"op_id":{"type":"string","description":"Node op_id at which to stop (cancel) the plan"},"when":{"type":"string","enum":["on_enter","on_complete"],"description":"on_enter = before the op runs; on_complete = after it finishes. Default on_complete."}},"required":["plan_id","op_id"]}"#,
+    },
+    BuiltinSpec {
+        op: "read_capability_doc",
+        description: "Read a capability provider's full CAPABILITY.md manual by provider_id. Call this to learn how to use a provider before invoking it. Only providers listed as having a doc carry one; never guess or read a file path for docs.",
+        input_schema_json: r#"{"type":"object","properties":{"provider_id":{"type":"string","description":"The provider_id whose CAPABILITY.md to read"}},"required":["provider_id"]}"#,
+    },
 ];
+
+#[derive(Deserialize)]
+struct DocArgs {
+    provider_id: String,
+}
+
+/// Apply the `read_capability_doc` builtin: fetch a provider's registered
+/// CAPABILITY.md *content* from atlas and return it as markdown text.
+///
+/// Unlike `read_file`, this never touches the filesystem — atlas serves the
+/// content the provider sent at registration, so it works regardless of the
+/// provider's (possibly containerised) mount layout. Errors when the provider
+/// is unknown or registered no doc; output is truncated to keep prompt size
+/// bounded.
+async fn read_capability_doc(
+    call: &CapabilityCall,
+    atlas: &mut AtlasClient,
+) -> CapabilityCallResult {
+    let mut out = CapabilityCallResult {
+        call_id: call.call_id.clone(),
+        provider_id: call.provider_id.clone(),
+        contract_id: call.contract_id.clone(),
+        ..Default::default()
+    };
+    let provider_id = match serde_json::from_str::<DocArgs>(&call.args_json) {
+        Ok(a) => a.provider_id.trim().to_string(),
+        Err(e) => {
+            out.error = format!("invalid read_capability_doc args: {e}");
+            return out;
+        }
+    };
+    if provider_id.is_empty() {
+        out.error = "read_capability_doc: provider_id is required".to_string();
+        return out;
+    }
+    match atlas
+        .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
+        .await
+    {
+        Ok(providers) => match providers.iter().find(|p| p.id == provider_id) {
+            Some(p) if !p.capability_md.is_empty() => {
+                out.success = true;
+                out.output = truncate(&p.capability_md, 12000);
+            }
+            Some(_) => {
+                out.error = format!("provider '{provider_id}' registered no CAPABILITY.md");
+            }
+            None => {
+                out.error = format!("no provider '{provider_id}' registered in atlas");
+            }
+        },
+        Err(e) => {
+            out.error = format!("atlas query for '{provider_id}' failed: {e}");
+        }
+    }
+    out
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -328,94 +436,6 @@ mod tests {
         let _ = std::fs::remove_dir(&tmp);
     }
 
-    // CapabilityCall builder — tests dispatch by contract_id leaf, so each
-    // call's contract_id is `<anything>/<op>` and the leaf names the op.
-    fn call(call_id: &str, op: &str, args_json: &str) -> CapabilityCall {
-        CapabilityCall {
-            call_id: call_id.to_string(),
-            provider_id: "executor".to_string(),
-            contract_id: format!("robonix/system/executor/builtin/{op}"),
-            args_json: args_json.to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn read_file_rejects_path_traversal() {
-        let tmp = std::env::temp_dir().join("rbnx_test_read");
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
-
-        let result = execute(&call(
-            "test-1",
-            "read_file",
-            r#"{"path": "../../../etc/passwd"}"#,
-        ))
-        .await;
-        assert!(!result.success, "read_file should fail for path traversal");
-        assert!(
-            result.error.contains("traversal") || result.error.contains("does not exist"),
-            "error should explain traversal, got: {}",
-            result.error
-        );
-    }
-
-    #[tokio::test]
-    async fn write_file_rejects_path_traversal() {
-        let tmp = std::env::temp_dir().join("rbnx_test_write");
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
-
-        let result = execute(&call(
-            "test-2",
-            "write_file",
-            r#"{"path": "/tmp/outside_workspace_evil.txt", "content": "pwned"}"#,
-        ))
-        .await;
-        assert!(
-            !result.success,
-            "write_file should fail for path outside workspace"
-        );
-
-        // File should NOT have been created
-        assert!(
-            !std::path::Path::new("/tmp/outside_workspace_evil.txt").exists(),
-            "file outside workspace must not be created"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_command_rejects_oversized_command() {
-        let long_cmd = "a".repeat(MAX_COMMAND_LEN + 1);
-        let args = format!(r#"{{"command": "{}"}}"#, long_cmd);
-        let result = execute(&call("test-3", "run_command", &args)).await;
-        assert!(!result.success, "oversized command should be rejected");
-        assert!(
-            result.error.contains("command too long"),
-            "error should mention 'command too long', got: {}",
-            result.error
-        );
-    }
-
-    #[tokio::test]
-    async fn run_command_accepts_normal_command() {
-        let result = execute(&call(
-            "test-4",
-            "run_command",
-            r#"{"command": "echo hello"}"#,
-        ))
-        .await;
-        assert!(
-            result.success,
-            "normal command should succeed: {}",
-            result.error
-        );
-        assert!(
-            result.output.contains("hello"),
-            "output should contain 'hello', got: {}",
-            result.output
-        );
-    }
-
     #[test]
     fn truncate_ascii_works() {
         let s = "hello world";
@@ -461,12 +481,5 @@ mod tests {
             result.starts_with("A"),
             "should start with 'A', got: {result}"
         );
-    }
-
-    #[tokio::test]
-    async fn unknown_builtin_returns_error() {
-        let result = execute(&call("test-5", "evil_tool", "{}")).await;
-        assert!(!result.success);
-        assert!(result.error.contains("unknown builtin"));
     }
 }

@@ -7,11 +7,12 @@ env:
 system:
   # basic layer
   atlas:
-    listen: 127.0.0.1:50051
+    listen: 0.0.0.0:50051
     log: info
   # soma+scene layer
   scene:
     log: info
+    camera_frame: head_front_camera_rgb_optical_frame
   # execution layer
   executor:
     listen: 127.0.0.1:50061
@@ -47,16 +48,41 @@ primitive:
       fps: 30
       width: 640
       height: 480
+      # Webots Tiago head camera calibration for the intrinsics contract.
+      # The simulator does not publish CameraInfo, so the camera primitive
+      # publishes this deployment-provided K on /tiago/camera/intrinsics.
+      fx: 554.0
+      fy: 554.0
+      cx: 320.0
+      cy: 240.0
       frame_id: head_front_camera_rgb_optical_frame
+      # First-RGB-frame wait at INIT. Webots under a CPU-starved boot (all
+      # drivers initialising at once) can take well over a minute to deliver
+      # the first frame — lidar alone routinely needs ~70s — so the default
+      # 60s is too tight here. Match the lidar tolerance with headroom.
+      sentinel_timeout_s: 150
   - name: tiago_lidar
     path: ./primitives/tiago_lidar
     config:
       # example place holders
       update_rate: 10
       frame_id: lidar
+  # ── audio mic/speaker source ─────────────────────────────────────────────
+  # Default: local ALSA via audio_driver. liaison/speech resolve
+  # robonix/primitive/audio/{mic,speaker} from whichever single provider is
+  # active here.
   - name: audio_driver
     path: ./primitives/audio_driver
     config: {}
+  # macOS-bridge variant (opt-in): relays mic/speaker over a WebSocket from a
+  # macOS box across the LAN. To use it, comment out the audio_driver block
+  # above and uncomment this one, then point host at the Mac's address and run
+  # mac_server/server.py (or server_web.py) on it.
+  # - name: audio_macos_bridge
+  #   path: ./primitives/audio_macos_bridge
+  #   config:
+  #     host: 100.78.199.22       # macOS tailscale address
+  #     port: 60000
 
 # after booted all the primitives, start the services
 service:
@@ -67,6 +93,28 @@ service:
     path: ../../services/memsearch
     config:
       backend: sqlite
+
+  # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
+  # liaison's voice loop connects to. Captures mic through the
+  # robonix/primitive/audio/mic primitive, which `audio_driver` (primitive
+  # section above) provides — so voice runs fully local on this host's ALSA
+  # mic. The macOS-bridge variant lives in robonix_manifest.macos_debug.yaml.
+  # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
+  - name: speech
+    path: ../../services/speech
+    config:
+      disable_whisper: true
+      funasr_device: cuda
+      tts_voice: zh-CN-XiaoxiaoNeural
+
+  # voiceprint — ECAPA-TDNN speaker identification. Provides
+  # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
+  # stamps each Task with the identified user_id, and `rbnx chat`'s user
+  # modal enrolls/lists speakers. Config is env-driven (port 50092,
+  # threshold 0.25, device auto) so the manifest block stays empty.
+  - name: voiceprint
+    path: ../../services/voiceprint
+    config: {}
 
   # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
   # depends on `service/map/occupancy_grid` and rbnx-cli currently
@@ -81,33 +129,29 @@ service:
       sensors:
         lidar2d: true # webots do not have 3d pointcloud, so we use 2d lidar
         lidar3d: false
-        rgb: true # rtabmap fuses RGB for visual loop closure
-        rgbd: true # depth fills below-lidar-plane obstacles
+        rgb: true # color image — rtabmap fuses RGB for visual loop closure
+        depth: true # depth image — fills below-lidar-plane obstacles (rgb+depth = RGB-D)
         imu: false
         odom: true
 
-  # `simple_nav` IS the navigation service for this deploy.
+  # nav2_wrapper_rbnx IS the navigation service for this deploy.
   #
-  # Implementation: A* on rtabmap's /map (35 cm inscribed + 40 cm
-  # inflation costmap) → Regulated Pure Pursuit follower → publishes
-  # /cmd_vel. Re-validates the cached path on every /map update and
-  # auto-replans if a waypoint becomes blocked. 360° lidar emergency
-  # stop. Target_yaw align phase.
-  - name: simple_nav
-    path: ./services/simple_nav
+  # Wraps a standard Nav2 stack. Discovers its inputs through atlas — /map
+  # (mapping/occupancy_grid), /odom (chassis/odom), /scan (lidar/lidar) —
+  # and drives /cmd_vel via Nav2's navigate_to_pose action. Runs in the
+  # `robonix-nav2` docker image (built by `rbnx build`, so the host needs
+  # no ROS2). The `sim` params profile navigates in the odom frame with a
+  # rolling-window costmap, so it needs only odom + a 2D scan and no SLAM
+  # map->odom TF — which is what makes it work in Webots. Listed after
+  # mapping (its /map provider); on_init returns Deferred until mapping is
+  # up, so order is a convenience, not a hard requirement.
+  - name: nav2
+    url: https://github.com/enkerewpo/nav2_wrapper_rbnx
+    branch: main
     config:
-      # just examples place holders, we passthrough it to the service when calling INIT
-      robot_radius: 0.25
-      follower_hz: 20
-      max_linear: 0.5
-      max_angular: 1.0
-      pid_linear: [0.8, 0.0, 0.1]
-      pid_angular: [1.5, 0.0, 0.2]
-      goal_tolerance: 0.3
-      goal_yaw_tolerance: 0.2
-      timeout: 120
-      planner_diagonal: true
-      planner_max_iters: 500000
+      params_profile: sim
+      use_sim_time: true
+      action_wait_s: 240.0
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:
