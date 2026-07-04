@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 -c \"import sys; sys.path.insert\\(0, '/home/hyl/robonix/services/memsearch/rbnx-build/codegen'\\); from memsearch import MemSearch; print\\(type\\(MemSearch\\)\\)\")"
-    ]
-  }
-}

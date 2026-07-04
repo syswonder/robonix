@@ -42,7 +42,7 @@ done
 if [[ -z "$_UV" ]]; then
     echo "[build] error: 'uv' not found." >&2
     echo "[build] Checked: PATH, ~/.cargo/bin/uv, ~/.local/bin/uv, conda env_robonix." >&2
-    echo "[build] Install: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    echo "[build] Install: https://docs.astral.sh/uv/getting-started/installation" >&2
     echo "[build] Or:   conda activate env_robonix && rbnx boot" >&2
     exit 1
 fi

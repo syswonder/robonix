@@ -58,10 +58,12 @@ def _hash_embedding(text: str, dim: int = 384) -> List[float]:
     h = hashlib.sha256(text.encode("utf-8")).digest()
     vec: List[float] = []
     for i in range(dim):
-        # Use 4 bytes from the hash (cycling) to build each float in [-1, 1]
+        # Map 4 hash bytes to a float in [-1, 1] via unsigned int division.
+        # struct.unpack('>f', ...) can produce NaN/Inf from arbitrary bytes;
+        # unsigned-int scaling is always finite and deterministic.
         byte_idx = (i * 4) % len(h)
-        val = struct.unpack(">f", h[byte_idx:byte_idx + 4])[0]
-        vec.append(max(-1.0, min(1.0, val)))
+        u = struct.unpack(">I", h[byte_idx:byte_idx + 4])[0]
+        vec.append((u / 0xFFFFFFFF) * 2.0 - 1.0)
     # Normalize to unit vector
     norm = sum(v * v for v in vec) ** 0.5
     if norm > 1e-12:
