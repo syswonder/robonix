@@ -132,7 +132,12 @@ async def import_yaml_to_service(service, yaml_path: str,
     records = load_memories_from_yaml(yaml_path)
 
     if clear_existing:
-        await service.init()
+        # Remove all existing nodes and rebuild empty indices.
+        for nid in list(service.graph.all_ids()):
+            service.graph.remove_node(nid)
+        service.tags.rebuild([])
+        service.vectors.rebuild([])
+        log.info("import_yaml: cleared existing data before import")
 
     node_ids = []
     for rec in records:

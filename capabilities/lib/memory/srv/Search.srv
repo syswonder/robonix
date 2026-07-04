@@ -1,33 +1,6 @@
-# robonix/service/memory/search — 3-stage hybrid search over CKG memory (unary RPC).
-# Phase1 JSON encoding over std_msgs/String; Phase2: structured IDL.
-#
-# Request JSON: {
-#   "query":             "<semantic query text>",
-#   "tags":              {                            // optional — TagFilter, all fields optional (AND semantics)
-#     "scene_type":      "kitchen",                   // optional
-#     "objects":         ["cup"],                     // optional — intersection match
-#     "action_type":     "grasp",                     // optional
-#     "success":         true,                        // optional
-#     "task_type":       "fetch",                     // optional
-#     "difficulty_max":  "medium"                     // optional — "easy"/"medium"/"hard"
-#   },
-#   "top_k":             5,                           // default 5
-#   "alpha":             0.3,                         // optional — BM25 weight (1.0=pure BM25, 0.0=pure cosine)
-#   "time_range":        {"start_ts": 0, "end_ts": 0},// optional — ns timestamps
-#   "require_executable": false                       // default false (Phase2)
-# }
-#
-# Response JSON: {
-#   "nodes": [
-#     {
-#       "node_id": 42, "summary": "successfully grasp red cup in kitchen",
-#       "tags": {"scene_type": "kitchen", "action_type": "grasp", ...},
-#       "spatial_data": {"objects": [{"obj_id": "...", "label": "red cup", "x": 1.0, "y": 2.0, "z": 0.8}]},
-#       "weight": 0.5, "timestamp": 1765432100123456789,
-#       "raw_log": {...}, "causal_chain": [...], "embedding": [...]
-#     }
-#   ]
-# }
-std_msgs/String request_json
+# robonix/service/memory/search — semantic search over long-term memory (unary RPC).
+# Used by memsearch (milvus-lite). The memgraph backend uses
+# robonix/service/memgraph/search with structured JSON-over-String.
+std_msgs/String query
 ---
-std_msgs/String response_json
+std_msgs/String results

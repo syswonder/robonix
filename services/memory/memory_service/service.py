@@ -69,12 +69,12 @@ from .core.compact import CompactPipeline  # noqa: E402
 
 # ── 2. Backend construction ─────────────────────────────────────────────
 
-# Phase1: local directory under the service CWD (matches memsearch pattern).
-# When launched by rbnx boot, CWD = services/memory/, so data lands in
-# services/memory/memory/graph_store.json.
+# Phase1: local directory anchored to the package root (this file is at
+# memory_service/service.py, so parent.parent = services/memory/).
 # Override via AGENT_MEMORY_DIR env var to point elsewhere.
+_DEFAULT_MEMORY_DIR = str(Path(__file__).resolve().parent.parent / "memory")
 MEMORY_DIR = str(
-    Path(os.environ.get("AGENT_MEMORY_DIR", "./memory"))
+    Path(os.environ.get("AGENT_MEMORY_DIR", _DEFAULT_MEMORY_DIR))
     .resolve()
 )
 

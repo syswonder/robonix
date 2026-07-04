@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -341,7 +342,7 @@ class VectorStore:
         cosine_scores: Dict[int, float] = {}
         for nid in candidate_ids:
             vec = self._vectors.get(nid)
-            if vec is None:
+            if vec is None or vec.shape != query_vec.shape:
                 continue
             # Cosine similarity
             dot = np.dot(query_vec, vec)

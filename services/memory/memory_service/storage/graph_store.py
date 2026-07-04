@@ -174,7 +174,7 @@ class GraphStore:
 
     def _next_id(self) -> int:
         """Auto-increment ID: 0-999 short-term, 1000+ long-term."""
-        if self._next_short_term_id < 999:
+        if self._next_short_term_id <= 999:
             nid = self._next_short_term_id
             self._next_short_term_id += 1
             return nid

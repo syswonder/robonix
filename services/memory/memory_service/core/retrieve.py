@@ -99,9 +99,11 @@ class RetrievePipeline:
         for nid, _ in final_scores[:top_k]:
             node = self._graph.get_node(nid)
             if node is not None:
-                # Update access metadata
+                # Update access metadata (persist to GraphStore so it
+                # survives reboots — used by forget/compact scoring).
                 node.last_access = time.time_ns()
                 node.access_count += 1
+                self._graph.update_node(nid, node)
                 result_nodes.append(node)
 
         log.info("search: \"%s\" → %d results", request.query[:60], len(result_nodes))
