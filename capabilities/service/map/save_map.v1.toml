@@ -6,6 +6,7 @@ id      = "robonix/service/map/save_map"
 version = "1"
 kind    = "service"
 idl     = "map/srv/SaveMap.srv"
+description = "Persist the current map under a stable map id."
 
 [mode]
 type = "rpc"

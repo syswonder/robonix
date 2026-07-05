@@ -4,8 +4,8 @@
 // package, ordered so prost `super::sibling` references resolve.
 //
 // Used here:
-//   pb::contracts::robonix_service_vitals_get_server    — GetVitals RPC handler
-//   pb::contracts::robonix_service_vitals_stream_server  — StreamVitals server_stream handler
+//   pb::contracts::robonix_system_vitals_get_server    — GetVitals RPC handler
+//   pb::contracts::robonix_system_vitals_stream_server  — StreamVitals server_stream handler
 //   pb::vitals                                          — VitalsSnapshot, PowerState, ComponentHealth
 #![allow(
     dead_code,

@@ -258,6 +258,8 @@ impl ProcessManager {
             .stderr(Stdio::piped())
             .env("PYTHONUNBUFFERED", "1")
             .env("SCRIBE_LOG_DIR", &self.log_dir);
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd
             .spawn()
@@ -266,6 +268,22 @@ impl ProcessManager {
             .id()
             .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
         info!("Running {} (PID {})", key, pid);
+        let log_file = self.log_dir.join(format!("{std_name}.log"));
+        {
+            let mut processes = self.processes.lock().unwrap();
+            processes.insert(
+                key.clone(),
+                ProcessInfo {
+                    package_name: _package_name.to_string(),
+                    std_name: std_name.to_string(),
+                    package_type: package_type.to_string(),
+                    pid,
+                    log_file: log_file.clone(),
+                    hostname: self.hostname.clone(),
+                },
+            );
+        }
+        self.save_state()?;
 
         // Pipe stdout / stderr through Scribe so structured logs land in
         // $SCRIBE_LOG_DIR/{tag}.log.  Do NOT forward to the terminal —
@@ -281,7 +299,7 @@ impl ProcessManager {
             let reader = tokio::io::BufReader::new(stdout);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                robonix_scribe::info(&tag, &line);
+                robonix_scribe::ingest(&tag, &line);
             }
         });
 
@@ -294,7 +312,7 @@ impl ProcessManager {
                 // WARNING messages to stderr — use `info` rather than
                 // `warn` so the level in the file doesn't misrepresent
                 // the actual severity.
-                robonix_scribe::info(&tag2, &line);
+                robonix_scribe::ingest(&tag2, &line);
             }
         });
 
@@ -305,6 +323,12 @@ impl ProcessManager {
 
         // Drain remaining pipe output before returning.
         let _ = tokio::join!(stdout_task, stderr_task);
+
+        {
+            let mut processes = self.processes.lock().unwrap();
+            processes.remove(&key);
+        }
+        self.save_state()?;
 
         if !status.success() {
             anyhow::bail!("{}: process exited with {}", std_name, status);

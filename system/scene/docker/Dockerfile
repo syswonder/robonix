@@ -69,7 +69,7 @@ unset ALL_PROXY all_proxy NO_PROXY no_proxy
 exec "$@"
 EOF2
 
-# ── TUNA mirrors for domestic (CN) networks ─────────────────────────────
+# ── TUNA mirrors ───────────────────────────────────────────────────
 RUN set -eux; \
     find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
       | xargs -0 -r sed -i --follow-symlinks \
@@ -253,10 +253,9 @@ COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
 
 RUN chmod +x /entrypoint.sh
 
-# Force FastRTPS to skip SHM transport.
+# Left for operators who explicitly override RMW back to FastRTPS.
 ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml
 
-# Stick with FastRTPS.
-ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 ENTRYPOINT ["/entrypoint.sh"]

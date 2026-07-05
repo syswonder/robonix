@@ -10,9 +10,9 @@ on their own schedule. Keeps GIL contention predictable and means
 the relation engine / MCP server don't stall behind a fat pointcloud
 callback.
 
-Topic names come from `RBNX_CONFIG_FILE.observations[]` so a new
-robot doesn't need a code edit — just declare which topic publishes
-which observation kind. Default mapping matches Webots Tiago.
+Topic names come from atlas channel declarations or
+`RBNX_CONFIG_FILE.observations[]` so a new robot does not need a code edit —
+just declare which topic publishes which observation kind.
 """
 from __future__ import annotations
 
@@ -82,18 +82,6 @@ class TopicSpec:
     topic: str
     msg_type: str            # "Image" | "LaserScan" | "PoseWithCovarianceStamped" | "Odometry"
     qos_profile: str = "default"
-
-
-# Default topic mapping per robot platform. The Soma adapter in
-# service.py reads RBNX_CONFIG_FILE.observations[] and overrides
-# this; this dict is only the fallback for an empty config.
-DEFAULT_WEBOTS_TIAGO_TOPICS = [
-    TopicSpec(kind="rgb",     topic="/head_front_camera/rgb/image_raw",     msg_type="Image"),
-    TopicSpec(kind="depth",   topic="/head_front_camera/depth_registered/image_raw", msg_type="Image"),
-    TopicSpec(kind="lidar2d", topic="/scan",                                msg_type="LaserScan"),
-    TopicSpec(kind="pose",    topic="/amcl_pose",                           msg_type="PoseWithCovarianceStamped"),
-    TopicSpec(kind="odom",    topic="/odom",                                msg_type="Odometry"),
-]
 
 
 class _LatestSlot:

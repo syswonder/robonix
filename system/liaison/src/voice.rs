@@ -31,7 +31,10 @@ use anyhow::Result;
 use futures::Stream;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -51,6 +54,7 @@ use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::{PilotEvent, Task};
 use crate::pb::tts;
 use crate::pb::voiceprint;
+use crate::{access, access::AccessControlConfig};
 use robonix_scribe::{info, warn};
 
 // ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
@@ -71,7 +75,7 @@ pub const KIND_ERROR: u32 = 10;
 /// Hard ceiling on a single voice turn. Real end-of-turn comes from
 /// the silence-VAD in the mic pump (see VAD_* below); this just keeps
 /// a stuck mic from monopolizing the session forever.
-const DEFAULT_RECORD_SECONDS: u32 = 30;
+const DEFAULT_RECORD_SECONDS: u32 = 10;
 
 /// Silence-VAD parameters. After we've heard a chunk above
 /// `VAD_SPEECH_RMS`, count consecutive sub-threshold chunks; once the
@@ -170,6 +174,7 @@ pub async fn start_voice_session(
     req: StartVoiceSessionRequest,
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
+    access: Arc<AccessControlConfig>,
 ) -> Result<impl Stream<Item = Result<VoiceEvent, Status>>, Status> {
     let session_id = if req.session_id.is_empty() {
         Uuid::new_v4().to_string()
@@ -214,6 +219,7 @@ pub async fn start_voice_session(
             language,
             atlas,
             pilot_endpoint_default,
+            access,
             tx.clone(),
         )
         .await;
@@ -247,6 +253,7 @@ async fn run_session(
     language: String,
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
+    access: Arc<AccessControlConfig>,
     tx: mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<()> {
     let mock = is_mock_mode();
@@ -319,8 +326,11 @@ async fn run_session(
         anyhow::bail!("empty transcript — nothing to send to Pilot");
     }
 
-    // 3. Voiceprint (graceful — fallback to client hint on any failure).
-    let user_id = identify_user(
+    // 3. Voiceprint + access gate. ASR may already have produced a transcript,
+    // but no Pilot task, TTS, or action is allowed until the voice identity passes
+    // the Liaison access policy. Client hints cannot bypass voiceprint when the
+    // gate is enabled.
+    let identity = identify_user(
         &atlas,
         &req.voiceprint_node_id,
         &audio_pcm,
@@ -329,6 +339,46 @@ async fn run_session(
         &tx,
     )
     .await;
+    let decision = access.authorize_voice(&req.client_user_id, identity.response.as_ref());
+    let (user_id, access_context) = match decision {
+        access::AccessDecision::Allow {
+            user_id,
+            method,
+            confidence,
+            reason,
+        } => {
+            info!(
+                "[liaison/access] voice allow user={user_id} via {method:?} confidence={confidence:.2}: {reason}"
+            );
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    &session_id,
+                    &user_id,
+                    confidence,
+                    &format!("access allowed: {reason}"),
+                )))
+                .await;
+            (
+                user_id,
+                AccessContext {
+                    method: method.as_str().to_string(),
+                    confidence,
+                    reason,
+                },
+            )
+        }
+        access::AccessDecision::Deny {
+            user_id,
+            confidence,
+            reason,
+        } => {
+            warn!(
+                "[liaison/access] voice deny user={user_id} confidence={confidence:.2}: {reason}"
+            );
+            anyhow::bail!("access denied for voice user '{user_id}': {reason}");
+        }
+    };
 
     // 4. Build Task and stream Pilot events.
     let pilot_endpoint = resolve_endpoint(&atlas, "robonix/system/pilot", "")
@@ -339,6 +389,7 @@ async fn run_session(
         &session_id,
         &transcript,
         &user_id,
+        &access_context,
         &audio_pcm,
         &req.context_json,
     );
@@ -555,6 +606,10 @@ async fn stream_capture_and_recognize(
         (DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize),
     )));
     let pcm_buf_for_pump = Arc::clone(&pcm_buf);
+    // Detect the mic's actual sample rate from the first chunk's
+    // data size ÷ duration — no env var or proto change needed.
+    let detected_rate: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    let detected_rate_pump = Arc::clone(&detected_rate);
     let _language_owned = language.to_string();
 
     // Mic pump — drains the mic gRPC stream into the asr_req sender,
@@ -575,6 +630,7 @@ async fn stream_capture_and_recognize(
         let mut logged_first = false;
         let mut has_spoken = false;
         let mut silence_secs: f32 = 0.0;
+        let mut first_chunk = true;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -592,6 +648,16 @@ async fn stream_capture_and_recognize(
                     n_chunks += 1;
                     audio_s += chunk.duration_s.max(0.0);
                     let dur = chunk.duration_s.max(0.0);
+                    // Detect sample rate from the first chunk:
+                    // rate ≈ data_bytes / (duration_s × bytes_per_sample)
+                    // For 16-bit mono: bytes_per_sample = 2.
+                    if first_chunk && dur > 0.0 && chunk.data.len() >= 2 {
+                        first_chunk = false;
+                        let est = (chunk.data.len() as f64 / (dur as f64 * 2.0)).round() as u32;
+                        if est >= 8000 {
+                            detected_rate_pump.store(est, Ordering::Relaxed);
+                        }
+                    }
                     let rms = pcm_rms_s16le(&chunk.data);
                     if rms >= VAD_SPEECH_RMS {
                         has_spoken = true;
@@ -695,22 +761,56 @@ async fn stream_capture_and_recognize(
     let _ = pump_handle.await;
 
     let pcm = std::mem::take(&mut *pcm_buf.lock().await);
-    let _ = tx
-        .send(Ok(event_status(
-            KIND_RECORDING_DONE,
-            session_id,
-            &format!(
-                "captured {} bytes (~{:.2}s @ 16kHz mono s16le); transcript={:?}",
-                pcm.len(),
-                pcm.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
-                transcript,
-            ),
-        )))
-        .await;
+    let sample_rate = detected_rate.load(Ordering::Relaxed);
+    let sample_rate = if sample_rate > 0 {
+        sample_rate
+    } else {
+        DEFAULT_AUDIO_SAMPLE_RATE
+    };
+    if let Some(path) = save_voice_recording(session_id, &pcm, sample_rate) {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_RECORDING_DONE,
+                session_id,
+                &format!(
+                    "saved voice recording to {} ({} bytes, ~{:.2}s @ {}Hz) ; transcript={:?}",
+                    path.display(),
+                    pcm.len(),
+                    pcm.len() as f32 / (sample_rate as f32 * 2.0),
+                    sample_rate,
+                    transcript,
+                ),
+            )))
+            .await;
+    } else {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_RECORDING_DONE,
+                session_id,
+                &format!(
+                    "captured {} bytes (~{:.2}s @ {}Hz mono s16le); transcript={:?}",
+                    pcm.len(),
+                    pcm.len() as f32 / (sample_rate as f32 * 2.0),
+                    sample_rate,
+                    transcript,
+                ),
+            )))
+            .await;
+    }
     Ok((pcm, transcript))
 }
 
 // ── Voiceprint ───────────────────────────────────────────────────────────────
+
+struct VoiceIdentity {
+    response: Option<voiceprint::IdentifyResponse>,
+}
+
+struct AccessContext {
+    method: String,
+    confidence: f32,
+    reason: String,
+}
 
 async fn identify_user(
     atlas: &Arc<Mutex<AtlasClient>>,
@@ -719,7 +819,7 @@ async fn identify_user(
     fallback_hint: &str,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-) -> String {
+) -> VoiceIdentity {
     let fallback = if fallback_hint.is_empty() {
         "voice:unknown".to_string()
     } else if fallback_hint.starts_with("voice:") || fallback_hint.starts_with("local:") {
@@ -737,89 +837,85 @@ async fn identify_user(
     {
         Some(ep) => ep,
         None => {
+            warn!("[voice] voiceprint provider unavailable; using hint {fallback}");
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     session_id,
                     &fallback,
                     0.0,
-                    "no RobonixServiceVoiceprintIdentify provider — using client hint",
+                    "voiceprint provider unavailable",
                 )))
                 .await;
-            return fallback;
+            return VoiceIdentity { response: None };
         }
     };
 
     let mut client = match RobonixServiceVoiceprintIdentifyClient::connect(endpoint.clone()).await {
         Ok(c) => c,
         Err(e) => {
+            warn!("[voice] connect voiceprint at {endpoint}: {e}; using hint {fallback}");
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     session_id,
                     &fallback,
                     0.0,
-                    &format!("voiceprint connect failed: {e} — using client hint"),
+                    "voiceprint connect failed",
                 )))
                 .await;
-            return fallback;
-        }
-    };
-    let resp = match client
-        .identify(Request::new(voiceprint::IdentifyRequest {
-            audio_data: audio_pcm.to_vec(),
-            encoding: DEFAULT_AUDIO_ENCODING.to_string(),
-            sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
-        }))
-        .await
-    {
-        Ok(r) => r.into_inner(),
-        Err(e) => {
-            let _ = tx
-                .send(Ok(event_user(
-                    KIND_USER_IDENTIFIED,
-                    session_id,
-                    &fallback,
-                    0.0,
-                    &format!("voiceprint rpc failed: {e} — using client hint"),
-                )))
-                .await;
-            return fallback;
+            return VoiceIdentity { response: None };
         }
     };
 
-    let user_id = if resp.is_known && !resp.user_id.is_empty() {
-        if resp.user_id.starts_with("voice:") {
-            resp.user_id.clone()
-        } else {
-            format!("voice:{}", resp.user_id)
+    let request = voiceprint::IdentifyRequest {
+        audio_data: audio_pcm.to_vec(),
+        encoding: DEFAULT_AUDIO_ENCODING.to_string(),
+        sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
+    };
+
+    match client.identify(Request::new(request)).await {
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            let user = if resp.user_id.is_empty() {
+                fallback.clone()
+            } else if resp.user_id.starts_with("voice:") || resp.user_id.starts_with("local:") {
+                resp.user_id.clone()
+            } else {
+                format!("voice:{}", resp.user_id)
+            };
+            let detail = if resp.is_known {
+                "voiceprint matched"
+            } else {
+                "voiceprint unknown speaker"
+            };
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &user,
+                    resp.confidence,
+                    detail,
+                )))
+                .await;
+            VoiceIdentity {
+                response: Some(resp),
+            }
         }
-    } else {
-        fallback.clone()
-    };
-    let label = if !resp.user_name.is_empty() {
-        format!(
-            "matched {}={} ({:.2})",
-            resp.user_id, resp.user_name, resp.confidence
-        )
-    } else if resp.is_known {
-        format!("matched {} ({:.2})", resp.user_id, resp.confidence)
-    } else {
-        format!(
-            "unknown speaker (best={:.2}) — using fallback",
-            resp.confidence
-        )
-    };
-    let _ = tx
-        .send(Ok(event_user(
-            KIND_USER_IDENTIFIED,
-            session_id,
-            &user_id,
-            resp.confidence,
-            &label,
-        )))
-        .await;
-    user_id
+        Err(e) => {
+            warn!("[voice] voiceprint RPC failed: {e}; using hint {fallback}");
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &fallback,
+                    0.0,
+                    "voiceprint rpc failed",
+                )))
+                .await;
+            VoiceIdentity { response: None }
+        }
+    }
 }
 
 // ── TTS playback ─────────────────────────────────────────────────────────────
@@ -911,6 +1007,7 @@ fn build_task(
     session_id: &str,
     transcript: &str,
     user_id: &str,
+    access: &AccessContext,
     audio_pcm: &[u8],
     extra_context_json: &str,
 ) -> Task {
@@ -926,6 +1023,15 @@ fn build_task(
         obj.insert("modality".to_string(), serde_json::json!("voice"));
         obj.insert("voice_session".to_string(), serde_json::json!(true));
         obj.insert("user_id".to_string(), serde_json::json!(user_id));
+        obj.insert(
+            "access".to_string(),
+            serde_json::json!({
+                "allowed": true,
+                "method": access.method,
+                "confidence": access.confidence,
+                "reason": access.reason,
+            }),
+        );
     }
     Task {
         task_id: Uuid::new_v4().to_string(),
@@ -1038,6 +1144,52 @@ fn now_ns() -> u64 {
         .as_nanos() as u64
 }
 
+fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Option<PathBuf> {
+    let dump_dir = std::env::var("ROBONIX_LIAISON_VOICE_SAVE_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let dir = Path::new(&dump_dir);
+    if fs::create_dir_all(dir).is_err() {
+        return None;
+    }
+    let ts = now_ms();
+    let file_name = format!("voice_{}_{}.wav", session_id, ts);
+    let path = dir.join(file_name);
+    if write_wav(&path, pcm, sample_rate).is_ok() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::Error> {
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+    let data_size = pcm.len() as u32;
+    let file_size = 36 + data_size;
+    let byte_rate = sample_rate * CHANNELS as u32 * (BITS_PER_SAMPLE as u32) / 8;
+    let block_align = CHANNELS * BITS_PER_SAMPLE / 8;
+
+    let mut buf = Vec::with_capacity(44 + pcm.len());
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&CHANNELS.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    buf.extend_from_slice(pcm);
+
+    fs::write(path, buf)
+}
+
 /// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
 /// silence-VAD in the mic pump. Returns 0.0 on empty / odd-length input.
 fn pcm_rms_s16le(data: &[u8]) -> f32 {
@@ -1072,10 +1224,23 @@ mod tests {
 
     #[test]
     fn build_task_injects_user_id_into_context() {
-        let task = build_task("sess-1", "hello", "voice:alice", &[], r#"{"foo":"bar"}"#);
+        let task = build_task(
+            "sess-1",
+            "hello",
+            "voice:alice",
+            &AccessContext {
+                method: "voiceprint".to_string(),
+                confidence: 0.9,
+                reason: "matched".to_string(),
+            },
+            &[],
+            r#"{"foo":"bar"}"#,
+        );
         let v: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
         assert_eq!(v["user_id"], "voice:alice");
         assert_eq!(v["voice_session"], true);
+        assert_eq!(v["access"]["allowed"], true);
+        assert_eq!(v["access"]["method"], "voiceprint");
         assert_eq!(v["foo"], "bar");
     }
 

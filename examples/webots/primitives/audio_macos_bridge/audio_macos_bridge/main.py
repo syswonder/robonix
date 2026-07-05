@@ -29,6 +29,7 @@ from queue import Empty as QueueEmpty
 from queue import Queue
 
 from robonix_api import Primitive, Ok, Err, Deferred
+from google.protobuf.empty_pb2 import Empty
 
 audio_macos_bridge = Primitive(
     id="audio_macos_bridge",
@@ -37,7 +38,6 @@ audio_macos_bridge = Primitive(
 log = logging.getLogger("audio-macos-bridge")
 
 import audio_pb2          # type: ignore  # noqa: E402  (codegen)
-import std_msgs_pb2       # type: ignore  # noqa: E402
 
 import websockets         # type: ignore  # noqa: E402
 
@@ -47,6 +47,7 @@ import websockets         # type: ignore  # noqa: E402
 # discovery moment.
 bridge_host: str | None = None
 bridge_port: int | None = None
+speaker_lock = threading.Lock()
 
 # Per-100-ms PCM frame: 16000 Hz * 0.1 s * 2 bytes/sample * 1 ch.
 SAMPLE_RATE = 16_000
@@ -55,6 +56,18 @@ CHUNK_BYTES = SAMPLE_RATE * 2 // 10
 
 def _ws_url(path: str) -> str:
     return f"ws://{bridge_host}:{bridge_port}{path}"
+
+
+def _ws_connect(path: str, **kwargs):
+    """Open a WebSocket to the macOS daemon, always DIRECTLY (never via a proxy).
+
+    websockets >= 14 auto-reads all_proxy / http_proxy / https_proxy from the
+    environment and tunnels ws:// through it. On a host with all_proxy set (this
+    deploy box has all_proxy=http://127.0.0.1:7892) that silently routes the
+    LAN/tailscale bridge URL into the local proxy, which can't reach the Mac →
+    "timed out during opening handshake" on every connect. Passing proxy=None
+    forces a direct connection regardless of the ambient proxy env."""
+    return websockets.connect(_ws_url(path), proxy=None, **kwargs)
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
@@ -80,7 +93,7 @@ def mic_stream(request, context):
 
     async def pump() -> None:
         try:
-            async with websockets.connect(_ws_url("/mic"), max_size=None) as ws:
+            async with _ws_connect("/mic", max_size=None) as ws:
                 while not stop.is_set():
                     msg = await ws.recv()
                     if isinstance(msg, str):
@@ -128,46 +141,59 @@ def speaker_stream(request_iterator, context):
     the macOS daemon's `/speaker` WebSocket. Same threading dance as
     `mic_stream` but in reverse: the gRPC iterator hands frames to a
     queue, the asyncio coroutine drains the queue and writes them to
-    the WebSocket."""
+    the WebSocket.
+
+    The gRPC call must not return immediately after the last frame is sent:
+    macOS playback continues asynchronously inside sounddevice. Holding the
+    speaker lock for the estimated PCM duration keeps consecutive TTS
+    utterances serialized even when Liaison speaks sentence by sentence."""
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
                       "macos bridge not initialized")
-        return std_msgs_pb2.Empty()
+        return Empty()
 
-    log.info("speaker stream client connected → relaying %s", _ws_url("/speaker"))
-    q: Queue = Queue(maxsize=64)
-    done = threading.Event()
+    log.info("speaker stream client waiting for playback lock")
+    with speaker_lock:
+        log.info("speaker stream client connected → relaying %s", _ws_url("/speaker"))
+        q: Queue = Queue(maxsize=64)
+        done = threading.Event()
 
-    async def pump() -> None:
+        async def pump() -> None:
+            try:
+                async with _ws_connect("/speaker", max_size=None) as ws:
+                    while True:
+                        frame = await asyncio.get_event_loop().run_in_executor(None, q.get)
+                        if frame is None:
+                            break
+                        await ws.send(frame)
+            except Exception as e:  # noqa: BLE001
+                log.warning("speaker ws closed: %s", e)
+            finally:
+                done.set()
+
+        def loop_runner() -> None:
+            asyncio.run(pump())
+
+        t = threading.Thread(target=loop_runner, name="audio-bridge-speaker", daemon=True)
+        t.start()
+
+        total_bytes = 0
         try:
-            async with websockets.connect(_ws_url("/speaker"), max_size=None) as ws:
-                while True:
-                    frame = await asyncio.get_event_loop().run_in_executor(None, q.get)
-                    if frame is None:
-                        break
-                    await ws.send(frame)
-        except Exception as e:  # noqa: BLE001
-            log.warning("speaker ws closed: %s", e)
+            for chunk in request_iterator:
+                if chunk.data:
+                    frame = bytes(chunk.data)
+                    total_bytes += len(frame)
+                    q.put(frame)
         finally:
-            done.set()
-
-    def loop_runner() -> None:
-        asyncio.run(pump())
-
-    t = threading.Thread(target=loop_runner, name="audio-bridge-speaker", daemon=True)
-    t.start()
-
-    try:
-        for chunk in request_iterator:
-            if chunk.data:
-                q.put(bytes(chunk.data))
-    finally:
-        q.put(None)
-        # Give the websocket a moment to drain; don't block forever in
-        # case the server side already went away.
-        done.wait(timeout=2.0)
-        log.info("speaker stream client disconnected")
-    return std_msgs_pb2.Empty()
+            q.put(None)
+            # Give the websocket a moment to drain; don't block forever in
+            # case the server side already went away.
+            done.wait(timeout=10.0)
+            playback_s = total_bytes / float(SAMPLE_RATE * 2)
+            if playback_s > 0:
+                time.sleep(min(playback_s + 0.15, 30.0))
+            log.info("speaker stream client disconnected")
+    return Empty()
 
 
 # ── device list / select ───────────────────────────────────────────────────
@@ -183,7 +209,7 @@ def _ws_request(path: str, body: object | None = None, timeout_s: float = 3.0):
     receive one JSON response, close. Sync wrapper around the asyncio API
     so the gRPC servicer thread doesn't have to learn asyncio."""
     async def go():
-        async with websockets.connect(_ws_url(path), open_timeout=timeout_s) as ws:
+        async with _ws_connect(path, open_timeout=timeout_s) as ws:
             if body is not None:
                 await ws.send(json.dumps(body))
             msg = await asyncio.wait_for(ws.recv(), timeout=timeout_s)
@@ -287,7 +313,7 @@ def init(cfg):
 
     async def probe() -> str | None:
         try:
-            async with websockets.connect(_ws_url("/health"), open_timeout=3.0) as ws:
+            async with _ws_connect("/health", open_timeout=3.0) as ws:
                 msg = await asyncio.wait_for(ws.recv(), timeout=3.0)
                 return msg if isinstance(msg, str) else "<binary>"
         except Exception as e:  # noqa: BLE001

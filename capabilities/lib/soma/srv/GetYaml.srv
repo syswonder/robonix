@@ -1,0 +1,5 @@
+# Return the raw Soma YAML text for one loaded robot.
+string robot_id  # empty = default robot
+---
+string robot_id
+string yaml_text

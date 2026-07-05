@@ -3,6 +3,7 @@ id      = "robonix/system/executor/cancel_all_plans"
 version = "1"
 kind    = "service"
 idl     = "executor/srv/CancelAll.srv"
+description = "Cancel all currently running executor plans."
 
 [mode]
 type = "rpc"

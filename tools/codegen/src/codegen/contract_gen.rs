@@ -31,6 +31,10 @@ struct ContractMeta {
     ///   `system/pilot/srv/SubmitTask.srv`        → lib/.../srv/SubmitTask.srv
     ///   `common_interfaces/sensor_msgs/msg/Image.msg` → lib/.../msg/Image.msg
     idl: String,
+    /// Documentation-only meaning of this abstract contract. This is not the
+    /// provider/runtime capability description declared to Atlas.
+    #[serde(default)]
+    description: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +88,8 @@ pub struct ContractSummary {
     pub kind: String,
     pub mode: String,
     pub idl: String,
+    /// Documentation-only meaning of this abstract contract.
+    pub description: String,
     /// Absolute path to the source `.v1.toml`.
     pub toml_path: PathBuf,
 }
@@ -108,6 +114,7 @@ pub fn load_contract_summaries(dirs: &[PathBuf]) -> Result<Vec<ContractSummary>>
                     kind: c.contract.kind,
                     mode: c.mode.mode_type,
                     idl: c.contract.idl,
+                    description: c.contract.description.trim().to_string(),
                     toml_path: p,
                 },
             );

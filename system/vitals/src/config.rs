@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// Default Atlas provider id registered by Vitals.
 pub const DEFAULT_VITALS_PROVIDER_ID: &str = "vitals";
 /// Atlas service namespace for Vitals capability declarations.
-pub const VITALS_NAMESPACE: &str = "robonix/service/vitals";
+pub const VITALS_NAMESPACE: &str = "robonix/system/vitals";
 /// Default Atlas control-plane endpoint.
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 /// Default Vitals gRPC listen address.

@@ -385,7 +385,8 @@ impl AtlasRegistry {
         let was_present = state.providers.remove(provider_id).is_some();
         let dropped = state.drop_channels_of(provider_id);
         info!(
-            "[atlas] unregister {provider_id} (was_present={was_present}, channels_dropped={dropped})"
+            "[atlas] unregister {provider_id} (was_present={was_present}, \
+             channels_dropped={dropped})"
         );
         was_present
     }

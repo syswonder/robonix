@@ -237,7 +237,9 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
                 (None, Some(u)) => entries.push(Resolved {
                     section,
                     name: name.clone(),
-                    pkg_dir: cache_root.join(&name),
+                    // Cache dir = git repo name (one clone per repo), not the
+                    // per-instance provider id. See deploy::repo_dir_name.
+                    pkg_dir: cache_root.join(super::deploy::repo_dir_name(u)),
                     url_to_clone: Some((u.to_string(), branch)),
                     manifest_override,
                 }),
@@ -252,9 +254,9 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
     // `system:` non-builtin entries are real packages too (memory / scene
     // / speech / …), they just live under `<robonix_source>/system/<key>/`
     // instead of being declared with an explicit `path:` / `url:`. The
-    // builtin Rust binaries (atlas / executor / pilot / liaison) are
+    // builtin Rust binaries (atlas / executor / pilot / liaison / soma) are
     // shipped via `cargo install` and skipped here.
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison"];
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
     if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
         let source_root = config.robonix_source_path.as_ref();
         for (key, _value) in map {
@@ -665,10 +667,18 @@ pub async fn execute_start(
         None
     };
 
+    // Scribe tag = the per-INSTANCE provider id, never the package name. A
+    // single package (one `package.name`) can be deployed as N instances, each
+    // with a distinct provider id; tagging by package.name would collide them
+    // all into one log. `rbnx boot` passes the instance's provider id via
+    // RBNX_INSTANCE_NAME (the deploy manifest entry's `name`); fall back to
+    // package.name only for a bare standalone `rbnx start` with no instance.
+    let instance_name =
+        std::env::var("RBNX_INSTANCE_NAME").unwrap_or_else(|_| manifest.package.name.clone());
     let result = process_manager
         .start_process(
-            &manifest.package.name,
-            &manifest.package.name,
+            &instance_name,
+            &instance_name,
             "package",
             &package_root,
             &start_command,
@@ -688,8 +698,18 @@ pub async fn execute_start(
 }
 
 const CMD_INIT_DELIVERY: u32 = 0;
+const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const CAP_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn driver_init_timeout() -> Duration {
+    std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_DRIVER_INIT_TIMEOUT)
+}
 
 /// Wait for the new provider (any provider not in `before`) to appear in atlas with a
 /// `*/driver` gRPC capability, then call Driver(CMD_INIT, config_json). One
@@ -790,6 +810,7 @@ async fn call_driver_init(
         format!("http://{endpoint}")
     };
     let result = async {
+        let driver_timeout = driver_init_timeout();
         let channel = Endpoint::new(normalized.clone())
             .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
             .connect()
@@ -804,7 +825,7 @@ async fn call_driver_init(
         grpc.ready().await.context("gRPC ready")?;
         let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
         let resp = tokio::time::timeout(
-            Duration::from_secs(90),
+            driver_timeout,
             grpc.unary(
                 Request::new(DriverRequest {
                     command: CMD_INIT_DELIVERY,
@@ -815,7 +836,12 @@ async fn call_driver_init(
             ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Driver(CMD_INIT) timed out after 90s"))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Driver(CMD_INIT) timed out after {}s",
+                driver_timeout.as_secs()
+            )
+        })?
         .context("Driver(CMD_INIT) RPC failed")?;
         Ok::<_, anyhow::Error>(resp.into_inner())
     }

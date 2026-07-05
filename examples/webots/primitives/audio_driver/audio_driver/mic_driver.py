@@ -29,6 +29,7 @@ Usage:
         process(chunk)
     driver.stop()
 """
+import re
 import subprocess
 import time
 import logging
@@ -42,6 +43,71 @@ _ALSA_FORMATS = {
     32: "S32_LE",   # 32-bit signed little-endian
     8: "S8",        # 8-bit signed
 }
+
+
+def probe_mic_sample_rate(device_id: str) -> int:
+    """Query ALSA hardware parameters to find supported sample rates.
+
+    Runs `arecord --dump-hw-params` against the device and parses the
+    RATE line to find the minimum supported sample rate (preferring
+    16000 Hz if within the supported range). Falls back to 16000 on
+    any parse or subprocess failure.
+
+    Example RATE lines parsed:
+        RATE: [44100 48000]        → picks 44100
+        RATE: 8000 16000 44100     → picks 16000 (preferred)
+        RATE: [8000 96000]         → picks 16000 (in range)
+
+    Args:
+        device_id: ALSA device string (e.g. "hw:0,0").
+
+    Returns:
+        Sample rate in Hz (int). Never fails — returns 16000 on error.
+    """
+    try:
+        proc = subprocess.run(
+            ["arecord", "-D", device_id, "--dump-hw-params",
+             "-f", "S16_LE", "-d", "1", "/dev/null"],
+            capture_output=True, text=True, timeout=5,
+        )
+        output = proc.stdout + "\n" + proc.stderr
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        log.warning(f"Failed to probe mic sample rate for selected device '{device_id}', falling back to 16000 Hz")
+        return 16000
+
+    # Parse RATE line. Two forms:
+    #   RATE: [min max]     → continuous range
+    #   RATE: rate1 rate2 … → discrete list
+    m = re.search(r"RATE:\s*(.+)", output)
+    if not m:
+        log.warning(f"Failed to probe mic sample rate for selected device '{device_id}', falling back to 16000 Hz")
+        return 16000
+    rates_str = m.group(1).strip()
+
+    rates: list[int] = []
+    range_m = re.match(r"\[(\d+)\s+(\d+)\]", rates_str)
+    if range_m:
+        lo, hi = int(range_m.group(1)), int(range_m.group(2))
+        rates = [lo, hi]
+    else:
+        rates = [int(x) for x in rates_str.split() if x.isdigit()]
+
+    if not rates:
+        log.warning(f"Failed to probe mic sample rate for selected device '{device_id}', falling back to 16000 Hz")
+        return 16000
+
+    PREFERRED = 16000
+    if len(rates) == 2 and rates[0] <= PREFERRED <= rates[1]:
+        # Continuous range that includes our preferred rate
+        log.info("mic hw RATE [%d .. %d] → using %d Hz", rates[0], rates[1], PREFERRED)
+        return PREFERRED
+    if PREFERRED in rates:
+        log.info("mic hw rates %s → using %d Hz (preferred)", rates, PREFERRED)
+        return PREFERRED
+    # Pick the lowest available rate
+    chosen = min(rates)
+    log.info("mic hw rates %s → using %d Hz (lowest)", rates, chosen)
+    return chosen
 
 
 class MicDriver:

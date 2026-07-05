@@ -38,41 +38,53 @@ pub fn llm_name(contract_id: &str) -> String {
 /// One row per provider that registered a CAPABILITY.md, summarised for the
 /// LLM-facing "## Capability docs" block in pilot's system prompt. We expose
 /// the `provider_id` (what the LLM passes to `read_capability_doc`), the
-/// package `kind` (so skills can be flagged read-first), and a one-line
-/// `description` lifted from the CAPABILITY.md frontmatter — enough for the
-/// model to judge relevance without reading the full manual. The internal
-/// `namespace` and any filesystem path are deliberately NOT exposed.
+/// package `kind` (from atlas's authoritative `CapabilityProvider.kind`, so
+/// skills can be flagged read-first), and a one-line `description` lifted from
+/// the CAPABILITY.md frontmatter — enough for the model to judge relevance
+/// without reading the full manual. The internal `namespace` and any
+/// filesystem path are deliberately NOT exposed.
 pub struct CapDoc {
     pub provider_id: String,
     pub kind: String,
     pub description: String,
 }
 
-/// Pull `kind` and `description` from a CAPABILITY.md YAML frontmatter block.
+/// Pull `description` from a CAPABILITY.md YAML frontmatter block.
 ///
-/// The package-level frontmatter is a leading `---` … `---` fence with simple
-/// `key: value` lines (single-line values — see the CAPABILITY.md format spec).
-/// Returns empty strings when there is no frontmatter or the keys are absent,
-/// which is non-fatal: the provider still appears in the index, just without a
-/// description until its CAPABILITY.md is updated.
-fn parse_frontmatter(md: &str) -> (String, String) {
+/// The package-level frontmatter is a leading `---` … `---` fence with a single
+/// `description: <one line>` key (see the CAPABILITY.md format spec). The
+/// provider *kind* is deliberately NOT read here — it comes from atlas's
+/// authoritative `CapabilityProvider.kind` (set at registration via
+/// `Primitive`/`Service`/`Skill`), so the hand-written markdown can never drift
+/// from it. Returns an empty string when there is no frontmatter or no
+/// `description:` key, which is non-fatal: the provider still appears in the
+/// index, just without a one-line description until its CAPABILITY.md is updated.
+fn parse_description(md: &str) -> String {
     let t = md.trim_start();
     let Some(rest) = t.strip_prefix("---") else {
-        return (String::new(), String::new());
+        return String::new();
     };
     let Some(end) = rest.find("\n---") else {
-        return (String::new(), String::new());
+        return String::new();
     };
-    let (mut kind, mut description) = (String::new(), String::new());
     for line in rest[..end].lines() {
-        let line = line.trim();
-        if let Some(v) = line.strip_prefix("kind:") {
-            kind = v.trim().trim_matches('"').to_string();
-        } else if let Some(v) = line.strip_prefix("description:") {
-            description = v.trim().trim_matches('"').to_string();
+        if let Some(v) = line.trim().strip_prefix("description:") {
+            return v.trim().trim_matches('"').to_string();
         }
     }
-    (kind, description)
+    String::new()
+}
+
+/// Map atlas's `CapabilityProvider.kind` enum to the lowercase label the prompt
+/// uses. Atlas is the source of truth for a provider's kind.
+fn kind_label(kind: i32) -> String {
+    match atlas_pb::Kind::try_from(kind) {
+        Ok(atlas_pb::Kind::Primitive) => "primitive",
+        Ok(atlas_pb::Kind::Service) => "service",
+        Ok(atlas_pb::Kind::Skill) => "skill",
+        _ => "",
+    }
+    .to_string()
 }
 
 /// Returns a `CapDoc` per provider that registered non-empty CAPABILITY.md
@@ -87,7 +99,8 @@ pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
         if provider.capability_md.trim().is_empty() {
             continue;
         }
-        let (kind, description) = parse_frontmatter(&provider.capability_md);
+        let kind = kind_label(provider.kind);
+        let description = parse_description(&provider.capability_md);
         out.push(CapDoc {
             provider_id: provider.id,
             kind,

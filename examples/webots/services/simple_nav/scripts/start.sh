@@ -15,6 +15,7 @@ trap cleanup EXIT INT TERM
 exec docker exec -i \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     "$SIM_CT" bash -lc '
         set -eo pipefail
         source /opt/ros/humble/setup.bash

@@ -1,6 +1,4 @@
 ---
-provider: tiago_chassis
-kind: primitive
 description: Mobile differential-drive base — all movement during navigation, exploration, and search.
 ---
 

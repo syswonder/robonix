@@ -6,6 +6,7 @@ id      = "robonix/service/navigation/navigate/status"
 version = "1"
 kind    = "service"
 idl     = "navigation/srv/GetNavigationStatus.srv"
+description = "Read status for a previously accepted navigation run."
 
 [mode]
 type = "rpc"
