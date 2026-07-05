@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "0887c97ecf091807a5a1a49d16b46dc34ac5215a",
+  "prompts": {},
+  "humans": {
+    "h_9f1ebe31af207f": {
+      "author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
