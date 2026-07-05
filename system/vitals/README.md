@@ -103,5 +103,5 @@ cargo test -p robonix-vitals
 
 ```bash
 grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
-  robonix.contracts.RobonixServiceVitalsGet/GetVitals
+  robonix.contracts.RobonixSystemVitalsGet/GetVitals
 ```

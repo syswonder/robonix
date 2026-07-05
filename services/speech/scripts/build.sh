@@ -95,13 +95,12 @@ FLAGS=(--mcp)
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-# ── 4. Pre-download models (skip in CI / SKIP_MODEL_DOWNLOAD=1) ─────────────
-# Default HF_ENDPOINT to hf-mirror.com — direct huggingface.co is essentially
-# unreachable from CN networks (was failing with 0% throughput on partial
-# 1.6GB cache). Override by exporting HF_ENDPOINT before invoking build.sh.
+# ── 4. Pre-download models (skip with SKIP_MODEL_DOWNLOAD=1) ────────────────
+# Default HF_ENDPOINT to hf-mirror.com for runners where direct model downloads
+# are slow or unreliable. Override by exporting HF_ENDPOINT before invoking build.sh.
 : "${HF_ENDPOINT:=https://hf-mirror.com}"
 export HF_ENDPOINT
-if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
+if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
     # Whisper is opt-in: it's a 20+ GB pull (whisper-large-v3) that only
     # the one-shot `robonix/system/speech/asr` contract uses. The default
@@ -124,7 +123,7 @@ if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     "$PY" -c "from funasr import AutoModel; AutoModel(model='paraformer-zh-streaming')" \
         || echo "[build] WARNING: FunASR model download failed; streaming ASR backend will fail at runtime."
 else
-    echo "[build] skipping model download (CI mode or SKIP_MODEL_DOWNLOAD=1)."
+    echo "[build] skipping model download (SKIP_MODEL_DOWNLOAD=1)."
 fi
 
 echo "[build] done."

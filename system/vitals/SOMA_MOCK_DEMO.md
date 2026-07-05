@@ -160,7 +160,7 @@ Expected output:
 
 ```
 mock-soma [ACTIVE] robonix/system/soma
-vitals [ACTIVE] robonix/service/vitals
+vitals [ACTIVE] robonix/system/vitals
 ```
 
 ## gRPC verification
@@ -168,7 +168,7 @@ vitals [ACTIVE] robonix/service/vitals
 ```bash
 # Vitals side
 grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
-  robonix.contracts.RobonixServiceVitalsGet/GetVitals
+  robonix.contracts.RobonixSystemVitalsGet/GetVitals
 
 # Mock Soma side
 grpcurl -plaintext -d '{}' 127.0.0.1:50092 \

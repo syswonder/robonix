@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 //
 // gRPC contract handlers:
-//   RobonixServiceVitalsGet.GetVitals(GetVitalsRequest) → GetVitalsResponse  (rpc)
-//   RobonixServiceVitalsStream.StreamVitals(StreamVitalsRequest) → stream VitalsSnapshot  (server_stream)
+//   RobonixSystemVitalsGet.GetVitals(GetVitalsRequest) → GetVitalsResponse  (rpc)
+//   RobonixSystemVitalsStream.StreamVitals(StreamVitalsRequest) → stream VitalsSnapshot  (server_stream)
 //
 // Phase 2: returns a hardcoded/mock snapshot.
 
-use crate::pb::contracts::robonix_service_vitals_get_server::RobonixServiceVitalsGet;
-use crate::pb::contracts::robonix_service_vitals_stream_server::RobonixServiceVitalsStream;
+use crate::pb::contracts::robonix_system_vitals_get_server::RobonixSystemVitalsGet;
+use crate::pb::contracts::robonix_system_vitals_stream_server::RobonixSystemVitalsStream;
 use crate::pb::vitals::{
     BodyComponent, GetVitalsRequest, GetVitalsResponse, PowerState, StreamVitalsRequest,
     VitalsSnapshot,
@@ -381,7 +381,7 @@ fn monotonic_ns() -> u64 {
 }
 
 #[tonic::async_trait]
-impl RobonixServiceVitalsGet for VitalsServiceImpl {
+impl RobonixSystemVitalsGet for VitalsServiceImpl {
     async fn get_vitals(
         &self,
         _request: Request<GetVitalsRequest>,
@@ -394,7 +394,7 @@ impl RobonixServiceVitalsGet for VitalsServiceImpl {
 }
 
 #[tonic::async_trait]
-impl RobonixServiceVitalsStream for VitalsServiceImpl {
+impl RobonixSystemVitalsStream for VitalsServiceImpl {
     type StreamVitalsStream = ReceiverStream<Result<VitalsSnapshot, Status>>;
 
     async fn stream_vitals(

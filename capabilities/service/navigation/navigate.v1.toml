@@ -5,6 +5,7 @@ id      = "robonix/service/navigation/navigate"
 version = "1"
 kind    = "service"
 idl     = "navigation/srv/Navigate.srv"
+description = "Navigate the robot to a target pose using planning and obstacle avoidance."
 
 [mode]
 type = "rpc"

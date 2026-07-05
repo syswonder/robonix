@@ -5,7 +5,7 @@
 //
 //   ┌────────────────┐ Enter ─────────► SrvLiaison.Stream(Task)
 //   │ rbnx chat TUI  │                 (text → PilotEvent stream)
-//   └────────────────┘ Ctrl+V ────────► SrvLiaison.StartVoiceSession(req)
+//   └────────────────┘ F2 ────────► SrvLiaison.StartVoiceSession(req)
 //                                       (voice → VoiceEvent stream which
 //                                        wraps PilotEvent in `pilot` field)
 //
@@ -481,7 +481,7 @@ async fn pick_audio_settings(
         Err(e) => {
             warnings.push(format!(
                 "audio device pick skipped — atlas unreachable at {atlas_endpoint}: {e:#}. \
-                 Text mode still works; voice (Ctrl+V) will fail until atlas is up."
+                 Text mode still works; voice (F2) will fail until atlas is up."
             ));
             return Ok((cfg, warnings));
         }
@@ -1489,7 +1489,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · type + Enter mid-task = steer · Ctrl+V = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
+             Enter = send · F2 = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
         ),
     });
     for w in audio_warnings {
@@ -1553,15 +1553,12 @@ async fn run_tui(
                 continue;
             }
 
-            // Ctrl+V → push-to-talk voice session (auto-ends on silence).
-            if !busy
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('v')
-            {
+            // F2 → push-to-talk voice session (auto-ends on silence).
+            if !busy && key.code == KeyCode::F(2) {
                 busy = true;
                 messages.borrow_mut().push(ChatMessage {
                     role: Role::Status,
-                    text: "Ctrl+V — starting voice session…".to_string(),
+                    text: "F2 — starting voice session…".to_string(),
                 });
                 draw(
                     terminal,
@@ -2455,10 +2452,11 @@ fn draw(
             .scroll((panel_scroll, 0));
         f.render_widget(panel, body[1]);
 
-        let input_widget =
-            Paragraph::new(input.to_string()).block(Block::default().borders(Borders::ALL).title(
-                " > Enter = send · type+Enter mid-task = steer · Esc = abort · Ctrl+C = quit ",
-            ));
+        let input_widget = Paragraph::new(input.to_string()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" > Enter = send · F2 = voice (auto end) · Esc = abort · Ctrl+C = quit "),
+        );
         f.render_widget(input_widget, chunks[1]);
     })?;
     Ok(())

@@ -1,5 +1,5 @@
 [contract]
-id      = "robonix/service/vitals/stream"
+id      = "robonix/system/vitals/stream"
 version = "1"
 kind    = "service"
 idl     = "vitals/srv/StreamVitals.srv"

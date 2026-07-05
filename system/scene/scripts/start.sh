@@ -3,10 +3,9 @@
 # Scene service start phase — `rbnx boot` calls this via package_manifest.yaml.
 #
 # Runs the `robonix-scene` container on the host network so it shares
-# the host DDS bus with whatever sim/robot container publishes the
-# observation topics. `--ipc=host` is load-bearing: FastRTPS's default
-# SHM transport keys are namespaced by /dev/shm, so without sharing
-# host IPC scene saw publishers but received zero messages.
+# the host ROS 2 graph with whatever sim/robot container publishes the
+# observation topics. The runtime RMW is passed through so scene uses
+# the same transport as the rest of the deploy.
 #
 # Trap discipline: when boot SIGTERMs our PGID, this script's TERM
 # trap stops + removes the container. `docker run --rm` alone is not
@@ -55,18 +54,43 @@ if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
 
+declare -a ZENOH_ARGS=()
+if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
+    ZENOH_ARGS=(-e "ROBONIX_ZENOH_ROUTER=${ROBONIX_ZENOH_ROUTER}")
+fi
+if [[ -n "${ROBONIX_ZENOH_MODE:-}" ]]; then
+    ZENOH_ARGS+=(-e "ROBONIX_ZENOH_MODE=${ROBONIX_ZENOH_MODE}")
+fi
+if [[ -n "${ROBONIX_ZENOH_LISTEN:-}" ]]; then
+    ZENOH_ARGS+=(-e "ROBONIX_ZENOH_LISTEN=${ROBONIX_ZENOH_LISTEN}")
+fi
+
 # GPU passthrough: ConceptGraphs perception (YOLO-World + MobileSAM +
 # CLIP) wants CUDA. Auto-detect via nvidia-smi; opt out by setting
 # ROBONIX_FORCE_CPU=1. Without this flag the container sees CPU only
 # and CLIP/YOLO run ~5x slower.
 declare -a GPU_ARGS=()
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
+    # NVIDIA_DRIVER_CAPABILITIES=all is REQUIRED: with just `--gpus all` (or
+    # `--runtime nvidia`) and the capability unset, the NVIDIA runtime injects
+    # only "utility" — nvidia-smi works but the CUDA compute libs are NOT
+    # mounted, so torch.cuda.is_available() is False and ConceptGraphs silently
+    # falls back to CPU (~5x slower). Requesting all caps (compute+utility+
+    # graphics) makes CUDA actually available.
     if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}" || [[ -e /etc/nv_tegra_release ]]; then
         # Jetson / L4T: the container gets the GPU via the NVIDIA container
         # runtime (which bind-mounts the host CUDA libs); `--gpus all` is x86.
-        GPU_ARGS=(--runtime nvidia)
+        GPU_ARGS=(--runtime nvidia -e NVIDIA_DRIVER_CAPABILITIES=all)
     elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-        GPU_ARGS=(--gpus all)
+        GPU_ARGS=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
+    fi
+    # Forward CUDA_VISIBLE_DEVICES ONLY when explicitly set (e.g. to pin one
+    # GPU). The old unconditional `-e CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}`
+    # passed it EMPTY when unset on the host — which tells CUDA "no GPUs" and
+    # disabled the GPU even though --gpus all had mounted it (torch.cuda → False
+    # while nvidia-smi still worked). Omitting it lets all mounted GPUs show.
+    if [[ ${#GPU_ARGS[@]} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        GPU_ARGS+=(-e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
     fi
 fi
 
@@ -87,6 +111,8 @@ exec docker run --rm \
     -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
+    -e SCENE_GRAPH_CAPTION_ENABLED="${SCENE_GRAPH_CAPTION_ENABLED:-true}" \
+    -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
     -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \
     -e SCENE_GRAPH_MIN_OBSERVATIONS="${SCENE_GRAPH_MIN_OBSERVATIONS:-2}" \
@@ -96,8 +122,9 @@ exec docker run --rm \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
     -e SCENE_MAP_ID="${SCENE_MAP_ID:-default}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
-    -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
+    "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
     -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \

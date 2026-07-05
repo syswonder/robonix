@@ -6,6 +6,7 @@ id      = "robonix/service/map/load_map"
 version = "1"
 kind    = "service"
 idl     = "map/srv/LoadMap.srv"
+description = "Load a saved map for localization or continued mapping."
 
 [mode]
 type = "rpc"

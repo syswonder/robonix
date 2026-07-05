@@ -3,6 +3,7 @@ id      = "robonix/system/executor/execute"
 version = "1"
 kind    = "service"
 idl     = "executor/srv/Execute.srv"
+description = "Execute an RTDL plan and stream execution events."
 
 [mode]
 type = "rpc_server_stream"

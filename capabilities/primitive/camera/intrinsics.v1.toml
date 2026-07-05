@@ -27,6 +27,7 @@ id      = "robonix/primitive/camera/intrinsics"
 version = "1"
 kind    = "primitive"
 idl     = "common_interfaces/sensor_msgs/msg/CameraInfo.msg"
+description = "Camera calibration and image geometry used for projection and 3D reconstruction."
 
 [mode]
 type = "topic_out"

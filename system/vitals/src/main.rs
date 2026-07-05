@@ -4,8 +4,8 @@
 // On startup vitals:
 //   1. Connects to atlas, registers as `vitals`.
 //   2. Declares two gRPC capabilities:
-//      - robonix/service/vitals/get    (rpc: GetVitals → VitalsSnapshot)
-//      - robonix/service/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
+//      - robonix/system/vitals/get    (rpc: GetVitals → VitalsSnapshot)
+//      - robonix/system/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
 //   3. Consumes Soma's StreamHealth gRPC stream (real or mock), normalizes
 //      SomaHealthSnapshot → VitalsSnapshot via threshold rules.
 //   4. Serves both gRPC services on `listen`.
@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, VITALS_NAMESPACE, VitalsConfig};
 use log::info;
-use pb::contracts::robonix_service_vitals_get_server::RobonixServiceVitalsGetServer;
-use pb::contracts::robonix_service_vitals_stream_server::RobonixServiceVitalsStreamServer;
+use pb::contracts::robonix_system_vitals_get_server::RobonixSystemVitalsGetServer;
+use pb::contracts::robonix_system_vitals_stream_server::RobonixSystemVitalsStreamServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use service::VitalsServiceImpl;
@@ -82,13 +82,13 @@ async fn main() -> Result<()> {
     atlas
         .declare_capability(
             &cfg.id,
-            "robonix/service/vitals/get",
+            "robonix/system/vitals/get",
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/system/vitals/get.v1.toml",
-                "robonix.contracts.RobonixServiceVitalsGet",
-                "/robonix.contracts.RobonixServiceVitalsGet/GetVitals",
+                "robonix.contracts.RobonixSystemVitalsGet",
+                "/robonix.contracts.RobonixSystemVitalsGet/GetVitals",
             ),
         )
         .await?;
@@ -98,13 +98,13 @@ async fn main() -> Result<()> {
     atlas
         .declare_capability(
             &cfg.id,
-            "robonix/service/vitals/stream",
+            "robonix/system/vitals/stream",
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/system/vitals/stream.v1.toml",
-                "robonix.contracts.RobonixServiceVitalsStream",
-                "/robonix.contracts.RobonixServiceVitalsStream/StreamVitals",
+                "robonix.contracts.RobonixSystemVitalsStream",
+                "/robonix.contracts.RobonixSystemVitalsStream/StreamVitals",
             ),
         )
         .await?;
@@ -223,8 +223,8 @@ async fn main() -> Result<()> {
         eprintln!("robonix-vitals ready on {listen_addr} (Soma input)");
 
         tonic::transport::Server::builder()
-            .add_service(RobonixServiceVitalsGetServer::new(svc.clone()))
-            .add_service(RobonixServiceVitalsStreamServer::new(svc))
+            .add_service(RobonixSystemVitalsGetServer::new(svc.clone()))
+            .add_service(RobonixSystemVitalsStreamServer::new(svc))
             .serve(listen_addr)
             .await
             .context("vitals gRPC server failed")?;

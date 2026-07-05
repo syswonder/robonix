@@ -5,6 +5,7 @@ id      = "robonix/service/map/reset_map"
 version = "1"
 kind    = "service"
 idl     = "map/srv/ResetMap.srv"
+description = "Clear the live map state without deleting persisted maps."
 
 [mode]
 type = "rpc"

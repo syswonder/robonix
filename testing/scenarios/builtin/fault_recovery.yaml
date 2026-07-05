@@ -1,0 +1,52 @@
+# Exception injection on a builtin: read a missing file, then recover.
+name: fault_recovery_builtin
+task: "ci-flow: read a missing file, recovering by using a fallback file"
+expect_final_done: true
+steps:
+  - status: in_progress
+    rtdl_description: faulty read
+    rtdl:
+      op: sequence
+      id: faulty_read_step
+      children:
+        - op: do
+          id: missing_read
+          cap: executor.builtin_read_file
+          args: {path: ci_never_created.txt}
+          expect:
+            contract: robonix/system/executor/builtin/read_file
+            success: false
+            args: {path: ci_never_created.txt}
+            output:
+              error_regex: 'No such file'
+  - status: in_progress
+    rtdl_description: recover by writing fallback
+    rtdl:
+      op: sequence
+      id: write_recovery_step
+      children:
+        - op: do
+          id: write_recovery
+          cap: executor.builtin_write_file
+          args: {path: ci_recovered.txt, content: "recovered charlie-3"}
+          expect:
+            contract: robonix/system/executor/builtin/write_file
+            success: true
+            args: {path: ci_recovered.txt, content: "recovered charlie-3"}
+  - status: in_progress
+    rtdl_description: read fallback
+    rtdl:
+      op: sequence
+      id: read_recovery_step
+      children:
+        - op: do
+          id: read_recovery
+          cap: executor.builtin_read_file
+          args: {path: ci_recovered.txt}
+          expect:
+            contract: robonix/system/executor/builtin/read_file
+            success: true
+            args: {path: ci_recovered.txt}
+            output:
+              text_equals: "recovered charlie-3"
+  - status: done
