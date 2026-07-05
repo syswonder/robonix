@@ -1,0 +1,16 @@
+system/scene/docker/requirements/scene-base.txt
+  h_9f1ebe31af207f 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2d92bf7e6010d21100e33c1f57b6c65f600c2940",
+  "prompts": {},
+  "humans": {
+    "h_9f1ebe31af207f": {
+      "author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
