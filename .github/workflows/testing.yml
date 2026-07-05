@@ -67,6 +67,10 @@ on:
         description: "pull request head branch when invoked by ChatOps"
         type: string
         required: false
+      pr_base_ref:
+        description: "pull request base branch when invoked by ChatOps"
+        type: string
+        required: false
       pr_head_repo:
         description: "pull request head repository when invoked by ChatOps"
         type: string
@@ -115,7 +119,7 @@ jobs:
           # For ChatOps PR tests, checkout the current base branch first; the
           # next step merges the PR head locally so stale refs/pull/*/merge refs
           # cannot make CI test an old base.
-          ref: ${{ inputs.pr_number != '' && github.event.repository.default_branch || inputs.ref }}
+          ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
           fetch-depth: ${{ inputs.pr_number != '' && '0' || '1' }}
       - name: Merge PR head into current base
         if: ${{ inputs.pr_number != '' }}
@@ -152,9 +156,16 @@ jobs:
         run: |
           set -euo pipefail
           # ChatOps PR tests need full git history for local merge-base
-          # resolution. Do not let that make gitleaks scan old repository
-          # history; scan the merged working tree that will actually run.
-          docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:latest \
+          # resolution. Never scan .git history here; scan only tracked files
+          # from the merged working tree that will actually run.
+          scan_dir="$RUNNER_TEMP/gitleaks-tree"
+          rm -rf "$scan_dir"
+          mkdir -p "$scan_dir"
+          while IFS= read -r -d '' f; do
+            mkdir -p "$scan_dir/$(dirname "$f")"
+            cp -a "$f" "$scan_dir/$f"
+          done < <(git ls-files -z)
+          docker run --rm -v "$scan_dir:/repo:ro" zricethezav/gitleaks:latest \
             dir /repo --no-banner --redact \
             || { echo "::error::possible secret in checked-out tree"; exit 1; }
 
@@ -257,7 +268,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.pr_number != '' && github.event.repository.default_branch || inputs.ref }}
+          ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
           fetch-depth: ${{ inputs.pr_number != '' && '0' || '1' }}
 
       - name: Merge PR head into current base
@@ -816,6 +827,7 @@ jobs:
           REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
           REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
           REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+          REPORT_PR_BASE_REF: ${{ inputs.pr_base_ref || github.event.pull_request.base.ref || '' }}
           REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
           REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
           REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
@@ -921,6 +933,7 @@ jobs:
               "pr_author": env("REPORT_PR_AUTHOR"),
               "pr_url": env("REPORT_PR_URL"),
               "pr_head_ref": env("REPORT_PR_HEAD_REF"),
+              "pr_base_ref": env("REPORT_PR_BASE_REF"),
               "pr_head_repo": env("REPORT_PR_HEAD_REPO"),
               "pr_head_sha": env("REPORT_PR_HEAD_SHA"),
               "pr_head_commit_url": env("PR_HEAD_COMMIT_URL"),
@@ -978,6 +991,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=$pr_head_commit_url" \
@@ -1041,6 +1055,7 @@ jobs:
       REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
       REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
       REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+      REPORT_PR_BASE_REF: ${{ inputs.pr_base_ref || github.event.pull_request.base.ref || '' }}
       REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
       REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
       REPORT_TEST_REF: ${{ inputs.ref || github.ref }}
@@ -1089,6 +1104,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=${pr_head_commit_url}" \
