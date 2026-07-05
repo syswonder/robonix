@@ -89,6 +89,10 @@ def _make_detector(reg):
     p._uuid_to_oid = {}
     p._world_frame_fn = lambda: "map"
     p.cfg = {"max_merge_dist_m": 1.5}
+    # State added by the cross-tick re-bind / soft-eviction work that
+    # _apply_snapshot now also touches.
+    p._object_ttl_s = 30.0
+    p._merge_class_group = {}
     return p
 
 
