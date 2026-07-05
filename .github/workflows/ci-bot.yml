@@ -175,6 +175,11 @@ jobs:
             git -C "$REPORT_SITE_DIR" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           fi
 
+      - name: Prepare self-contained report viewer assets
+        run: |
+          set -euo pipefail
+          python3 testing/prepare_report_assets.py --asset-dir "$RUNNER_TEMP/report-assets"
+
       - name: Build report page
         env:
           REPORT_PR_NUMBER: ${{ needs.gate.outputs.pr_number }}

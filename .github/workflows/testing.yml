@@ -352,7 +352,8 @@ jobs:
         working-directory: examples/webots
         run: |
           set -euo pipefail
-          rbnx build
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          rbnx build 2>&1 | tee "$RUNNER_TEMP/sim-logs/build-webots-deployment.log"
           # provenance: record exactly which upstream commit each remote built from
           for d in rbnx-boot/cache/*/; do
             [ -d "$d/.git" ] && echo "$(basename "$d") @ $(git -C "$d" rev-parse --short HEAD) $(git -C "$d" log -1 --format=%s)"
@@ -364,6 +365,13 @@ jobs:
           NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"
         run: |
           set -euo pipefail
+          # Avoid Docker Hub metadata checks on every Webots sim rebuild.
+          # The helper creates a local alias and pulls through configured
+          # mirrors on first use.
+          # shellcheck disable=SC1091
+          source "../../../scripts/docker_base_image.sh"
+          export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
+          robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
           docker compose -p "$ROBONIX_SIM_PROJECT" -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
           # robot publishes /scanner /odom /head_front_camera/* within ~15s.
@@ -727,6 +735,12 @@ jobs:
             docker volume rm -f "$vid" >/dev/null 2>&1 || true
           done
 
+      - name: Prepare self-contained report viewer assets
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 testing/prepare_report_assets.py --asset-dir "$RUNNER_TEMP/report-assets"
+
       - name: Generate test report
         if: always()
         env:
@@ -977,6 +991,11 @@ jobs:
           pattern: testing-logs-*
           path: dl
           merge-multiple: true
+
+      - name: Prepare self-contained report viewer assets
+        run: |
+          set -euo pipefail
+          python3 testing/prepare_report_assets.py --asset-dir "$RUNNER_TEMP/report-assets"
 
       - name: Build Webots HTML report
         run: |

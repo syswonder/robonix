@@ -30,6 +30,14 @@ SIM_CT="$ROBONIX_SIM_CONTAINER"
 # even though the script printed "[sim/start] launching rviz2 ..."
 # because the bash sub-process couldn't find start_rviz.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# Avoid Docker Hub metadata checks on every compose rebuild. The helper creates
+# a local alias and pulls through configured mirrors on first use.
+# Override ROBONIX_SIM_ROS_BASE_IMAGE for a custom/mirror/digest base.
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/docker_base_image.sh"
+export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
+robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
 cd "$SCRIPT_DIR"
 
 # Auto-detect DISPLAY if the launching shell didn't export one. Probes
