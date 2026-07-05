@@ -34,6 +34,9 @@
 set -euo pipefail
 
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+REPO_ROOT="$(cd "$PKG/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/docker_base_image.sh"
 cd "$PKG"
 
 BUILD="rbnx-build"
@@ -57,6 +60,9 @@ TARGET="${RBNX_BUILD_TARGET:-x86-docker}"
 # (`rbnx build` inherits the shell environment, so the variable reaches this
 # script unchanged).
 ROS_DISTRO_BUILD="${ROBONIX_SCENE_ROS_DISTRO:-humble}"
+UPSTREAM_ROS_BASE_IMAGE="ros:${ROS_DISTRO_BUILD}-ros-base"
+DEFAULT_ROS_BASE_IMAGE="robonix-ros:${ROS_DISTRO_BUILD}-ros-base"
+ROS_BASE_IMAGE="${ROBONIX_SCENE_ROS_BASE_IMAGE:-$DEFAULT_ROS_BASE_IMAGE}"
 
 if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
@@ -72,7 +78,7 @@ echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
-# Pulled out of the docker build because github CDN connections from CN
+# Pulled out of the docker build because direct CDN connections from some
 # drop mid-stream on multi-hundred-MB transfers; an out-of-band download
 # with curl --retry-all-errors is much more robust, and the resulting
 # files become a cache-key-stable COPY into the image.
@@ -217,17 +223,60 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     fi
     "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
     # Pre-fetch the CLIP weights into the host HF cache (start_native points
-    # HF_HOME here). The docker path bakes these into the image; the native
-    # path must cache them now, since the runtime host may have no internet
-    # and perception silently degrades to "no objects" without them.
+    # HF_HOME here). Also pre-warm Ultralytics YOLO-World's text encoder path:
+    # YOLOWorld.set_classes() uses openai/clip via Ultralytics' weights_dir,
+    # not open_clip's HF cache. If this is left to start_native, first boot can
+    # spend minutes downloading ViT-B-32.pt and miss the scene/object test flow.
     HFD="$PKG/rbnx-build/data/hf"
-    mkdir -p "$HFD/clip"
+    YCD="$PKG/rbnx-build/data/ultralytics"
+    UWD="$YCD/weights"
+    mkdir -p "$HFD/clip" "$YCD" "$UWD"
     HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HOME="$HFD" HF_HUB_DOWNLOAD_TIMEOUT=120 \
         "$PY" -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
         || echo "[build] warning: open_clip weight prefetch failed (perception will degrade)"
-    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" \
-        "$PY" -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='$HFD/clip')" \
-        || echo "[build] warning: openai-clip weight prefetch failed"
+    YOLO_CONFIG_DIR="$YCD" "$PY" <<PY \
+        || echo "[build] warning: failed to persist Ultralytics settings"
+from ultralytics.utils import SETTINGS
+
+SETTINGS.update({
+    "weights_dir": "$UWD",
+    "datasets_dir": "$YCD/datasets",
+    "runs_dir": "$YCD/runs",
+    "sync": False,
+})
+PY
+    YOLO_CONFIG_DIR="$YCD" HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" "$PY" <<PY \
+        || echo "[build] warning: ultralytics CLIP prefetch failed (scene start will fail fast until build succeeds)"
+from pathlib import Path
+from ultralytics.utils import WEIGHTS_DIR
+
+expected = Path("$UWD")
+if Path(WEIGHTS_DIR) != expected:
+    raise RuntimeError(f"Ultralytics WEIGHTS_DIR={WEIGHTS_DIR!s}, expected {expected!s}")
+
+from ultralytics import YOLO
+
+classes = [
+    "chair", "table", "desk", "couch", "sofa", "bookshelf", "shelf",
+    "cabinet", "drawer", "whiteboard",
+    "monitor", "laptop", "keyboard", "mouse", "computer tower",
+    "monitor stand", "headphones", "webcam", "router", "power strip",
+    "cup", "mug", "water bottle", "thermos", "paper cup",
+    "backpack", "handbag", "book", "notebook", "pen", "pencil",
+    "phone", "tablet",
+    "box", "cardboard box", "tray", "basket", "trash bin",
+    "tool", "screwdriver", "wrench", "tape",
+    "plant", "potted plant", "lamp", "clock", "picture frame",
+    "snack", "fruit", "apple", "banana",
+    "door", "doorway", "fire extinguisher", "person",
+]
+
+model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
+model.set_classes(classes)
+PY
+    if [[ ! -s "$UWD/clip/ViT-B-32.pt" ]]; then
+        echo "[build] warning: missing $UWD/clip/ViT-B-32.pt after ultralytics prefetch; scene start will fail fast" >&2
+    fi
     "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
     echo "[build] done (jetson-native)."
     exit 0
@@ -242,9 +291,23 @@ fi
 SCENE_DOCKERFILE="docker/Dockerfile"
 [[ "$TARGET" == "jetson-docker" ]] && SCENE_DOCKERFILE="docker/Dockerfile.jetson"
 
-DOCKER_BUILD_FLAGS=(--network=host --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}")
+DOCKER_BUILD_FLAGS=(
+    --network=host
+    --pull=false
+    --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}"
+    --build-arg "ROS_BASE_IMAGE=${ROS_BASE_IMAGE}"
+)
 [[ "$CLEAN" == "1" ]] && DOCKER_BUILD_FLAGS+=(--no-cache)
 echo "[build] ROS distro: ${ROS_DISTRO_BUILD} (set ROBONIX_SCENE_ROS_DISTRO to change)"
+echo "[build] ROS base image: ${ROS_BASE_IMAGE} (set ROBONIX_SCENE_ROS_BASE_IMAGE to override)"
+
+# Keep the default base image local. A Dockerfile FROM that points at a remote
+# tag makes BuildKit query registry metadata on every rebuild, even when the
+# layers are cached. The local alias removes that registry hit from normal
+# rebuilds while still preserving an explicit override for mirrors/digests.
+if [[ "$ROS_BASE_IMAGE" == "$DEFAULT_ROS_BASE_IMAGE" ]]; then
+    robonix_ensure_local_base_image "$ROS_BASE_IMAGE" "$UPSTREAM_ROS_BASE_IMAGE"
+fi
 
 # Proxy → docker build-args.
 #
@@ -258,11 +321,11 @@ echo "[build] ROS distro: ${ROS_DISTRO_BUILD} (set ROBONIX_SCENE_ROS_DISTRO to c
 #
 #   Because we use --network=host, keep 127.0.0.1 unchanged.
 #
-# Default to no proxy: this repo targets domestic (CN) networks where the
-# aliyun / tuna mirrors are reached directly and fast. Picking up the host's
-# http_proxy (the old `auto` default) would tunnel large wheel downloads
-# (torch, ~1 GB) through a local proxy and stall them. Opt back in with
-# RBNX_BUILD_PROXY=1 only when the host genuinely needs a proxy for egress.
+# Default to no proxy: most CI/self-hosted environments work better when
+# configured mirrors are reached directly. Picking up the host's http_proxy
+# would tunnel large wheel downloads (torch, ~1 GB) through a local proxy and
+# can stall them. Opt back in with RBNX_BUILD_PROXY=1 only when the host
+# genuinely needs a proxy for egress.
 USE_PROXY="${RBNX_BUILD_PROXY:-0}"
 
 _http_proxy="${HTTP_PROXY:-${http_proxy:-}}"

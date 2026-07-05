@@ -1,0 +1,8 @@
+logs/
+rbnx-boot/
+rbnx-build/
+__pycache__/
+*.pyc
+.venv/
+skills/*/logs/
+skills/*/rbnx-build/

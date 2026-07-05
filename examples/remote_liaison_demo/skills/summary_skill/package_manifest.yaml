@@ -1,0 +1,17 @@
+manifestVersion: 1
+
+package:
+  name: com.robonix.demo.summary_skill
+  version: 0.1.0
+  vendor: robonix
+  description: Remote Liaison demo summary skill.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/skill/summary_skill/driver
+    path: capabilities/driver.v1.toml
+  - name: robonix/skill/summary_skill/compact
+    path: capabilities/compact.v1.toml

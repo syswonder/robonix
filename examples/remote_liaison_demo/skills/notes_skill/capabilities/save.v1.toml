@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/skill/notes_skill/save"
+version = "1"
+kind    = "skill"
+idl     = "memory/srv/Save.srv"
+
+[mode]
+type = "rpc"
