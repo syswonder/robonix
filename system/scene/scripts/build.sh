@@ -57,6 +57,9 @@ TARGET="${RBNX_BUILD_TARGET:-x86-docker}"
 # (`rbnx build` inherits the shell environment, so the variable reaches this
 # script unchanged).
 ROS_DISTRO_BUILD="${ROBONIX_SCENE_ROS_DISTRO:-humble}"
+UPSTREAM_ROS_BASE_IMAGE="ros:${ROS_DISTRO_BUILD}-ros-base"
+DEFAULT_ROS_BASE_IMAGE="robonix-ros:${ROS_DISTRO_BUILD}-ros-base"
+ROS_BASE_IMAGE="${ROBONIX_SCENE_ROS_BASE_IMAGE:-$DEFAULT_ROS_BASE_IMAGE}"
 
 if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
@@ -285,9 +288,31 @@ fi
 SCENE_DOCKERFILE="docker/Dockerfile"
 [[ "$TARGET" == "jetson-docker" ]] && SCENE_DOCKERFILE="docker/Dockerfile.jetson"
 
-DOCKER_BUILD_FLAGS=(--network=host --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}")
+DOCKER_BUILD_FLAGS=(
+    --network=host
+    --pull=false
+    --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}"
+    --build-arg "ROS_BASE_IMAGE=${ROS_BASE_IMAGE}"
+)
 [[ "$CLEAN" == "1" ]] && DOCKER_BUILD_FLAGS+=(--no-cache)
 echo "[build] ROS distro: ${ROS_DISTRO_BUILD} (set ROBONIX_SCENE_ROS_DISTRO to change)"
+echo "[build] ROS base image: ${ROS_BASE_IMAGE} (set ROBONIX_SCENE_ROS_BASE_IMAGE to override)"
+
+# Keep the default base image local. A Dockerfile FROM that points at a remote
+# tag makes BuildKit query registry metadata on every rebuild, even when the
+# layers are cached. The local alias removes that registry hit from normal
+# rebuilds while still preserving an explicit override for mirrors/digests.
+if [[ "$ROS_BASE_IMAGE" == "$DEFAULT_ROS_BASE_IMAGE" ]]; then
+    if ! docker image inspect "$ROS_BASE_IMAGE" >/dev/null 2>&1; then
+        if docker image inspect "$UPSTREAM_ROS_BASE_IMAGE" >/dev/null 2>&1; then
+            echo "[build] tagging cached $UPSTREAM_ROS_BASE_IMAGE as $ROS_BASE_IMAGE"
+        else
+            echo "[build] pulling ROS base once: $UPSTREAM_ROS_BASE_IMAGE"
+            docker pull "$UPSTREAM_ROS_BASE_IMAGE"
+        fi
+        docker tag "$UPSTREAM_ROS_BASE_IMAGE" "$ROS_BASE_IMAGE"
+    fi
+fi
 
 # Proxy → docker build-args.
 #

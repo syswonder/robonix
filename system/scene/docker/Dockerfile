@@ -29,11 +29,13 @@
 # the first time, then reused. Rebuild only when this Dockerfile or
 # requirements/ change.
 
-# Selects the base image AND (via the base's own ENV ROS_DISTRO) the apt
-# package names + the runtime setup.bash path. Override: --build-arg
-# ROS_DISTRO=iron (build.sh wires this from ROBONIX_SCENE_ROS_DISTRO).
+# Selects the ROS package names + runtime setup.bash path. build.sh also passes
+# ROS_BASE_IMAGE, defaulting to a local robonix-ros:<distro>-ros-base alias so
+# BuildKit does not query Docker Hub metadata on every rebuild. Override with
+# ROBONIX_SCENE_ROS_BASE_IMAGE for a mirror, digest-pinned base, or custom image.
 ARG ROS_DISTRO=humble
-FROM ros:${ROS_DISTRO}-ros-base
+ARG ROS_BASE_IMAGE=robonix-ros:humble-ros-base
+FROM ${ROS_BASE_IMAGE}
 
 # ── Build-time proxy helpers ──────────────────────────────────────
 # Usage:
