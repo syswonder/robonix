@@ -5,7 +5,8 @@
 # code. Driver code lives in each primitive/service package directory
 # on the host and is bind-mounted in by compose.yaml under /robonix_pkgs.
 # Build context = the directory containing this Dockerfile (sim/bridge/).
-FROM osrf/ros:humble-desktop-full
+ARG ROS_BASE_IMAGE=osrf/ros:humble-desktop-full
+FROM ${ROS_BASE_IMAGE}
 
 # ── TUNA mirrors ───────────────────────────────────────────────────
 # Swap apt sources (Ubuntu/ports + ROS 2) to TUNA. Use `find` + sed

@@ -34,6 +34,9 @@
 set -euo pipefail
 
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+REPO_ROOT="$(cd "$PKG/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/docker_base_image.sh"
 cd "$PKG"
 
 BUILD="rbnx-build"
@@ -75,7 +78,7 @@ echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
-# Pulled out of the docker build because github CDN connections from CN
+# Pulled out of the docker build because direct CDN connections from some
 # drop mid-stream on multi-hundred-MB transfers; an out-of-band download
 # with curl --retry-all-errors is much more robust, and the resulting
 # files become a cache-key-stable COPY into the image.
@@ -303,15 +306,7 @@ echo "[build] ROS base image: ${ROS_BASE_IMAGE} (set ROBONIX_SCENE_ROS_BASE_IMAG
 # layers are cached. The local alias removes that registry hit from normal
 # rebuilds while still preserving an explicit override for mirrors/digests.
 if [[ "$ROS_BASE_IMAGE" == "$DEFAULT_ROS_BASE_IMAGE" ]]; then
-    if ! docker image inspect "$ROS_BASE_IMAGE" >/dev/null 2>&1; then
-        if docker image inspect "$UPSTREAM_ROS_BASE_IMAGE" >/dev/null 2>&1; then
-            echo "[build] tagging cached $UPSTREAM_ROS_BASE_IMAGE as $ROS_BASE_IMAGE"
-        else
-            echo "[build] pulling ROS base once: $UPSTREAM_ROS_BASE_IMAGE"
-            docker pull "$UPSTREAM_ROS_BASE_IMAGE"
-        fi
-        docker tag "$UPSTREAM_ROS_BASE_IMAGE" "$ROS_BASE_IMAGE"
-    fi
+    robonix_ensure_local_base_image "$ROS_BASE_IMAGE" "$UPSTREAM_ROS_BASE_IMAGE"
 fi
 
 # Proxy → docker build-args.
@@ -326,11 +321,11 @@ fi
 #
 #   Because we use --network=host, keep 127.0.0.1 unchanged.
 #
-# Default to no proxy: this repo targets domestic (CN) networks where the
-# aliyun / tuna mirrors are reached directly and fast. Picking up the host's
-# http_proxy (the old `auto` default) would tunnel large wheel downloads
-# (torch, ~1 GB) through a local proxy and stall them. Opt back in with
-# RBNX_BUILD_PROXY=1 only when the host genuinely needs a proxy for egress.
+# Default to no proxy: most CI/self-hosted environments work better when
+# configured mirrors are reached directly. Picking up the host's http_proxy
+# would tunnel large wheel downloads (torch, ~1 GB) through a local proxy and
+# can stall them. Opt back in with RBNX_BUILD_PROXY=1 only when the host
+# genuinely needs a proxy for egress.
 USE_PROXY="${RBNX_BUILD_PROXY:-0}"
 
 _http_proxy="${HTTP_PROXY:-${http_proxy:-}}"
