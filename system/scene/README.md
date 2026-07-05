@@ -1,20 +1,20 @@
 # `system/scene` — live semantic + geometric map
 
-Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid republished from the SLAM service. Exposes 5 read-only MCP tools that Pilot calls each LLM round, and a self-contained 2D + 3D web viewer.
+Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes read-only MCP tools that Pilot calls during RTDL planning/execution, and a self-contained 2D + 3D web viewer.
 
-This service is **NOT** a memory store (see `spatial_memory_service` for episodic recall) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
+This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
 
 ## What's inside
 
 ```
 system/scene/
 ├── README.md                    ← this file
-├── package_manifest.yaml        Robonix package: 5 MCP capabilities
+├── package_manifest.yaml        Robonix package: scene MCP capabilities
 ├── docker/
 │   ├── Dockerfile               ROS Humble + torch cu124 + CV stack
 │   ├── requirements.txt         scene + concept-graphs deps
 │   ├── _weights/                pre-fetched YOLO-World + MobileSAM .pt
-│   └── no_shm_profile.xml       FastRTPS UDP-only profile
+│   └── entrypoint.sh            container runtime setup, including Zenoh RMW config
 ├── scripts/
 │   ├── build.sh                 rbnx codegen + docker build (+ weight pre-fetch)
 │   └── start.sh                 docker run wrapper used by `rbnx boot`
@@ -107,9 +107,10 @@ RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user 
 ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
 ```
 
-> Native scene shares the **host RMW** rather than forcing the container's own
-> RMW/SHM profile, so it sees the live camera / pointcloud topics the other
-> host nodes publish. Set `ROBONIX_FORCE_CPU=1` to skip CUDA.
+> Native scene uses the same ROS 2 RMW configuration as the host process. Set
+> `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
+> the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set
+> `ROBONIX_FORCE_CPU=1` to skip CUDA.
 
 ## Build + run
 
@@ -157,7 +158,7 @@ Pilot calls `skill/explore/explore`, polls `status` every few seconds, and lets 
 
 For interactive use: `rbnx chat`, type `explore the environment`; Esc cancels current reasoning, `Ctrl+C` exits.
 
-Within ~15 s of the explore goal landing you should see: the robot moving in rviz / Webots; 2D occupancy updating (web UI left panel); objects accumulating in the 3D panel and the scene registry (`get_snapshot` via `rbnx tools`); live RGB + depth in the cam panel (third column).
+Within ~15 s of the explore goal landing you should see: the robot moving in rviz / Webots; 2D occupancy updating (web UI left panel); objects accumulating in the 3D panel and the scene registry (`list_objects` / `get_scene_graph` via `rbnx tools`); live RGB + depth in the cam panel (third column).
 
 ### Just scene, attached to your own webots/sim
 
@@ -167,14 +168,27 @@ bash scripts/build.sh                # one-time
 bash scripts/start.sh                # docker run, stays foreground
 ```
 
-scene's container joins the host DDS bus (`--network host` + FastRTPS UDP-only) and auto-discovers any provider on atlas declaring a ROS2 `topic_out` interface. Required topics:
+Scene auto-discovers data providers from Atlas. At startup it walks the fixed
+contract list in `scene_service/service.py` (`_SCENE_CONTRACTS`), asks Atlas for
+providers that implement those contracts, connects to their ROS 2 `topic_out`
+interfaces, and subscribes only to what the deployment actually exposes.
 
-* RGB image (`sensor_msgs/Image`)
-* Depth registered to RGB (`sensor_msgs/Image`, 32FC1 metres or 16UC1 mm)
-* `/tf` chain ending at `head_front_camera_rgb_optical_frame` and `base_link` in `map` frame.
-* Optional: `nav_msgs/OccupancyGrid` (for the 2D underlay)
+The default RMW is Zenoh (`RMW_IMPLEMENTATION=rmw_zenoh_cpp`). For single-host
+deployments the default local router/session is used; advanced deployments can
+override it with `ROBONIX_ZENOH_ROUTER`, `ROBONIX_ZENOH_MODE`, and
+`ROBONIX_ZENOH_LISTEN`. Fast DDS can still be tested by setting
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`, but it is not the default path.
 
-If your camera frame isn't `head_front_camera_rgb_optical_frame`, override via env when starting scene:
+Useful input contracts include:
+
+* `robonix/primitive/camera/rgb` (`sensor_msgs/Image`)
+* `robonix/primitive/camera/depth` (`sensor_msgs/Image`, 32FC1 metres or 16UC1 mm)
+* `robonix/primitive/camera/intrinsics` (`sensor_msgs/CameraInfo`)
+* `robonix/primitive/camera/extrinsics` (`geometry_msgs/TransformStamped`)
+* `robonix/service/map/pose` (`geometry_msgs/PoseWithCovarianceStamped`)
+* `robonix/service/map/occupancy_grid` (`nav_msgs/OccupancyGrid`)
+
+If your camera frame is not the deployment default, override it when starting scene:
 
 ```bash
 SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
@@ -253,20 +267,18 @@ map identity to wire in here.
 | Contract                                       | Tool name        | What it does                                                        |
 |------------------------------------------------|------------------|---------------------------------------------------------------------|
 | `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object (id, label, x,y,z, last_seen). LLM filters client-side. |
-| `robonix/system/scene/goal_near`               | `goal_near`      | Map-frame approach pose near a registered object (id → reachable + x + y + yaw + reason). Pass to `navigation/navigate`. |
+| `robonix/system/scene/goal_near`               | `goal_near`      | Map-frame approach pose near a registered object (id -> reachable + x + y + yaw + reason). Pass to `navigation/navigate`. |
+| `robonix/system/scene/get_scene_graph`         | `get_scene_graph` | Current semantic graph nodes and relation edges. |
+| `robonix/system/scene/get_object_context`      | `get_object_context` | One object's graph context plus nearby objects and directly related edges. |
+| `robonix/system/scene/list_relations`          | `list_relations` | Relation edges, optionally filtered by relation type. |
 
-Both are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
+These are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
 
 ```bash
 curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
      -H "Accept: application/json, text/event-stream" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-         "name":"get_snapshot","arguments":{"spec":{
-             "layers":["object","relation"],"region_frame":"map",
-             "region_center_x":0,"region_center_y":0,"region_center_z":0,
-             "region_radius_m":5.0,"freshness_s":30.0,
-             "include_stale":false,"min_confidence":0.0,
-             "max_objects":50}}}}'
+         "name":"list_objects","arguments":{}}}'
 ```
 
 ## Web UI quick tour
@@ -301,7 +313,6 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 - **No write API.** No `IngestObservation`, no `UpdateTaskContext`. Per the spec, scene is a sink.
 - **No subscribe-stream.** `SubscribeUpdates` doesn't fit MCP semantics. Pilot polls.
-- **No episodic memory.** Belongs to `spatial_memory_service`.
-- **No real reachability.** `reachable_by` is a distance stub.
-- **No Sentinel.** `get_safety_context` always returns `status="not_implemented"`.
+- **No episodic memory.** Long-term memory belongs to memory services, not scene.
+- **No direct motion control.** `goal_near` returns an approach pose; navigation is performed by `robonix/service/navigation/navigate`.
 - **No real Tiago URDF in the 3D viz.** The composite primitive proxy is good enough; PAL's `tiago_description` xacro chain is too heavy to ship into the browser. STLs are pre-staged under `static/urdf/meshes/` if anyone wants to wire urdf-loader-three.js.
