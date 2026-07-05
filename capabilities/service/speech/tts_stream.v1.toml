@@ -5,6 +5,7 @@ id      = "robonix/service/speech/tts_stream"
 version = "1"
 kind    = "service"
 idl     = "tts/srv/SynthesizeStream.srv"
+description = "Streaming text-to-speech synthesis that returns audio chunks."
 
 [mode]
 type = "rpc_server_stream"

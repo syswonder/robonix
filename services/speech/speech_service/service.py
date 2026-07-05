@@ -39,6 +39,7 @@ Atlas integration:
   runs in standalone mode. Set SPEECH_STANDALONE=1 to skip registration.
 
 Environment variables:
+  SPEECH_BACKEND      Backend selector: local | tencent (default: local)
   ASR_MODEL          Whisper model path (default: openai/whisper-large-v3)
   ASR_DEVICE         Torch device: cuda | cpu (default: cuda)
   ASR_CHUNK_LENGTH   Whisper chunk length in seconds (default: 30.0)
@@ -46,10 +47,13 @@ Environment variables:
   FUNASR_MODEL       FunASR model name or path (default: paraformer-zh-streaming)
   FUNASR_CHUNK_SIZE  Paraformer chunk_size as JSON (default: [0,10,5])
   TTS_VOICE          Edge TTS voice name (default: zh-CN-XiaoxiaoNeural)
+  TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY
+                     Tencent Cloud credentials when SPEECH_BACKEND=tencent
+  TENCENT_ASR_APPID  Tencent Cloud ASR AppID when SPEECH_BACKEND=tencent
   ROBONIX_ATLAS      Atlas control-plane address (default: localhost:50051)
   SPEECH_PORT        gRPC listen port, 0 = auto-pick (default: 0)
   SPEECH_BIND_ADDR   gRPC bind address (default: 0.0.0.0)
-  SPEECH_CI_MODE     Set to 1 for mock backends (no GPU/model needed)
+  SPEECH_BACKEND     Set to mock for local mock backends (no GPU/model needed)
 """
 import io
 import json
@@ -60,9 +64,10 @@ import uuid
 import asyncio
 import logging
 import wave
+import importlib
 from concurrent import futures
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Iterator, Optional, Protocol
 
 # Route all stdlib logging (this module + transitive deps) through Scribe so
 # `rbnx logs -t speech` sees everything and the package owns no log file or
@@ -72,6 +77,30 @@ from robonix_api import scribe_logger  # noqa: E402
 
 scribe_logger.install_stdlib_bridge("speech")
 log = logging.getLogger(__name__)
+
+
+class OneShotASRBackend(Protocol):
+    """Backend contract for `robonix/service/speech/asr`."""
+
+    def recognize(self, audio_bytes: bytes, encoding: str, sample_rate: int, language: str) -> dict:
+        """Return `{"text": str, "confidence": float}` for complete utterance audio."""
+
+
+class StreamingASRBackend(Protocol):
+    """Backend contract for `robonix/service/speech/asr_stream`."""
+
+    def recognize_stream(self, pcm_chunks: Iterable[bytes]) -> Iterator[dict]:
+        """Yield ASR event dicts from 16 kHz mono pcm_s16le chunks."""
+
+
+class TTSBackend(Protocol):
+    """Backend contract for `robonix/service/speech/tts` and `tts_stream`."""
+
+    async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
+        """Return complete 16 kHz mono pcm_s16le audio."""
+
+    async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
+        """Yield 16 kHz mono pcm_s16le audio chunks."""
 
 # -- Proto stub resolution ---------------------------------------------------
 # Walks up from this file's directory looking for proto_gen/ containing the
@@ -96,12 +125,45 @@ import speech_pb2
 import audio_pb2  # for AudioChunk (lib/primitive/audio/msg/AudioChunk.msg)
 import robonix_contracts_pb2_grpc as contracts_grpc
 
-# -- CI mock mode ------------------------------------------------------------
 
-CI_MODE = os.environ.get("SPEECH_CI_MODE", "").strip() in ("1", "true", "yes")
+def _grpc_class(primary: str, fallback: str):
+    cls = getattr(contracts_grpc, primary, None)
+    if cls is not None:
+        return cls
+    return getattr(contracts_grpc, fallback)
+
+
+SpeechAsrBase = _grpc_class(
+    "RobonixServiceSpeechAsrServicer",
+    "RobonixSystemSpeechAsrServicer",
+)
+SpeechAsrStreamBase = _grpc_class(
+    "RobonixServiceSpeechAsrStreamServicer",
+    "RobonixSystemSpeechAsrStreamServicer",
+)
+SpeechTtsBase = _grpc_class(
+    "RobonixServiceSpeechTtsServicer",
+    "RobonixSystemSpeechTtsServicer",
+)
+SpeechTtsStreamBase = _grpc_class(
+    "RobonixServiceSpeechTtsStreamServicer",
+    "RobonixSystemSpeechTtsStreamServicer",
+)
+SpeechDialogBase = _grpc_class(
+    "RobonixServiceSpeechDialogServicer",
+    "RobonixSystemSpeechDialogServicer",
+)
+
+# -- Explicit mock mode ------------------------------------------------------
+
+MOCK_MODE = os.environ.get("SPEECH_BACKEND", "").strip().lower() == "mock"
 
 def check_torch_cuda():
-    import torch
+    try:
+        import torch
+    except ImportError:
+        log.info("Torch not installed; CUDA diagnostics skipped")
+        return
     log.info("Torch: %s", torch.__version__)
     log.info("CUDA available: %s", torch.cuda.is_available())
 
@@ -212,14 +274,14 @@ class WhisperASRBackend:
 
 
 class MockASRBackend:
-    """CI mock ASR -- returns a fixed canned response, no model loaded.
+    """Mock ASR -- returns a fixed canned response, no model loaded.
 
-    Activated when SPEECH_CI_MODE=1. Useful for testing the gRPC layer
+    Activated when SPEECH_BACKEND=mock. Useful for testing the gRPC layer
     without requiring GPU or model weights.
     """
 
     def recognize(self, audio_bytes: bytes, encoding: str, sample_rate: int, language: str) -> dict:
-        return {"text": "[ci-mock] hello world", "confidence": 1.0}
+        return {"text": "[mock] hello world", "confidence": 1.0}
 
 
 # -- ASR Backend (FunASR Paraformer streaming) --------------------------------
@@ -363,15 +425,68 @@ class FunASRStreamingBackend:
             outputs.append({"text": text, "confidence": 0.9})
         return outputs
 
+    def recognize_stream(self, pcm_chunks: Iterable[bytes]) -> Iterator[dict]:
+        """Recognize a stream of 16 kHz mono pcm_s16le chunks.
+
+        The public backend shape matches TencentRealtimeASRBackend:
+        callers provide arbitrary PCM chunks and receive Robonix ASR event
+        dictionaries. Internally FunASR still needs stride-sized frames, so
+        this adapter buffers input before calling recognize_chunk().
+        """
+        cache: dict = {}
+        frame_buf = bytearray()
+        stride_bytes = self.chunk_stride * 2
+
+        for chunk in pcm_chunks:
+            if not chunk:
+                continue
+            frame_buf.extend(chunk)
+            while len(frame_buf) >= stride_bytes:
+                frame = bytes(frame_buf[:stride_bytes])
+                del frame_buf[:stride_bytes]
+                for result in self.recognize_chunk(frame, cache, is_final=False):
+                    text = result.get("text", "")
+                    if text:
+                        yield {
+                            "event_type": 0,
+                            "text": text,
+                            "confidence": result.get("confidence", 0.0),
+                            "is_final": False,
+                        }
+
+        for result in self.recognize_chunk(bytes(frame_buf), cache, is_final=True):
+            text = result.get("text", "")
+            if text:
+                yield {
+                    "event_type": 1,
+                    "text": text,
+                    "confidence": result.get("confidence", 0.0),
+                    "is_final": True,
+                }
+
 
 class MockASRStreamingBackend:
-    """CI mock streaming ASR -- returns empty results during streaming,
+    """Mock streaming ASR -- returns empty results during streaming,
     canned result on is_final. No model loaded.
     """
 
+    def recognize_stream(self, pcm_chunks: Iterable[bytes]) -> Iterator[dict]:
+        """Consume the stream and return one deterministic final result."""
+        seen = False
+        for _ in pcm_chunks:
+            seen = True
+            yield {"event_type": 0, "text": "", "confidence": 0.0, "is_final": False}
+        if seen:
+            yield {
+                "event_type": 1,
+                "text": "[ci-mock-stream] hello world",
+                "confidence": 1.0,
+                "is_final": True,
+            }
+
     def recognize_chunk(self, audio_chunk, cache, is_final=False, encoding="pcm_s16le", sample_rate=16000):
         if is_final:
-            return [{"text": "[ci-mock-stream] hello world", "confidence": 1.0}]
+            return [{"text": "[mock-stream] hello world", "confidence": 1.0}]
         return [{"text": "", "confidence": 0.0}]
 
 
@@ -450,13 +565,29 @@ class EdgeTTSBackend:
         v = voice or self.voice
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
-        communicate = edge_tts.Communicate(text, v, rate=rate)
         chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                communicate = edge_tts.Communicate(text, v, rate=rate)
+                chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        chunks.append(chunk["data"])
+                if chunks:
+                    break
+                raise RuntimeError("Edge TTS returned no audio chunks")
+            except Exception as exc:  # noqa: BLE001 - preserve edge-tts details.
+                last_error = exc
+                if attempt == 3:
+                    raise
+                log.warning("Edge TTS synthesize attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(0.5 * attempt)
         mp3 = b"".join(chunks)
-        return _mp3_to_pcm_s16le_16k(mp3)
+        pcm = _mp3_to_pcm_s16le_16k(mp3)
+        if not pcm:
+            raise RuntimeError(f"Edge TTS decoded to empty PCM audio: {last_error or 'no error'}")
+        return pcm
 
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
         """Yields PCM s16le mono 16 kHz chunks (one decode at the end).
@@ -480,19 +611,34 @@ class EdgeTTSBackend:
         v = voice or self.voice
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
-        communicate = edge_tts.Communicate(text, v, rate=rate)
         mp3_chunks: list[bytes] = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_chunks.append(chunk["data"])
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                communicate = edge_tts.Communicate(text, v, rate=rate)
+                mp3_chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        mp3_chunks.append(chunk["data"])
+                if mp3_chunks:
+                    break
+                raise RuntimeError("Edge TTS returned no audio chunks")
+            except Exception as exc:  # noqa: BLE001 - preserve edge-tts details.
+                last_error = exc
+                if attempt == 3:
+                    raise
+                log.warning("Edge TTS stream attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(0.5 * attempt)
         pcm = _mp3_to_pcm_s16le_16k(b"".join(mp3_chunks))
+        if not pcm:
+            raise RuntimeError(f"Edge TTS stream decoded to empty PCM audio: {last_error or 'no error'}")
         for i in range(0, len(pcm), 4096):
             yield pcm[i : i + 4096]
 
 
 class MockTTSBackend:
-    """CI mock TTS -- returns a minimal valid WAV file (silence).
-    Activated when SPEECH_CI_MODE=1.
+    """Mock TTS -- returns a minimal valid WAV file (silence).
+    Activated when SPEECH_BACKEND=mock.
     """
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
@@ -570,7 +716,7 @@ class DialogManager:
 # Note: the codegen service methods are named Call / Stream (not Recognize
 # or Synthesize) because the contract RPC is always called "Call" or "Stream".
 
-class SpeechAsrServicer(contracts_grpc.RobonixServiceSpeechAsrServicer):
+class SpeechAsrServicer(SpeechAsrBase):
     """ASR gRPC servicer -- handles the Call RPC for one-shot speech recognition.
 
     Delegates to WhisperASRBackend for transcription.
@@ -611,7 +757,6 @@ class SpeechAsrServicer(contracts_grpc.RobonixServiceSpeechAsrServicer):
         language = request.language
 
         try:
-            # Adapt to 16kHz mono pcm_s16le regardless of input format
             audio_data, _ = adapt_audio(
                 request.audio_data,
                 encoding=encoding,
@@ -628,37 +773,20 @@ class SpeechAsrServicer(contracts_grpc.RobonixServiceSpeechAsrServicer):
             return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
 
 
-class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServicer):
-    """Streaming ASR gRPC servicer -- handles the Stream RPC for chunk-by-chunk
-    speech recognition.
-
-    Delegates to FunASRStreamingBackend for real-time recognition.
-
-    This is a bidirectional stream: the client sends AsrAudioChunk messages
-    (each containing an AudioChunk with raw audio data), and the server
-    yields RecognizeStreamEvent messages with partial/final transcriptions.
-
-    Note: the stream carries no AudioConfig or language -- the service uses
-    defaults (16kHz mono pcm_s16le). Each chunk is adapted if needed.
-    """
+class SpeechAsrStreamServicer(SpeechAsrStreamBase):
+    """Streaming ASR gRPC servicer -- handles chunk-by-chunk speech recognition."""
 
     def __init__(self, stream_asr_backend):
         self.stream_asr_backend = stream_asr_backend
 
     def RecognizeStream(self, request_iterator, context):
-        """Handle streaming ASR: receive audio chunks, yield partial/final results.
-
-        Input: asr_pb2.AsrAudioChunk (has .chunk with .data field from audio_pb2.AudioChunk)
-        Output: asr_pb2.RecognizeStreamEvent
-
-        Since the stream has no AudioConfig, we use defaults: 16kHz mono pcm_s16le.
-        """
+        """Handle streaming ASR: receive audio chunks, yield partial/final results."""
         if self.stream_asr_backend is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
                 "Streaming ASR backend not available. "
-                "Set FUNASR_MODEL to a local model path with pre-downloaded weights. "
-                "Runtime downloads are disabled (local_files_only=True). "
+                "Set FUNASR_MODEL to a local model path with pre-downloaded weights, "
+                "or set SPEECH_BACKEND=tencent/custom/mock. "
                 "Current FUNASR_MODEL="
                 + os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
             )
@@ -666,114 +794,91 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
 
         from speech_service.audio_utils import adapt_audio
 
-        input_gain = float(os.environ.get("INPUT_GAIN", "1.0"))
-        dump_dir = os.environ.get("ROBONIX_ASR_DUMP_DIR", "").strip()
-        dump_buf = bytearray() if dump_dir else None
-        cache = {}
-        chunk_count = 0
-        # Detect actual mic sample rate from the first chunk (data bytes ÷
-        # duration_s ÷ 2 for 16-bit mono). Falls back to 16000 if detection
-        # fails. Same approach as voice.rs — no env var needed.
-        # 16KHz is the default sample rate for the ASR backend, but we detect 
-        # the actual mic sample rate from the first chunk.
-        mic_sample_rate = 16000 
-
-        # Paraformer streaming requires fixed chunk_stride-sample frames
-        # (the chunk_size[1]*960 granularity). Clients (liaison) stream
-        # arbitrary smaller frames (~100ms), so we re-buffer here and only
-        # call the backend on full stride-sized frames; feeding short frames
-        # straight through corrupts the encoder/decoder cache (yields a filler "uh-huh").
-        stride_samples = getattr(self.stream_asr_backend, "chunk_stride", 9600)
-        stride_bytes = stride_samples * 2  # 16-bit mono
-        frame_buf = bytearray()
-
         try:
-            for req in request_iterator:
-                # Extract raw audio bytes from AsrAudioChunk.chunk.data
-                chunk_data = bytes(req.chunk.data) if req.chunk and req.chunk.data else None
-                if chunk_data is None:
-                    continue
+            def adapted_chunks():
+                input_gain = float(os.environ.get("INPUT_GAIN", "1.0"))
+                dump_dir = os.environ.get("ROBONIX_ASR_DUMP_DIR", "").strip()
+                dump_buf = bytearray() if dump_dir else None
+                chunk_count = 0
+                mic_sample_rate = 16000
 
-                if dump_buf is not None:
-                    dump_buf.extend(chunk_data)
-                chunk_count += 1
+                for req in request_iterator:
+                    chunk_data = bytes(req.chunk.data) if req.chunk and req.chunk.data else None
+                    if not chunk_data:
+                        continue
+                    if dump_buf is not None:
+                        dump_buf.extend(chunk_data)
+                    chunk_count += 1
 
-                # Detect mic sample rate from the first chunk
-                if chunk_count == 1 and req.chunk and req.chunk.duration_s > 0 and len(chunk_data) >= 2:
-                    est = int(len(chunk_data) / (req.chunk.duration_s * 2) + 0.5)
-                    if est >= 8000:
-                        mic_sample_rate = est
-                        log.info("detected mic sample rate: %d Hz (from %dB / %.3fs)",
-                                 mic_sample_rate, len(chunk_data), req.chunk.duration_s)
-
-                # Adapt each chunk from mic's actual sample rate to 16kHz
-                # mono pcm_s16le. adapt_audio resamples when needed.
-                adapted, _ = adapt_audio(
-                    chunk_data,
-                    encoding="pcm_s16le",
-                    sample_rate=mic_sample_rate,
-                    channels=1,
-                    bits_per_sample=16,
-                    gain=input_gain,
-                )
-                frame_buf.extend(adapted)
-
-                while len(frame_buf) >= stride_bytes:
-                    frame = bytes(frame_buf[:stride_bytes])
-                    del frame_buf[:stride_bytes]
-                    results = self.stream_asr_backend.recognize_chunk(
-                        frame, cache, is_final=False,
-                        encoding="pcm_s16le", sample_rate=16000,
-                    )
-                    for r in results:
-                        if r.get("text"):
-                            yield asr_pb2.RecognizeStreamEvent(
-                                event_type=0, text=r["text"],
-                                confidence=r.get("confidence", 0.0),
-                                language="",
+                    if chunk_count == 1 and req.chunk and req.chunk.duration_s > 0 and len(chunk_data) >= 2:
+                        est = int(len(chunk_data) / (req.chunk.duration_s * 2) + 0.5)
+                        if est >= 8000:
+                            mic_sample_rate = est
+                            log.info(
+                                "detected mic sample rate: %d Hz (from %dB / %.3fs)",
+                                mic_sample_rate,
+                                len(chunk_data),
+                                req.chunk.duration_s,
                             )
 
-            # Final flush — send the trailing partial frame with is_final.
-            if chunk_count > 0:
-                final_results = self.stream_asr_backend.recognize_chunk(
-                    bytes(frame_buf), cache, is_final=True,
-                    encoding="pcm_s16le", sample_rate=16000,
-                )
-                for r in final_results:
-                    if r.get("text"):
-                        yield asr_pb2.RecognizeStreamEvent(
-                            event_type=1, text=r["text"],
-                            confidence=r.get("confidence", 0.0),
-                            language="", is_final=True,
-                        )
-            else:
-                yield asr_pb2.RecognizeStreamEvent(
-                    event_type=2, error="No audio data received",
-                )
+                    adapted, _ = adapt_audio(
+                        chunk_data,
+                        encoding="pcm_s16le",
+                        sample_rate=mic_sample_rate,
+                        channels=1,
+                        bits_per_sample=16,
+                        gain=input_gain,
+                    )
+                    yield adapted
 
-            # Debug: dump the exact audio liaison streamed in, so we can
-            # inspect level / waveform off-line when ASR misfires.
-            if dump_buf is not None and len(dump_buf) > 0:
-                import numpy as np
-                os.makedirs(dump_dir, exist_ok=True)
-                ts = time.strftime("%H%M%S")
-                path = os.path.join(dump_dir, f"asr_{ts}.wav")
-                with wave.open(path, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(16000)
-                    wf.writeframes(bytes(dump_buf))
-                a = np.frombuffer(bytes(dump_buf), dtype=np.int16)
-                peak = int(np.abs(a).max()) if a.size else 0
-                rms = float(np.sqrt(np.mean(a.astype(np.float32) ** 2))) if a.size else 0.0
-                log.info("ASR dump %s: %d samples (%.1fs) RMS=%.0f peak=%d (%.1f%%)",
-                         path, a.size, a.size / 16000, rms, peak, peak / 327.67)
+                if dump_buf is not None and len(dump_buf) > 0:
+                    self._dump_stream_audio(dump_dir, bytes(dump_buf))
+                if chunk_count == 0:
+                    raise RuntimeError("No audio data received")
+
+            for r in self.stream_asr_backend.recognize_stream(adapted_chunks()):
+                text = r.get("text", "")
+                if not text and not r.get("is_final", False):
+                    continue
+                yield asr_pb2.RecognizeStreamEvent(
+                    event_type=int(r.get("event_type", 1 if r.get("is_final", False) else 0)),
+                    text=text,
+                    confidence=r.get("confidence", 0.0),
+                    language="",
+                    is_final=bool(r.get("is_final", False)),
+                )
         except Exception as e:
             log.exception("ASR stream recognize failed")
             yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
 
+    @staticmethod
+    def _dump_stream_audio(dump_dir: str, pcm: bytes) -> None:
+        """Write the adapted ASR input stream to disk for offline inspection."""
+        import numpy as np
 
-class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
+        os.makedirs(dump_dir, exist_ok=True)
+        ts = time.strftime("%H%M%S")
+        path = os.path.join(dump_dir, f"asr_{ts}.wav")
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(pcm)
+        a = np.frombuffer(pcm, dtype=np.int16)
+        peak = int(np.abs(a).max()) if a.size else 0
+        rms = float(np.sqrt(np.mean(a.astype(np.float32) ** 2))) if a.size else 0.0
+        log.info(
+            "ASR dump %s: %d samples (%.1fs) RMS=%.0f peak=%d (%.1f%%)",
+            path,
+            a.size,
+            a.size / 16000,
+            rms,
+            peak,
+            peak / 327.67,
+        )
+
+
+class SpeechTtsServicer(SpeechTtsBase):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
     Delegates to EdgeTTSBackend for audio generation.
@@ -802,7 +907,7 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             context.set_details(
                 "TTS backend not available. "
                 "Edge TTS requires network access to Microsoft Cognitive Services. "
-                "Check your network connection or set SPEECH_CI_MODE=1 for testing."
+                "Check network/model access or set SPEECH_BACKEND=mock for local mock testing."
             )
             return tts_pb2.Synthesize_Response()
 
@@ -814,8 +919,8 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
             return tts_pb2.Synthesize_Response(
                 audio_data=audio_data,
-                encoding="mp3",
-                sample_rate_hz=24000,
+                encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
+                sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
                 error="",
             )
         except Exception as e:
@@ -823,7 +928,7 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
 
 
-class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServicer):
+class SpeechTtsStreamServicer(SpeechTtsStreamBase):
     """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     text-to-speech synthesis.
 
@@ -876,16 +981,16 @@ class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServic
                             data=chunk_data,
                             sequence=seq,
                         ),
-                        encoding="mp3",
-                        sample_rate_hz=24000,
+                        encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
+                        sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
                         is_final=False,
                     )
                     seq += 1
                 except StopAsyncIteration:
                     yield tts_pb2.SynthesizeAudioChunk(
                         chunk=audio_pb2.AudioChunk(data=b""),
-                        encoding="mp3",
-                        sample_rate_hz=24000,
+                        encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
+                        sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
                         is_final=True,
                     )
                     break
@@ -896,7 +1001,7 @@ class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServic
             context.set_details(str(e))
 
 
-class SpeechDialogServicer(contracts_grpc.RobonixServiceSpeechDialogServicer):
+class SpeechDialogServicer(SpeechDialogBase):
     """Dialog gRPC servicer -- handles the Stream RPC for voice dialog sessions.
 
     Creates a DialogSession and streams DialogEvent updates to the client.
@@ -967,12 +1072,24 @@ def _try_backend(name: str, factory):
         return None
 
 
+def _load_backend_class(env_name: str):
+    """Load `module:Class` backend selectors for custom speech algorithms."""
+    spec = os.environ.get(env_name, "").strip()
+    if not spec:
+        return None
+    if ":" not in spec:
+        raise RuntimeError(f"{env_name} must be module:Class, got {spec!r}")
+    module_name, class_name = spec.split(":", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
+
+
 # Servicers attached with None backends; backends are loaded inside
 # on_init(cfg) so the boot manifest's `system: speech: {...}` block can
 # gate which engines come up. Each servicer's Recognize/Synthesize
 # already returns UNAVAILABLE when its backend is None, which covers
 # the small window between gRPC server start and Driver(CMD_INIT).
-log.info("Starting speech service (ci_mode=%s)", CI_MODE)
+log.info("Starting speech service (mock_mode=%s)", MOCK_MODE)
 _dialog_manager = DialogManager()
 _asr_servicer        = SpeechAsrServicer(None)
 _asr_stream_servicer = SpeechAsrStreamServicer(None)
@@ -1032,7 +1149,6 @@ def speak(req: Speak_Request) -> Speak_Response:
     text = (req.text or "").strip()
     if not text:
         raise RuntimeError("empty text")
-
     caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
     if req.target:
         caps = [c for c in caps if c.provider_id == req.target]
@@ -1040,15 +1156,23 @@ def speak(req: Speak_Request) -> Speak_Response:
         raise RuntimeError(f"no speaker provider (target={req.target!r})")
     cap = caps[0]
 
-    if _speak_tts is None:
+    tts_backend = _tts_servicer.tts_backend
+    if tts_backend is None:
+        log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
+    if tts_backend is None and _speak_tts is None:
         _speak_tts = EdgeTTSBackend()
+    if tts_backend is None:
+        tts_backend = _speak_tts
     # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
     # would error ("loop already running"). Synthesize on a worker thread
     # that owns its own loop.
     import asyncio
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        pcm = ex.submit(lambda: asyncio.run(_speak_tts.synthesize(text))).result()
+        pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
+    if not pcm:
+        raise RuntimeError("TTS backend returned no PCM audio")
+    log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
 
     with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
         stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
@@ -1074,6 +1198,7 @@ def speak(req: Speak_Request) -> Speak_Response:
 # constructors read. Cfg wins; absent keys leave existing env intact so
 # operators who export ASR_MODEL etc. in the start: block still work.
 _CFG_ENV_MAP = {
+    "speech_backend":    "SPEECH_BACKEND",
     "asr_model":         "ASR_MODEL",
     "asr_device":        "ASR_DEVICE",
     "asr_chunk_length":  "ASR_CHUNK_LENGTH",
@@ -1082,6 +1207,13 @@ _CFG_ENV_MAP = {
     "funasr_device":     "FUNASR_DEVICE",
     "funasr_chunk_size": "FUNASR_CHUNK_SIZE",
     "tts_voice":         "TTS_VOICE",
+    "tencent_asr_appid": "TENCENT_ASR_APPID",
+    "tencent_asr_engine": "TENCENT_ASR_ENGINE",
+    "tencent_tts_voice_type": "TENCENT_TTS_VOICE_TYPE",
+    "tencent_tts_region": "TENCENT_TTS_REGION",
+    "speech_asr_backend_class": "SPEECH_ASR_BACKEND_CLASS",
+    "speech_asr_stream_backend_class": "SPEECH_ASR_STREAM_BACKEND_CLASS",
+    "speech_tts_backend_class": "SPEECH_TTS_BACKEND_CLASS",
 }
 
 
@@ -1103,10 +1235,44 @@ def init(cfg):
         os.environ.get("SPEECH_DISABLE_WHISPER", "").strip() in ("1", "true", "yes"),
     ))
 
-    if CI_MODE:
+    backend_name = os.environ.get("SPEECH_BACKEND", "local").strip().lower()
+    asr_label = "unconfigured"
+    asr_stream_label = "unconfigured"
+    tts_label = "unconfigured"
+
+    if MOCK_MODE:
         asr = MockASRBackend()
         asr_stream = MockASRStreamingBackend()
         tts = MockTTSBackend()
+        asr_label = "mock ASR"
+        asr_stream_label = "mock streaming ASR"
+        tts_label = "mock TTS"
+    elif backend_name == "tencent":
+        from speech_service.tencent_cloud import TencentRealtimeASRBackend, TencentTTSBackend
+
+        os.environ["SPEECH_TTS_OUTPUT_ENCODING"] = "pcm_s16le"
+        os.environ["SPEECH_TTS_OUTPUT_SAMPLE_RATE"] = os.environ.get(
+            "TENCENT_TTS_SAMPLE_RATE", "16000"
+        )
+        asr = _try_backend("Tencent Cloud ASR", TencentRealtimeASRBackend)
+        asr_stream = asr
+        tts = _try_backend("Tencent Cloud TTS", TencentTTSBackend)
+        asr_label = "Tencent Cloud ASR"
+        asr_stream_label = "Tencent Cloud ASR"
+        tts_label = "Tencent Cloud TTS"
+    elif backend_name == "custom":
+        asr_cls = _load_backend_class("SPEECH_ASR_BACKEND_CLASS")
+        asr_stream_cls = _load_backend_class("SPEECH_ASR_STREAM_BACKEND_CLASS") or asr_cls
+        tts_cls = _load_backend_class("SPEECH_TTS_BACKEND_CLASS")
+
+        asr = _try_backend("custom ASR", asr_cls) if asr_cls else None
+        asr_stream = _try_backend("custom streaming ASR", asr_stream_cls) if asr_stream_cls else None
+        tts = _try_backend("custom TTS", tts_cls) if tts_cls else None
+        asr_label = os.environ.get("SPEECH_ASR_BACKEND_CLASS", "custom ASR")
+        asr_stream_label = os.environ.get(
+            "SPEECH_ASR_STREAM_BACKEND_CLASS", asr_label,
+        )
+        tts_label = os.environ.get("SPEECH_TTS_BACKEND_CLASS", "custom TTS")
     else:
         if disable_whisper:
             log.info("Whisper ASR disabled by config; asr contract will return UNAVAILABLE")
@@ -1115,20 +1281,26 @@ def init(cfg):
             asr = _try_backend("Whisper ASR", WhisperASRBackend)
         asr_stream = _try_backend("FunASR (streaming)", FunASRStreamingBackend)
         tts = _try_backend("Edge TTS", EdgeTTSBackend)
+        asr_label = "Whisper ASR"
+        asr_stream_label = "FunASR streaming ASR"
+        tts_label = "Edge TTS"
 
     _asr_servicer.asr_backend = asr
     _asr_stream_servicer.stream_asr_backend = asr_stream
     _tts_servicer.tts_backend = tts
     _tts_stream_servicer.tts_backend = tts
 
-    log.info("Backend status: Whisper=%s FunASR=%s EdgeTTS=%s",
-             "OK" if asr else "UNAVAILABLE",
-             "OK" if asr_stream else "UNAVAILABLE",
-             "OK" if tts else "UNAVAILABLE")
+    log.info(
+        "Backend status: mode=%s asr=%s (%s) asr_stream=%s (%s) tts=%s (%s)",
+        "mock" if MOCK_MODE else backend_name,
+        asr_label, "OK" if asr else "UNAVAILABLE",
+        asr_stream_label, "OK" if asr_stream else "UNAVAILABLE",
+        tts_label, "OK" if tts else "UNAVAILABLE",
+    )
 
     if not any([asr, asr_stream, tts]):
         return Err(
-            "all backends failed; set SPEECH_CI_MODE=1 for mocks or fix "
+            "all backends failed; set SPEECH_BACKEND=mock for local mock testing or fix "
             "model / network issues (see backend errors above)"
         )
     return Ok()

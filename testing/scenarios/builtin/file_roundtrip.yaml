@@ -1,0 +1,41 @@
+# Executor builtins in one RTDL sequence round: write -> read -> list.
+name: file_roundtrip
+task: "ci-test: write a file, read it back, and list the dir"
+steps:
+  - status: in_progress
+    rtdl_description: write, read, and list probe file
+    rtdl:
+      op: sequence
+      id: file_roundtrip_tree
+      children:
+        - op: do
+          id: write_probe
+          cap: executor.builtin_write_file
+          args: {path: ci_probe.txt, content: "robonix ci probe alpha-7"}
+          expect:
+            contract: robonix/system/executor/builtin/write_file
+            success: true
+            args: {path: ci_probe.txt, content: "robonix ci probe alpha-7"}
+            output:
+              text_regex: '^wrote [0-9]+ bytes to .*/ci_probe\.txt$'
+        - op: do
+          id: read_probe
+          cap: executor.builtin_read_file
+          args: {path: ci_probe.txt}
+          expect:
+            contract: robonix/system/executor/builtin/read_file
+            success: true
+            args: {path: ci_probe.txt}
+            output:
+              text_equals: "robonix ci probe alpha-7"
+        - op: do
+          id: list_probe
+          cap: executor.builtin_list_dir
+          args: {path: .}
+          expect:
+            contract: robonix/system/executor/builtin/list_dir
+            success: true
+            args: {path: .}
+            output:
+              text_regex: '(?m)^file ci_probe\.txt$'
+  - status: done

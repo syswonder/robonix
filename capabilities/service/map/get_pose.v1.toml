@@ -6,6 +6,7 @@ id      = "robonix/service/map/get_pose"
 version = "1"
 kind    = "service"
 idl     = "map/srv/GetPose.srv"
+description = "Read the robot pose in the map frame as scalar x, y, and yaw."
 
 [mode]
 type = "rpc"

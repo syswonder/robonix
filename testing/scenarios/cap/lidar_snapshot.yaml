@@ -1,0 +1,27 @@
+# Exercise the lidar primitive's on-demand point-cloud frame.
+name: lidar_snapshot
+task: "ci-test: capture one lidar point-cloud snapshot"
+steps:
+  - content: Capturing a lidar snapshot.
+    rtdl_description: lidar snapshot
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: lidar_snapshot_step
+      children:
+        - op: do
+          id: lidar_snapshot
+          cap: tiago_lidar.lidar_snapshot
+          args: {}
+          description: grab one point-cloud frame
+          expect:
+            contract: robonix/primitive/lidar/snapshot
+            success: true
+            output:
+              json:
+                header: {frame_id: hokuyo}
+              jsonpath:
+                - path: $.ranges
+                  min_length: 1
+  - content: Point cloud captured.
+    status: done

@@ -249,9 +249,9 @@ async fn drive_plan(
 /// Render the in-flight forest as a system-prompt block so the LLM can see what
 /// is still running and reference a `plan_id` to cancel it. Empty when no tree
 /// is running. Trees are ordered by numeric plan id for stable output.
-/// True when every `do` node is a control builtin (`cancel_plan` /
-/// `cancel_all_plans`) and there is at least one. A cancel is not itself a
-/// cancellable task tree; advertising it makes the model cancel its own cancels.
+/// True when every `do` node is a plan-control builtin and there is at least
+/// one. Plan-control trees are not themselves cancellable task work; advertising
+/// them makes the model inspect or cancel its own control actions.
 fn is_control_only(plan: &Plan) -> bool {
     let mut has_do = false;
     for n in &plan.nodes {
@@ -264,7 +264,14 @@ fn is_control_only(plan: &Plan) -> bool {
             .as_ref()
             .map(|c| c.contract_id.rsplit('/').next().unwrap_or(""))
             .unwrap_or("");
-        if !matches!(leaf, "cancel_plan" | "cancel_all_plans") {
+        if !matches!(
+            leaf,
+            "cancel_plan"
+                | "cancel_all_plans"
+                | "get_all_plans"
+                | "get_plan_status"
+                | "stop_plan_at"
+        ) {
             return false;
         }
     }
@@ -283,8 +290,14 @@ fn build_forest_block(forest: &HashMap<String, TreeMeta>) -> String {
     let mut block = String::from(
         "\n\n## In-flight trees\n\
          These RTDL trees you dispatched earlier are still running concurrently. \
-         To stop one, call `builtin_cancel_plan` with its exact `plan_id` below \
-         (or `executor_cancel_all_plans` to stop everything at once). Cancel each \
+         To stop one immediately, call `builtin_cancel_plan` with its exact \
+         `plan_id` below (or `executor_cancel_all_plans` to stop everything at \
+         once). To stop a plan at a specific step instead of now, first call \
+         `builtin_get_plan_status` with its `plan_id` to read its ops (each op's \
+         `op_id`, description, and live state), then call `builtin_stop_plan_at` \
+         with that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
+         before that op runs, `on_complete` to stop after it finishes) — this \
+         cancels the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Only the plan_ids listed here are running; never cancel an id \
          not in this list. Do not reuse these ids for new trees. If an in-flight \
@@ -416,6 +429,7 @@ pub async fn run_turn(
     mut cancel_rx: watch::Receiver<bool>,
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
+    soma_prompt_block: &str,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
 
@@ -452,7 +466,10 @@ pub async fn run_turn(
     }
 
     // 1. Build system prompt (once per turn)
-    let base_prompt = build_system_prompt(load_agent_soul().as_deref());
+    let mut base_prompt = build_system_prompt(load_agent_soul().as_deref());
+    if !soma_prompt_block.trim().is_empty() {
+        base_prompt.push_str(soma_prompt_block);
+    }
 
     // Pilot's capability catalog comes straight from atlas (filtered to
     // MCP transport — only those are LLM-callable). McpParams ride along
@@ -1703,25 +1720,32 @@ fn is_terminal_executor_state(state: u32) -> bool {
 }
 
 fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {
-    if !r.success {
-        return history::ToolResultHistory {
-            tool_messages: vec![Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): {}",
-                r.output
-            ))],
+    let mapped = if r.success {
+        history::tool_result_to_messages(&r.call_id, &r.output)
+    } else {
+        history::ToolResultHistory {
+            tool_messages: vec![Message::user(&r.output)],
             followup_messages: vec![],
-        };
-    }
+        }
+    };
 
-    let mapped = history::tool_result_to_messages(&r.call_id, &r.output);
     let tool_messages = mapped
         .tool_messages
         .into_iter()
         .map(|msg| {
-            let content = msg.content.unwrap_or_default();
+            let output = msg.content.unwrap_or_default();
+            let feedback = serde_json::json!({
+                "leaf_result": {
+                    "call_id": r.call_id,
+                    "contract_id": r.contract_id,
+                    "success": r.success,
+                    "output": output,
+                    "error": r.error,
+                }
+            });
             Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): {}",
-                content
+                "Executor feedback for the current RTDL leaf (not a new user request): {}",
+                feedback
             ))
         })
         .collect();
@@ -1827,11 +1851,11 @@ while you wait for an in-flight tree). Do NOT mark the task `done` until it is
 mod tests {
     use super::{
         CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, TaskState, expand_rtdl_to_plan,
-        extract_json_object, format_plan_summary, parse_rtdl_assistant_response, parse_task_update,
-        rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch,
-        task_is_session_end,
+        extract_json_object, format_plan_summary, is_control_only, parse_rtdl_assistant_response,
+        parse_task_update, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        skip_memory_prefetch, task_is_session_end,
     };
-    use crate::pb::pilot::Task;
+    use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode, Task};
     use serde_json::json;
 
     #[test]
@@ -1884,6 +1908,41 @@ mod tests {
     fn no_skip_prefetch_real_query() {
         assert!(!skip_memory_prefetch("open the door"));
         assert!(!skip_memory_prefetch("find me a red cup"));
+    }
+
+    fn single_do_plan(contract_leaf: &str) -> Plan {
+        Plan {
+            plan_id: "p".into(),
+            session_id: "s".into(),
+            round: 0,
+            root_index: 0,
+            nodes: vec![RtdlNode {
+                node_kind: RTDL_DO,
+                children: vec![],
+                call: Some(CapabilityCall {
+                    call_id: "p:0".into(),
+                    provider_id: "executor".into(),
+                    contract_id: format!("robonix/system/executor/builtin/{contract_leaf}"),
+                    args_json: "{}".into(),
+                }),
+                op_id: "op_1".into(),
+                description: "control action".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn plan_control_builtins_are_control_only() {
+        for leaf in [
+            "cancel_plan",
+            "cancel_all_plans",
+            "get_all_plans",
+            "get_plan_status",
+            "stop_plan_at",
+        ] {
+            assert!(is_control_only(&single_do_plan(leaf)), "{leaf}");
+        }
+        assert!(!is_control_only(&single_do_plan("list_dir")));
     }
 
     #[test]

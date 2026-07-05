@@ -128,6 +128,28 @@ def _scan_audio_devices_proto():
             channels=1,           # arecord -l doesn't report; conservative default
             note="",
         ))
+    ids = {d.id for d in devs}
+    configured_mic = os.environ.get("AUDIO_MIC_DEVICE", "").strip()
+    if configured_mic and configured_mic not in ids:
+        devs.append(audio_pb2.AudioDevice(
+            id=configured_mic,
+            name="Configured ALSA input device",
+            kind="input",
+            is_default=False,
+            channels=1,
+            note="configured via AUDIO_MIC_DEVICE",
+        ))
+        ids.add(configured_mic)
+    configured_spk = os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip()
+    if configured_spk and configured_spk not in ids:
+        devs.append(audio_pb2.AudioDevice(
+            id=configured_spk,
+            name="Configured ALSA output device",
+            kind="output",
+            is_default=False,
+            channels=1,
+            note="configured via AUDIO_SPEAKER_DEVICE",
+        ))
     return devs
 
 
@@ -149,17 +171,28 @@ def select_device(request, context):
             ok=False, error=f"kind must be 'input' or 'output', got '{kind}'")
 
     requested = request.id
-    # "" means revert to default; otherwise ensure the id exists.
+    # "" means revert to default; otherwise ensure the id exists. ALSA plugin
+    # names configured via env (for example "null") are valid even though
+    # `arecord -l` / `aplay -l` do not list them as hardware cards.
     if requested:
         valid = {d.device_id for d in scan_alsa_devices()
                  if (d.is_input if kind == "input" else d.is_output)}
+        configured = os.environ.get(
+            "AUDIO_MIC_DEVICE" if kind == "input" else "AUDIO_SPEAKER_DEVICE",
+            "",
+        ).strip()
+        if configured:
+            valid.add(configured)
         if requested not in valid:
             return audio_pb2.SelectAudioDevice_Response(
                 ok=False, error=f"unknown {kind} id '{requested}'")
         new_id = requested
     else:
-        info = find_default_mic(scan_alsa_devices()) if kind == "input" \
-               else find_default_speaker(scan_alsa_devices())
+        info = (
+            find_default_mic(scan_alsa_devices())
+            if kind == "input"
+            else find_default_speaker(scan_alsa_devices())
+        )
         if info is None:
             return audio_pb2.SelectAudioDevice_Response(
                 ok=False, error=f"no default {kind} device")

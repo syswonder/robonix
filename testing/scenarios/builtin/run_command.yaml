@@ -1,0 +1,21 @@
+# Executor builtin run_command.
+name: run_command
+task: "ci-test: run a shell command that echoes a marker"
+steps:
+  - status: in_progress
+    rtdl_description: echo marker
+    rtdl:
+      op: sequence
+      id: echo_marker_step
+      children:
+        - op: do
+          id: echo_marker
+          cap: executor.builtin_run_command
+          args: {command: "echo robonix-ci-marker-bravo"}
+          expect:
+            contract: robonix/system/executor/builtin/run_command
+            success: true
+            args: {command: "echo robonix-ci-marker-bravo"}
+            output:
+              text_regex: '^robonix-ci-marker-bravo\n?$'
+  - status: done

@@ -31,7 +31,7 @@ The build phase:
 2. Generates gRPC stubs from `proto/voiceprint.proto` into `rbnx-build/codegen/proto_gen/`.
 3. Pre-downloads ECAPA-TDNN (`speechbrain/spkrec-ecapa-voxceleb`) into
    `rbnx-build/models/`. Set `SKIP_MODEL_DOWNLOAD=1` to skip; set
-   `HF_ENDPOINT=https://hf-mirror.com` (default) for CN networks.
+   `HF_ENDPOINT=https://hf-mirror.com` (default) for runner environments where direct model downloads are unreliable.
 
 ## Run
 

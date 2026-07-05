@@ -399,7 +399,7 @@ class ConceptGraphsDetector:
         # hardcoded camera mount — this matters once SLAM corrects
         # map→odom and the chassis_pose drifts out of map frame.
         hub: Any = None,
-        camera_frame: str = "head_front_camera_rgb_optical_frame",
+        camera_frame: str = "camera_optical_frame",
     ) -> None:
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg

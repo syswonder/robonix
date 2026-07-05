@@ -1,0 +1,5 @@
+# Return the URDF text referenced by one loaded robot's Soma YAML.
+string robot_id  # empty = default robot
+---
+string robot_id
+string urdf_xml

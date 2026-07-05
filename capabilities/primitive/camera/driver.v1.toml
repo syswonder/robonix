@@ -6,6 +6,7 @@ id      = "robonix/primitive/camera/driver"
 version = "1"
 kind    = "primitive"
 idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for camera primitive providers."
 
 [mode]
 type = "rpc"

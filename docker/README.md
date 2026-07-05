@@ -101,7 +101,7 @@ The script will automatically use values from `.env` if no command-line argument
 ## gRPC and ROS 2
 
 - gRPC: `grpcio-tools`, `python3-grpcio`, protobuf tooling as needed.
-- Default `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` (override if required).
+- Default `RMW_IMPLEMENTATION=rmw_zenoh_cpp` (override if required).
 
 ```bash
 export ROBONIX_META_GRPC_ENDPOINT=192.168.1.10:50051

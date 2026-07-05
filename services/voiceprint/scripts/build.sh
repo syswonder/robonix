@@ -103,7 +103,7 @@ fi
 # Fetch from ModelScope, not HuggingFace: hf_hub's metadata HEAD only follows
 # same-host redirects, and the reachable hf-mirror.com bounces resolve/main to
 # huggingface.co with a cross-host 308 that no hf_hub version follows, so every
-# HF path fails on CN networks. ModelScope's SDK has no such issue (it's also
+# HF path can fail in restricted runner environments. ModelScope's SDK has no such issue (it's also
 # where the speech service pulls FunASR). This populates ~/.cache/modelscope so
 # the service loads offline at startup; engine.py resolves the same repo.
 PY="$VENV/bin/python"
