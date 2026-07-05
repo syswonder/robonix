@@ -1,4 +1,4 @@
-# robonix/service/memgraph/compact — compact ShortTerm → LongTerm memory (unary RPC).
+# robonix/service/memory/promote — promote ShortTerm → LongTerm memory (unary RPC).
 # Phase1 JSON encoding over std_msgs/String; Phase2: structured IDL.
 #
 # Request: Empty trigger (std_msgs/Empty)

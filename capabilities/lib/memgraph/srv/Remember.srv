@@ -1,4 +1,4 @@
-# robonix/service/memgraph/remember — persist a structured memory node into the CKG (unary RPC).
+# robonix/service/memory/remember — persist a structured memory node into the CKG (unary RPC).
 # Phase1 JSON encoding over std_msgs/String.
 #
 # Request: JSON-serialized RememberRequest

@@ -212,6 +212,14 @@ class GraphStore:
         for cid in old_children:
             self._parents.setdefault(cid, set()).add(new_id)
             self._children[new_id].add(cid)
+            # Rewrite causal_chain in each child node so the serialised
+            # copy stays consistent with the in-memory adjacency sets.
+            child = self._nodes.get(cid)
+            if child is not None and node_id in child.causal_chain:
+                child.causal_chain = [
+                    new_id if p == node_id else p
+                    for p in child.causal_chain
+                ]
 
         self._persist()
         return new_id
