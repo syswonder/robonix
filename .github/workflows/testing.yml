@@ -150,9 +150,13 @@ jobs:
           echo "forbidden-operation scan clean"
       - name: Scan for committed secrets
         run: |
+          set -euo pipefail
+          # ChatOps PR tests need full git history for local merge-base
+          # resolution. Do not let that make gitleaks scan old repository
+          # history; scan the merged working tree that will actually run.
           docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:latest \
-            detect --source=/repo --no-banner --redact \
-            || { echo "::error::possible secret in diff"; exit 1; }
+            dir /repo --no-banner --redact \
+            || { echo "::error::possible secret in checked-out tree"; exit 1; }
 
   # ── Gate 2: the GPU testing job itself ────────────────────────────────────
   gpu_testing:
