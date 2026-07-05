@@ -103,6 +103,8 @@ Executor declares builtin MCP capabilities under
 
 - `read_file`, `write_file`, `patch_file`, `list_dir`, `run_command`: workspace
   file and shell helpers.
+- `read_capability_doc`: read the generated capability documentation for a
+  registered contract so Pilot can inspect the abstract interface before use.
 - `cancel_plan`: best-effort cancellation for an in-flight RTDL plan. Args:
   `plan_id` (required) and `wait_ms` (optional, default 5000). Async capability
   calls receive cancel requests through `<contract_id>/cancel`; synchronous
