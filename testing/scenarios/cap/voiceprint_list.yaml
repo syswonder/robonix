@@ -19,8 +19,8 @@ steps:
             success: true
             output:
               text_regex: '"users_json"'
-              jsonpath:
-                - path: $.count
-                  exists: true
+              checks:
+                - select: $.count
+                  assert: {op: exists}
   - content: Listed.
     status: done

@@ -133,6 +133,92 @@ def json_path_values(value: object, path: str) -> list[object]:
     return current
 
 
+def select_json_values(value: object, path: str) -> list[object]:
+    if path == "$":
+        return [value]
+    if not path.startswith("$."):
+        return []
+    return json_path_values(value, path)
+
+
+def _values_for_check(context: object, path: str | None) -> list[object]:
+    return select_json_values(context, path or "$")
+
+
+def _check_scalar(value: object, op: str, expected: object = None) -> bool:
+    if op == "exists":
+        return value is not None
+    if op == "eq":
+        return value == expected
+    if op == "ne":
+        return value != expected
+    if op == "in":
+        return value in (expected if isinstance(expected, list) else [expected])
+    if op == "not_in":
+        return value not in (expected if isinstance(expected, list) else [expected])
+    if op == "starts_with":
+        return str(value).startswith(str(expected))
+    if op == "contains":
+        return str(expected) in str(value)
+    if op == "regex":
+        return __import__("re").search(str(expected), str(value)) is not None
+    if op in {"gt", "gte", "lt", "lte"}:
+        try:
+            lhs = float(value)
+            rhs = float(expected)
+        except (TypeError, ValueError):
+            return False
+        return {"gt": lhs > rhs, "gte": lhs >= rhs, "lt": lhs < rhs, "lte": lhs <= rhs}[op]
+    if op == "min_length":
+        return hasattr(value, "__len__") and len(value) >= int(expected)
+    return False
+
+
+def _check_values(values: list[object], check: dict) -> bool:
+    op = str(check.get("op", "exists"))
+    expected = check.get("value")
+    if op == "exists":
+        return bool(values)
+    return any(_check_scalar(value, op, expected) for value in values)
+
+
+def check_expr(context: object, expr: object) -> bool:
+    if not isinstance(expr, dict):
+        return False
+    if "all" in expr:
+        items = expr.get("all") or []
+        return isinstance(items, list) and all(check_expr(context, item) for item in items)
+    if "any" in expr:
+        items = expr.get("any") or []
+        return isinstance(items, list) and any(check_expr(context, item) for item in items)
+    if "not" in expr:
+        return not check_expr(context, expr.get("not"))
+    return _check_values(_values_for_check(context, expr.get("path", "$")), expr)
+
+
+def filter_selected_values(values: list[object], where: object) -> list[object]:
+    if where is None:
+        return values
+    return [value for value in values if check_expr(value, where)]
+
+
+def check_structured_clause(parsed: object, clause: dict) -> list[str]:
+    errs: list[str] = []
+    for idx, check in enumerate(clause.get("checks", []) or []):
+        if not isinstance(check, dict):
+            errs.append(f"checks[{idx}] must be a mapping")
+            continue
+        selected = select_json_values(parsed, str(check.get("select", "$")))
+        selected = filter_selected_values(selected, check.get("where"))
+        assertion = check.get("assert", {"op": "exists"})
+        if not isinstance(assertion, dict):
+            errs.append(f"checks[{idx}].assert must be a mapping")
+            continue
+        if not _check_values(selected, assertion):
+            errs.append(f"checks[{idx}] failed: select={check.get('select', '$')!r} where={check.get('where')!r} assert={assertion!r} values={selected!r}")
+    return errs
+
+
 def check_output_clause(leaf: dict, clause: dict) -> list[str]:
     errs: list[str] = []
     raw = str(leaf.get("output", ""))
@@ -149,18 +235,7 @@ def check_output_clause(leaf: dict, clause: dict) -> list[str]:
             errs.append(f"output missing exact line {line!r}")
     if "json" in clause and not contains_subset(parsed, clause["json"]):
         errs.append(f"output JSON did not contain subset {clause['json']!r}, got {parsed!r}")
-    for cond in clause.get("jsonpath", []):
-        values = json_path_values(parsed, str(cond.get("path", "")))
-        if cond.get("exists") and not values:
-            errs.append(f"jsonpath {cond.get('path')!r} did not exist")
-            continue
-        if "min_length" in cond:
-            if len(values) != 1 or not hasattr(values[0], "__len__") or len(values[0]) < int(cond["min_length"]):
-                errs.append(f"jsonpath {cond.get('path')!r} length < {cond['min_length']}: {values!r}")
-        if "equals" in cond and cond["equals"] not in values:
-            errs.append(f"jsonpath {cond.get('path')!r} missing exact value {cond['equals']!r}: {values!r}")
-        if "prefix" in cond and not any(str(v).startswith(str(cond["prefix"])) for v in values):
-            errs.append(f"jsonpath {cond.get('path')!r} missing prefix {cond['prefix']!r}: {values!r}")
+    errs.extend(check_structured_clause(parsed, clause))
     return errs
 
 
@@ -179,6 +254,100 @@ def iter_expected_leaves(scenario: dict):
             expect = node.get("expect")
             if expect is not None:
                 yield step_idx, node_path, node, expect
+
+
+REMOVED_FILTER_KEYS = {"label_not", "label_in", "id_prefix", "id_contains"}
+CHECK_OPS = {"exists", "eq", "ne", "in", "not_in", "starts_with", "contains", "regex", "gt", "gte", "lt", "lte", "min_length"}
+
+
+def validate_check_expr(expr: object, path: str) -> list[str]:
+    errs: list[str] = []
+    if not isinstance(expr, dict):
+        return [f"{path} must be a mapping"]
+    removed = sorted(REMOVED_FILTER_KEYS & set(expr))
+    if removed:
+        errs.append(f"{path} uses removed field-specific filter(s) {removed}; use path/op/value predicates")
+    logical = [key for key in ("all", "any", "not") if key in expr]
+    if logical:
+        if len(logical) != 1:
+            errs.append(f"{path} must use only one logical operator")
+            return errs
+        key = logical[0]
+        if key in {"all", "any"}:
+            items = expr.get(key)
+            if not isinstance(items, list) or not items:
+                errs.append(f"{path}.{key} must be a non-empty list")
+            else:
+                for idx, item in enumerate(items):
+                    errs.extend(validate_check_expr(item, f"{path}.{key}[{idx}]"))
+        else:
+            errs.extend(validate_check_expr(expr.get("not"), f"{path}.not"))
+        return errs
+    op = str(expr.get("op", ""))
+    if not op:
+        errs.append(f"{path}.op is required")
+    elif op not in CHECK_OPS:
+        errs.append(f"{path}.op {op!r} is not supported")
+    check_path = expr.get("path", "$")
+    if not isinstance(check_path, str) or not check_path.startswith("$"):
+        errs.append(f"{path}.path must be a JSON selector starting with $")
+    return errs
+
+
+def validate_output_assertions(output: object, path: str) -> list[str]:
+    errs: list[str] = []
+    if not isinstance(output, dict):
+        return errs
+    if "jsonpath" in output:
+        errs.append(f"{path}.jsonpath is removed; use {path}.checks")
+    checks = output.get("checks")
+    if checks is None:
+        return errs
+    if not isinstance(checks, list) or not checks:
+        return [f"{path}.checks must be a non-empty list"]
+    for idx, check in enumerate(checks):
+        cpath = f"{path}.checks[{idx}]"
+        if not isinstance(check, dict):
+            errs.append(f"{cpath} must be a mapping")
+            continue
+        select = check.get("select", "$")
+        if not isinstance(select, str) or not select.startswith("$"):
+            errs.append(f"{cpath}.select must be a JSON selector starting with $")
+        if "where" in check:
+            errs.extend(validate_check_expr(check.get("where"), f"{cpath}.where"))
+        assertion = check.get("assert", {"op": "exists"})
+        errs.extend(validate_check_expr(assertion, f"{cpath}.assert"))
+    return errs
+
+
+def validate_capture_assertions(captures: object, path: str) -> list[str]:
+    errs: list[str] = []
+    if captures is None:
+        return errs
+    if not isinstance(captures, dict):
+        return [f"{path} must be a mapping"]
+    for name, spec in captures.items():
+        cpath = f"{path}.{name}"
+        if not isinstance(spec, dict):
+            errs.append(f"{cpath} must be a mapping")
+            continue
+        removed = sorted(REMOVED_FILTER_KEYS & set(spec))
+        if removed:
+            errs.append(f"{cpath} uses removed field-specific filter(s) {removed}; use where path/op/value predicates")
+        if "jsonpath" in spec or "field" in spec:
+            errs.append(f"{cpath} jsonpath/field selector is removed; use select + path")
+        if "select" in spec:
+            select = spec.get("select")
+            if not isinstance(select, str) or not select.startswith("$"):
+                errs.append(f"{cpath}.select must be a JSON selector starting with $")
+            extract_path = spec.get("path", "$")
+            if not isinstance(extract_path, str) or not extract_path.startswith("$"):
+                errs.append(f"{cpath}.path must be a JSON selector starting with $")
+            if "where" in spec:
+                errs.extend(validate_check_expr(spec.get("where"), f"{cpath}.where"))
+        elif "regex" not in spec:
+            errs.append(f"{cpath} must define either select/path or regex")
+    return errs
 
 
 def validate_new_assertion_shape(scenario: dict) -> list[str]:
@@ -207,6 +376,8 @@ def validate_new_assertion_shape(scenario: dict) -> list[str]:
             contract = expect.get("contract")
             if not isinstance(contract, str) or not contract.startswith("robonix/"):
                 errs.append(f"steps[{step_idx}].{node_path}.expect.contract must be a full robonix/... contract id")
+            errs.extend(validate_output_assertions(expect.get("output"), f"steps[{step_idx}].{node_path}.expect.output"))
+            errs.extend(validate_capture_assertions(expect.get("capture"), f"steps[{step_idx}].{node_path}.expect.capture"))
     return errs
 
 

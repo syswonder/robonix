@@ -20,8 +20,8 @@ steps:
             output:
               json:
                 header: {frame_id: hokuyo}
-              jsonpath:
-                - path: $.ranges
-                  min_length: 1
+              checks:
+                - select: $.ranges
+                  assert: {op: min_length, value: 1}
   - content: Point cloud captured.
     status: done
