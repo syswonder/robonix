@@ -42,6 +42,7 @@ jobs:
     outputs:
       test_ref: ${{ steps.pr.outputs.test_ref }}
       merge_ref_available: ${{ steps.pr.outputs.merge_ref_available }}
+      pr_base_ref: ${{ steps.pr.outputs.base_ref }}
       pr_number: ${{ steps.pr.outputs.number }}
       pr_title: ${{ steps.pr.outputs.title }}
       pr_author: ${{ steps.pr.outputs.author }}
@@ -74,10 +75,12 @@ jobs:
               });
               mergeRefAvailable = true;
             } catch (e) {
-              core.notice(`merge ref ${mergeRef} is unavailable; Webots will not run until the PR merges cleanly into base`);
+              core.notice(`merge ref ${mergeRef} is unavailable; CI will still test a local merge against the current base`);
             }
-            core.setOutput('test_ref', mergeRef);
+            const baseRef = pr.data.base?.ref || context.payload.repository.default_branch || 'dev';
+            core.setOutput('test_ref', `refs/heads/${baseRef}`);
             core.setOutput('merge_ref_available', String(mergeRefAvailable));
+            core.setOutput('base_ref', baseRef);
             core.setOutput('head_sha', pr.data.head.sha || '');
             core.setOutput('number', String(pr.data.number));
             core.setOutput('title', pr.data.title || '');
@@ -95,7 +98,7 @@ jobs:
               '<!-- robonix-ci-status -->',
               '### Robonix Webots CI - running',
               `Triggered by @${context.payload.comment.user.login}.`,
-              `Testing merge result \`${{ steps.pr.outputs.test_ref }}\` for head \`${{ steps.pr.outputs.head_sha }}\`.`,
+              `Testing current base \`${{ steps.pr.outputs.base_ref }}\` locally merged with head \`${{ steps.pr.outputs.head_sha }}\`.`,
               `[Live logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
             const c = await github.rest.issues.createComment({
@@ -108,7 +111,7 @@ jobs:
   test:
     name: Run Webots integration tests
     needs: gate
-    if: needs.gate.outputs.merge_ref_available == 'true'
+    if: needs.gate.result == 'success'
     uses: ./.github/workflows/testing.yml
     with:
       authorized: true
@@ -118,6 +121,7 @@ jobs:
       pr_author: ${{ needs.gate.outputs.pr_author }}
       pr_url: ${{ needs.gate.outputs.pr_url }}
       pr_head_ref: ${{ needs.gate.outputs.pr_head_ref }}
+      pr_base_ref: ${{ needs.gate.outputs.pr_base_ref }}
       pr_head_repo: ${{ needs.gate.outputs.pr_head_repo }}
       pr_head_sha: ${{ needs.gate.outputs.pr_head_sha }}
       triggered_by: ${{ needs.gate.outputs.triggered_by }}
@@ -187,6 +191,7 @@ jobs:
           REPORT_PR_AUTHOR: ${{ needs.gate.outputs.pr_author }}
           REPORT_PR_URL: ${{ needs.gate.outputs.pr_url }}
           REPORT_PR_HEAD_REF: ${{ needs.gate.outputs.pr_head_ref }}
+          REPORT_PR_BASE_REF: ${{ needs.gate.outputs.pr_base_ref }}
           REPORT_PR_HEAD_REPO: ${{ needs.gate.outputs.pr_head_repo }}
           REPORT_PR_HEAD_SHA: ${{ needs.gate.outputs.pr_head_sha }}
           REPORT_TEST_REF: ${{ needs.gate.outputs.test_ref }}
@@ -217,6 +222,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}" \
@@ -326,8 +332,6 @@ jobs:
             const fs = require('fs');
             const outcome = '${{ needs.test.result }}';  // success / failure / cancelled / skipped
             const harnessResult = '${{ needs.test.outputs.result }}';
-            const mergeRefAvailable = '${{ needs.gate.outputs.merge_ref_available }}' === 'true';
-            const testRef = '${{ needs.gate.outputs.test_ref }}';
             // The artifact preserves the upload path (testing/logs/summary.json),
             // so locate it rather than assuming a flat layout.
             const findSummary = (dir) => {
@@ -385,14 +389,11 @@ jobs:
                 lines.push('</details>');
               }
             } else {
-              const mergeUnavailable = !mergeRefAvailable;
               const looksSkipped = outcome === 'skipped' || (outcome === 'success' && !harnessResult);
-              const icon = outcome === 'failure' || outcome === 'cancelled' || mergeUnavailable ? '❌' : '⚠️';
-              const label = mergeUnavailable ? 'merge ref unavailable' : (looksSkipped ? 'skipped' : 'no scenario summary');
+              const icon = outcome === 'failure' || outcome === 'cancelled' ? '❌' : '⚠️';
+              const label = looksSkipped ? 'skipped' : 'no scenario summary';
               lines.push(`### ${icon} robonix CI — ${label}`);
-              if (mergeUnavailable) {
-                lines.push('GitHub did not provide the PR merge ref `' + testRef + '`, so this PR cannot currently be tested as merged into its base branch. Webots was not run.');
-              } else if (looksSkipped) {
+              if (looksSkipped) {
                 lines.push('The Webots test job did not produce scenario output, so no report was published. This is not a verified Webots pass.');
               } else {
                 lines.push('No machine-readable scenario summary was produced. Treat this as an incomplete infrastructure run, not as a verified Webots pass.');
