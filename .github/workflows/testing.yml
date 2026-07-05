@@ -1177,9 +1177,6 @@ jobs:
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.publish_url.outputs.report_url }}
     outputs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
