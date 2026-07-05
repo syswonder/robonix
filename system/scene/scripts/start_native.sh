@@ -36,8 +36,9 @@ if ROBONIX_API="$(rbnx path robonix-api 2>/dev/null)"; then
     export PYTHONPATH="$ROBONIX_API:$PYTHONPATH"
 fi
 
-# Model weights: build.sh fetches yolo + mobile_sam to docker/_weights (shared
-# with the docker path); CLIP downloads to a host HF cache on first run.
+# Model weights: build.sh fetches yolo + mobile_sam to docker/_weights and
+# pre-warms both CLIP paths. Keep these envs aligned with build.sh so start is
+# offline-fast and never downloads model weights during robot boot.
 W="$PKG/docker/_weights"
 export SCENE_YOLO_WORLD_WEIGHTS="${SCENE_YOLO_WORLD_WEIGHTS:-$W/yolov8l-world.pt}"
 export SCENE_MOBILE_SAM_WEIGHTS="${SCENE_MOBILE_SAM_WEIGHTS:-$W/mobile_sam.pt}"
@@ -45,6 +46,15 @@ export SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}"
 export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-laion2b_s34b_b79k}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export HF_HOME="${HF_HOME:-$PKG/rbnx-build/data/hf}"
+export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
+ULTRALYTICS_CLIP_WEIGHTS="$YOLO_CONFIG_DIR/weights/clip/ViT-B-32.pt"
+for model_path in "$SCENE_YOLO_WORLD_WEIGHTS" "$SCENE_MOBILE_SAM_WEIGHTS" "$ULTRALYTICS_CLIP_WEIGHTS"; do
+    if [[ ! -s "$model_path" ]]; then
+        echo "[scene/native] error: missing model weight $model_path" >&2
+        echo "               run system/scene/scripts/build.sh before starting scene." >&2
+        exit 1
+    fi
+done
 
 # Host-persisted scene state (object-memory DB + scene-graph caches).
 mkdir -p "$PKG/rbnx-build/data/robonix"

@@ -563,6 +563,64 @@ jobs:
           } | tee -a "$RUNNER_TEMP/sim-logs/map-readiness.txt"
           exit 1
 
+      - name: Wait for scene object detection
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          scene_url="http://127.0.0.1:${SCENE_WEB_PORT}/api/state"
+          state_file="$RUNNER_TEMP/sim-logs/scene-state-readiness.json"
+          echo "waiting for a real non-robot scene object before scenario execution: ${scene_url}"
+          for _ in $(seq 1 180); do
+            if curl -fsS --max-time 2 "$scene_url" -o "$state_file"; then
+              if python3 - "$state_file" <<'SCENE_READY_PY'
+          import json, sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              state = json.load(f)
+          objects = state.get("objects") or []
+          real = []
+          for obj in objects:
+              cls = str(obj.get("cls") or obj.get("label") or "").strip().lower()
+              oid = str(obj.get("id") or "")
+              if cls and cls != "robot" and oid.startswith("scene.object."):
+                  real.append(obj)
+          if not real:
+              sys.exit(1)
+          print(json.dumps([
+              {
+                  "id": o.get("id"),
+                  "cls": o.get("cls") or o.get("label"),
+                  "confidence": o.get("confidence"),
+                  "observation_count": o.get("observation_count"),
+                  "pose": o.get("pose"),
+              }
+              for o in real[:8]
+          ], ensure_ascii=False))
+          SCENE_READY_PY
+              then
+                echo "scene object readiness confirmed"
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+
+          echo "::error::scene did not expose a non-robot object before scenario execution"
+          {
+            echo "=== latest /api/state ==="
+            cat "$state_file" || true
+            echo
+            echo "=== scene.log tail ==="
+            tail -260 "examples/webots/rbnx-boot/logs/scene.log" || true
+            echo
+            echo "=== final caps ==="
+            rbnx caps -v --server "$ROBONIX_CI_ATLAS" || true
+            echo
+            echo "=== rbnx boot tail ==="
+            tail -240 "$RUNNER_TEMP/rbnx-boot.log" || true
+          } | tee -a "$RUNNER_TEMP/sim-logs/scene-readiness.txt"
+          exit 1
+
       - name: Run scenario suite
         id: scenarios
         run: |
@@ -1075,8 +1133,32 @@ jobs:
           name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.REPORT_SITE_DIR }}
 
-      - name: Deploy Pages
-        id: deployment
+      - name: Deploy Pages (attempt 1)
+        id: deployment_1
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Wait before Pages deploy retry
+        if: steps.deployment_1.outcome != 'success'
+        run: sleep 60
+
+      - name: Deploy Pages (attempt 2)
+        id: deployment_2
+        if: steps.deployment_1.outcome != 'success'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Wait before final Pages deploy retry
+        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
+        run: sleep 120
+
+      - name: Deploy Pages (attempt 3)
+        id: deployment_3
+        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}

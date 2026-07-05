@@ -217,17 +217,60 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     fi
     "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
     # Pre-fetch the CLIP weights into the host HF cache (start_native points
-    # HF_HOME here). The docker path bakes these into the image; the native
-    # path must cache them now, since the runtime host may have no internet
-    # and perception silently degrades to "no objects" without them.
+    # HF_HOME here). Also pre-warm Ultralytics YOLO-World's text encoder path:
+    # YOLOWorld.set_classes() uses openai/clip via Ultralytics' weights_dir,
+    # not open_clip's HF cache. If this is left to start_native, first boot can
+    # spend minutes downloading ViT-B-32.pt and miss the scene/object test flow.
     HFD="$PKG/rbnx-build/data/hf"
-    mkdir -p "$HFD/clip"
+    YCD="$PKG/rbnx-build/data/ultralytics"
+    UWD="$YCD/weights"
+    mkdir -p "$HFD/clip" "$YCD" "$UWD"
     HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HOME="$HFD" HF_HUB_DOWNLOAD_TIMEOUT=120 \
         "$PY" -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
         || echo "[build] warning: open_clip weight prefetch failed (perception will degrade)"
-    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" \
-        "$PY" -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='$HFD/clip')" \
-        || echo "[build] warning: openai-clip weight prefetch failed"
+    YOLO_CONFIG_DIR="$YCD" "$PY" <<PY \
+        || echo "[build] warning: failed to persist Ultralytics settings"
+from ultralytics.utils import SETTINGS
+
+SETTINGS.update({
+    "weights_dir": "$UWD",
+    "datasets_dir": "$YCD/datasets",
+    "runs_dir": "$YCD/runs",
+    "sync": False,
+})
+PY
+    YOLO_CONFIG_DIR="$YCD" HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" "$PY" <<PY \
+        || echo "[build] warning: ultralytics CLIP prefetch failed (scene start will fail fast until build succeeds)"
+from pathlib import Path
+from ultralytics.utils import WEIGHTS_DIR
+
+expected = Path("$UWD")
+if Path(WEIGHTS_DIR) != expected:
+    raise RuntimeError(f"Ultralytics WEIGHTS_DIR={WEIGHTS_DIR!s}, expected {expected!s}")
+
+from ultralytics import YOLO
+
+classes = [
+    "chair", "table", "desk", "couch", "sofa", "bookshelf", "shelf",
+    "cabinet", "drawer", "whiteboard",
+    "monitor", "laptop", "keyboard", "mouse", "computer tower",
+    "monitor stand", "headphones", "webcam", "router", "power strip",
+    "cup", "mug", "water bottle", "thermos", "paper cup",
+    "backpack", "handbag", "book", "notebook", "pen", "pencil",
+    "phone", "tablet",
+    "box", "cardboard box", "tray", "basket", "trash bin",
+    "tool", "screwdriver", "wrench", "tape",
+    "plant", "potted plant", "lamp", "clock", "picture frame",
+    "snack", "fruit", "apple", "banana",
+    "door", "doorway", "fire extinguisher", "person",
+]
+
+model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
+model.set_classes(classes)
+PY
+    if [[ ! -s "$UWD/clip/ViT-B-32.pt" ]]; then
+        echo "[build] warning: missing $UWD/clip/ViT-B-32.pt after ultralytics prefetch; scene start will fail fast" >&2
+    fi
     "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
     echo "[build] done (jetson-native)."
     exit 0
