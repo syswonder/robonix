@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""scene_service.state — object registry, data association, relations.
+"""scene_service.state — object registry and data association.
 All shared mutable state lives here behind a single asyncio.Lock owned
-by ObjectRegistry."""
+by ObjectRegistry. Geometric relations moved to
+``scene_graph/geometry.py`` (judgment) + ``scene_graph/geometric_loop.py``
+(runtime), which feed the Pilot-facing scene-graph store."""
 
 from .object_registry import (
     SceneObject,
@@ -12,7 +14,6 @@ from .object_registry import (
     OBJECT_ATTRIBUTE_KEYS,
 )
 from .data_assoc import Detection, associate
-from .relations import RelationEngine, RELATION_PREDICATES
 
 __all__ = [
     "SceneObject",
@@ -23,6 +24,4 @@ __all__ = [
     "OBJECT_ATTRIBUTE_KEYS",
     "Detection",
     "associate",
-    "RelationEngine",
-    "RELATION_PREDICATES",
 ]

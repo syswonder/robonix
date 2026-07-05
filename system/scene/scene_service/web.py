@@ -27,7 +27,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .state import ObjectRegistry, RelationEngine
+from .state import ObjectRegistry
 
 log = logging.getLogger(__name__)
 
@@ -171,35 +171,10 @@ function draw(state) {
         ctx.fillText(text, tx, ty);
     }
 
-    // scene graph relation edges — dashed lines between object centers
-    const sgEdgeColors = {
-      on_top_of: '#4caf50', under: '#4caf50',
-      inside: '#2196f3', contains: '#2196f3',
-      near: '#9e9e9e', attached_to: '#ff9800',
-      part_of: '#ff9800', same_object: '#f44336',
-    };
-    if (state.scene_graph && state.scene_graph.edges) {
-        const objById = {};
-        for (const o of (state.objects || [])) objById[o.id] = o;
-        ctx.save();
-        ctx.setLineDash([4, 4]);
-        ctx.lineWidth = 1.5;
-        ctx.font = '10px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        for (const e of state.scene_graph.edges) {
-            const oa = objById[e.source_id], ob = objById[e.target_id];
-            if (!oa || !ob) continue;
-            const [ax, ay] = w2p(oa.pose.x, oa.pose.y);
-            const [bx, by] = w2p(ob.pose.x, ob.pose.y);
-            ctx.strokeStyle = sgEdgeColors[e.relation] || '#757575';
-            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-            // relation label at midpoint
-            const mx = (ax + bx) / 2, my = (ay + by) / 2;
-            ctx.fillStyle = ctx.strokeStyle;
-            ctx.fillText(e.relation, mx, my - 4);
-        }
-        ctx.restore();
-    }
+    // Relation edges are NOT drawn on the map any more. Overlapping
+    // object dots + crossing dashed lines were unreadable once more than
+    // a couple of edges existed; relations now read as an explicit text
+    // list in the floating info panel (see `info-rels` in _COMBINED_HTML).
 
     // robot heading arrow
     if (robot) {
@@ -395,13 +370,16 @@ def _camera_payload(hub: Any) -> dict:
     return out
 
 
-def _state_payload(registry: ObjectRegistry, relations: RelationEngine,
+def _state_payload(registry: ObjectRegistry,
                    hub: Any, sg_store: Any = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
-    sees a half-updated registry."""
+    sees a half-updated registry. The "relations" field shows the fast
+    geometric slice (``reachable_by`` only, under the VLM-primary graph);
+    the "scene_graph" field shows the full composed graph (geometric +
+    image-grounded relational/semantic edges)."""
     objs_dict, _surfaces = _sync_snapshot(registry)
-    rels = relations.current()
+    geo_edges = sg_store.get_geometric_edges() if sg_store is not None else []
     out_objects: list[dict[str, Any]] = []
     robot_pose: Optional[dict[str, float]] = None
     for o in objs_dict.values():
@@ -421,8 +399,8 @@ def _state_payload(registry: ObjectRegistry, relations: RelationEngine,
         if o.attributes.get("is_robot"):
             robot_pose = {"x": o.pose.x, "y": o.pose.y, "z": o.pose.z, "yaw": o.pose.yaw}
     out_relations = [
-        {"subject": r.subject_object_id, "predicate": r.predicate, "target": r.target_object_id}
-        for r in rels
+        {"subject": e.source_id, "predicate": e.relation, "target": e.target_id}
+        for e in geo_edges
     ]
 
     # Scene graph edges from the LLM-enhanced layer (if enabled).
@@ -468,7 +446,7 @@ def _sync_snapshot(registry: ObjectRegistry):
     return dict(registry._objects), dict(registry._surfaces)  # noqa: SLF001
 
 
-def make_app(*, registry: ObjectRegistry, relations: RelationEngine,
+def make_app(*, registry: ObjectRegistry,
              hub: Any = None, detector: Any = None,
              sg_store: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
@@ -499,7 +477,7 @@ def make_app(*, registry: ObjectRegistry, relations: RelationEngine,
         return HTMLResponse(_INDEX_HTML)
 
     async def state(_request) -> JSONResponse:
-        return JSONResponse(_state_payload(registry, relations, hub, sg_store))
+        return JSONResponse(_state_payload(registry, hub, sg_store))
 
     async def index3d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_3D_HTML)
@@ -644,6 +622,15 @@ _COMBINED_HTML = r"""<!doctype html>
     #info-body td.cls { color: #f0c674; white-space: nowrap; }
     #info-body td.pp { color: #6a6f7a; font-size: 10px; }
     #info-body td.miss { color: #555; }
+    /* Relation list: one "<source> <predicate> <target>" row per edge,
+       replacing the old on-canvas dashed lines. */
+    #info-rels .rel { display: flex; gap: 6px; align-items: baseline;
+                      padding: 2px 4px; border-bottom: 1px solid #1a1d24;
+                      font-size: 11px; white-space: nowrap;
+                      overflow: hidden; text-overflow: ellipsis; }
+    #info-rels .rs { color: #7aa7ff; }
+    #info-rels .rp { color: #f0c050; font-weight: 600; }
+    #info-rels .rt { color: #f0c674; }
     /* "Show info" pill that appears once the panel is dismissed. */
     #info-show {
       position: fixed; top: 12px; left: 12px; z-index: 200;
@@ -698,6 +685,8 @@ _COMBINED_HTML = r"""<!doctype html>
       <table>
         <tbody id="info-objs"><tr><td colspan="3" style="color:#555">—</td></tr></tbody>
       </table>
+      <h2>relations</h2>
+      <div id="info-rels"><span style="color:#555">—</span></div>
     </div>
   </div>
   <button id="info-show" title="re-open the floating info panel">▸ show info</button>
@@ -836,6 +825,23 @@ _COMBINED_HTML = r"""<!doctype html>
                   (${fmt(o.pose.x)}, ${fmt(o.pose.y)}) c=${fmt(o.confidence)}
                 </td>
               </tr>
+            `).join('');
+          }
+          // Relations as an explicit "<source> <predicate> <target>" list
+          // (replaces the old on-canvas dashed lines). short_id = last
+          // dotted segment of the object id, e.g. scene.object.cup_001 → cup_001.
+          const shortId = id => String(id).split('.').pop();
+          const edges = (s.scene_graph && s.scene_graph.edges) || [];
+          const relsEl = document.getElementById('info-rels');
+          if (!edges.length) {
+            relsEl.innerHTML = '<span style="color:#555">none</span>';
+          } else {
+            relsEl.innerHTML = edges.map(e => `
+              <div class="rel">
+                <span class="rs">${shortId(e.source_id)}</span>
+                <span class="rp">${e.relation}</span>
+                <span class="rt">${shortId(e.target_id)}</span>
+              </div>
             `).join('');
           }
         }
