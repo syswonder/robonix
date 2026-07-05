@@ -18,9 +18,9 @@ steps:
             args: {}
             output:
               json: {count: 1}
-              jsonpath:
-                - path: $.plans[].plan_id
-                  equals: "1"
+              checks:
+                - select: $.plans[].plan_id
+                  assert: {op: eq, value: "1"}
         - op: do
           id: inspect_current_plan
           cap: executor.builtin_get_plan_status
@@ -31,9 +31,9 @@ steps:
             args: {plan_id: "1"}
             output:
               json: {plan_id: "1", running: true}
-              jsonpath:
-                - path: $.ops
-                  min_length: 1
+              checks:
+                - select: $.ops
+                  assert: {op: min_length, value: 1}
         - op: do
           id: stop_current_plan_on_complete
           cap: executor.builtin_stop_plan_at
@@ -54,7 +54,7 @@ steps:
             args: {}
             output:
               json: {count: 1}
-              jsonpath:
-                - path: $.plans[].stop_points
-                  equals: 1
+              checks:
+                - select: $.plans[].stop_points
+                  assert: {op: eq, value: 1}
   - status: done

@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -168,6 +169,38 @@ class EnrolledDB:
 _engine: EcapaTdnnEngine | None = None
 _db: EnrolledDB | None = None
 _threshold_value: float = _DEFAULT_THRESHOLD
+_init_lock = threading.Lock()
+
+
+def _ensure_ready(cfg: dict | None = None) -> bool:
+    """Initialise the model and enrolled DB once.
+
+    The voiceprint package exposes no driver contract in the current
+    manifest, so Service.run() marks it ACTIVE without invoking on_init.
+    Enroll/Identify still need the ECAPA model; lazy init keeps the service
+    usable without changing the public contract surface.
+    """
+    global _engine, _db, _threshold_value
+    if _engine is not None and _db is not None:
+        return True
+    with _init_lock:
+        if _engine is not None and _db is not None:
+            return True
+        try:
+            cfg = cfg or {}
+            data_dir = Path(cfg.get("data_dir", str(_data_dir())))
+            data_dir.mkdir(parents=True, exist_ok=True)
+            _threshold_value = float(cfg.get("threshold", _threshold()))
+            _engine = EcapaTdnnEngine(device=cfg.get("device"))
+            _db = EnrolledDB(data_dir / "enrolled.json")
+            log.info(
+                "voiceprint init complete: data_dir=%s threshold=%.2f enrolled=%d",
+                data_dir, _threshold_value, len(_db.data),
+            )
+            return True
+        except Exception:  # noqa: BLE001
+            log.exception("voiceprint init failed")
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +216,7 @@ class _IdentifyServicer(pb_grpc.RobonixServiceVoiceprintIdentifyServicer):
     """robonix/service/voiceprint/identify — Identify(audio) → (user_id, confidence)."""
 
     def Identify(self, request, context):  # noqa: N802 (gRPC method)
+        _ensure_ready()
         if _engine is None or _db is None:
             return vp.Identify_Response(
                 user_id="", user_name="", confidence=0.0, is_known=False,
@@ -215,6 +249,7 @@ class _EnrollServicer(pb_grpc.RobonixServiceVoiceprintEnrollServicer):
     """robonix/service/voiceprint/enroll — Enroll(audio + user_id + user_name)."""
 
     def Enroll(self, request, context):  # noqa: N802
+        _ensure_ready()
         if _engine is None or _db is None:
             return vp.Enroll_Response(
                 success=False, error="engine not initialised",
@@ -283,6 +318,7 @@ class _DeleteServicer(pb_grpc.RobonixServiceVoiceprintDeleteServicer):
     """robonix/service/voiceprint/delete — DeleteEnrolled(user_id)."""
 
     def DeleteEnrolled(self, request, context):  # noqa: N802
+        _ensure_ready()
         if _db is None:
             return vp.DeleteEnrolled_Response(
                 success=False, error="db not initialised",
@@ -303,6 +339,7 @@ class _ListServicer(pb_grpc.RobonixServiceVoiceprintListServicer):
     """robonix/service/voiceprint/list — ListEnrolled() → JSON catalog."""
 
     def ListEnrolled(self, request, context):  # noqa: N802
+        _ensure_ready()
         if _db is None:
             return vp.ListEnrolled_Response(
                 users_json="[]", count=0, error="db not initialised",
@@ -362,21 +399,9 @@ def init(cfg: dict):
     """Load the ECAPA-TDNN model + the enrolled DB. Slow (model load can
     take 10-30s the first time on Jetson Orin), but happens once at
     Driver(CMD_INIT). Subsequent Identify/Enroll calls are fast."""
-    global _engine, _db, _threshold_value
-    try:
-        data_dir = Path(cfg.get("data_dir", str(_data_dir())))
-        data_dir.mkdir(parents=True, exist_ok=True)
-        _threshold_value = float(cfg.get("threshold", _threshold()))
-        _engine = EcapaTdnnEngine(device=cfg.get("device"))
-        _db = EnrolledDB(data_dir / "enrolled.json")
-        log.info(
-            "voiceprint init complete: data_dir=%s threshold=%.2f enrolled=%d",
-            data_dir, _threshold_value, len(_db.data),
-        )
+    if _ensure_ready(cfg):
         return Ok()
-    except Exception as exc:  # noqa: BLE001
-        log.exception("voiceprint init failed")
-        return Err(f"voiceprint init failed: {exc}")
+    return Err("voiceprint init failed")
 
 
 def main() -> int:

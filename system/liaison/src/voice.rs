@@ -54,6 +54,7 @@ use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::{PilotEvent, Task};
 use crate::pb::tts;
 use crate::pb::voiceprint;
+use crate::{access, access::AccessControlConfig};
 use robonix_scribe::{info, warn};
 
 // ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
@@ -173,6 +174,7 @@ pub async fn start_voice_session(
     req: StartVoiceSessionRequest,
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
+    access: Arc<AccessControlConfig>,
 ) -> Result<impl Stream<Item = Result<VoiceEvent, Status>>, Status> {
     let session_id = if req.session_id.is_empty() {
         Uuid::new_v4().to_string()
@@ -217,6 +219,7 @@ pub async fn start_voice_session(
             language,
             atlas,
             pilot_endpoint_default,
+            access,
             tx.clone(),
         )
         .await;
@@ -250,6 +253,7 @@ async fn run_session(
     language: String,
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
+    access: Arc<AccessControlConfig>,
     tx: mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<()> {
     let mock = is_mock_mode();
@@ -322,8 +326,11 @@ async fn run_session(
         anyhow::bail!("empty transcript — nothing to send to Pilot");
     }
 
-    // 3. Voiceprint (graceful — fallback to client hint on any failure).
-    let user_id = identify_user(
+    // 3. Voiceprint + access gate. ASR may already have produced a transcript,
+    // but no Pilot task, TTS, or action is allowed until the voice identity passes
+    // the Liaison access policy. Client hints cannot bypass voiceprint when the
+    // gate is enabled.
+    let identity = identify_user(
         &atlas,
         &req.voiceprint_node_id,
         &audio_pcm,
@@ -332,6 +339,46 @@ async fn run_session(
         &tx,
     )
     .await;
+    let decision = access.authorize_voice(&req.client_user_id, identity.response.as_ref());
+    let (user_id, access_context) = match decision {
+        access::AccessDecision::Allow {
+            user_id,
+            method,
+            confidence,
+            reason,
+        } => {
+            info!(
+                "[liaison/access] voice allow user={user_id} via {method:?} confidence={confidence:.2}: {reason}"
+            );
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    &session_id,
+                    &user_id,
+                    confidence,
+                    &format!("access allowed: {reason}"),
+                )))
+                .await;
+            (
+                user_id,
+                AccessContext {
+                    method: method.as_str().to_string(),
+                    confidence,
+                    reason,
+                },
+            )
+        }
+        access::AccessDecision::Deny {
+            user_id,
+            confidence,
+            reason,
+        } => {
+            warn!(
+                "[liaison/access] voice deny user={user_id} confidence={confidence:.2}: {reason}"
+            );
+            anyhow::bail!("access denied for voice user '{user_id}': {reason}");
+        }
+    };
 
     // 4. Build Task and stream Pilot events.
     let pilot_endpoint = resolve_endpoint(&atlas, "robonix/system/pilot", "")
@@ -342,6 +389,7 @@ async fn run_session(
         &session_id,
         &transcript,
         &user_id,
+        &access_context,
         &audio_pcm,
         &req.context_json,
     );
@@ -754,6 +802,16 @@ async fn stream_capture_and_recognize(
 
 // ── Voiceprint ───────────────────────────────────────────────────────────────
 
+struct VoiceIdentity {
+    response: Option<voiceprint::IdentifyResponse>,
+}
+
+struct AccessContext {
+    method: String,
+    confidence: f32,
+    reason: String,
+}
+
 async fn identify_user(
     atlas: &Arc<Mutex<AtlasClient>>,
     pin_provider_id: &str,
@@ -761,7 +819,7 @@ async fn identify_user(
     fallback_hint: &str,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-) -> String {
+) -> VoiceIdentity {
     let fallback = if fallback_hint.is_empty() {
         "voice:unknown".to_string()
     } else if fallback_hint.starts_with("voice:") || fallback_hint.starts_with("local:") {
@@ -779,89 +837,85 @@ async fn identify_user(
     {
         Some(ep) => ep,
         None => {
+            warn!("[voice] voiceprint provider unavailable; using hint {fallback}");
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     session_id,
                     &fallback,
                     0.0,
-                    "no RobonixServiceVoiceprintIdentify provider — using client hint",
+                    "voiceprint provider unavailable",
                 )))
                 .await;
-            return fallback;
+            return VoiceIdentity { response: None };
         }
     };
 
     let mut client = match RobonixServiceVoiceprintIdentifyClient::connect(endpoint.clone()).await {
         Ok(c) => c,
         Err(e) => {
+            warn!("[voice] connect voiceprint at {endpoint}: {e}; using hint {fallback}");
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     session_id,
                     &fallback,
                     0.0,
-                    &format!("voiceprint connect failed: {e} — using client hint"),
+                    "voiceprint connect failed",
                 )))
                 .await;
-            return fallback;
-        }
-    };
-    let resp = match client
-        .identify(Request::new(voiceprint::IdentifyRequest {
-            audio_data: audio_pcm.to_vec(),
-            encoding: DEFAULT_AUDIO_ENCODING.to_string(),
-            sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
-        }))
-        .await
-    {
-        Ok(r) => r.into_inner(),
-        Err(e) => {
-            let _ = tx
-                .send(Ok(event_user(
-                    KIND_USER_IDENTIFIED,
-                    session_id,
-                    &fallback,
-                    0.0,
-                    &format!("voiceprint rpc failed: {e} — using client hint"),
-                )))
-                .await;
-            return fallback;
+            return VoiceIdentity { response: None };
         }
     };
 
-    let user_id = if resp.is_known && !resp.user_id.is_empty() {
-        if resp.user_id.starts_with("voice:") {
-            resp.user_id.clone()
-        } else {
-            format!("voice:{}", resp.user_id)
+    let request = voiceprint::IdentifyRequest {
+        audio_data: audio_pcm.to_vec(),
+        encoding: DEFAULT_AUDIO_ENCODING.to_string(),
+        sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
+    };
+
+    match client.identify(Request::new(request)).await {
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            let user = if resp.user_id.is_empty() {
+                fallback.clone()
+            } else if resp.user_id.starts_with("voice:") || resp.user_id.starts_with("local:") {
+                resp.user_id.clone()
+            } else {
+                format!("voice:{}", resp.user_id)
+            };
+            let detail = if resp.is_known {
+                "voiceprint matched"
+            } else {
+                "voiceprint unknown speaker"
+            };
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &user,
+                    resp.confidence,
+                    detail,
+                )))
+                .await;
+            VoiceIdentity {
+                response: Some(resp),
+            }
         }
-    } else {
-        fallback.clone()
-    };
-    let label = if !resp.user_name.is_empty() {
-        format!(
-            "matched {}={} ({:.2})",
-            resp.user_id, resp.user_name, resp.confidence
-        )
-    } else if resp.is_known {
-        format!("matched {} ({:.2})", resp.user_id, resp.confidence)
-    } else {
-        format!(
-            "unknown speaker (best={:.2}) — using fallback",
-            resp.confidence
-        )
-    };
-    let _ = tx
-        .send(Ok(event_user(
-            KIND_USER_IDENTIFIED,
-            session_id,
-            &user_id,
-            resp.confidence,
-            &label,
-        )))
-        .await;
-    user_id
+        Err(e) => {
+            warn!("[voice] voiceprint RPC failed: {e}; using hint {fallback}");
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &fallback,
+                    0.0,
+                    "voiceprint rpc failed",
+                )))
+                .await;
+            VoiceIdentity { response: None }
+        }
+    }
 }
 
 // ── TTS playback ─────────────────────────────────────────────────────────────
@@ -953,6 +1007,7 @@ fn build_task(
     session_id: &str,
     transcript: &str,
     user_id: &str,
+    access: &AccessContext,
     audio_pcm: &[u8],
     extra_context_json: &str,
 ) -> Task {
@@ -968,6 +1023,15 @@ fn build_task(
         obj.insert("modality".to_string(), serde_json::json!("voice"));
         obj.insert("voice_session".to_string(), serde_json::json!(true));
         obj.insert("user_id".to_string(), serde_json::json!(user_id));
+        obj.insert(
+            "access".to_string(),
+            serde_json::json!({
+                "allowed": true,
+                "method": access.method,
+                "confidence": access.confidence,
+                "reason": access.reason,
+            }),
+        );
     }
     Task {
         task_id: Uuid::new_v4().to_string(),
@@ -1160,10 +1224,23 @@ mod tests {
 
     #[test]
     fn build_task_injects_user_id_into_context() {
-        let task = build_task("sess-1", "hello", "voice:alice", &[], r#"{"foo":"bar"}"#);
+        let task = build_task(
+            "sess-1",
+            "hello",
+            "voice:alice",
+            &AccessContext {
+                method: "voiceprint".to_string(),
+                confidence: 0.9,
+                reason: "matched".to_string(),
+            },
+            &[],
+            r#"{"foo":"bar"}"#,
+        );
         let v: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
         assert_eq!(v["user_id"], "voice:alice");
         assert_eq!(v["voice_session"], true);
+        assert_eq!(v["access"]["allowed"], true);
+        assert_eq!(v["access"]["method"], "voiceprint");
         assert_eq!(v["foo"], "bar");
     }
 

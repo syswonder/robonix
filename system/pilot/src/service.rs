@@ -105,6 +105,7 @@ pub struct PilotServiceImpl {
     /// the executor.
     provider_id: String,
     vlm: VlmClient,
+    soma_prompt_block: Arc<String>,
     histories: Histories,
     /// Per-session cancellation senders. `abort_turn` Task signals this
     /// without holding the history lock.
@@ -120,11 +121,17 @@ pub struct PilotServiceImpl {
 }
 
 impl PilotServiceImpl {
-    pub fn new(atlas: AtlasClient, provider_id: String, vlm: VlmClient) -> Self {
+    pub fn new(
+        atlas: AtlasClient,
+        provider_id: String,
+        vlm: VlmClient,
+        soma_prompt_block: String,
+    ) -> Self {
         Self {
             atlas,
             provider_id,
             vlm,
+            soma_prompt_block: Arc::new(soma_prompt_block),
             histories: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             steers: Arc::new(Mutex::new(HashMap::new())),
@@ -222,6 +229,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
         let vlm = self.vlm.clone();
+        let soma_prompt_block = Arc::clone(&self.soma_prompt_block);
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
         let steers = Arc::clone(&self.steers);
@@ -271,6 +279,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 cancel_rx,
                 steer_rx,
                 plan_seq,
+                soma_prompt_block.as_str(),
             )
             .await
             {
