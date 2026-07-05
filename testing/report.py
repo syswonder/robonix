@@ -844,11 +844,21 @@ def _inline_scripts(paths: list[Path]) -> str:
         if not path or not path.exists():
             continue
         try:
-            js = path.read_text(encoding="utf-8")
+            data = path.read_bytes()
         except OSError:
             continue
-        safe_js = js.replace("</", "<\\/")
-        blocks.append(f'<script data-inline-asset="{html.escape(path.name)}">\n{safe_js}\n</script>')
+        encoded = base64.b64encode(data).decode("ascii")
+        asset_name = html.escape(path.name)
+        source_url = re.sub(r"[^A-Za-z0-9_.-]", "_", path.name)
+        # Do not edit third-party JavaScript text before embedding it. Minified
+        # bundles contain regex literals and strings where a blind </ replacement
+        # can produce invalid JavaScript. The base64 wrapper keeps the HTML
+        # self-contained while executing the original bytes in order.
+        blocks.append(
+            f'<script data-inline-asset="{asset_name}">\n'
+            f'(0,eval)(atob("{encoded}") + "\\n//# sourceURL=inline-{source_url}");\n'
+            f'</script>'
+        )
     return "\n".join(blocks)
 
 
@@ -1426,6 +1436,7 @@ def write_html(
     let aceEditor = null;
     let aceReady = false;
     let pendingEntry = null;
+    let syncingTreeSelection = false;
 
     for (const entry of LOGS) {{
       if (!LOG_BY_NAME.has(entry.name)) LOG_BY_NAME.set(entry.name, entry);
@@ -1484,7 +1495,7 @@ def write_html(
       const view = document.getElementById('log-view');
       if (aceEl) aceEl.style.display = 'none';
       view.style.display = 'block';
-      const lines = entry.content.split(/\r?\n/);
+      const lines = entry.content.split(/\\r?\\n/);
       const html = lines.map((line, idx) => (
         '<div class="log-line"><span class="line-no">' + (idx + 1) + '</span><code class="line-text">' + highlightLine(line, entry.language) + '</code></div>'
       )).join('');
@@ -1514,9 +1525,19 @@ def write_html(
       if (window.jQuery) {{
         const tree = $('#log-tree-widget').jstree(true);
         if (tree && tree.get_node(id)) {{
-          tree.deselect_all(true);
-          tree.select_node(id, true, false);
-          tree.open_node(tree.get_parent(id));
+          const selected = tree.get_selected();
+          if (selected.length === 1 && selected[0] === id) {{
+            tree.open_node(tree.get_parent(id));
+            return;
+          }}
+          syncingTreeSelection = true;
+          try {{
+            tree.deselect_all(true);
+            tree.select_node(id, true, true);
+            tree.open_node(tree.get_parent(id));
+          }} finally {{
+            syncingTreeSelection = false;
+          }}
         }}
       }}
     }}
@@ -1558,6 +1579,7 @@ def write_html(
             types: {{ folder: {{}}, file: {{ icon: 'jstree-file' }} }},
           }})
           .on('select_node.jstree', function (_event, data) {{
+            if (syncingTreeSelection) return;
             const node = data.node;
             if (node && node.type === 'file') openLog(node.id);
           }});

@@ -94,28 +94,85 @@ def _parse_maybe_json(value: Any) -> Any:
     return value
 
 
-def _matches_where(value: Any, where: dict | None) -> bool:
+def _json_path_values(value: Any, path: str) -> list[Any]:
+    value = _parse_maybe_json(value)
+    if path == "$":
+        return [value]
+    if not path.startswith("$."):
+        return []
+    current = [value]
+    for token in path[2:].split("."):
+        next_values: list[Any] = []
+        is_array = token.endswith("[]")
+        key = token[:-2] if is_array else token
+        for item in current:
+            if not isinstance(item, dict) or key not in item:
+                continue
+            child = item[key]
+            if is_array:
+                if isinstance(child, list):
+                    next_values.extend(child)
+            else:
+                next_values.append(child)
+        current = next_values
+    return current
+
+
+def _check_scalar(value: Any, op: str, expected: Any = None) -> bool:
+    if op == "exists":
+        return value is not None
+    if op == "eq":
+        return value == expected
+    if op == "ne":
+        return value != expected
+    if op == "in":
+        return value in (expected if isinstance(expected, list) else [expected])
+    if op == "not_in":
+        return value not in (expected if isinstance(expected, list) else [expected])
+    if op == "starts_with":
+        return str(value).startswith(str(expected))
+    if op == "contains":
+        return str(expected) in str(value)
+    if op == "regex":
+        return re.search(str(expected), str(value)) is not None
+    if op in {"gt", "gte", "lt", "lte"}:
+        try:
+            lhs = float(value)
+            rhs = float(expected)
+        except (TypeError, ValueError):
+            return False
+        return {"gt": lhs > rhs, "gte": lhs >= rhs, "lt": lhs < rhs, "lte": lhs <= rhs}[op]
+    if op == "min_length":
+        return hasattr(value, "__len__") and len(value) >= int(expected)
+    return False
+
+
+def _check_values(values: list[Any], check: dict) -> bool:
+    op = str(check.get("op", "exists"))
+    expected = check.get("value")
+    if op == "exists":
+        return bool(values)
+    return any(_check_scalar(value, op, expected) for value in values)
+
+
+def _check_expr(context: Any, expr: Any) -> bool:
+    if not isinstance(expr, dict):
+        return False
+    if "all" in expr:
+        items = expr.get("all") or []
+        return isinstance(items, list) and all(_check_expr(context, item) for item in items)
+    if "any" in expr:
+        items = expr.get("any") or []
+        return isinstance(items, list) and any(_check_expr(context, item) for item in items)
+    if "not" in expr:
+        return not _check_expr(context, expr.get("not"))
+    return _check_values(_json_path_values(context, str(expr.get("path", "$"))), expr)
+
+
+def _matches_where(value: Any, where: Any) -> bool:
     if not where:
         return True
-    if not isinstance(value, dict):
-        return False
-    for key, expected in where.items():
-        if key == "label_not":
-            if value.get("label") == expected or value.get("cls") == expected:
-                return False
-        elif key == "label_in":
-            labels = set(expected if isinstance(expected, list) else [expected])
-            if value.get("label") not in labels and value.get("cls") not in labels:
-                return False
-        elif key == "id_prefix":
-            if not str(value.get("id", value.get("object_id", ""))).startswith(str(expected)):
-                return False
-        elif key == "id_contains":
-            if str(expected) not in str(value.get("id", value.get("object_id", ""))):
-                return False
-        elif value.get(key) != expected:
-            return False
-    return True
+    return _check_expr(value, where)
 
 
 def _extract_path(value: Any, path: str, where: dict | None = None) -> Any:
@@ -237,26 +294,20 @@ def _contains_subset(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def _json_path_values(value: Any, path: str) -> list[Any]:
-    value = _parse_maybe_json(value)
-    if not path.startswith("$."):
-        return []
-    current = [value]
-    for token in path[2:].split("."):
-        next_values: list[Any] = []
-        is_array = token.endswith("[]")
-        key = token[:-2] if is_array else token
-        for item in current:
-            if not isinstance(item, dict) or key not in item:
-                continue
-            child = item[key]
-            if is_array:
-                if isinstance(child, list):
-                    next_values.extend(child)
-            else:
-                next_values.append(child)
-        current = next_values
-    return current
+def _structured_check_errors(parsed: Any, clause: dict) -> list[str]:
+    errors: list[str] = []
+    for idx, check in enumerate(clause.get("checks", []) or []):
+        if not isinstance(check, dict):
+            errors.append(f"checks[{idx}]")
+            continue
+        selected = _json_path_values(parsed, str(check.get("select", "$")))
+        where = check.get("where")
+        if where is not None:
+            selected = [value for value in selected if _matches_where(value, where)]
+        assertion = check.get("assert", {"op": "exists"})
+        if not isinstance(assertion, dict) or not _check_values(selected, assertion):
+            errors.append(f"checks[{idx}]")
+    return errors
 
 
 def _leaf_expect_errors(leaf: dict, expect: dict) -> list[str]:
@@ -285,18 +336,7 @@ def _leaf_expect_errors(leaf: dict, expect: dict) -> list[str]:
             errors.append("text_lines")
     if "json" in clause and not _contains_subset(parsed, clause["json"]):
         errors.append("json")
-    for cond in clause.get("jsonpath", []) or []:
-        values = _json_path_values(parsed, str(cond.get("path", "")))
-        if cond.get("exists") and not values:
-            errors.append("jsonpath_exists")
-            continue
-        if "min_length" in cond:
-            if len(values) != 1 or not hasattr(values[0], "__len__") or len(values[0]) < int(cond["min_length"]):
-                errors.append("jsonpath_min_length")
-        if "equals" in cond and cond["equals"] not in values:
-            errors.append("jsonpath_equals")
-        if "prefix" in cond and not any(str(v).startswith(str(cond["prefix"])) for v in values):
-            errors.append("jsonpath_prefix")
+    errors.extend(_structured_check_errors(parsed, clause))
     return errors
 
 
@@ -343,7 +383,8 @@ def _step_is_complete(step: dict, leaves: list[dict], consumed: set[int]) -> boo
         for idx, leaf in enumerate(leaves):
             if idx in consumed or idx in local_used:
                 continue
-            matcher = _leaf_matches_expect if step.get("retry_delay_s") else _leaf_matches_contract_success
+            require_full_expect = bool(step.get("retry_delay_s") or expect.get("capture"))
+            matcher = _leaf_matches_expect if require_full_expect else _leaf_matches_contract_success
             if matcher(leaf, expect):
                 match_idx = idx
                 break
@@ -373,13 +414,21 @@ def _capture_one(leaf: dict, spec: Any) -> Any:
         return None
     source = str(spec.get("source", "output"))
     text = str(leaf.get("error" if source == "error" else "output", ""))
-    if "jsonpath" in spec or "field" in spec:
-        value = _extract_path(text, str(spec.get("jsonpath") or spec.get("field") or ""), spec.get("where"))
+    parsed = _parse_maybe_json(text)
+    if "select" in spec:
+        selected = _json_path_values(parsed, str(spec.get("select", "$")))
+        where = spec.get("where")
+        if where is not None:
+            selected = [value for value in selected if _matches_where(value, where)]
+        if not selected:
+            return None
+        context = selected[0]
+        value = _extract_path(context, str(spec.get("path", "$")))
     elif "regex" in spec:
         m = re.search(str(spec["regex"]), text, re.MULTILINE | re.DOTALL)
         value = m.group(int(spec.get("group", 1))) if m else None
     else:
-        value = _parse_maybe_json(text)
+        value = parsed
     if value is None:
         return None
     try:
