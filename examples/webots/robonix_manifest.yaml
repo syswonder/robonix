@@ -131,11 +131,6 @@ service:
     config:
       algo: rtabmap
       platform: x86_desktop
-      # Named, persisted map. `map_id` is the join key scene binds to via the
-      # top-level env SCENE_MAP_ID (keep both == webots_lab). `mapping` mode
-      # builds/extends the map (origin = boot pose, resets each run); switch to
-      # `localization` once a map is saved to get a stable cross-restart frame
-      # (the 档2 round-trip — see system/scene/docs/map-semantic-integration.md).
       map_id: webots_lab
       map_mode: mapping
       sensors:
