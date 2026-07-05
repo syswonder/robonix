@@ -217,6 +217,37 @@ def test_store_cache():
     print("  [PASS] test_store_cache")
 
 
+def test_store_cache_map_id_partition():
+    """Two stores with different map_ids on the same base dir keep isolated
+    caches: each writes to its own <map_id> subdir and cannot read the other's
+    cached captions (the per-map scoping that prevents cross-map 串味)."""
+    from scene_service.scene_graph.store import SceneGraphStore
+    from scene_service.scene_graph.types import SceneGraphNode
+
+    node = SceneGraphNode(
+        "obj_1", "cup", (1.0, 0.5, 0.8), (0.1, 0.1, 0.15),
+        caption="a white cup", observation_count=10,
+    )
+
+    with tempfile.TemporaryDirectory() as base:
+        kitchen = SceneGraphStore(cache_dir=base, map_id="kitchen")
+        kitchen.put_cached_caption(node)
+        kitchen.flush_caches()
+
+        # Same base dir, different map_id → nested in its own subdir, blind to
+        # kitchen's cache.
+        office = SceneGraphStore(cache_dir=base, map_id="office")
+        assert office.get_cached_caption(node) is None
+
+        assert os.path.exists(os.path.join(base, "kitchen", "captions.json"))
+        assert not os.path.exists(os.path.join(base, "office", "captions.json"))
+
+        # A fresh store reopened on the same map_id sees its own cache back.
+        kitchen2 = SceneGraphStore(cache_dir=base, map_id="kitchen")
+        assert kitchen2.get_cached_caption(node) == "a white cup"
+    print("  [PASS] test_store_cache_map_id_partition")
+
+
 def test_llm_client_no_key():
     """LLM client with no API key returns empty dict and doesn't crash."""
     env_backup = _pop_llm_env()
@@ -720,6 +751,7 @@ if __name__ == "__main__":
     test_edge_candidates()
     test_captioner()
     test_store_cache()
+    test_store_cache_map_id_partition()
     test_llm_client_no_key()
     test_relation_inferer_no_llm()
     test_builder_rebuild_no_objects()
