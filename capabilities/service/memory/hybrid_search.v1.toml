@@ -1,5 +1,5 @@
 [contract]
-id      = "robonix/service/memgraph/search"
+id      = "robonix/service/memory/hybrid_search"
 version = "1"
 kind    = "service"
 idl     = "memgraph/srv/Search.srv"

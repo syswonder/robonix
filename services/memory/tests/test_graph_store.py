@@ -184,6 +184,60 @@ class TestPromote:
         # Old ID should be gone
         assert self.store.get_node(nid) is None
 
+    def test_promote_rewrites_child_causal_chain(self):
+        """After promote, child nodes' causal_chain references the new parent ID."""
+        # parent → child: causal edge + causal_chain in child
+        parent_id = self.store.add_node(MemoryNode(summary="parent",
+                                                    node_type=NodeType.SHORT_TERM))
+        child = MemoryNode(summary="child", node_type=NodeType.SHORT_TERM)
+        child_id = self.store.add_node(child)
+        self.store.add_edge(parent_id, child_id)
+
+        # Verify initial state
+        child_node = self.store.get_node(child_id)
+        assert parent_id in child_node.causal_chain
+        assert parent_id in self.store.get_parents(child_id)
+
+        # Promote parent: old ID → new ID (1000+)
+        new_parent_id = self.store.promote_to_long_term(parent_id)
+        assert new_parent_id is not None
+        assert new_parent_id >= 1000
+        assert self.store.get_node(parent_id) is None
+
+        # Verify child's causal_chain was rewritten
+        child_node = self.store.get_node(child_id)
+        assert parent_id not in child_node.causal_chain, \
+            f"stale parent {parent_id} still in child.causal_chain"
+        assert new_parent_id in child_node.causal_chain, \
+            f"new parent {new_parent_id} missing from child.causal_chain"
+
+        # Verify adjacency sets match causal_chain
+        adjacency_parents = self.store.get_parents(child_id)
+        assert new_parent_id in adjacency_parents
+        assert parent_id not in adjacency_parents
+        assert set(child_node.causal_chain) == set(adjacency_parents), \
+            f"causal_chain {child_node.causal_chain} != adjacency {adjacency_parents}"
+
+    def test_promote_with_multiple_children(self):
+        """Promote a node with 3 children — all causal_chains updated."""
+        parent_id = self.store.add_node(MemoryNode(summary="parent",
+                                                    node_type=NodeType.SHORT_TERM))
+        child_ids = []
+        for i in range(3):
+            cid = self.store.add_node(MemoryNode(summary=f"child-{i}",
+                                                  node_type=NodeType.SHORT_TERM))
+            self.store.add_edge(parent_id, cid)
+            child_ids.append(cid)
+
+        new_parent_id = self.store.promote_to_long_term(parent_id)
+
+        for cid in child_ids:
+            child = self.store.get_node(cid)
+            assert parent_id not in child.causal_chain, \
+                f"child {cid}: stale parent {parent_id}"
+            assert new_parent_id in child.causal_chain, \
+                f"child {cid}: missing new parent {new_parent_id}"
+
     def test_promote_long_term_does_nothing(self):
         # Force the node into the long-term ID range explicitly
         n = MemoryNode(summary="long", node_type=NodeType.LONG_TERM, node_id=5000)

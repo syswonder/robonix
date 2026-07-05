@@ -3,13 +3,13 @@
 Runs as a robonix-api Service with MCP tool registration.
 Entrypoint for rbnx boot: `python -m memory_service.service`
 
-MCP tools (registered under robonix/service/memgraph/):
-  - robonix/service/memgraph/remember  — write structured MemoryNode
-  - robonix/service/memgraph/search    — 3-stage hybrid retrieval
-  - robonix/service/memgraph/compact   — promote short-term → long-term
+MCP tools (registered under robonix/service/memory/ alongside memsearch):
+  - robonix/service/memory/remember       — write structured MemoryNode
+  - robonix/service/memory/hybrid_search  — 3-stage hybrid retrieval (BM25+Embedding)
+  - robonix/service/memory/promote        — promote short-term → long-term
 
-Runs in parallel with memsearch (robonix/service/memory/*) — separate
-namespace so Pilot can discover both sets of tools.
+Runs in parallel with memsearch (save/search/compact) under the same
+robonix/service/memory/ namespace so Pilot discovers both sets of tools.
 
 Phase1: JSON-over-std_msgs/String (avoids protobuf codegen changes).
 Phase2: structured IDL when contract schema is frozen.
@@ -189,7 +189,7 @@ except ImportError:
 
 
 if _MCP_AVAILABLE:
-    _memory_svc = Service(id="memgraph", namespace="robonix/service/memgraph")
+    _memory_svc = Service(id="memgraph", namespace="robonix/service/memory")
     _indices_initialized = False
 
     # ── JSON response helpers ──────────────────────────────────────────
@@ -217,7 +217,7 @@ if _MCP_AVAILABLE:
 
     # ── MCP tool handlers ──────────────────────────────────────────────
 
-    @_memory_svc.mcp("robonix/service/memgraph/remember")
+    @_memory_svc.mcp("robonix/service/memory/remember")
     async def _mcp_remember(msg: String) -> String:
         """Write a structured memory node into the CKG (Causal Knowledge Graph).
 
@@ -300,7 +300,7 @@ if _MCP_AVAILABLE:
                  request.session_id, request.plan_id, resp.node_id, summary)
         return _json_ok({"node_id": resp.node_id, "message": resp.message})
 
-    @_memory_svc.mcp("robonix/service/memgraph/search")
+    @_memory_svc.mcp("robonix/service/memory/hybrid_search")
     async def _mcp_search(msg: String) -> String:
         """Search the CKG memory using a 3-stage pipeline: tag filter → hybrid
         BM25+embedding ranking → causal/time/weight filter.
@@ -404,7 +404,7 @@ if _MCP_AVAILABLE:
                  request.top_k, request.alpha, len(resp.nodes))
         return _json_ok({"nodes": [n.to_dict() for n in resp.nodes]})
 
-    @_memory_svc.mcp("robonix/service/memgraph/compact")
+    @_memory_svc.mcp("robonix/service/memory/promote")
     async def _mcp_compact(msg: Empty) -> String:
         """Promote overflowing ShortTerm memory nodes (oldest first) to LongTerm.
 

@@ -1,4 +1,4 @@
-# robonix/service/memgraph/search — 3-stage hybrid search over CKG memory (unary RPC).
+# robonix/service/memory/hybrid_search — 3-stage hybrid search over CKG memory (unary RPC).
 # Phase1 JSON encoding over std_msgs/String; Phase2: structured IDL.
 #
 # Request JSON: {

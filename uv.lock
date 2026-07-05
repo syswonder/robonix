@@ -18,7 +18,7 @@ resolution-markers = [
 members = [
     "robonix",
     "robonix-api",
-    "robonix-scribe-memory",
+    "robonix-memgraph",
     "robonix-system-memory",
     "robonix-system-scene",
     "robonix-system-speech",
@@ -4182,7 +4182,7 @@ requires-dist = [
 provides-extras = ["codegen"]
 
 [[package]]
-name = "robonix-scribe-memory"
+name = "robonix-memgraph"
 version = "0.1.0"
 source = { virtual = "services/memory" }
 dependencies = [

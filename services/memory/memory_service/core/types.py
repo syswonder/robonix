@@ -318,7 +318,7 @@ class ForgetAuditEntry:
 
 @dataclass
 class RememberRequest:
-    """Input for `robonix/service/memgraph/remember`. (§4.1)"""
+    """Input for `robonix/service/memory/remember`. (§4.1)"""
     session_id: str
     plan_id: str
     log_record: LogRecord
@@ -351,14 +351,14 @@ class RememberRequest:
 
 @dataclass
 class RememberResponse:
-    """Output for `robonix/service/memgraph/remember`."""
+    """Output for `robonix/service/memory/remember`."""
     node_id: int
     message: str = ""
 
 
 @dataclass
 class SearchRequest:
-    """Input for `robonix/service/memgraph/search`. (§4.1)"""
+    """Input for `robonix/service/memory/hybrid_search`. (§4.1)"""
     query: str
     tags: Optional[TagFilter] = None
     top_k: int = 5
@@ -397,13 +397,13 @@ class SearchRequest:
 
 @dataclass
 class SearchResponse:
-    """Output for `robonix/service/memgraph/search`."""
+    """Output for `robonix/service/memory/hybrid_search`."""
     nodes: List[MemoryNode] = field(default_factory=list)
 
 
 @dataclass
 class CompactResponse:
-    """Output for `robonix/service/memgraph/compact`."""
+    """Output for `robonix/service/memory/promote`."""
     summary: str = ""
     nodes_compacted: int = 0
 

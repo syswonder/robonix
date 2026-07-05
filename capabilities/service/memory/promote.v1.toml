@@ -1,5 +1,5 @@
 [contract]
-id      = "robonix/service/memgraph/compact"
+id      = "robonix/service/memory/promote"
 version = "1"
 kind    = "service"
 idl     = "memgraph/srv/Compact.srv"
