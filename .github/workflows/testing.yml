@@ -112,9 +112,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Empty on push/PR/dispatch (checkout uses the triggering ref); set to
-          # the PR head SHA when the ChatOps bot invokes this via workflow_call.
-          ref: ${{ inputs.ref }}
+          # For ChatOps PR tests, checkout the current base branch first; the
+          # next step merges the PR head locally so stale refs/pull/*/merge refs
+          # cannot make CI test an old base.
+          ref: ${{ inputs.pr_number != '' && github.event.repository.default_branch || inputs.ref }}
+          fetch-depth: 0
+      - name: Merge PR head into current base
+        if: ${{ inputs.pr_number != '' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin \
+            "+refs/pull/${{ inputs.pr_number }}/head:refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              merge --no-edit --no-ff "refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+          git log -1 --oneline
       - name: Scan executable build and runtime files
         run: |
           set -euo pipefail
@@ -241,7 +253,19 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.pr_number != '' && github.event.repository.default_branch || inputs.ref }}
+          fetch-depth: 0
+
+      - name: Merge PR head into current base
+        if: ${{ inputs.pr_number != '' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin \
+            "+refs/pull/${{ inputs.pr_number }}/head:refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              merge --no-edit --no-ff "refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+          git log -1 --oneline
 
       - name: Initialize submodules
         run: |
@@ -368,8 +392,47 @@ jobs:
           # Avoid Docker Hub metadata checks on every Webots sim rebuild.
           # The helper creates a local alias and pulls through configured
           # mirrors on first use.
-          # shellcheck disable=SC1091
-          source "../../../scripts/docker_base_image.sh"
+          helper="$GITHUB_WORKSPACE/scripts/docker_base_image.sh"
+          if [ -f "$helper" ]; then
+            # shellcheck disable=SC1090
+            source "$helper"
+          else
+            # The reusable workflow may test an older PR merge tree that does not
+            # yet contain scripts/docker_base_image.sh. Keep this minimal fallback
+            # here so CI infrastructure changes do not make old PRs untestable.
+            robonix_ensure_local_base_image() {
+              local dest="$1"
+              local upstream="$2"
+              local mirrors_raw="${ROBONIX_DOCKER_MIRRORS:-${ROBONIX_DOCKER_MIRROR:-docker.m.daocloud.io,dockerproxy.net}}"
+              local image_path="$upstream"
+              local candidates=()
+              if docker image inspect "$dest" >/dev/null 2>&1; then return 0; fi
+              if docker image inspect "$upstream" >/dev/null 2>&1; then
+                echo "[docker-base] tagging cached $upstream as $dest"
+                docker tag "$upstream" "$dest"
+                return 0
+              fi
+              image_path="${image_path#docker.io/}"
+              image_path="${image_path#registry-1.docker.io/}"
+              if [[ "$image_path" != */* ]]; then image_path="library/$image_path"; fi
+              IFS=',' read -r -a _mirror_items <<< "$mirrors_raw"
+              for mirror in "${_mirror_items[@]}"; do
+                mirror="${mirror#${mirror%%[![:space:]]*}}"
+                mirror="${mirror%${mirror##*[![:space:]]}}"
+                [[ -z "$mirror" ]] && continue
+                mirror="${mirror%/}"
+                candidates+=("${mirror}/${image_path}")
+              done
+              candidates+=("$upstream")
+              for candidate in "${candidates[@]}"; do
+                echo "[docker-base] pulling base candidate: $candidate"
+                if docker pull "$candidate"; then docker tag "$candidate" "$dest"; return 0; fi
+                echo "[docker-base] warning: failed to pull $candidate" >&2
+              done
+              echo "[docker-base] error: failed to prepare local base image $dest from $upstream" >&2
+              return 1
+            }
+          fi
           export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
           robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
