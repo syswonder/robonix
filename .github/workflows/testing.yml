@@ -292,7 +292,72 @@ jobs:
       - name: Configure run isolation
         run: |
           set -euo pipefail
-          suffix=$((RUN_ID % 1000))
+          base_suffix=$((RUN_ID % 1000))
+          suffix=""
+          xdisplay=""
+
+          port_is_listening() {
+            ss -ltn "sport = :$1" | grep -q LISTEN
+          }
+
+          xdisplay_has_live_server() {
+            ps -eo pid=,args= | awk -v d=":$1" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {found=1} END {exit found ? 0 : 1}'
+          }
+
+          remove_stale_x_socket() {
+            display="$1"
+            socket="/tmp/.X11-unix/X${display}"
+            [ -S "$socket" ] || return 0
+            if xdisplay_has_live_server "$display"; then
+              return 1
+            fi
+            echo "removing stale per-run X socket: $socket"
+            rm -f "$socket" 2>/dev/null || sudo -n rm -f "$socket" 2>/dev/null || true
+            if [ -S "$socket" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
+              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "$socket" >/dev/null 2>&1 || true
+            fi
+            [ ! -S "$socket" ]
+          }
+
+          for offset in $(seq 0 199); do
+            candidate_suffix=$(((base_suffix + offset) % 1000))
+            candidate_xdisplay=$((1000 + candidate_suffix))
+            candidate_ports=(
+              $((19000 + candidate_suffix))
+              $((20000 + candidate_suffix))
+              $((21000 + candidate_suffix))
+              $((22000 + candidate_suffix))
+              $((18000 + candidate_suffix))
+              $((23000 + candidate_suffix))
+              $((24000 + candidate_suffix))
+              $((25000 + candidate_suffix))
+              $((26000 + candidate_suffix))
+              $((27000 + candidate_suffix))
+            )
+
+            busy=0
+            for port in "${candidate_ports[@]}"; do
+              if port_is_listening "$port"; then
+                busy=1
+                break
+              fi
+            done
+            [ "$busy" -eq 0 ] || continue
+
+            if [ -S "/tmp/.X11-unix/X${candidate_xdisplay}" ] && ! remove_stale_x_socket "$candidate_xdisplay"; then
+              continue
+            fi
+
+            suffix="$candidate_suffix"
+            xdisplay="$candidate_xdisplay"
+            break
+          done
+
+          if [ -z "$suffix" ] || [ -z "$xdisplay" ]; then
+            echo "::error::could not find an unused per-run port/display slot from base suffix $base_suffix"
+            exit 1
+          fi
+
           atlas_port=$((19000 + suffix))
           executor_port=$((20000 + suffix))
           pilot_port=$((21000 + suffix))
@@ -303,25 +368,9 @@ jobs:
           mapping_port=$((25000 + suffix))
           nav2_port=$((26000 + suffix))
           scene_web_port=$((27000 + suffix))
-          ros_domain_id=$((90 + (RUN_ID % 100)))
-          xdisplay=$((1000 + suffix))
+          ros_domain_id=$((90 + (suffix % 100)))
 
-          if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
-            x_pids=$(ps -eo pid=,args= | awk -v d=":${xdisplay}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
-            if [ -n "$x_pids" ]; then
-              echo "::error::per-run X display already in use: :${xdisplay}"
-              exit 1
-            fi
-            echo "removing stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-            rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || sudo -n rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || true
-            if [ -S "/tmp/.X11-unix/X${xdisplay}" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
-              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "/tmp/.X11-unix/X${xdisplay}" >/dev/null 2>&1 || true
-            fi
-            if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
-              echo "::error::could not remove stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-              exit 1
-            fi
-          fi
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port} ros_domain_id=${ros_domain_id}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
@@ -355,13 +404,6 @@ jobs:
             echo "RBNX_MODEL_DOWNLOAD_RETRIES=2"
           } >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TOOL_CACHE:-$HOME/.cache}/robonix-models"
-
-          for port in "$atlas_port" "$executor_port" "$pilot_port" "$liaison_port" "$fake_vlm_port" "$stream_port" "$viewer_port" "$mapping_port" "$nav2_port" "$scene_web_port"; do
-            if ss -ltn "sport = :$port" | grep -q LISTEN; then
-              echo "::error::per-run port already in use: $port"
-              exit 1
-            fi
-          done
 
       - name: Configure toolchain and workspace
         run: |
