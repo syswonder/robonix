@@ -8,9 +8,9 @@
 # ─────────────────────────── SECURITY (read first) ───────────────────────────
 # `issue_comment` runs with the BASE repo's token, so the trigger is gated hard:
 #   1. Only PR comments (not plain issues) whose body starts with the command.
-#   2. Only authors with write access — author_association in
-#      OWNER / MEMBER / COLLABORATOR. A drive-by commenter cannot start a run on
-#      the self-hosted runner. This is the load-bearing check.
+#   2. Only callers with actual repo permission `admin` or `maintain` may
+#      start a run. A drive-by commenter, org member without repo admin/maintain,
+#      or write-only contributor cannot start work on the self-hosted runner.
 #   3. The actual GPU job still goes through testing.yml's `security-gate` +
 #      `environment: gpu-testing` (required-reviewer approval, once configured),
 #      so even an
@@ -36,10 +36,11 @@ jobs:
     name: Authorize CI command
     if: >-
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@robonix-ci test') &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      contains(github.event.comment.body, '@robonix-ci test')
     runs-on: ubuntu-22.04
     outputs:
+      authorized: ${{ steps.auth.outputs.authorized }}
+      caller_permission: ${{ steps.auth.outputs.permission }}
       test_ref: ${{ steps.pr.outputs.test_ref }}
       merge_ref_available: ${{ steps.pr.outputs.merge_ref_available }}
       pr_base_ref: ${{ steps.pr.outputs.base_ref }}
@@ -53,8 +54,47 @@ jobs:
       triggered_by: ${{ steps.pr.outputs.triggered_by }}
       comment_id: ${{ steps.say.outputs.comment_id }}
     steps:
+      - name: Authorize caller permission
+        id: auth
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const username = context.payload.comment.user.login;
+            let permission = 'none';
+            try {
+              const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner, repo: context.repo.repo, username,
+              });
+              permission = r.data.permission || 'none';
+            } catch (e) {
+              core.notice(`could not resolve repo permission for @${username}: ${e.message}`);
+            }
+            const authorized = ['admin', 'maintain'].includes(permission);
+            core.setOutput('permission', permission);
+            core.setOutput('authorized', String(authorized));
+            if (!authorized) {
+              core.notice(`@${username} has repo permission '${permission}', not allowed to run robonix CI`);
+            }
+
+      - name: Report unauthorized command
+        if: steps.auth.outputs.authorized != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              '<!-- robonix-ci-status -->',
+              '### Robonix Webots CI - not authorized',
+              `@${context.payload.comment.user.login} cannot start this self-hosted Webots test run.`,
+              `Required repo permission: \`admin\` or \`maintain\`. Current permission: \`${{ steps.auth.outputs.permission }}\`.`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.issue.number, body,
+            });
+
       - name: Acknowledge command and resolve PR head
         id: pr
+        if: steps.auth.outputs.authorized == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -111,7 +151,7 @@ jobs:
   test:
     name: Run Webots integration tests
     needs: gate
-    if: needs.gate.result == 'success'
+    if: needs.gate.result == 'success' && needs.gate.outputs.authorized == 'true'
     uses: ./.github/workflows/testing.yml
     with:
       authorized: true
@@ -132,7 +172,7 @@ jobs:
   publish_report:
     name: Publish skipped-run report site
     needs: [gate, test]
-    if: always() && needs.gate.result == 'success' && needs.test.result == 'skipped'
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.authorized == 'true' && needs.test.result == 'skipped'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -308,7 +348,7 @@ jobs:
   report:
     name: Publish PR status comment
     needs: [gate, test, publish_report]
-    if: always() && needs.gate.result == 'success'
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.authorized == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Download test report artifact

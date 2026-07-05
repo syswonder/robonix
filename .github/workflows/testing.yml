@@ -13,7 +13,8 @@
 #  1. Triggers below are TRUSTED ONLY: `push` to dev/main (already-merged =
 #     reviewed) and manual `workflow_dispatch`. A PR runs the GPU job ONLY when
 #     a maintainer adds the `safe-to-test` label after auditing the diff — the
-#     `if:` on the job enforces that. There is no bare `on: pull_request` that
+#     security gate verifies that the latest labeler has admin/maintain repo
+#     permission before the GPU job can start. There is no bare `on: pull_request` that
 #     runs fork code unattended, and we never use `pull_request_target`.
 #  2. Also turn ON in repo settings: Actions → Fork pull request workflows →
 #     "Require approval for all external contributors".
@@ -101,6 +102,8 @@ on:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
   pages: write
   id-token: write
 
@@ -113,7 +116,60 @@ jobs:
   security-gate:
     name: Preflight security checks
     runs-on: ubuntu-22.04
+    outputs:
+      safe_to_test_authorized: ${{ steps.safe_to_test.outputs.authorized }}
+      safe_to_test_labeler: ${{ steps.safe_to_test.outputs.labeler }}
+      safe_to_test_permission: ${{ steps.safe_to_test.outputs.permission }}
     steps:
+      - name: Authorize safe-to-test label
+        id: safe_to_test
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('authorized', 'true');
+              core.setOutput('labeler', 'trusted-event');
+              core.setOutput('permission', 'trusted-event');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            const labels = (pr.labels || []).map(l => l.name);
+            if (!labels.includes('safe-to-test')) {
+              core.setOutput('authorized', 'false');
+              core.setOutput('labeler', '');
+              core.setOutput('permission', 'none');
+              core.notice('safe-to-test label is absent; GPU test will be skipped');
+              return;
+            }
+            const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const labeled = [...events].reverse().find(e =>
+              e.event === 'labeled' && e.label && e.label.name === 'safe-to-test' && e.actor && e.actor.login
+            );
+            const labeler = labeled?.actor?.login || '';
+            let permission = 'none';
+            if (labeler) {
+              try {
+                const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner, repo: context.repo.repo, username: labeler,
+                });
+                permission = r.data.permission || 'none';
+              } catch (e) {
+                core.notice(`could not resolve repo permission for safe-to-test labeler @${labeler}: ${e.message}`);
+              }
+            }
+            const authorized = ['admin', 'maintain'].includes(permission);
+            core.setOutput('authorized', String(authorized));
+            core.setOutput('labeler', labeler);
+            core.setOutput('permission', permission);
+            if (!authorized) {
+              core.notice(`safe-to-test was added by @${labeler || 'unknown'} with permission '${permission}', so GPU test will be skipped`);
+            }
+
       - uses: actions/checkout@v4
         with:
           # For ChatOps PR tests, checkout the current base branch first; the
@@ -179,7 +235,7 @@ jobs:
     # with Required reviewers in repo settings if we want GitHub to pause this
     # job before it is assigned to the self-hosted runner.
     environment: gpu-testing
-    # Belt-and-suspenders: require `safe-to-test` for direct PR events.
+    # Belt-and-suspenders: require admin/maintain authorization for direct PR events.
     # ChatOps callers must perform their own authorization gate before setting
     # inputs.authorized=true; ci-bot.yml restricts that to trusted PR comments.
     if: >-
@@ -187,7 +243,7 @@ jobs:
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+       needs.security-gate.outputs.safe_to_test_authorized == 'true')
     runs-on: [self-hosted, robonix-testing]
     timeout-minutes: 90
     env:
