@@ -11,11 +11,11 @@
 # auto-ran here would be arbitrary code execution on our box. Controls:
 #
 #  1. Triggers below are TRUSTED ONLY: `push` to dev/main (already-merged =
-#     reviewed) and manual `workflow_dispatch`. A PR runs the GPU job ONLY when
-#     a maintainer adds the `safe-to-test` label after auditing the diff — the
-#     security gate verifies that the latest labeler has admin/maintain repo
-#     permission before the GPU job can start. There is no bare `on: pull_request` that
-#     runs fork code unattended, and we never use `pull_request_target`.
+#     reviewed), manual `workflow_dispatch`, ChatOps `workflow_call`, and a
+#     narrow `pull_request_target` label gate. For direct PR auto-runs, the
+#     workflow source stays on the trusted base branch; the GPU job starts only
+#     after `safe-to-test` was added by admin/maintain and the current PR head
+#     has an admin/maintain APPROVED review.
 #  2. Also turn ON in repo settings: Actions → Fork pull request workflows →
 #     "Require approval for all external contributors".
 #  3. `permissions: contents: read` — the job gets a read-only GITHUB_TOKEN.
@@ -33,7 +33,7 @@ on:
   push:
     branches: [dev, main]
   workflow_dispatch:
-  pull_request:
+  pull_request_target:
     types: [labeled, synchronize, reopened]
   # Lets the ChatOps bot (ci-bot.yml) invoke this whole pipeline on an
   # authorized `@robonix-ci test` comment and read back the result summary.
@@ -120,13 +120,16 @@ jobs:
       safe_to_test_authorized: ${{ steps.safe_to_test.outputs.authorized }}
       safe_to_test_labeler: ${{ steps.safe_to_test.outputs.labeler }}
       safe_to_test_permission: ${{ steps.safe_to_test.outputs.permission }}
+      pr_review_approved: ${{ steps.pr_review.outputs.approved }}
+      pr_review_approver: ${{ steps.pr_review.outputs.approver }}
+      pr_review_permission: ${{ steps.pr_review.outputs.permission }}
     steps:
       - name: Authorize safe-to-test label
         id: safe_to_test
         uses: actions/github-script@v7
         with:
           script: |
-            if (context.eventName !== 'pull_request') {
+            if (context.eventName !== 'pull_request_target') {
               core.setOutput('authorized', 'true');
               core.setOutput('labeler', 'trusted-event');
               core.setOutput('permission', 'trusted-event');
@@ -170,22 +173,82 @@ jobs:
               core.notice(`safe-to-test was added by @${labeler || 'unknown'} with permission '${permission}', so GPU test will be skipped`);
             }
 
+      - name: Require maintainer approval for PR Webots testing
+        id: pr_review
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
+          PR_HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
+        with:
+          script: |
+            const prNumber = process.env.PR_NUMBER;
+            if (!prNumber) {
+              core.setOutput('approved', 'true');
+              core.setOutput('approver', 'trusted-event');
+              core.setOutput('permission', 'trusted-event');
+              return;
+            }
+            let headSha = process.env.PR_HEAD_SHA || '';
+            if (!headSha) {
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: Number(prNumber),
+              });
+              headSha = pr.data.head.sha || '';
+            }
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(prNumber),
+              per_page: 100,
+            });
+            const approved = [...reviews].reverse().filter(r =>
+              r.state === 'APPROVED' && (!headSha || r.commit_id === headSha) && r.user && r.user.login
+            );
+            for (const review of approved) {
+              const username = review.user.login;
+              let permission = 'none';
+              try {
+                const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username,
+                });
+                permission = r.data.permission || 'none';
+              } catch (e) {
+                core.notice(`could not resolve repo permission for approver @${username}: ${e.message}`);
+              }
+              if (['admin', 'maintain'].includes(permission)) {
+                core.setOutput('approved', 'true');
+                core.setOutput('approver', username);
+                core.setOutput('permission', permission);
+                return;
+              }
+            }
+            core.setOutput('approved', 'false');
+            core.setOutput('approver', '');
+            core.setOutput('permission', 'none');
+            core.notice(`PR #${prNumber} has no current-head APPROVED review from an admin/maintain user; Webots GPU test will be skipped`);
+
       - uses: actions/checkout@v4
         with:
-          # For ChatOps PR tests, checkout the current base branch first; the
-          # next step merges the PR head locally so stale refs/pull/*/merge refs
+          # For PR tests, checkout the current base branch first; the next
+          # step merges the PR head locally so stale refs/pull/*/merge refs
           # cannot make CI test an old base.
-          ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
-          fetch-depth: ${{ inputs.pr_number != '' && '0' || '1' }}
+          ref: ${{ (inputs.pr_number != '' || github.event_name == 'pull_request_target') && (inputs.pr_base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch) || inputs.ref }}
+          fetch-depth: ${{ (inputs.pr_number != '' || github.event_name == 'pull_request_target') && '0' || '1' }}
       - name: Merge PR head into current base
-        if: ${{ inputs.pr_number != '' }}
+        if: ${{ inputs.pr_number != '' || github.event_name == 'pull_request_target' }}
+        env:
+          TEST_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         run: |
           set -euo pipefail
           git fetch --no-tags --prune origin \
-            "+refs/pull/${{ inputs.pr_number }}/head:refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+            "+refs/pull/${TEST_PR_NUMBER}/head:refs/remotes/robonix-pr/${TEST_PR_NUMBER}/head"
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              merge --no-edit --no-ff "refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+              merge --no-edit --no-ff "refs/remotes/robonix-pr/${TEST_PR_NUMBER}/head"
           git log -1 --oneline
       - name: Scan executable build and runtime files
         run: |
@@ -235,15 +298,16 @@ jobs:
     # with Required reviewers in repo settings if we want GitHub to pause this
     # job before it is assigned to the self-hosted runner.
     environment: gpu-testing
-    # Belt-and-suspenders: require admin/maintain authorization for direct PR events.
-    # ChatOps callers must perform their own authorization gate before setting
-    # inputs.authorized=true; ci-bot.yml restricts that to trusted PR comments.
+    # Belt-and-suspenders: direct safe-to-test PR auto-runs require current-head
+    # approval by admin/maintain. ChatOps callers are authorized separately in
+    # ci-bot.yml and do not require PR approval.
     if: >-
       inputs.authorized == true ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       needs.security-gate.outputs.safe_to_test_authorized == 'true')
+      (github.event_name == 'pull_request_target' &&
+       needs.security-gate.outputs.safe_to_test_authorized == 'true' &&
+       needs.security-gate.outputs.pr_review_approved == 'true')
     runs-on: [self-hosted, robonix-testing]
     timeout-minutes: 90
     env:
