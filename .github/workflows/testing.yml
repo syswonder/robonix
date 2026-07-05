@@ -1167,12 +1167,7 @@ jobs:
   publish_report:
     name: Publish Webots report site
     needs: report
-    if: >-
-      always() &&
-      (inputs.authorized == true ||
-       github.event_name == 'push' ||
-       github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'workflow_call')
+    if: always()
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -1190,14 +1185,28 @@ jobs:
     env:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
       REPORTS_BRANCH: robonix-ci-reports
+      PUBLISH_REPORT_SITE: >-
+        ${{ inputs.authorized == true ||
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'workflow_call' }}
     steps:
+      - name: Mark Pages publish skipped for pull request
+        if: env.PUBLISH_REPORT_SITE != 'true'
+        run: |
+          set -euo pipefail
+          echo "Pages publishing is skipped for this pull_request event, but the required job succeeds."
+          echo "Download the testing-report-${GITHUB_RUN_ID} artifact for the generated HTML report." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout repository for report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
 
       - name: Download generated report
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -1206,6 +1215,7 @@ jobs:
           merge-multiple: true
 
       - name: Restore report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -1221,6 +1231,7 @@ jobs:
           fi
 
       - name: Stage report site
+        if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
           report_id="${GITHUB_RUN_ID}"
@@ -1251,6 +1262,7 @@ jobs:
           echo "report_url=${expected_report_url}" >> "$GITHUB_OUTPUT"
 
       - name: Persist report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -1269,9 +1281,11 @@ jobs:
           git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
 
       - name: Configure Pages
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1279,36 +1293,38 @@ jobs:
 
       - name: Deploy Pages (attempt 1)
         id: deployment_1
+        if: env.PUBLISH_REPORT_SITE == 'true'
         continue-on-error: true
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Wait before Pages deploy retry
-        if: steps.deployment_1.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success'
         run: sleep 60
 
       - name: Deploy Pages (attempt 2)
         id: deployment_2
-        if: steps.deployment_1.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success'
         continue-on-error: true
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Wait before final Pages deploy retry
-        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
         run: sleep 120
 
       - name: Deploy Pages (attempt 3)
         id: deployment_3
-        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Set report URL
         id: publish_url
+        if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
           page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
