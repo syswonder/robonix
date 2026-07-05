@@ -26,6 +26,7 @@ mod memory;
 mod pb;
 mod planner;
 mod service;
+mod soma_context;
 mod vlm;
 
 use anyhow::{Context, Result};
@@ -56,6 +57,19 @@ async fn main() -> Result<()> {
 
     atlas.register_service(&cfg.id, PILOT_NAMESPACE, "").await?;
     info!("registered as '{}' under '{PILOT_NAMESPACE}'", cfg.id);
+
+    let soma_prompt_block = match soma_context::fetch_system_prompt_block(&mut atlas, &cfg.id).await
+    {
+        Ok(Some(block)) => {
+            info!("loaded Soma body context into Pilot system prompt");
+            block
+        }
+        Ok(None) => String::new(),
+        Err(e) => {
+            warn!("Soma body context load failed; continuing without it: {e:#}");
+            String::new()
+        }
+    };
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -117,7 +131,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let svc = PilotServiceImpl::new(atlas, cfg.id.clone(), vlm);
+    let svc = PilotServiceImpl::new(atlas, cfg.id.clone(), vlm, soma_prompt_block);
 
     info!("RobonixSystemPilot gRPC on {listen_addr}");
     info!("robonix-pilot ready on {listen_addr}");

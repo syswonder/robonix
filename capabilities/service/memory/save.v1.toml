@@ -3,6 +3,7 @@ id      = "robonix/service/memory/save"
 version = "1"
 kind    = "service"
 idl     = "memory/srv/Save.srv"
+description = "Persist a fact, preference, or note into long-term memory."
 
 [mode]
 type = "rpc"

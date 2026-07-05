@@ -8,6 +8,7 @@ id      = "robonix/service/voiceprint/enroll"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/Enroll.srv"
+description = "Enroll a speaker identity from voice samples."
 
 [mode]
 type = "rpc"

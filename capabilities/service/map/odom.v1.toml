@@ -15,6 +15,7 @@ id      = "robonix/service/map/odom"
 version = "1"
 kind    = "service"
 idl     = "common_interfaces/nav_msgs/msg/Odometry.msg"
+description = "Continuous SLAM or localization odometry suitable for controllers."
 
 [mode]
 type = "topic_out"

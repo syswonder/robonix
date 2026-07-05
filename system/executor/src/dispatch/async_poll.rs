@@ -113,6 +113,11 @@ pub async fn run_until_terminal(
         };
 
         let (state, detail) = parse_status_json(&status_out);
+        // Record live state (RUNNING/PENDING/PAUSED or terminal) so
+        // get_plan_status reflects async progress between polls.
+        runtime
+            .record_op_state(&node.plan_id, &node.op_id, state)
+            .await;
         if rtdl_wire::is_terminal_state(state) {
             let result = terminal_result(call, state, &detail, &status_out);
             runtime

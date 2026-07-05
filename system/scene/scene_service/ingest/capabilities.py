@@ -22,10 +22,10 @@ Tier selection depends only on which *camera* streams are wired. The
 intrinsics / pose / extrinsics slots are recorded for the startup log
 and grounding-quality note, but they do NOT gate the tier. Their absence
 degrades grounding rather than the tier: ConceptGraphs falls back to tf2
-for a missing pose contract, but it *waits* for intrinsics rather than
-guessing — a missing intrinsics contract stalls object output instead of
-silently misplacing it (intrinsics come only from the contract, never a
-scene-side default).
+for a missing pose contract, and it uses intrinsics from the live
+contract when available. Simulator deployments may opt in to a reviewed
+`intrinsics_fallback`; otherwise a missing intrinsics contract still stalls
+object output instead of silently guessing K.
 """
 from __future__ import annotations
 
@@ -46,10 +46,10 @@ class PerceptionPlan:
     startup log explains itself. `grounding` is a coarse quality label
     for the metric tier — "metric" when intrinsics + a pose contract are
     both wired, "degraded" when one is missing (ConceptGraphs then waits
-    for intrinsics and/or falls back to tf2 pose); it is "n/a" off the
-    metric tier. It reflects wiring at startup, not live data arrival —
-    the detector's own logs are authoritative on whether K actually
-    landed."""
+    for intrinsics unless the deployment configured a reviewed fallback,
+    and/or falls back to tf2 pose); it is "n/a" off the metric tier. It
+    reflects wiring at startup, not live data arrival — the detector's own
+    logs are authoritative on whether K actually landed or fallback K was used."""
 
     tier: Tier
     detector: Detector

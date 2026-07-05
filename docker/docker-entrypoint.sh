@@ -12,7 +12,7 @@ apt install -qq -y iputils-ping screenfetch >/dev/null 2>&1
 
 source /opt/ros/humble/setup.bash
 
-export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 export ROBONIX_META_GRPC_ADDR="${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"
 export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"
 
@@ -20,7 +20,7 @@ if ! grep -q "### ROBONIX_DOCKER_ENV ###" ~/.bashrc 2>/dev/null; then
 cat <<'EOF' >> ~/.bashrc
 ### ROBONIX_DOCKER_ENV ###
 source /opt/ros/humble/setup.bash
-export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 export ROBONIX_META_GRPC_ADDR="${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"
 export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"
 EOF

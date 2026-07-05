@@ -85,16 +85,40 @@ rbnx codegen -p "$PKG" "${FLAGS[@]}"
 #     RBNX_GH_MIRROR= ./this-script.sh
 #
 WEIGHTS_DIR="$PKG/docker/_weights"
-mkdir -p "$WEIGHTS_DIR"
+MODEL_CACHE_DIR="${ROBONIX_MODEL_CACHE_DIR:-$WEIGHTS_DIR}"
+mkdir -p "$WEIGHTS_DIR" "$MODEL_CACHE_DIR"
 
 GH_MIRROR="${RBNX_GH_MIRROR-https://ghfast.top/}"
+DOWNLOAD_CONNECT_TIMEOUT="${RBNX_MODEL_DOWNLOAD_CONNECT_TIMEOUT:-20}"
+DOWNLOAD_MAX_TIME="${RBNX_MODEL_DOWNLOAD_MAX_TIME:-600}"
+DOWNLOAD_RETRIES="${RBNX_MODEL_DOWNLOAD_RETRIES:-3}"
+DOWNLOAD_SPEED_TIME="${RBNX_MODEL_DOWNLOAD_SPEED_TIME:-60}"
+DOWNLOAD_SPEED_LIMIT="${RBNX_MODEL_DOWNLOAD_SPEED_LIMIT:-1024}"
+
+copy_cached_weight() {
+    local src="$1"
+    local dest="$2"
+    mkdir -p "$(dirname "$dest")"
+    if [[ "$src" == "$dest" ]]; then
+        return 0
+    fi
+    cp -f "$src" "$dest"
+}
 
 fetch_weight() {
     local url="$1"
     local dest="$2"
+    local name
+    name="$(basename "$dest")"
+    local cached="$MODEL_CACHE_DIR/$name"
 
     if [[ -s "$dest" ]]; then
-        echo "[build] weight already present: $(basename "$dest")"
+        echo "[build] weight already present: $name"
+        return 0
+    fi
+    if [[ -s "$cached" ]]; then
+        echo "[build] using cached weight: $cached"
+        copy_cached_weight "$cached" "$dest"
         return 0
     fi
 
@@ -103,37 +127,43 @@ fetch_weight() {
         primary="${GH_MIRROR%/}/$url"
     fi
 
-    echo "[build] downloading $(basename "$dest") from $primary"
+    download_one() {
+        local source_url="$1"
+        local tmp="$cached.tmp.$$"
+        rm -f "$tmp"
+        echo "[build] downloading $name from $source_url"
+        if curl -fL \
+                --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
+                --max-time "$DOWNLOAD_MAX_TIME" \
+                --retry "$DOWNLOAD_RETRIES" \
+                --retry-all-errors \
+                --retry-delay 5 \
+                --speed-time "$DOWNLOAD_SPEED_TIME" \
+                --speed-limit "$DOWNLOAD_SPEED_LIMIT" \
+                -o "$tmp" \
+                "$source_url"; then
+            mv -f "$tmp" "$cached"
+            copy_cached_weight "$cached" "$dest"
+            return 0
+        fi
+        rm -f "$tmp"
+        return 1
+    }
 
-    if curl -fL \
-            --connect-timeout 30 \
-            --retry 5 \
-            --retry-all-errors \
-            --retry-delay 5 \
-            -o "$dest" \
-            "$primary"; then
+    if download_one "$primary"; then
         return 0
     fi
 
-    rm -f "$dest"
-
     if [[ "$primary" != "$url" ]]; then
         echo "[build] mirror failed; falling back to direct: $url" >&2
-
-        if curl -fL \
-                --connect-timeout 30 \
-                --retry 5 \
-                --retry-all-errors \
-                --retry-delay 5 \
-                -o "$dest" \
-                "$url"; then
+        if download_one "$url"; then
             return 0
         fi
-
-        rm -f "$dest"
     fi
 
+    rm -f "$dest"
     echo "[build] error: failed to download $url" >&2
+    echo "[build]        set ROBONIX_MODEL_CACHE_DIR to a directory containing $name to build offline" >&2
     exit 1
 }
 

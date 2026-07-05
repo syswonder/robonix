@@ -622,23 +622,25 @@ def test_normalize_relation():
 
 
 def test_llm_client_reasoning_effort_default():
-    """reasoning_effort defaults to 'minimal' and never silently drops to the
-    model's slow default on an empty/whitespace env value."""
+    """reasoning_effort is opt-in: unset/blank env → "" (field omitted, so
+    strict endpoints that 400 on unknown params are unaffected); a set env
+    value is used; a constructor arg overrides the env."""
     env_backup = _pop_llm_env()
     try:
         from scene_service.scene_graph.llm_client import SceneGraphLLMClient
 
-        # env unset → minimal
-        assert SceneGraphLLMClient().reasoning_effort == "minimal"
-        # env empty / whitespace → still minimal (no silent re-enable)
+        # env unset → "" (field omitted from requests)
+        assert SceneGraphLLMClient().reasoning_effort == ""
+        # env empty / whitespace → still "" (opt-in stays off)
         os.environ["VLM_REASONING_EFFORT"] = ""
-        assert SceneGraphLLMClient().reasoning_effort == "minimal"
+        assert SceneGraphLLMClient().reasoning_effort == ""
         os.environ["VLM_REASONING_EFFORT"] = "   "
-        assert SceneGraphLLMClient().reasoning_effort == "minimal"
+        assert SceneGraphLLMClient().reasoning_effort == ""
         # explicit env value wins
         os.environ["VLM_REASONING_EFFORT"] = "high"
         assert SceneGraphLLMClient().reasoning_effort == "high"
-        # explicit constructor "" is the escape hatch — disables the field
+        # constructor arg overrides the env
+        assert SceneGraphLLMClient(reasoning_effort="minimal").reasoning_effort == "minimal"
         assert SceneGraphLLMClient(reasoning_effort="").reasoning_effort == ""
     finally:
         _restore_llm_env(env_backup)

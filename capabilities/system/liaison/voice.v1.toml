@@ -5,6 +5,7 @@ id      = "robonix/system/liaison/voice"
 version = "1"
 kind    = "system"
 idl     = "liaison/srv/StartVoiceSession.srv"
+description = "Run a voice interaction session through Liaison."
 
 [mode]
 type = "rpc_server_stream"

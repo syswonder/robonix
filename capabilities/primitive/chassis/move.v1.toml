@@ -8,6 +8,7 @@ id      = "robonix/primitive/chassis/move"
 version = "1"
 kind    = "primitive"
 idl     = "chassis/srv/ExecuteMoveCommand.srv"
+description = "Low-level bounded chassis motion command without global path planning."
 
 [mode]
 type = "rpc"

@@ -39,4 +39,4 @@ tonic-prost-build.workspace = true
 protoc-bin-vendored.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["signal", "process", "fs"] }

@@ -62,6 +62,14 @@ The output should show `text path → OK` and `voice path → OK`.
 | `ROBONIX_LIAISON_VOICE_MOCK` | (unset) | Set to `1` to skip mic+ASR and use preset text |
 | `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `Hello, please introduce yourself.` | Text used in mock mode |
 | `ROBONIX_LIAISON_SOURCE` | (unset) | Set to `text` to enable the stdin text loop (headless) |
+| `ROBONIX_LIAISON_ACCESS_ENABLED` | `0` | Set to `1` to require user/voice access before Pilot, ASR post-gate, and TTS |
+| `ROBONIX_LIAISON_ALLOWED_USERS` | (empty) | Comma/space separated ids such as `local:alice,voice:alice` |
+| `ROBONIX_LIAISON_VOICE_THRESHOLD` | `0.25` | Minimum voiceprint confidence for a voice user to pass |
+
+When access is enabled, text/API tasks must carry an allowed
+`context_json.user_id` after Liaison normalisation. Voice turns capture mic
+audio first, call voiceprint, and only then enter ASR/Pilot/TTS if either the
+client user hint or the matched `voice:<user_id>` is in the allowed set.
 
 ## TUI Shortcuts
 
