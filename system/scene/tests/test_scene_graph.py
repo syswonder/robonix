@@ -220,7 +220,7 @@ def test_store_cache():
 def test_store_cache_map_id_partition():
     """Two stores with different map_ids on the same base dir keep isolated
     caches: each writes to its own <map_id> subdir and cannot read the other's
-    cached captions (the per-map scoping that prevents cross-map 串味)."""
+    cached captions."""
     from scene_service.scene_graph.store import SceneGraphStore
     from scene_service.scene_graph.types import SceneGraphNode
 
