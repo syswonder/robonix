@@ -205,10 +205,10 @@ contract definitions are documented in the
 [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md).
 
 This repository contains the core runtime, built-in reference services, and
-examples such as Webots/Tiago. External robot deploys and reusable community
-packages are tracked in the
-[Robonix Package Catalog](https://github.com/syswonder/robonix-package-catalog),
-not duplicated here.
+examples such as Webots/Tiago. Reusable community packages are indexed by the
+[Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/);
+their source stays in separate package repositories instead of being duplicated
+here.
 
 ### Built-in services — [`services/`](services/)
 
@@ -222,24 +222,32 @@ not duplicated here.
 
 ### External packages
 
-Use the [Robonix Package Catalog](https://github.com/syswonder/robonix-package-catalog)
-to find robot deploy repositories and reusable primitive, service, and skill
-packages maintained by the community.
+Use the [Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/)
+to find reusable primitive, service, and skill packages maintained outside this
+repository. The catalog also exposes machine-readable APIs:
+[`packages.json`](https://syswonder.github.io/robonix-package-catalog/api/packages.json),
+[`search.json`](https://syswonder.github.io/robonix-package-catalog/api/search.json),
+and per-package JSON under `/api/packages/<package-name>.json`.
 
 Repository naming follows the catalog convention:
 
-- `robot-[company]-[model]` for robot deploy repositories.
 - `primitive-[company]-[model]-[primitive_type]-rbnx` for primitive packages.
 - `service-[service_namespace]-rbnx` for service packages.
 - `skill-[skill_namespace]-rbnx` for skill packages.
 
 To contribute a community package:
 
-1. Create the package or robot deploy repository under the Robonix community
-   naming convention.
-2. Open a pull request to
+1. Put the package source in its own GitHub repository. The repository root
+   must contain `package_manifest.yaml`.
+2. In `package_manifest.yaml`, provide catalog metadata under `package`:
+   `name`, `version`, `description`, `tags`, and `maintainers`.
+   `maintainers` is a list of `Name <email@domain>` entries. Do not use legacy
+   `vendor` or `capability_id` fields.
+3. Open a pull request to
    [`syswonder/robonix-package-catalog`](https://github.com/syswonder/robonix-package-catalog)
-   adding the repository, contract namespace, and a short description.
+   and add only `name` + `repo` to `catalog.yaml`. The catalog CI fetches the
+   package manifest from GitHub, validates the name and metadata, generates the
+   website/API, and deploys it to GitHub Pages.
 
 ## Contributors
 
