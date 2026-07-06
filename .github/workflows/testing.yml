@@ -415,6 +415,12 @@ jobs:
               busybox:latest sh -c 'find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'
           fi
 
+      - name: Configure Git mirror for checkout
+        if: env.GIT_MIRROR_INSTEADOF == 'true'
+        run: |
+          set -euo pipefail
+          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
