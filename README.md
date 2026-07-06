@@ -224,10 +224,22 @@ here.
 
 Use the [Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/)
 to find reusable primitive, service, and skill packages maintained outside this
-repository. The catalog also exposes machine-readable APIs:
-[`packages.json`](https://syswonder.github.io/robonix-package-catalog/api/packages.json),
-[`search.json`](https://syswonder.github.io/robonix-package-catalog/api/search.json),
-and per-package JSON under `/api/packages/<package-name>.json`.
+repository. The catalog also exposes a machine-readable static JSON API:
+
+| Method | Path | Parameters |
+| --- | --- | --- |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/packages` | none |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/search` | none; filter client-side |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/package/<package-name>` | `package-name` is the exact `package.name`, URL-encoded |
+
+Example:
+
+```js
+const base = 'https://syswonder.github.io/robonix-package-catalog/api/v1';
+const catalog = await fetch(`${base}/packages`).then(r => r.json());
+const mapping = await fetch(`${base}/package/${encodeURIComponent('robonix.service.mapping')}`)
+  .then(r => r.json());
+```
 
 Repository naming follows the catalog convention:
 
