@@ -23,6 +23,11 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn package_name(name: &str, ns_kind: &str) -> String {
+    let normalized = name.replace('-', "_");
+    format!("robonix.{ns_kind}.{normalized}")
+}
+
 pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<()> {
     validate_name(name)?;
 
@@ -53,14 +58,13 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
     output::action("PackageNew", &format!("creating package '{name}'"));
 
     // Provider class + namespace segment for the generated skeleton.
-    // `--path` mode leaves pkg_type at its clap default ("service"); fall
-    // back to primitive for anything unrecognised so the skeleton is still
-    // valid Python the author can edit.
+    // `--path` mode leaves pkg_type at its clap default ("service").
     let (provider_class, ns_kind) = match pkg_type {
         "service" => ("Service", "service"),
         "skill" => ("Skill", "skill"),
         _ => ("Primitive", "primitive"),
     };
+    let package_name = package_name(name, ns_kind);
 
     // Create directory structure; put .gitkeep in empty dirs.
     for sub in ["scripts", "capabilities"] {
@@ -81,10 +85,12 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 package:
-  name: com.vendor.{name}
+  name: "{package_name}"
   version: 0.0.1
-  vendor: vendor
-  description: TODO
+  description: "TODO: describe this package."
+  tags: ["{ns_kind}", "{name}"]
+  maintainers:
+    - "TODO Maintainer <maintainer@example.com>"
   license: Apache-2.0
 
 capabilities: []
