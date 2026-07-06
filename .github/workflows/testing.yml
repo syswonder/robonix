@@ -1433,7 +1433,7 @@ jobs:
           page_url="${REPORT_BASE_URL}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for report Pages URL
+      - name: Probe report Pages URL
         if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           REPORT_URL: ${{ steps.publish_url.outputs.report_url }}
@@ -1446,8 +1446,8 @@ jobs:
             echo "report URL is not ready yet: ${REPORT_URL} (attempt ${attempt}/30)"
             sleep 10
           done
-          echo "report URL did not become reachable: ${REPORT_URL}" >&2
-          exit 1
+          echo "::warning::report URL is not reachable yet; GitHub Pages may still be building: ${REPORT_URL}"
+          echo "Report URL is not reachable yet; GitHub Pages may still be building: ${REPORT_URL}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record Pages deployment status
         if: env.PUBLISH_REPORT_SITE == 'true'
