@@ -1,7 +1,8 @@
 # Robonix full-stack testing — real Webots sim + real components + fake VLM.
 #
-# Runs on the self-hosted GPU runner (label `robonix-testing`, pinned to one GPU
-# via the runner's own CUDA_VISIBLE_DEVICES). Cheap checks (fmt/clippy/build/unit)
+# Runs on the self-hosted GPU runner (label `robonix-testing`). The selected
+# GPU is configurable via workflow input, repository/org variable, or runner env.
+# Cheap checks (fmt/clippy/build/unit)
 # live in ci.yml on GitHub-hosted runners and gate every PR; THIS workflow is the
 # heavy GPU testing job and is deliberately NOT exposed to untrusted PR code.
 #
@@ -33,6 +34,11 @@ on:
   push:
     branches: [dev, main]
   workflow_dispatch:
+    inputs:
+      gpu_id:
+        description: "GPU index visible on the selected self-hosted runner; defaults to vars.ROBONIX_CI_GPU_ID or 0"
+        required: false
+        default: ""
   pull_request_target:
     types: [labeled, synchronize, reopened]
   # Lets the ChatOps bot (ci-bot.yml) invoke this whole pipeline on an
@@ -89,6 +95,10 @@ on:
         type: boolean
         required: false
         default: false
+      gpu_id:
+        description: "GPU index visible on the selected self-hosted runner; defaults to vars.ROBONIX_CI_GPU_ID or 0"
+        type: string
+        required: false
     secrets:
       DEEPSEEK_API_KEY:
         required: false
@@ -318,11 +328,10 @@ jobs:
       GRPCIO_PIN: "1.80.0"
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
-      # Pin CI to the runner's reserved 5090. Without this, torch/Webots may
-      # default to GPU0/1, which are often occupied by interactive workloads.
-      CUDA_VISIBLE_DEVICES: "2"
-      ROBONIX_GPU_ID: "2"
-      NVIDIA_VISIBLE_DEVICES: "2"
+      # GPU selection is runner-specific. Priority:
+      # workflow_call input -> repo/org variable -> runner env -> default GPU 0.
+      ROBONIX_CI_GPU_ID_INPUT: ${{ inputs.gpu_id || '' }}
+      ROBONIX_CI_GPU_ID_VAR: ${{ vars.ROBONIX_CI_GPU_ID || '' }}
       RMW_IMPLEMENTATION: "rmw_zenoh_cpp"
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
@@ -355,6 +364,28 @@ jobs:
             auth.docker.io:443
             production.cloudflare.docker.com:443
 
+      - name: Select runner GPU
+        run: |
+          set -euo pipefail
+          gpu_id="${ROBONIX_CI_GPU_ID_INPUT:-${ROBONIX_CI_GPU_ID_VAR:-${ROBONIX_CI_GPU_ID:-${CUDA_VISIBLE_DEVICES:-${ROBONIX_GPU_ID:-0}}}}}"
+          if [ -z "$gpu_id" ]; then
+            gpu_id=0
+          fi
+          case "$gpu_id" in
+            ''|*[!0-9]*) echo "::error::ROBONIX_CI_GPU_ID must be a numeric GPU index, got '$gpu_id'"; exit 1 ;;
+          esac
+          if ! nvidia-smi --query-gpu=index --format=csv,noheader,nounits | awk '{print $1}' | grep -Fxq "$gpu_id"; then
+            echo "::error::selected GPU index $gpu_id is not present on this runner"
+            nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader,nounits || true
+            exit 1
+          fi
+          {
+            echo "ROBONIX_CI_GPU_ID=$gpu_id"
+            echo "CUDA_VISIBLE_DEVICES=$gpu_id"
+            echo "ROBONIX_GPU_ID=$gpu_id"
+            echo "NVIDIA_VISIBLE_DEVICES=$gpu_id"
+          } >> "$GITHUB_ENV"
+
       - name: Verify GPU health
         run: |
           # NEVER nvidia-smi --gpu-reset / rmmod / driver writes (RTX 5090 GSP
@@ -368,7 +399,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${GITHUB_WORKSPACE:-}" in
-            /home/*/actions-runner/_work/*/*) ;;
+            /home/*/*/_work/*/*) ;;
             *) echo "::error::refusing to reset unexpected workspace: ${GITHUB_WORKSPACE:-<unset>}"; exit 1 ;;
           esac
           mkdir -p "$GITHUB_WORKSPACE"
