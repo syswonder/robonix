@@ -7,9 +7,10 @@
 // When Soma is ready, SubprocessHandle is replaced with gRPC clients —
 // the rest of the pipeline stays unchanged.
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::Duration;
 
 /// Manages a long-running Python subprocess that reads JSON commands from
 /// stdin and writes JSON responses to stdout (one line per response).
@@ -19,6 +20,7 @@ pub struct SubprocessHandle {
     #[allow(dead_code)]
     child: Child,
     label: String,
+    alive: bool,
 }
 
 impl SubprocessHandle {
@@ -51,30 +53,58 @@ impl SubprocessHandle {
         let stdout = child.stdout.take().context("capture script stdout")?;
         let reader = BufReader::new(stdout);
 
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("check {label} startup status"))?
+        {
+            bail!("{label} script exited during startup with {status}");
+        }
+
         Ok(Self {
             stdin,
             reader,
             child,
             label: label.to_string(),
+            alive: true,
         })
     }
 
     /// Send a `{"cmd":"collect"}` request and read one JSON line back.
     /// Returns the raw trimmed line, or `None` on any I/O error.
     pub fn collect_json(&mut self) -> Option<String> {
+        if !self.alive {
+            return None;
+        }
+        if !self.is_alive() {
+            self.alive = false;
+            return None;
+        }
+
         let cmd = serde_json::json!({"cmd": "collect"});
         if let Err(e) = writeln!(self.stdin, "{cmd}") {
             log::error!("[{}] write to script failed: {e:#}", self.label);
+            self.alive = false;
             return None;
         }
         if let Err(e) = self.stdin.flush() {
             log::error!("[{}] flush stdin failed: {e:#}", self.label);
+            self.alive = false;
             return None;
         }
         let mut line = String::new();
-        if let Err(e) = self.reader.read_line(&mut line) {
-            log::error!("[{}] read from script failed: {e:#}", self.label);
-            return None;
+        match self.reader.read_line(&mut line) {
+            Ok(0) => {
+                log::warn!("[{}] script closed stdout", self.label);
+                self.alive = false;
+                return None;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::error!("[{}] read from script failed: {e:#}", self.label);
+                self.alive = false;
+                return None;
+            }
         }
         let trimmed = line.trim().to_string();
         if trimmed.is_empty() {
@@ -122,6 +152,7 @@ impl SubprocessHandle {
         let stdout = child.stdout.take().context("capture script stdout")?;
         self.reader = BufReader::new(stdout);
         self.child = child;
+        self.alive = true;
         Ok(())
     }
 }
