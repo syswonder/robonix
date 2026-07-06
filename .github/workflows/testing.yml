@@ -342,6 +342,7 @@ jobs:
       ROBONIX_SIM_IPC: "private"
       WEBOTS_HEADLESS_MODE: "nvidia"
       WEBOTS_STREAM: "1"
+      ROBONIX_SIM_PRIVILEGED: "true"
 
     steps:
       - name: Configure network egress policy
