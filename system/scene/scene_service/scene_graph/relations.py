@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from typing import Optional
 
 from .llm_client import SceneGraphLLMClient
-from .prompts import RELATION_SYSTEM_PROMPT, build_relation_user_prompt
+from .prompts import (
+    RELATION_SYSTEM_PROMPT,
+    SEMANTIC_RELATION_SYSTEM_PROMPT,
+    SEMANTIC_RELATIONS,
+    build_relation_user_prompt,
+    build_semantic_relation_user_prompt,
+)
 from .types import (
     RELATION_TYPES,
     GeometryHint,
@@ -17,6 +24,25 @@ from .types import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# Per-call LLM timeout. The old hard-coded 20 s was below the reasoning
+# model's latency on a real relation prompt, so calls intermittently
+# ReadTimeout'd (and the empty-string timeout looked like a bare
+# "request failed:"). 60 s is generous headroom; with
+# VLM_REASONING_EFFORT=minimal a call returns in ~2 s anyway.
+_LLM_TIMEOUT_SEC = 60.0
+
+
+def _normalize_relation(relation: object) -> str:
+    """Canonicalize an LLM-returned relation to the wire vocabulary.
+
+    Lowercases and collapses spaces/hyphens to underscores so a model that
+    answers ``"on top of"`` or ``"On-Top-Of"`` still maps to the
+    ``on_top_of`` token instead of silently falling through to
+    ``unknown``/``none``. Unknown tokens are left for the caller's
+    membership check to reject."""
+    return re.sub(r"[\s\-]+", "_", str(relation).strip().lower())
 
 
 # ── geometry helpers ─────────────────────────────────────────────────────────
@@ -146,7 +172,7 @@ class RelationInferer:
         raw = await self.llm_client.chat_json(
             system_prompt=RELATION_SYSTEM_PROMPT,
             user_message=user_msg,
-            timeout=20,
+            timeout=_LLM_TIMEOUT_SEC,
         )
 
         if not raw:
@@ -159,7 +185,7 @@ class RelationInferer:
                 reason="LLM call returned empty",
             )
 
-        relation = raw.get("relation", "unknown")
+        relation = _normalize_relation(raw.get("relation", "unknown"))
         if relation not in RELATION_TYPES:
             log.debug(
                 "[scene-graph] LLM returned unknown relation '%s'; "
@@ -183,4 +209,58 @@ class RelationInferer:
             confidence=max(0.0, min(1.0, confidence)),
             method="llm",
             reason=reason,
+        )
+
+    async def infer_semantic_relation(
+        self,
+        source: SceneGraphNode,
+        target: SceneGraphNode,
+        hint: GeometryHint,
+        known_relation: str,
+    ) -> SceneGraphEdge:
+        """Semantic-only inference for a pair whose spatial relation geometry
+        already owns (``known_relation``). The LLM is constrained to the
+        semantic vocabulary; any spatial or off-vocabulary answer collapses
+        to ``"none"`` (geometry stays authoritative for the spatial slot).
+        On transport failure the edge is ``relation="unknown"`` /
+        ``method="llm_fail"`` so the builder retries it like a rate-limited
+        pair rather than caching a false "no semantic relation"."""
+        user_msg = build_semantic_relation_user_prompt(
+            source, target, hint, known_relation
+        )
+        raw = await self.llm_client.chat_json(
+            system_prompt=SEMANTIC_RELATION_SYSTEM_PROMPT,
+            user_message=user_msg,
+            timeout=_LLM_TIMEOUT_SEC,
+        )
+
+        if not raw:
+            return SceneGraphEdge(
+                source_id=source.object_id,
+                target_id=target.object_id,
+                relation="unknown",
+                confidence=0.0,
+                method="llm_fail",
+                reason="LLM call returned empty",
+            )
+
+        relation = _normalize_relation(raw.get("relation", "none"))
+        if relation not in SEMANTIC_RELATIONS:
+            # Spatial / unknown / garbage — geometry owns the spatial slot,
+            # so anything that is not a semantic relation means "none".
+            relation = "none"
+
+        confidence = 0.0
+        try:
+            confidence = float(raw.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            pass
+
+        return SceneGraphEdge(
+            source_id=source.object_id,
+            target_id=target.object_id,
+            relation=relation,
+            confidence=max(0.0, min(1.0, confidence)),
+            method="llm",
+            reason=str(raw.get("reason", "")),
         )
