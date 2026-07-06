@@ -1,6 +1,12 @@
 # Query hand metadata — joint count, names, and model.  LLM-facing MCP tool.
 # Consumer calls this first to discover the expected array length for move_joint,
 # enabling model-agnostic adaptation across different dexterous hands.
+# Reply: ok=false (e.g. driver not initialized, hardware not connected) with a
+# human-readable reason in message and empty metadata; ok=true leaves message
+# empty and populates joint_names / model / num_joints.
+# model is a free-form hardware identifier (e.g. "BeingBeyond D1") for display
+# and diagnostics only — do NOT branch program logic on it; use joint_names /
+# num_joints for capability decisions.
 [contract]
 id      = "robonix/primitive/hand/info"
 version = "1"

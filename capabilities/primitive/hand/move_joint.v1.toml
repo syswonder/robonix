@@ -1,6 +1,9 @@
 # Set all joint positions (0=open, 1=closed).  LLM-facing MCP tool.
 # Request includes joint_names alongside positions so the driver can validate
 # joint order.  Call info first to discover expected array length and names.
+# Reply: ok=false on rejection (length mismatch, unknown joint, out-of-range
+# position, hardware fault) with a human-readable reason in message; ok=true
+# leaves message empty.
 [contract]
 id      = "robonix/primitive/hand/move_joint"
 version = "1"

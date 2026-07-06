@@ -1,5 +1,6 @@
-# Lifecycle entry point.  Every primitive MUST declare this contract — `rbnx boot`
-# calls Driver(CMD_INIT, config_json) against it and waits for ok=true.
+# Lifecycle interface every hand primitive implementation MUST declare.
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
+# right after RegisterCapability and waits for ok=true before moving on.
 [contract]
 id      = "robonix/primitive/hand/driver"
 version = "1"
