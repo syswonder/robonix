@@ -200,12 +200,15 @@ Dive deeper:
 ## Ecosystem
 
 Robonix is built from small, swappable **packages**, each implementing one or
-more capability contracts under a `robonix/<kind>/<area>/*` namespace (browse
-them in the [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md)).
-Packages come in two flavours:
+more capability contracts under a `robonix/<kind>/<area>/*` namespace. The
+contract definitions are documented in the
+[interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md).
 
-- **Built-in reference packages** ship in this repo under [`services/`](services/) and deploy as-is.
-- **Community packages** live in their own repos and are pulled in at boot via the manifest's `url:` field — fork one as a template to add new hardware or behaviour.
+This repository contains the core runtime, built-in reference services, and
+examples such as Webots/Tiago. External robot deploys and reusable community
+packages are tracked in the
+[Robonix Package Catalog](https://github.com/syswonder/robonix-package-catalog),
+not duplicated here.
 
 ### Built-in services — [`services/`](services/)
 
@@ -217,39 +220,26 @@ Packages come in two flavours:
 
 > `scene` (3D scene graph) and the core runtime (`atlas`, `executor`, `pilot`, `liaison`) are **system** components under [`system/`](system/), not services.
 
-### Community packages
+### External packages
 
-Standalone repos, cloned at boot via `url:` in the deploy manifest.
+Use the [Robonix Package Catalog](https://github.com/syswonder/robonix-package-catalog)
+to find robot deploy repositories and reusable primitive, service, and skill
+packages maintained by the community.
 
-**Primitives** — one hardware device per package:
+Repository naming follows the catalog convention:
 
-| Package | Hardware | Namespace |
-|---|---|---|
-| [`ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx) | AgileX Ranger Mini v3 chassis | `robonix/primitive/chassis/*` |
-| [`mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx) | Livox MID-360 — point cloud | `robonix/primitive/lidar/*` |
-| [`mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx) | Livox MID-360 — IMU | `robonix/primitive/imu/*` |
-| [`realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx) | Intel RealSense camera | `robonix/primitive/camera/*` |
+- `robot-[company]-[model]` for robot deploy repositories.
+- `primitive-[company]-[model]-[primitive_type]-rbnx` for primitive packages.
+- `service-[service_namespace]-rbnx` for service packages.
+- `skill-[skill_namespace]-rbnx` for skill packages.
 
-**Services** — robot-level algorithms:
+To contribute a community package:
 
-| Package | What it does | Namespace |
-|---|---|---|
-| [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) | SLAM mapping (RTAB-Map + FAST-LIO2) | `robonix/service/map/*` |
-| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
-
-**Skills** — LLM-triggered composite tasks:
-
-| Package | What it does | Namespace |
-|---|---|---|
-| [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx) | Autonomous frontier room exploration | `robonix/skill/explore/*` |
-| [`greet_rbnx`](https://github.com/enkerewpo/greet_rbnx) | Greet passers-by — YOLO person detection → VLM line → speak | `robonix/skill/greet/*` |
-
-**Tools & deployments:**
-
-| Repo | What it is |
-|---|---|
-| [Robonix Skill Toolkit](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit) | Train VLA-based skills: collect teleop data, fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, deploy on a real arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)). |
-| [ranger_mini_deploy](https://github.com/enkerewpo/ranger_mini_deploy) | Full deploy manifest for the AgileX Ranger Mini robot at Syswonder Lab. |
+1. Create the package or robot deploy repository under the Robonix community
+   naming convention.
+2. Open a pull request to
+   [`syswonder/robonix-package-catalog`](https://github.com/syswonder/robonix-package-catalog)
+   adding the repository, contract namespace, and a short description.
 
 ## Contributors
 
