@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT="${INPUT:-$SCRIPT_DIR/demo_01.mp4}"
-OUTPUT="${OUTPUT:-$SCRIPT_DIR/demo_01_readme.gif}"
+OUTPUT="${OUTPUT:-$SCRIPT_DIR/demo_01_readme.local.gif}"
 START="${START:-0}"
 # README GIFs: keep short unless you really need the whole video.
 DURATION="${DURATION:-20}"
