@@ -126,7 +126,7 @@ service:
   # boots services in manifest order; until the defer-queue lands
   # consumers must come after their providers.
   - name: mapping
-    url: https://github.com/enkerewpo/mapping_rbnx
+    url: https://github.com/syswonder/service-map-rbnx
     branch: main
     config:
       algo: rtabmap
@@ -153,7 +153,7 @@ service:
   # mapping (its /map provider); on_init returns Deferred until mapping is
   # up, so order is a convenience, not a hard requirement.
   - name: nav2
-    url: https://github.com/enkerewpo/nav2_wrapper_rbnx
+    url: https://github.com/syswonder/service-navigation-rbnx
     branch: main
     config:
       params_profile: sim
@@ -164,7 +164,7 @@ service:
 skill:
   # explore_rbnx — autonomous frontier exploration.
   - name: explore
-    url: https://github.com/enkerewpo/explore_rbnx
+    url: https://github.com/syswonder/skill-explore-rbnx
     branch: main
     config:
       # example place holders

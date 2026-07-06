@@ -241,8 +241,7 @@ To contribute a community package:
    must contain `package_manifest.yaml`.
 2. In `package_manifest.yaml`, provide catalog metadata under `package`:
    `name`, `version`, `description`, `tags`, and `maintainers`.
-   `maintainers` is a list of `Name <email@domain>` entries. Do not use legacy
-   `vendor` or `capability_id` fields.
+   `maintainers` is a list of `Name <email@domain>` entries.
 3. Open a pull request to
    [`syswonder/robonix-package-catalog`](https://github.com/syswonder/robonix-package-catalog)
    and add only `name` + `repo` to `catalog.yaml`. The catalog CI fetches the

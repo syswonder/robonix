@@ -65,9 +65,11 @@ pub struct Package {
     #[serde(default)]
     pub version: String,
     #[serde(default)]
-    pub vendor: String,
-    #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub maintainers: Vec<String>,
     #[serde(default)]
     pub license: String,
 }
@@ -279,7 +281,6 @@ impl Manifest {
         for (name, val) in [
             ("package.name", &p.name),
             ("package.version", &p.version),
-            ("package.vendor", &p.vendor),
             ("package.description", &p.description),
             ("package.license", &p.license),
         ] {
