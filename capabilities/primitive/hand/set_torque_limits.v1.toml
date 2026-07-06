@@ -1,5 +1,7 @@
-# Set torque limit per joint (0-1).  NOT exposed as MCP — same reasoning as
-# set_speed_limits: motor parameters belong in skill/service task context.
+# Set torque limit per joint (0-1).  Request includes joint_names alongside
+# limits so the driver can validate joint order (mirrors move_joint convention).
+# NOT exposed as MCP — same reasoning as set_speed_limits: motor parameters
+# belong in skill/service task context.
 [contract]
 id      = "robonix/primitive/hand/set_torque_limits"
 version = "1"

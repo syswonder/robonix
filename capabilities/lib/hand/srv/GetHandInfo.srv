@@ -1,4 +1,6 @@
 ---
+bool ok
+string message
 string[] joint_names
 string model
 uint32 num_joints

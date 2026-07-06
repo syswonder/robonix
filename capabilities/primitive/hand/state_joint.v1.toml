@@ -1,5 +1,5 @@
 # Continuous ROS 2 topic stream of current joint positions.
-# Publishes JointState messages (float64[] values) at driver-native rate.
+# Publishes JointState messages (float64[] positions) at driver-native rate.
 # Array order matches info.joint_names — consumer must query info first
 # to map indices to joint names.
 [contract]
