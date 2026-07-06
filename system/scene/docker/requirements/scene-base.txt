@@ -5,6 +5,7 @@ fastmcp
 grpcio
 grpcio-tools
 protobuf
+pymilvus[milvus_lite]!=2.6.10,>=2.5.0
 uvicorn
 httpx
 Pillow

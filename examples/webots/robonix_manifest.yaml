@@ -2,6 +2,11 @@ manifestVersion: 1
 name: robonix-webots-example-deploy
 
 env:
+  # Bind scene's semantic store to the same named SLAM map as `mapping`
+  # below (the join key between geometric + semantic maps). Propagated by
+  # `rbnx boot` into the process env, which scene's start.sh forwards as
+  # `-e SCENE_MAP_ID` into the container. Keep this id == mapping's `map_id`.
+  SCENE_MAP_ID: webots_lab
 
 # boot in sequence: system -> soma+scene -> execution -> interaction
 system:
@@ -126,6 +131,8 @@ service:
     config:
       algo: rtabmap
       platform: x86_desktop
+      map_id: webots_lab
+      map_mode: mapping
       sensors:
         lidar2d: true # webots do not have 3d pointcloud, so we use 2d lidar
         lidar3d: false

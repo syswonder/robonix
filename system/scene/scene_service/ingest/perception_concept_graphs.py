@@ -750,8 +750,13 @@ class ConceptGraphsDetector:
 
         # ── YOLO-World detect ────────────────────────────────────────
         try:
+            # device must be explicit: ultralytics auto-selects CUDA when
+            # torch sees a GPU, bypassing SCENE_CG_FORCE_CPU — and crashing
+            # on hosts where YOLO-under-CUDA is unstable (the reason that
+            # flag exists).
             yolo_results = self._yolo.predict(
                 rgb, conf=self._conf_thresh, verbose=False,
+                device=self._device,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("yolo-world predict failed: %s", e)
