@@ -1,22 +1,35 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
 use crate::pb::contracts::{
+    robonix_system_soma_get_health_server::RobonixSystemSomaGetHealth,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdf,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYaml,
+    robonix_system_soma_health_server::RobonixSystemSomaHealth,
 };
-use crate::pb::soma::{GetUrdfRequest, GetUrdfResponse, GetYamlRequest, GetYamlResponse};
+use crate::pb::soma::{
+    GetHealthRequest, GetHealthResponse, GetUrdfRequest, GetUrdfResponse, GetYamlRequest,
+    GetYamlResponse, SomaHealthSnapshot, StreamHealthRequest,
+};
 use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
+use tokio::sync::{RwLock, broadcast};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 #[derive(Debug)]
 pub struct SomaService {
     body: Arc<SomaBody>,
+    latest_snapshot: Arc<RwLock<Option<SomaHealthSnapshot>>>,
+    snapshot_tx: broadcast::Sender<SomaHealthSnapshot>,
 }
 
 impl SomaService {
-    pub fn new(body: Arc<SomaBody>) -> Self {
-        Self { body }
+    pub fn new(body: Arc<SomaBody>, snapshot_tx: broadcast::Sender<SomaHealthSnapshot>) -> Self {
+        Self {
+            body,
+            latest_snapshot: Arc::new(RwLock::new(None)),
+            snapshot_tx,
+        }
     }
 
     fn map_lookup_error(error: StoreError) -> Status {
@@ -62,6 +75,62 @@ impl RobonixSystemSomaGetUrdf for SomaService {
     }
 }
 
+#[tonic::async_trait]
+impl RobonixSystemSomaGetHealth for SomaService {
+    async fn get_health(
+        &self,
+        _request: Request<GetHealthRequest>,
+    ) -> Result<Response<GetHealthResponse>, Status> {
+        let snapshot = self.latest_snapshot.read().await.clone();
+        Ok(Response::new(GetHealthResponse { snapshot }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemSomaHealth for SomaService {
+    type StreamHealthStream = ReceiverStream<Result<SomaHealthSnapshot, Status>>;
+
+    async fn stream_health(
+        &self,
+        _request: Request<StreamHealthRequest>,
+    ) -> Result<Response<Self::StreamHealthStream>, Status> {
+        let mut rx = self.snapshot_tx.subscribe();
+        let latest = self.latest_snapshot.clone();
+        let (tx, out_rx) = tokio::sync::mpsc::channel(16);
+
+        tokio::spawn(async move {
+            // Send current snapshot first (if any), then forward new ones.
+            if let Some(snap) = latest.read().await.clone()
+                && tx.send(Ok(snap)).await.is_err()
+            {
+                return;
+            }
+            loop {
+                match rx.recv().await {
+                    Ok(snapshot) => {
+                        if tx.send(Ok(snapshot)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        robonix_scribe::warn!("[soma] health broadcast lagged by {n} frames");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
+}
+
+impl SomaService {
+    /// Update the cached latest snapshot (called by health collector).
+    pub async fn update_snapshot(&self, snapshot: SomaHealthSnapshot) {
+        *self.latest_snapshot.write().await = Some(snapshot);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,9 +150,14 @@ mod tests {
         Arc::new(SomaBody::load(&yaml_path).expect("load fixture body"))
     }
 
+    fn fixture_svc(body: Arc<SomaBody>) -> SomaService {
+        let (tx, _) = broadcast::channel(8);
+        SomaService::new(body, tx)
+    }
+
     #[tokio::test]
     async fn get_yaml_returns_raw_text() {
-        let service = SomaService::new(fixture_body());
+        let service = fixture_svc(fixture_body());
         let response = service
             .get_yaml(Request::new(GetYamlRequest {
                 robot_id: "test_ci_robot".into(),
@@ -97,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_urdf_returns_xml_text() {
-        let service = SomaService::new(fixture_body());
+        let service = fixture_svc(fixture_body());
         let response = service
             .get_urdf(Request::new(GetUrdfRequest {
                 robot_id: "".into(),
@@ -111,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_robot_maps_to_not_found() {
-        let service = SomaService::new(fixture_body());
+        let service = fixture_svc(fixture_body());
         let status = service
             .get_yaml(Request::new(GetYamlRequest {
                 robot_id: "missing".into(),
@@ -125,7 +199,7 @@ mod tests {
     async fn grpc_clients_call_yaml_and_urdf_services() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        let service = Arc::new(SomaService::new(fixture_body()));
+        let service = Arc::new(fixture_svc(fixture_body()));
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(

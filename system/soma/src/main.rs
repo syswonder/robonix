@@ -36,19 +36,26 @@ use robonix_soma::config::{Args, SomaConfig};
 use robonix_soma::deployment::Deployment;
 use robonix_soma::launcher::PackageLauncher;
 use robonix_soma::pb::contracts::{
+    robonix_system_soma_get_health_server::RobonixSystemSomaGetHealthServer,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYamlServer,
+    robonix_system_soma_health_server::RobonixSystemSomaHealthServer,
 };
 use robonix_soma::service::SomaService;
 use robonix_soma::store::SomaBody;
-use robonix_soma::{GET_URDF_CONTRACT, GET_YAML_CONTRACT, SOMA_NAMESPACE};
+use robonix_soma::{
+    GET_HEALTH_CONTRACT, GET_URDF_CONTRACT, GET_YAML_CONTRACT, HEALTH_CONTRACT, SOMA_NAMESPACE,
+};
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::broadcast;
 
 const GET_YAML_TOML: &str = "capabilities/system/soma/get_yaml.v1.toml";
 const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
+const HEALTH_TOML: &str = "capabilities/system/soma/health.v1.toml";
+const GET_HEALTH_TOML: &str = "capabilities/system/soma/get_health.v1.toml";
 /// Line rbnx writes to the stage-trigger pipe to release soma's
 /// stage 2. Match this exactly in rbnx's `cmd::deploy.rs` — they're
 /// a contract pair, not configurable per deployment.
@@ -204,7 +211,89 @@ async fn main() -> Result<()> {
         }
     });
 
-    let svc = Arc::new(SomaService::new(body));
+    // ── Health streaming setup ──────────────────────────────────────
+    // Broadcast channel for SomaHealthSnapshot: health collector pushes,
+    // StreamHealth subscribers pull.
+    let (snapshot_tx, _) = broadcast::channel::<robonix_soma::pb::soma::SomaHealthSnapshot>(8);
+    let svc = Arc::new(SomaService::new(body.clone(), snapshot_tx.clone()));
+
+    // Background task: cache the latest snapshot for GetHealth.
+    {
+        let svc_cache = svc.clone();
+        let mut cache_rx = snapshot_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match cache_rx.recv().await {
+                    Ok(snapshot) => {
+                        svc_cache.update_snapshot(snapshot).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    // Start health collector: discovers health primitives via Atlas,
+    // consumes their streams, broadcasts SomaHealthSnapshot.
+    if deployment.primitives.is_empty() {
+        warn!(
+            "No primitives declared in robonix_manifest.yaml — \
+             SOMA health stream will be empty.  Add a health primitive \
+             (e.g. health_piper) to the manifest's primitive: list."
+        );
+    }
+    {
+        let health_atlas = atlas.clone();
+        let health_body_id = body.robot_id.clone();
+        let health_tx = snapshot_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = robonix_soma::health::start_health_collector(
+                health_atlas,
+                health_body_id,
+                "piper".to_string(), // arm model: piper (configurable later via soma.yaml)
+                health_tx,
+            )
+            .await
+            {
+                robonix_scribe::warn!("[soma] health collector failed: {e:#}");
+            }
+        });
+    }
+
+    // Declare health capabilities.
+    atlas
+        .declare_capability(
+            &config.provider_id,
+            GET_HEALTH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                GET_HEALTH_TOML,
+                "robonix.contracts.RobonixSystemSomaGetHealth",
+                "/robonix.contracts.RobonixSystemSomaGetHealth/GetHealth",
+            ),
+        )
+        .await
+        .context("declare Soma get_health gRPC capability")?;
+    info!("declared GetHealth at {advertised}");
+
+    atlas
+        .declare_capability(
+            &config.provider_id,
+            HEALTH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                HEALTH_TOML,
+                "robonix.contracts.RobonixSystemSomaHealth",
+                "/robonix.contracts.RobonixSystemSomaHealth/StreamHealth",
+            ),
+        )
+        .await
+        .context("declare Soma stream_health gRPC capability")?;
+    info!("declared StreamHealth at {advertised}");
+
     info!(
         "robonix-soma ready on {}  (robot loaded, provider_id={})",
         config.listen, config.provider_id
@@ -212,7 +301,9 @@ async fn main() -> Result<()> {
     let shutdown = shutdown_signal(heartbeat_failure);
     let serve_result = tonic::transport::Server::builder()
         .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(&svc)))
-        .add_service(RobonixSystemSomaGetUrdfServer::from_arc(svc))
+        .add_service(RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&svc)))
+        .add_service(RobonixSystemSomaGetHealthServer::from_arc(Arc::clone(&svc)))
+        .add_service(RobonixSystemSomaHealthServer::from_arc(svc))
         .serve_with_shutdown(listen_addr, shutdown)
         .await;
     // Always abort the stage-2 watcher before tearing down children,

@@ -158,8 +158,9 @@ async fn main() -> Result<()> {
             Err(_) => soma_ingest::default_thresholds(),
         };
 
-    if let Some(mut stream) =
-        soma_ingest::open_soma_stream(&mut atlas, &cfg.id, cfg.soma_endpoint.as_deref()).await?
+    // ── SOMA stream consumer (background, retries until SOMA appears) ──
+    // Start the gRPC server immediately so Vitals is ready before SOMA.
+    // The SOMA connection retries in the background.
     {
         let svc_for_stream = svc.clone();
         let rules_for_stream = soma_rules.clone();
@@ -167,6 +168,27 @@ async fn main() -> Result<()> {
         let reconnect_consumer_id = cfg.id.clone();
         let reconnect_soma_endpoint = cfg.soma_endpoint.clone();
         tokio::spawn(async move {
+            // Initial connect: retry until SOMA appears.
+            let mut stream = loop {
+                match soma_ingest::open_soma_stream(
+                    &mut reconnect_atlas,
+                    &reconnect_consumer_id,
+                    reconnect_soma_endpoint.as_deref(),
+                )
+                .await
+                {
+                    Ok(Some(s)) => break s,
+                    Ok(None) => {
+                        log::warn!("[vitals] waiting for Soma health stream...");
+                    }
+                    Err(e) => {
+                        log::warn!("[vitals] Soma connect failed: {e:#} — retrying in 2s...");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            };
+            log::info!("[vitals] connected to Soma StreamHealth");
+
             // Outer loop: reconnect on stream end or error.
             loop {
                 // Inner loop: process stream messages.
@@ -218,23 +240,19 @@ async fn main() -> Result<()> {
                 }
             }
         });
-
-        info!("Vitals gRPC on {listen_addr} (Soma input)");
-        eprintln!("robonix-vitals ready on {listen_addr} (Soma input)");
-
-        tonic::transport::Server::builder()
-            .add_service(RobonixSystemVitalsGetServer::new(svc.clone()))
-            .add_service(RobonixSystemVitalsStreamServer::new(svc))
-            .serve(listen_addr)
-            .await
-            .context("vitals gRPC server failed")?;
-
-        return Ok(());
     }
 
-    log::error!("[vitals] no Soma stream available — Vitals requires Soma (real or mock)");
-    eprintln!("robonix-vitals: no Soma stream available. Start real Soma or use --mock-soma.");
-    std::process::exit(1);
+    info!("Vitals gRPC on {listen_addr} (Soma input)");
+    eprintln!("robonix-vitals ready on {listen_addr} (Soma input)");
+
+    tonic::transport::Server::builder()
+        .add_service(RobonixSystemVitalsGetServer::new(svc.clone()))
+        .add_service(RobonixSystemVitalsStreamServer::new(svc))
+        .serve(listen_addr)
+        .await
+        .context("vitals gRPC server failed")?;
+
+    Ok(())
 }
 
 fn monotonic_ns() -> u64 {
