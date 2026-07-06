@@ -1,10 +1,10 @@
 # Set speed limit per joint (0-1).  NOT exposed as MCP — LLM should not
 # tune motor parameters directly; skill/service set these in task context.
 [contract]
-id      = "robonix/primitive/hand/set_speed"
+id      = "robonix/primitive/hand/set_speed_limits"
 version = "1"
 kind    = "primitive"
-idl     = "hand/srv/SetSpeed.srv"
+idl     = "hand/srv/SetSpeedLimits.srv"
 
 [mode]
 type = "rpc"

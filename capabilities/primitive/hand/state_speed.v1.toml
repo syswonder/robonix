@@ -1,5 +1,6 @@
 # Continuous ROS 2 topic stream of current joint speeds.
-# Reuses JointState message — semantics: positions → speed.
+# Reuses JointState message — semantics: values → speed.
+# Array order matches info.joint_names.
 [contract]
 id      = "robonix/primitive/hand/state_speed"
 version = "1"
