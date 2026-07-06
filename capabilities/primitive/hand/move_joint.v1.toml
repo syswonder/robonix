@@ -1,5 +1,6 @@
 # Set all joint positions (0=open, 1=closed).  LLM-facing MCP tool.
-# Call info first to discover expected array length and joint order.
+# Request includes joint_names alongside positions so the driver can validate
+# joint order.  Call info first to discover expected array length and names.
 [contract]
 id      = "robonix/primitive/hand/move_joint"
 version = "1"
