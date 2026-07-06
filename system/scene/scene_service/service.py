@@ -865,6 +865,15 @@ async def _run() -> None:
     # arrive; the embedder is wired in later (only needed for writes). The
     # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
     # prior boot wrote rows — but writes are driven by the scene-graph builder.
+    # Which SLAM map this scene session belongs to. Deploy-controlled until
+    # mapping emits a real map identity — manifest `map_id` wins, else the
+    # SCENE_MAP_ID env, else "default". This is the join key against mapping
+    # and the scope key for ALL of scene's persistent state: object poses are
+    # only valid in their own map's frame, and so are the scene-graph caption/
+    # relation caches. Computed once here so the object store (below) and the
+    # scene-graph cache (further down) partition on the same value.
+    map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
+
     obj_store = None
     if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
         from .persistence import ObjectStore
@@ -872,11 +881,6 @@ async def _run() -> None:
         db_path = os.environ.get(
             "SCENE_OBJECT_MEMORY_DB", "/data/robonix/scene_memory/objects.db"
         )
-        # Which SLAM map's objects to load/store. Deploy-controlled until
-        # mapping emits a real map identity — manifest `map_id` wins, else
-        # the SCENE_MAP_ID env, else "default". Object poses are only valid
-        # in their own map's frame, so persistence is scoped per map.
-        map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
         try:
             obj_store = ObjectStore(db_path, map_id=map_id)
             restored = obj_store.load_all()
@@ -983,7 +987,13 @@ async def _run() -> None:
     sg_cache_dir = os.environ.get(
         "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
     )
-    sg_store = SceneGraphStore(cache_dir=sg_cache_dir)
+    # Partition the scene-graph caches by the same map_id as the object store,
+    # so caption/relation answers from one map never bleed into another.
+    sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=map_id)
+    log.info(
+        "[scene-graph] cache base=%s partitioned by map_id=%s",
+        sg_cache_dir, map_id,
+    )
     mcp_tools.attach_scene_graph_store(sg_store)
     geo_loop = GeometricRelationLoop(registry, sg_store)
     await geo_loop.start()
