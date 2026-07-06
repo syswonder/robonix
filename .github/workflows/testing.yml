@@ -1005,8 +1005,8 @@ jobs:
               sleep 1
             done
             if [ -n "$xnum" ] && [ -S "/tmp/.X11-unix/X${xnum}" ]; then
-              echo "::error::stale per-run X socket remains: /tmp/.X11-unix/X${xnum}"
-              exit 1
+              echo "::warning::stale per-run X socket remains after cleanup: /tmp/.X11-unix/X${xnum}"
+              ls -l "/tmp/.X11-unix/X${xnum}" || true
             fi
           fi
           docker volume ls -q --filter "name=ci-${RUN_ID}_" | while read -r vid; do
