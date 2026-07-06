@@ -36,6 +36,7 @@ from typing import Any
 DXL_AVAILABLE = False
 try:
     from dynamixel_sdk import (  # type: ignore[import-untyped]
+        COMM_SUCCESS,
         GroupSyncRead,
         PacketHandler,
         PortHandler,
@@ -85,6 +86,36 @@ def _decode_hw_error(error_code: int) -> str:
     return ",".join(labels)
 
 
+def _sync_read_u8(reader: Any, address: int, length: int) -> tuple[list[int], list[bool]]:
+    """Read one byte-like register from all Koch motors.
+
+    Dynamixel SDK's GroupSyncRead.txRxPacket() returns one communication result,
+    not a per-motor failure bitmap.  Per-motor availability must be checked with
+    isAvailable() before getData().
+    """
+    reader.clearParam()
+    params_ok: list[bool] = []
+    for mid in MOTOR_IDS:
+        params_ok.append(bool(reader.addParam(mid)))
+
+    comm_result = reader.txRxPacket()
+    values: list[int] = []
+    available: list[bool] = []
+    for i, mid in enumerate(MOTOR_IDS):
+        ok = (
+            params_ok[i]
+            and comm_result == COMM_SUCCESS
+            and bool(reader.isAvailable(mid, address, length))
+        )
+        if ok:
+            values.append(int(reader.getData(mid, address, length)))
+            available.append(True)
+        else:
+            values.append(-1)
+            available.append(False)
+    return values, available
+
+
 # ---------------------------------------------------------------------------
 # Koch collector
 # ---------------------------------------------------------------------------
@@ -131,53 +162,32 @@ class KochCollector:
         components: list[dict[str, Any]] = []
 
         # ── Read temperatures ──────────────────────────────────────────
-        self._temp_reader.clearParam()
-        for mid in MOTOR_IDS:
-            self._temp_reader.addParam(mid)
-        _comm_result, comm_fail = self._temp_reader.txRxPacket()
-        temps: list[int] = []
-        for mid in MOTOR_IDS:
-            if comm_fail & (1 << (mid - 1)):
-                temps.append(-1)
-            else:
-                temps.append(
-                    self._temp_reader.getData(
-                        mid, ADDR_PRESENT_TEMPERATURE, LEN_PRESENT_TEMPERATURE
-                    )
-                )
+        temps, temp_ok = _sync_read_u8(
+            self._temp_reader,
+            ADDR_PRESENT_TEMPERATURE,
+            LEN_PRESENT_TEMPERATURE,
+        )
 
         # ── Read hardware error status ─────────────────────────────────
-        self._error_reader.clearParam()
-        for mid in MOTOR_IDS:
-            self._error_reader.addParam(mid)
-        _comm_result, comm_fail = self._error_reader.txRxPacket()
-        errors: list[int] = []
-        for mid in MOTOR_IDS:
-            if comm_fail & (1 << (mid - 1)):
-                errors.append(-1)
-            else:
-                errors.append(
-                    self._error_reader.getData(
-                        mid, ADDR_HARDWARE_ERROR_STATUS, LEN_HARDWARE_ERROR_STATUS
-                    )
-                )
+        errors, error_ok = _sync_read_u8(
+            self._error_reader,
+            ADDR_HARDWARE_ERROR_STATUS,
+            LEN_HARDWARE_ERROR_STATUS,
+        )
 
         # ── Read torque enable ─────────────────────────────────────────
-        self._torque_reader.clearParam()
-        for mid in MOTOR_IDS:
-            self._torque_reader.addParam(mid)
-        _comm_result, comm_fail = self._torque_reader.txRxPacket()
-        enables: list[bool] = []
-        for mid in MOTOR_IDS:
-            if comm_fail & (1 << (mid - 1)):
-                enables.append(False)
-            else:
-                enables.append(
-                    self._torque_reader.getData(
-                        mid, ADDR_TORQUE_ENABLE, LEN_TORQUE_ENABLE
-                    )
-                    == 1
-                )
+        enable_values, enable_ok = _sync_read_u8(
+            self._torque_reader,
+            ADDR_TORQUE_ENABLE,
+            LEN_TORQUE_ENABLE,
+        )
+        enables = [
+            ok and value == 1 for value, ok in zip(enable_values, enable_ok)
+        ]
+
+        joint_ok = [
+            temp_ok[i] and error_ok[i] and enable_ok[i] for i in range(JOINT_COUNT)
+        ]
 
         # ── Build component list ───────────────────────────────────────
         for i in range(JOINT_COUNT):
@@ -194,14 +204,16 @@ class KochCollector:
         # ── Arm-level state ────────────────────────────────────────────
         state = 0  # NORMAL
         message_parts: list[str] = []
-        has_comm_failure = any(t == -1 for t in temps)
+        has_comm_failure = any(not ok for ok in joint_ok)
         has_hw_error = any(e > 0 for e in errors)
 
         if has_hw_error or has_comm_failure:
             state = 1  # FAULT
 
-        # Decode fault labels from per-component error_codes into message.
-        for comp in components:
+        # Decode fault labels and communication failures into arm-level message.
+        for i, comp in enumerate(components):
+            if not joint_ok[i]:
+                message_parts.append(f"{comp['name']}:comm")
             if comp["error_code"] != 0:
                 label = _decode_hw_error(comp["error_code"])
                 message_parts.append(f"{comp['name']}:{label}")
@@ -231,7 +243,12 @@ def main() -> None:
 
     serial_port = sys.argv[1]
     baudrate = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_BAUDRATE
-    collector = KochCollector(serial_port, baudrate)
+    try:
+        collector = KochCollector(serial_port, baudrate)
+    except Exception as exc:
+        print(f"[koch_bridge] startup failed: {exc}", file=sys.stderr, flush=True)
+        sys.exit(1)
+
     print(
         f"[koch_bridge] connected to Koch arm via {serial_port} @ {baudrate} bps",
         file=sys.stderr,
@@ -244,7 +261,11 @@ def main() -> None:
         except json.JSONDecodeError:
             continue
         if cmd.get("cmd") == "collect":
-            result = collector.collect()
+            try:
+                result = collector.collect()
+            except Exception as exc:
+                print(f"[koch_bridge] collect failed: {exc}", file=sys.stderr, flush=True)
+                continue
             print(json.dumps(result), flush=True)
 
 
