@@ -557,15 +557,18 @@ jobs:
       - name: Configure toolchain and workspace
         run: |
           set -euo pipefail
-          export PATH="$HOME/.local/bin:$PATH"
+          python3 -m venv "$RUNNER_TEMP/robonix-ci-venv"
+          export PATH="$RUNNER_TEMP/robonix-ci-venv/bin:$HOME/.local/bin:$PATH"
+          echo "$RUNNER_TEMP/robonix-ci-venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
           # Keep the mirror rewrite for rbnx build remote provider clones.
           git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
-          # codegen tools pinned to the runtime grpcio version.
-          python3 -m pip install --user "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
+          # codegen tools pinned to the runtime grpcio version. Install them in
+          # a per-job venv so Debian/Ubuntu PEP 668 system Python remains intact.
+          python3 -m pip install "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
           # testing harness (fake VLM + scenario runner) parses YAML scenarios.
-          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+          python3 -m pip install pyyaml
           # Build and use binaries from THIS checkout. Do not mutate or trust the
           # runner user's ~/.cargo/bin; this is a shared Webots host.
           cargo build --workspace
