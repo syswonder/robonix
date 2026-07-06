@@ -11,10 +11,11 @@
 # auto-ran here would be arbitrary code execution on our box. Controls:
 #
 #  1. Triggers below are TRUSTED ONLY: `push` to dev/main (already-merged =
-#     reviewed) and manual `workflow_dispatch`. A PR runs the GPU job ONLY when
-#     a maintainer adds the `safe-to-test` label after auditing the diff — the
-#     `if:` on the job enforces that. There is no bare `on: pull_request` that
-#     runs fork code unattended, and we never use `pull_request_target`.
+#     reviewed), manual `workflow_dispatch`, ChatOps `workflow_call`, and a
+#     narrow `pull_request_target` label gate. For direct PR auto-runs, the
+#     workflow source stays on the trusted base branch; the GPU job starts only
+#     after `safe-to-test` was added by admin/maintain and the current PR head
+#     has an admin/maintain APPROVED review.
 #  2. Also turn ON in repo settings: Actions → Fork pull request workflows →
 #     "Require approval for all external contributors".
 #  3. `permissions: contents: read` — the job gets a read-only GITHUB_TOKEN.
@@ -32,7 +33,7 @@ on:
   push:
     branches: [dev, main]
   workflow_dispatch:
-  pull_request:
+  pull_request_target:
     types: [labeled, synchronize, reopened]
   # Lets the ChatOps bot (ci-bot.yml) invoke this whole pipeline on an
   # authorized `@robonix-ci test` comment and read back the result summary.
@@ -67,6 +68,10 @@ on:
         description: "pull request head branch when invoked by ChatOps"
         type: string
         required: false
+      pr_base_ref:
+        description: "pull request base branch when invoked by ChatOps"
+        type: string
+        required: false
       pr_head_repo:
         description: "pull request head repository when invoked by ChatOps"
         type: string
@@ -97,6 +102,8 @@ on:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
   pages: write
   id-token: write
 
@@ -109,23 +116,139 @@ jobs:
   security-gate:
     name: Preflight security checks
     runs-on: ubuntu-22.04
+    outputs:
+      safe_to_test_authorized: ${{ steps.safe_to_test.outputs.authorized }}
+      safe_to_test_labeler: ${{ steps.safe_to_test.outputs.labeler }}
+      safe_to_test_permission: ${{ steps.safe_to_test.outputs.permission }}
+      pr_review_approved: ${{ steps.pr_review.outputs.approved }}
+      pr_review_approver: ${{ steps.pr_review.outputs.approver }}
+      pr_review_permission: ${{ steps.pr_review.outputs.permission }}
     steps:
+      - name: Authorize safe-to-test label
+        id: safe_to_test
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'pull_request_target') {
+              core.setOutput('authorized', 'true');
+              core.setOutput('labeler', 'trusted-event');
+              core.setOutput('permission', 'trusted-event');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            const labels = (pr.labels || []).map(l => l.name);
+            if (!labels.includes('safe-to-test')) {
+              core.setOutput('authorized', 'false');
+              core.setOutput('labeler', '');
+              core.setOutput('permission', 'none');
+              core.notice('safe-to-test label is absent; GPU test will be skipped');
+              return;
+            }
+            const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const labeled = [...events].reverse().find(e =>
+              e.event === 'labeled' && e.label && e.label.name === 'safe-to-test' && e.actor && e.actor.login
+            );
+            const labeler = labeled?.actor?.login || '';
+            let permission = 'none';
+            if (labeler) {
+              try {
+                const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner, repo: context.repo.repo, username: labeler,
+                });
+                permission = r.data.permission || 'none';
+              } catch (e) {
+                core.notice(`could not resolve repo permission for safe-to-test labeler @${labeler}: ${e.message}`);
+              }
+            }
+            const authorized = ['admin', 'maintain'].includes(permission);
+            core.setOutput('authorized', String(authorized));
+            core.setOutput('labeler', labeler);
+            core.setOutput('permission', permission);
+            if (!authorized) {
+              core.notice(`safe-to-test was added by @${labeler || 'unknown'} with permission '${permission}', so GPU test will be skipped`);
+            }
+
+      - name: Require maintainer approval for PR Webots testing
+        id: pr_review
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
+          PR_HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
+        with:
+          script: |
+            const prNumber = process.env.PR_NUMBER;
+            if (!prNumber) {
+              core.setOutput('approved', 'true');
+              core.setOutput('approver', 'trusted-event');
+              core.setOutput('permission', 'trusted-event');
+              return;
+            }
+            let headSha = process.env.PR_HEAD_SHA || '';
+            if (!headSha) {
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: Number(prNumber),
+              });
+              headSha = pr.data.head.sha || '';
+            }
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(prNumber),
+              per_page: 100,
+            });
+            const approved = [...reviews].reverse().filter(r =>
+              r.state === 'APPROVED' && (!headSha || r.commit_id === headSha) && r.user && r.user.login
+            );
+            for (const review of approved) {
+              const username = review.user.login;
+              let permission = 'none';
+              try {
+                const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username,
+                });
+                permission = r.data.permission || 'none';
+              } catch (e) {
+                core.notice(`could not resolve repo permission for approver @${username}: ${e.message}`);
+              }
+              if (['admin', 'maintain'].includes(permission)) {
+                core.setOutput('approved', 'true');
+                core.setOutput('approver', username);
+                core.setOutput('permission', permission);
+                return;
+              }
+            }
+            core.setOutput('approved', 'false');
+            core.setOutput('approver', '');
+            core.setOutput('permission', 'none');
+            core.notice(`PR #${prNumber} has no current-head APPROVED review from an admin/maintain user; Webots GPU test will be skipped`);
+
       - uses: actions/checkout@v4
         with:
-          # For ChatOps PR tests, checkout the current base branch first; the
-          # next step merges the PR head locally so stale refs/pull/*/merge refs
+          # For PR tests, checkout the current base branch first; the next
+          # step merges the PR head locally so stale refs/pull/*/merge refs
           # cannot make CI test an old base.
-          ref: ${{ inputs.pr_number != '' && github.event.repository.default_branch || inputs.ref }}
-          fetch-depth: 0
+          ref: ${{ (inputs.pr_number != '' || github.event_name == 'pull_request_target') && (inputs.pr_base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch) || inputs.ref }}
+          fetch-depth: ${{ (inputs.pr_number != '' || github.event_name == 'pull_request_target') && '0' || '1' }}
       - name: Merge PR head into current base
-        if: ${{ inputs.pr_number != '' }}
+        if: ${{ inputs.pr_number != '' || github.event_name == 'pull_request_target' }}
+        env:
+          TEST_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         run: |
           set -euo pipefail
           git fetch --no-tags --prune origin \
-            "+refs/pull/${{ inputs.pr_number }}/head:refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+            "+refs/pull/${TEST_PR_NUMBER}/head:refs/remotes/robonix-pr/${TEST_PR_NUMBER}/head"
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              merge --no-edit --no-ff "refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+              merge --no-edit --no-ff "refs/remotes/robonix-pr/${TEST_PR_NUMBER}/head"
           git log -1 --oneline
       - name: Scan executable build and runtime files
         run: |
@@ -150,9 +273,20 @@ jobs:
           echo "forbidden-operation scan clean"
       - name: Scan for committed secrets
         run: |
-          docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:latest \
-            detect --source=/repo --no-banner --redact \
-            || { echo "::error::possible secret in diff"; exit 1; }
+          set -euo pipefail
+          # ChatOps PR tests need full git history for local merge-base
+          # resolution. Never scan .git history here; scan only tracked files
+          # from the merged working tree that will actually run.
+          scan_dir="$RUNNER_TEMP/gitleaks-tree"
+          rm -rf "$scan_dir"
+          mkdir -p "$scan_dir"
+          while IFS= read -r -d '' f; do
+            mkdir -p "$scan_dir/$(dirname "$f")"
+            cp -a "$f" "$scan_dir/$f"
+          done < <(git ls-files -z)
+          docker run --rm -v "$scan_dir:/repo:ro" zricethezav/gitleaks:latest \
+            dir /repo --no-banner --redact \
+            || { echo "::error::possible secret in checked-out tree"; exit 1; }
 
   # ── Gate 2: the GPU testing job itself ────────────────────────────────────
   gpu_testing:
@@ -164,15 +298,16 @@ jobs:
     # with Required reviewers in repo settings if we want GitHub to pause this
     # job before it is assigned to the self-hosted runner.
     environment: gpu-testing
-    # Belt-and-suspenders: require `safe-to-test` for direct PR events.
-    # ChatOps callers must perform their own authorization gate before setting
-    # inputs.authorized=true; ci-bot.yml restricts that to trusted PR comments.
+    # Belt-and-suspenders: direct safe-to-test PR auto-runs require current-head
+    # approval by admin/maintain. ChatOps callers are authorized separately in
+    # ci-bot.yml and do not require PR approval.
     if: >-
       inputs.authorized == true ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request_target' &&
+       needs.security-gate.outputs.safe_to_test_authorized == 'true' &&
+       needs.security-gate.outputs.pr_review_approved == 'true')
     runs-on: [self-hosted, robonix-testing]
     timeout-minutes: 90
     env:
@@ -253,8 +388,8 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.pr_number != '' && github.event.repository.default_branch || inputs.ref }}
-          fetch-depth: 0
+          ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
+          fetch-depth: ${{ inputs.pr_number != '' && '0' || '1' }}
 
       - name: Merge PR head into current base
         if: ${{ inputs.pr_number != '' }}
@@ -277,7 +412,72 @@ jobs:
       - name: Configure run isolation
         run: |
           set -euo pipefail
-          suffix=$((RUN_ID % 1000))
+          base_suffix=$((RUN_ID % 1000))
+          suffix=""
+          xdisplay=""
+
+          port_is_listening() {
+            ss -ltn "sport = :$1" | grep -q LISTEN
+          }
+
+          xdisplay_has_live_server() {
+            ps -eo pid=,args= | awk -v d=":$1" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {found=1} END {exit found ? 0 : 1}'
+          }
+
+          remove_stale_x_socket() {
+            display="$1"
+            socket="/tmp/.X11-unix/X${display}"
+            [ -S "$socket" ] || return 0
+            if xdisplay_has_live_server "$display"; then
+              return 1
+            fi
+            echo "removing stale per-run X socket: $socket"
+            rm -f "$socket" 2>/dev/null || sudo -n rm -f "$socket" 2>/dev/null || true
+            if [ -S "$socket" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
+              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "$socket" >/dev/null 2>&1 || true
+            fi
+            [ ! -S "$socket" ]
+          }
+
+          for offset in $(seq 0 199); do
+            candidate_suffix=$(((base_suffix + offset) % 1000))
+            candidate_xdisplay=$((1000 + candidate_suffix))
+            candidate_ports=(
+              $((19000 + candidate_suffix))
+              $((20000 + candidate_suffix))
+              $((21000 + candidate_suffix))
+              $((22000 + candidate_suffix))
+              $((18000 + candidate_suffix))
+              $((23000 + candidate_suffix))
+              $((24000 + candidate_suffix))
+              $((25000 + candidate_suffix))
+              $((26000 + candidate_suffix))
+              $((27000 + candidate_suffix))
+            )
+
+            busy=0
+            for port in "${candidate_ports[@]}"; do
+              if port_is_listening "$port"; then
+                busy=1
+                break
+              fi
+            done
+            [ "$busy" -eq 0 ] || continue
+
+            if [ -S "/tmp/.X11-unix/X${candidate_xdisplay}" ] && ! remove_stale_x_socket "$candidate_xdisplay"; then
+              continue
+            fi
+
+            suffix="$candidate_suffix"
+            xdisplay="$candidate_xdisplay"
+            break
+          done
+
+          if [ -z "$suffix" ] || [ -z "$xdisplay" ]; then
+            echo "::error::could not find an unused per-run port/display slot from base suffix $base_suffix"
+            exit 1
+          fi
+
           atlas_port=$((19000 + suffix))
           executor_port=$((20000 + suffix))
           pilot_port=$((21000 + suffix))
@@ -288,25 +488,9 @@ jobs:
           mapping_port=$((25000 + suffix))
           nav2_port=$((26000 + suffix))
           scene_web_port=$((27000 + suffix))
-          ros_domain_id=$((90 + (RUN_ID % 100)))
-          xdisplay=$((1000 + suffix))
+          ros_domain_id=$((90 + (suffix % 100)))
 
-          if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
-            x_pids=$(ps -eo pid=,args= | awk -v d=":${xdisplay}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
-            if [ -n "$x_pids" ]; then
-              echo "::error::per-run X display already in use: :${xdisplay}"
-              exit 1
-            fi
-            echo "removing stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-            rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || sudo -n rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || true
-            if [ -S "/tmp/.X11-unix/X${xdisplay}" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
-              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "/tmp/.X11-unix/X${xdisplay}" >/dev/null 2>&1 || true
-            fi
-            if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
-              echo "::error::could not remove stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-              exit 1
-            fi
-          fi
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port} ros_domain_id=${ros_domain_id}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
@@ -340,13 +524,6 @@ jobs:
             echo "RBNX_MODEL_DOWNLOAD_RETRIES=2"
           } >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TOOL_CACHE:-$HOME/.cache}/robonix-models"
-
-          for port in "$atlas_port" "$executor_port" "$pilot_port" "$liaison_port" "$fake_vlm_port" "$stream_port" "$viewer_port" "$mapping_port" "$nav2_port" "$scene_web_port"; do
-            if ss -ltn "sport = :$port" | grep -q LISTEN; then
-              echo "::error::per-run port already in use: $port"
-              exit 1
-            fi
-          done
 
       - name: Configure toolchain and workspace
         run: |
@@ -812,6 +989,7 @@ jobs:
           REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
           REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
           REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+          REPORT_PR_BASE_REF: ${{ inputs.pr_base_ref || github.event.pull_request.base.ref || '' }}
           REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
           REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
           REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
@@ -917,6 +1095,7 @@ jobs:
               "pr_author": env("REPORT_PR_AUTHOR"),
               "pr_url": env("REPORT_PR_URL"),
               "pr_head_ref": env("REPORT_PR_HEAD_REF"),
+              "pr_base_ref": env("REPORT_PR_BASE_REF"),
               "pr_head_repo": env("REPORT_PR_HEAD_REPO"),
               "pr_head_sha": env("REPORT_PR_HEAD_SHA"),
               "pr_head_commit_url": env("PR_HEAD_COMMIT_URL"),
@@ -974,6 +1153,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=$pr_head_commit_url" \
@@ -1037,6 +1217,7 @@ jobs:
       REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
       REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
       REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+      REPORT_PR_BASE_REF: ${{ inputs.pr_base_ref || github.event.pull_request.base.ref || '' }}
       REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
       REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
       REPORT_TEST_REF: ${{ inputs.ref || github.ref }}
@@ -1085,6 +1266,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=${pr_head_commit_url}" \
@@ -1105,12 +1287,7 @@ jobs:
   publish_report:
     name: Publish Webots report site
     needs: report
-    if: >-
-      always() &&
-      (inputs.authorized == true ||
-       github.event_name == 'push' ||
-       github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'workflow_call')
+    if: always()
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -1120,22 +1297,33 @@ jobs:
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.publish_url.outputs.report_url }}
     outputs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
       REPORTS_BRANCH: robonix-ci-reports
+      PUBLISH_REPORT_SITE: >-
+        ${{ inputs.authorized == true ||
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'workflow_call' }}
     steps:
+      - name: Mark Pages publish skipped for pull request
+        if: env.PUBLISH_REPORT_SITE != 'true'
+        run: |
+          set -euo pipefail
+          echo "Pages publishing is skipped for this pull_request event, but the required job succeeds."
+          echo "Download the testing-report-${GITHUB_RUN_ID} artifact for the generated HTML report." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout repository for report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
 
       - name: Download generated report
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -1144,6 +1332,7 @@ jobs:
           merge-multiple: true
 
       - name: Restore report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -1159,6 +1348,7 @@ jobs:
           fi
 
       - name: Stage report site
+        if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
           report_id="${GITHUB_RUN_ID}"
@@ -1189,6 +1379,7 @@ jobs:
           echo "report_url=${expected_report_url}" >> "$GITHUB_OUTPUT"
 
       - name: Persist report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -1207,9 +1398,11 @@ jobs:
           git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
 
       - name: Configure Pages
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1217,36 +1410,38 @@ jobs:
 
       - name: Deploy Pages (attempt 1)
         id: deployment_1
+        if: env.PUBLISH_REPORT_SITE == 'true'
         continue-on-error: true
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Wait before Pages deploy retry
-        if: steps.deployment_1.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success'
         run: sleep 60
 
       - name: Deploy Pages (attempt 2)
         id: deployment_2
-        if: steps.deployment_1.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success'
         continue-on-error: true
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Wait before final Pages deploy retry
-        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
         run: sleep 120
 
       - name: Deploy Pages (attempt 3)
         id: deployment_3
-        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
+        if: env.PUBLISH_REPORT_SITE == 'true' && steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Set report URL
         id: publish_url
+        if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
           page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"

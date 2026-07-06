@@ -275,6 +275,77 @@ class ObjectRegistry:
                 flipped += 1
         return flipped
 
+    # ── cross-tick re-bind / soft eviction ─────────────────────────────────
+    # The perception layer (concept-graphs) releases an object's tracking
+    # uuid whenever a cleanup tick culls or re-keys it; without these, the
+    # record is hard-deleted and a re-detection a few ticks later mints a
+    # fresh id at observation_count=1 (the "9 objects → 1" collapse). Keeping
+    # the record `missing` and re-binding it by class+pose preserves the id
+    # and accumulated count across the uuid gap. This generalizes the same
+    # class+distance gate the perception layer already uses for warm-restore
+    # re-binding (`_rebind_restored`).
+
+    def find_rebindable(
+        self,
+        cls: str,
+        pose: Pose3D,
+        max_d: float,
+        *,
+        only_missing: bool = False,
+        exclude_oids: Optional[Iterable[str]] = None,
+    ) -> Optional[SceneObject]:
+        """Nearest non-robot, non-restored record of class `cls` whose centroid
+        is within `max_d` of `pose`, else None.
+
+        With `only_missing=True` only soft-evicted (`missing`) records are
+        considered — the cross-tick re-bind case, where a re-detected object
+        reclaims the id it held before a cull. `exclude_oids` skips records
+        already claimed this tick. Restored records are excluded (the
+        perception layer re-binds those via its own warm-restore path). Caller
+        must hold the lock."""
+        excl = set(exclude_oids or ())
+        best: Optional[SceneObject] = None
+        best_d = max_d
+        for obj in self._objects.values():
+            if obj.object_id in excl or obj.cls != cls:
+                continue
+            if obj.attributes.get("is_robot") or obj.attributes.get("restored"):
+                continue
+            if only_missing and not obj.missing:
+                continue
+            d = _dist3(obj.pose, pose)
+            if d <= best_d:
+                best_d = d
+                best = obj
+        return best
+
+    def soft_evict(self, obj: SceneObject) -> None:
+        """Mark a perception record `missing` and release its concept-graphs
+        uuid binding instead of deleting it, so a later re-detection can
+        re-bind the same id (and accumulated observation_count) via
+        `find_rebindable`. Bounded by `prune_expired`. Caller must hold the
+        lock."""
+        obj.missing = True
+        obj.attributes.pop("cg_uuid", None)
+
+    def prune_expired(self, now: float, ttl_s: float) -> list[str]:
+        """Hard-delete `missing` perception records whose `last_seen` is older
+        than `ttl_s`; returns the deleted object_ids. Bounds growth of
+        soft-evicted records — dedup survivors' stale twins and objects that
+        truly left the scene. The robot self-record and warm-restored records
+        (kept indefinitely until re-seen) are never pruned here. Caller must
+        hold the lock."""
+        doomed = [
+            oid for oid, o in self._objects.items()
+            if o.missing
+            and not o.attributes.get("is_robot")
+            and not o.attributes.get("restored")
+            and (now - o.last_seen) > ttl_s
+        ]
+        for oid in doomed:
+            del self._objects[oid]
+        return doomed
+
     # ── surface insert ─────────────────────────────────────────────────────
     def insert_or_update_surface(
         self,

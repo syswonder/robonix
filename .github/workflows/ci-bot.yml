@@ -8,9 +8,9 @@
 # ─────────────────────────── SECURITY (read first) ───────────────────────────
 # `issue_comment` runs with the BASE repo's token, so the trigger is gated hard:
 #   1. Only PR comments (not plain issues) whose body starts with the command.
-#   2. Only authors with write access — author_association in
-#      OWNER / MEMBER / COLLABORATOR. A drive-by commenter cannot start a run on
-#      the self-hosted runner. This is the load-bearing check.
+#   2. Only callers with actual repo permission `admin` or `maintain` may
+#      start a run. A drive-by commenter, org member without repo admin/maintain,
+#      or write-only contributor cannot start work on the self-hosted runner.
 #   3. The actual GPU job still goes through testing.yml's `security-gate` +
 #      `environment: gpu-testing` (required-reviewer approval, once configured),
 #      so even an
@@ -36,12 +36,14 @@ jobs:
     name: Authorize CI command
     if: >-
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@robonix-ci test') &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      contains(github.event.comment.body, '@robonix-ci test')
     runs-on: ubuntu-22.04
     outputs:
+      authorized: ${{ steps.auth.outputs.authorized }}
+      caller_permission: ${{ steps.auth.outputs.permission }}
       test_ref: ${{ steps.pr.outputs.test_ref }}
       merge_ref_available: ${{ steps.pr.outputs.merge_ref_available }}
+      pr_base_ref: ${{ steps.pr.outputs.base_ref }}
       pr_number: ${{ steps.pr.outputs.number }}
       pr_title: ${{ steps.pr.outputs.title }}
       pr_author: ${{ steps.pr.outputs.author }}
@@ -52,8 +54,47 @@ jobs:
       triggered_by: ${{ steps.pr.outputs.triggered_by }}
       comment_id: ${{ steps.say.outputs.comment_id }}
     steps:
+      - name: Authorize caller permission
+        id: auth
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const username = context.payload.comment.user.login;
+            let permission = 'none';
+            try {
+              const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner, repo: context.repo.repo, username,
+              });
+              permission = r.data.permission || 'none';
+            } catch (e) {
+              core.notice(`could not resolve repo permission for @${username}: ${e.message}`);
+            }
+            const authorized = ['admin', 'maintain'].includes(permission);
+            core.setOutput('permission', permission);
+            core.setOutput('authorized', String(authorized));
+            if (!authorized) {
+              core.notice(`@${username} has repo permission '${permission}', not allowed to run robonix CI`);
+            }
+
+      - name: Report unauthorized command
+        if: steps.auth.outputs.authorized != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              '<!-- robonix-ci-status -->',
+              '### Robonix Webots CI - not authorized',
+              `@${context.payload.comment.user.login} cannot start this self-hosted Webots test run.`,
+              `Required repo permission: \`admin\` or \`maintain\`. Current permission: \`${{ steps.auth.outputs.permission }}\`.`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.issue.number, body,
+            });
+
       - name: Acknowledge command and resolve PR head
         id: pr
+        if: steps.auth.outputs.authorized == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -74,10 +115,12 @@ jobs:
               });
               mergeRefAvailable = true;
             } catch (e) {
-              core.notice(`merge ref ${mergeRef} is unavailable; Webots will not run until the PR merges cleanly into base`);
+              core.notice(`merge ref ${mergeRef} is unavailable; CI will still test a local merge against the current base`);
             }
-            core.setOutput('test_ref', mergeRef);
+            const baseRef = pr.data.base?.ref || context.payload.repository.default_branch || 'dev';
+            core.setOutput('test_ref', `refs/heads/${baseRef}`);
             core.setOutput('merge_ref_available', String(mergeRefAvailable));
+            core.setOutput('base_ref', baseRef);
             core.setOutput('head_sha', pr.data.head.sha || '');
             core.setOutput('number', String(pr.data.number));
             core.setOutput('title', pr.data.title || '');
@@ -95,7 +138,7 @@ jobs:
               '<!-- robonix-ci-status -->',
               '### Robonix Webots CI - running',
               `Triggered by @${context.payload.comment.user.login}.`,
-              `Testing merge result \`${{ steps.pr.outputs.test_ref }}\` for head \`${{ steps.pr.outputs.head_sha }}\`.`,
+              `Testing current base \`${{ steps.pr.outputs.base_ref }}\` locally merged with head \`${{ steps.pr.outputs.head_sha }}\`.`,
               `[Live logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
             const c = await github.rest.issues.createComment({
@@ -108,7 +151,7 @@ jobs:
   test:
     name: Run Webots integration tests
     needs: gate
-    if: needs.gate.outputs.merge_ref_available == 'true'
+    if: needs.gate.result == 'success' && needs.gate.outputs.authorized == 'true'
     uses: ./.github/workflows/testing.yml
     with:
       authorized: true
@@ -118,6 +161,7 @@ jobs:
       pr_author: ${{ needs.gate.outputs.pr_author }}
       pr_url: ${{ needs.gate.outputs.pr_url }}
       pr_head_ref: ${{ needs.gate.outputs.pr_head_ref }}
+      pr_base_ref: ${{ needs.gate.outputs.pr_base_ref }}
       pr_head_repo: ${{ needs.gate.outputs.pr_head_repo }}
       pr_head_sha: ${{ needs.gate.outputs.pr_head_sha }}
       triggered_by: ${{ needs.gate.outputs.triggered_by }}
@@ -128,7 +172,7 @@ jobs:
   publish_report:
     name: Publish skipped-run report site
     needs: [gate, test]
-    if: always() && needs.gate.result == 'success' && needs.test.result == 'skipped'
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.authorized == 'true' && needs.test.result == 'skipped'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -187,6 +231,7 @@ jobs:
           REPORT_PR_AUTHOR: ${{ needs.gate.outputs.pr_author }}
           REPORT_PR_URL: ${{ needs.gate.outputs.pr_url }}
           REPORT_PR_HEAD_REF: ${{ needs.gate.outputs.pr_head_ref }}
+          REPORT_PR_BASE_REF: ${{ needs.gate.outputs.pr_base_ref }}
           REPORT_PR_HEAD_REPO: ${{ needs.gate.outputs.pr_head_repo }}
           REPORT_PR_HEAD_SHA: ${{ needs.gate.outputs.pr_head_sha }}
           REPORT_TEST_REF: ${{ needs.gate.outputs.test_ref }}
@@ -217,6 +262,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}" \
@@ -302,7 +348,7 @@ jobs:
   report:
     name: Publish PR status comment
     needs: [gate, test, publish_report]
-    if: always() && needs.gate.result == 'success'
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.authorized == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Download test report artifact
@@ -326,8 +372,6 @@ jobs:
             const fs = require('fs');
             const outcome = '${{ needs.test.result }}';  // success / failure / cancelled / skipped
             const harnessResult = '${{ needs.test.outputs.result }}';
-            const mergeRefAvailable = '${{ needs.gate.outputs.merge_ref_available }}' === 'true';
-            const testRef = '${{ needs.gate.outputs.test_ref }}';
             // The artifact preserves the upload path (testing/logs/summary.json),
             // so locate it rather than assuming a flat layout.
             const findSummary = (dir) => {
@@ -385,14 +429,11 @@ jobs:
                 lines.push('</details>');
               }
             } else {
-              const mergeUnavailable = !mergeRefAvailable;
               const looksSkipped = outcome === 'skipped' || (outcome === 'success' && !harnessResult);
-              const icon = outcome === 'failure' || outcome === 'cancelled' || mergeUnavailable ? '❌' : '⚠️';
-              const label = mergeUnavailable ? 'merge ref unavailable' : (looksSkipped ? 'skipped' : 'no scenario summary');
+              const icon = outcome === 'failure' || outcome === 'cancelled' ? '❌' : '⚠️';
+              const label = looksSkipped ? 'skipped' : 'no scenario summary';
               lines.push(`### ${icon} robonix CI — ${label}`);
-              if (mergeUnavailable) {
-                lines.push('GitHub did not provide the PR merge ref `' + testRef + '`, so this PR cannot currently be tested as merged into its base branch. Webots was not run.');
-              } else if (looksSkipped) {
+              if (looksSkipped) {
                 lines.push('The Webots test job did not produce scenario output, so no report was published. This is not a verified Webots pass.');
               } else {
                 lines.push('No machine-readable scenario summary was produced. Treat this as an incomplete infrastructure run, not as a verified Webots pass.');
