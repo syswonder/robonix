@@ -1294,6 +1294,7 @@ jobs:
       actions: read
       pages: write
       id-token: write
+      deployments: write
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
@@ -1446,3 +1447,47 @@ jobs:
           set -euo pipefail
           page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
+
+      - name: Record Pages deployment status
+        if: env.PUBLISH_REPORT_SITE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_URL: ${{ steps.publish_url.outputs.report_url }}
+        run: |
+          set -euo pipefail
+          page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          deployment_payload="$(mktemp)"
+          status_payload="$(mktemp)"
+          jq -n \
+            --arg ref "${GITHUB_SHA}" \
+            --arg env "github-pages" \
+            --arg desc "Robonix Webots report site" \
+            '{
+              ref: $ref,
+              environment: $env,
+              description: $desc,
+              auto_merge: false,
+              required_contexts: []
+            }' > "$deployment_payload"
+          deployment_id="$(
+            gh api \
+              -X POST \
+              "repos/${GITHUB_REPOSITORY}/deployments" \
+              --input "$deployment_payload" \
+              --jq ".id"
+          )"
+          jq -n \
+            --arg state "success" \
+            --arg target_url "$REPORT_URL" \
+            --arg environment_url "$page_url" \
+            --arg desc "Robonix Webots report is published." \
+            '{
+              state: $state,
+              target_url: $target_url,
+              environment_url: $environment_url,
+              description: $desc
+            }' > "$status_payload"
+          gh api \
+            -X POST \
+            "repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses" \
+            --input "$status_payload" >/dev/null
