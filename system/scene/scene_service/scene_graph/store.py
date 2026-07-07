@@ -45,9 +45,10 @@ class SceneGraphStore:
         (caption/relation answers are only valid within the map frame they were
         computed in — the same per-map isolation the object store gets from its
         ``"{map_id}::{object_id}"`` composite key). The id is run through
-        ``persistence._sanitize_map_id`` so it is a safe path component
-        (imported lazily — that module defers its pymilvus import, so this stays
-        importable on hosts without the milvus backend). With no ``map_id`` the
+        ``map_binding.sanitize_map_id`` (the one sanitize rule shared by every
+        map_id-partitioned store; reached via persistence's alias, imported
+        lazily so this stays importable without the milvus backend) so it is a
+        safe path component. With no ``map_id`` the
         path is unchanged (legacy/"default" behaviour)."""
         self._nodes: dict[str, SceneGraphNode] = {}
         self._geometric_edges: list[SceneGraphEdge] = []
