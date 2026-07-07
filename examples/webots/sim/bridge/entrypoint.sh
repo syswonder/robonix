@@ -131,7 +131,8 @@ EndSection
 XCONF
 
   Xorg "$NVIDIA_DISPLAY" -config /tmp/xorg-nvidia.conf \
-       -noreset -nolisten tcp -logfile "/tmp/Xorg.${XNUM}.log" &
+       -noreset -novtswitch -sharevts -nolisten tcp \
+       -logfile "/tmp/Xorg.${XNUM}.log" &
   local i
   for i in $(seq 1 30); do
     [ -S "/tmp/.X11-unix/X${XNUM}" ] && break
