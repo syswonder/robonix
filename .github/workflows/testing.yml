@@ -1333,7 +1333,6 @@ jobs:
     permissions:
       contents: write
       actions: read
-      deployments: write
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
