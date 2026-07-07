@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/system/vitals/modules/get"
+version = "1"
+kind    = "service"
+idl     = "module_health/srv/GetModuleHealthSnapshot.srv"
+description = "Return the current aggregated module health snapshot from Vitals."
+
+[mode]
+type = "rpc"
