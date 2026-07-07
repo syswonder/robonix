@@ -71,7 +71,13 @@ fi
 mkdir -p "$BUILD/data"
 
 # ── 1. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
-FLAGS=(--mcp)
+# --ros2 also emits rbnx-build/codegen/ros2_idl: the generated ROS 2
+# interface overlay carrying map/msg/MapLifecycle (mapping's latched map
+# identity broadcast, which scene's map binding subscribes to). It is
+# colcon-built inside the scene image after the docker build below and
+# sourced by docker/entrypoint.sh; without it scene falls back to static
+# map binding (SCENE_MAP_ID / config) with a warning.
+FLAGS=(--mcp --ros2)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
 echo "[build] rbnx codegen ${FLAGS[*]}"
@@ -369,5 +375,25 @@ esac
 
 echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
 docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
+
+# colcon-build the ros2_idl overlay (map interface package for the
+# lifecycle broadcast) inside the image we just built, so the install
+# tree lands on the host bind mount at the SAME path the runtime
+# container sees (/scene/rbnx-build/...). Skipped when codegen was
+# skipped — scene then runs with static map binding only.
+IDL="$PKG/rbnx-build/codegen/ros2_idl"
+if [[ -d "$IDL/src/map" ]]; then
+    echo "[build] colcon build ros2_idl (map interface pkg) in $IMG"
+    # --user: build/ install/ land on the HOST bind mount — as root they
+    # would survive a later non-root `rm -rf rbnx-build` (RBNX_BUILD_CLEAN).
+    # HOME=/tmp gives colcon a writable home for its metadata as that uid.
+    docker run --rm --entrypoint bash --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -v "$PKG":/scene "$IMG" -lc \
+        "source /opt/ros/\${ROS_DISTRO:-humble}/setup.bash && \
+         cd /scene/rbnx-build/codegen/ros2_idl && \
+         colcon build --packages-up-to map"
+else
+    echo "[build] WARNING: ros2_idl/src/map missing — dynamic map binding disabled"
+fi
 
 echo "[build] done."
