@@ -1,0 +1,41 @@
+examples/webots/robonix_manifest.yaml
+  s_fdf4b8253f845e::t_ba7232ba301043 5-13
+system/scene/README.md
+  s_2910e3e11437c8::t_29164676b1d4a0 244-245,263-279
+system/scene/docker/entrypoint.sh
+  s_2910e3e11437c8::t_c2fb3b7b523283 19-28
+system/scene/scene_service/ingest/ros_subscribers.py
+  s_2910e3e11437c8::t_0963a794c06bbc 47-54,76-78,180-183,189-191,227-230,232-242,298-307,342
+system/scene/scene_service/map_binding.py
+  s_2910e3e11437c8::t_60333dfe40abd7 1-127
+system/scene/scripts/build.sh
+  s_2910e3e11437c8::t_fb1e912aecd991 68-74,316-335
+system/scene/tests/test_map_binding.py
+  s_2910e3e11437c8::t_a9e2601a77bcb1 1-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "06b061855f07d7c1848af1c78d6562eaeeb722a6",
+  "prompts": {},
+  "sessions": {
+    "s_2910e3e11437c8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0243c438-9781-4e69-b199-0c413c536d5f",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    },
+    "s_fdf4b8253f845e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9afa3c5f-267b-4c9a-a3a4-deed51c94dde",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
