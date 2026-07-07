@@ -255,7 +255,8 @@ plain `humble`.
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
-| `SCENE_MAP_ID` | `default` | SLAM map the persisted objects belong to; restore loads only this map's objects (manifest `map_id` overrides) |
+| `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
+| `SCENE_MAP_BINDING_WAIT_S` | `3.0` | how long the startup probe waits for the lifecycle contract to appear on atlas before falling back to static binding; `0` disables the probe |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
 
 ## Object memory (warm restore)
@@ -273,13 +274,23 @@ DB — and lives under the host-mounted `/data/robonix`, which also makes the
 scene-graph JSON caches survive boots. Writes are driven by the scene-graph
 builder, so disabling `SCENE_GRAPH_ENABLED` stops new writes (restore still runs).
 
-Persistence is partitioned by `SCENE_MAP_ID` (or the manifest `map_id`): an
-object's pose is only meaningful in the `map` frame of the SLAM map it was
-observed on, so restore loads exactly the current map's objects and never mixes
-two maps. The same `object_id` may exist on different maps without colliding.
-`map_id` is a deploy-controlled string today (default `"default"`) and stays
-internal to scene — no atlas/MCP contract changes — until mapping emits a real
-map identity to wire in here.
+Persistence is partitioned by the map binding: an object's pose is only
+meaningful in the `map` frame of the SLAM map it was observed on, so restore
+loads exactly the current map's objects and never mixes two maps. The same
+`object_id` may exist on different maps without colliding.
+
+The binding itself (`scene_service/map_binding.py`) is learned at startup with
+this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
+(`{map_id, mode, generation}` — the authoritative map identity, probed for
+`SCENE_MAP_BINDING_WAIT_S`) → manifest `config.map_id` → `SCENE_MAP_ID` env →
+`"default"`. The broadcast needs the generated `map` interface package
+(`rbnx codegen --ros2` → colcon overlay, built by `scripts/build.sh`, sourced
+by the container entrypoint); without it scene falls back to static binding
+with a warning. At runtime scene only WATCHES the broadcast: if mapping's
+identity or `generation` (bumped when the map origin may have changed: reset /
+mapping-mode session start) drifts from the startup binding, scene logs a
+warning and keeps its binding — reacting (flush + re-anchor) is the planned
+lifecycle linkage (P3).
 
 ## Capabilities exposed
 
