@@ -40,6 +40,38 @@ export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ro
 robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
 cd "$SCRIPT_DIR"
 
+# Webots world / robot launch args.
+# Usage:
+#   ./start.sh --world your_new_world.wbt
+#   ROBONIX_WEBOTS_WORLD=your_new_world.wbt ./start.sh
+export ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
+export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --world|-w)
+      export ROBONIX_WEBOTS_WORLD="$2"
+      shift 2
+      ;;
+    --robot|-r)
+      export ROBONIX_WEBOTS_ROBOT="$2"
+      shift 2
+      ;;
+    --help|-h)
+      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]"
+      exit 0
+      ;;
+    *)
+      echo "[sim/start] unknown argument: $1" >&2
+      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+echo "[sim/start] using Webots world: $ROBONIX_WEBOTS_WORLD"
+echo "[sim/start] using robot URDF: $ROBONIX_WEBOTS_ROBOT"
+
 # Auto-detect DISPLAY if the launching shell didn't export one. Probes
 # the standard local X server slots via `xset q`; if any responds, use
 # it. Falls back to :0 so headless / non-X bash still gets a sensible

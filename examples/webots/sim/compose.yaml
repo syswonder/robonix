@@ -56,6 +56,8 @@ services:
       XAUTHORITY: /root/.Xauthority
       QT_X11_NO_MITSHM: "1"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROBONIX_WEBOTS_WORLD: "${ROBONIX_WEBOTS_WORLD:-office.wbt}"
+      ROBONIX_WEBOTS_ROBOT: "${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
       # Headless render backend (host|nvidia|xvfb|auto) + display number,
       # forwarded so a deploy can pick GPU-backed offscreen rendering WITHOUT
       # the browser stream (compose.stream.yaml). Lets a CI run render on its
