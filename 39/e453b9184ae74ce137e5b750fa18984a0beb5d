@@ -1,0 +1,23 @@
+capabilities/lib/map/msg/MapLifecycle.msg
+  s_2910e3e11437c8::t_612a019ddddfd3 1-17
+capabilities/service/map/lifecycle.v1.toml
+  s_2910e3e11437c8::t_cd7801b160e7e8 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "39e453b9184ae74ce137e5b750fa18984a0beb5d",
+  "prompts": {},
+  "sessions": {
+    "s_2910e3e11437c8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0243c438-9781-4e69-b199-0c413c536d5f",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
