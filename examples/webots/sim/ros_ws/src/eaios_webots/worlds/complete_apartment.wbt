@@ -82,6 +82,7 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/bathroom/protos/Toilet.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/lights/protos/CeilingSpotLight.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/trees/protos/Cypress.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/pal_robotics/tiago_lite/protos/TiagoLite.proto"
 
 WorldInfo {
   info [
@@ -91,8 +92,8 @@ WorldInfo {
   basicTimeStep 16
 }
 Viewpoint {
-  orientation -0.1119626265841257 0.9920963074853238 0.056650568597051615 1.341062144783736
-  position -12.422696006483225 -6.727066901400375 30.406658794186228
+  orientation -0.15201755566742853 0.9834181398571323 0.09889097516375378 1.4469351409373075
+  position -8.85639699650863 -7.383900238581184 19.12362798322346
   exposure 0.5
   ambientOcclusionRadius 1
 }
@@ -2067,6 +2068,22 @@ DEF TREES Group {
       name "cypress tree(8)"
       scale 0.6
       enableBoundingObject FALSE
+    }
+  ]
+}
+TiagoLite {
+  translation -8.72609 -3.84863 0.230247
+  rotation -0.006363227570975 -0.002646197037686 -0.999976253206104 0.78447116344273
+  name "my_robot"
+  controller "<extern>"
+  supervisor TRUE
+  lidarSlot [
+    Lidar {
+      name "hokuyo"
+      horizontalResolution 660
+      fieldOfView 3.14
+      numberOfLayers 1
+      maxRange 6
     }
   ]
 }
