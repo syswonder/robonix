@@ -1,0 +1,35 @@
+system/scene/README.md
+  s_2f94ac3ad6e006::t_401bd5c4f48600 246,282-318,343,347,350,378
+system/scene/scene_service/annotations.py
+  s_2f94ac3ad6e006::t_fcec7f2c14d8d9 1-354
+system/scene/scene_service/map_binding.py
+  s_2f94ac3ad6e006::t_3316a832a3e18f 24,31-43
+system/scene/scene_service/persistence.py
+  s_2f94ac3ad6e006::t_d8e95c42947cd2 29
+system/scene/scene_service/scene_graph/store.py
+  s_2f94ac3ad6e006::t_5ff02d358273d5 48-51
+system/scene/scene_service/service.py
+  s_2f94ac3ad6e006::t_561d40dd7b9312 39,904-908,913-925,929,951,959-973,985,987-1015,1105-1132,1195-1196,1293-1299
+system/scene/scene_service/web.py
+  s_2f94ac3ad6e006::t_41d2d1c008c141 30,375-377,383-386,436-437,459-460,465-466,468-470,473-474,481-502,517-601,614-616,631,635-640,1833-2245
+system/scene/tests/test_annotations.py
+  s_2f94ac3ad6e006::t_5ee3c2ae279dee 1-424
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "57e06aa88f299bfa52edad933a61261e157ddc24",
+  "prompts": {},
+  "sessions": {
+    "s_2f94ac3ad6e006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3eeb7755-ddb1-4165-a5a3-d575e28fb944",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
