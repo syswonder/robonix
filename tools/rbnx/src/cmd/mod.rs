@@ -319,9 +319,9 @@ pub enum Commands {
         server: String,
     },
 
-    /// Initialize a new robonix project (creates robonix_manifest.yaml + directory skeleton)
+    /// Initialize a new robot deployment directory (creates robonix_manifest.yaml)
     Init {
-        /// Project name (also used as directory name)
+        /// Robot deployment directory name
         name: String,
         /// Parent directory (default: current directory)
         #[arg(long)]

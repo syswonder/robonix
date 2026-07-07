@@ -28,6 +28,10 @@ fn package_name(name: &str, ns_kind: &str) -> String {
     format!("robonix.{ns_kind}.{normalized}")
 }
 
+fn python_module_name(name: &str) -> String {
+    name.replace('-', "_")
+}
+
 pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<()> {
     validate_name(name)?;
 
@@ -65,6 +69,7 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
         _ => ("Primitive", "primitive"),
     };
     let package_name = package_name(name, ns_kind);
+    let module_name = python_module_name(name);
 
     // Create directory structure; put .gitkeep in empty dirs.
     for sub in ["scripts", "capabilities"] {
@@ -87,10 +92,12 @@ start: bash scripts/start.sh
 package:
   name: "{package_name}"
   version: 0.0.1
-  description: "TODO: describe this package."
-  tags: ["{ns_kind}", "{name}"]
+  description: TODO: describe what this {ns_kind} package provides.
+  tags:
+    - {ns_kind}
+    - robonix
   maintainers:
-    - "TODO Maintainer <maintainer@example.com>"
+    - Your Name <you@example.com>
   license: Apache-2.0
 
 capabilities: []
@@ -140,7 +147,7 @@ cd "$PKG_ROOT"
 
 export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${{PYTHONPATH:-}}"
 
-exec python3 -m {name}.main
+exec python3 -m {module_name}.main
 "#
     );
     std::fs::write(pkg_dir.join("scripts/start.sh"), start_sh)
@@ -160,7 +167,7 @@ exec python3 -m {name}.main
     // Minimal Python provider skeleton: <pkg>/<name>/{__init__.py, main.py}
     // so `python3 -m {name}.main` (from start.sh) runs out of the box. The
     // author fills in lifecycle handlers + capability declarations.
-    let module_dir = pkg_dir.join(name);
+    let module_dir = pkg_dir.join(&module_name);
     std::fs::create_dir_all(&module_dir).context("failed to create python module directory")?;
     std::fs::write(module_dir.join("__init__.py"), "").context("failed to write __init__.py")?;
     let main_py = format!(
@@ -200,7 +207,7 @@ if __name__ == "__main__":
     output::sub_step("package_manifest.yaml");
     output::sub_step("scripts/build.sh");
     output::sub_step("scripts/start.sh");
-    output::sub_step(&format!("{name}/main.py  (provider skeleton)"));
+    output::sub_step(&format!("{module_name}/main.py  (provider skeleton)"));
     output::sub_step("capabilities/  (.gitkeep)");
     output::sub_step(".gitignore");
 

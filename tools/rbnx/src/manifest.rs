@@ -64,6 +64,8 @@ pub struct Package {
     pub id: Option<String>,
     #[serde(default)]
     pub version: String,
+    /// Deprecated package metadata accepted for old manifests. New package
+    /// manifests should use maintainers/tags for catalog metadata.
     #[serde(default)]
     pub description: String,
     #[serde(default)]
