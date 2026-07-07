@@ -21,11 +21,25 @@ read are unit-testable without atlas.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 log = logging.getLogger("scene.map_binding")
+
+# map_id is used as a milvus filter literal and as a filename, so restrict
+# it to a safe identifier charset (no quotes / spaces / separators) — keeps
+# the predicate injection-free and the path escape-free. Anything else is
+# squashed to "_"; empty falls back to "default". Every map_id-partitioned
+# store (objects, scene-graph cache, annotations) MUST key on this one rule
+# so the partitions always agree.
+_MAP_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._\-]")
+
+
+def sanitize_map_id(raw: Optional[str]) -> str:
+    cleaned = _MAP_ID_UNSAFE.sub("_", (raw or "").strip())
+    return cleaned or "default"
 
 
 @dataclass(frozen=True)
