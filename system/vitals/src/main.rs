@@ -15,6 +15,7 @@
 
 mod config;
 mod mock_soma;
+pub mod module_health;
 mod pb;
 mod service;
 mod soma_ingest;
