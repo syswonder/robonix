@@ -102,6 +102,8 @@ on:
     secrets:
       DEEPSEEK_API_KEY:
         required: false
+      ROBONIX_REPORTS_DEPLOY_KEY:
+        required: false
     outputs:
       result:
         description: "PASS/FAIL summary line from the harness"
