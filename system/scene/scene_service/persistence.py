@@ -23,25 +23,16 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
+from .map_binding import sanitize_map_id as _sanitize_map_id
 from .state.object_registry import BBox3D, Pose3D, SceneObject
 
 log = logging.getLogger(__name__)
 
 _COLLECTION = "scene_objects"
 
-# map_id is interpolated into a milvus filter expression, so restrict it to a
-# safe identifier charset (no quotes / spaces) to keep the predicate injection
-# -free. Anything else is squashed to "_"; empty falls back to "default".
-_MAP_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._\-]")
-
-
-def _sanitize_map_id(raw: Optional[str]) -> str:
-    cleaned = _MAP_ID_UNSAFE.sub("_", (raw or "").strip())
-    return cleaned or "default"
 # open_clip ViT-B-32 text/image features are 512-d (see
 # ingest/perception_concept_graphs.py). Object image features already live in
 # this space, so caption-text vectors are directly comparable for G3.
