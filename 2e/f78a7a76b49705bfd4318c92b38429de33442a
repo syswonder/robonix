@@ -1,0 +1,21 @@
+system/scene/tests/test_scene_graph.py
+  s_fdf4b8253f845e::t_06bfee68016169 33-46,173,274,298,335,363,636,718
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "2ef78a7a76b49705bfd4318c92b38429de33442a",
+  "prompts": {},
+  "sessions": {
+    "s_fdf4b8253f845e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9afa3c5f-267b-4c9a-a3a4-deed51c94dde",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
