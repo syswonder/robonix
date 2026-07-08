@@ -16,7 +16,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
 fi
 
 cleanup() {
-  docker exec "$SIM_CT" pkill -9 -f 'lidar_driver|scan_normalize' 2>/dev/null || true
+  timeout 5s docker exec "$SIM_CT" pkill -9 -f '[l]idar_driver|[s]can_normalize' 2>/dev/null || true
   kill -- "-$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -62,7 +62,7 @@ docker exec -i \
   -e TIAGO_SCAN_TOPIC="$OUT_TOPIC" \
   -e TIAGO_SCAN_RAW_TOPIC="$RAW_TOPIC" \
   -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
-  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/robonix_mcp_types" \
   "$SIM_CT" \
   bash -lc "
     set -eo pipefail

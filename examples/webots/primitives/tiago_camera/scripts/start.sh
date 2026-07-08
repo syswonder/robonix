@@ -16,7 +16,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
 fi
 
 cleanup() {
-  docker exec "$SIM_CT" pkill -9 -f 'camera_driver|static_transform_publisher.*head_front_camera' 2>/dev/null || true
+  timeout 5s docker exec "$SIM_CT" pkill -9 -f '[c]amera_driver|[s]tatic_transform_publisher.*head_front_camera' 2>/dev/null || true
   kill -- "-$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -76,7 +76,7 @@ docker exec -i \
   -e TIAGO_RGB_FRAME_ID="${TIAGO_RGB_FRAME_ID:-head_front_camera_rgb_optical_frame}" \
   -e TIAGO_DEPTH_FRAME_ID="${TIAGO_DEPTH_FRAME_ID:-head_front_camera_depth_optical_frame}" \
   -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
-  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/robonix_mcp_types:/robonix_pkgs/primitives/tiago_camera/robonix_mcp_types" \
   "$SIM_CT" \
   bash -lc 'set -eo pipefail
             source /opt/ros/humble/setup.bash
