@@ -31,6 +31,10 @@ source /opt/ros/humble/setup.bash
 source /colcon_ws/install/setup.bash
 set -u
 
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 # Display number is overridable via ROBONIX_SIM_XDISPLAY so two sim containers
 # can run on one host without colliding on the same Xorg socket / logfile (a CI
 # runner alongside an interactive user). Default :48 preserves single-tenant
@@ -161,6 +165,42 @@ start_xvfb() {
   echo "[entrypoint] Xvfb ${NVIDIA_DISPLAY} (CPU render)"
 }
 
+prepare_full_webots_assets() {
+  if [ "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS:-0}" != "1" ]; then
+    return 0
+  fi
+
+  local version url mirror fetch_url cache_dir marker tmp_zip
+  version="${ROBONIX_WEBOTS_ASSETS_VERSION:-R2025a}"
+  url="${ROBONIX_WEBOTS_ASSETS_URL:-https://github.com/cyberbotics/webots/releases/download/${version}/assets-${version}.zip}"
+  mirror="${ROBONIX_WEBOTS_ASSETS_MIRROR:-https://ghfast.top/}"
+  fetch_url="$url"
+  if [ -n "$mirror" ]; then
+    case "$url" in
+      https://github.com/*)
+        fetch_url="${mirror%/}/${url}"
+        ;;
+    esac
+  fi
+
+  cache_dir="${ROBONIX_WEBOTS_ASSET_CACHE_DIR:-/root/.cache/Cyberbotics/Webots/assets}"
+  marker="${cache_dir}/.robonix-full-assets-${version}.ok"
+  if [ -f "$marker" ]; then
+    echo "[entrypoint] Webots full asset cache already present (${version})"
+    return 0
+  fi
+
+  mkdir -p "$cache_dir"
+  tmp_zip="/tmp/webots-assets-${version}.zip"
+  echo "[entrypoint] downloading Webots full asset library: ${fetch_url}"
+  wget -S --progress=dot:giga -O "$tmp_zip" "$fetch_url"
+  echo "[entrypoint] extracting Webots full asset library to ${cache_dir}"
+  unzip -q -o "$tmp_zip" -d "$cache_dir"
+  rm -f "$tmp_zip"
+  touch "$marker"
+  echo "[entrypoint] Webots full asset library ready: $(find "$cache_dir" -maxdepth 1 -type f | wc -l) cached files"
+}
+
 case "${WEBOTS_HEADLESS_MODE:-host}" in
   host)   : ;;                                # legacy: keep $DISPLAY from compose env
   nvidia) start_nvidia_xorg || exit 1 ;;
@@ -187,6 +227,7 @@ if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
 fi
 
 start_zenoh_router
+prepare_full_webots_assets
 
 WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
 

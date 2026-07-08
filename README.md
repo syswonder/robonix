@@ -123,6 +123,40 @@ rbnx build       # first run pulls model weights + docker images, may take a whi
 rbnx boot
 ```
 
+The simulator launcher supports multiple built-in `.wbt` environments. Select one
+explicitly with `--world` or `ROBONIX_WEBOTS_WORLD`:
+
+```bash
+bash examples/webots/sim/start.sh --world office.wbt
+bash examples/webots/sim/start.sh --world apartment.wbt
+ROBONIX_WEBOTS_WORLD=break_room.wbt bash examples/webots/sim/start.sh
+```
+
+Available worlds in `examples/webots/sim/ros_ws/src/eaios_webots/worlds/`:
+`office.wbt`, `apartment.wbt`, `complete_apartment.wbt`, `break_room.wbt`, and
+`kitchen.wbt`.
+
+`office.wbt` is the fully seeded default path and is the recommended quickstart
+world. For the other built-in worlds, fetch Cyberbotics' official offline asset
+bundle once before launching:
+
+```bash
+ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 \
+  bash examples/webots/sim/start.sh --world apartment.wbt
+```
+
+This downloads `assets-R2025a.zip` from the Webots GitHub release through
+`https://ghfast.top/` by default, extracts it into the persistent
+`webots_cache` Docker volume, and writes a marker so later starts skip the
+download. Use `ROBONIX_WEBOTS_ASSETS_MIRROR` or `ROBONIX_WEBOTS_ASSETS_URL`
+only when your network requires a different mirror/source.
+
+|  |  |
+|---|---|
+| `office.wbt`<br>![office](examples/webots/sim/thumbnails/office.jpg) | `apartment.wbt`<br>![apartment](examples/webots/sim/thumbnails/apartment.jpg) |
+| `complete_apartment.wbt`<br>![complete apartment](examples/webots/sim/thumbnails/complete_apartment.jpg) | `break_room.wbt`<br>![break room](examples/webots/sim/thumbnails/break_room.jpg) |
+| `kitchen.wbt`<br>![kitchen](examples/webots/sim/thumbnails/kitchen.jpg) |  |
+
 Robonix keeps the ROS 2 middleware selectable, but the Webots deploy defaults to
 Zenoh RMW. Our CI and local Webots tests run a single-machine, multi-container
 ROS graph with high-rate TF, RGB-D, lidar, map, Nav2, and scene traffic. Fast

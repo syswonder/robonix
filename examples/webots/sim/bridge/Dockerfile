@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pciutils \
     python3-pip \
     python3-colcon-common-extensions \
+    unzip \
     ros-humble-nav2-msgs \
     ros-humble-nav2-bringup \
     ros-humble-webots-ros2 \

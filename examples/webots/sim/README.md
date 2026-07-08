@@ -20,6 +20,44 @@ cd examples/webots
 rbnx boot
 ```
 
+World selection:
+
+```bash
+bash examples/webots/sim/start.sh --world office.wbt
+bash examples/webots/sim/start.sh --world apartment.wbt
+bash examples/webots/sim/start.sh --world complete_apartment.wbt
+bash examples/webots/sim/start.sh --world break_room.wbt
+bash examples/webots/sim/start.sh --world kitchen.wbt
+```
+
+Or:
+
+```bash
+export ROBONIX_WEBOTS_WORLD=kitchen.wbt
+bash examples/webots/sim/start.sh
+```
+
+`office.wbt` is the seeded default and does not require the full upstream Webots
+asset library. For the other built-in worlds, download Cyberbotics' official
+offline asset bundle once before launching:
+
+```bash
+ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 \
+  bash examples/webots/sim/start.sh --world apartment.wbt
+```
+
+This downloads `assets-R2025a.zip` from the Webots GitHub release through
+`https://ghfast.top/` by default and extracts it into the persistent
+`webots_cache` Docker volume. Later starts reuse the cache and skip the
+download. Override `ROBONIX_WEBOTS_ASSETS_MIRROR` or `ROBONIX_WEBOTS_ASSETS_URL`
+only if your network needs a different mirror/source.
+
+|  |  |
+|---|---|
+| `office.wbt`<br>![office](thumbnails/office.jpg) | `apartment.wbt`<br>![apartment](thumbnails/apartment.jpg) |
+| `complete_apartment.wbt`<br>![complete apartment](thumbnails/complete_apartment.jpg) | `break_room.wbt`<br>![break room](thumbnails/break_room.jpg) |
+| `kitchen.wbt`<br>![kitchen](thumbnails/kitchen.jpg) |  |
+
 `start.sh` auto-detects `nvidia-smi` and merges `compose.gpu.yaml` when
 present. Force CPU-only with `ROBONIX_FORCE_CPU=1`. The container's name
 is `robonix_tiago_sim` (referenced by every driver package's
@@ -48,7 +86,7 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `compose.stream.yaml` | Optional browser-streaming mode — headless Xorg + webots `--stream`. Merged when `ROBONIX_SIM_STREAM=1`. |
 | `bridge/Dockerfile` | Humble + Webots `.deb` + Python deps used by docker-exec'd robonix drivers. |
 | `bridge/entrypoint.sh` | Launch Webots, then `wait` so the container stays alive. Picks display backend per `WEBOTS_HEADLESS_MODE`. |
-| `bridge/webots_assets_seed.tar.gz` | Pre-baked Webots proto/texture cache (offline-fast first run). |
+| `bridge/webots_assets_seed.tar.gz` | Pre-baked office Webots proto/texture cache (offline-fast default world). |
 | `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
 
 ## Headless / browser-streaming mode
