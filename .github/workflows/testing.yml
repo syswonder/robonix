@@ -921,12 +921,14 @@ jobs:
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
 
       - name: Validate boot/shutdown lifecycle
-        # boot → shutdown → re-boot → shutdown. Proves the runtime keeps
+        # boot → shutdown → re-boot. Proves the runtime keeps
         # state under <manifest-dir>/rbnx-boot/ (not ~/.robonix/), that
         # Soma package children are stopped cleanly, and that the stack
         # can come back up after a clean teardown (the issue #128
         # regression). The second boot reuses the per-run sim container;
-        # the validator does NOT start a new webots instance.
+        # the validator does NOT start a new webots instance. CI leaves
+        # the second boot running so the next step can exercise scenarios
+        # against the restarted stack; the final cleanup step shuts it down.
         working-directory: examples/webots
         env:
           ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
@@ -937,6 +939,7 @@ jobs:
             --manifest robonix_manifest.ci.generated.yaml \
             --server "$ROBONIX_CI_ATLAS" \
             --sim-container "$ROBONIX_SIM_CONTAINER" \
+            --leave-running \
             --log-dir examples/webots/rbnx-boot/logs | tee "$RUNNER_TEMP/lifecycle.out"
 
       - name: Re-run scenario suite after lifecycle validator

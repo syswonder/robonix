@@ -23,8 +23,10 @@ has finished:
   2. Re-`rbnx boot` the same manifest in a clean workdir. Wait for the same
      set of capabilities + providers that scenario waiting already proved
      on the first boot. This is the "issue #128" restart loop.
-  3. `rbnx shutdown` of the second boot (final cleanup; the report step
-     is expected to capture the resulting clean state).
+  3. By default, `rbnx shutdown` of the second boot (final cleanup; the
+     report step is expected to capture the resulting clean state). In CI,
+     `--leave-running` keeps the second boot alive so the workflow can run
+     the scenario suite again against the post-shutdown boot.
 
 Failure in any step fails the workflow (exit non-zero). Detailed checks
 are streamed to stderr; the human-readable summary lands on stdout for
@@ -290,6 +292,11 @@ def main() -> int:
         "--shutdown-timeout", type=int, default=240,
         help="seconds to wait for rbnx shutdown to finish (default 240)",
     )
+    ap.add_argument(
+        "--leave-running", action="store_true",
+        help="after the second boot is healthy, leave it running instead of "
+             "performing the final shutdown",
+    )
     args = ap.parse_args()
 
     manifest_dir = args.manifest.parent
@@ -347,6 +354,21 @@ def main() -> int:
         )
         return 7
     log("phase 2: re-boot is healthy — state.json present, all ports bound")
+
+    if args.leave_running:
+        log("RESULT: PASS — boot → shutdown → re-boot healthy; leaving stack running")
+        summary = {
+            "suite": "lifecycle",
+            "passed": True,
+            "manifest": str(args.manifest),
+            "left_running": True,
+            "checks": [
+                "first_shutdown_clean",
+                "reboot_active_providers",
+            ],
+        }
+        print(json.dumps(summary, indent=2))
+        return 0
 
     # 6. Final shutdown.
     log("phase 3: rbnx shutdown — second boot (final cleanup)")
