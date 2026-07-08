@@ -189,7 +189,18 @@ fi
 start_zenoh_router
 
 WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
-ros2 launch eaios_webots robot_launch.py use_sim_time:=true &
+
+ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
+ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+
+echo "[entrypoint] Webots world: ${ROBONIX_WEBOTS_WORLD}"
+echo "[entrypoint] robot URDF: ${ROBONIX_WEBOTS_ROBOT}"
+
+ros2 launch eaios_webots robot_launch.py \
+  use_sim_time:=true \
+  world:="${ROBONIX_WEBOTS_WORLD}" \
+  robot:="${ROBONIX_WEBOTS_ROBOT}" &
+
 _webots_launch_pid=$!
 echo "[entrypoint] eaios_webots pid=${_webots_launch_pid}"
 sleep "${WEBOTS_WARMUP_SEC}"
