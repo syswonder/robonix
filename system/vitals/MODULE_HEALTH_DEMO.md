@@ -1,21 +1,21 @@
 # Vitals Module Health Demo
 
-本文档用于演示 Vitals 对系统模块健康状态的最小闭环：
+This document demonstrates the minimal system-module health loop in Vitals:
 
 ```text
-executor / pilot 自报 ModuleHealthReport
-        -> Vitals 定期轮询 get_health
-        -> Vitals 聚合为 ModuleHealthSnapshot
-        -> 模块失联超过 ttl_ms 后，Vitals 合成 STALE / ERROR
-        -> 模块恢复后，Vitals 记录 ERROR -> OK
+executor / pilot self-report ModuleHealthReport
+        -> Vitals polls get_health periodically
+        -> Vitals aggregates ModuleHealthSnapshot
+        -> Vitals synthesizes STALE / ERROR after ttl_ms expires
+        -> Vitals records ERROR -> OK after the module reports again
 ```
 
-这个 demo 不需要真实机器人硬件。硬件健康链路使用 mock Soma；模块健康链路使用
-executor 和 pilot 的 `get_health`。
+No real robot hardware is required. The hardware-health path uses mock Soma,
+while the module-health path uses the executor and pilot `get_health` services.
 
-## 1. 准备
+## 1. Prepare
 
-进入仓库并先编译：
+Enter the repository and build the required binaries:
 
 ```bash
 cd /path/to/robonix
@@ -26,12 +26,12 @@ cargo build -p robonix-pilot
 cargo build -p robonix-vitals
 ```
 
-如果需要查询 gRPC 结果，建议安装 `grpcurl` 和 `jq`。没有 `grpcurl` 时，也可以只
-通过 Vitals 日志观察模块连接、stale 和恢复。
+Install `grpcurl` and `jq` if you want to query the gRPC snapshot directly.
+Without `grpcurl`, the same flow can still be verified from Vitals logs.
 
-## 2. 启动系统
+## 2. Start The Stack
 
-需要 5 个终端。
+Use five terminals.
 
 ### Terminal 1: Atlas
 
@@ -43,7 +43,7 @@ cargo run -p robonix-atlas -- \
   --capabilities capabilities
 ```
 
-Atlas 是服务注册和 capability 发现中心。
+Atlas is the service registry and capability discovery service.
 
 ### Terminal 2: Executor
 
@@ -55,13 +55,13 @@ cargo run -p robonix-executor -- \
   --listen 127.0.0.1:50061
 ```
 
-Executor 会注册：
+Executor declares:
 
 ```text
 robonix/system/executor/get_health
 ```
 
-Vitals 会轮询这个接口。
+Vitals polls this service.
 
 ### Terminal 3: Pilot
 
@@ -76,9 +76,10 @@ cargo run -p robonix-pilot -- \
   --vlm-model dummy
 ```
 
-这里 VLM 参数可以用 dummy，因为本 demo 只测试 `get_health`，不提交任务给 Pilot。
+The VLM fields may use dummy values for this demo because no task is submitted
+to Pilot. Only `get_health` is exercised.
 
-Pilot 会注册：
+Pilot declares:
 
 ```text
 robonix/system/pilot/get_health
@@ -98,15 +99,15 @@ cargo run -p robonix-vitals -- \
   --log info
 ```
 
-Mock Soma 会注册：
+Mock Soma declares:
 
 ```text
 robonix/system/soma/health
 robonix/system/soma/get_health
 ```
 
-这里 `--mock-soma-interval-ms 10000` 表示每 10 秒生成一帧硬件健康快照，录屏时不
-会滚动太快。
+The `--mock-soma-interval-ms 10000` setting emits one hardware-health frame
+every 10 seconds, which keeps screen recordings readable.
 
 ### Terminal 5: Vitals
 
@@ -120,7 +121,7 @@ cargo run -p robonix-vitals -- \
   --log robonix_vitals=info
 ```
 
-Vitals 会注册：
+Vitals declares:
 
 ```text
 robonix/system/vitals/get
@@ -128,9 +129,9 @@ robonix/system/vitals/stream
 robonix/system/vitals/modules/get
 ```
 
-## 3. 观察正常启动
+## 3. Observe Normal Startup
 
-Vitals 启动后应看到：
+Vitals should print lines like:
 
 ```text
 declared GetVitals at 127.0.0.1:50091
@@ -142,14 +143,14 @@ module health poll connected: executor (robonix/system/executor/get_health)
 module health poll connected: pilot (robonix/system/pilot/get_health)
 ```
 
-这说明两条链路都通了：
+This confirms that both paths are alive:
 
 ```text
-mock Soma -> Vitals                       硬件健康链路
-executor / pilot -> Vitals modules/get   模块健康链路
+mock Soma -> Vitals                       hardware-health path
+executor / pilot -> Vitals modules/get   module-health path
 ```
 
-10 秒后，Vitals 还会打印 mock Soma 的 body 基线，例如：
+After about 10 seconds, Vitals also prints the mock Soma body baseline:
 
 ```text
 [vitals] body: NORMAL (computer_jetson/jetson_agx_orin)
@@ -157,11 +158,11 @@ executor / pilot -> Vitals modules/get   模块健康链路
 [vitals] body: NORMAL (battery_main/mock_bms)
 ```
 
-这些是硬件健康数据，不是模块健康数据。
+Those body lines are hardware-health data, not module-health data.
 
-## 4. 查询模块健康快照
+## 4. Query ModuleHealthSnapshot
 
-如果安装了 `grpcurl`，可以查询 Vitals 聚合后的模块健康快照：
+If `grpcurl` is installed, query the Vitals aggregate module-health snapshot:
 
 ```bash
 cd /path/to/robonix
@@ -176,7 +177,7 @@ grpcurl -plaintext \
   robonix.contracts.RobonixSystemVitalsModulesGet/GetModuleHealthSnapshot | jq
 ```
 
-正常情况下应看到 executor 和 pilot：
+The normal response should include executor and pilot:
 
 ```json
 {
@@ -210,40 +211,41 @@ grpcurl -plaintext \
 }
 ```
 
-字段含义：
+Field summary:
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
 | `health = 0` | OK |
 | `health = 1` | WARN |
 | `health = 2` | ERROR |
-| `source = SELF_REPORTED` | 来自模块自己的 `get_health` |
-| `ttlMs = 5000` | 这条报告 5 秒内有效 |
+| `source = SELF_REPORTED` | Reported by the module's own `get_health` service |
+| `ttlMs = 5000` | The report is valid for 5 seconds |
 
-## 5. 测试 executor 失联 stale
+## 5. Test Executor Stale
 
-保持 Atlas、mock Soma、Vitals、Pilot 都运行。
+Keep Atlas, mock Soma, Vitals, and Pilot running.
 
-在 Terminal 2 中停止 executor：
+Stop executor in Terminal 2:
 
 ```bash
 Ctrl+C
 ```
 
-Vitals 先会发现 poll 失败：
+Vitals first notices that polling failed:
 
 ```text
 [vitals] module health poll lost executor: ...
 ```
 
-如果 executor 曾经成功上报过，超过 `ttlMs = 5000` 后，Vitals 会合成 stale：
+If executor had previously reported successfully, Vitals synthesizes stale after
+`ttlMs = 5000` expires:
 
 ```text
 [vitals] module executor health: OK -> ERROR (STALE)
 [vitals] ALERT: module executor - no health report received within ttl
 ```
 
-再次查询 `modules/get`，executor 应变为：
+Query `modules/get` again. Executor should now look like:
 
 ```json
 {
@@ -259,12 +261,12 @@ Vitals 先会发现 poll 失败：
 }
 ```
 
-注意：如果某个模块从来没有成功上报过，Vitals 不会立刻把它标成 ERROR。当前逻辑只
-对“曾经成功上报过、后来失联”的模块做 stale 合成。
+Vitals only synthesizes stale for modules that have reported at least once.
+A module that never appeared is not immediately marked as ERROR.
 
-## 6. 测试 executor 恢复
+## 6. Test Executor Recovery
 
-重新启动 Terminal 2：
+Restart Terminal 2:
 
 ```bash
 cd /path/to/robonix
@@ -274,14 +276,14 @@ cargo run -p robonix-executor -- \
   --listen 127.0.0.1:50061
 ```
 
-Vitals 应看到：
+Vitals should print:
 
 ```text
 [vitals] module health poll connected: executor (robonix/system/executor/get_health)
 [vitals] module executor health: ERROR -> OK (OK)
 ```
 
-再次查询 `modules/get`，executor 应恢复为：
+Query `modules/get` again. Executor should recover to:
 
 ```json
 {
@@ -293,35 +295,36 @@ Vitals 应看到：
 }
 ```
 
-## 7. 测试 pilot stale
+## 7. Test Pilot Stale
 
-Pilot 的测试方式和 executor 一样：
+Pilot uses the same flow:
 
-1. 在 Terminal 3 停止 pilot。
-2. 等待约 5 秒。
-3. Vitals 应打印 `pilot OK -> ERROR (STALE)`。
-4. 重启 pilot。
-5. Vitals 应打印 `pilot ERROR -> OK (OK)`。
+1. Stop pilot in Terminal 3.
+2. Wait about 5 seconds.
+3. Vitals should print `pilot OK -> ERROR (STALE)`.
+4. Restart pilot.
+5. Vitals should print `pilot ERROR -> OK (OK)`.
 
-## 8. 常见问题
+## 8. Troubleshooting
 
-### Vitals 没有打印 executor / pilot connected
+### Vitals Does Not Print Executor / Pilot Connected
 
-检查 executor 和 pilot 是否已经启动，并确认它们连接的是同一个 Atlas：
+Check that executor and pilot are running and using the same Atlas endpoint:
 
 ```text
 --atlas 127.0.0.1:50051
 ```
 
-### Pilot 启动失败，提示缺少 VLM 配置
+### Pilot Fails Because VLM Config Is Missing
 
-即使只测 `get_health`，Pilot 当前启动也需要 VLM 参数。使用 demo 中的 dummy 参数即可。
+Pilot currently requires VLM fields at startup even when only `get_health` is
+tested. Use the dummy values shown in this demo.
 
-### 端口占用
+### Port Already In Use
 
-本 demo 使用：
+This demo uses:
 
-| 服务 | 端口 |
+| Service | Port |
 |---|---|
 | Atlas | `50051` |
 | Executor | `50061` |
@@ -329,25 +332,25 @@ Pilot 的测试方式和 executor 一样：
 | Vitals | `50091` |
 | Mock Soma | `50092` |
 
-如果端口被占用，可以先停止旧进程，或者统一替换为其他端口。
+Stop the old process or replace all affected ports consistently.
 
-### grpcurl 查询失败
+### grpcurl Query Fails
 
-先确认 Vitals 已经编译过，并且 `PROTO_DIR` 能找到生成的 proto：
+First confirm that Vitals has been built and that the generated proto exists:
 
 ```bash
 PROTO_DIR=$(ls -td target/debug/build/robonix-vitals-*/out | head -n1)
 ls "$PROTO_DIR/robonix_contracts.proto"
 ```
 
-如果没有 `grpcurl`，可以先只通过 Vitals 日志验证。
+If `grpcurl` is unavailable, verify the flow from Vitals logs instead.
 
-## 9. 本 demo 证明了什么
+## 9. What This Demo Proves
 
-完成以上步骤后，可以证明：
+After completing the steps above, the demo proves that:
 
-1. executor 和 pilot 已按 V1 协议提供 `ModuleHealthReport`。
-2. Vitals 能发现并轮询它们的 `get_health`。
-3. Vitals 能通过 `modules/get` 返回聚合后的 `ModuleHealthSnapshot`。
-4. 模块失联超过 `ttl_ms` 后，Vitals 能合成 `STALE / ERROR`。
-5. 模块恢复后，Vitals 能记录并展示 `ERROR -> OK`。
+1. executor and pilot expose `ModuleHealthReport` through the V1 protocol.
+2. Vitals discovers and polls their `get_health` services.
+3. Vitals exposes the aggregate `ModuleHealthSnapshot` through `modules/get`.
+4. Vitals synthesizes `STALE / ERROR` when a known module exceeds `ttl_ms`.
+5. Vitals records and exposes recovery when the module returns to `OK`.

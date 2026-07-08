@@ -87,12 +87,11 @@ pub fn spawn_module_health_poller(
                                 target.label
                             );
                         }
-                        if let Some(module_key) = module_keys.get(target.label) {
-                            if let Some(event) =
+                        if let Some(module_key) = module_keys.get(target.label)
+                            && let Some(event) =
                                 svc.synthesize_stale_module_if_expired(module_key).await
-                            {
-                                log_module_event(&event);
-                            }
+                        {
+                            log_module_event(&event);
                         }
                         available.insert(target.label, false);
                     }
