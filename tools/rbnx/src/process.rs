@@ -4,7 +4,6 @@
 // Process management for robonix-cli (start/stop/monitor processes)
 
 use anyhow::{Context, Result};
-use dirs;
 use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -76,6 +75,30 @@ impl ProcessTreeNode {
     }
 }
 
+/// Resolve the per-deploy process-state path from the log directory.
+///
+/// Two layouts are recognised:
+///
+///   * `<…>/rbnx-boot/logs/`  →  `<…>/rbnx-boot/processes.json` (sits
+///     next to `rbnx-boot/state.json` written by `rbnx boot`/`shutdown`)
+///   * anything else          →  `<log_dir>/../processes.json`
+///     (covers `rbnx start --standalone` on a package whose default
+///     `rbnx-build/logs/` is the log root)
+///
+/// The result is always inside the per-deploy tree — never `~/.robonix/`,
+/// which is reserved for cross-deploy user state.
+fn derive_state_file_path(log_dir: &Path) -> PathBuf {
+    if let Some(parent) = log_dir.parent() {
+        if parent.file_name().and_then(|s| s.to_str()) == Some("rbnx-boot") {
+            return parent.join("processes.json");
+        }
+    }
+    match log_dir.parent() {
+        Some(p) => p.join("processes.json"),
+        None => log_dir.join("processes.json"),
+    }
+}
+
 /// Manager for processes running capabilities and skills
 pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, // key: "{package_type}::{std_name}"
@@ -97,13 +120,25 @@ impl ProcessManager {
             .to_string_lossy()
             .to_string();
 
-        // State file in ~/.robonix/processes.json
-        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        let state_dir = home_dir.join(".robonix");
-        std::fs::create_dir_all(&state_dir).with_context(|| {
-            format!("Failed to create state directory: {}", state_dir.display())
-        })?;
-        let state_file = state_dir.join("processes.json");
+        // State file lives in the per-deploy root, NOT ~/.robonix/.
+        //
+        // ~/.robonix/ is for cross-deploy user state (config.yaml, chat.yaml,
+        // voiceprint enrollments, installed package db). The package runtime
+        // record belongs to ONE deploy and dies with it, so it must live
+        // inside the deploy tree — the same place `rbnx shutdown` reads
+        // `<manifest-dir>/rbnx-boot/state.json` from — and disappear on
+        // shutdown. A `~/.robonix/processes.json` from a half-killed boot
+        // would otherwise leak across deploys and confuse `rbnx start` on
+        // unrelated packages.
+        //
+        // The deploy root is anchored to the log directory (which
+        // `rbnx start` defaults to `<pkg>/rbnx-build/logs`, and
+        // `rbnx boot` overrides to `<manifest-dir>/rbnx-boot/logs`).
+        // State file is the sibling `processes.json` in the same dir —
+        // or, when a deploy root is unambiguous (`<…>/rbnx-boot/logs`),
+        // inside the `rbnx-boot/` parent so it sits next to
+        // `rbnx-boot/state.json` and `rbnx-boot/logs/`.
+        let state_file = derive_state_file_path(&log_dir);
 
         let mut manager = Self {
             processes: Arc::new(Mutex::new(HashMap::new())),

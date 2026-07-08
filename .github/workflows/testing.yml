@@ -920,6 +920,55 @@ jobs:
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
 
+      - name: Validate boot/shutdown lifecycle
+        # boot → shutdown → re-boot → shutdown. Proves the runtime keeps
+        # state under <manifest-dir>/rbnx-boot/ (not ~/.robonix/), that
+        # Soma package children are stopped cleanly, and that the stack
+        # can come back up after a clean teardown (the issue #128
+        # regression). The second boot reuses the per-run sim container;
+        # the validator does NOT start a new webots instance.
+        working-directory: examples/webots
+        env:
+          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
+            --rbnx rbnx \
+            --manifest robonix_manifest.ci.generated.yaml \
+            --server "$ROBONIX_CI_ATLAS" \
+            --sim-container "$ROBONIX_SIM_CONTAINER" \
+            --log-dir examples/webots/rbnx-boot/logs | tee "$RUNNER_TEMP/lifecycle.out"
+
+      - name: Re-run scenario suite after lifecycle validator
+        # After the validator re-boots the stack, run the scenarios one
+        # more time so the report covers both a fresh boot and a
+        # post-shutdown boot. This is what actually exercises the
+        # "restart doesn't crash" fix — the original suite proved
+        # boot-once, this proves boot-after-shutdown.
+        working-directory: examples/webots
+        run: |
+          set -euo pipefail
+          export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
+          # Wait for atlas to settle (the validator just re-booted
+          # everything; reuse the same caps wait).
+          for i in $(seq 1 60); do
+            if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.post-restart.txt" 2>&1 \
+              && grep -q "robonix/service/navigation/navigate" "$RUNNER_TEMP/caps.post-restart.txt" \
+              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
+              echo "post-restart atlas ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "::error::atlas not ready after lifecycle reboot"
+              tail -120 "$RUNNER_TEMP/caps.post-restart.txt" || true
+              exit 1
+            fi
+            sleep 5
+          done
+          python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
+            --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \
+            | tee "$RUNNER_TEMP/scenarios.restart.out"
+
       - name: Capture runtime logs
         if: always()
         env:
@@ -1242,6 +1291,11 @@ jobs:
             ${{ runner.temp }}/rbnx-boot.log
             ${{ runner.temp }}/cache-provider-logs/
             ${{ runner.temp }}/sim-logs/
+            ${{ runner.temp }}/lifecycle.out
+            ${{ runner.temp }}/scenarios.out
+            ${{ runner.temp }}/scenarios.restart.out
+            examples/webots/rbnx-boot/logs/lifecycle-*.log
+            examples/webots/rbnx-boot/processes.json
           if-no-files-found: ignore
 
   report:
