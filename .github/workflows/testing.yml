@@ -1512,13 +1512,17 @@ jobs:
               auto_merge: false,
               required_contexts: []
             }' > "$deployment_payload"
-          deployment_id="$(
+          if ! deployment_id="$(
             gh api \
               -X POST \
               "repos/${GITHUB_REPOSITORY}/deployments" \
               --input "$deployment_payload" \
               --jq ".id"
-          )"
+          )"; then
+            echo "::warning::unable to create deployment status record for report site; skipping GitHub deployment metadata"
+            echo "Skipped GitHub deployment metadata for the report site because the workflow token cannot create deployments." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           jq -n \
             --arg state "success" \
             --arg target_url "$REPORT_URL" \
@@ -1530,7 +1534,10 @@ jobs:
               environment_url: $environment_url,
               description: $desc
             }' > "$status_payload"
-          gh api \
+          if ! gh api \
             -X POST \
             "repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses" \
-            --input "$status_payload" >/dev/null
+            --input "$status_payload" >/dev/null; then
+            echo "::warning::unable to update deployment status for report site; report was still published"
+            echo "Skipped GitHub deployment status update for the report site because the workflow token cannot update deployments." >> "$GITHUB_STEP_SUMMARY"
+          fi
