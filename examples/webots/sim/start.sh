@@ -137,11 +137,24 @@ if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
   echo "[sim/start] stream mode — merging compose.stream.yaml (WS :1234, viewer :8080)"
 fi
 
-# X11 GUI: ensure docker can reach the local DISPLAY. xhost is harmless
-# on systems without an X server (it just fails silently).
-if command -v xhost &>/dev/null; then
-  xhost +local:docker >/dev/null 2>&1 || true
-fi
+allow_x11_for_docker() {
+  if ! command -v xhost &>/dev/null; then
+    echo "[sim/start] warning: xhost not found; Docker may not be allowed to open DISPLAY=$DISPLAY"
+    return 0
+  fi
+
+  local ok=0
+  xhost +SI:localuser:root >/dev/null 2>&1 && ok=1 || true
+  xhost +local:root >/dev/null 2>&1 && ok=1 || true
+  xhost +local:docker >/dev/null 2>&1 && ok=1 || true
+  if [[ "$ok" != "1" ]]; then
+    echo "[sim/start] warning: failed to authorize Docker for DISPLAY=$DISPLAY"
+    echo "[sim/start] If Webots exits with Qt xcb / 'No protocol specified', run:"
+    echo "[sim/start]   xhost +SI:localuser:root +local:root"
+  fi
+}
+
+allow_x11_for_docker
 
 # Bring sim up detached so we can layer rviz on top before tailing logs.
 docker compose "${CF[@]}" up --build -d
@@ -185,9 +198,7 @@ fi
 # into `docker exec`, independent of the container's internal Xorg :48.
 # So an xrdp / NoMachine user still gets rviz inside their session;
 # webots' 3D view streams to the browser via :8080 separately.
-if command -v xhost &>/dev/null; then
-    xhost +local:docker >/dev/null 2>&1 || true
-fi
+allow_x11_for_docker
 echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
 # Per-user log path: /tmp is shared on multi-tenant boxes and a fixed
 # /tmp/rviz2.log file owned by another user blocks rewrite. ${USER:-rviz}
