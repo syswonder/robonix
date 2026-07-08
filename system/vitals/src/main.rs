@@ -3,12 +3,13 @@
 // robonix-vitals — health monitoring: power state, component health, threshold alerts.
 // On startup vitals:
 //   1. Connects to atlas, registers as `vitals`.
-//   2. Declares two gRPC capabilities:
+//   2. Declares gRPC capabilities:
 //      - robonix/system/vitals/get    (rpc: GetVitals → VitalsSnapshot)
 //      - robonix/system/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
+//      - robonix/system/vitals/modules/get (rpc: GetModuleHealthSnapshot)
 //   3. Consumes Soma's StreamHealth gRPC stream (real or mock), normalizes
 //      SomaHealthSnapshot → VitalsSnapshot via threshold rules.
-//   4. Serves both gRPC services on `listen`.
+//   4. Serves all gRPC services on `listen`.
 //
 // Vitals requires Soma.  Use --mock-soma to run an embedded mock, or point
 // --soma-endpoint at a real Soma instance.
@@ -16,6 +17,7 @@
 mod config;
 mod mock_soma;
 pub mod module_health;
+mod module_health_poll;
 mod pb;
 mod service;
 mod soma_ingest;
@@ -26,6 +28,7 @@ use clap::Parser;
 use config::{Args, VITALS_NAMESPACE, VitalsConfig};
 use log::info;
 use pb::contracts::robonix_system_vitals_get_server::RobonixSystemVitalsGetServer;
+use pb::contracts::robonix_system_vitals_modules_get_server::RobonixSystemVitalsModulesGetServer;
 use pb::contracts::robonix_system_vitals_stream_server::RobonixSystemVitalsStreamServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -111,6 +114,22 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared StreamVitals at {advertised}");
 
+    // Declare module health aggregate snapshot RPC.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/vitals/modules/get",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/vitals/modules/get.toml",
+                "robonix.contracts.RobonixSystemVitalsModulesGet",
+                "/robonix.contracts.RobonixSystemVitalsModulesGet/GetModuleHealthSnapshot",
+            ),
+        )
+        .await?;
+    info!("declared ModuleHealthSnapshot at {advertised}");
+
     if let Err(e) = atlas
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
@@ -136,6 +155,8 @@ async fn main() -> Result<()> {
 
     // Build the shared service state.
     let svc = VitalsServiceImpl::new();
+
+    module_health_poll::spawn_module_health_poller(atlas.clone(), cfg.id.clone(), svc.clone());
 
     let soma_rules: Vec<soma_ingest::SomaThresholdRule> =
         match std::fs::read_to_string(&cfg.thresholds_path) {
@@ -248,7 +269,8 @@ async fn main() -> Result<()> {
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemVitalsGetServer::new(svc.clone()))
-        .add_service(RobonixSystemVitalsStreamServer::new(svc))
+        .add_service(RobonixSystemVitalsStreamServer::new(svc.clone()))
+        .add_service(RobonixSystemVitalsModulesGetServer::new(svc))
         .serve(listen_addr)
         .await
         .context("vitals gRPC server failed")?;
