@@ -21,6 +21,9 @@ pub const SOURCE_VITALS_SYNTHESIZED_STALE: &str = "VITALS_SYNTHESIZED_STALE";
 pub const SOURCE_CONFIG_DISABLED: &str = "CONFIG_DISABLED";
 
 const MAX_EVENTS: usize = 256;
+const STALE_REASON_CODE: &str = "STALE";
+const STALE_DETAIL: &str = "no health report received within ttl";
+const NS_PER_MS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleHealthError {
@@ -95,6 +98,39 @@ impl ModuleHealthStore {
         Ok(event)
     }
 
+    pub fn synthesize_stale_if_expired(
+        &mut self,
+        module_key: &str,
+        now_ns: u64,
+    ) -> Option<ModuleHealthEvent> {
+        let previous = self.latest.get(module_key).cloned()?;
+        if previous.ttl_ms == 0 || !is_expired(&previous, now_ns) {
+            return None;
+        }
+        if previous.source == SOURCE_VITALS_SYNTHESIZED_STALE
+            && previous.reason_code == STALE_REASON_CODE
+        {
+            return None;
+        }
+
+        let mut current = previous.clone();
+        current.health = HEALTH_ERROR;
+        current.state = "stale".to_string();
+        current.reason_code = STALE_REASON_CODE.to_string();
+        current.detail = STALE_DETAIL.to_string();
+        current.source = SOURCE_VITALS_SYNTHESIZED_STALE.to_string();
+        current.received_ts_ns = now_ns;
+
+        let event = self.health_transition_event(&previous, &current, now_ns);
+        self.latest.insert(module_key.to_string(), current);
+
+        if let Some(event) = event.clone() {
+            self.push_event(event);
+        }
+
+        event
+    }
+
     pub fn snapshot(&mut self, ts_ns: u64) -> ModuleHealthSnapshot {
         self.snapshot_seq += 1;
         ModuleHealthSnapshot {
@@ -142,6 +178,11 @@ impl ModuleHealthStore {
         }
         self.events.push_back(event);
     }
+}
+
+fn is_expired(module: &ModuleHealth, now_ns: u64) -> bool {
+    let ttl_ns = u64::from(module.ttl_ms).saturating_mul(NS_PER_MS);
+    module.received_ts_ns.saturating_add(ttl_ns) <= now_ns
 }
 
 fn module_key_for(module: &ModuleHealth) -> String {
@@ -253,6 +294,68 @@ mod tests {
         assert!(event.is_none());
         assert_eq!(store.latest("executor").unwrap().received_ts_ns, 200);
         assert_eq!(store.events().count(), 0);
+    }
+
+    #[test]
+    fn stale_is_synthesized_after_ttl_expires() {
+        let mut store = ModuleHealthStore::new();
+        store
+            .ingest_report(report("executor", "executor", HEALTH_OK, "OK"), 100)
+            .unwrap();
+
+        assert!(
+            store
+                .synthesize_stale_if_expired("executor", 100 + 4_999_000_000)
+                .is_none()
+        );
+        assert_eq!(store.latest("executor").unwrap().health, HEALTH_OK);
+
+        let event = store
+            .synthesize_stale_if_expired("executor", 100 + 5_000_000_000)
+            .expect("stale event");
+
+        let module = store.latest("executor").unwrap();
+        assert_eq!(module.health, HEALTH_ERROR);
+        assert_eq!(module.state, "stale");
+        assert_eq!(module.reason_code, STALE_REASON_CODE);
+        assert_eq!(module.detail, STALE_DETAIL);
+        assert_eq!(module.source, SOURCE_VITALS_SYNTHESIZED_STALE);
+        assert_eq!(module.received_ts_ns, 100 + 5_000_000_000);
+        assert_eq!(event.previous_health, HEALTH_OK);
+        assert_eq!(event.current_health, HEALTH_ERROR);
+        assert_eq!(event.reason_code, STALE_REASON_CODE);
+        assert_eq!(event.source, SOURCE_VITALS_SYNTHESIZED_STALE);
+        assert_eq!(store.events().count(), 1);
+    }
+
+    #[test]
+    fn stale_synthesis_is_not_repeated_until_self_report_recovers() {
+        let mut store = ModuleHealthStore::new();
+        store
+            .ingest_report(report("pilot", "pilot", HEALTH_OK, "OK"), 100)
+            .unwrap();
+        assert!(
+            store
+                .synthesize_stale_if_expired("pilot", 100 + 5_000_000_000)
+                .is_some()
+        );
+        assert!(
+            store
+                .synthesize_stale_if_expired("pilot", 100 + 20_000_000_000)
+                .is_none()
+        );
+
+        let recovered = store
+            .ingest_report(
+                report("pilot", "pilot", HEALTH_OK, "OK"),
+                100 + 21_000_000_000,
+            )
+            .unwrap()
+            .expect("recovery event");
+        assert_eq!(recovered.previous_health, HEALTH_ERROR);
+        assert_eq!(recovered.current_health, HEALTH_OK);
+        assert_eq!(store.latest("pilot").unwrap().source, SOURCE_SELF_REPORTED);
+        assert_eq!(store.events().count(), 2);
     }
 
     #[test]
