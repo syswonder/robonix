@@ -1,9 +1,11 @@
-# Set all joint positions (0=open, 1=closed).  LLM-facing MCP tool.
-# Request includes joint_names alongside positions so the driver can validate
-# joint order.  Call info first to discover expected array length and names.
-# Reply: ok=false on rejection (length mismatch, unknown joint, out-of-range
-# position, hardware fault) with a human-readable reason in message; ok=true
-# leaves message empty.
+# Axis-level position command (precise / full-spectrum fallback): address
+# individual control axes by JointInfo.name. For hardware-independent control
+# prefer move_finger. Values normalized [0,1]; endpoint meaning comes from each
+# axis's `type` in info (bend/sway/oppose/other). Only listed axes move; unlisted hold
+# their current target. An empty request, unknown/duplicate names, and values
+# outside [0,1] (or non-finite) are rejected, never clamped. ok=true means
+# the command was accepted and dispatched, NOT that the hand reached the target
+# -- observe state_joint; ok=false with a reason in message on rejection.
 [contract]
 id      = "robonix/primitive/hand/move_joint"
 version = "1"

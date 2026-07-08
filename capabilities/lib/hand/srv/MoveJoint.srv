@@ -1,5 +1,8 @@
-string[] joint_names
-float64[] positions
+# Axis-level position command: address individual control axes by name (from
+# info's JointInfo.name). The precise / full-spectrum path; for hardware-
+# independent control prefer move_finger. Only listed axes move; unlisted hold.
+# See contract for accept semantics.
+JointValue[] targets   # value = target normalized position [0,1]
 ---
-bool ok
-string message
+bool ok                # true = accepted & dispatched (not necessarily reached)
+string message         # non-empty on rejection: human-readable reason
