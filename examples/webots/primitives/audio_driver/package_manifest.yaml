@@ -32,6 +32,11 @@ start: bash scripts/start.sh
 # ALSA naturally has many "hw:X,Y" devices behind one driver, so we
 # expose the routing table. These are driver-internal devices, not
 # robonix caps.
+stop: |
+  pkill -TERM -f "[p]ython3 -m audio_driver.main" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython3 -m audio_driver.main" 2>/dev/null || true
+
 capabilities:
   - name: robonix/primitive/audio/mic
   - name: robonix/primitive/audio/speaker

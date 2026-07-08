@@ -45,7 +45,7 @@ pub async fn execute(file: PathBuf) -> Result<()> {
         ),
     );
 
-    teardown::teardown(&state.components).await;
+    teardown::teardown(Some(&state.atlas_endpoint), &state.components).await;
 
     // Best-effort: also signal the boot process itself (which is probably
     // already dead because we just killed all its children, but if the

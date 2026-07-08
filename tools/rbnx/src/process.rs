@@ -24,6 +24,10 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub log_file: PathBuf,
     pub hostname: String,
+    #[serde(default)]
+    pub package_path: Option<PathBuf>,
+    #[serde(default)]
+    pub command: String,
 }
 
 /// Process start result with group information
@@ -131,8 +135,9 @@ impl ProcessManager {
         let mut valid_processes = HashMap::new();
         let original_count = processes.len();
         for process_info in processes {
-            // Check if process is still running
-            if Self::is_process_running(process_info.pid) {
+            // Check if process is still live. `kill(pid, 0)` alone accepts
+            // zombies and PID reuse; validate procfs too when available.
+            if Self::is_process_record_live(&process_info) {
                 let key = format!("{}::{}", process_info.package_type, process_info.std_name);
                 valid_processes.insert(key, process_info);
             } else {
@@ -153,7 +158,70 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Check if a process with given PID is still running
+    /// Check if a persisted process record still points at a live process.
+    fn is_process_record_live(process_info: &ProcessInfo) -> bool {
+        if !Self::is_process_running(process_info.pid) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            if Self::is_process_zombie(process_info.pid) {
+                return false;
+            }
+            let Some(cmdline) = Self::process_cmdline(process_info.pid) else {
+                return false;
+            };
+            if cmdline.trim().is_empty() || cmdline.contains("<defunct>") {
+                return false;
+            }
+            // Old state files did not store command/cwd, which made PID reuse
+            // indistinguishable from a real still-running package. Treat them
+            // as stale after this schema upgrade; new records below carry both.
+            if process_info.command.trim().is_empty() || !cmdline.contains(&process_info.command) {
+                return false;
+            }
+            let Some(expected_cwd) = process_info.package_path.as_ref() else {
+                return false;
+            };
+            if let Ok(actual_cwd) = std::fs::read_link(format!("/proc/{}/cwd", process_info.pid)) {
+                if actual_cwd != *expected_cwd {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    fn is_process_zombie(pid: u32) -> bool {
+        let path = format!("/proc/{pid}/status");
+        let Ok(status) = std::fs::read_to_string(path) else {
+            return true;
+        };
+        status
+            .lines()
+            .find(|line| line.starts_with("State:"))
+            .map(|line| line.contains(" Z") || line.contains(" X"))
+            .unwrap_or(true)
+    }
+
+    #[cfg(unix)]
+    fn process_cmdline(pid: u32) -> Option<String> {
+        let path = format!("/proc/{pid}/cmdline");
+        let raw = std::fs::read(path).ok()?;
+        Some(
+            String::from_utf8_lossy(&raw)
+                .replace('\0', " ")
+                .trim()
+                .to_string(),
+        )
+    }
+
+    /// Check if a process with given PID exists. This is only the first
+    /// liveness probe; callers that use persisted state should prefer
+    /// `is_process_record_live`.
     fn is_process_running(pid: u32) -> bool {
         #[cfg(unix)]
         {
@@ -280,6 +348,8 @@ impl ProcessManager {
                     pid,
                     log_file: log_file.clone(),
                     hostname: self.hostname.clone(),
+                    package_path: Some(package_path.to_path_buf()),
+                    command: start_script.to_string(),
                 },
             );
         }
@@ -366,7 +436,7 @@ impl ProcessManager {
 
         if let Some(process_info) = process_info {
             // Verify the process is actually still running
-            if Self::is_process_running(process_info.pid) {
+            if Self::is_process_record_live(&process_info) {
                 return true;
             } else {
                 // Process is dead, remove it from state

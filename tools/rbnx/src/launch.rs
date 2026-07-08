@@ -44,8 +44,13 @@ use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::process::Command;
 use tonic::Request;
 use tonic::transport::Endpoint;
 
@@ -75,6 +80,185 @@ pub const DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 /// output, so we keep one stable string instead of inventing per-caller
 /// ones (would only add noise).
 pub const BOOT_CONSUMER_ID: &str = "rbnx-cli/deploy";
+
+/// Runtime-owned process and lifecycle metadata for one package wrapper.
+///
+/// Both `rbnx boot` and Soma spawn long-lived `rbnx start -p` wrappers.
+/// Shutdown must be ordered the same way in both callers: provider lifecycle,
+/// package stop hook, process-group fallback. Keeping the record here prevents
+/// Soma and rbnx from growing divergent cleanup semantics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackageRuntimeRecord {
+    pub name: String,
+    pub kind: String,
+    pub pid: u32,
+    pub pgid: u32,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub driver_contract: Option<String>,
+    #[serde(default)]
+    pub config_json: Option<String>,
+    #[serde(default)]
+    pub package_dir: Option<String>,
+    #[serde(default)]
+    pub stop: Option<String>,
+}
+
+/// Stop one package runtime using the canonical shutdown order:
+/// Driver(CMD_SHUTDOWN) -> manifest stop -> TERM PGID -> KILL PGID.
+pub async fn shutdown_package_runtime(
+    atlas_endpoint: Option<&str>,
+    record: &PackageRuntimeRecord,
+    term_wait: Duration,
+) {
+    if let (Some(endpoint), Some(provider_id), Some(driver_contract)) = (
+        atlas_endpoint,
+        record.provider_id.as_deref(),
+        record.driver_contract.as_deref(),
+    ) {
+        let normalized = if endpoint.starts_with("http") {
+            endpoint.to_string()
+        } else {
+            format!("http://{endpoint}")
+        };
+        match AtlasClient::connect(&normalized).await {
+            Ok(mut atlas) => {
+                let config_json = record.config_json.clone().unwrap_or_else(|| "{}".into());
+                match call_driver_cmd(
+                    &mut atlas,
+                    provider_id,
+                    driver_contract,
+                    CMD_SHUTDOWN,
+                    config_json,
+                    &record.name,
+                )
+                .await
+                {
+                    Ok(state) => info!(
+                        "shutdown {} via Driver(CMD_SHUTDOWN): {}",
+                        record.name, state
+                    ),
+                    Err(e) => warn!(
+                        "shutdown {} Driver(CMD_SHUTDOWN) failed: {e:#}",
+                        record.name
+                    ),
+                }
+            }
+            Err(e) => warn!(
+                "shutdown {} could not connect atlas at {}: {e:#}",
+                record.name, normalized
+            ),
+        }
+    }
+
+    if let Some(stop) = record
+        .stop
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        run_package_stop_hook(record, stop, atlas_endpoint).await;
+    }
+
+    terminate_process_group(record.pgid, term_wait).await;
+}
+
+async fn run_package_stop_hook(
+    record: &PackageRuntimeRecord,
+    stop: &str,
+    atlas_endpoint: Option<&str>,
+) {
+    let Some(package_dir) = record.package_dir.as_deref() else {
+        warn!("shutdown {} has stop hook but no package_dir", record.name);
+        return;
+    };
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(stop)
+        .current_dir(PathBuf::from(package_dir))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(endpoint) = atlas_endpoint {
+        cmd.env("ROBONIX_ATLAS", endpoint);
+    }
+    match tokio::time::timeout(Duration::from_secs(20), cmd.status()).await {
+        Ok(Ok(status)) if status.success() => {
+            info!("shutdown {} manifest stop hook completed", record.name);
+        }
+        Ok(Ok(status)) => warn!(
+            "shutdown {} manifest stop hook exited with {}",
+            record.name, status
+        ),
+        Ok(Err(e)) => warn!(
+            "shutdown {} manifest stop hook failed to start: {e:#}",
+            record.name
+        ),
+        Err(_) => warn!(
+            "shutdown {} manifest stop hook timed out after 20s",
+            record.name
+        ),
+    }
+}
+
+/// TERM one wrapper process group, wait until it exits, then KILL stragglers.
+pub async fn terminate_process_group(pgid: u32, term_wait: Duration) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    let pgid_raw = pgid;
+    let pgid = Pid::from_raw(pgid as i32);
+    match killpg(pgid, Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(nix::errno::Errno::ESRCH) => return,
+        Err(e) => warn!("SIGTERM pgid {} failed: {e}", pgid),
+    }
+
+    let deadline = Instant::now() + term_wait;
+    while Instant::now() < deadline {
+        if !process_group_has_members(pgid_raw).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let _ = killpg(pgid, Signal::SIGKILL);
+}
+
+async fn process_group_has_members(pgid: u32) -> bool {
+    let output = match Command::new("pgrep")
+        .arg("-g")
+        .arg(pgid.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => return true,
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| {
+        line.trim()
+            .parse::<u32>()
+            .map(process_is_not_zombie)
+            .unwrap_or(true)
+    })
+}
+
+fn process_is_not_zombie(pid: u32) -> bool {
+    let status_path = format!("/proc/{pid}/status");
+    let Ok(status) = std::fs::read_to_string(status_path) else {
+        return false;
+    };
+    !status
+        .lines()
+        .any(|line| line.starts_with("State:") && line.contains("Z"))
+}
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
