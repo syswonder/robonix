@@ -1,0 +1,7 @@
+# Set per-axis speed limit by name (normalized [0,1]). Motor parameter,
+# typically configured by skill/service in task context. Only listed axes
+# are updated.
+JointValue[] limits    # value = speed limit [0,1]
+---
+bool ok                # true = limits accepted & applied; false = rejected, reason in message
+string message

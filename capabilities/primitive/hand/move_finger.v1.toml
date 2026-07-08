@@ -1,0 +1,24 @@
+# Finger-level position command: each entry is (finger, type, value) --
+# (finger, type) selects the motion (e.g. index bend, thumb oppose) and value
+# is the normalized target for that whole motion. One (finger, type) may map to
+# several underlying axes (JointInfo marks the pair non-unique); how they share
+# the motion is the driver's choice, the only rule being that sweeping value
+# 0->1 moves the finger uniformly through the motion. This is an intentional
+# lossy view -- for precise per-axis control use move_joint. So the same command
+# works across different hands.
+# Values normalized [0,1]; endpoint meaning comes from `type`, a closed lowercase
+# set {bend, sway, oppose, other} spelled out per axis in info (JointInfo).
+# Rejected, never coerced or clamped: a `type` outside that set, a value outside
+# [0,1] or non-finite, and finger="" (a non-finger-mapped axis -- drive it via
+# move_joint by name).
+# Only listed (finger,type) move; others hold. An empty request, an
+# unknown/duplicate pair, or one this hand lacks, is rejected. ok=true means accepted and dispatched,
+# NOT reached -- observe state_finger; ok=false with a reason in message on rejection.
+[contract]
+id      = "robonix/primitive/hand/move_finger"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/MoveFinger.srv"
+
+[mode]
+type = "rpc"
