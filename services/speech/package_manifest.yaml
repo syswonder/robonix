@@ -43,6 +43,11 @@ start: |
   # exactly what bit us debugging the FunASR loader.
   exec rbnx-build/venv/bin/python -m speech_service.service
 
+stop: |
+  pkill -TERM -f "[p]ython -m speech_service.service|[p]ython3 -m speech_service.service|[s]peech_service.service" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython -m speech_service.service|[p]ython3 -m speech_service.service|[s]peech_service.service" 2>/dev/null || true
+
 capabilities:
   - name: robonix/service/speech/driver
   - name: robonix/service/speech/asr

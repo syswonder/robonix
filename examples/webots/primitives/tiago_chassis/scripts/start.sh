@@ -59,7 +59,7 @@ docker exec -i \
   -e ROBONIX_ADVERTISE_HOST="$ADVERTISE_HOST" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
-  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/proto_gen" \
   "$SIM_CT" \
   bash -lc 'set -eo pipefail
             source /opt/ros/humble/setup.bash

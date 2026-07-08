@@ -43,6 +43,11 @@ start: |
   exec rbnx-build/venv/bin/python -m memsearch_service.service \
        > rbnx-build/data/memsearch.log 2>&1
 
+stop: |
+  pkill -TERM -f "[p]ython -m memsearch_service.service|[p]ython3 -m memsearch_service.service|[m]emsearch_service.service" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython -m memsearch_service.service|[p]ython3 -m memsearch_service.service|[m]emsearch_service.service" 2>/dev/null || true
+
 capabilities:
   - name: robonix/service/memory/save
   - name: robonix/service/memory/search
