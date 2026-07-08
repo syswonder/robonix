@@ -44,6 +44,11 @@ start: bash scripts/start.sh
 # optional list_devices/select_device contracts so the user can pick
 # which physical mic/speaker the cap's driver routes to. Those CoreAudio
 # devices are driver-internal — not separate robonix caps.
+stop: |
+  pkill -TERM -f "[p]ython3 -m audio_macos_bridge.main" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython3 -m audio_macos_bridge.main" 2>/dev/null || true
+
 capabilities:
   - name: robonix/primitive/audio/mic
   - name: robonix/primitive/audio/speaker

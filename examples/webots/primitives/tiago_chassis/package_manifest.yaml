@@ -33,6 +33,12 @@ build: bash scripts/build.sh
 # Start: docker-exec into the pre-running sim container. See scripts/start.sh.
 start: bash scripts/start.sh
 
+stop: |
+  SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+  docker exec "$SIM_CT" pkill -TERM -f "[p]ython3 -m chassis_driver.driver" 2>/dev/null || true
+  sleep 1
+  docker exec "$SIM_CT" pkill -KILL -f "[p]ython3 -m chassis_driver.driver" 2>/dev/null || true
+
 capabilities:
   - name: robonix/primitive/chassis/move
   - name: robonix/primitive/chassis/odom

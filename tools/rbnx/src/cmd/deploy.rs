@@ -29,6 +29,7 @@
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_cli::launch::PackageRuntimeRecord;
 use robonix_cli::output;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -440,10 +441,13 @@ struct Spawned {
     child: Child,
     pid: u32,
     /// Process group id. Each child is spawned with `process_group(0)` so
-    /// it becomes the leader of a new PGID == its own PID. Tear-down
-    /// signals `-PGID` to take the whole subtree (rbnx start wrapper +
-    /// inner interpreter + any docker-exec wrappers it forked).
+    /// it becomes the leader of a new PGID == its own PID.
     pgid: u32,
+    provider_id: Option<String>,
+    driver_contract: Option<String>,
+    config_json: Option<String>,
+    package_dir: Option<PathBuf>,
+    stop: Option<String>,
 }
 
 fn log_path(log_dir: &Path, name: &str) -> PathBuf {
@@ -515,6 +519,11 @@ async fn spawn_system_binary(
         child,
         pid,
         pgid: pid,
+        provider_id: None,
+        driver_contract: None,
+        config_json: None,
+        package_dir: None,
+        stop: None,
     })
 }
 
@@ -656,6 +665,11 @@ async fn spawn_soma_binary(
             child,
             pid,
             pgid: pid,
+            provider_id: None,
+            driver_contract: None,
+            config_json: None,
+            package_dir: None,
+            stop: None,
         },
         writer,
     ))
@@ -706,6 +720,11 @@ async fn spawn_package(
     } else {
         entry.name.clone()
     };
+    let package_manifest =
+        robonix_cli::manifest::detect_and_load(&pkg_path, entry.manifest.as_deref())
+            .with_context(|| format!("load package manifest for {}", pkg_path.display()))?;
+    let stop = package_manifest.manifest.stop.trim().to_string();
+    let stop = if stop.is_empty() { None } else { Some(stop) };
     // Scribe tag + log-file stem = the provider_id (`entry.name`) verbatim.
     // provider_id is unique per deploy (atlas enforces it), so no kind prefix
     // is needed for disambiguation — `rbnx logs -t <provider_id>` and the file
@@ -812,6 +831,11 @@ async fn spawn_package(
         child,
         pid,
         pgid: pid,
+        provider_id: None,
+        driver_contract: None,
+        config_json: None,
+        package_dir: Some(pkg_path),
+        stop,
     })
 }
 
@@ -1359,7 +1383,7 @@ pub async fn execute(
             &children,
         );
         let providers = component_records(&children);
-        teardown::teardown(&providers).await;
+        teardown::teardown(Some(&atlas_endpoint), &providers).await;
         for sp in &mut children {
             let _ = sp.child.wait().await;
         }
@@ -1382,7 +1406,7 @@ pub async fn execute(
                 &children,
             );
             let providers = component_records(&children);
-            teardown::teardown(&providers).await;
+            teardown::teardown(Some(&atlas_endpoint), &providers).await;
             let _ = std::fs::remove_file(&state_path);
             return Err(e);
         }
@@ -1428,7 +1452,7 @@ pub async fn execute(
         ),
     );
     let providers = component_records(&children);
-    teardown::teardown(&providers).await;
+    teardown::teardown(Some(&atlas_endpoint), &providers).await;
     // Best-effort wait so we get clean "exited" lines in our own log.
     for sp in &mut children {
         let _ = sp.child.wait().await;
@@ -1440,11 +1464,16 @@ pub async fn execute(
 fn component_records(children: &[Spawned]) -> Vec<teardown::ComponentRecord> {
     children
         .iter()
-        .map(|s| teardown::ComponentRecord {
+        .map(|s| PackageRuntimeRecord {
             name: s.name.clone(),
             kind: s.kind.clone(),
             pid: s.pid,
             pgid: s.pgid,
+            provider_id: s.provider_id.clone(),
+            driver_contract: s.driver_contract.clone(),
+            config_json: s.config_json.clone(),
+            package_dir: s.package_dir.as_ref().map(|p| p.display().to_string()),
+            stop: s.stop.clone(),
         })
         .collect()
 }
@@ -1741,7 +1770,7 @@ async fn spawn_and_init(
         .map(|r| r.id)
         .collect();
 
-    let sp = spawn_package(component, entry, spawn_env).await?;
+    let mut sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
 
     // One package = one provider. After spawn, the new provider_id is whatever
@@ -1802,11 +1831,15 @@ async fn spawn_and_init(
         // No driver contract — system providers auto-promote to ACTIVE on
         // their own once gRPC + MCP are listening. We don't drive INIT
         // / ACTIVATE for them.
+        sp.provider_id = Some(provider_id);
         output::boot_ok(short_label(&pkg_label, component), "ACTIVE  (no driver)");
         return Ok(sp);
     };
 
     let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
+    sp.provider_id = Some(provider_id.clone());
+    sp.driver_contract = Some(driver_contract.clone());
+    sp.config_json = Some(config_json.clone());
 
     let display_label = short_label(&pkg_label, component);
     let init_state = match with_spinner(
