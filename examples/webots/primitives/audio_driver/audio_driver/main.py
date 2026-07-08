@@ -290,6 +290,25 @@ def init(cfg):
     return Ok()
 
 
+@audio_driver.on_shutdown
+def shutdown(cfg):
+    _ = cfg
+    global mic_driver, speaker_driver
+    if mic_driver is not None:
+        try:
+            mic_driver.stop()
+        except Exception:
+            pass
+        mic_driver = None
+    if speaker_driver is not None:
+        try:
+            speaker_driver.stop()
+        except Exception:
+            pass
+        speaker_driver = None
+    return Ok()
+
+
 def main() -> int:
     audio_driver.run()
     return 0
