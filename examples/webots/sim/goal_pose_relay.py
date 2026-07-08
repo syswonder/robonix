@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Relay rviz's /goal_pose to Nav2's navigate_to_pose action, zero-stamped.
+"""Relay rviz's private goal topic to Nav2's navigate_to_pose action, zero-stamped.
 
 Why this is needed (not a hack): under use_sim_time, rtabmap publishes the
 map->odom TF on the /clock timeline, but rviz2's "2D Goal Pose" / Nav2 Goal
@@ -10,7 +10,7 @@ yet the goal arrives stamped at wall-epoch while the TF is at sim seconds).
 The planner then can't transform the goal ("Extrapolation … into the
 future") and aborts every plan, so the robot only spin-recovers in place.
 
-This relay forwards /goal_pose to the action with header.stamp = 0, which
+This relay forwards a private RViz goal topic to the action with header.stamp = 0, which
 tells tf2 to use the LATEST available transform instead of one exact
 instant — the standard workaround for this rviz/Nav2 (Humble) behaviour,
 and exactly what the navigation wrapper already does for its own goals.
@@ -30,10 +30,12 @@ class GoalPoseRelay(Node):
     def __init__(self) -> None:
         super().__init__("goal_pose_relay")
         self.client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self.input_topic = self.declare_parameter(
+            "input_topic", "/rviz_goal_pose").get_parameter_value().string_value
         self.sub = self.create_subscription(
-            PoseStamped, "/goal_pose", self._on_goal, 10)
+            PoseStamped, self.input_topic, self._on_goal, 10)
         self.get_logger().info(
-            "goal_pose_relay: /goal_pose -> navigate_to_pose (stamp=0)")
+            f"goal_pose_relay: {self.input_topic} -> navigate_to_pose (stamp=0)")
 
     def _on_goal(self, msg: PoseStamped) -> None:
         if not self.client.wait_for_server(timeout_sec=3.0):

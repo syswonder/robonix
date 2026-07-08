@@ -23,7 +23,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
 fi
 
 cleanup() {
-  docker exec "$SIM_CT" pkill -9 -f 'chassis_driver' 2>/dev/null || true
+  timeout 5s docker exec "$SIM_CT" pkill -9 -f '[c]hassis_driver' 2>/dev/null || true
   kill -- "-$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
