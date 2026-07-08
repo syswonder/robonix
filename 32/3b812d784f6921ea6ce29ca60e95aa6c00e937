@@ -1,0 +1,21 @@
+system/scene/tests/test_annotations.py
+  s_c3d30b7552e447::t_6ac09891048b2d 297
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "323b812d784f6921ea6ce29ca60e95aa6c00e937",
+  "prompts": {},
+  "sessions": {
+    "s_c3d30b7552e447": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "837bc608-0062-4c8f-a736-1fcd973b0e83",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
