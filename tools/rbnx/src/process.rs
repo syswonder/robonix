@@ -88,10 +88,10 @@ impl ProcessTreeNode {
 /// The result is always inside the per-deploy tree — never `~/.robonix/`,
 /// which is reserved for cross-deploy user state.
 fn derive_state_file_path(log_dir: &Path) -> PathBuf {
-    if let Some(parent) = log_dir.parent() {
-        if parent.file_name().and_then(|s| s.to_str()) == Some("rbnx-boot") {
-            return parent.join("processes.json");
-        }
+    if let Some(parent) = log_dir.parent()
+        && parent.file_name().and_then(|s| s.to_str()) == Some("rbnx-boot")
+    {
+        return parent.join("processes.json");
     }
     match log_dir.parent() {
         Some(p) => p.join("processes.json"),
