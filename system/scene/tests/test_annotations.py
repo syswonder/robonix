@@ -294,7 +294,7 @@ def test_rest_crud_roundtrip():
         assert (st, out) == (200, {"ok": True, "annotations": []})
 
         st, out = _call(app, "POST", "/api/annotations",
-                        {"kind": "room", "name": "厨房", "points": ROOM_PTS})
+                        {"kind": "room", "name": "kitchen-draft", "points": ROOM_PTS})
         assert st == 200 and out["ok"]
         ann_id = out["annotation"]["annotation_id"]
 
