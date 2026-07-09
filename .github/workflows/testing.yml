@@ -1023,6 +1023,33 @@ jobs:
             fi
             sleep 5
           done
+          # The fake VLM keeps per-scenario pending-step state so it can avoid
+          # duplicate calls while one RTDL batch is still executing. The first
+          # suite and the post-lifecycle suite are independent test runs, so
+          # restart the deterministic planner before the second suite.
+          if [ -n "${FAKE_VLM_PID:-}" ]; then
+            kill "$FAKE_VLM_PID" 2>/dev/null || true
+          fi
+          for _ in $(seq 1 30); do
+            if ! curl -fsS --noproxy '*' "http://127.0.0.1:${FAKE_VLM_PORT}/v1/models" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.2
+          done
+          echo "[fake-vlm] --- restart after lifecycle validator ---" >>"$RUNNER_TEMP/fake_vlm.log"
+          python3 "$GITHUB_WORKSPACE/testing/fake_vlm/server.py" \
+            --port "$FAKE_VLM_PORT" >>"$RUNNER_TEMP/fake_vlm.log" 2>&1 &
+          export FAKE_VLM_PID="$!"
+          echo "FAKE_VLM_PID=$FAKE_VLM_PID" >> "$GITHUB_ENV"
+          for i in $(seq 1 20); do
+            curl -fsS --noproxy '*' "http://127.0.0.1:${FAKE_VLM_PORT}/v1/models" >/dev/null 2>&1 && break
+            if [ "$i" -eq 20 ]; then
+              echo "::error::fake VLM did not restart after lifecycle validator"
+              tail -120 "$RUNNER_TEMP/fake_vlm.log" || true
+              exit 1
+            fi
+            sleep 0.5
+          done
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \
             | tee "$RUNNER_TEMP/scenarios.restart.out"
