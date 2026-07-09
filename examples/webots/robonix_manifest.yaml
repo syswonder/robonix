@@ -2,10 +2,15 @@ manifestVersion: 1
 name: robonix-webots-example-deploy
 
 env:
-  # Bind scene's semantic store to the same named SLAM map as `mapping`
-  # below (the join key between geometric + semantic maps). Propagated by
-  # `rbnx boot` into the process env, which scene's start.sh forwards as
-  # `-e SCENE_MAP_ID` into the container. Keep this id == mapping's `map_id`.
+  # FALLBACK binding of scene's semantic store to the named SLAM map of
+  # `mapping` below (the join key between geometric + semantic maps).
+  # Scene now learns the map identity from mapping's latched
+  # robonix/service/map/lifecycle broadcast (authoritative, wins over
+  # this env) — but in this boot order scene starts BEFORE mapping, so
+  # the first boot binds from this env; keep it == mapping's `map_id`.
+  # A scene restart while mapping runs binds from the broadcast alone.
+  # Propagated by `rbnx boot` into the process env, which scene's
+  # start.sh forwards as `-e SCENE_MAP_ID` into the container.
   SCENE_MAP_ID: webots_lab
 
 # boot in sequence: system -> soma+scene -> execution -> interaction

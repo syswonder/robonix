@@ -1,0 +1,17 @@
+# Map identity + lifecycle events. The mapping service is the sole
+# authority on which named map is active; this topic broadcasts that
+# identity ({map_id, mode, generation}) latched, so consumers that key
+# state by map (e.g. scene's semantic object store) can discover the
+# current map at startup and react to init/load/reset/mode-switch
+# transitions without polling. Additive to the v0.1 surface: the four
+# original topic_out streams (occupancy_grid / pose / odom / pointcloud)
+# are unchanged.
+[contract]
+id      = "robonix/service/map/lifecycle"
+version = "1"
+kind    = "service"
+idl     = "map/msg/MapLifecycle.msg"
+description = "Latched map identity and lifecycle events ({map_id, mode, generation}) from the mapping service."
+
+[mode]
+type = "topic_out"
