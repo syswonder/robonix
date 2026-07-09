@@ -1319,53 +1319,17 @@ Wall {
   name "wall 7(3)"
   size 0.3 3.2 2.4
 }
-Door {
-  translation -6.24 -8.43 0
-  rotation 0 0 1 -1.5707953071795862
-  size 0.3 1 2.4
-  jointAtLeft FALSE
-  frameSize 0.001 0.05 0.05
-  frameAppearance BrushedAluminium {
-  }
-  doorHandle DoorLever {
-    jointAtLeft FALSE
-  }
-}
-Door {
-  translation -3.89 -3.95 0
-  name "door(6)"
-  size 0.3 1 2.4
-  frameSize 0.001 0.05 0.05
-  frameAppearance BrushedAluminium {
-  }
-}
-Door {
-  translation -4.94 -8.43 0
-  rotation 0 0 1 -1.5707953071795862
-  name "door(5)"
-  size 0.3 1 2.4
-  frameSize 0.001 0.05 0.05
-  frameAppearance BrushedAluminium {
-  }
-}
-Door {
-  translation -6.97 -7.24 0
-  rotation 0 0 1 3.14159
-  name "door(3)"
-  size 0.3 1 2.4
-  frameSize 0.001 0.05 0.05
-  frameAppearance BrushedAluminium {
-  }
-}
-Door {
-  translation -0.91 -6.6 0
-  rotation 0 0 1 1.5708
-  name "door(4)"
-  size 0.3 1 2.4
-  frameSize 0.001 0.05 0.05
-  frameAppearance BrushedAluminium {
-  }
-}
+
+# Interior door door removed for open-room apartment navigation.
+
+# Interior door door(6) removed for open-room apartment navigation.
+
+# Interior door door(5) removed for open-room apartment navigation.
+
+# Interior door door(3) removed for open-room apartment navigation.
+
+# Interior door door(4) removed for open-room apartment navigation.
+
 Door {
   translation 0 -7.49 0
   name "door(1)"
@@ -1374,15 +1338,8 @@ Door {
   frameAppearance BrushedAluminium {
   }
 }
-Door {
-  translation -2.14977 -8.43 0
-  rotation 0 0 1 -1.5707953071795862
-  name "door(2)"
-  size 0.3 1 2.4
-  frameSize 0.001 0.05 0.05
-  frameAppearance BrushedAluminium {
-  }
-}
+# Interior door door(2) removed for open-room apartment navigation.
+
 Wall {
   translation -2.93 -6.6 0
   rotation 0 0 1 1.5708
