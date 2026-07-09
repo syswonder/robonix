@@ -162,9 +162,26 @@ impl ProcessManager {
         let content = std::fs::read_to_string(&self.state_file)
             .with_context(|| format!("Failed to read state file: {}", self.state_file.display()))?;
 
-        let processes: Vec<ProcessInfo> = serde_json::from_str(&content).with_context(|| {
-            format!("Failed to parse state file: {}", self.state_file.display())
-        })?;
+        if content.trim().is_empty() {
+            warn!(
+                "Process state file {} is empty; resetting stale runtime state",
+                self.state_file.display()
+            );
+            self.save_state_internal(&HashMap::new())?;
+            return Ok(());
+        }
+
+        let processes: Vec<ProcessInfo> = match serde_json::from_str(&content) {
+            Ok(processes) => processes,
+            Err(err) => {
+                warn!(
+                    "Process state file {} is invalid ({err}); resetting stale runtime state",
+                    self.state_file.display()
+                );
+                self.save_state_internal(&HashMap::new())?;
+                return Ok(());
+            }
+        };
 
         // Verify processes are still running and filter out dead ones
         let mut valid_processes = HashMap::new();
@@ -890,3 +907,49 @@ impl ProcessManager {
 // Processes are started as daemon processes and should continue running
 // even after the CLI exits. They can be stopped explicitly using the
 // unregister command or stop_process/stop_all methods.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "robonix-process-test-{label}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn empty_process_state_is_reset_instead_of_fatal() {
+        let root = unique_temp_dir("empty");
+        let log_dir = root.join("rbnx-boot").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        let state_file = root.join("rbnx-boot").join("processes.json");
+        fs::write(&state_file, "").unwrap();
+
+        let manager = ProcessManager::new(log_dir).unwrap();
+
+        assert!(manager.processes.lock().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&state_file).unwrap(), "[]");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_process_state_is_reset_instead_of_fatal() {
+        let root = unique_temp_dir("invalid");
+        let log_dir = root.join("rbnx-boot").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        let state_file = root.join("rbnx-boot").join("processes.json");
+        fs::write(&state_file, "{").unwrap();
+
+        let manager = ProcessManager::new(log_dir).unwrap();
+
+        assert!(manager.processes.lock().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&state_file).unwrap(), "[]");
+        let _ = fs::remove_dir_all(root);
+    }
+}
