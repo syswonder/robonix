@@ -73,7 +73,7 @@ system:
       model: ${{VLM_MODEL}}
       api_format: openai
   liaison:
-    listen: 127.0.0.1:50081
+    listen: 0.0.0.0:50081
     log: info
   memory: []
 

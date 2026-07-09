@@ -126,9 +126,10 @@ def shutdown():
         try:
             from geometry_msgs.msg import Twist  # type: ignore
             cmd_vel_pub.publish(Twist())
-        except Exception:
-            pass
-    cmd_vel_pub = None
+        except Exception as exc:
+            print(f"[tiago_chassis] shutdown zero Twist failed: {exc}", flush=True)
+        finally:
+            cmd_vel_pub = None
     return Ok()
 
 
