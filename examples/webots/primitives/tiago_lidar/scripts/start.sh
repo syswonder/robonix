@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
 # tiago_lidar runtime — docker-exec into the pre-running sim container.
-# See tiago_chassis/scripts/start.sh for trap-discipline rationale.
+# Lifecycle cleanup is handled by Driver(CMD_SHUTDOWN) + manifest stop hook.
 set -euo pipefail
 
 # Sim container name — overridable via ROBONIX_SIM_CONTAINER for isolated
-# CI / parallel deploys. Default keeps single-deploy behaviour. See
-# tiago_chassis/scripts/start.sh for the full rationale.
+# CI / parallel deploys. Default keeps single-deploy behaviour.
 SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
@@ -14,12 +13,6 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
   echo "              Bring it up first:  bash examples/webots/sim/start.sh"
   exit 1
 fi
-
-cleanup() {
-  timeout 5s docker exec "$SIM_CT" pkill -9 -f '[l]idar_driver|[s]can_normalize' 2>/dev/null || true
-  kill -- "-$$" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
 
 # Webots's LaserScan publisher has known quirks (reversed angle_increment,
 # scan_time/time_increment unset, stamp lags one sim step) that wreck
@@ -55,7 +48,7 @@ resolve_advertise_host() {
 
 ADVERTISE_HOST="$(resolve_advertise_host)"
 
-docker exec -i \
+exec docker exec \
   -e ROBONIX_ATLAS="${ROBONIX_SIM_ATLAS:-${ROBONIX_ATLAS:-127.0.0.1:50051}}" \
   -e ROBONIX_ADVERTISE_HOST="$ADVERTISE_HOST" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
@@ -75,5 +68,4 @@ docker exec -i \
     trap 'kill -TERM \$NORM_PID 2>/dev/null || true' EXIT
     cd /robonix_pkgs/primitives/tiago_lidar
     exec python3 -m lidar_driver.driver
-  " &
-wait $!
+  "

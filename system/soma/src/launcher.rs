@@ -318,12 +318,17 @@ impl PackageLauncher {
             .with_context(|| format!("load {}", target.package_manifest_path.display()))?;
         let stop = package_manifest.stop.trim().to_string();
 
+        // Match rbnx deploy's provider endpoint semantics: atlas may listen on
+        // 0.0.0.0, but providers need a dialable address. In-container Webots
+        // drivers can still override this in their start.sh via ROBONIX_SIM_ATLAS.
+        let provider_atlas = self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1);
+
         let mut cmd = TokioCommand::new(RBNX_BIN);
         cmd.arg("start")
             .arg("-p")
             .arg(target.package_dir.as_os_str())
             .arg("--endpoint")
-            .arg(&self.atlas_endpoint)
+            .arg(&provider_atlas)
             .env("RBNX_INSTANCE_NAME", &target.name)
             .env("RBNX_INVOCATION_CWD", &target.package_dir)
             .env("SCRIBE_LOG_DIR", &self.log_dir)
@@ -444,7 +449,7 @@ impl PackageLauncher {
             "{} start -p {} --endpoint {}",
             RBNX_BIN,
             target.package_dir.display(),
-            self.atlas_endpoint
+            self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
         )
     }
 }

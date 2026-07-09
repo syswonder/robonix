@@ -291,8 +291,7 @@ def init(cfg):
 
 
 @audio_driver.on_shutdown
-def shutdown(cfg):
-    _ = cfg
+def shutdown():
     global mic_driver, speaker_driver
     if mic_driver is not None:
         try:

@@ -570,6 +570,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/robonix-ci-venv"
+          export ROBONIX_HOME="$RUNNER_TEMP/robonix-home"
+          mkdir -p "$ROBONIX_HOME"
+          echo "ROBONIX_HOME=$ROBONIX_HOME" >> "$GITHUB_ENV"
           export PATH="$RUNNER_TEMP/robonix-ci-venv/bin:$HOME/.local/bin:$PATH"
           echo "$RUNNER_TEMP/robonix-ci-venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -689,26 +692,37 @@ jobs:
             fi
             sleep 4
           done
-          sim_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .Gateway}}{{println .Gateway}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
-          if [ -z "$sim_gateway" ]; then
-            echo "::error::cannot determine sim bridge gateway"
-            exit 1
-          fi
-          sim_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
-          if [ -z "$sim_ip" ]; then
-            echo "::error::cannot determine sim bridge IP"
-            exit 1
+          sim_network_mode=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$ROBONIX_SIM_CONTAINER")
+          if [ "$sim_network_mode" = "host" ]; then
+            sim_gateway="127.0.0.1"
+            sim_ip="127.0.0.1"
+            sim_atlas_host="127.0.0.1"
+            zenoh_router_host="127.0.0.1"
+          else
+            sim_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .Gateway}}{{println .Gateway}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
+            if [ -z "$sim_gateway" ] || [ "$sim_gateway" = "invalid IP" ]; then
+              echo "::error::cannot determine sim bridge gateway (network_mode=$sim_network_mode, gateway=$sim_gateway)"
+              exit 1
+            fi
+            sim_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
+            if [ -z "$sim_ip" ] || [ "$sim_ip" = "invalid IP" ]; then
+              echo "::error::cannot determine sim bridge IP (network_mode=$sim_network_mode, ip=$sim_ip)"
+              exit 1
+            fi
+            sim_atlas_host="$sim_gateway"
+            zenoh_router_host="$sim_ip"
           fi
           {
-            echo "ROBONIX_SIM_ATLAS=${sim_gateway}:${ATLAS_PORT}"
-            echo "ROBONIX_ZENOH_ROUTER=tcp/${sim_ip}:7447"
+            echo "ROBONIX_SIM_ATLAS=${sim_atlas_host}:${ATLAS_PORT}"
+            echo "ROBONIX_ZENOH_ROUTER=tcp/${zenoh_router_host}:7447"
             echo "ROBONIX_ZENOH_MODE=client"
             echo "ROBONIX_ZENOH_LISTEN=tcp/${sim_gateway}:0"
             echo "NO_PROXY=127.0.0.1,localhost,${sim_gateway},${sim_ip}"
             echo "no_proxy=127.0.0.1,localhost,${sim_gateway},${sim_ip}"
           } >> "$GITHUB_ENV"
-          echo "sim gateway: $sim_gateway"
-          echo "sim zenoh router: tcp/${sim_ip}:7447"
+          echo "sim network mode: $sim_network_mode"
+          echo "sim atlas: ${sim_atlas_host}:${ATLAS_PORT}"
+          echo "sim zenoh router: tcp/${zenoh_router_host}:7447"
 
       - name: Start deterministic VLM planner
         working-directory: examples/webots
@@ -738,7 +752,8 @@ jobs:
           import os
           from pathlib import Path
 
-          text = Path("robonix_manifest.yaml").read_text()
+          import yaml
+
           env_keys = [
               "ROBONIX_SIM_ATLAS",
               "ROBONIX_MAPPING_CONTAINER",
@@ -764,18 +779,19 @@ jobs:
               "ROBONIX_ZENOH_MODE",
               "ROBONIX_ZENOH_LISTEN",
           ]
-          env_block = "\n".join(f"  {key}: {os.environ[key]!r}" for key in env_keys)
-          text = text.replace("env:\n\n# boot", f"env:\n{env_block}\n\n# boot")
-          replacements = {
-              "0.0.0.0:50051": f"0.0.0.0:{os.environ['ATLAS_PORT']}",
-              "127.0.0.1:50051": f"127.0.0.1:{os.environ['ATLAS_PORT']}",
-              "127.0.0.1:50061": f"127.0.0.1:{os.environ['EXECUTOR_PORT']}",
-              "127.0.0.1:50071": f"127.0.0.1:{os.environ['PILOT_PORT']}",
-              "127.0.0.1:50081": f"127.0.0.1:{os.environ['LIAISON_PORT']}",
-          }
-          for old, new in replacements.items():
-              text = text.replace(old, new)
-          Path("robonix_manifest.ci.generated.yaml").write_text(text)
+          manifest = yaml.safe_load(Path("robonix_manifest.yaml").read_text())
+          env = manifest.setdefault("env", {}) or {}
+          manifest["env"] = env
+          for key in env_keys:
+              env[key] = os.environ[key]
+          system = manifest.setdefault("system", {})
+          system.setdefault("atlas", {})["listen"] = f"0.0.0.0:{os.environ['ATLAS_PORT']}"
+          system.setdefault("executor", {})["listen"] = f"127.0.0.1:{os.environ['EXECUTOR_PORT']}"
+          system.setdefault("pilot", {})["listen"] = f"127.0.0.1:{os.environ['PILOT_PORT']}"
+          system.setdefault("liaison", {})["listen"] = f"127.0.0.1:{os.environ['LIAISON_PORT']}"
+          Path("robonix_manifest.ci.generated.yaml").write_text(
+              yaml.safe_dump(manifest, sort_keys=False)
+          )
           PY
           # boot is the deploy supervisor (foreground); run it detached and poll
           # atlas until the expected providers register. ROS talks to the sim
@@ -962,7 +978,7 @@ jobs:
             --server "$ROBONIX_CI_ATLAS" \
             --sim-container "$ROBONIX_SIM_CONTAINER" \
             --leave-running \
-            --log-dir examples/webots/rbnx-boot/logs | tee "$RUNNER_TEMP/lifecycle.out"
+            --log-dir "$RUNNER_TEMP/lifecycle-logs" | tee "$RUNNER_TEMP/lifecycle.out"
 
       - name: Re-run scenario suite after lifecycle validator
         # After the validator re-boots the stack, run the scenarios one
@@ -1248,6 +1264,7 @@ jobs:
             --metadata-json "$RUNNER_TEMP/report-metadata.json" \
             --log-root "testing/logs=$GITHUB_WORKSPACE/testing/logs" \
             --log-root "boot_logs=$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs" \
+            --log-root "lifecycle_logs=$RUNNER_TEMP/lifecycle-logs" \
             --log-root "cache_provider_logs=$cache_log_dir" \
             --log-root "provider_logs=$GITHUB_WORKSPACE/examples/webots/logs" \
             --log-root "scene_logs=$GITHUB_WORKSPACE/system/scene/logs" \
