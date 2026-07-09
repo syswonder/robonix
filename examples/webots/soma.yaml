@@ -8,7 +8,20 @@ robot:
   display_name: "Webots TIAGo Lite mobile robot"
   family: mobile_robot
   root_part: base
-  dimensions: { length_m: 0.70, width_m: 0.54, height_m: 1.10 }
+  # Webots R2025a TiagoBase uses a cylindrical bumper/base_cover collision
+  # with radius 0.272 m. Keep the Soma footprint tied to that simulator body
+  # model so nav2 does not overestimate the robot as a 0.70 m long rectangle.
+  dimensions: { length_m: 0.544, width_m: 0.544, height_m: 1.10 }
+  footprint:
+    base_frame: base_link
+    # 2D collision hull in base_frame, CCW, first point not repeated.
+    # Consumers such as navigation must read this through Soma instead of
+    # hardcoding Tiago/Webots dimensions in their own package configs.
+    points:
+      - [0.272, 0.272]
+      - [0.272, -0.272]
+      - [-0.272, -0.272]
+      - [-0.272, 0.272]
   mass_kg: 55.0
   passable_door_width_m: 0.80
   exports:
