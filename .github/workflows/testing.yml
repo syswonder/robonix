@@ -338,6 +338,8 @@ jobs:
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
+      # CI should not depend on external Tencent/FunASR credentials or quota.
+      SPEECH_BACKEND: "mock"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
       ROBONIX_SIM_NETWORK: "bridge"
@@ -546,6 +548,7 @@ jobs:
             echo "ROBONIX_SIM_CONTAINER=ci-${RUN_ID}-sim"
             echo "ROBONIX_SIM_PROJECT=ci-${RUN_ID}"
             echo "ROBONIX_SIM_XDISPLAY=:$xdisplay"
+            echo "ROBONIX_WEBOTS_CACHE_VOLUME=robonix_ci_webots_cache"
             echo "ROBONIX_MAPPING_CONTAINER=ci-${RUN_ID}-mapping"
             echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_ID}-nav2"
             echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_ID}-explore"
@@ -653,6 +656,24 @@ jobs:
           fi
           export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
           robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
+          export ROBONIX_WEBOTS_CACHE_VOLUME="${ROBONIX_WEBOTS_CACHE_VOLUME:-robonix_ci_webots_cache}"
+          docker volume create "$ROBONIX_WEBOTS_CACHE_VOLUME" >/dev/null
+          cache_count=$(docker run --rm -v "$ROBONIX_WEBOTS_CACHE_VOLUME:/cache" busybox sh -lc 'find /cache -type f 2>/dev/null | wc -l')
+          if [ "${cache_count:-0}" -lt 1000 ]; then
+            seed_volume="${ROBONIX_WEBOTS_SEED_CACHE_VOLUME:-robonix_tiago_sim_webots_cache}"
+            seed_count=0
+            if docker volume inspect "$seed_volume" >/dev/null 2>&1; then
+              seed_count=$(docker run --rm -v "$seed_volume:/seed:ro" busybox sh -lc 'find /seed -type f 2>/dev/null | wc -l')
+            fi
+            if [ "${seed_count:-0}" -lt 1000 ]; then
+              echo "::error::Webots asset cache $ROBONIX_WEBOTS_CACHE_VOLUME is not pre-warmed, and seed volume $seed_volume has only ${seed_count:-0} files. Run ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 bash examples/webots/sim/start.sh once on this runner, then rerun CI."
+              exit 1
+            fi
+            echo "[webots-cache] prewarming $ROBONIX_WEBOTS_CACHE_VOLUME from $seed_volume ($seed_count files)"
+            docker run --rm -v "$seed_volume:/seed:ro" -v "$ROBONIX_WEBOTS_CACHE_VOLUME:/cache" busybox sh -lc 'cp -a /seed/. /cache/'
+          else
+            echo "[webots-cache] using prewarmed $ROBONIX_WEBOTS_CACHE_VOLUME ($cache_count files)"
+          fi
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
           docker compose -p "$ROBONIX_SIM_PROJECT" -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
           # robot publishes /scanner /odom /head_front_camera/* within ~15s.
@@ -735,6 +756,7 @@ jobs:
               "NVIDIA_VISIBLE_DEVICES",
               "AUDIO_MIC_DEVICE",
               "AUDIO_SPEAKER_DEVICE",
+              "SPEECH_BACKEND",
               "SCENE_GRAPH_INTERVAL_SEC",
               "SCENE_GRAPH_MIN_OBSERVATIONS",
               "RMW_IMPLEMENTATION",
@@ -761,7 +783,7 @@ jobs:
           nohup rbnx boot -f robonix_manifest.ci.generated.yaml >"$RUNNER_TEMP/rbnx-boot.log" 2>&1 &
           echo "RBNX_BOOT_PID=$!" >> "$GITHUB_ENV"
           required_caps='robonix/primitive/camera/snapshot robonix/primitive/lidar/snapshot robonix/primitive/audio/list_devices robonix/primitive/audio/select_device robonix/primitive/audio/mic robonix/primitive/audio/speaker robonix/system/scene/list_objects robonix/system/scene/goal_near robonix/service/navigation/navigate robonix/service/navigation/navigate/status robonix/service/navigation/navigate/cancel robonix/skill/explore/explore robonix/skill/explore/explore/status robonix/skill/explore/explore/cancel robonix/service/map/save_map robonix/service/memory/save robonix/service/memory/search robonix/service/speech/speak robonix/service/voiceprint/list'
-          required_active='scene tiago_camera tiago_lidar audio_driver mapping nav2 memory speech voiceprint'
+          required_active='scene tiago_camera tiago_lidar audio_client_bridge mapping nav2 memory speech voiceprint'
           for i in $(seq 1 120); do
             if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.wait.txt" 2>&1; then
               missing=0
