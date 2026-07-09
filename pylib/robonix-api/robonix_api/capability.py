@@ -51,6 +51,7 @@ from .lifecycle import (
     build_lifecycle_servicer,
     resolve_servicer,
 )
+from .result import Err, Ok
 from .ros import RosBackend, resolve_msg_type
 from .spawn import SpawnRegistry
 from .tool import mcp_contract
@@ -793,13 +794,16 @@ class _ProviderBase:
             except Exception as e:  # noqa: BLE001
                 log.warning("declare mcp %s failed: %s", cid, e)
 
-    def _user_shutdown_then_teardown(self) -> None:
+    def _user_shutdown_then_teardown(self):
+        result = None
         if self._on_shutdown is not None:
             try:
-                self._on_shutdown()
-            except Exception:  # noqa: BLE001
+                result = self._on_shutdown()
+            except Exception as exc:  # noqa: BLE001
                 log.exception("[%s] on_shutdown raised", self.id)
+                result = Err(f"{type(exc).__name__}: {exc}")
         self._teardown()
+        return result if result is not None else Ok()
 
     def _teardown(self) -> None:
         for ch in self._channels:

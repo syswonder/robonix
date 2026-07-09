@@ -120,8 +120,7 @@ def init(cfg):
 
 
 @tiago_chassis.on_shutdown
-def shutdown(cfg):
-    _ = cfg
+def shutdown():
     global cmd_vel_pub
     if cmd_vel_pub is not None:
         try:
