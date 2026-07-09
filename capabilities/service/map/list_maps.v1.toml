@@ -1,0 +1,11 @@
+# List saved maps known to the mapping service.
+# ROS IDL: `lib/map/srv/ListMaps.srv` (empty -> ok + maps_json + detail).
+[contract]
+id      = "robonix/service/map/list_maps"
+version = "1"
+kind    = "service"
+idl     = "map/srv/ListMaps.srv"
+description = "List saved maps and metadata available for load/delete."
+
+[mode]
+type = "rpc"
