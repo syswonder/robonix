@@ -142,6 +142,37 @@ def pgrep(pattern: str) -> list[int]:
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+def pid_cmdline(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
+def _run_scope_tokens(manifest_dir: Path) -> list[str]:
+    tokens = [str(manifest_dir.resolve())]
+    tokens.extend(f":{port}" for port in PER_RUN_PORTS.values())
+    return tokens
+
+
+def scoped_pgrep(pattern: str, manifest_dir: Path) -> list[tuple[int, str]]:
+    """Return matching PIDs that belong to this manifest/run.
+
+    CI runners and developer machines may have unrelated Robonix processes alive.
+    The lifecycle check must fail on this run's leftovers, not on a stale Atlas
+    from another workspace or port. Package processes carry the manifest path in
+    argv; system services carry the per-run ports.
+    """
+    scoped: list[tuple[int, str]] = []
+    tokens = _run_scope_tokens(manifest_dir)
+    for pid in pgrep(pattern):
+        cmdline = pid_cmdline(pid)
+        if any(token in cmdline for token in tokens):
+            scoped.append((pid, cmdline))
+    return scoped
+
+
 def port_listening(port: int) -> bool:
     """True iff `port` is currently bound to LISTEN on the local host."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -179,8 +210,9 @@ def _clean_failures(label: str, manifest_dir: Path, sim_container: str | None) -
 
     survivors: list[str] = []
     for pat in PROCESS_NAME_PATTERNS:
-        pids = pgrep(pat)
-        if pids:
+        matches = scoped_pgrep(pat, manifest_dir)
+        if matches:
+            pids = [pid for pid, _ in matches]
             survivors.append(f"{pat} ({len(pids)} pids: {','.join(map(str, pids))})")
     if survivors:
         failures.append(f"{label}: runtime processes still alive: {survivors}")
