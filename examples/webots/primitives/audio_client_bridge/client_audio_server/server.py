@@ -3,7 +3,7 @@
 """Audio bridge daemon — runs on the macOS host that physically owns
 the mic + speakers, exposes both as WebSocket endpoints over LAN to
 the Linux side of the robonix stack (see
-`../audio_macos_bridge/main.py`).
+`../audio_client_bridge/main.py`).
 
 Three endpoints, all `ws://0.0.0.0:60000/...`:
 
@@ -29,7 +29,7 @@ Use `python3 server.py --list-devices` to see CoreAudio device IDs
 when the defaults aren't what you want.
 
 Local-only by convention; this script and the sibling
-audio_macos_bridge package are git-ignored at the repo root.
+audio_client_bridge package are git-ignored at the repo root.
 """
 from __future__ import annotations
 
@@ -255,7 +255,7 @@ async def serve_health(ws) -> None:
 
 # ── /devices ──────────────────────────────────────────────────────────────
 # Same JSON shape as server_web.py's /devices so the bridge's gRPC
-# ListAudioDevices handler doesn't have to branch on which mac_server
+# ListAudioDevices handler doesn't have to branch on which client_audio_server
 # variant is running. Headless server can't change the active device
 # at runtime (it's pinned to --input-device/--output-device CLI flags),
 # so /set_device returns ok=false with a hint.

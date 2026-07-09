@@ -250,6 +250,7 @@ class TencentTTSBackend:
         )
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
+        primary_language = self._primary_language_for_text(text)
         payload = {
             "Text": text,
             "SessionId": str(uuid.uuid4()),
@@ -258,11 +259,12 @@ class TencentTTSBackend:
             "ProjectId": 0,
             "ModelType": self.model_type,
             "VoiceType": int(voice) if voice else self.voice_type,
-            "PrimaryLanguage": self.primary_language,
+            "PrimaryLanguage": primary_language,
             "SampleRate": self.sample_rate,
             "Codec": self.codec,
             "EnableSubtitle": False,
         }
+        log.info("Tencent TTS request: voice_type=%s primary_language=%s text_len=%s", payload["VoiceType"], primary_language, len(text or ""))
         response = await asyncio.to_thread(self._post_json, payload)
         audio_b64 = response.get("Audio", "")
         if not audio_b64:
@@ -273,6 +275,17 @@ class TencentTTSBackend:
         data = await self.synthesize(text, voice, speed)
         for i in range(0, len(data), 4096):
             yield data[i : i + 4096]
+
+    def _primary_language_for_text(self, text: str) -> int:
+        override = os.environ.get("TENCENT_TTS_PRIMARY_LANGUAGE", "").strip()
+        if override:
+            return int(override)
+        letters = sum(1 for ch in text if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+        cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+        # Tencent TextToVoice exposes 1=Chinese, 2=English. Use English only
+        # when the utterance is primarily English; mixed Chinese/English sounds
+        # more consistent with Chinese as the primary language.
+        return 2 if letters > 0 and cjk == 0 else 1
 
     @staticmethod
     def _speed_to_tencent(speed: float) -> float:

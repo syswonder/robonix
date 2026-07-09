@@ -1,26 +1,26 @@
-# audio_macos_bridge
+# audio_client_bridge
 
 Local-only audio primitive that runs on a Linux atlas host but routes
-mic + speaker through a daemon on a macOS box across the LAN. The
+mic + speaker through a daemon on an client machine across the LAN. The
 manifest-side provider (`com.robonix.primitive.audio`) is identical to the
 default `audio_driver` package, so liaison / scene / pilot don't see a
 difference; the only thing that changes is where the actual ADC/DAC
 lives.
 
 Both halves (the Linux primitive package and the macOS server) live
-in this directory and are committed to the repo. The macOS box just
-needs `mac_server/server.py` + `mac_server/requirements.txt` — no
+in this directory and are committed to the repo. The client machine just
+needs `client_audio_server/server.py` + `client_audio_server/requirements.txt` — no
 robonix install, no codegen.
 
 ## Layout
 
 ```
-audio_macos_bridge/
+audio_client_bridge/
 ├── package_manifest.yaml          # provider_id = com.robonix.primitive.audio
-├── audio_macos_bridge/main.py     # Linux side: gRPC servicer ↔ WebSocket client
-├── mac_server/server.py           # macOS side: headless WebSocket server
-├── mac_server/server_web.py       # macOS side: same protocol + browser debug UI
-├── mac_server/requirements.txt    # sounddevice + websockets
+├── audio_client_bridge/main.py     # Linux side: gRPC servicer ↔ WebSocket client
+├── client_audio_server/server.py           # client side: headless WebSocket server
+├── client_audio_server/server_web.py       # client side: same protocol + browser debug UI
+├── client_audio_server/requirements.txt    # sounddevice + websockets
 └── scripts/{build,start}.sh       # rbnx codegen + entry
 ```
 
@@ -38,10 +38,10 @@ across LAN/Tailscale. `60001` only binds loopback by default; pass
 
 ## Setup (one-shot)
 
-### macOS side
+### client side
 
 ```sh
-cd ~/robonix-scripts/mac_server          # or wherever you scp'd this dir
+cd ~/robonix-scripts/client_audio_server          # or wherever you scp'd this dir
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -69,15 +69,15 @@ for the bridge:
 primitive:
   # - name: audio_driver
   #   path: ./primitives/audio_driver
-  - name: audio_macos_bridge
-    path: ./primitives/audio_macos_bridge
+  - name: audio_client_bridge
+    path: ./primitives/audio_client_bridge
     config:
       host: 192.168.1.42      # macOS LAN IP
       port: 60000
 ```
 
 Then `rbnx build && rbnx boot` as usual. Driver(CMD_INIT) probes
-`/health` on the macOS box; if unreachable, this primitive defers
+`/health` on the client machine; if unreachable, this primitive defers
 instead of advertising dead mic/speaker streams.
 
 ## Wire format
@@ -86,5 +86,5 @@ Both directions: 16 kHz, mono, s16le PCM. Frames are 100 ms (3200 B
 each). `/mic` is server-stream binary frames; `/speaker` is
 client-stream binary frames. `/health` is a single text JSON message.
 
-No auth, no TLS — assume LAN. Don't expose `mac_server` on a public
+No auth, no TLS — assume LAN. Don't expose `client_audio_server` on a public
 interface.

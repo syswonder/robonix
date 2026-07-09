@@ -79,14 +79,14 @@ primitive:
   - name: audio_driver
     path: ./primitives/audio_driver
     config: {}
-  # macOS-bridge variant (opt-in): relays mic/speaker over a WebSocket from a
-  # macOS box across the LAN. To use it, comment out the audio_driver block
-  # above and uncomment this one, then point host at the Mac's address and run
-  # mac_server/server.py (or server_web.py) on it.
-  # - name: audio_macos_bridge
-  #   path: ./primitives/audio_macos_bridge
+  # audio client bridge variant (opt-in): relays mic/speaker over a WebSocket from a
+  # client machine across the LAN. To use it, comment out the audio_driver block
+  # above and uncomment this one, then point host at the client machine's address
+  # and run client_audio_server/server.py (or server_web.py) on it.
+  # - name: audio_client_bridge
+  #   path: ./primitives/audio_client_bridge
   #   config:
-  #     host: 100.78.199.22       # macOS tailscale address
+  #     host: 127.0.0.1           # client machine address reachable by robonix
   #     port: 60000
 
 # after booted all the primitives, start the services
@@ -103,7 +103,7 @@ service:
   # liaison's voice loop connects to. Captures mic through the
   # robonix/primitive/audio/mic primitive, which `audio_driver` (primitive
   # section above) provides — so voice runs fully local on this host's ALSA
-  # mic. The macOS-bridge variant lives in robonix_manifest.macos_debug.yaml.
+  # mic. The audio client bridge variant can be enabled in this primitive section when the mic/speaker live on a client machine.
   # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
   - name: speech
     path: ../../services/speech
