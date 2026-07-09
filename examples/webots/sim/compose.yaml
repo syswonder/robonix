@@ -109,4 +109,8 @@ services:
 
 volumes:
   webots_cache:
+    # Webots assets are immutable cache data. CI can point this at a
+    # pre-warmed runner-local volume so each isolated compose project does not
+    # start with an empty asset cache and block on raw.githubusercontent.com.
+    name: ${ROBONIX_WEBOTS_CACHE_VOLUME:-robonix_tiago_sim_webots_cache}
   webots_local:
