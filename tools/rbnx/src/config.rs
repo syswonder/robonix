@@ -8,6 +8,8 @@ use dirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub const ROBONIX_HOME_ENV: &str = "ROBONIX_HOME";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub package_storage_path: PathBuf,
@@ -19,10 +21,19 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn config_file_path() -> Result<PathBuf> {
-        // Use ~/.robonix/config.yaml instead of ~/.config/robonix/config.yaml
+    pub fn robonix_home_dir() -> Result<PathBuf> {
+        if let Some(raw) = std::env::var_os(ROBONIX_HOME_ENV) {
+            if !raw.is_empty() {
+                return Ok(PathBuf::from(raw));
+            }
+        }
+
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        Ok(home_dir.join(".robonix").join("config.yaml"))
+        Ok(home_dir.join(".robonix"))
+    }
+
+    pub fn config_file_path() -> Result<PathBuf> {
+        Ok(Self::robonix_home_dir()?.join("config.yaml"))
     }
 
     pub fn load() -> Result<Self> {
@@ -103,9 +114,8 @@ impl Config {
 
     #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
-        let default_path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".robonix")
+        let default_path = Self::robonix_home_dir()
+            .unwrap_or_else(|_| PathBuf::from("/tmp/robonix"))
             .join("packages");
 
         Self {
