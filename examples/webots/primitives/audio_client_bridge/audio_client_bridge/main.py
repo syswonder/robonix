@@ -349,6 +349,11 @@ def init(cfg):
     return Ok()
 
 
+@audio_client_bridge.on_shutdown
+def shutdown():
+    return Ok()
+
+
 def main() -> int:
     audio_client_bridge.run()
     return 0

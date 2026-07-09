@@ -321,7 +321,7 @@ impl PackageLauncher {
         // Match rbnx deploy's provider endpoint semantics: atlas may listen on
         // 0.0.0.0, but providers need a dialable address. In-container Webots
         // drivers can still override this in their start.sh via ROBONIX_SIM_ATLAS.
-        let provider_atlas = self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1);
+        let provider_atlas = self.provider_atlas_endpoint();
 
         let mut cmd = TokioCommand::new(RBNX_BIN);
         cmd.arg("start")
@@ -427,13 +427,10 @@ impl PackageLauncher {
     /// Stop all packages launched by soma and abort their
     /// pipe-forwarding tasks. Called on SIGINT/SIGTERM in main.
     pub async fn stop_all(&mut self) -> Result<()> {
+        let provider_atlas = self.provider_atlas_endpoint();
         for record in self.children.drain(..).rev() {
-            shutdown_package_runtime(
-                Some(&self.atlas_endpoint),
-                &record,
-                Duration::from_millis(500),
-            )
-            .await;
+            shutdown_package_runtime(Some(&provider_atlas), &record, Duration::from_millis(500))
+                .await;
         }
         if let Err(e) = self.manager.stop_all().await {
             warn!("stop ProcessManager-owned Soma packages: {e:#}");
@@ -449,8 +446,12 @@ impl PackageLauncher {
             "{} start -p {} --endpoint {}",
             RBNX_BIN,
             target.package_dir.display(),
-            self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
+            self.provider_atlas_endpoint()
         )
+    }
+
+    fn provider_atlas_endpoint(&self) -> String {
+        self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
     }
 }
 
@@ -465,6 +466,28 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let launcher =
             PackageLauncher::new(tmp.path().join("logs"), "127.0.0.1:50051").expect("launcher");
+        let target = PackageLaunchTarget {
+            kind: PackageKind::Primitive,
+            name: "demo".into(),
+            package_dir: PathBuf::from("/tmp/robonix/examples/test_ci/primitives/demo"),
+            package_manifest_path: PathBuf::from(
+                "/tmp/robonix/examples/test_ci/primitives/demo/package_manifest.yaml",
+            ),
+            manifest_override: None,
+            config: serde_yaml::Value::Null,
+        };
+
+        assert_eq!(
+            launcher.command_line(&target),
+            "rbnx start -p /tmp/robonix/examples/test_ci/primitives/demo --endpoint 127.0.0.1:50051"
+        );
+    }
+
+    #[test]
+    fn command_line_rewrites_bind_all_atlas_to_loopback_for_packages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let launcher =
+            PackageLauncher::new(tmp.path().join("logs"), "0.0.0.0:50051").expect("launcher");
         let target = PackageLaunchTarget {
             kind: PackageKind::Primitive,
             name: "demo".into(),
