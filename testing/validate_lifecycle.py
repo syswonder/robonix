@@ -154,26 +154,29 @@ def port_listening(port: int) -> bool:
 
 
 def docker_running(prefix: str) -> list[str]:
-    """Names of containers whose name starts with `prefix` (e.g. `ci-123-`)."""
+    """Names of containers whose name starts with `prefix`."""
     if shutil.which("docker") is None:
         return []
     out = run(["docker", "ps", "--format", "{{.Names}}"], check=False)
     return [n for n in out.stdout.splitlines() if n.startswith(prefix)]
 
 
-# ── shutdown-side checks ───────────────────────────────────────────────────
+def _ci_container_prefix(sim_container: str | None) -> str | None:
+    """Return the current run's container prefix from ci-<run>-sim."""
+    if not sim_container:
+        return None
+    if sim_container.startswith("ci-") and sim_container.endswith("-sim"):
+        return sim_container[:-3]
+    return None
 
-def assert_clean(label: str, manifest_dir: Path, sim_container: str | None) -> None:
-    """Verify the host has nothing left over from a `rbnx boot` run."""
+
+def _clean_failures(label: str, manifest_dir: Path, sim_container: str | None) -> list[str]:
     failures: list[str] = []
 
-    # 1. state.json must be gone. rbnx shutdown removes it on success; if
-    #    it's still there, shutdown crashed or was interrupted.
     sp = find_state_file(manifest_dir)
     if sp.exists():
         failures.append(f"{label}: state.json still present at {sp}")
 
-    # 2. No `rbnx boot` parent, no atlas/pilot/soma/liaison running.
     survivors: list[str] = []
     for pat in PROCESS_NAME_PATTERNS:
         pids = pgrep(pat)
@@ -182,7 +185,6 @@ def assert_clean(label: str, manifest_dir: Path, sim_container: str | None) -> N
     if survivors:
         failures.append(f"{label}: runtime processes still alive: {survivors}")
 
-    # 3. The four per-run ports must be free.
     bound: list[str] = []
     for name, port in PER_RUN_PORTS.items():
         if port_listening(port):
@@ -190,24 +192,32 @@ def assert_clean(label: str, manifest_dir: Path, sim_container: str | None) -> N
     if bound:
         failures.append(f"{label}: ports still bound: {bound}")
 
-    # 4. No provider-owned docker container besides the long-running sim
-    #    container. The sim container is external to rbnx (start.sh brings
-    #    it up); we only require the deploy-owned ones to be gone.
-    if sim_container:
-        providers = docker_running("ci-")
-        # The sim container is itself named ci-…-sim and we want to keep it
-        # alive for the second boot; only fail on *other* ci-… containers.
+    prefix = _ci_container_prefix(sim_container)
+    if prefix and sim_container:
+        providers = docker_running(prefix)
         stale = [c for c in providers if c != sim_container]
         if stale:
-            failures.append(
-                f"{label}: leftover provider containers: {stale}"
-            )
+            failures.append(f"{label}: leftover provider containers: {stale}")
 
-    if failures:
-        for f in failures:
-            err(f)
-        raise SystemExit(2)
-    log(f"{label}: clean — state.json removed, no leftover processes/ports/containers")
+    return failures
+
+
+# ── shutdown-side checks ───────────────────────────────────────────────────
+
+def assert_clean(label: str, manifest_dir: Path, sim_container: str | None) -> None:
+    """Verify the host has nothing left over from a `rbnx boot` run."""
+    deadline = time.monotonic() + float(os.environ.get("ROBONIX_LIFECYCLE_CLEAN_TIMEOUT_S", "20"))
+    failures: list[str] = []
+    while True:
+        failures = _clean_failures(label, manifest_dir, sim_container)
+        if not failures:
+            log(f"{label}: clean — state.json removed, no leftover processes/ports/containers")
+            return
+        if time.monotonic() >= deadline:
+            for f in failures:
+                err(f)
+            raise SystemExit(2)
+        time.sleep(0.5)
 
 
 # ── boot-side checks (re-uses the workflow's existing wait pattern) ───────
