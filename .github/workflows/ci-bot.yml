@@ -409,8 +409,16 @@ jobs:
               .slice(0, 500);
             if (summary) {
               const pct = Math.round(summary.rate * 100);
-              const icon = summary.failed === 0 ? '✅' : '❌';
-              lines.push(`### ${icon} robonix CI — ${summary.passed}/${summary.total} passed (${pct}%)`);
+              const jobFailed = outcome === 'failure' || outcome === 'cancelled';
+              const icon = summary.failed === 0 && !jobFailed ? '✅' : '❌';
+              const title = jobFailed && summary.failed === 0
+                ? `job ${outcome} after scenarios (${summary.passed}/${summary.total} scenarios passed, ${pct}%)`
+                : `${summary.passed}/${summary.total} passed (${pct}%)`;
+              lines.push(`### ${icon} robonix CI — ${title}`);
+              if (jobFailed) {
+                lines.push('');
+                lines.push(`Webots job concluded \`${outcome}\` after producing a scenario summary. Treat this as a failed CI run; inspect lifecycle, teardown, report, and raw logs in the action run.`);
+              }
               lines.push('');
               lines.push('| suite | scenario | result | rounds |');
               lines.push('|-------|----------|--------|--------|');
