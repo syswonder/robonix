@@ -783,7 +783,7 @@ jobs:
           nohup rbnx boot -f robonix_manifest.ci.generated.yaml >"$RUNNER_TEMP/rbnx-boot.log" 2>&1 &
           echo "RBNX_BOOT_PID=$!" >> "$GITHUB_ENV"
           required_caps='robonix/primitive/camera/snapshot robonix/primitive/lidar/snapshot robonix/primitive/audio/list_devices robonix/primitive/audio/select_device robonix/primitive/audio/mic robonix/primitive/audio/speaker robonix/system/scene/list_objects robonix/system/scene/goal_near robonix/service/navigation/navigate robonix/service/navigation/navigate/status robonix/service/navigation/navigate/cancel robonix/skill/explore/explore robonix/skill/explore/explore/status robonix/skill/explore/explore/cancel robonix/service/map/save_map robonix/service/memory/save robonix/service/memory/search robonix/service/speech/speak robonix/service/voiceprint/list'
-          required_active='scene tiago_camera tiago_lidar audio_client_bridge mapping nav2 memory speech voiceprint'
+          required_active='scene tiago_camera tiago_lidar audio_driver mapping nav2 memory speech voiceprint'
           for i in $(seq 1 120); do
             if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.wait.txt" 2>&1; then
               missing=0
