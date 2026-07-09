@@ -1059,9 +1059,12 @@ async def _run() -> None:
         broadcast, config.get("map_id"), os.environ.get("SCENE_MAP_ID")
     )
     map_id = binding.map_id
+    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in ("true", "1", "yes")
+    scene_state_map_id = map_id if restore_on_start else f".live-{os.getpid()}-{int(time.time())}"
     log.info(
-        "[scene] map binding: id=%s gen=%s source=%s",
-        binding.map_id, binding.generation, binding.source,
+        "[scene] map binding: id=%s gen=%s source=%s mode=%s restore_on_start=%s state_partition=%s",
+        binding.map_id, binding.generation, binding.source, binding.mode,
+        restore_on_start, scene_state_map_id,
     )
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # mapping is provably UP but running ephemeral (no map_id) — its
@@ -1083,14 +1086,15 @@ async def _run() -> None:
             "SCENE_OBJECT_MEMORY_DB", "/data/robonix/scene_memory/objects.db"
         )
         try:
-            obj_store = ObjectStore(db_path, map_id=map_id)
-            restored = obj_store.load_all()
-            async with registry.lock():
-                for o in restored:
-                    registry.restore_object(o)
+            obj_store = ObjectStore(db_path, map_id=scene_state_map_id)
+            restored = obj_store.load_all() if restore_on_start else []
+            if restored:
+                async with registry.lock():
+                    for o in restored:
+                        registry.restore_object(o)
             log.info(
-                "[scene-persist] restored %d objects (map_id=%s) from %s",
-                len(restored), obj_store.map_id, db_path,
+                "[scene-persist] object store ready: restored %d object(s) (partition=%s, restore_on_start=%s) from %s",
+                len(restored), obj_store.map_id, restore_on_start, db_path,
             )
         except Exception as e:  # noqa: BLE001
             # Object memory is opted in (default on), so a failure here is not
@@ -1115,8 +1119,8 @@ async def _run() -> None:
             os.environ.get(
                 "SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"
             ),
-            map_id=map_id,
-            generation=binding.generation,
+            map_id=scene_state_map_id,
+            generation=binding.generation if restore_on_start else None,
         )
         anns = anno_store.list()
         log.info(
@@ -1134,6 +1138,7 @@ async def _run() -> None:
     # supplied later in _start_ros_ingest). The geometric relation loop +
     # scene-graph store are wired further down, once the registry is live.
     mcp_tools.attach_state(registry=registry)
+    mcp_tools.attach_annotation_store(anno_store)
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
     # keeps running its own asyncio event loop after this returns.
@@ -1227,9 +1232,10 @@ async def _run() -> None:
     sg_cache_dir = os.environ.get(
         "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
     )
-    # Partition the scene-graph caches by the same map_id as the object store,
-    # so caption/relation answers from one map never bleed into another.
-    sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=map_id)
+    # Partition the scene-graph caches by the same runtime state partition as
+    # the object store. Startup defaults to a live session; explicit Load rebinds
+    # persistent room/object state through the web map facade.
+    sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=scene_state_map_id)
     log.info(
         "[scene-graph] cache base=%s partitioned by map_id=%s",
         sg_cache_dir, map_id,
@@ -1291,11 +1297,12 @@ async def _run() -> None:
             detector=perception,
             sg_store=sg_store,
             anno_store=anno_store,
+            object_store=obj_store,
             map_binding={
                 "map_id": binding.map_id,
-                "mode": binding.mode,
-                "generation": binding.generation,
-                "source": binding.source,
+                "mode": binding.mode if restore_on_start else "",
+                "generation": binding.generation if restore_on_start else None,
+                "source": binding.source if restore_on_start else "default",
             },
         )
         web_uv = uvicorn.Config(

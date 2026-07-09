@@ -77,6 +77,15 @@ class ObjectStore:
         """The sanitized map id this store is scoped to."""
         return self._map_id
 
+    def rebind(self, map_id: str) -> None:
+        """Switch subsequent reads/writes to another map partition.
+
+        The Milvus collection is shared across maps; rows are filtered by the
+        scalar ``map_id`` field and keyed by ``{map_id}::{object_id}``, so a
+        rebind only changes the partition used by ``persist`` / ``load_all``.
+        """
+        self._map_id = _sanitize_map_id(map_id)
+
     # ── schema ───────────────────────────────────────────────────────────
     def _ensure_collection(self) -> None:
         """Create the collection + index on first run; when it already exists

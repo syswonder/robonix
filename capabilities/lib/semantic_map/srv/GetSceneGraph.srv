@@ -3,4 +3,5 @@
 ---
 SceneGraphNode[] nodes
 SceneGraphEdge[] edges
+SceneAnnotation[] annotations
 float64 updated_at

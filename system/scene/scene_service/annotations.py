@@ -38,6 +38,18 @@ VALID_KINDS = ("room", "poi")
 MAX_NAME_LEN = 128
 
 
+def _annotation_identity(kind: str, name: str) -> tuple[str, str]:
+    """Stable user-facing identity for idempotent room creation.
+
+    The UI may submit the same completed polygon twice when double-click or
+    Enter events race. Rooms are named user assets, so a repeated create with
+    the same normalized name updates that room instead of minting a second UUID.
+    POIs keep append semantics.
+    """
+    normalized = " ".join(str(name).strip().split()).casefold()
+    return str(kind).strip().casefold(), normalized
+
+
 def validate_annotation_fields(
     kind: str,
     name: Any,
@@ -151,6 +163,32 @@ class AnnotationStore:
     def path(self) -> Path:
         return self._path
 
+    def rebind(self, map_id: str, *, generation: Optional[int] = None,
+               carry_current: bool = False) -> None:
+        """Switch this store to another map partition.
+
+        `carry_current=True` is used by scene's Save Map UI path: the user
+        just named the live spatial map, so the rooms they drew in the live
+        session must be written under the same map_id before future loads.
+        `carry_current=False` is used by Load Map: discard the in-memory
+        partition and load the target map's annotation JSON.
+        """
+        next_id = sanitize_map_id(map_id)
+        with self._lock:
+            if next_id == self._map_id:
+                self._generation = generation
+                if carry_current:
+                    self._save_locked()
+                return
+            self._map_id = next_id
+            self._path = self._base / f"{self._map_id}.json"
+            self._generation = generation
+            if carry_current:
+                self._save_locked()
+            else:
+                self._annotations = {}
+                self._load(current_generation=generation)
+
     # ── load / save ──────────────────────────────────────────────────────
     def _load(self, current_generation: Optional[int]) -> None:
         """Read the per-map file into memory. Missing file → empty store.
@@ -247,20 +285,40 @@ class AnnotationStore:
     # ── mutate (each call persists before returning) ─────────────────────
     def create(self, *, kind: str, name: str, points: list,
                theta: Optional[float] = None) -> Annotation:
-        """Create + persist a new annotation and return it. Fields must
-        already be validated (validate_annotation_fields) — the store
-        trusts its callers and only owns id/timestamp assignment."""
+        """Create + persist an annotation and return it.
+
+        Room creation is idempotent by normalized room name: the user page can
+        legitimately re-enter this endpoint once when double-click or Enter
+        browser events race around the async name dialog. In that case we keep
+        the existing annotation id and update its polygon instead of creating
+        two visually identical rooms. POIs remain append-style assets. Fields
+        must already be validated (validate_annotation_fields).
+        """
         now = time.time()
-        ann = Annotation(
-            annotation_id=f"anno.{uuid.uuid4().hex[:8]}",
-            kind=kind,
-            name=name,
-            points=[[float(x), float(y)] for x, y in points],
-            theta=None if theta is None else float(theta),
-            created_at=now,
-            updated_at=now,
-        )
+        norm_points = [[float(x), float(y)] for x, y in points]
+        norm_theta = None if theta is None else float(theta)
         with self._lock:
+            if kind == "room":
+                target = _annotation_identity(kind, name)
+                for existing in self._annotations.values():
+                    if _annotation_identity(existing.kind, existing.name) == target:
+                        existing.name = name
+                        existing.points = norm_points
+                        existing.theta = norm_theta
+                        existing.stale = False
+                        existing.stale_reason = ""
+                        existing.updated_at = now
+                        self._save_locked()
+                        return existing
+            ann = Annotation(
+                annotation_id=f"anno.{uuid.uuid4().hex[:8]}",
+                kind=kind,
+                name=name,
+                points=norm_points,
+                theta=norm_theta,
+                created_at=now,
+                updated_at=now,
+            )
             self._annotations[ann.annotation_id] = ann
             self._save_locked()
         return ann
