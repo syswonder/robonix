@@ -330,6 +330,7 @@ jobs:
       GRPCIO_PIN: "1.80.0"
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
+      ROBONIX_HOME: "${{ runner.temp }}/robonix-home"
       # GPU selection is runner-specific. Priority:
       # workflow_call input -> repo/org variable -> runner env -> default GPU 0.
       ROBONIX_CI_GPU_ID_INPUT: ${{ inputs.gpu_id || '' }}
@@ -919,6 +920,19 @@ jobs:
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out"
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify scene map persistence
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          map_id="ci_scene_map_${RUN_ID}"
+          python3 "$GITHUB_WORKSPACE/testing/verify_scene_map_persistence.py" \
+            --scene-url "http://127.0.0.1:${SCENE_WEB_PORT}" \
+            --map-id "$map_id" \
+            --mapping-container "${ROBONIX_MAPPING_CONTAINER:-robonix_mapping}" \
+            --sim-container "$ROBONIX_SIM_CONTAINER" \
+            --delete-after \
+            --timeout 420 | tee "$RUNNER_TEMP/sim-logs/scene-map-persistence.txt"
 
       - name: Validate boot/shutdown lifecycle
         # boot → shutdown → re-boot. Proves the runtime keeps
