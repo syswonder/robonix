@@ -7,7 +7,7 @@ server, plus a small in-process HTTP+WS UI:
 
   http://<host>:<port+1>/     single-page debug UI
                               (device pickers, live VU meter, log panel)
-  ws://<host>:<port>/devices  JSON list of CoreAudio devices
+  ws://<host>:<port>/devices  JSON list of client audio devices
   ws://<host>:<port>/vu       server-stream peak RMS values (50 ms tick)
   ws://<host>:<port>/log      newline-delimited live log feed
   ws://<host>:<port>/set_device  one-shot setter; client sends a JSON
@@ -20,10 +20,10 @@ only runtime dep beyond `sounddevice`; HTTP is served via stdlib
 `http.server` on a sibling port so the front-end is a single static
 HTML page baked into this file.
 
-Run on the macOS box (in a real desktop session — open the UI URL in
+Run on the client machine (in a real desktop session — open the UI URL in
 Safari / Chrome on the same Mac):
 
-    cd ~/robonix-scripts/mac_server
+    cd ~/robonix-scripts/client_audio_server
     . .venv/bin/activate
     python3 server_web.py --port 60000
     # then open http://localhost:60001/
