@@ -14,10 +14,15 @@ from __future__ import annotations
 import logging
 import math
 import time
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 from .state import ObjectRegistry, SceneObject
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
+
+if TYPE_CHECKING:
+    from .annotations import Annotation, AnnotationStore
 
 # Resolved at import time. PYTHONPATH is set by package_manifest.yaml's
 # `start:` block to include rbnx-build/codegen/{proto_gen,robonix_mcp_types}.
@@ -34,6 +39,7 @@ from semantic_map_mcp import (  # type: ignore
     ListRelations_Request,
     ListRelations_Response,
     Object,
+    SceneAnnotation as SceneAnnotationIDL,
     SceneGraphEdge as SceneGraphEdgeIDL,
     SceneGraphNode as SceneGraphNodeIDL,
 )
@@ -48,6 +54,7 @@ log = logging.getLogger(__name__)
 _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
+_ANNO_STORE: "AnnotationStore | None" = None
 
 
 def attach_state(*, registry: ObjectRegistry, hub=None) -> None:
@@ -59,6 +66,11 @@ def attach_state(*, registry: ObjectRegistry, hub=None) -> None:
 def attach_scene_graph_store(store: SceneGraphStore) -> None:
     global _SG_STORE
     _SG_STORE = store
+
+
+def attach_annotation_store(store: "AnnotationStore | None") -> None:
+    global _ANNO_STORE
+    _ANNO_STORE = store
 
 
 # ── conversions: SceneObject → IDL Object ──────────────────────────────────
@@ -73,6 +85,42 @@ def _to_idl(o: SceneObject) -> Object:
         yaw=float(o.pose.yaw),
         last_seen_unix=float(o.last_seen),
     )
+
+
+def _annotation_centroid(a: "Annotation") -> tuple[float, float]:
+    pts = getattr(a, "points", []) or []
+    if not pts:
+        return 0.0, 0.0
+    sx = sum(float(p[0]) for p in pts)
+    sy = sum(float(p[1]) for p in pts)
+    n = max(1, len(pts))
+    return sx / n, sy / n
+
+
+def _annotation_object_id(a: "Annotation") -> str:
+    return f"scene.{a.kind}.{a.annotation_id}"
+
+
+def _annotation_to_object(a: "Annotation") -> Object:
+    x, y = _annotation_centroid(a)
+    return Object(
+        id=_annotation_object_id(a),
+        label=str(a.name or a.kind),
+        x=float(x),
+        y=float(y),
+        z=0.0,
+        yaw=float(a.theta or 0.0),
+        last_seen_unix=float(a.updated_at or 0.0),
+    )
+
+
+def _find_annotation_target(object_id: str) -> "Annotation | None":
+    if _ANNO_STORE is None:
+        return None
+    for a in _ANNO_STORE.list():
+        if object_id in (a.annotation_id, _annotation_object_id(a)):
+            return a
+    return None
 
 
 # ── @mcp_contract handlers ─────────────────────────────────────────────────
@@ -90,8 +138,11 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
     objs, _surfs = await _REGISTRY.snapshot()
     visible = [o for o in objs.values() if not o.missing]
+    objects = [_to_idl(o) for o in visible]
+    if _ANNO_STORE is not None:
+        objects.extend(_annotation_to_object(a) for a in _ANNO_STORE.list() if a.kind == "room")
     return ListObjects_Response(
-        objects=[_to_idl(o) for o in visible],
+        objects=objects,
         stamp_unix=time.time(),
     )
 
@@ -166,10 +217,24 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
     objs, _surfs = await _REGISTRY.snapshot()
     target = objs.get(req.object_id)
+    ann_target = None
     if target is None:
-        return GoalNear_Response(
-            reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason=f"unknown object_id '{req.object_id}'",
+        ann_target = _find_annotation_target(req.object_id)
+        if ann_target is None:
+            return GoalNear_Response(
+                reachable=False, x=0.0, y=0.0, yaw=0.0,
+                reason=f"unknown object_id '{req.object_id}'",
+            )
+        tx, ty = _annotation_centroid(ann_target)
+        target = SimpleNamespace(
+            pose=SimpleNamespace(
+                x=float(tx),
+                y=float(ty),
+                z=0.0,
+                yaw=float(ann_target.theta or 0.0),
+            ),
+            cls=str(ann_target.name or ann_target.kind),
+            object_id=_annotation_object_id(ann_target),
         )
 
     robot = next(
@@ -258,6 +323,29 @@ def _edge_to_idl(e) -> SceneGraphEdgeIDL:
     )
 
 
+def _annotation_to_idl(a: "Annotation") -> SceneAnnotationIDL:
+    points_xy: list[float] = []
+    for point in a.points or []:
+        if len(point) >= 2:
+            points_xy.extend([float(point[0]), float(point[1])])
+    return SceneAnnotationIDL(
+        annotation_id=a.annotation_id,
+        kind=a.kind,
+        name=a.name,
+        points_xy=points_xy,
+        theta=float(a.theta) if a.theta is not None else 0.0,
+        stale=bool(a.stale),
+        stale_reason=a.stale_reason or "",
+        updated_at_unix=float(a.updated_at or 0.0),
+    )
+
+
+def _annotation_list() -> list[SceneAnnotationIDL]:
+    if _ANNO_STORE is None:
+        return []
+    return [_annotation_to_idl(a) for a in _ANNO_STORE.list()]
+
+
 @mcp_contract(mcp, contract_id="robonix/system/scene/get_scene_graph")
 async def get_scene_graph(_req: GetSceneGraph_Request) -> GetSceneGraph_Response:
     """Return the current scene graph snapshot — all stable nodes
@@ -266,11 +354,12 @@ async def get_scene_graph(_req: GetSceneGraph_Request) -> GetSceneGraph_Response
     snap = _sg_snapshot()
     if snap is None:
         return GetSceneGraph_Response(
-            nodes=[], edges=[], updated_at=0.0,
+            nodes=[], edges=[], annotations=_annotation_list(), updated_at=0.0,
         )
     return GetSceneGraph_Response(
         nodes=[_node_to_idl(n) for n in snap.nodes.values()],
         edges=[_edge_to_idl(e) for e in snap.edges],
+        annotations=_annotation_list(),
         updated_at=snap.updated_at,
     )
 
@@ -350,6 +439,7 @@ __all__ = [
     "mcp",
     "attach_state",
     "attach_scene_graph_store",
+    "attach_annotation_store",
     "list_objects",
     "goal_near",
     "get_scene_graph",

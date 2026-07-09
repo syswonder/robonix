@@ -63,6 +63,20 @@ def test_store_roundtrip_across_reopen():
     print("  [PASS] test_store_roundtrip_across_reopen")
 
 
+def test_room_create_is_idempotent_by_name():
+    with tempfile.TemporaryDirectory() as base:
+        s = AnnotationStore(base, map_id="lab", generation=1)
+        a = s.create(kind="room", name="Bathroom", points=ROOM_PTS)
+        b = s.create(kind="room", name="  bathroom  ",
+                     points=[[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]])
+        assert a.annotation_id == b.annotation_id
+        assert len(s.list()) == 1
+        assert s.list()[0].points == [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]]
+        raw = json.loads(open(s.path).read())
+        assert len(raw["annotations"]) == 1
+    print("  [PASS] test_room_create_is_idempotent_by_name")
+
+
 def test_update_and_delete():
     with tempfile.TemporaryDirectory() as base:
         s = AnnotationStore(base, map_id="lab", generation=1)
@@ -408,6 +422,7 @@ def test_state_payload_carries_annotations_and_binding():
 if __name__ == "__main__":
     test_validation_rules()
     test_store_roundtrip_across_reopen()
+    test_room_create_is_idempotent_by_name()
     test_update_and_delete()
     test_map_id_partition_isolation_and_sanitize()
     test_atomic_write_leaves_no_tmp()
