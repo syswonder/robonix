@@ -192,6 +192,56 @@ def docker_running(prefix: str) -> list[str]:
     return [n for n in out.stdout.splitlines() if n.startswith(prefix)]
 
 
+def _path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def remove_path_as_root(path: Path) -> None:
+    """Remove a CI-owned runtime path, including root-owned container output."""
+    if not _path_exists(path):
+        return
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError as first_err:
+        log(f"reset path needs elevated cleanup: {path} ({first_err})")
+        parent = path.parent
+        if shutil.which("docker") is not None and parent.exists():
+            proc = run(
+                [
+                    "docker", "run", "--rm", "--network", "none",
+                    "-v", f"{parent}:/mnt:rw",
+                    "busybox:latest", "sh", "-lc",
+                    'rm -rf -- "$1"',
+                    "sh", f"/mnt/{path.name}",
+                ],
+                timeout=60,
+            )
+            if proc.returncode != 0:
+                err(
+                    f"docker cleanup failed for {path}: "
+                    f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+                )
+        if _path_exists(path) and shutil.which("sudo") is not None:
+            run(["sudo", "-n", "rm", "-rf", str(path)], timeout=60)
+        if _path_exists(path):
+            raise RuntimeError(f"failed to remove reset path {path}")
+    log(f"reset path removed: {path}")
+
+
+def reset_runtime_paths() -> None:
+    """Clear state that should not survive into the lifecycle reboot pass."""
+    raw = os.environ.get("ROBONIX_LIFECYCLE_RESET_PATHS", "")
+    paths = [Path(item).expanduser() for item in raw.split(":") if item.strip()]
+    if not paths:
+        return
+    log(f"phase 1: resetting {len(paths)} runtime path(s) before re-boot")
+    for path in paths:
+        remove_path_as_root(path)
+
+
 def _ci_container_prefix(sim_container: str | None) -> str | None:
     """Return the current run's container prefix from ci-<run>-sim."""
     if not sim_container:
@@ -376,6 +426,7 @@ def main() -> int:
 
     # 3. Assert the first shutdown was actually clean.
     assert_clean("phase 1", manifest_dir, args.sim_container or None)
+    reset_runtime_paths()
 
     # 4. Re-boot — issue #128 regression check.
     boot_log_2 = log_dir / "lifecycle-boot-2.log"
