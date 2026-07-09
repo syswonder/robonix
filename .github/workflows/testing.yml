@@ -555,6 +555,8 @@ jobs:
             echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_ID}-scene"
             echo "AGENT_MEMORY_DIR=/tmp/robonix-ci-${RUN_ID}/agent_memory"
             echo "AGENT_MILVUS_URI=/tmp/robonix-ci-${RUN_ID}/agent_milvus.db"
+            echo "MAPPING_MAPS_DIR=$RUNNER_TEMP/mapping-maps"
+            echo "SCENE_DATA_DIR=$RUNNER_TEMP/scene-data"
             echo "ROS_DOMAIN_ID=$ros_domain_id"
             echo "ROBONIX_DRIVER_INIT_TIMEOUT_S=${ROBONIX_DRIVER_INIT_TIMEOUT_S}"
             echo "ROBONIX_GPU_ID=${ROBONIX_GPU_ID}"
@@ -577,8 +579,6 @@ jobs:
           echo "$RUNNER_TEMP/robonix-ci-venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-          # Keep the mirror rewrite for rbnx build remote provider clones.
-          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
           # codegen tools pinned to the runtime grpcio version. Install them in
           # a per-job venv so Debian/Ubuntu PEP 668 system Python remains intact.
           python3 -m pip install "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
@@ -601,6 +601,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
+          # Apply the GitHub mirror rewrite only to this build process. Do not
+          # write it to the shared runner user's global git config.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
+          export GIT_CONFIG_VALUE_0='https://github.com/'
           rbnx build 2>&1 | tee "$RUNNER_TEMP/sim-logs/build-webots-deployment.log"
           # provenance: record exactly which upstream commit each remote built from
           for d in rbnx-boot/cache/*/; do
@@ -747,7 +752,7 @@ jobs:
         run: |
           set -euo pipefail
           export VLM_BASE_URL="http://127.0.0.1:${FAKE_VLM_PORT}/v1"
-          mkdir -p "$AGENT_MEMORY_DIR"
+          mkdir -p "$AGENT_MEMORY_DIR" "$MAPPING_MAPS_DIR" "$SCENE_DATA_DIR"
           python3 - <<'PY'
           import os
           from pathlib import Path
@@ -756,6 +761,7 @@ jobs:
 
           env_keys = [
               "ROBONIX_SIM_ATLAS",
+              "ROBONIX_SIM_CONTAINER",
               "ROBONIX_MAPPING_CONTAINER",
               "ROBONIX_NAV2_CONTAINER",
               "ROBONIX_EXPLORE_CONTAINER",
@@ -765,6 +771,8 @@ jobs:
               "SCENE_WEB_PORT",
               "AGENT_MEMORY_DIR",
               "AGENT_MILVUS_URI",
+              "MAPPING_MAPS_DIR",
+              "SCENE_DATA_DIR",
               "ROS_DOMAIN_ID",
               "CUDA_VISIBLE_DEVICES",
               "ROBONIX_GPU_ID",
@@ -778,6 +786,9 @@ jobs:
               "ROBONIX_ZENOH_ROUTER",
               "ROBONIX_ZENOH_MODE",
               "ROBONIX_ZENOH_LISTEN",
+              "VLM_BASE_URL",
+              "VLM_API_KEY",
+              "VLM_MODEL",
           ]
           manifest = yaml.safe_load(Path("robonix_manifest.yaml").read_text())
           env = manifest.setdefault("env", {}) or {}
@@ -788,6 +799,12 @@ jobs:
           system.setdefault("atlas", {})["listen"] = f"0.0.0.0:{os.environ['ATLAS_PORT']}"
           system.setdefault("executor", {})["listen"] = f"127.0.0.1:{os.environ['EXECUTOR_PORT']}"
           system.setdefault("pilot", {})["listen"] = f"127.0.0.1:{os.environ['PILOT_PORT']}"
+          system.setdefault("pilot", {}).setdefault("vlm", {}).update({
+              "upstream": os.environ["VLM_BASE_URL"],
+              "api_key": os.environ["VLM_API_KEY"],
+              "model": os.environ["VLM_MODEL"],
+              "api_format": "openai",
+          })
           system.setdefault("liaison", {})["listen"] = f"127.0.0.1:{os.environ['LIAISON_PORT']}"
           Path("robonix_manifest.ci.generated.yaml").write_text(
               yaml.safe_dump(manifest, sort_keys=False)
@@ -1334,6 +1351,7 @@ jobs:
             ${{ runner.temp }}/cache-provider-logs/
             ${{ runner.temp }}/sim-logs/
             ${{ runner.temp }}/lifecycle.out
+            ${{ runner.temp }}/lifecycle-logs/
             ${{ runner.temp }}/scenarios.out
             ${{ runner.temp }}/scenarios.restart.out
             examples/webots/rbnx-boot/logs/lifecycle-*.log

@@ -46,8 +46,10 @@ docker rm -f "$CT" >/dev/null 2>&1 || true
 mkdir -p rbnx-build/data
 # Host-persisted scene state. Mounted at /data/robonix in the container so the
 # object-memory DB — and the scene-graph JSON caches, which otherwise die with
-# the --rm container — survive across boots.
-mkdir -p rbnx-build/data/robonix
+# the --rm container — survive across boots. CI sets SCENE_DATA_DIR to keep
+# semantic/object state isolated per run.
+SCENE_HOST_DATA_DIR="${SCENE_DATA_DIR:-$(pwd)/rbnx-build/data/robonix}"
+mkdir -p "$SCENE_HOST_DATA_DIR"
 
 declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
@@ -137,7 +139,7 @@ exec docker run --rm \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
-    -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
+    -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
     "$IMG"
