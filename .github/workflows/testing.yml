@@ -998,6 +998,8 @@ jobs:
           ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
         run: |
           set -euo pipefail
+          milvus_lock="$(dirname "$AGENT_MILVUS_URI")/.$(basename "$AGENT_MILVUS_URI").lock"
+          export ROBONIX_LIFECYCLE_RESET_PATHS="${MAPPING_MAPS_DIR}:${SCENE_DATA_DIR}:${AGENT_MEMORY_DIR}:${AGENT_MILVUS_URI}:${milvus_lock}"
           python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
             --rbnx rbnx \
             --manifest robonix_manifest.ci.generated.yaml \
