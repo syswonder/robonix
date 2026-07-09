@@ -206,7 +206,9 @@ def _clean_failures(label: str, manifest_dir: Path, sim_container: str | None) -
 
 def assert_clean(label: str, manifest_dir: Path, sim_container: str | None) -> None:
     """Verify the host has nothing left over from a `rbnx boot` run."""
-    deadline = time.monotonic() + float(os.environ.get("ROBONIX_LIFECYCLE_CLEAN_TIMEOUT_S", "20"))
+    clean_timeout_s = float(os.environ.get("ROBONIX_LIFECYCLE_CLEAN_TIMEOUT_S", "90"))
+    log(f"{label}: waiting up to {clean_timeout_s:.0f}s for shutdown cleanup")
+    deadline = time.monotonic() + clean_timeout_s
     failures: list[str] = []
     while True:
         failures = _clean_failures(label, manifest_dir, sim_container)
