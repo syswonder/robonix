@@ -580,12 +580,12 @@ jobs:
       - name: Configure toolchain and workspace
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/robonix-ci-venv"
-          export ROBONIX_HOME="$RUNNER_TEMP/robonix-home"
+          python3 -m venv "$ROBONIX_CI_RUNTIME_DIR/venv"
+          export ROBONIX_HOME="$ROBONIX_CI_RUNTIME_DIR/robonix-home"
           mkdir -p "$ROBONIX_HOME"
           echo "ROBONIX_HOME=$ROBONIX_HOME" >> "$GITHUB_ENV"
-          export PATH="$RUNNER_TEMP/robonix-ci-venv/bin:$HOME/.local/bin:$PATH"
-          echo "$RUNNER_TEMP/robonix-ci-venv/bin" >> "$GITHUB_PATH"
+          export PATH="$ROBONIX_CI_RUNTIME_DIR/venv/bin:$HOME/.local/bin:$PATH"
+          echo "$ROBONIX_CI_RUNTIME_DIR/venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
           # codegen tools pinned to the runtime grpcio version. Install them in
