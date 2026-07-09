@@ -1032,6 +1032,11 @@ jobs:
             fi
             sleep 5
           done
+          # The restart suite is an independent pass over the same scenario set.
+          # save_map is intentionally immutable, so remove the first suite's
+          # test-only saved map before exercising save_map again. Do not touch
+          # the live Webots/RTAB-Map session database (webots_lab).
+          rm -rf "${MAPPING_MAPS_DIR:?}/ci_test_map"
           # The fake VLM keeps per-scenario pending-step state so it can avoid
           # duplicate calls while one RTDL batch is still executing. The first
           # suite and the post-lifecycle suite are independent test runs, so
