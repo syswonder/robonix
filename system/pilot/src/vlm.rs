@@ -4,9 +4,7 @@
 // Embedded OpenAI-compatible chat-completions client.
 // TODO: maybe we will support Google/Anthropic/etc. in the future :D
 use crate::config::VlmConfig;
-use anyhow::{Context, Result};
-use async_openai::Client;
-use async_openai::config::OpenAIConfig;
+use anyhow::{Context, Result, bail};
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
@@ -180,17 +178,18 @@ pub enum VlmStreamItem {
 /// `Arc<...>` internally). No mutex needed when sharing across tasks.
 #[derive(Clone)]
 pub struct VlmClient {
-    inner: Client<OpenAIConfig>,
+    inner: reqwest::Client,
+    api_base: String,
+    api_key: String,
     model: String,
 }
 
 impl VlmClient {
     pub fn new(cfg: &VlmConfig) -> Self {
-        let oa = OpenAIConfig::new()
-            .with_api_base(cfg.upstream.trim_end_matches('/'))
-            .with_api_key(&cfg.api_key);
         Self {
-            inner: Client::with_config(oa),
+            inner: reqwest::Client::new(),
+            api_base: cfg.upstream.trim_end_matches('/').to_string(),
+            api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
         }
     }
@@ -221,12 +220,23 @@ impl VlmClient {
             .build()
             .context("build chat completion request")?;
 
-        let mut upstream = self
+        let url = format!("{}/chat/completions", self.api_base);
+        let response = self
             .inner
-            .chat()
-            .create_stream(request)
+            .post(url)
+            .bearer_auth(&self.api_key)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&request)
+            .send()
             .await
             .context("open VLM chat stream")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            bail!("open VLM chat stream: HTTP {status}: {text}");
+        }
+        let mut upstream = response.bytes_stream();
 
         // Walk the upstream chunk-by-chunk, accumulating tool-call deltas by
         // index until the upstream finishes; then emit one ToolCall per index
@@ -236,40 +246,35 @@ impl VlmClient {
         tokio::spawn(async move {
             let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
             let mut finish = "stop".to_string();
-            while let Some(chunk) = upstream.next().await {
+            let mut buf = String::new();
+            let mut done = false;
+            while !done {
+                let Some(chunk) = upstream.next().await else {
+                    break;
+                };
                 match chunk {
-                    Ok(resp) => {
-                        let Some(choice) = resp.choices.into_iter().next() else {
-                            continue;
-                        };
-                        let delta = choice.delta;
-                        if let Some(content) = delta.content
-                            && !content.is_empty()
-                            && tx
-                                .send(Ok(VlmStreamItem::TextDelta(content)))
-                                .await
-                                .is_err()
-                        {
-                            return;
-                        }
-                        if let Some(tc_chunks) = delta.tool_calls {
-                            for tc in tc_chunks {
-                                let entry = tc_acc.entry(tc.index).or_default();
-                                if let Some(id) = tc.id {
-                                    entry.id = id;
+                    Ok(bytes) => {
+                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                        while let Some(pos) = buf.find('\n') {
+                            let line: String = buf.drain(..=pos).collect();
+                            match process_stream_line(
+                                line.trim_end(),
+                                &mut tc_acc,
+                                &mut finish,
+                                &tx,
+                            )
+                            .await
+                            {
+                                Ok(true) => {
+                                    done = true;
+                                    break;
                                 }
-                                if let Some(func) = tc.function {
-                                    if let Some(name) = func.name {
-                                        entry.name.push_str(&name);
-                                    }
-                                    if let Some(args) = func.arguments {
-                                        entry.arguments.push_str(&args);
-                                    }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    let _ = tx.send(Err(e)).await;
+                                    return;
                                 }
                             }
-                        }
-                        if let Some(fr) = choice.finish_reason {
-                            finish = format!("{fr:?}").to_lowercase();
                         }
                     }
                     Err(e) => {
@@ -279,6 +284,13 @@ impl VlmClient {
                         return;
                     }
                 }
+            }
+            if !buf.trim().is_empty()
+                && let Err(e) =
+                    process_stream_line(buf.trim_end(), &mut tc_acc, &mut finish, &tx).await
+            {
+                let _ = tx.send(Err(e)).await;
+                return;
             }
 
             for (_, tc) in tc_acc {
@@ -310,6 +322,73 @@ struct AccumulatedToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+async fn process_stream_line(
+    line: &str,
+    tc_acc: &mut BTreeMap<u32, AccumulatedToolCall>,
+    finish: &mut String,
+    tx: &tokio::sync::mpsc::Sender<Result<VlmStreamItem>>,
+) -> Result<bool> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(false);
+    }
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok(false);
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+
+    let v: Value = serde_json::from_str(data)
+        .with_context(|| format!("deserialize VLM stream chunk: {data}"))?;
+    let Some(choice) = v
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    else {
+        return Ok(false);
+    };
+
+    if let Some(content) = choice
+        .get("delta")
+        .and_then(|delta| delta.get("content"))
+        .and_then(Value::as_str)
+        && !content.is_empty()
+        && tx
+            .send(Ok(VlmStreamItem::TextDelta(content.to_string())))
+            .await
+            .is_err()
+    {
+        return Ok(true);
+    }
+    if let Some(tc_chunks) = choice
+        .get("delta")
+        .and_then(|delta| delta.get("tool_calls"))
+        .and_then(Value::as_array)
+    {
+        for tc in tc_chunks {
+            let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let entry = tc_acc.entry(index).or_default();
+            if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                entry.id = id.to_string();
+            }
+            if let Some(func) = tc.get("function") {
+                if let Some(name) = func.get("name").and_then(Value::as_str) {
+                    entry.name.push_str(name);
+                }
+                if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                    entry.arguments.push_str(args);
+                }
+            }
+        }
+    }
+    if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
+        *finish = fr.to_string();
+    }
+    Ok(false)
 }
 
 fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionRequestMessage>> {
