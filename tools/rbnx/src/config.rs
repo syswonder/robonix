@@ -22,10 +22,10 @@ pub struct Config {
 
 impl Config {
     pub fn robonix_home_dir() -> Result<PathBuf> {
-        if let Some(raw) = std::env::var_os(ROBONIX_HOME_ENV) {
-            if !raw.is_empty() {
-                return Ok(PathBuf::from(raw));
-            }
+        if let Some(raw) = std::env::var_os(ROBONIX_HOME_ENV)
+            && !raw.is_empty()
+        {
+            return Ok(PathBuf::from(raw));
         }
 
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
