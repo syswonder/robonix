@@ -445,7 +445,12 @@ jobs:
       - name: Initialize submodules
         run: |
           set -euo pipefail
-          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          # Keep the GitHub mirror rewrite process-scoped. The self-hosted
+          # runner is also a developer workstation, so CI must not mutate the
+          # user's global git config.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
+          export GIT_CONFIG_VALUE_0='https://github.com/'
           git submodule sync --recursive
           git submodule update --init --recursive
 
@@ -529,8 +534,11 @@ jobs:
           nav2_port=$((26000 + suffix))
           scene_web_port=$((27000 + suffix))
           ros_domain_id=$((90 + (suffix % 100)))
+          runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_ID}"
+          rm -rf "$runtime_dir"
+          mkdir -p "$runtime_dir"
 
-          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port} ros_domain_id=${ros_domain_id}"
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
@@ -553,10 +561,11 @@ jobs:
             echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_ID}-nav2"
             echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_ID}-explore"
             echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_ID}-scene"
-            echo "AGENT_MEMORY_DIR=/tmp/robonix-ci-${RUN_ID}/agent_memory"
-            echo "AGENT_MILVUS_URI=/tmp/robonix-ci-${RUN_ID}/agent_milvus.db"
-            echo "MAPPING_MAPS_DIR=$RUNNER_TEMP/mapping-maps"
-            echo "SCENE_DATA_DIR=$RUNNER_TEMP/scene-data"
+            echo "ROBONIX_CI_RUNTIME_DIR=$runtime_dir"
+            echo "AGENT_MEMORY_DIR=$runtime_dir/agent_memory"
+            echo "AGENT_MILVUS_URI=$runtime_dir/agent_milvus.db"
+            echo "MAPPING_MAPS_DIR=$runtime_dir/mapping-maps"
+            echo "SCENE_DATA_DIR=$runtime_dir/scene-data"
             echo "ROS_DOMAIN_ID=$ros_domain_id"
             echo "ROBONIX_DRIVER_INIT_TIMEOUT_S=${ROBONIX_DRIVER_INIT_TIMEOUT_S}"
             echo "ROBONIX_GPU_ID=${ROBONIX_GPU_ID}"
