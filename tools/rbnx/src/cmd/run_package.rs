@@ -137,10 +137,19 @@ fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf
 
 pub async fn execute_build(
     config: Config,
+    file: Option<PathBuf>,
     path: Option<PathBuf>,
     global: Option<String>,
     clean: bool,
 ) -> Result<()> {
+    if let Some(file) = file {
+        let manifest_path = resolve_local_path_for_filesystem(&file)?;
+        if !manifest_path.is_file() {
+            anyhow::bail!("deployment manifest not found: {}", manifest_path.display());
+        }
+        return build_deploy_manifest(&manifest_path, &config, clean);
+    }
+
     // Deploy-manifest mode: if `path` (or cwd, when -p is omitted)
     // contains a `robonix_manifest.yaml`, build every primitive /
     // service / skill entry it lists. This lets the user run
@@ -185,6 +194,8 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         .with_context(|| format!("read {}", manifest_path.display()))?;
     let root: Value =
         serde_yaml::from_str(&raw).with_context(|| format!("parse {}", manifest_path.display()))?;
+    let root = super::deploy::prepare_manifest(root, config.robonix_source_path.as_deref())
+        .with_context(|| format!("prepare {}", manifest_path.display()))?;
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
 
     output::action(

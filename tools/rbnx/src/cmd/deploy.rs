@@ -81,8 +81,6 @@ struct DeployManifest {
     #[serde(default)]
     name: String,
     #[serde(default)]
-    env: HashMap<String, String>,
-    #[serde(default)]
     system: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
     primitive: Vec<PackageEntry>,
@@ -308,6 +306,25 @@ fn expand_env_in_str(s: &str) -> String {
     out
 }
 
+/// Apply the deployment's top-level `env:` block to the current process.
+///
+/// Both `rbnx build` and `rbnx boot` call this before package resolution,
+/// freshness checks, config expansion, builds, or child process spawning so
+/// they select the same platform/profile and inherit the same environment.
+fn apply_manifest_env(env: &HashMap<String, String>) {
+    let expanded: Vec<(&String, String)> = env
+        .iter()
+        .map(|(key, value)| (key, expand_env_in_str(value)))
+        .collect();
+    for (key, value) in expanded {
+        // SAFETY: both callers run this before package child processes are
+        // spawned and before any task reads deployment-specific variables.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
 fn expand_yaml(v: &mut serde_yaml::Value) {
     use serde_yaml::Value;
     match v {
@@ -324,6 +341,35 @@ fn expand_yaml(v: &mut serde_yaml::Value) {
         }
         _ => {}
     }
+}
+
+/// Apply top-level deployment variables, then expand every scalar in the
+/// manifest. Build and boot share this preparation path so package locations,
+/// target-manifest selectors, system settings, and package config all resolve
+/// against the same environment.
+pub(super) fn prepare_manifest(
+    mut root: serde_yaml::Value,
+    robonix_source_path: Option<&Path>,
+) -> Result<serde_yaml::Value> {
+    if std::env::var_os("ROBONIX_SOURCE_PATH").is_none()
+        && let Some(path) = robonix_source_path
+    {
+        // SAFETY: manifest preparation happens before package child processes
+        // are spawned and before deployment-specific variables are read.
+        unsafe {
+            std::env::set_var("ROBONIX_SOURCE_PATH", path);
+        }
+    }
+    let env: HashMap<String, String> = root
+        .get("env")
+        .cloned()
+        .map(serde_yaml::from_value)
+        .transpose()
+        .context("parse top-level env")?
+        .unwrap_or_default();
+    apply_manifest_env(&env);
+    expand_yaml(&mut root);
+    Ok(root)
 }
 
 /// Make sure `system.soma` exists in the manifest map as a mapping,
@@ -858,8 +904,12 @@ pub async fn execute(
 
     let raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let mut deploy: DeployManifest = serde_yaml::from_str(&raw)
+    let root: serde_yaml::Value = serde_yaml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let root = prepare_manifest(root, config.robonix_source_path.as_deref())
+        .with_context(|| format!("failed to prepare {}", manifest_path.display()))?;
+    let mut deploy: DeployManifest = serde_yaml::from_value(root)
+        .with_context(|| format!("failed to decode {}", manifest_path.display()))?;
     // Banner + boot header FIRST, so the logo/version and what we're booting
     // lead the output — before the (possibly slow) remote freshness check.
     output::boot_banner();
@@ -888,20 +938,6 @@ pub async fn execute(
     // `--no-update-check` skips the per-package `git fetch` pass entirely.
     if !no_update_check {
         super::check_remotes::report_outdated(&manifest_path);
-    }
-
-    // Env expansion applies to both the top-level env block and all nested
-    // scalar strings in system / primitive / service / skill configs.
-    for v in deploy.system.values_mut() {
-        expand_yaml(v);
-    }
-    for e in deploy
-        .primitive
-        .iter_mut()
-        .chain(deploy.service.iter_mut())
-        .chain(deploy.skill.iter_mut())
-    {
-        expand_yaml(&mut e.config);
     }
 
     // soma owns primitive + skill bring-up (see
@@ -971,16 +1007,6 @@ pub async fn execute(
     let instances_dir = manifest_dir.join("rbnx-boot").join("instances");
     std::fs::create_dir_all(&instances_dir)
         .with_context(|| format!("failed to create instances dir {}", instances_dir.display()))?;
-
-    // Propagate the manifest's `env:` block into our own env so child
-    // processes (which inherit) see it.
-    // set_var is unsafe on edition 2024 (other threads may race). We call
-    // it before spawning any children, so no races in practice.
-    for (k, v) in &deploy.env {
-        unsafe {
-            std::env::set_var(k, expand_env_in_str(v));
-        }
-    }
 
     let mut children: Vec<Spawned> = Vec::new();
     let state_path = teardown::state_path(&manifest_dir);

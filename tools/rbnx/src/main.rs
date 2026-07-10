@@ -96,3 +96,30 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_accepts_explicit_deploy_manifest() {
+        let cli = Cli::try_parse_from(["rbnx", "build", "-f", "robot/robonix_manifest.yaml"])
+            .expect("build -f should parse");
+        match cli.command {
+            cmd::Commands::Build {
+                file, path, global, ..
+            } => {
+                assert_eq!(file, Some("robot/robonix_manifest.yaml".into()));
+                assert!(path.is_none());
+                assert!(global.is_none());
+            }
+            _ => panic!("expected build command"),
+        }
+    }
+
+    #[test]
+    fn build_manifest_conflicts_with_single_package_selectors() {
+        assert!(Cli::try_parse_from(["rbnx", "build", "-f", "deploy.yaml", "-p", "."]).is_err());
+        assert!(Cli::try_parse_from(["rbnx", "build", "-f", "deploy.yaml", "-g", "pkg"]).is_err());
+    }
+}
