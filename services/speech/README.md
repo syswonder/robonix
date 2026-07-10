@@ -16,22 +16,63 @@ Tencent Cloud mode:
 2. Open CAM / Access Management -> Access Key -> API Key Management and create
    an API key. Save `SecretKey` immediately; Tencent Cloud only shows it when
    the key is created. The same page/account information provides the AppID.
-3. Export the credentials on the operator machine before `rbnx boot`:
+3. Select the backend in the deployment manifest so `rbnx build` also knows
+   that no local model or GPU dependencies are needed:
+
+```yaml
+env:
+  SPEECH_BACKEND: tencent
+
+service:
+  - name: speech
+    path: ${ROBONIX_SOURCE_PATH}/services/speech
+    config:
+      speech_backend: tencent
+      tencent_asr_appid: "1234567890"
+      tencent_asr_engine: 16k_zh_en
+      tencent_tts_voice_type: 502003
+      tencent_tts_region: ap-guangzhou
+```
+
+4. Export only the credentials on the operator machine before `rbnx boot`:
 
 ```bash
-export SPEECH_BACKEND=tencent
-export TENCENT_ASR_APPID=...
 export TENCENTCLOUD_SECRET_ID=...
 export TENCENTCLOUD_SECRET_KEY=...
 ```
 
 Do not commit Tencent credentials. Put them in the operator shell, a local
-ignored env file, or a machine-local boot wrapper. Useful optional knobs:
+ignored env file, or a machine-local boot wrapper. The AppID and non-secret
+backend settings belong in the deployment manifest. Useful optional knobs:
 `TENCENT_ASR_ENGINE` (default `16k_zh_en`), `TENCENT_TTS_VOICE_TYPE` (default
 `1001`), and `TENCENT_TTS_REGION` (default `ap-guangzhou`).
 
+With `SPEECH_BACKEND=tencent`, the build installs only the cloud client and
+audio adaptation dependencies. It does not install or warm FunASR, Whisper,
+Torch, CUDA, or Edge TTS. The `local` backend keeps those dependencies in the
+`local` optional dependency set and preloads its models during build.
+
 The TTS contract returns 16 kHz mono `pcm_s16le` bytes in both local and Tencent
 modes so existing audio speaker primitives can play the response directly.
+
+## Wake word
+
+Wake-word recognition is part of the Speech package, not Liaison. The default
+phrase is `罗伯特`; it is selected because the bundled KWS model recognizes it
+from a 16 kHz Tencent TTS test stream. A deployment can replace it without
+changing code:
+
+```yaml
+service:
+  - name: speech
+    config:
+      wake_words: ["罗伯特"]
+      wake_word_boost: 2.0
+      wake_word_threshold: 0.45
+```
+
+`SPEECH_WAKE_WORDS` is the environment equivalent (comma-separated). The
+Speech build downloads the KWS model; runtime does not download model weights.
 
 ## Adding a new ASR/TTS algorithm
 

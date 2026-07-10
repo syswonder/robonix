@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/speech/wake_word"
+version = "1"
+kind = "service"
+idl = "speech/srv/DetectWakeWord.srv"
+description = "Detect a configured wake phrase from a client-streamed PCM audio source."
+
+[mode]
+type = "rpc_client_stream"
