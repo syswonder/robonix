@@ -1393,7 +1393,11 @@ def init(cfg):
         # The default is a distinctive phrase validated with the bundled KWS
         # model and Tencent 16 kHz TTS. Deployments can replace it without
         # modifying Liaison through `wake_words` or `SPEECH_WAKE_WORDS`.
-        wake_words = _configured_strings(cfg.get("wake_words"), "SPEECH_WAKE_WORDS", ["罗伯特"])
+        wake_words = _configured_strings(
+            cfg.get("wake_words"),
+            "SPEECH_WAKE_WORDS",
+            ["\u7f57\u4f2f\u7279"],
+        )
         configured_keywords = cfg.get("wake_word_keywords_file")
         if configured_keywords:
             keywords_file = Path(configured_keywords)
@@ -1420,7 +1424,7 @@ def init(cfg):
         warm_phrases = _configured_strings(
             cfg.get("tts_warm_phrases"),
             "SPEECH_TTS_WARM_PHRASES",
-            ["我在"],
+            ["\u6211\u5728"],
         )
         _tts_servicer.prewarm(warm_phrases)
 

@@ -42,7 +42,7 @@ impl Default for HandsfreeConfig {
     fn default() -> Self {
         Self {
             handsfree_enabled: false,
-            handsfree_ack_text: "我在".to_string(),
+            handsfree_ack_text: "\u{6211}\u{5728}".to_string(),
             handsfree_mic_provider_id: String::new(),
             handsfree_speech_provider_id: "speech".to_string(),
             handsfree_voiceprint_provider_id: "voiceprint".to_string(),
