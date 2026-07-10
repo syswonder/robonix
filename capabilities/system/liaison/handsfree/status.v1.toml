@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/liaison/handsfree/status"
+version = "1"
+kind = "service"
+idl = "liaison/srv/GetHandsfreeStatus.srv"
+description = "Read Liaison's robot-local wake-word interaction state."
+
+[mode]
+type = "rpc"

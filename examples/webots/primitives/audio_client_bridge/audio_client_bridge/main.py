@@ -11,13 +11,12 @@ Wire format both directions: 16 kHz, mono, s16le PCM, ~100 ms chunks
 (3200 bytes each). Identical to `audio_driver` so liaison's voice
 pipeline never needs to know which backend is loaded.
 
-Config (RBNX_CAP_CONFIG_JSON or env fallbacks):
-  host:  IP / hostname of the client machine running client_audio_server
-         (env: AUDIO_CLIENT_SERVER_HOST, fallback AUDIO_BRIDGE_HOST,
-         default 127.0.0.1).
-  port:  TCP port the client audio device server listens on
-         (env: AUDIO_CLIENT_SERVER_PORT, fallback AUDIO_BRIDGE_PORT,
-         default 60000).
+Config (RBNX_CAP_CONFIG_JSON):
+  transport: reverse (default) makes this primitive listen for an outbound
+      robonix-client connection.  The deployment never stores a client IP.
+  listen_host/listen_port: reverse listener address (default 0.0.0.0:60002).
+  host/port: legacy client-owned server mode. Kept only for compatibility with
+      existing manifests; a configured ``host`` selects it automatically.
 """
 from __future__ import annotations
 
@@ -32,6 +31,7 @@ from queue import Queue
 
 from robonix_api import Primitive, Ok, Err, Deferred
 from google.protobuf.empty_pb2 import Empty
+from audio_client_bridge.reverse import ReverseAudioBridge
 
 audio_client_bridge = Primitive(
     id="audio_client_bridge",
@@ -49,6 +49,7 @@ import websockets         # type: ignore  # noqa: E402
 # discovery moment.
 bridge_host: str | None = None
 bridge_port: int | None = None
+reverse_bridge: ReverseAudioBridge | None = None
 speaker_lock = threading.Lock()
 
 # Per-100-ms PCM frame: 16000 Hz * 0.1 s * 2 bytes/sample * 1 ch.
@@ -84,6 +85,9 @@ def mic_stream(request, context):
     because robonix-api's gRPC server doesn't expose an async dispatch
     path yet, so the websockets library — which is asyncio-only — has
     to live behind a thread boundary."""
+    if reverse_bridge is not None:
+        yield from reverse_bridge.mic_stream(context, audio_pb2)
+        return
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
                       "audio client bridge not initialized — Driver(CMD_INIT) failed or never ran")
@@ -149,6 +153,8 @@ def speaker_stream(request_iterator, context):
     macOS playback continues asynchronously inside sounddevice. Holding the
     speaker lock for the estimated PCM duration keeps consecutive TTS
     utterances serialized even when Liaison speaks sentence by sentence."""
+    if reverse_bridge is not None:
+        return reverse_bridge.speaker_stream(request_iterator, context, Empty)
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
                       "audio client bridge not initialized")
@@ -231,12 +237,16 @@ def _ws_request(path: str, body: object | None = None, timeout_s: float = 3.0):
 
 @audio_client_bridge.grpc("robonix/primitive/audio/list_devices")
 def list_devices(request, context):
-    if bridge_host is None:
+    if reverse_bridge is None and bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
                       "audio client bridge not initialized")
         return audio_pb2.ListAudioDevices_Response()
     try:
-        payload = _ws_request("/devices")
+        payload = (
+            reverse_bridge.control_request("list_devices")
+            if reverse_bridge is not None
+            else _ws_request("/devices")
+        )
     except Exception as e:  # noqa: BLE001
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
                       f"client_audio_server /devices unreachable: {e}")
@@ -280,7 +290,7 @@ def list_devices(request, context):
 
 @audio_client_bridge.grpc("robonix/primitive/audio/select_device")
 def select_device(request, context):
-    if bridge_host is None:
+    if reverse_bridge is None and bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
                       "audio client bridge not initialized")
         return audio_pb2.SelectAudioDevice_Response()
@@ -300,7 +310,11 @@ def select_device(request, context):
             sent_id = raw_id  # forward as string; client_audio_server will reject if bad
     body = {kind: sent_id}
     try:
-        payload = _ws_request("/set_device", body)
+        payload = (
+            reverse_bridge.control_request("select_device", body)
+            if reverse_bridge is not None
+            else _ws_request("/set_device", body)
+        )
     except Exception as e:  # noqa: BLE001
         return audio_pb2.SelectAudioDevice_Response(ok=False, error=f"ws: {e}")
     return audio_pb2.SelectAudioDevice_Response(
@@ -316,11 +330,20 @@ def init(cfg):
     endpoint once. Refuse to come up if it's unreachable — atlas defers
     instead of advertising dead interfaces, and consumers see a clear
     error rather than mysteriously empty mic streams."""
-    global bridge_host, bridge_port
+    global bridge_host, bridge_port, reverse_bridge
+
+    transport = str(cfg.get("transport") or "").strip().lower()
+    legacy_host = cfg.get("host") or os.environ.get("AUDIO_CLIENT_SERVER_HOST") or os.environ.get("AUDIO_BRIDGE_HOST")
+    if transport == "reverse" or (not transport and not legacy_host):
+        listen_host = str(cfg.get("listen_host") or os.environ.get("AUDIO_CLIENT_LISTEN_HOST", "0.0.0.0"))
+        listen_port = int(cfg.get("listen_port") or os.environ.get("AUDIO_CLIENT_LISTEN_PORT", "60002"))
+        reverse_bridge = ReverseAudioBridge(listen_host, listen_port, CHUNK_BYTES)
+        reverse_bridge.start()
+        log.info("reverse client audio transport enabled on ws://%s:%d/client", listen_host, listen_port)
+        return Ok()
 
     bridge_host = (
-        cfg.get("host")
-        or os.environ.get("AUDIO_CLIENT_SERVER_HOST")
+        legacy_host
         or os.environ.get("AUDIO_BRIDGE_HOST", "127.0.0.1")
     ).strip()
     bridge_port = int(
@@ -351,6 +374,10 @@ def init(cfg):
 
 @audio_client_bridge.on_shutdown
 def shutdown():
+    global reverse_bridge
+    if reverse_bridge is not None:
+        reverse_bridge.stop()
+        reverse_bridge = None
     return Ok()
 
 

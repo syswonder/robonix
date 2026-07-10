@@ -22,6 +22,7 @@
 // and called via gRPC — same pattern as the VLM service in Pilot.
 
 mod access;
+mod handsfree;
 mod pb;
 mod voice;
 
@@ -29,6 +30,12 @@ use access::{AccessControlConfig, AccessDecision};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use pb::contracts::{
+    robonix_system_liaison_handsfree_set_enabled_server::{
+        RobonixSystemLiaisonHandsfreeSetEnabled, RobonixSystemLiaisonHandsfreeSetEnabledServer,
+    },
+    robonix_system_liaison_handsfree_status_server::{
+        RobonixSystemLiaisonHandsfreeStatus, RobonixSystemLiaisonHandsfreeStatusServer,
+    },
     robonix_system_liaison_submit_server::{
         RobonixSystemLiaisonSubmit, RobonixSystemLiaisonSubmitServer,
     },
@@ -37,7 +44,10 @@ use pb::contracts::{
     },
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
-use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
+use pb::liaison::{
+    GetHandsfreeStatusRequest, GetHandsfreeStatusResponse, SetHandsfreeRequest,
+    SetHandsfreeResponse, StartVoiceSessionRequest, VoiceEvent,
+};
 use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
@@ -55,8 +65,13 @@ const LIAISON_PROVIDER_ID: &str = "liaison";
 const LIAISON_NAMESPACE: &str = "robonix/system/liaison";
 const LIAISON_SUBMIT_CONTRACT: &str = "robonix/system/liaison/submit";
 const LIAISON_VOICE_CONTRACT: &str = "robonix/system/liaison/voice";
+const LIAISON_HANDSFREE_SET_CONTRACT: &str = "robonix/system/liaison/handsfree/set_enabled";
+const LIAISON_HANDSFREE_STATUS_CONTRACT: &str = "robonix/system/liaison/handsfree/status";
 const LIAISON_SUBMIT_TOML: &str = "capabilities/system/liaison/submit.v1.toml";
 const LIAISON_VOICE_TOML: &str = "capabilities/system/liaison/voice.v1.toml";
+const LIAISON_HANDSFREE_SET_TOML: &str =
+    "capabilities/system/liaison/handsfree/set_enabled.v1.toml";
+const LIAISON_HANDSFREE_STATUS_TOML: &str = "capabilities/system/liaison/handsfree/status.v1.toml";
 
 /// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1
 const INTENT_SOURCE_TEXT: u32 = 0;
@@ -237,6 +252,7 @@ struct LiaisonServiceImpl {
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
+    handsfree: Arc<handsfree::HandsfreeController>,
 }
 
 #[tonic::async_trait]
@@ -276,6 +292,41 @@ impl RobonixSystemLiaisonVoice for LiaisonServiceImpl {
         .await?;
         let boxed: Self::StartVoiceSessionStream = Box::pin(stream);
         Ok(Response::new(boxed))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemLiaisonHandsfreeSetEnabled for LiaisonServiceImpl {
+    async fn set_handsfree(
+        &self,
+        request: Request<SetHandsfreeRequest>,
+    ) -> Result<Response<SetHandsfreeResponse>, Status> {
+        let request = request.into_inner();
+        let status = self
+            .handsfree
+            .set_enabled(
+                request.enabled,
+                request.mic_provider_id,
+                request.speaker_provider_id,
+            )
+            .await
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        Ok(Response::new(SetHandsfreeResponse {
+            ok: true,
+            enabled: status.enabled,
+            state: status.state,
+            detail: String::new(),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemLiaisonHandsfreeStatus for LiaisonServiceImpl {
+    async fn get_handsfree_status(
+        &self,
+        _request: Request<GetHandsfreeStatusRequest>,
+    ) -> Result<Response<GetHandsfreeStatusResponse>, Status> {
+        Ok(Response::new(self.handsfree.snapshot().await))
     }
 }
 
@@ -531,6 +582,34 @@ async fn main() -> Result<()> {
         )
         .await
         .context("declare liaison voice gRPC capability")?;
+    atlas
+        .declare_capability(
+            LIAISON_PROVIDER_ID,
+            LIAISON_HANDSFREE_SET_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                LIAISON_HANDSFREE_SET_TOML,
+                "robonix.contracts.RobonixSystemLiaisonHandsfreeSetEnabled",
+                "/robonix.contracts.RobonixSystemLiaisonHandsfreeSetEnabled/SetHandsfree",
+            ),
+        )
+        .await
+        .context("declare liaison hands-free set gRPC capability")?;
+    atlas
+        .declare_capability(
+            LIAISON_PROVIDER_ID,
+            LIAISON_HANDSFREE_STATUS_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                LIAISON_HANDSFREE_STATUS_TOML,
+                "robonix.contracts.RobonixSystemLiaisonHandsfreeStatus",
+                "/robonix.contracts.RobonixSystemLiaisonHandsfreeStatus/GetHandsfreeStatus",
+            ),
+        )
+        .await
+        .context("declare liaison hands-free status gRPC capability")?;
     // Liaison has no Driver(CMD_INIT/CMD_ACTIVATE) handshake — it's a Rust binary
     // that's fully ready as soon as the gRPC server is listening. Push the
     // state explicitly so `rbnx caps` shows ACTIVE instead of stopping at
@@ -575,6 +654,20 @@ async fn main() -> Result<()> {
         Arc::clone(&atlas),
         Arc::clone(&access),
     ));
+    let handsfree_config = args
+        .config_json
+        .as_deref()
+        .map(serde_json::from_str::<handsfree::HandsfreeConfig>)
+        .transpose()
+        .context("parse liaison hands-free config")?
+        .unwrap_or_default();
+    let handsfree = handsfree::HandsfreeController::new(
+        handsfree_config,
+        Arc::clone(&atlas),
+        pilot_http.clone(),
+        Arc::clone(&access),
+    );
+    handsfree.spawn();
 
     let source = std::env::var("ROBONIX_LIAISON_SOURCE").unwrap_or_default();
     let text_handle: Option<tokio::task::JoinHandle<Result<()>>> = if source == "text" {
@@ -589,10 +682,15 @@ async fn main() -> Result<()> {
         atlas: Arc::clone(&atlas),
         pilot_endpoint_default: pilot_http,
         access,
+        handsfree,
     });
     let server = tonic::transport::Server::builder()
         .add_service(RobonixSystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
-        .add_service(RobonixSystemLiaisonVoiceServer::from_arc(svc))
+        .add_service(RobonixSystemLiaisonVoiceServer::from_arc(Arc::clone(&svc)))
+        .add_service(RobonixSystemLiaisonHandsfreeSetEnabledServer::from_arc(
+            Arc::clone(&svc),
+        ))
+        .add_service(RobonixSystemLiaisonHandsfreeStatusServer::from_arc(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {

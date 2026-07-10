@@ -99,7 +99,7 @@ const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
 /// `ConnectCapability` against the chosen one to actually receive the
 /// endpoint string. Atlas hides endpoints from `query_capabilities` on
 /// purpose; consumers must commit a channel before they can dial.
-async fn resolve_endpoint(
+pub(crate) async fn resolve_endpoint(
     atlas: &Arc<Mutex<AtlasClient>>,
     contract_id: &str,
     pin_provider_id: &str,
@@ -123,10 +123,10 @@ async fn resolve_endpoint(
     let pick: Option<&atlas_pb::CapabilityProvider> = if pin_provider_id.is_empty() {
         auto_pick()
     } else {
-        // Try the pinned provider first; if it isn't in atlas anymore (stale chat
-        // config / pin pointed at a provider that's not in this deploy), fall back
-        // to auto-pick rather than failing hard. The pin is a hint, not a
-        // hard requirement.
+        // A caller that explicitly names a provider is selecting a physical I/O
+        // boundary, not merely expressing a preference. Falling back from a
+        // client bridge to the robot device would silently capture or play on
+        // the wrong machine, so an explicit pin is a hard requirement.
         match providers
             .iter()
             .find(|r| r.id == pin_provider_id || r.namespace == pin_provider_id)
@@ -135,10 +135,10 @@ async fn resolve_endpoint(
             None => {
                 warn!(
                     "[voice] pinned provider '{pin_provider_id}' for {contract_id} not in atlas; \
-                     falling back to auto-pick. Available providers: {:?}",
+                     refusing implicit fallback. Available providers: {:?}",
                     providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
                 );
-                auto_pick()
+                None
             }
         }
     };
@@ -438,12 +438,14 @@ async fn run_session(
                             seg.push_str(&ev.text_chunk);
                         }
                         let is_boundary = matches!(kind, 1 | 2 | 4);
-                        let say = if is_boundary && req.tts_enabled && !seg.trim().is_empty() {
-                            Some(std::mem::take(&mut seg))
-                        } else {
-                            if is_boundary {
-                                seg.clear();
+                        let say = if is_boundary {
+                            let streamed = std::mem::take(&mut seg);
+                            if req.tts_enabled {
+                                tts_boundary_text(kind, streamed, &ev.final_text)
+                            } else {
+                                None
                             }
+                        } else {
                             None
                         };
                         let _ = tx
@@ -1001,6 +1003,18 @@ async fn synthesize_and_play(
     Ok(())
 }
 
+pub(crate) async fn play_prompt(
+    atlas: &Arc<Mutex<AtlasClient>>,
+    tts_pin: &str,
+    speaker_pin: &str,
+    language: &str,
+    text: &str,
+    session_id: &str,
+) -> Result<()> {
+    let (tx, _rx) = mpsc::channel(2);
+    synthesize_and_play(atlas, tts_pin, speaker_pin, language, text, session_id, &tx).await
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn build_task(
@@ -1054,6 +1068,19 @@ fn accumulate_text(ev: &PilotEvent, into: &mut String) {
         }
         _ => {}
     }
+}
+
+/// Pick the narration for a completed Pilot stream segment.
+///
+/// FINAL_TEXT is authoritative: some providers emit it without preceding
+/// TEXT_CHUNK events. Returning it here ensures voice sessions do not lose
+/// their final spoken response while text sessions remain unaffected.
+fn tts_boundary_text(kind: u32, streamed: String, final_text: &str) -> Option<String> {
+    const EVT_FINAL_TEXT: u32 = 4;
+    if kind == EVT_FINAL_TEXT && !final_text.trim().is_empty() {
+        return Some(final_text.trim().to_string());
+    }
+    (!streamed.trim().is_empty()).then_some(streamed)
 }
 
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
@@ -1276,5 +1303,13 @@ mod tests {
             &mut buf,
         );
         assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn final_text_is_spoken_without_text_chunks() {
+        assert_eq!(
+            tts_boundary_text(4, String::new(), "final answer"),
+            Some("final answer".to_string())
+        );
     }
 }

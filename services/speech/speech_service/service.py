@@ -63,6 +63,7 @@ import time
 import uuid
 import asyncio
 import logging
+import threading
 import wave
 import importlib
 from concurrent import futures
@@ -140,6 +141,10 @@ SpeechAsrBase = _grpc_class(
 SpeechAsrStreamBase = _grpc_class(
     "RobonixServiceSpeechAsrStreamServicer",
     "RobonixSystemSpeechAsrStreamServicer",
+)
+SpeechWakeWordBase = _grpc_class(
+    "RobonixServiceSpeechWakeWordServicer",
+    "RobonixSystemSpeechWakeWordServicer",
 )
 SpeechTtsBase = _grpc_class(
     "RobonixServiceSpeechTtsServicer",
@@ -878,6 +883,30 @@ class SpeechAsrStreamServicer(SpeechAsrStreamBase):
         )
 
 
+class SpeechWakeWordServicer(SpeechWakeWordBase):
+    """Client-streaming wake-word inference owned by the Speech service."""
+
+    def __init__(self, backend):
+        self.backend = backend
+
+    def DetectWakeWord(self, request_iterator, context):
+        if self.backend is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details("wake-word backend is unavailable; run the speech package build")
+            return speech_pb2.DetectWakeWord_Response(error="wake-word backend unavailable")
+        try:
+            keyword = self.backend.detect(bytes(chunk.data) for chunk in request_iterator if chunk.data)
+            return speech_pb2.DetectWakeWord_Response(
+                detected=bool(keyword),
+                keyword=keyword,
+                confidence=1.0 if keyword else 0.0,
+                error="",
+            )
+        except Exception as exc:
+            log.exception("wake-word stream failed")
+            return speech_pb2.DetectWakeWord_Response(error=str(exc))
+
+
 class SpeechTtsServicer(SpeechTtsBase):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
@@ -890,6 +919,39 @@ class SpeechTtsServicer(SpeechTtsBase):
 
     def __init__(self, tts_backend):
         self.tts_backend = tts_backend
+        self._cache: dict[tuple[str, str, float], bytes] = {}
+        self._cache_lock = threading.Lock()
+
+    def configure_backend(self, tts_backend) -> None:
+        with self._cache_lock:
+            self.tts_backend = tts_backend
+            self._cache.clear()
+
+    def _synthesize_cached(self, text: str, voice: str, speed: float) -> bytes:
+        key = (text, voice, speed)
+        with self._cache_lock:
+            cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
+        with self._cache_lock:
+            self._cache[key] = audio_data
+            while len(self._cache) > 16:
+                self._cache.pop(next(iter(self._cache)))
+        return audio_data
+
+    def prewarm(self, phrases: Iterable[str]) -> None:
+        if self.tts_backend is None:
+            return
+        for phrase in phrases:
+            text = str(phrase).strip()
+            if not text:
+                continue
+            try:
+                self._synthesize_cached(text, "", 1.0)
+                log.info("TTS cache prewarmed for %d-character prompt", len(text))
+            except Exception:
+                log.exception("TTS cache prewarm failed for %d-character prompt", len(text))
 
     def Synthesize(self, request, context):
         """Handle one-shot TTS: receive text, return complete MP3 audio.
@@ -916,7 +978,7 @@ class SpeechTtsServicer(SpeechTtsBase):
         speed = request.speed or 1.0
 
         try:
-            audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
+            audio_data = self._synthesize_cached(text, voice, speed)
             return tts_pb2.Synthesize_Response(
                 audio_data=audio_data,
                 encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
@@ -1093,11 +1155,13 @@ log.info("Starting speech service (mock_mode=%s)", MOCK_MODE)
 _dialog_manager = DialogManager()
 _asr_servicer        = SpeechAsrServicer(None)
 _asr_stream_servicer = SpeechAsrStreamServicer(None)
+_wake_word_servicer   = SpeechWakeWordServicer(None)
 _tts_servicer        = SpeechTtsServicer(None)
 _tts_stream_servicer = SpeechTtsStreamServicer(None)
 _dialog_servicer     = SpeechDialogServicer(_dialog_manager)
 speech.attach_grpc_servicer("robonix/service/speech/asr",        _asr_servicer)
 speech.attach_grpc_servicer("robonix/service/speech/asr_stream", _asr_stream_servicer)
+speech.attach_grpc_servicer("robonix/service/speech/wake_word",  _wake_word_servicer)
 speech.attach_grpc_servicer("robonix/service/speech/tts",        _tts_servicer)
 speech.attach_grpc_servicer("robonix/service/speech/tts_stream", _tts_stream_servicer)
 speech.attach_grpc_servicer("robonix/service/speech/dialog",     _dialog_servicer)
@@ -1227,6 +1291,24 @@ _CFG_ENV_MAP = {
 }
 
 
+def _configured_strings(value, env_name: str, default: list[str]) -> list[str]:
+    raw = value if value is not None else os.environ.get(env_name, "")
+    if not raw:
+        return list(default)
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if stripped.startswith("["):
+            raw = json.loads(stripped)
+        else:
+            raw = [item.strip() for item in stripped.replace("\n", ",").split(",")]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"{env_name} must be a JSON list or comma-separated string")
+    values = [str(item).strip() for item in raw if str(item).strip()]
+    if not values:
+        raise ValueError(f"{env_name} must contain at least one non-empty value")
+    return values
+
+
 def _apply_cfg_to_env(cfg: dict) -> None:
     for key, env in _CFG_ENV_MAP.items():
         if key not in cfg:
@@ -1303,8 +1385,44 @@ def init(cfg):
 
     _asr_servicer.asr_backend = asr
     _asr_stream_servicer.stream_asr_backend = asr_stream
-    _tts_servicer.tts_backend = tts
+    try:
+        from speech_service.wake_word import WakeWordBackend, prepare_keywords_file
+
+        package_root = Path(__file__).resolve().parents[1]
+        model_dir = Path(cfg.get("wake_word_model_dir") or package_root / "rbnx-build" / "models" / "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20")
+        # The default is a distinctive phrase validated with the bundled KWS
+        # model and Tencent 16 kHz TTS. Deployments can replace it without
+        # modifying Liaison through `wake_words` or `SPEECH_WAKE_WORDS`.
+        wake_words = _configured_strings(cfg.get("wake_words"), "SPEECH_WAKE_WORDS", ["罗伯特"])
+        configured_keywords = cfg.get("wake_word_keywords_file")
+        if configured_keywords:
+            keywords_file = Path(configured_keywords)
+        else:
+            keywords_file = prepare_keywords_file(
+                model_dir,
+                package_root / "rbnx-build" / "runtime" / "wake_word",
+                wake_words,
+                boost=float(cfg.get("wake_word_boost") or 2.0),
+                threshold=float(cfg.get("wake_word_threshold") or 0.45),
+            )
+        _wake_word_servicer.backend = WakeWordBackend(
+            model_dir,
+            keywords_file,
+            max(1, int(cfg.get("wake_word_num_threads") or 2)),
+        )
+        log.info("wake-word backend ready: phrases=%s", wake_words)
+    except Exception as exc:
+        _wake_word_servicer.backend = None
+        log.exception("wake-word backend unavailable: %s", exc)
+    _tts_servicer.configure_backend(tts)
     _tts_stream_servicer.tts_backend = tts
+    if tts is not None:
+        warm_phrases = _configured_strings(
+            cfg.get("tts_warm_phrases"),
+            "SPEECH_TTS_WARM_PHRASES",
+            ["我在"],
+        )
+        _tts_servicer.prewarm(warm_phrases)
 
     log.info(
         "Backend status: mode=%s asr=%s (%s) asr_stream=%s (%s) tts=%s (%s)",
