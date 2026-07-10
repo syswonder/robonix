@@ -108,6 +108,11 @@ pub enum Commands {
         /// hurry.
         #[arg(long)]
         no_update_check: bool,
+        /// Stream append-only, Scribe-backed component logs during boot.
+        /// Disables animated cursor updates so output can be read or piped
+        /// like a Linux/FreeBSD kernel boot log or Android logcat.
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Update remote (`url:`) providers to their latest upstream commit
     ///
@@ -415,7 +420,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             log_dir,
             skip_system,
             no_update_check,
-        } => deploy::execute(config, file, log_dir, skip_system, no_update_check).await,
+            verbose,
+        } => deploy::execute(config, file, log_dir, skip_system, no_update_check, verbose).await,
         Commands::Update { path, file } => update::execute(config, path, file).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {

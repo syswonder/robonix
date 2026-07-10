@@ -691,14 +691,14 @@ async fn spawn_soma_binary(
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_out, &line);
+            scribe::ingest(&tag_out, &line);
         }
     });
     tokio::spawn(async move {
         let reader = tokio::io::BufReader::new(stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_err, &line);
+            scribe::ingest(&tag_err, &line);
         }
     });
 
@@ -893,7 +893,9 @@ pub async fn execute(
     log_dir: Option<PathBuf>,
     skip_system: bool,
     no_update_check: bool,
+    verbose: bool,
 ) -> Result<()> {
+    output::set_boot_verbose(verbose);
     let manifest_path = manifest_path
         .canonicalize()
         .with_context(|| format!("manifest not found: {}", manifest_path.display()))?;
@@ -921,19 +923,6 @@ pub async fn execute(
         },
         &manifest_path.display().to_string(),
     );
-    scribe::info(
-        "bootstrap",
-        &format!(
-            "booting {} from {}",
-            if deploy.name.is_empty() {
-                "robonix"
-            } else {
-                &deploy.name
-            },
-            manifest_path.display()
-        ),
-    );
-
     // Notice (non-fatal) if any cloned remote provider is behind upstream.
     // `--no-update-check` skips the per-package `git fetch` pass entirely.
     if !no_update_check {
@@ -976,21 +965,8 @@ pub async fn execute(
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
-    // Wipe stale per-component logs from prior runs — without this you
-    // can't tell whether `system_speech.log` is from THIS boot or one
-    // ten `rbnx boot` retries ago. Only `*.log` files at the top level
-    // get removed; nested directories (if a future package wants its
-    // own subdir) are left alone.
-    if log_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&log_dir)
-    {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("log") {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
+    // The CLI prepares and clears this directory before Scribe's first log
+    // call. Do not remove files here: Scribe may already hold open handles.
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
@@ -1002,6 +978,18 @@ pub async fn execute(
     unsafe {
         std::env::set_var("SCRIBE_LOG_DIR", log_dir.as_os_str());
     }
+    scribe::info(
+        "bootstrap",
+        &format!(
+            "booting {} from {}",
+            if deploy.name.is_empty() {
+                "robonix"
+            } else {
+                &deploy.name
+            },
+            manifest_path.display()
+        ),
+    );
 
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
     let instances_dir = manifest_dir.join("rbnx-boot").join("instances");
@@ -1944,6 +1932,10 @@ async fn with_spinner<F, T>(label: &str, msg_prefix: &str, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
+    if output::boot_verbose() {
+        output::boot_wait(label, msg_prefix);
+        return fut.await;
+    }
     use std::time::Instant;
     let started = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -1981,6 +1973,9 @@ async fn wait_for_soma_stage1(
     let started = Instant::now();
     let deadline = started + SOMA_STAGE1_TIMEOUT;
     let mut frame: usize = 0;
+    if output::boot_verbose() {
+        output::boot_wait("soma stage 1", "waiting for primitive readiness");
+    }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
         let detail = if primitive_count == 0 {
@@ -1988,7 +1983,13 @@ async fn wait_for_soma_stage1(
         } else {
             format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
         };
-        output::boot_progress("soma stage 1", &detail, frame);
+        if output::boot_verbose() {
+            if frame > 0 && frame.is_multiple_of(50) {
+                output::boot_note("soma stage 1", &detail);
+            }
+        } else {
+            output::boot_progress("soma stage 1", &detail, frame);
+        }
         // Check every tick whether soma is still alive. If it exited
         // (typically: `missing robot_yaml`, `read Soma config`, port
         // bind failure), surface that immediately with the tail of
@@ -2266,13 +2267,19 @@ async fn wait_for_registration(
     let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
+    if output::boot_verbose() {
+        output::boot_wait(display_label, "registering with atlas");
+    }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
-        output::boot_progress(
-            display_label,
-            &format!("registering with atlas… {elapsed_s:>4.1}s"),
-            frame,
-        );
+        let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
+        if output::boot_verbose() {
+            if frame > 0 && frame.is_multiple_of(50) {
+                output::boot_note(display_label, &detail);
+            }
+        } else {
+            output::boot_progress(display_label, &detail, frame);
+        }
         if frame.is_multiple_of(POLLS_PER_TICK as usize) {
             let providers = atlas
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
