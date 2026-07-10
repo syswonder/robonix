@@ -40,6 +40,9 @@ Optionally, `--mock-soma-arm piper` spawns `scripts/piper_bridge.py` as a subpro
 
 ## Running
 
+For a screen-recording-friendly end-to-end health demo, see
+[`VITALS_HEALTH_DEMO.md`](VITALS_HEALTH_DEMO.md).
+
 ### With real SOMA (production)
 
 ```bash
