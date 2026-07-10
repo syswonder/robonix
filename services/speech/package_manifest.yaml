@@ -15,10 +15,18 @@
 #   funasr_device:     str   — auto | cuda | cpu (default: auto — try GPU then fall back to CPU on OOM)
 #   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
 #   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
+#   default_speaker_provider_id: str — provider id used by speech/speak when
+#       its request target is empty; explicit request target overrides this
 #   tencent_asr_appid: str   — Tencent Cloud ASR AppID (secret id/key stay in env)
 #   tencent_asr_engine: str  — default 16k_zh_en
+#   tencent_asr_host: str    — default asr.cloud.tencent.com
 #   tencent_tts_voice_type: int — default 1001
 #   tencent_tts_region: str — default ap-guangzhou
+#   tencent_tts_model_type: int — default 1
+#   tencent_tts_sample_rate: int — default 16000
+#   tencent_tts_codec: str — default pcm
+#   tencent_tts_primary_language: int — optional 1=Chinese, 2=English;
+#       omit for automatic Chinese/English selection per utterance
 #   log:               str   — log level (default: info)
 manifestVersion: 1
 

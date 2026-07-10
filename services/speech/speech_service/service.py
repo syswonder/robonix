@@ -1117,6 +1117,7 @@ from speech_mcp import (  # noqa: E402
 
 _SPEAKER_CONTRACT = "robonix/primitive/audio/speaker"
 _speak_tts = None
+_default_speaker_provider_id = ""
 
 
 @speech.mcp("robonix/service/speech/list_speakers")
@@ -1143,17 +1144,20 @@ def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
 @speech.mcp("robonix/service/speech/speak")
 def speak(req: Speak_Request) -> Speak_Response:
     """Synthesize `text` to speech and play it out loud on a speaker. `target`
-    is the speaker primitive's provider_id (from list_speakers); empty = first
-    available. Use this to make the robot announce things aloud."""
+    is the speaker primitive's provider_id (from list_speakers). When it is
+    empty, the configured default_speaker_provider_id is used; without a
+    configured default the first available provider preserves legacy behavior.
+    """
     global _speak_tts
     text = (req.text or "").strip()
     if not text:
         raise RuntimeError("empty text")
     caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
-    if req.target:
-        caps = [c for c in caps if c.provider_id == req.target]
+    target = (req.target or _default_speaker_provider_id).strip()
+    if target:
+        caps = [c for c in caps if c.provider_id == target]
     if not caps:
-        raise RuntimeError(f"no speaker provider (target={req.target!r})")
+        raise RuntimeError(f"no speaker provider (target={target!r})")
     cap = caps[0]
 
     tts_backend = _tts_servicer.tts_backend
@@ -1207,10 +1211,16 @@ _CFG_ENV_MAP = {
     "funasr_device":     "FUNASR_DEVICE",
     "funasr_chunk_size": "FUNASR_CHUNK_SIZE",
     "tts_voice":         "TTS_VOICE",
+    "default_speaker_provider_id": "SPEECH_DEFAULT_SPEAKER_PROVIDER_ID",
     "tencent_asr_appid": "TENCENT_ASR_APPID",
     "tencent_asr_engine": "TENCENT_ASR_ENGINE",
+    "tencent_asr_host": "TENCENT_ASR_HOST",
     "tencent_tts_voice_type": "TENCENT_TTS_VOICE_TYPE",
     "tencent_tts_region": "TENCENT_TTS_REGION",
+    "tencent_tts_model_type": "TENCENT_TTS_MODEL_TYPE",
+    "tencent_tts_sample_rate": "TENCENT_TTS_SAMPLE_RATE",
+    "tencent_tts_codec": "TENCENT_TTS_CODEC",
+    "tencent_tts_primary_language": "TENCENT_TTS_PRIMARY_LANGUAGE",
     "speech_asr_backend_class": "SPEECH_ASR_BACKEND_CLASS",
     "speech_asr_stream_backend_class": "SPEECH_ASR_STREAM_BACKEND_CLASS",
     "speech_tts_backend_class": "SPEECH_TTS_BACKEND_CLASS",
@@ -1227,8 +1237,14 @@ def _apply_cfg_to_env(cfg: dict) -> None:
 
 @speech.on_init
 def init(cfg):
+    global _default_speaker_provider_id
     log.info("Driver(INIT) cfg keys: %s", sorted(cfg.keys()))
     _apply_cfg_to_env(cfg)
+    _default_speaker_provider_id = os.environ.get(
+        "SPEECH_DEFAULT_SPEAKER_PROVIDER_ID", ""
+    ).strip()
+    if _default_speaker_provider_id:
+        log.info("speech/speak default speaker provider: %s", _default_speaker_provider_id)
 
     disable_whisper = bool(cfg.get(
         "disable_whisper",
