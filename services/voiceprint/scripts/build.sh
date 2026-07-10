@@ -37,6 +37,8 @@ VENV="$BUILD/venv"
 MODELS="$BUILD/models"
 DATA="$BUILD/data"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
+IS_JETSON=0
+[[ -f /etc/nv_tegra_release ]] && IS_JETSON=1
 
 if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
@@ -49,9 +51,18 @@ if ! command -v uv >/dev/null 2>&1; then
     echo "[build] error: 'uv' not found on PATH. Install: https://docs.astral.sh/uv/" >&2
     exit 1
 fi
+if [[ "$IS_JETSON" == "1" && -d "$VENV" ]] \
+    && ! grep -q '^include-system-site-packages = true$' "$VENV/pyvenv.cfg"; then
+    echo "[build] Jetson: recreating venv with host CUDA Python packages"
+    rm -rf "$VENV"
+fi
 if [[ ! -d "$VENV" ]]; then
     echo "[build] uv venv → $VENV"
-    uv venv "$VENV"
+    if [[ "$IS_JETSON" == "1" ]]; then
+        uv venv --system-site-packages "$VENV"
+    else
+        uv venv "$VENV"
+    fi
 fi
 
 # This venv's site-packages (robust to the python minor version).
@@ -69,7 +80,24 @@ fi
 
 # ── 2. uv sync (deps from pyproject.toml + workspace uv.lock) ──────────────
 echo "[build] uv sync (pyproject.toml → $VENV)"
-VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
+SYNC_ARGS=(--active --no-managed-python)
+if [[ "$IS_JETSON" == "1" ]]; then
+    SYNC_ARGS+=(
+        --no-install-package torch
+        --no-install-package torchaudio
+        --no-install-package torchvision
+    )
+fi
+VIRTUAL_ENV="$PKG/$VENV" uv sync "${SYNC_ARGS[@]}"
+
+# SpeechBrain declares torch/torchaudio as unconditional dependencies. On
+# Jetson those transitive requirements resolve to large, incompatible PyPI
+# CUDA wheels even though the package itself uses JetPack Torch. Install only
+# the small pure-Python SpeechBrain wheel; all of its non-Torch dependencies
+# are declared explicitly in pyproject.toml.
+if [[ "$IS_JETSON" == "1" ]]; then
+    uv pip install --python "$VENV/bin/python" --no-deps "speechbrain==1.1.0"
+fi
 
 # ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
 # On Jetson (aarch64), PyPI's torch is built against a CUDA version that does
@@ -99,7 +127,14 @@ if [[ -f /etc/nv_tegra_release && "${VOICEPRINT_SKIP_JETSON_TORCH:-}" != "1" ]];
     fi
 fi
 
-# ── 3. Pre-warm ECAPA-TDNN weights from ModelScope (skip with SKIP_MODEL_DOWNLOAD=1) ─
+# ── 3. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
+FLAGS=(--mcp)
+# The complete build directory was already removed above. A second clean here
+# would delete the freshly synchronized venv.
+echo "[build] rbnx codegen ${FLAGS[*]}"
+rbnx codegen -p "$PKG" "${FLAGS[@]}"
+
+# ── 4. Pre-warm ECAPA-TDNN weights from ModelScope (skip with SKIP_MODEL_DOWNLOAD=1) ─
 # Fetch from ModelScope, not HuggingFace: hf_hub's metadata HEAD only follows
 # same-host redirects, and the reachable hf-mirror.com bounces resolve/main to
 # huggingface.co with a cross-host 308 that no hf_hub version follows, so every
@@ -108,20 +143,20 @@ fi
 # the service loads offline at startup; engine.py resolves the same repo.
 PY="$VENV/bin/python"
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
-    echo "[build] pre-warming ECAPA-TDNN weights from ModelScope → ~/.cache/modelscope"
-    "$PY" -c "
-from modelscope.hub.snapshot_download import snapshot_download
-d = snapshot_download('speechbrain/spkrec-ecapa-voxceleb')
-print('[build] ModelScope snapshot:', d)
-" || echo "[build] WARNING: ECAPA-TDNN download failed; service will retry at startup."
+    echo "[build] loading ECAPA-TDNN from ModelScope and verifying one embedding"
+    PYTHONPATH="$PKG:$PKG/rbnx-build/codegen/proto_gen" "$PY" - <<'PY'
+import numpy as np
+from voiceprint_service.engine import EcapaTdnnEngine
+
+source = EcapaTdnnEngine._resolve_source()
+engine = EcapaTdnnEngine()
+embedding = engine.extract_from_file(f"{source}/example1.wav")
+if embedding.shape != (192,) or not np.isfinite(embedding).all():
+    raise RuntimeError(f"invalid ECAPA-TDNN embedding: shape={embedding.shape}")
+print(f"[build]   ECAPA-TDNN ready on {engine.device}; embedding shape={embedding.shape}")
+PY
 else
     echo "[build] SKIP_MODEL_DOWNLOAD=1 — skipping ECAPA-TDNN download."
 fi
-
-# ── 4. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
-FLAGS=(--mcp)
-[[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
-echo "[build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 echo "[build] done."

@@ -40,7 +40,7 @@ start: |
   # creates rbnx-build/venv; start only activates that sealed environment.
   export VIRTUAL_ENV="$(pwd)/rbnx-build/venv"
   export PATH="$VIRTUAL_ENV/bin:$PATH"
-  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:${PYTHONPATH:-}"
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
   exec "$VIRTUAL_ENV/bin/python" -m voiceprint_service.service
 
 stop: |
