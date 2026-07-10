@@ -57,15 +57,29 @@ exec docker exec \
   -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/robonix_mcp_types" \
   "$SIM_CT" \
-  bash -lc "
+  bash -lc '''
     set -eo pipefail
-    source /opt/ros/humble/setup.bash
+    set +u
+    source /opt/ros/humble/setup.bash >/dev/null
     OVL=/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/ros2_idl/install/setup.bash
-    [ -f \"\$OVL\" ] && source \"\$OVL\" || true
-    python3 /robonix_pkgs/primitives/tiago_lidar/scripts/scan_normalize.py \\
-        --in $RAW_TOPIC --out $OUT_TOPIC &
-    NORM_PID=\$!
-    trap 'kill -TERM \$NORM_PID 2>/dev/null || true' EXIT
+    [ -f "$OVL" ] && source "$OVL" >/dev/null || true
+    python3 /robonix_pkgs/primitives/tiago_lidar/scripts/scan_normalize.py \
+        --in "$TIAGO_SCAN_RAW_TOPIC" --out "$TIAGO_SCAN_TOPIC" &
+    NORM_PID=$!
+    trap "kill -TERM \"$NORM_PID\" 2>/dev/null || true" EXIT
     cd /robonix_pkgs/primitives/tiago_lidar
-    exec python3 -m lidar_driver.driver
-  "
+    LOG=/tmp/tiago_lidar_driver.log
+    : > "$LOG"
+    python3 -m lidar_driver.driver >>"$LOG" 2>&1 &
+    DRIVER_PID=$!
+    tail --pid="$DRIVER_PID" -n +1 -F "$LOG" &
+    TAIL_PID=$!
+    set +e
+    wait "$DRIVER_PID"
+    STATUS=$?
+    set -e
+    kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
+    exit "$STATUS"
+  '''
+
