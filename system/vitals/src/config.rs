@@ -22,6 +22,12 @@ pub const DEFAULT_MOCK_SOMA_LISTEN: &str = "127.0.0.1:50092";
 pub const DEFAULT_MOCK_SOMA_INTERVAL_MS: u64 = 10_000;
 /// Default Python binary for hardware bridge subprocesses.
 pub const DEFAULT_BRIDGE_PYTHON: &str = "python3";
+/// Default module health report TTL in milliseconds.
+pub const DEFAULT_MODULE_HEALTH_TTL_MS: u32 = 5_000;
+/// Executor module health capability.
+pub const EXECUTOR_GET_HEALTH_CONTRACT: &str = "robonix/system/executor/get_health";
+/// Pilot module health capability.
+pub const PILOT_GET_HEALTH_CONTRACT: &str = "robonix/system/pilot/get_health";
 
 /// Mock Soma arm data source: fully synthetic, or real hardware via bridge.
 #[derive(Debug, Clone)]
@@ -53,6 +59,48 @@ impl MockArmConfig {
     }
 }
 
+/// Deployment policy for a module that Vitals expects to supervise.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExpectedModulePolicy {
+    Required,
+    #[default]
+    Optional,
+    Disabled,
+}
+
+/// One module that Vitals should include in the module-health view.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ExpectedModuleConfig {
+    pub module_id: String,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub policy: ExpectedModulePolicy,
+    #[serde(default = "default_module_health_ttl_ms")]
+    pub ttl_ms: u32,
+}
+
+impl ExpectedModuleConfig {
+    pub fn module_key(&self) -> String {
+        self.provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider_id| !provider_id.is_empty())
+            .unwrap_or_else(|| self.module_id.trim())
+            .to_string()
+    }
+
+    pub fn provider_id_or_empty(&self) -> &str {
+        self.provider_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+    }
+}
+
 /// Resolved Vitals configuration: compiled defaults < YAML < CLI/env.
 #[derive(Debug, Clone)]
 pub struct VitalsConfig {
@@ -68,6 +116,8 @@ pub struct VitalsConfig {
     pub mock_soma_interval_ms: u64,
     /// Mock arm data source (default: Synthetic).
     pub mock_soma_arm: MockArmConfig,
+    /// Modules Vitals should supervise in the module-health path.
+    pub expected_modules: Vec<ExpectedModuleConfig>,
 }
 
 #[derive(Parser, Debug)]
@@ -182,6 +232,8 @@ struct FileConfig {
     mock_soma_piper_script: Option<PathBuf>,
     #[serde(default)]
     mock_soma_koch_script: Option<PathBuf>,
+    #[serde(default)]
+    expected_modules: Option<Vec<ExpectedModuleConfig>>,
 }
 
 impl VitalsConfig {
@@ -252,6 +304,15 @@ impl VitalsConfig {
             }
         };
 
+        let id = args
+            .id
+            .or(file_cfg.id)
+            .unwrap_or_else(|| DEFAULT_VITALS_PROVIDER_ID.to_string());
+        let expected_modules = file_cfg
+            .expected_modules
+            .unwrap_or_else(|| default_expected_modules(&id));
+        validate_expected_modules(&expected_modules)?;
+
         Ok(Self {
             atlas_endpoint: args
                 .atlas
@@ -261,10 +322,7 @@ impl VitalsConfig {
                 .listen
                 .or(file_cfg.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
-            id: args
-                .id
-                .or(file_cfg.id)
-                .unwrap_or_else(|| DEFAULT_VITALS_PROVIDER_ID.to_string()),
+            id,
             thresholds_path: args
                 .thresholds_path
                 .or(file_cfg.thresholds_path)
@@ -288,8 +346,48 @@ impl VitalsConfig {
                 .or(file_cfg.mock_soma_interval_ms)
                 .unwrap_or(DEFAULT_MOCK_SOMA_INTERVAL_MS),
             mock_soma_arm,
+            expected_modules,
         })
     }
+}
+
+pub fn default_expected_modules(vitals_provider_id: &str) -> Vec<ExpectedModuleConfig> {
+    vec![
+        ExpectedModuleConfig {
+            module_id: "vitals".to_string(),
+            provider_id: Some(vitals_provider_id.to_string()),
+            capability: None,
+            policy: ExpectedModulePolicy::Required,
+            ttl_ms: 0,
+        },
+        ExpectedModuleConfig {
+            module_id: "executor".to_string(),
+            provider_id: Some("executor".to_string()),
+            capability: Some(EXECUTOR_GET_HEALTH_CONTRACT.to_string()),
+            policy: ExpectedModulePolicy::Required,
+            ttl_ms: DEFAULT_MODULE_HEALTH_TTL_MS,
+        },
+        ExpectedModuleConfig {
+            module_id: "pilot".to_string(),
+            provider_id: Some("pilot".to_string()),
+            capability: Some(PILOT_GET_HEALTH_CONTRACT.to_string()),
+            policy: ExpectedModulePolicy::Required,
+            ttl_ms: DEFAULT_MODULE_HEALTH_TTL_MS,
+        },
+    ]
+}
+
+fn default_module_health_ttl_ms() -> u32 {
+    DEFAULT_MODULE_HEALTH_TTL_MS
+}
+
+fn validate_expected_modules(modules: &[ExpectedModuleConfig]) -> Result<()> {
+    for module in modules {
+        if module.module_id.trim().is_empty() {
+            anyhow::bail!("expected_modules contains an empty module_id");
+        }
+    }
+    Ok(())
 }
 
 fn load_yaml(path: &Path) -> Result<FileConfig> {
@@ -372,6 +470,22 @@ mod tests {
         assert!(cfg.soma_endpoint.is_none());
         assert!(!cfg.mock_soma);
         assert!(matches!(cfg.mock_soma_arm, MockArmConfig::Synthetic));
+        assert_eq!(cfg.expected_modules.len(), 3);
+        assert_eq!(cfg.expected_modules[0].module_id, "vitals");
+        assert_eq!(
+            cfg.expected_modules[0].policy,
+            ExpectedModulePolicy::Required
+        );
+        assert_eq!(cfg.expected_modules[1].module_id, "executor");
+        assert_eq!(
+            cfg.expected_modules[1].policy,
+            ExpectedModulePolicy::Required
+        );
+        assert_eq!(cfg.expected_modules[2].module_id, "pilot");
+        assert_eq!(
+            cfg.expected_modules[2].policy,
+            ExpectedModulePolicy::Required
+        );
     }
 
     #[test]
@@ -424,5 +538,31 @@ mod tests {
             MockArmConfig::Koch { serial_port, .. } => assert_eq!(serial_port, "/dev/ttyUSB1"),
             other => panic!("expected Koch, got {:?}", other.label()),
         }
+    }
+
+    #[test]
+    fn file_config_parses_expected_modules() {
+        let file_cfg: FileConfig = serde_yaml::from_str(
+            r#"
+expected_modules:
+  - module_id: executor
+    provider_id: executor-main
+    capability: robonix/system/executor/get_health
+    policy: required
+    ttl_ms: 3000
+  - module_id: speech
+    policy: disabled
+"#,
+        )
+        .expect("parse expected modules");
+
+        let modules = file_cfg.expected_modules.expect("expected modules");
+        assert_eq!(modules.len(), 2);
+        assert_eq!(modules[0].module_key(), "executor-main");
+        assert_eq!(modules[0].policy, ExpectedModulePolicy::Required);
+        assert_eq!(modules[0].ttl_ms, 3000);
+        assert_eq!(modules[1].module_key(), "speech");
+        assert_eq!(modules[1].policy, ExpectedModulePolicy::Disabled);
+        assert_eq!(modules[1].ttl_ms, DEFAULT_MODULE_HEALTH_TTL_MS);
     }
 }

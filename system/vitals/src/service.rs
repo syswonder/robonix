@@ -6,13 +6,17 @@
 //
 // Phase 2: returns a hardcoded/mock snapshot.
 
-use crate::module_health::{ModuleHealthError, ModuleHealthStore};
+use crate::config::{ExpectedModuleConfig, ExpectedModulePolicy};
+use crate::module_health::{
+    HEALTH_ERROR, HEALTH_OK, HEALTH_WARN, MODULE_HEALTH_SCHEMA_VERSION, ModuleHealthError,
+    ModuleHealthStore,
+};
 use crate::pb::contracts::robonix_system_vitals_get_server::RobonixSystemVitalsGet;
 use crate::pb::contracts::robonix_system_vitals_modules_get_server::RobonixSystemVitalsModulesGet;
 use crate::pb::contracts::robonix_system_vitals_stream_server::RobonixSystemVitalsStream;
 use crate::pb::module_health::{
-    GetModuleHealthSnapshotRequest, GetModuleHealthSnapshotResponse, ModuleHealthEvent,
-    ModuleHealthReport, ModuleHealthSnapshot,
+    GetModuleHealthSnapshotRequest, GetModuleHealthSnapshotResponse, ModuleHealth,
+    ModuleHealthEvent, ModuleHealthReport, ModuleHealthSnapshot,
 };
 use crate::pb::vitals::{
     BodyComponent, GetVitalsRequest, GetVitalsResponse, PowerState, StreamVitalsRequest,
@@ -349,15 +353,59 @@ impl VitalsServiceImpl {
             .ingest_report(report, monotonic_ns())
     }
 
+    /// Publish Vitals' own module health into the aggregate module snapshot.
+    pub async fn update_self_module_health(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<ModuleHealthEvent>, ModuleHealthError> {
+        self.ingest_module_health_report(vitals_self_health_report(provider_id))
+            .await
+    }
+
+    /// Publish disabled expected modules into the aggregate module snapshot.
+    pub async fn apply_expected_module_config(&self, modules: &[ExpectedModuleConfig]) {
+        for module in modules {
+            if module.policy == ExpectedModulePolicy::Disabled {
+                self.module_health.write().await.synthesize_config_disabled(
+                    &module.module_id,
+                    module.provider_id_or_empty(),
+                    monotonic_ns(),
+                );
+            }
+        }
+    }
+
     /// Mark a known module as stale if its last self-reported frame exceeded ttl_ms.
     pub async fn synthesize_stale_module_if_expired(
         &self,
         module_key: &str,
+        policy: ExpectedModulePolicy,
     ) -> Option<ModuleHealthEvent> {
         self.module_health
             .write()
             .await
-            .synthesize_stale_if_expired(module_key, monotonic_ns())
+            .synthesize_stale_if_expired(module_key, stale_health_for(policy), monotonic_ns())
+    }
+
+    /// Mark an expected module as unavailable before it has ever reported health.
+    pub async fn synthesize_expected_module_unavailable(
+        &self,
+        module: &ExpectedModuleConfig,
+    ) -> Option<ModuleHealthEvent> {
+        if module.policy == ExpectedModulePolicy::Disabled {
+            return None;
+        }
+
+        self.module_health
+            .write()
+            .await
+            .synthesize_expected_unavailable(
+                &module.module_id,
+                module.provider_id_or_empty(),
+                stale_health_for(module.policy),
+                module.ttl_ms,
+                monotonic_ns(),
+            )
     }
 
     /// Return the latest module health aggregate snapshot.
@@ -368,6 +416,32 @@ impl VitalsServiceImpl {
     #[allow(dead_code)] // Phase 3 will expose uptime through snapshot metadata
     pub fn start_instant(&self) -> Instant {
         self.start_time
+    }
+}
+
+fn stale_health_for(policy: ExpectedModulePolicy) -> u32 {
+    match policy {
+        ExpectedModulePolicy::Required => HEALTH_ERROR,
+        ExpectedModulePolicy::Optional => HEALTH_WARN,
+        ExpectedModulePolicy::Disabled => HEALTH_OK,
+    }
+}
+
+fn vitals_self_health_report(provider_id: &str) -> ModuleHealthReport {
+    ModuleHealthReport {
+        schema_version: MODULE_HEALTH_SCHEMA_VERSION,
+        module: Some(ModuleHealth {
+            module_key: String::new(),
+            module_id: "vitals".to_string(),
+            provider_id: provider_id.to_string(),
+            health: HEALTH_OK,
+            state: "active".to_string(),
+            reason_code: "OK".to_string(),
+            detail: "vitals serving".to_string(),
+            source: String::new(),
+            received_ts_ns: 0,
+            ttl_ms: 0,
+        }),
     }
 }
 
@@ -485,8 +559,6 @@ impl RobonixSystemVitalsStream for VitalsServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module_health::{HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION};
-    use crate::pb::module_health::ModuleHealth;
 
     #[tokio::test]
     async fn modules_get_returns_empty_snapshot_initially() {
@@ -529,6 +601,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn self_module_health_enters_snapshot() {
+        let svc = VitalsServiceImpl::new();
+        let event = svc
+            .update_self_module_health("vitals")
+            .await
+            .expect("self health report");
+        assert!(event.is_none());
+
+        let snapshot = svc.module_health_snapshot(1000).await;
+        assert_eq!(snapshot.modules.len(), 1);
+        assert_eq!(snapshot.modules[0].module_key, "vitals");
+        assert_eq!(snapshot.modules[0].module_id, "vitals");
+        assert_eq!(snapshot.modules[0].provider_id, "vitals");
+        assert_eq!(snapshot.modules[0].health, HEALTH_OK);
+        assert_eq!(snapshot.modules[0].state, "active");
+        assert_eq!(snapshot.modules[0].reason_code, "OK");
+        assert_eq!(snapshot.modules[0].detail, "vitals serving");
+        assert_eq!(snapshot.modules[0].source, "SELF_REPORTED");
+        assert_eq!(snapshot.modules[0].ttl_ms, 0);
+    }
+
+    #[tokio::test]
     async fn stale_synthesis_updates_module_snapshot() {
         let svc = VitalsServiceImpl::new();
         svc.ingest_module_health_report(ModuleHealthReport {
@@ -549,7 +643,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let event = svc
-            .synthesize_stale_module_if_expired("pilot")
+            .synthesize_stale_module_if_expired("pilot", ExpectedModulePolicy::Required)
             .await
             .expect("stale event");
         assert_eq!(event.previous_health, HEALTH_OK);
@@ -565,5 +659,55 @@ mod tests {
             snapshot.modules[0].source,
             crate::module_health::SOURCE_VITALS_SYNTHESIZED_STALE
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_expected_module_enters_snapshot() {
+        let svc = VitalsServiceImpl::new();
+        svc.apply_expected_module_config(&[ExpectedModuleConfig {
+            module_id: "speech".to_string(),
+            provider_id: None,
+            capability: None,
+            policy: ExpectedModulePolicy::Disabled,
+            ttl_ms: 0,
+        }])
+        .await;
+
+        let snapshot = svc.module_health_snapshot(1000).await;
+        assert_eq!(snapshot.modules.len(), 1);
+        assert_eq!(snapshot.modules[0].module_key, "speech");
+        assert_eq!(snapshot.modules[0].health, HEALTH_OK);
+        assert_eq!(snapshot.modules[0].state, "disabled");
+        assert_eq!(snapshot.modules[0].reason_code, "DISABLED");
+        assert_eq!(
+            snapshot.modules[0].source,
+            crate::module_health::SOURCE_CONFIG_DISABLED
+        );
+    }
+
+    #[tokio::test]
+    async fn required_expected_module_can_be_marked_unavailable() {
+        let svc = VitalsServiceImpl::new();
+        let event = svc
+            .synthesize_expected_module_unavailable(&ExpectedModuleConfig {
+                module_id: "executor".to_string(),
+                provider_id: Some("executor".to_string()),
+                capability: None,
+                policy: ExpectedModulePolicy::Required,
+                ttl_ms: 5000,
+            })
+            .await
+            .expect("missing event");
+
+        assert_eq!(event.previous_health, HEALTH_OK);
+        assert_eq!(event.current_health, crate::module_health::HEALTH_ERROR);
+
+        let snapshot = svc.module_health_snapshot(1000).await;
+        assert_eq!(snapshot.modules[0].module_key, "executor");
+        assert_eq!(
+            snapshot.modules[0].health,
+            crate::module_health::HEALTH_ERROR
+        );
+        assert_eq!(snapshot.modules[0].source, "VITALS_SYNTHESIZED_STALE");
     }
 }

@@ -23,6 +23,8 @@ pub const SOURCE_CONFIG_DISABLED: &str = "CONFIG_DISABLED";
 const MAX_EVENTS: usize = 256;
 const STALE_REASON_CODE: &str = "STALE";
 const STALE_DETAIL: &str = "no health report received within ttl";
+const DISABLED_REASON_CODE: &str = "DISABLED";
+const DISABLED_DETAIL: &str = "disabled by deployment config";
 const NS_PER_MS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +103,7 @@ impl ModuleHealthStore {
     pub fn synthesize_stale_if_expired(
         &mut self,
         module_key: &str,
+        stale_health: u32,
         now_ns: u64,
     ) -> Option<ModuleHealthEvent> {
         let previous = self.latest.get(module_key).cloned()?;
@@ -109,12 +112,13 @@ impl ModuleHealthStore {
         }
         if previous.source == SOURCE_VITALS_SYNTHESIZED_STALE
             && previous.reason_code == STALE_REASON_CODE
+            && previous.health == stale_health
         {
             return None;
         }
 
         let mut current = previous.clone();
-        current.health = HEALTH_ERROR;
+        current.health = stale_health;
         current.state = "stale".to_string();
         current.reason_code = STALE_REASON_CODE.to_string();
         current.detail = STALE_DETAIL.to_string();
@@ -129,6 +133,54 @@ impl ModuleHealthStore {
         }
 
         event
+    }
+
+    pub fn synthesize_expected_unavailable(
+        &mut self,
+        module_id: &str,
+        provider_id: &str,
+        health: u32,
+        ttl_ms: u32,
+        now_ns: u64,
+    ) -> Option<ModuleHealthEvent> {
+        self.upsert_synthesized(
+            ModuleHealth {
+                module_id: module_id.trim().to_string(),
+                provider_id: provider_id.trim().to_string(),
+                health,
+                state: "stale".to_string(),
+                reason_code: STALE_REASON_CODE.to_string(),
+                detail: STALE_DETAIL.to_string(),
+                source: SOURCE_VITALS_SYNTHESIZED_STALE.to_string(),
+                ttl_ms,
+                ..Default::default()
+            },
+            now_ns,
+            true,
+        )
+    }
+
+    pub fn synthesize_config_disabled(
+        &mut self,
+        module_id: &str,
+        provider_id: &str,
+        now_ns: u64,
+    ) -> Option<ModuleHealthEvent> {
+        self.upsert_synthesized(
+            ModuleHealth {
+                module_id: module_id.trim().to_string(),
+                provider_id: provider_id.trim().to_string(),
+                health: HEALTH_OK,
+                state: "disabled".to_string(),
+                reason_code: DISABLED_REASON_CODE.to_string(),
+                detail: DISABLED_DETAIL.to_string(),
+                source: SOURCE_CONFIG_DISABLED.to_string(),
+                ttl_ms: 0,
+                ..Default::default()
+            },
+            now_ns,
+            false,
+        )
     }
 
     pub fn snapshot(&mut self, ts_ns: u64) -> ModuleHealthSnapshot {
@@ -178,6 +230,44 @@ impl ModuleHealthStore {
         }
         self.events.push_back(event);
     }
+
+    fn upsert_synthesized(
+        &mut self,
+        mut current: ModuleHealth,
+        now_ns: u64,
+        emit_initial_non_ok: bool,
+    ) -> Option<ModuleHealthEvent> {
+        let module_key = module_key_for(&current);
+        current.module_key = module_key.clone();
+        current.received_ts_ns = now_ns;
+
+        let previous = self.latest.get(&module_key).cloned();
+        let event = match previous.as_ref() {
+            Some(previous) => self.health_transition_event(previous, &current, now_ns),
+            None if emit_initial_non_ok && current.health != HEALTH_OK => {
+                self.event_seq += 1;
+                Some(ModuleHealthEvent {
+                    ts_ns: now_ns,
+                    seq: self.event_seq,
+                    module_key: current.module_key.clone(),
+                    previous_health: HEALTH_OK,
+                    current_health: current.health,
+                    reason_code: current.reason_code.clone(),
+                    detail: current.detail.clone(),
+                    source: current.source.clone(),
+                })
+            }
+            None => None,
+        };
+
+        self.latest.insert(module_key, current);
+
+        if let Some(event) = event.clone() {
+            self.push_event(event);
+        }
+
+        event
+    }
 }
 
 fn is_expired(module: &ModuleHealth, now_ns: u64) -> bool {
@@ -186,11 +276,15 @@ fn is_expired(module: &ModuleHealth, now_ns: u64) -> bool {
 }
 
 fn module_key_for(module: &ModuleHealth) -> String {
-    let provider_id = module.provider_id.trim();
+    module_key_from_parts(&module.module_id, &module.provider_id)
+}
+
+fn module_key_from_parts(module_id: &str, provider_id: &str) -> String {
+    let provider_id = provider_id.trim();
     if !provider_id.is_empty() {
         provider_id.to_string()
     } else {
-        module.module_id.trim().to_string()
+        module_id.trim().to_string()
     }
 }
 
@@ -305,13 +399,13 @@ mod tests {
 
         assert!(
             store
-                .synthesize_stale_if_expired("executor", 100 + 4_999_000_000)
+                .synthesize_stale_if_expired("executor", HEALTH_ERROR, 100 + 4_999_000_000)
                 .is_none()
         );
         assert_eq!(store.latest("executor").unwrap().health, HEALTH_OK);
 
         let event = store
-            .synthesize_stale_if_expired("executor", 100 + 5_000_000_000)
+            .synthesize_stale_if_expired("executor", HEALTH_ERROR, 100 + 5_000_000_000)
             .expect("stale event");
 
         let module = store.latest("executor").unwrap();
@@ -336,12 +430,12 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .synthesize_stale_if_expired("pilot", 100 + 5_000_000_000)
+                .synthesize_stale_if_expired("pilot", HEALTH_ERROR, 100 + 5_000_000_000)
                 .is_some()
         );
         assert!(
             store
-                .synthesize_stale_if_expired("pilot", 100 + 20_000_000_000)
+                .synthesize_stale_if_expired("pilot", HEALTH_ERROR, 100 + 20_000_000_000)
                 .is_none()
         );
 
@@ -356,6 +450,46 @@ mod tests {
         assert_eq!(recovered.current_health, HEALTH_OK);
         assert_eq!(store.latest("pilot").unwrap().source, SOURCE_SELF_REPORTED);
         assert_eq!(store.events().count(), 2);
+    }
+
+    #[test]
+    fn expected_unavailable_creates_initial_non_ok_event() {
+        let mut store = ModuleHealthStore::new();
+        let event = store
+            .synthesize_expected_unavailable("executor", "executor", HEALTH_ERROR, 5000, 500)
+            .expect("initial missing event");
+
+        let module = store.latest("executor").unwrap();
+        assert_eq!(module.health, HEALTH_ERROR);
+        assert_eq!(module.state, "stale");
+        assert_eq!(module.reason_code, STALE_REASON_CODE);
+        assert_eq!(module.source, SOURCE_VITALS_SYNTHESIZED_STALE);
+        assert_eq!(event.previous_health, HEALTH_OK);
+        assert_eq!(event.current_health, HEALTH_ERROR);
+        assert_eq!(store.events().count(), 1);
+
+        assert!(
+            store
+                .synthesize_expected_unavailable("executor", "executor", HEALTH_ERROR, 5000, 800)
+                .is_none()
+        );
+        assert_eq!(store.events().count(), 1);
+    }
+
+    #[test]
+    fn config_disabled_is_stored_without_event() {
+        let mut store = ModuleHealthStore::new();
+        let event = store.synthesize_config_disabled("speech", "", 100);
+        assert!(event.is_none());
+
+        let module = store.latest("speech").unwrap();
+        assert_eq!(module.health, HEALTH_OK);
+        assert_eq!(module.state, "disabled");
+        assert_eq!(module.reason_code, DISABLED_REASON_CODE);
+        assert_eq!(module.detail, DISABLED_DETAIL);
+        assert_eq!(module.source, SOURCE_CONFIG_DISABLED);
+        assert_eq!(module.ttl_ms, 0);
+        assert_eq!(store.events().count(), 0);
     }
 
     #[test]
