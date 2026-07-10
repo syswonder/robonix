@@ -58,15 +58,16 @@ modes so existing audio speaker primitives can play the response directly.
 ## Wake word
 
 Wake-word recognition is part of the Speech package, not Liaison. The default
-phrase is `罗伯特`; it is selected because the bundled KWS model recognizes it
-from a 16 kHz Tencent TTS test stream. A deployment can replace it without
+phrase is the bundled Mandarin wake phrase (YAML `\u7f57\u4f2f\u7279`); it is
+selected because the bundled KWS model recognizes it from a 16 kHz Tencent TTS
+test stream. A deployment can replace it without
 changing code:
 
 ```yaml
 service:
   - name: speech
     config:
-      wake_words: ["罗伯特"]
+      wake_words: ["\u7f57\u4f2f\u7279"]
       wake_word_boost: 2.0
       wake_word_threshold: 0.45
 ```
