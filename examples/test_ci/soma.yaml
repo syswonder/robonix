@@ -8,6 +8,13 @@ robot:
   display_name: "Test CI robot"
   family: test_fixture
   root_part: base
+  footprint:
+    base_frame: base_link
+    points:
+      - [0.2, 0.1]
+      - [0.2, -0.1]
+      - [-0.2, -0.1]
+      - [-0.2, 0.1]
 
 description:
   summary: "Soma v2 test fixture robot."

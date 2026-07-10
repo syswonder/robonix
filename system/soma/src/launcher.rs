@@ -63,6 +63,7 @@ const RBNX_BIN: &str = "rbnx";
 pub struct PackageLauncher {
     manager: Arc<ProcessManager>,
     atlas_endpoint: String,
+    soma_endpoint: String,
     log_dir: PathBuf,
     /// Track every async pipe-forwarding task we spawn so `stop_all`
     /// can abort them when soma shuts down. The ProcessManager kills
@@ -75,10 +76,15 @@ pub struct PackageLauncher {
 impl PackageLauncher {
     /// Build a launcher that spawns packages via `rbnx start -p` and
     /// drives their Driver(CMD_*) lifecycle through `atlas`.
-    pub fn new(log_dir: PathBuf, atlas_endpoint: impl Into<String>) -> Result<Self> {
+    pub fn new(
+        log_dir: PathBuf,
+        atlas_endpoint: impl Into<String>,
+        soma_endpoint: impl Into<String>,
+    ) -> Result<Self> {
         Ok(Self {
             manager: Arc::new(ProcessManager::new(log_dir.clone())?),
             atlas_endpoint: atlas_endpoint.into(),
+            soma_endpoint: soma_endpoint.into(),
             log_dir,
             tasks: Vec::new(),
             children: Vec::new(),
@@ -331,7 +337,13 @@ impl PackageLauncher {
             .arg(&provider_atlas)
             .env("RBNX_INSTANCE_NAME", &target.name)
             .env("RBNX_INVOCATION_CWD", &target.package_dir)
+            // This `rbnx start` is already the leader of a Soma-owned PGID.
+            // Keep its package shell in that group so Soma's stop_all reaches
+            // the wrapper and real driver together; standalone rbnx start
+            // continues to create its own PGID.
+            .env("RBNX_DEPLOY_MANAGED", "1")
             .env("SCRIBE_LOG_DIR", &self.log_dir)
+            .env("ROBONIX_SOMA_ENDPOINT", self.provider_soma_endpoint())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -453,6 +465,10 @@ impl PackageLauncher {
     fn provider_atlas_endpoint(&self) -> String {
         self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
     }
+
+    fn provider_soma_endpoint(&self) -> String {
+        self.soma_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
+    }
 }
 
 #[cfg(test)]
@@ -464,8 +480,12 @@ mod tests {
     /// The command passes `-p` directly and avoids rebasing through invocation cwd.
     fn command_line_uses_package_path_without_invocation_cwd_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let launcher =
-            PackageLauncher::new(tmp.path().join("logs"), "127.0.0.1:50051").expect("launcher");
+        let launcher = PackageLauncher::new(
+            tmp.path().join("logs"),
+            "127.0.0.1:50051",
+            "127.0.0.1:50091",
+        )
+        .expect("launcher");
         let target = PackageLaunchTarget {
             kind: PackageKind::Primitive,
             name: "demo".into(),
@@ -487,7 +507,8 @@ mod tests {
     fn command_line_rewrites_bind_all_atlas_to_loopback_for_packages() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let launcher =
-            PackageLauncher::new(tmp.path().join("logs"), "0.0.0.0:50051").expect("launcher");
+            PackageLauncher::new(tmp.path().join("logs"), "0.0.0.0:50051", "0.0.0.0:50091")
+                .expect("launcher");
         let target = PackageLaunchTarget {
             kind: PackageKind::Primitive,
             name: "demo".into(),
@@ -503,5 +524,15 @@ mod tests {
             launcher.command_line(&target),
             "rbnx start -p /tmp/robonix/examples/test_ci/primitives/demo --endpoint 127.0.0.1:50051"
         );
+    }
+
+    #[test]
+    fn soma_bind_all_address_is_dialed_through_loopback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let launcher =
+            PackageLauncher::new(tmp.path().join("logs"), "127.0.0.1:50051", "0.0.0.0:50091")
+                .expect("launcher");
+
+        assert_eq!(launcher.provider_soma_endpoint(), "127.0.0.1:50091");
     }
 }

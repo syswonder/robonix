@@ -21,12 +21,29 @@ pub struct SomaBody {
     pub yaml_text: String,
     pub urdf_path: PathBuf,
     pub urdf_xml: String,
+    pub footprint: Option<Footprint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Footprint {
+    pub base_frame: String,
+    pub points: Vec<FootprintPoint>,
+    pub inscribed_radius_m: f64,
+    pub circumscribed_radius_m: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FootprintPoint {
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("unknown Soma robot_id '{0}'")]
     NotFound(String),
+    #[error("Soma robot '{0}' does not define robot.footprint")]
+    MissingFootprint(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +60,14 @@ struct MinimalUrdf {
 #[derive(Debug, Deserialize)]
 struct MinimalRobot {
     id: String,
+    #[serde(default)]
+    footprint: Option<FootprintDoc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FootprintDoc {
+    base_frame: String,
+    points: Vec<[f64; 2]>,
 }
 
 impl SomaBody {
@@ -68,12 +93,14 @@ impl SomaBody {
         };
         let urdf_xml = std::fs::read_to_string(&urdf_path)
             .with_context(|| format!("read URDF '{}'", urdf_path.display()))?;
+        let footprint = doc.robot.footprint.map(Footprint::from_doc).transpose()?;
         Ok(Self {
             robot_id: doc.robot.id,
             yaml_path: yaml_path.to_path_buf(),
             yaml_text,
             urdf_path,
             urdf_xml,
+            footprint,
         })
     }
 
@@ -89,6 +116,63 @@ impl SomaBody {
             Err(StoreError::NotFound(trimmed.to_string()))
         }
     }
+
+    pub fn footprint(&self) -> std::result::Result<&Footprint, StoreError> {
+        self.footprint
+            .as_ref()
+            .ok_or_else(|| StoreError::MissingFootprint(self.robot_id.clone()))
+    }
+}
+
+impl Footprint {
+    fn from_doc(doc: FootprintDoc) -> Result<Self> {
+        if doc.base_frame.trim().is_empty() {
+            bail!("robot.footprint.base_frame must not be empty");
+        }
+        if doc.points.len() < 3 {
+            bail!("robot.footprint.points must contain at least three vertices");
+        }
+        let points: Vec<FootprintPoint> = doc
+            .points
+            .into_iter()
+            .map(|[x, y]| FootprintPoint { x, y })
+            .collect();
+        if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            bail!("robot.footprint.points must be finite x/y pairs");
+        }
+
+        let circumscribed_radius_m = points
+            .iter()
+            .map(|p| p.x.hypot(p.y))
+            .fold(0.0_f64, f64::max);
+        let inscribed_radius_m = points
+            .iter()
+            .zip(points.iter().cycle().skip(1))
+            .take(points.len())
+            .map(|(a, b)| distance_from_origin_to_segment(*a, *b))
+            .fold(f64::INFINITY, f64::min);
+        if !inscribed_radius_m.is_finite() || inscribed_radius_m <= 0.0 {
+            bail!("robot.footprint must enclose the base-frame origin");
+        }
+
+        Ok(Self {
+            base_frame: doc.base_frame,
+            points,
+            inscribed_radius_m,
+            circumscribed_radius_m,
+        })
+    }
+}
+
+fn distance_from_origin_to_segment(a: FootprintPoint, b: FootprintPoint) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let length_sq = dx * dx + dy * dy;
+    if length_sq == 0.0 {
+        return a.x.hypot(a.y);
+    }
+    let t = (-(a.x * dx + a.y * dy) / length_sq).clamp(0.0, 1.0);
+    (a.x + t * dx).hypot(a.y + t * dy)
 }
 
 #[cfg(test)]
@@ -107,6 +191,10 @@ mod tests {
         assert_eq!(body.robot_id, "test_ci_robot");
         assert!(body.yaml_text.contains("robot:"));
         assert!(body.urdf_xml.contains("<robot name=\"test_ci_robot\">"));
+        let footprint = body.footprint().expect("fixture footprint");
+        assert_eq!(footprint.base_frame, "base_link");
+        assert_eq!(footprint.points.len(), 4);
+        assert!((footprint.inscribed_radius_m - 0.1).abs() < 1e-9);
     }
 
     #[test]
