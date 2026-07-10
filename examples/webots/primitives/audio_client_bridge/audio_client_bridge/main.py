@@ -50,6 +50,7 @@ import websockets         # type: ignore  # noqa: E402
 bridge_host: str | None = None
 bridge_port: int | None = None
 reverse_bridge: ReverseAudioBridge | None = None
+reverse_endpoint: str = ""
 speaker_lock = threading.Lock()
 
 # Per-100-ms PCM frame: 16000 Hz * 0.1 s * 2 bytes/sample * 1 ch.
@@ -71,6 +72,24 @@ def _ws_connect(path: str, **kwargs):
     "timed out during opening handshake" on every connect. Passing proxy=None
     forces a direct connection regardless of the ambient proxy env."""
     return websockets.connect(_ws_url(path), proxy=None, **kwargs)
+
+
+@audio_client_bridge.grpc("robonix/primitive/audio/bridge_info")
+def bridge_info(request, context):
+    """Return the client-facing reverse endpoint through Atlas discovery."""
+    if reverse_bridge is None:
+        return audio_pb2.GetAudioBridgeInfo_Response(
+            reverse=False,
+            endpoint="",
+            connected=False,
+            detail="provider is using legacy client-owned transport",
+        )
+    return audio_pb2.GetAudioBridgeInfo_Response(
+        reverse=True,
+        endpoint=reverse_endpoint,
+        connected=reverse_bridge.is_connected(),
+        detail="connected" if reverse_bridge.is_connected() else "waiting for robonix-client",
+    )
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
@@ -330,7 +349,7 @@ def init(cfg):
     endpoint once. Refuse to come up if it's unreachable — atlas defers
     instead of advertising dead interfaces, and consumers see a clear
     error rather than mysteriously empty mic streams."""
-    global bridge_host, bridge_port, reverse_bridge
+    global bridge_host, bridge_port, reverse_bridge, reverse_endpoint
 
     transport = str(cfg.get("transport") or "").strip().lower()
     legacy_host = cfg.get("host") or os.environ.get("AUDIO_CLIENT_SERVER_HOST") or os.environ.get("AUDIO_BRIDGE_HOST")
@@ -339,7 +358,8 @@ def init(cfg):
         listen_port = int(cfg.get("listen_port") or os.environ.get("AUDIO_CLIENT_LISTEN_PORT", "60002"))
         reverse_bridge = ReverseAudioBridge(listen_host, listen_port, CHUNK_BYTES)
         reverse_bridge.start()
-        log.info("reverse client audio transport enabled on ws://%s:%d/client", listen_host, listen_port)
+        reverse_endpoint = f"ws://{audio_client_bridge._advertise_host()}:{listen_port}/client"
+        log.info("reverse client audio transport enabled on %s", reverse_endpoint)
         return Ok()
 
     bridge_host = (
@@ -374,10 +394,11 @@ def init(cfg):
 
 @audio_client_bridge.on_shutdown
 def shutdown():
-    global reverse_bridge
+    global reverse_bridge, reverse_endpoint
     if reverse_bridge is not None:
         reverse_bridge.stop()
         reverse_bridge = None
+    reverse_endpoint = ""
     return Ok()
 
 

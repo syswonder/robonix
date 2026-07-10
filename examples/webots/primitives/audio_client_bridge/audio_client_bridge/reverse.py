@@ -63,6 +63,10 @@ class ReverseAudioBridge:
         self._connected.clear()
         self._put_mic(None)
 
+    def is_connected(self) -> bool:
+        """Whether a robonix-client currently owns this reverse session."""
+        return self._connected.is_set()
+
     def _run(self) -> None:
         asyncio.run(self._serve())
 

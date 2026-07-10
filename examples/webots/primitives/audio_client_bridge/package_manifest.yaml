@@ -53,3 +53,4 @@ capabilities:
   - name: robonix/primitive/audio/driver
   - name: robonix/primitive/audio/list_devices
   - name: robonix/primitive/audio/select_device
+  - name: robonix/primitive/audio/bridge_info
