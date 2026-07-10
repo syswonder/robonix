@@ -280,8 +280,17 @@ classes = [
 model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
 model.set_classes(classes)
 PY
-    if [[ ! -s "$UWD/clip/ViT-B-32.pt" ]]; then
-        echo "[build] warning: missing $UWD/clip/ViT-B-32.pt after ultralytics prefetch; scene start will fail fast" >&2
+    ULTRALYTICS_CLIP="$UWD/clip/ViT-B-32.pt"
+    HF_CLIP="$HFD/clip/ViT-B-32.pt"
+    if [[ ! -s "$ULTRALYTICS_CLIP" && -s "$HF_CLIP" ]]; then
+        mkdir -p "$(dirname "$ULTRALYTICS_CLIP")"
+        ln "$HF_CLIP" "$ULTRALYTICS_CLIP" 2>/dev/null \
+            || cp "$HF_CLIP" "$ULTRALYTICS_CLIP"
+        echo "[build] staged Ultralytics CLIP weight: $ULTRALYTICS_CLIP"
+    fi
+    if [[ ! -s "$ULTRALYTICS_CLIP" ]]; then
+        echo "[build] error: missing $ULTRALYTICS_CLIP after prefetch" >&2
+        exit 1
     fi
     "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
     echo "[build] done (jetson-native)."
