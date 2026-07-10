@@ -23,6 +23,15 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn package_name(name: &str, ns_kind: &str) -> String {
+    let normalized = name.replace('-', "_");
+    format!("robonix.{ns_kind}.{normalized}")
+}
+
+fn python_module_name(name: &str) -> String {
+    name.replace('-', "_")
+}
+
 pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<()> {
     validate_name(name)?;
 
@@ -53,14 +62,14 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
     output::action("PackageNew", &format!("creating package '{name}'"));
 
     // Provider class + namespace segment for the generated skeleton.
-    // `--path` mode leaves pkg_type at its clap default ("service"); fall
-    // back to primitive for anything unrecognised so the skeleton is still
-    // valid Python the author can edit.
+    // `--path` mode leaves pkg_type at its clap default ("service").
     let (provider_class, ns_kind) = match pkg_type {
         "service" => ("Service", "service"),
         "skill" => ("Skill", "skill"),
         _ => ("Primitive", "primitive"),
     };
+    let package_name = package_name(name, ns_kind);
+    let module_name = python_module_name(name);
 
     // Create directory structure; put .gitkeep in empty dirs.
     for sub in ["scripts", "capabilities"] {
@@ -81,10 +90,14 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 package:
-  name: com.vendor.{name}
+  name: "{package_name}"
   version: 0.0.1
-  vendor: vendor
-  description: TODO
+  description: TODO: describe what this {ns_kind} package provides.
+  tags:
+    - {ns_kind}
+    - robonix
+  maintainers:
+    - Your Name <you@example.com>
   license: Apache-2.0
 
 capabilities: []
@@ -134,7 +147,7 @@ cd "$PKG_ROOT"
 
 export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${{PYTHONPATH:-}}"
 
-exec python3 -m {name}.main
+exec python3 -m {module_name}.main
 "#
     );
     std::fs::write(pkg_dir.join("scripts/start.sh"), start_sh)
@@ -154,7 +167,7 @@ exec python3 -m {name}.main
     // Minimal Python provider skeleton: <pkg>/<name>/{__init__.py, main.py}
     // so `python3 -m {name}.main` (from start.sh) runs out of the box. The
     // author fills in lifecycle handlers + capability declarations.
-    let module_dir = pkg_dir.join(name);
+    let module_dir = pkg_dir.join(&module_name);
     std::fs::create_dir_all(&module_dir).context("failed to create python module directory")?;
     std::fs::write(module_dir.join("__init__.py"), "").context("failed to write __init__.py")?;
     let main_py = format!(
@@ -194,7 +207,7 @@ if __name__ == "__main__":
     output::sub_step("package_manifest.yaml");
     output::sub_step("scripts/build.sh");
     output::sub_step("scripts/start.sh");
-    output::sub_step(&format!("{name}/main.py  (provider skeleton)"));
+    output::sub_step(&format!("{module_name}/main.py  (provider skeleton)"));
     output::sub_step("capabilities/  (.gitkeep)");
     output::sub_step(".gitignore");
 

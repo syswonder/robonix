@@ -20,12 +20,14 @@ steps:
             contract: robonix/system/scene/list_objects
             success: true
             output:
-              text_regex: '"label":\s*"(?!robot)[^"]+"'
-              jsonpath:
-                - path: $.objects
-                  min_length: 1
-                - path: $.objects[].id
-                  exists: true
-                  prefix: scene.object.
+              checks:
+                - select: $.objects
+                  assert: {op: min_length, value: 1}
+                - select: $.objects[]
+                  where:
+                    all:
+                      - {path: $.label, op: ne, value: robot}
+                      - {path: $.id, op: starts_with, value: scene.object.}
+                  assert: {op: exists}
   - content: Scene objects listed.
     status: done

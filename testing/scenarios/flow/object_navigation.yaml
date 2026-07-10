@@ -40,19 +40,23 @@ steps:
             contract: robonix/system/scene/list_objects
             success: true
             output:
-              text_regex: '"label":\s*"(?!robot)[^"]+"'
-              jsonpath:
-                - path: $.objects
-                  min_length: 1
-                - path: $.objects[].id
-                  exists: true
-                  prefix: scene.object.
+              checks:
+                - select: $.objects
+                  assert: {op: min_length, value: 1}
+                - select: $.objects[]
+                  where:
+                    all:
+                      - {path: $.label, op: ne, value: robot}
+                      - {path: $.id, op: starts_with, value: scene.object.}
+                  assert: {op: exists}
             capture:
               object_id:
-                jsonpath: $.objects[].id
+                select: $.objects[]
                 where:
-                  label_not: robot
-                  id_prefix: scene.object.
+                  all:
+                    - {path: $.label, op: ne, value: robot}
+                    - {path: $.id, op: starts_with, value: scene.object.}
+                path: $.id
   - status: in_progress
     rtdl_description: resolve detected object approach pose
     rtdl:
@@ -72,9 +76,9 @@ steps:
               json: {reachable: true}
               text_regex: 'approach pose for'
             capture:
-              nav_x: {jsonpath: $.x, transform: float}
-              nav_y: {jsonpath: $.y, transform: float}
-              nav_yaw: {jsonpath: $.yaw, transform: float}
+              nav_x: {select: "$", path: $.x, transform: float}
+              nav_y: {select: "$", path: $.y, transform: float}
+              nav_yaw: {select: "$", path: $.yaw, transform: float}
   - status: in_progress
     rtdl_description: navigate to object approach pose
     rtdl:

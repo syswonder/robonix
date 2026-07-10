@@ -77,8 +77,9 @@ install:
 	cargo install --force --path system/vitals   --bin robonix-vitals   $(CARGO_FLAGS)
 	cargo install --force --path tools/rbnx      --bin rbnx             $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
-	@# on disk can resolve capabilities/IDL via `rbnx path`. Updates
-	@# ~/.robonix/config.yaml robonix_source_path = <repo-root>.
+	@# on disk can resolve capabilities/IDL via `rbnx path`. By default this
+	@# updates ~/.robonix/config.yaml; set ROBONIX_HOME=/path/to/dir to keep
+	@# install/setup state isolated for CI or temporary runner workspaces.
 	@REPO_ROOT="$$(pwd)"; \
 	echo ""; \
 	echo "[make install] registering robonix_source_path → $$REPO_ROOT"; \

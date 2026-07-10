@@ -5,10 +5,12 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 package:
-  name: com.vendor.test_skills
+  name: robonix.skill.test_skills
   version: 0.0.1
-  vendor: vendor
-  description: TODO
+  description: Test skill fixture.
+  tags: [skill, test]
+  maintainers:
+    - Test Maintainer <test@example.com>
   license: Apache-2.0
 
 capabilities: []

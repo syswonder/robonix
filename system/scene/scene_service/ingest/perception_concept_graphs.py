@@ -183,8 +183,12 @@ _CFG_DEFAULTS = {
     "denoise_interval_ticks": 10,
     "merge_overlap_interval_ticks": 10,
     # Periodic-cleanup thresholds (passed to merge_overlap_objects /
-    # denoise_objects in concept-graphs.utils).
-    "obj_min_points": 50,
+    # denoise_objects in concept-graphs.utils). obj_min_points is the cull
+    # gate inside filter_objects: thin/small objects (keyboard, lamp) backproject
+    # to sparse clouds, so 50 culled them every cleanup tick → uuid churn →
+    # observation_count reset. 20 lets them survive; override via
+    # SCENE_CG_OBJ_MIN_POINTS (env table below).
+    "obj_min_points": 20,
     "obj_min_detections": 1,
     # merge_overlap_thresh: spatial pcd-overlap ratio above which the
     # pair is a candidate (0..1). 0.5 = "half of A's volume is inside
@@ -220,7 +224,34 @@ _CFG_DEFAULTS = {
     "cross_class_iou_thresh": 0.30,
     "cross_class_overlap_thresh": 0.50,
     "cross_class_merge_interval_ticks": 10,
+    # ── Same-class lenient proximity merge (dedup) ─────────────────────
+    # Folds two objects of the SAME class (or same SCENE_CG_MERGE_CLASS_GROUPS
+    # bucket) whose centroids are within this distance into one, regardless of
+    # visual sim — targets the "one keyboard becomes three" duplication that the
+    # visual-gated merge_overlap pass misses (AABB-IoU≈0 across partial views,
+    # CLIP crops diverge enough to fail merge_visual_sim_thresh). 0 disables.
+    "same_class_merge_dist_m": 0.4,
+    "same_class_merge_interval_ticks": 10,
 }
+
+
+def _parse_merge_class_groups(raw: str) -> dict[str, str]:
+    """Parse SCENE_CG_MERGE_CLASS_GROUPS into a {class -> bucket-key} map.
+
+    Groups are separated by ``;``, members within a group by ``,`` — e.g.
+    ``"chair,table,desk;sofa,couch"`` maps chair/table/desk to one bucket and
+    sofa/couch to another. The bucket key is the sorted member list joined by
+    ``|`` (order-independent). Empty / malformed input yields an empty map, so
+    the feature is off by default and never silently relabels objects."""
+    out: dict[str, str] = {}
+    for group in raw.split(";"):
+        members = [m.strip().lower() for m in group.split(",") if m.strip()]
+        if len(members) < 2:
+            continue
+        key = "|".join(sorted(set(members)))
+        for m in members:
+            out[m] = key
+    return out
 
 
 # ── Model loading ────────────────────────────────────────────────────────
@@ -409,12 +440,22 @@ class ConceptGraphsDetector:
         self.cfg = dict(_CFG_DEFAULTS)
         if cfg_overrides:
             self.cfg.update(cfg_overrides)
-        # Allow env overrides for the most-tuned knobs.
+        # Allow env overrides for the most-tuned knobs. The merge/identity gates
+        # below are exposed so the desk chair/table split and object dedup can be
+        # tuned live on a running robot without a rebuild.
         for env, key, cast in (
             ("SCENE_CG_MERGE_THRESHOLD", "merge_threshold", float),
             ("SCENE_CG_VOXEL_SIZE", "downsample_voxel_size", float),
             ("SCENE_CG_MIN_POINTS", "min_points_threshold", int),
+            ("SCENE_CG_OBJ_MIN_POINTS", "obj_min_points", int),
             ("SCENE_CG_OBJ_MAX_POINTS", "obj_pcd_max_points", int),
+            ("SCENE_CG_MAX_MERGE_DIST_M", "max_merge_dist_m", float),
+            ("SCENE_CG_CROSS_CLASS_CENTROID_MAX_M", "cross_class_centroid_max_m", float),
+            ("SCENE_CG_CROSS_CLASS_IOU_THRESH", "cross_class_iou_thresh", float),
+            ("SCENE_CG_CROSS_CLASS_OVERLAP_THRESH", "cross_class_overlap_thresh", float),
+            ("SCENE_CG_MERGE_OVERLAP_THRESH", "merge_overlap_thresh", float),
+            ("SCENE_CG_MERGE_VISUAL_SIM_THRESH", "merge_visual_sim_thresh", float),
+            ("SCENE_CG_SAME_CLASS_MERGE_DIST_M", "same_class_merge_dist_m", float),
         ):
             v = os.environ.get(env, "").strip()
             if v:
@@ -422,6 +463,28 @@ class ConceptGraphsDetector:
                     self.cfg[key] = cast(v)
                 except ValueError:
                     pass
+
+        # uuid → registry object_id binding (see _apply_snapshot). Initialised
+        # here (not lazily) so _apply_snapshot is safe to call before the first
+        # _project_to_registry tick — including from unit tests.
+        self._uuid_to_oid: dict[str, str] = {}
+        # How long a soft-evicted (missing) registry record is kept so a
+        # re-detection can re-bind it before it is hard-pruned. Decouples
+        # observation_count from concept-graphs uuid churn across ticks.
+        try:
+            self._object_ttl_s = float(
+                os.environ.get("SCENE_OBJECT_TTL_SEC", "30.0").strip() or "30.0"
+            )
+        except ValueError:
+            self._object_ttl_s = 30.0
+        # Optional confusable-class reconciliation (off by default): maps a
+        # group of classes (e.g. chair/table/desk) to one bucket so YOLO-World
+        # label flicker across the group merges instead of splitting into
+        # separate records. Applied only inside the same-class merge gate and
+        # the same-class proximity collapse — both still distance-gated.
+        self._merge_class_group = _parse_merge_class_groups(
+            os.environ.get("SCENE_CG_MERGE_CLASS_GROUPS", "")
+        )
 
     async def start(self) -> None:
         if self._task is not None:
@@ -606,6 +669,36 @@ class ConceptGraphsDetector:
                 continue
         return {"objects": out, "stamp_unix": time.time()}
 
+    # ── frame bundle (for the scene-graph image relation pass) ────────
+    def latest_frame_bundle(self):
+        """Return ``(rgb_bgr, K, T_cam_map)`` for projecting map-frame points
+        into the current camera image, or None when any piece is unavailable.
+
+        Consumed by the scene-graph builder's image-grounded relation pass.
+        Reads the latest RGB frame, intrinsics, and camera→map transform
+        WITHOUT holding ``_inference_lock`` — same rationale as
+        ``export_3d_snapshot``: the lock is held by the worker tick for ~100 ms
+        of YOLO/SAM and the asyncio-loop caller must not block on it. A
+        one-tick mismatch between frame and transform is immaterial (poses move
+        slowly relative to the 30 s rebuild cadence)."""
+        rgb_msg = self._rgb_msg()
+        if rgb_msg is None:
+            return None
+        rgb = _image_msg_to_bgr(rgb_msg)
+        if rgb is None:
+            return None
+        K = self._cam_info()
+        if K is None or K.fx <= 0 or K.fy <= 0:
+            return None
+        try:
+            T = self._build_camera_to_map_transform()
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene-cg] frame bundle: transform unavailable: %s", e)
+            return None
+        if T is None:
+            return None
+        return rgb, K, T
+
     # ── tick loop ─────────────────────────────────────────────────────
     async def _loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -657,8 +750,13 @@ class ConceptGraphsDetector:
 
         # ── YOLO-World detect ────────────────────────────────────────
         try:
+            # device must be explicit: ultralytics auto-selects CUDA when
+            # torch sees a GPU, bypassing SCENE_CG_FORCE_CPU — and crashing
+            # on hosts where YOLO-under-CUDA is unstable (the reason that
+            # flag exists).
             yolo_results = self._yolo.predict(
                 rgb, conf=self._conf_thresh, verbose=False,
+                device=self._device,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("yolo-world predict failed: %s", e)
@@ -978,10 +1076,17 @@ class ConceptGraphsDetector:
                         # overlapping bboxes.
                         prox_m = float(self.cfg["cross_class_centroid_max_m"])
                         proximate = dist <= prox_m                  # (M, N) bool
+                        # Confusable-class buckets (SCENE_CG_MERGE_CLASS_GROUPS)
+                        # collapse e.g. chair/table/desk to one key so a desk's
+                        # YOLO label flicker is NOT treated as a class mismatch.
+                        # Empty map → identity, i.e. plain class comparison.
+                        grp = self._merge_class_group
                         cls_mismatch = np.zeros((len(det_classes), len(obj_classes)), dtype=bool)
                         for i, dc in enumerate(det_classes):
+                            dcg = grp.get(dc, dc)
                             for j, oc in enumerate(obj_classes):
-                                if dc and oc and dc != oc and not proximate[i, j]:
+                                ocg = grp.get(oc, oc)
+                                if dcg and ocg and dcg != ocg and not proximate[i, j]:
                                     cls_mismatch[i, j] = True
                         cls_mask = torch.from_numpy(cls_mismatch).to(agg_sim.device)
                         agg_sim[cls_mask] = float("-inf")
@@ -1188,6 +1293,15 @@ class ConceptGraphsDetector:
                     ran_any = True
             except Exception as e:  # noqa: BLE001
                 log.warning("cross-class geometric collapse failed: %s", e)
+        if self._tick_idx % self.cfg["same_class_merge_interval_ticks"] == 0:
+            try:
+                pre = len(self._map_objects)
+                self._map_objects = self._same_class_proximity_collapse(self._map_objects)
+                if len(self._map_objects) != pre:
+                    log.info("[scene-cg] cleanup same-class proximity: %d → %d", pre, len(self._map_objects))
+                    ran_any = True
+            except Exception as e:  # noqa: BLE001
+                log.warning("same-class proximity collapse failed: %s", e)
         if ran_any:
             self._project_to_registry()
 
@@ -1271,6 +1385,80 @@ class ConceptGraphsDetector:
                 pts = pts[np.all(np.isfinite(pts), axis=1)] if pts.size else pts
                 if pts.size:
                     bboxes[i] = (pts.min(axis=0), pts.max(axis=0))
+
+        MapObjectList = self._cg["MapObjectList"]
+        out = MapObjectList()
+        for k, alive in enumerate(keep):
+            if alive:
+                out.append(objects[k])
+        return out
+
+    def _same_class_proximity_collapse(self, objects):
+        """Fold same-class (or same merge-group) objects whose centroids are
+        within ``same_class_merge_dist_m`` into one, regardless of visual sim.
+
+        Targets the duplication the visual-gated ``merge_overlap_objects`` pass
+        misses: one physical object (e.g. a keyboard) seen across frames at
+        AABB-IoU≈0 spawns several same-class records whose CLIP crops diverge
+        enough to fail ``merge_visual_sim_thresh`` but which are obviously the
+        same thing by proximity + class. Distance 0 disables the pass. Class
+        grouping uses the optional SCENE_CG_MERGE_CLASS_GROUPS bucket map so a
+        flickering desk's chair/table records also collapse here. Returns a new
+        MapObjectList; reuses concept-graphs ``merge_obj2_into_obj1``."""
+        import numpy as np
+
+        max_d = float(self.cfg.get("same_class_merge_dist_m", 0.0))
+        if max_d <= 0.0:
+            return objects
+        n = len(objects)
+        if n < 2:
+            return objects
+        merge_obj2_into_obj1 = self._cg.get("merge_obj2_into_obj1")
+        if merge_obj2_into_obj1 is None:
+            try:
+                from conceptgraph.slam.utils import merge_obj2_into_obj1 as _m
+                merge_obj2_into_obj1 = _m
+            except Exception:
+                return objects
+
+        def _centroid(o):
+            pts = np.asarray(o["pcd"].points)
+            pts = pts[np.all(np.isfinite(pts), axis=1)] if pts.size else pts
+            return pts.mean(axis=0) if pts.size else np.zeros(3)
+
+        def _grp(o):
+            c = str(o.get("class_name", "")).lower()
+            return self._merge_class_group.get(c, c)
+
+        centroids = [_centroid(o) for o in objects]
+        groups = [_grp(o) for o in objects]
+        keep = [True] * n
+        for i in range(n):
+            if not keep[i]:
+                continue
+            for j in range(i + 1, n):
+                if not keep[j]:
+                    continue
+                if not groups[i] or groups[i] != groups[j]:
+                    continue
+                if float(np.linalg.norm(centroids[i] - centroids[j])) > max_d:
+                    continue
+                try:
+                    objects[i] = merge_obj2_into_obj1(
+                        obj1=objects[i], obj2=objects[j],
+                        downsample_voxel_size=self.cfg["downsample_voxel_size"],
+                        dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
+                        dbscan_eps=self.cfg["dbscan_eps"],
+                        dbscan_min_points=self.cfg["dbscan_min_points"],
+                        spatial_sim_type=self.cfg["spatial_sim_type"],
+                        device=self._device,
+                        run_dbscan=False,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.debug("same-class merge i=%d j=%d failed: %s", i, j, e)
+                    continue
+                keep[j] = False
+                centroids[i] = _centroid(objects[i])
 
         MapObjectList = self._cg["MapObjectList"]
         out = MapObjectList()
@@ -1570,7 +1758,6 @@ class ConceptGraphsDetector:
                 cls = _canon_class(obj.get("class_name", "object"))
                 conf_list = obj.get("conf", [])
                 conf = float(np.mean(conf_list)) if conf_list else 0.5
-                obs_count = int(obj.get("num_detections", 1))
                 snapshots.append({
                     # The MapObjectList entry's stable uuid — this is
                     # the key the registry uses to decide insert vs.
@@ -1585,7 +1772,6 @@ class ConceptGraphsDetector:
                     "size_y": float(max(0.05, obb_extent[1])),
                     "size_z": float(max(0.05, obb_extent[2])),
                     "confidence": max(0.0, min(1.0, conf)),
-                    "obs": obs_count,
                 })
             except Exception:  # noqa: BLE001
                 continue
@@ -1606,11 +1792,15 @@ class ConceptGraphsDetector:
 
           - REUSE the existing registry record when the
             MapObjectList uuid is already mapped (just refresh
-            pose / bbox / confidence / observation_count)
+            pose / bbox / confidence and bump observation_count)
           - RE-BIND a warm-restored object of the same class within
             the merge-distance gate to a fresh detection before minting
             a new id, so a remembered object keeps its stable id on
             re-observation instead of churning a new suffix
+          - ADOPT an orphaned live record (its cg_uuid vacated this tick
+            by merge-dedup or filter-cull) of the same class within the
+            merge gate, so the object keeps its id + accumulated count
+            across a uuid swap instead of resetting to obs=1
           - INSERT a new record only when nothing above matches
           - EVICT registry records whose uuid is no longer present in
             the latest MapObjectList (concept-graphs merged or
@@ -1618,6 +1808,13 @@ class ConceptGraphsDetector:
             been re-bound are exempt (they were never in this process's
             MapObjectList); if never re-seen, mark_stale keeps them
             missing rather than deleting them
+
+        Order matters: bind/adopt/insert runs FIRST, eviction AFTER, so
+        the new winning uuid of a merged/regenerated object can adopt the
+        record the old uuid is about to vacate (the orphan must still
+        exist when the snapshot loop runs). Records touched this tick are
+        spared from eviction via `adopted_oids`; observation_count is
+        registry-owned (one per tick seen), so it survives a uuid swap.
 
         The previous "drop everything, re-insert everything" approach
         churned object_ids on every tick (the visible `<cls>_NNN`
@@ -1627,31 +1824,15 @@ class ConceptGraphsDetector:
         now = time.time()
         live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
-            # Evict registry records whose source uuid is gone. We
-            # only touch our own records — robot self / surfaces /
-            # other-source objects are untouched.
-            doomed = []
-            for oid, obj in list(self._registry._objects.items()):
-                if obj.attributes.get("is_robot"):
-                    continue
-                src = obj.attributes.get("source")
-                if src not in ("concept_graphs", None):
-                    continue
-                # Warm-restored objects were never in this process's
-                # MapObjectList, so the uuid-membership rule below can't apply.
-                # The insert loop re-binds them by class+pose; if never re-seen,
-                # mark_stale keeps them missing instead of deleting them here.
-                if obj.attributes.get("restored"):
-                    continue
-                cg_uuid = obj.attributes.get("cg_uuid")
-                if cg_uuid is None or cg_uuid not in live_uuids:
-                    doomed.append(oid)
-                    if cg_uuid is not None:
-                        self._uuid_to_oid.pop(cg_uuid, None)
-            for oid in doomed:
-                del self._registry._objects[oid]
-
             wf = self._world_frame_fn()
+            # oids touched this tick (bound / adopted / inserted). Used to (a)
+            # stop two detections claiming the same orphan and (b) spare a
+            # touched record from the eviction sweep below.
+            adopted_oids: set[str] = set()
+            # Bind / adopt / insert FIRST; eviction runs after. The new winning
+            # uuid of a merged or regenerated object must be able to adopt the
+            # record the old uuid is about to vacate, so the orphan has to still
+            # exist while this loop runs.
             for s in snapshots:
                 u = s.get("uuid", "")
                 pose = Pose3D(
@@ -1665,27 +1846,61 @@ class ConceptGraphsDetector:
                 oid = self._uuid_to_oid.get(u) if u else None
                 existing = self._registry._objects.get(oid) if oid else None
                 if existing is None:
-                    # No uuid binding yet (first sighting this process). Before
-                    # minting a new id, try to adopt a warm-restored object of
-                    # the same class within the merge-distance gate: that is the
-                    # re-observation of a remembered object, so it keeps its old
-                    # id instead of churning a fresh suffix and orphaning the
-                    # persisted row. The match consumes the `restored` flag so a
-                    # restored object binds at most one detection per tick.
+                    # No uuid binding yet (first sighting of this uuid). Before
+                    # minting a new id, try to re-adopt a stable record so the
+                    # object keeps its id (and accumulated count) across a uuid
+                    # swap: first a warm-restored object of the same class, then
+                    # a live record whose cg_uuid vacated this tick (merge-dedup
+                    # / filter-cull). Both use the same class + merge-distance
+                    # gate, so re-binding is no looser than same-tick merging.
                     existing = self._rebind_restored(s["cls"], pose)
+                    # Cross-tick re-bind: a record soft-evicted (`missing`) by a
+                    # previous cull / uuid-churn tick is reclaimed by this
+                    # detection, so the object keeps its id + accumulated
+                    # observation_count instead of minting a fresh id at obs=1.
+                    # Same class + merge-distance gate as restored-rebind. This
+                    # is the cross-tick complement to _adopt_orphan (which only
+                    # rescues a uuid swap within the SAME tick).
+                    if existing is None:
+                        existing = self._registry.find_rebindable(
+                            s["cls"], pose,
+                            float(self.cfg.get("max_merge_dist_m", 1.5)),
+                            only_missing=True,
+                            exclude_oids=adopted_oids,
+                        )
+                    # Orphan-adoption needs a uuid to rebind to; a uuid-less
+                    # detection can't bind durably, so it must not consume an
+                    # orphan another (uuid-bearing) detection could re-adopt
+                    # this same tick.
+                    if existing is None and u:
+                        existing = self._adopt_orphan(
+                            s["cls"], pose, live_uuids, adopted_oids,
+                        )
                     if existing is not None:
                         existing.attributes.pop("restored", None)
+                        # Rebind to the new uuid only when we have one. A
+                        # uuid-less detection (CG object missing `id`) can't
+                        # establish a durable binding, so leave the adopted
+                        # record's old cg_uuid mapping intact rather than
+                        # popping it and orphaning the record (it is spared
+                        # this tick via adopted_oids regardless).
                         if u:
+                            old_uuid = existing.attributes.get("cg_uuid")
+                            if old_uuid and old_uuid != u:
+                                self._uuid_to_oid.pop(old_uuid, None)
                             existing.attributes["cg_uuid"] = u
                             self._uuid_to_oid[u] = existing.object_id
                 if existing is not None:
-                    # Update in place. Preserve oid + first_seen.
+                    # Update in place. Preserve oid + first_seen. The count is
+                    # registry-owned (one per tick seen) so it survives a uuid
+                    # swap instead of resetting to the CG object's num_detections.
                     existing.pose = pose
                     existing.bbox = bbox
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
                     existing.last_seen = now
                     existing.missing = False
-                    existing.observation_count = s["obs"]
+                    existing.observation_count += 1
+                    adopted_oids.add(existing.object_id)
                 else:
                     obj = self._registry.insert_object(
                         cls=s["cls"],
@@ -1695,10 +1910,48 @@ class ConceptGraphsDetector:
                         now=now,
                         source="concept_graphs",
                     )
-                    obj.observation_count = s["obs"]
+                    # insert_object seeds observation_count=1; it is
+                    # registry-owned from here (see the += 1 on re-sighting).
                     if u:
                         obj.attributes["cg_uuid"] = u
                         self._uuid_to_oid[u] = obj.object_id
+                    adopted_oids.add(obj.object_id)
+
+            # Evict registry records whose source uuid is gone. Runs AFTER
+            # bind/adopt so a record adopted above (cg_uuid rebound to a live
+            # uuid, and in adopted_oids) is spared automatically; only
+            # genuinely-vanished records remain doomed. We only touch our own
+            # records — robot self / surfaces / other-source objects untouched.
+            doomed = []
+            for oid, obj in list(self._registry._objects.items()):
+                if oid in adopted_oids:
+                    continue
+                if obj.attributes.get("is_robot"):
+                    continue
+                src = obj.attributes.get("source")
+                if src not in ("concept_graphs", None):
+                    continue
+                # Warm-restored objects were never in this process's
+                # MapObjectList, so the uuid-membership rule below can't apply.
+                # The loop above re-binds them by class+pose; if never re-seen,
+                # mark_stale keeps them missing instead of deleting them here.
+                if obj.attributes.get("restored"):
+                    continue
+                cg_uuid = obj.attributes.get("cg_uuid")
+                if cg_uuid is None or cg_uuid not in live_uuids:
+                    doomed.append(obj)
+                    if cg_uuid is not None:
+                        self._uuid_to_oid.pop(cg_uuid, None)
+            # Soft-evict (mark `missing`, release the uuid) rather than delete,
+            # so a re-detection within SCENE_OBJECT_TTL_SEC can re-bind the same
+            # id + observation_count via find_rebindable — fixing the cull→
+            # re-detect obs reset. A record concept-graphs deduped lingers
+            # `missing` until the TTL prune; a future detection at that spot
+            # re-binds the nearest *live* record (the dedup survivor), not the
+            # stale one, so soft eviction does not resurrect duplicates.
+            for obj in doomed:
+                self._registry.soft_evict(obj)
+            self._registry.prune_expired(now, self._object_ttl_s)
 
     def _rebind_restored(self, cls: str, pose: Pose3D) -> Optional[SceneObject]:
         """Nearest warm-restored, not-yet-rebound object of class `cls` whose
@@ -1715,6 +1968,49 @@ class ConceptGraphsDetector:
         best_d = max_d
         for obj in self._registry._objects.values():
             if not obj.attributes.get("restored") or obj.cls != cls:
+                continue
+            d = math.sqrt(
+                (obj.pose.x - pose.x) ** 2
+                + (obj.pose.y - pose.y) ** 2
+                + (obj.pose.z - pose.z) ** 2
+            )
+            if d <= best_d:
+                best_d = d
+                best = obj
+        return best
+
+    def _adopt_orphan(
+        self,
+        cls: str,
+        pose: Pose3D,
+        live_uuids: set[str],
+        adopted_oids: set[str],
+    ) -> Optional[SceneObject]:
+        """Nearest same-class concept-graphs record whose cg_uuid vacated this
+        tick (merge-dedup or filter-cull), within the merge-distance gate and
+        not already adopted, or None.
+
+        Lets the new uuid of a merged/regenerated object inherit the stable id
+        (and accumulated observation_count) of the record the old uuid is about
+        to vacate, instead of churning a fresh id at obs=1. Considers only
+        records whose cg_uuid is set but absent from this tick's `live_uuids`
+        (the eviction sweep removed earlier-tick orphans, so a surviving orphan
+        was vacated this tick). Same class + 3D-distance gate as
+        `_rebind_restored` / the concept-graphs merge, so re-binding is no
+        looser than same-tick merging. Caller must hold the registry lock and
+        rebinds the matched record's cg_uuid + records its oid in adopted_oids."""
+        max_d = float(self.cfg.get("max_merge_dist_m", 1.5))
+        best: Optional[SceneObject] = None
+        best_d = max_d
+        for obj in self._registry._objects.values():
+            if obj.object_id in adopted_oids or obj.cls != cls:
+                continue
+            if obj.attributes.get("is_robot") or obj.attributes.get("restored"):
+                continue
+            if obj.attributes.get("source") not in ("concept_graphs", None):
+                continue
+            cg_uuid = obj.attributes.get("cg_uuid")
+            if cg_uuid is None or cg_uuid in live_uuids:
                 continue
             d = math.sqrt(
                 (obj.pose.x - pose.x) ** 2

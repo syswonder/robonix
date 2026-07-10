@@ -19,6 +19,7 @@ frames_*
 __export__.py
 skill/__init__.py
 *.log
+images/demo_01_readme*.gif
 
 tmp/
 test_performance

@@ -8,8 +8,9 @@ who is operating it.
 
 Today: deployment manifests in YAML, per-package `package_manifest.yaml`,
 and ad-hoc `.env` files. User identity / per-user permissions are not
-modelled centrally — voiceprint identification (a service) feeds into
-sentinel rules directly.
+modelled centrally. The currently implemented user gate lives in Liaison:
+text/API tasks use `context_json.user_id`, while voice sessions must pass
+voiceprint before Pilot/TTS/action when access control is enabled.
 
 When Keystone lands it will:
 
@@ -17,5 +18,5 @@ When Keystone lands it will:
   boot, hot-reloadable for some keys),
 - track identities (operators, deployments, fleets) and the policies
   that bind them to capability allow-lists,
-- be the source-of-truth that [sentinel](../sentinel/) consults for
-  "is this user allowed to call this skill right now".
+- be the source-of-truth that Liaison and future Sentinel policy checks
+  consult for "is this user allowed to call this skill right now".

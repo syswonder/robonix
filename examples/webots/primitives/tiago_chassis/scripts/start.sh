@@ -3,11 +3,10 @@
 # tiago_chassis runtime — docker-exec into the pre-running sim container.
 # Sim must be brought up first by `bash examples/webots/sim/start.sh`.
 #
-# Trap discipline: when `rbnx boot` SIGTERMs our PGID, bash's EXIT/TERM
-# trap fires and explicitly kills the python interpreter inside the
-# container. `docker exec` doesn't reliably propagate signals to the
-# exec'd process, so without this trap the chassis_driver stays alive
-# and breaks the next boot.
+# Lifecycle is owned by rbnx/Soma: Driver(CMD_SHUTDOWN), then this package's
+# manifest stop hook, then wrapper PGID TERM/KILL. Keep start.sh as a foreground
+# docker-exec wrapper so provider stdout/stderr stay connected and failures are
+# visible in rbnx-boot/logs.
 set -euo pipefail
 
 # Sim container name — overridable via ROBONIX_SIM_CONTAINER so a CI / parallel
@@ -21,12 +20,6 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
   echo "                Bring it up first:  bash examples/webots/sim/start.sh"
   exit 1
 fi
-
-cleanup() {
-  docker exec "$SIM_CT" pkill -9 -f 'chassis_driver' 2>/dev/null || true
-  kill -- "-$$" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
 
 # Cross-host wiring for an isolated (bridge-network) sim: the driver runs INSIDE
 # the sim container but registers with an atlas on the host, and the host
@@ -54,17 +47,30 @@ resolve_advertise_host() {
 
 ADVERTISE_HOST="$(resolve_advertise_host)"
 
-docker exec -i \
+exec docker exec \
   -e ROBONIX_ATLAS="${ROBONIX_SIM_ATLAS:-${ROBONIX_ATLAS:-127.0.0.1:50051}}" \
   -e ROBONIX_ADVERTISE_HOST="$ADVERTISE_HOST" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
-  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/proto_gen" \
   "$SIM_CT" \
   bash -lc 'set -eo pipefail
-            source /opt/ros/humble/setup.bash
+            set +u
+            source /opt/ros/humble/setup.bash >/dev/null
             OVL=/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/ros2_idl/install/setup.bash
-            [ -f "$OVL" ] && source "$OVL" || true
+            [ -f "$OVL" ] && source "$OVL" >/dev/null || true
             cd /robonix_pkgs/primitives/tiago_chassis
-            exec python3 -m chassis_driver.driver' &
-wait $!
+            LOG=/tmp/tiago_chassis_driver.log
+            : > "$LOG"
+            python3 -m chassis_driver.driver >>"$LOG" 2>&1 &
+            DRIVER_PID=$!
+            tail --pid="$DRIVER_PID" -n +1 -F "$LOG" &
+            TAIL_PID=$!
+            set +e
+            wait "$DRIVER_PID"
+            STATUS=$?
+            set -e
+            kill "$TAIL_PID" 2>/dev/null || true
+            wait "$TAIL_PID" 2>/dev/null || true
+            exit "$STATUS"
+            '

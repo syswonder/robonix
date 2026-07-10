@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
+import mimetypes
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -673,35 +675,207 @@ def _collect_logs(
     return entries
 
 
-def _log_tree(logs: list[dict]) -> str:
+def _render_log_tree_fallback(logs: list[dict]) -> str:
     if not logs:
         return '<p class="muted">No logs were embedded.</p>'
 
-    groups: dict[str, list[dict]] = {}
+    tree: dict[str, object] = {}
     for entry in logs:
-        root = str(entry["path"]).split("/", 1)[0]
-        groups.setdefault(root, []).append(entry)
+        parts = [part for part in str(entry["path"]).split("/") if part]
+        cursor = tree
+        for dirname in parts[:-1]:
+            cursor = cursor.setdefault(dirname, {})  # type: ignore[assignment]
+        cursor.setdefault("__files__", []).append(entry)  # type: ignore[union-attr]
 
-    parts = []
-    for root, entries in groups.items():
-        parts.append(f'<details class="tree-group" open><summary>{html.escape(root)}</summary>')
-        for entry in entries:
-            rel = str(entry["path"]).split("/", 1)[1] if "/" in str(entry["path"]) else str(entry["path"])
-            parts.append(
-                f'<button class="tree-file" data-log-id="{entry["id"]}" onclick="openLog(this.dataset.logId)">'
-                f'<span class="tree-name">{html.escape(rel)}</span>'
+    def render_node(node: dict[str, object]) -> str:
+        out: list[str] = []
+        files = sorted(node.get("__files__", []), key=lambda item: str(item["path"]))
+        for entry in files:
+            out.append(
+                f'<button class="tree-file" data-log-id="{entry["id"]}" data-log-path="{html.escape(str(entry["path"]))}" '
+                f'onclick="openLog(this.dataset.logId)">'
+                f'<span class="tree-name">{html.escape(str(entry["name"]))}</span>'
                 f'<span class="tree-meta">{html.escape(entry["language"])} · {entry["size"]} B</span>'
                 "</button>"
             )
-        parts.append("</details>")
-    return "\n".join(parts)
+        for name, child in sorted((k, v) for k, v in node.items() if k != "__files__"):
+            out.append(f'<details class="tree-group" open><summary>{html.escape(str(name))}</summary>')
+            out.append(render_node(child))  # type: ignore[arg-type]
+            out.append("</details>")
+        return "\n".join(out)
+
+    return render_node(tree)
+
+
+def _log_tree_data(logs: list[dict]) -> list[dict]:
+    nodes: list[dict] = []
+    folders: dict[tuple[str, ...], str] = {}
+
+    def folder_id(parts: tuple[str, ...]) -> str:
+        existing = folders.get(parts)
+        if existing:
+            return existing
+        node_id = f"tree-dir-{len(folders)}"
+        folders[parts] = node_id
+        nodes.append(
+            {
+                "id": node_id,
+                "parent": folder_id(parts[:-1]) if len(parts) > 1 else "#",
+                "text": parts[-1],
+                "type": "folder",
+                "state": {"opened": len(parts) <= 2},
+            }
+        )
+        return node_id
+
+    for entry in logs:
+        parts = tuple(part for part in str(entry["path"]).split("/") if part)
+        if not parts:
+            continue
+        parent = folder_id(parts[:-1]) if len(parts) > 1 else "#"
+        nodes.append(
+            {
+                "id": entry["id"],
+                "parent": parent,
+                "text": entry["name"],
+                "type": "file",
+                "data": {"logId": entry["id"], "path": entry["path"]},
+                "a_attr": {"title": f'{entry["path"]} ({entry["language"]}, {entry["size"]} B)'},
+            }
+        )
+    return nodes
+
+
+def _log_shortcuts(logs: list[dict]) -> str:
+    if not logs:
+        return ""
+    specs = [
+        ("Build", ("build-webots-deployment.log", "rbnx-build.log", "build.log")),
+        ("rbnx boot", ("rbnx-boot.log",)),
+        ("Scenario summary", ("summary.json",)),
+        ("Scenario events", ("scenario.jsonl", "events.jsonl", "scenario-events.jsonl")),
+        ("Scene", ("scene.log",)),
+        ("Simulator", ("webots.log", "webots.stdout", "webots.stdout.log", "sim.log")),
+    ]
+    by_name: dict[str, dict] = {}
+    by_path: dict[str, dict] = {}
+    for entry in logs:
+        by_name.setdefault(str(entry["name"]), entry)
+        by_path.setdefault(str(entry["path"]), entry)
+    parts = []
+    for label, names in specs:
+        found = None
+        for name in names:
+            found = by_name.get(name)
+            if found:
+                break
+            found = next((entry for path, entry in by_path.items() if path.endswith('/' + name) or path.endswith(name)), None)
+            if found:
+                break
+        if found:
+            parts.append(
+                f'<button class="log-chip" data-log-id="{found["id"]}" onclick="openLog(this.dataset.logId)">'
+                f'{html.escape(label)}</button>'
+            )
+    if not parts:
+        return ""
+    return '<div class="log-shortcuts"><span>Quick logs:</span>' + "".join(parts) + "</div>"
+
+
+def _preferred_log_id(logs: list[dict]) -> str:
+    preferred = (
+        "build-webots-deployment.log",
+        "rbnx-boot.log",
+        "summary.json",
+        "scenario.jsonl",
+        "events.jsonl",
+        "scene.log",
+    )
+    for name in preferred:
+        for entry in logs:
+            if entry.get("name") == name or str(entry.get("path", "")).endswith('/' + name):
+                return str(entry["id"])
+    return str(logs[0]["id"]) if logs else ""
 
 
 def _json_for_script(data: object) -> str:
     return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
 
-def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analysis: dict | None, out: Path) -> None:
+CSS_URL_RE = re.compile(r"url\((['\"]?)([^)'\"]+)\1\)")
+
+
+def _css_with_embedded_urls(path: Path) -> str:
+    css = path.read_text(encoding="utf-8")
+    base = path.parent
+
+    def repl(match: re.Match[str]) -> str:
+        raw = match.group(2).strip()
+        if raw.startswith(("data:", "http://", "https://", "#")):
+            return match.group(0)
+        asset = (base / raw).resolve()
+        try:
+            data = asset.read_bytes()
+        except OSError:
+            return match.group(0)
+        mime = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
+        encoded = base64.b64encode(data).decode("ascii")
+        return f'url("data:{mime};base64,{encoded}")'
+
+    return CSS_URL_RE.sub(repl, css)
+
+
+def _inline_styles(paths: list[Path]) -> str:
+    blocks = []
+    for path in paths:
+        if not path or not path.exists():
+            continue
+        try:
+            css = _css_with_embedded_urls(path)
+        except OSError:
+            continue
+        blocks.append(f"<style data-inline-asset=\"{html.escape(path.name)}\">\n{css}\n</style>")
+    return "\n".join(blocks)
+
+
+def _inline_scripts(paths: list[Path]) -> str:
+    blocks = []
+    for path in paths:
+        if not path or not path.exists():
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        encoded = base64.b64encode(data).decode("ascii")
+        asset_name = html.escape(path.name)
+        source_url = re.sub(r"[^A-Za-z0-9_.-]", "_", path.name)
+        # Do not edit third-party JavaScript text before embedding it. Minified
+        # bundles contain regex literals and strings where a blind </ replacement
+        # can produce invalid JavaScript. The base64 wrapper keeps the HTML
+        # self-contained while executing the original bytes in order.
+        blocks.append(
+            f'<script data-inline-asset="{asset_name}">\n'
+            f'(0,eval)(atob("{encoded}") + "\\n//# sourceURL=inline-{source_url}");\n'
+            f'</script>'
+        )
+    return "\n".join(blocks)
+
+
+def _paths_from_env(name: str) -> list[Path]:
+    raw = os.environ.get(name, "")
+    return [Path(line.strip()) for line in raw.splitlines() if line.strip()]
+
+
+def write_html(
+    summary: dict,
+    logs: list[dict],
+    metadata: dict[str, str],
+    analysis: dict | None,
+    out: Path,
+    inline_styles: list[Path] | None = None,
+    inline_scripts: list[Path] | None = None,
+) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     total = int(summary.get("total", 0) or 0)
     passed = int(summary.get("passed", 0) or 0)
@@ -714,11 +888,16 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     verdict = "NO DATA" if total == 0 else ("PASS" if failed == 0 else "FAIL")
     result_class = "pass" if verdict == "PASS" else "fail"
     generated_on = html.escape(_format_beijing_time(metadata.get("generated_on", "")))
+    embedded_styles = _inline_styles(inline_styles or [])
+    embedded_scripts = _inline_scripts(inline_scripts or [])
+    log_tree_nodes_json = _json_for_script(_log_tree_data(logs))
+    preferred_log_id = _preferred_log_id(logs)
     body = f"""<!doctype html>
 <html lang=\"en\">
 <head>
   <meta charset=\"utf-8\">
   <title>Robonix Webots CI Report</title>
+  {embedded_styles}
   <style>
     :root {{
       --text: #111827;
@@ -975,26 +1154,74 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       font-family: var(--mono);
       font-size: 11px;
     }}
+    .log-note {{
+      color: var(--muted);
+      font-size: 12px;
+      margin: -4px 0 8px;
+    }}
+    .log-shortcuts {{
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 8px 0 10px;
+    }}
+    .log-shortcuts span {{ color: var(--muted); font-size: 12px; }}
+    .log-chip {{
+      appearance: none;
+      background: #f3f4f6;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: #111827;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 4px 8px;
+    }}
+    .log-chip:hover {{ background: #e5e7eb; }}
     .log-panel {{
       border: 1px solid var(--line);
       border-radius: 6px;
       display: grid;
-      grid-template-columns: minmax(240px, 28%) 1fr;
-      min-height: 520px;
+      grid-template-columns: minmax(280px, 30%) 1fr;
+      min-height: 580px;
       overflow: hidden;
     }}
     .log-tree {{
       background: #f9fafb;
       border-right: 1px solid var(--line);
-      max-height: 760px;
+      max-height: 820px;
       overflow: auto;
-      padding: 12px;
+      padding: 10px;
     }}
-    .tree-group {{ margin-bottom: 10px; }}
+    .log-tree-toolbar {{
+      border-bottom: 1px solid var(--line);
+      margin: -2px 0 8px;
+      padding: 0 0 8px;
+    }}
+    .log-tree-search {{
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      box-sizing: border-box;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 6px 8px;
+      width: 100%;
+    }}
+    #log-tree-widget {{ font-family: var(--mono); font-size: 11px; }}
+    #log-tree-widget .jstree-anchor {{ height: 22px; line-height: 22px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }}
+    #log-tree-widget .jstree-clicked {{ background: #dbeafe; box-shadow: inset 0 0 0 1px #93c5fd; }}
+    #log-tree-widget .jstree-hovered {{ background: #e5e7eb; box-shadow: none; }}
+    .fallback-log-tree {{ display: block; }}
+    .tree-group {{ margin: 0 0 8px 10px; }}
     .tree-group summary {{
       cursor: pointer;
+      font-family: var(--mono);
+      font-size: 11px;
       font-weight: 700;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }}
     .tree-file {{
       appearance: none;
@@ -1004,7 +1231,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       color: var(--text);
       cursor: pointer;
       display: block;
-      padding: 6px 8px;
+      padding: 5px 7px;
       text-align: left;
       width: 100%;
     }}
@@ -1013,9 +1240,11 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       display: block;
       font-family: var(--mono);
       font-size: 11px;
-      overflow-wrap: anywhere;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }}
-    .tree-meta {{ color: var(--muted); display: block; font-size: 11px; margin-top: 2px; }}
+    .tree-meta {{ color: var(--muted); display: block; font-size: 10px; margin-top: 1px; }}
     .viewer {{ min-width: 0; }}
     .viewer-head {{
       align-items: center;
@@ -1023,21 +1252,48 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       display: flex;
       gap: 10px;
       justify-content: space-between;
-      padding: 10px 12px;
+      padding: 9px 12px;
     }}
     .viewer-title {{
       font-family: var(--mono);
       font-size: 11px;
-      overflow-wrap: anywhere;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }}
     .viewer-meta {{ color: var(--muted); font-size: 11px; white-space: nowrap; }}
+    .viewer-actions {{ align-items: center; display: flex; gap: 8px; }}
+    .viewer-action {{
+      appearance: none;
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: #374151;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 3px 7px;
+    }}
+    .viewer-action:hover {{ background: #f3f4f6; }}
+    #ace-view {{
+      height: 720px;
+      min-height: 560px;
+    }}
+    .editor-loading {{
+      background: #0b1020;
+      color: #d1d5db;
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 12px;
+    }}
     .log-view {{
       background: #0b1020;
       color: #e5e7eb;
+      display: none;
       font-family: var(--mono);
       font-size: 11px;
       line-height: 1.45;
-      max-height: 700px;
+      max-height: 720px;
       overflow: auto;
       padding: 8px 0;
     }}
@@ -1147,22 +1403,41 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
   <p class=\"section-note\">Each scenario step is one VLM planning round. The tree below is the RTDL returned for that round; every <span class=\"mono\">do</span> leaf has its own expected runtime contract and output checks.</p>
   <div class=\"rtdl-tree-list\">{_scenario_rtdl_trees(summary)}</div>
   <h2>Logs</h2>
-  <div class=\"log-panel\">
-    <aside class=\"log-tree\">{_log_tree(logs)}</aside>
-    <section class=\"viewer\">
-      <div class=\"viewer-head\">
-        <div id=\"viewer-title\" class=\"viewer-title\">Select a log</div>
-        <div id=\"viewer-meta\" class=\"viewer-meta\"></div>
+  <p class="log-note">Build stdout is embedded as <span class="mono">sim_logs/build-webots-deployment.log</span> when the build step starts. The deploy supervisor output with the Robonix boot banner is embedded as <span class="mono">rbnx-boot.log</span>.</p>
+  {_log_shortcuts(logs)}
+  <div class="log-panel">
+    <aside class="log-tree">
+      <div class="log-tree-toolbar"><input id="log-tree-search" class="log-tree-search" type="search" placeholder="Search logs..."></div>
+      <div id="log-tree-widget"></div>
+      <div id="fallback-log-tree" class="fallback-log-tree">{_render_log_tree_fallback(logs)}</div>
+    </aside>
+    <section class="viewer">
+      <div class="viewer-head">
+        <div id="viewer-title" class="viewer-title">Select a log</div>
+        <div class="viewer-actions">
+          <button id="copy-log-path" class="viewer-action" type="button">Copy path</button>
+          <div id="viewer-meta" class="viewer-meta"></div>
+        </div>
       </div>
-      <div id=\"log-view\" class=\"log-view\"><div class=\"log-line\"><span class=\"line-no\">-</span><code class=\"line-text\">No log selected.</code></div></div>
+      <div id="ace-view"><div class="editor-loading">Loading embedded Ace viewer; fallback log viewer is available if scripts are blocked.</div></div>
+      <div id="log-view" class="log-view"><div class="log-line"><span class="line-no">-</span><code class="line-text">No log selected.</code></div></div>
     </section>
   </div>
   <h2>Runtime Contract Coverage</h2>
   {_coverage(summary)}
+  {embedded_scripts}
   <script>
     const LOGS = {_json_for_script(logs)};
+    const LOG_TREE_NODES = {log_tree_nodes_json};
+    const PREFERRED_LOG_ID = "{html.escape(preferred_log_id)}";
     const LOG_BY_ID = new Map(LOGS.map((entry) => [entry.id, entry]));
     const LOG_BY_NAME = new Map();
+    let currentLog = null;
+    let aceEditor = null;
+    let aceReady = false;
+    let pendingEntry = null;
+    let syncingTreeSelection = false;
+
     for (const entry of LOGS) {{
       if (!LOG_BY_NAME.has(entry.name)) LOG_BY_NAME.set(entry.name, entry);
       const pathTail = entry.path.split('/').slice(-1)[0];
@@ -1181,35 +1456,100 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     function highlightLine(line, language) {{
       let out = escapeHtml(line);
       if (language === 'json' || language === 'jsonl') {{
-        out = out.replace(/(&quot;[^&]*?&quot;)(\\s*:)/g, '<span class=\"tok-key\">$1</span>$2');
-        out = out.replace(/(:\\s*)(&quot;[^&]*?&quot;)/g, '$1<span class=\"tok-string\">$2</span>');
-        out = out.replace(/(:\\s*)(-?\\d+(?:\\.\\d+)?)/g, '$1<span class=\"tok-number\">$2</span>');
-        out = out.replace(/\\b(true|false|null)\\b/g, '<span class=\"tok-bool\">$1</span>');
+        out = out.replace(/(&quot;[^&]*?&quot;)(\\s*:)/g, '<span class="tok-key">$1</span>$2');
+        out = out.replace(/(:\\s*)(&quot;[^&]*?&quot;)/g, '$1<span class="tok-string">$2</span>');
+        out = out.replace(/(:\\s*)(-?\\d+(?:\\.\\d+)?)/g, '$1<span class="tok-number">$2</span>');
+        out = out.replace(/\\b(true|false|null)\\b/g, '<span class="tok-bool">$1</span>');
       }} else if (language === 'yaml' || language === 'toml') {{
-        out = out.replace(/^([\\w.-]+)(\\s*[:=])/g, '<span class=\"tok-key\">$1</span>$2');
-        out = out.replace(/(#.*)$/g, '<span class=\"tok-comment\">$1</span>');
+        out = out.replace(/^([\\w.-]+)(\\s*[:=])/g, '<span class="tok-key">$1</span>$2');
+        out = out.replace(/(#.*)$/g, '<span class="tok-comment">$1</span>');
       }} else if (language === 'py' || language === 'sh' || language === 'rs' || language === 'js' || language === 'ts') {{
-        out = out.replace(/(#.*)$/g, '<span class=\"tok-comment\">$1</span>');
-        out = out.replace(/(\\/\\/.*)$/g, '<span class=\"tok-comment\">$1</span>');
+        out = out.replace(/(#.*)$/g, '<span class="tok-comment">$1</span>');
+        out = out.replace(/(\\/\\/.*)$/g, '<span class="tok-comment">$1</span>');
       }}
-      out = out.replace(/\\b(ERROR|FAIL|FAILED|Traceback|Exception)\\b/g, '<span class=\"tok-error\">$1</span>');
-      out = out.replace(/\\b(WARN|WARNING)\\b/g, '<span class=\"tok-warn\">$1</span>');
-      out = out.replace(/\\b(PASS|SUCCESS|OK)\\b/g, '<span class=\"tok-pass\">$1</span>');
+      out = out.replace(/\\b(ERROR|FAIL|FAILED|Traceback|Exception)\\b/g, '<span class="tok-error">$1</span>');
+      out = out.replace(/\\b(WARN|WARNING)\\b/g, '<span class="tok-warn">$1</span>');
+      out = out.replace(/\\b(PASS|SUCCESS|OK)\\b/g, '<span class="tok-pass">$1</span>');
       return out;
     }}
 
-    function renderLog(entry) {{
-      document.getElementById('viewer-title').textContent = entry.path;
-      const suffix = entry.truncated ? ' · truncated' : '';
-      document.getElementById('viewer-meta').textContent = `${{entry.language}} · ${{entry.size}} B${{suffix}}`;
-      document.querySelectorAll('.tree-file').forEach((el) => {{
-        el.classList.toggle('active', el.dataset.logId === entry.id);
-      }});
+    function aceMode(language) {{
+      const map = {{
+        json: 'ace/mode/json',
+        jsonl: 'ace/mode/json',
+        yaml: 'ace/mode/yaml',
+        yml: 'ace/mode/yaml',
+        sh: 'ace/mode/sh',
+        bash: 'ace/mode/sh',
+        py: 'ace/mode/python',
+        rs: 'ace/mode/rust',
+        js: 'ace/mode/javascript',
+        ts: 'ace/mode/typescript',
+        md: 'ace/mode/markdown',
+      }};
+      return map[language] || 'ace/mode/text';
+    }}
+
+    function renderFallback(entry) {{
+      const aceEl = document.getElementById('ace-view');
+      const view = document.getElementById('log-view');
+      if (aceEl) aceEl.style.display = 'none';
+      view.style.display = 'block';
       const lines = entry.content.split(/\\r?\\n/);
       const html = lines.map((line, idx) => (
-        `<div class=\"log-line\"><span class=\"line-no\">${{idx + 1}}</span><code class=\"line-text\">${{highlightLine(line, entry.language)}}</code></div>`
+        '<div class="log-line"><span class="line-no">' + (idx + 1) + '</span><code class="line-text">' + highlightLine(line, entry.language) + '</code></div>'
       )).join('');
-      document.getElementById('log-view').innerHTML = html || '<div class=\"log-line\"><span class=\"line-no\">1</span><code class=\"line-text\"></code></div>';
+      view.innerHTML = html || '<div class="log-line"><span class="line-no">1</span><code class="line-text"></code></div>';
+    }}
+
+    function renderAce(entry) {{
+      const aceEl = document.getElementById('ace-view');
+      const view = document.getElementById('log-view');
+      if (!aceReady || !aceEditor) {{
+        renderFallback(entry);
+        return;
+      }}
+      aceEl.style.display = 'block';
+      view.style.display = 'none';
+      aceEditor.session.setMode(aceMode(entry.language));
+      aceEditor.session.setUseWorker(false);
+      aceEditor.setValue(entry.content, -1);
+      aceEditor.clearSelection();
+      aceEditor.scrollToLine(1, true, true, function () {{}});
+    }}
+
+    function selectTreeNode(id) {{
+      document.querySelectorAll('.tree-file').forEach((el) => {{
+        el.classList.toggle('active', el.dataset.logId === id);
+      }});
+      if (window.jQuery) {{
+        const tree = $('#log-tree-widget').jstree(true);
+        if (tree && tree.get_node(id)) {{
+          const selected = tree.get_selected();
+          if (selected.length === 1 && selected[0] === id) {{
+            tree.open_node(tree.get_parent(id));
+            return;
+          }}
+          syncingTreeSelection = true;
+          try {{
+            tree.deselect_all(true);
+            tree.select_node(id, true, true);
+            tree.open_node(tree.get_parent(id));
+          }} finally {{
+            syncingTreeSelection = false;
+          }}
+        }}
+      }}
+    }}
+
+    function renderLog(entry) {{
+      currentLog = entry;
+      pendingEntry = entry;
+      document.getElementById('viewer-title').textContent = entry.path;
+      const suffix = entry.truncated ? ' · truncated' : '';
+      document.getElementById('viewer-meta').textContent = entry.language + ' · ' + entry.size + ' B' + suffix;
+      selectTreeNode(entry.id);
+      renderAce(entry);
     }}
 
     function openLog(id) {{
@@ -1221,15 +1561,71 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       const entry = LOG_BY_NAME.get(name);
       if (entry) {{
         renderLog(entry);
-        document.getElementById('log-view').scrollIntoView({{block: 'nearest'}});
+        document.getElementById('ace-view').scrollIntoView({{block: 'nearest'}});
       }} else {{
-        document.getElementById('viewer-title').textContent = `Log not embedded: ${{name}}`;
+        document.getElementById('viewer-title').textContent = 'Log not embedded: ' + name;
         document.getElementById('viewer-meta').textContent = '';
-        document.getElementById('log-view').innerHTML = '<div class=\"log-line\"><span class=\"line-no\">-</span><code class=\"line-text\">No matching embedded log.</code></div>';
+        renderFallback({{content: 'No matching embedded log.', language: 'log', id: '', path: name, truncated: false, size: 0}});
       }}
     }}
 
-    if (LOGS.length) renderLog(LOGS[0]);
+    function initTree() {{
+      if (window.jQuery && $.fn && $.fn.jstree) {{
+        $('#fallback-log-tree').hide();
+        $('#log-tree-widget')
+          .jstree({{
+            core: {{ data: LOG_TREE_NODES, multiple: false, themes: {{ stripes: false, dots: true, icons: true }} }},
+            plugins: ['search', 'types', 'wholerow'],
+            types: {{ folder: {{}}, file: {{ icon: 'jstree-file' }} }},
+          }})
+          .on('select_node.jstree', function (_event, data) {{
+            if (syncingTreeSelection) return;
+            const node = data.node;
+            if (node && node.type === 'file') openLog(node.id);
+          }});
+        let searchTimer = null;
+        $('#log-tree-search').on('input', function () {{
+          clearTimeout(searchTimer);
+          const value = this.value;
+          searchTimer = setTimeout(function () {{ $('#log-tree-widget').jstree(true).search(value); }}, 180);
+        }});
+      }} else {{
+        document.getElementById('log-tree-widget').style.display = 'none';
+      }}
+    }}
+
+    function initAce() {{
+      if (!window.ace) {{
+        if (pendingEntry) renderFallback(pendingEntry);
+        return;
+      }}
+      ace.config.set('basePath', '');
+      ace.config.set('loadWorkerFromBlob', false);
+      aceEditor = ace.edit('ace-view');
+      aceEditor.setTheme('ace/theme/tomorrow_night_eighties');
+      aceEditor.setOptions({{
+        readOnly: true,
+        highlightActiveLine: true,
+        highlightGutterLine: true,
+        showPrintMargin: false,
+        fontFamily: 'JetBrains Mono, Menlo, Consolas, monospace',
+        fontSize: '11px',
+        wrap: false,
+        useWorker: false,
+      }});
+      aceEditor.renderer.setScrollMargin(8, 8, 0, 0);
+      aceReady = true;
+      if (pendingEntry) renderAce(pendingEntry);
+    }}
+
+    document.getElementById('copy-log-path').addEventListener('click', function () {{
+      if (!currentLog || !navigator.clipboard) return;
+      navigator.clipboard.writeText(currentLog.path).catch(function () {{}});
+    }});
+
+    initTree();
+    initAce();
+    if (LOGS.length) openLog(PREFERRED_LOG_ID || LOGS[0].id);
   </script>
 </body>
 </html>
@@ -1272,6 +1668,8 @@ def main() -> int:
     ap.add_argument("--metadata-json", action="append", type=Path, default=[], help="metadata JSON to merge")
     ap.add_argument("--metadata", action="append", default=[], help="key=value metadata to show in the report")
     ap.add_argument("--llm-analysis-json", type=Path, help="LLM-assisted diagnostic JSON to render")
+    ap.add_argument("--inline-style", action="append", type=Path, default=[], help="CSS file to embed directly into index.html")
+    ap.add_argument("--inline-script", action="append", type=Path, default=[], help="JavaScript file to embed directly into index.html")
     ap.add_argument("--max-log-bytes", type=int, default=524288, help="per-log byte cap; 0 embeds complete files")
     ap.add_argument(
         "--max-total-log-bytes",
@@ -1291,7 +1689,9 @@ def main() -> int:
     metadata = _parse_metadata(args.metadata, args.metadata_json)
     analysis = _read_json(args.llm_analysis_json) if args.llm_analysis_json else {}
     write_metadata(metadata, args.out_dir / "metadata.json")
-    write_html(summary, logs, metadata, analysis, args.out_dir / "index.html")
+    inline_styles = list(args.inline_style) + _paths_from_env("ROBONIX_REPORT_INLINE_STYLES")
+    inline_scripts = list(args.inline_script) + _paths_from_env("ROBONIX_REPORT_INLINE_SCRIPTS")
+    write_html(summary, logs, metadata, analysis, args.out_dir / "index.html", inline_styles, inline_scripts)
     write_markdown(summary, analysis, args.out_dir / "summary.md")
     return 0
 

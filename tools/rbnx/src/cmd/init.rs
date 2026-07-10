@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// `rbnx init <name>` — scaffold a new robonix project.
+// `rbnx init <name>` — scaffold a robot deployment directory.
 
 use anyhow::{Context, Result};
 use robonix_cli::output;
@@ -16,6 +16,11 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn robot_catalog_name(name: &str) -> String {
+    let suffix = name.strip_prefix("robot-").unwrap_or(name);
+    format!("robonix.robot.{}", suffix.replace('-', "."))
+}
+
 pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     validate_name(name)?;
 
@@ -29,17 +34,25 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
         anyhow::bail!("directory '{}' already exists", project_dir.display());
     }
 
-    output::action("Init", &format!("creating project '{name}'"));
+    output::action("Init", &format!("creating robot deployment '{name}'"));
 
-    // Create directory structure.
-    for sub in ["primitives", "services", "skills"] {
-        std::fs::create_dir_all(project_dir.join(sub))
-            .with_context(|| format!("failed to create {sub}/ directory"))?;
-    }
+    std::fs::create_dir_all(&project_dir).context("failed to create deployment directory")?;
 
     // robonix_manifest.yaml (deployment manifest).
+    let catalog_name = robot_catalog_name(name);
     let manifest = format!(
-        r#"name: {name}
+        r#"catalog:
+  name: {catalog_name}
+  version: 0.1.0
+  description: TODO: describe this robot deployment.
+  tags:
+    - robot
+    - deploy
+    - robonix
+  maintainers:
+    - Your Name <you@example.com>
+
+name: {name}
 
 env:
   LOG: "INFO"
@@ -60,7 +73,7 @@ system:
       model: ${{VLM_MODEL}}
       api_format: openai
   liaison:
-    listen: 127.0.0.1:50081
+    listen: 0.0.0.0:50081
     log: info
   memory: []
 
@@ -86,13 +99,10 @@ __pycache__/
         .context("failed to write .gitignore")?;
 
     output::success(&format!(
-        "Project '{name}' created at {}",
+        "Robot deployment '{name}' created at {}",
         project_dir.display()
     ));
     output::sub_step("robonix_manifest.yaml");
-    output::sub_step("primitives/");
-    output::sub_step("services/");
-    output::sub_step("skills/");
     output::sub_step(".gitignore");
 
     Ok(())

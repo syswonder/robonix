@@ -41,7 +41,8 @@ use crate::report::{PackageStartupCheck, PackageStartupStatus, StartupReport};
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_cli::launch::{
-    CMD_ACTIVATE, CMD_INIT, call_driver_cmd, snapshot_provider_ids, wait_for_registration_core,
+    CMD_ACTIVATE, CMD_INIT, PackageRuntimeRecord, call_driver_cmd, shutdown_package_runtime,
+    snapshot_provider_ids, wait_for_registration_core,
 };
 use robonix_cli::process::ProcessManager;
 use robonix_scribe::{info, warn};
@@ -67,6 +68,8 @@ pub struct PackageLauncher {
     /// can abort them when soma shuts down. The ProcessManager kills
     /// child processes; these tasks just drain stdout/stderr.
     tasks: Vec<JoinHandle<()>>,
+    /// Runtime records for `rbnx start -p` wrappers spawned directly by Soma.
+    children: Vec<PackageRuntimeRecord>,
 }
 
 impl PackageLauncher {
@@ -78,6 +81,7 @@ impl PackageLauncher {
             atlas_endpoint: atlas_endpoint.into(),
             log_dir,
             tasks: Vec::new(),
+            children: Vec::new(),
         })
     }
 
@@ -233,11 +237,20 @@ impl PackageLauncher {
             // don't expect this for primitives or skills, but mirror
             // rbnx's "treat as ACTIVE" behaviour so a misclassified
             // entry doesn't bring boot down.
+            if let Some(record) = self.children.iter_mut().find(|record| record.pid == pid) {
+                record.provider_id = Some(outcome.provider_id.clone());
+            }
             warn!("{who}: registered without a */driver capability — skipping INIT/ACTIVATE",);
             return PackageStartupStatus::Spawned { command };
         };
 
         let config_json = serde_json::to_string(&target.config).unwrap_or_else(|_| "{}".into());
+        self.note_lifecycle(
+            pid,
+            outcome.provider_id.clone(),
+            driver_contract.clone(),
+            config_json.clone(),
+        );
 
         if let Err(e) = call_driver_cmd(
             atlas,
@@ -301,12 +314,21 @@ impl PackageLauncher {
         &mut self,
         target: &PackageLaunchTarget,
     ) -> Result<(u32, tokio::process::Child)> {
+        let package_manifest = robonix_cli::manifest::load_from_path(&target.package_manifest_path)
+            .with_context(|| format!("load {}", target.package_manifest_path.display()))?;
+        let stop = package_manifest.stop.trim().to_string();
+
+        // Match rbnx deploy's provider endpoint semantics: atlas may listen on
+        // 0.0.0.0, but providers need a dialable address. In-container Webots
+        // drivers can still override this in their start.sh via ROBONIX_SIM_ATLAS.
+        let provider_atlas = self.provider_atlas_endpoint();
+
         let mut cmd = TokioCommand::new(RBNX_BIN);
         cmd.arg("start")
             .arg("-p")
             .arg(target.package_dir.as_os_str())
             .arg("--endpoint")
-            .arg(&self.atlas_endpoint)
+            .arg(&provider_atlas)
             .env("RBNX_INSTANCE_NAME", &target.name)
             .env("RBNX_INVOCATION_CWD", &target.package_dir)
             .env("SCRIBE_LOG_DIR", &self.log_dir)
@@ -327,6 +349,17 @@ impl PackageLauncher {
         let pid = child.id().ok_or_else(|| {
             anyhow::anyhow!("spawned package '{}' but it had no pid", target.name)
         })?;
+        self.children.push(PackageRuntimeRecord {
+            name: target.name.clone(),
+            kind: target.kind.to_string(),
+            pid,
+            pgid: pid,
+            provider_id: None,
+            driver_contract: None,
+            config_json: None,
+            package_dir: Some(target.package_dir.display().to_string()),
+            stop: if stop.is_empty() { None } else { Some(stop) },
+        });
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
         let tag_out = target.name.clone();
@@ -360,6 +393,20 @@ impl PackageLauncher {
         Ok((pid, child))
     }
 
+    fn note_lifecycle(
+        &mut self,
+        pid: u32,
+        provider_id: String,
+        driver_contract: String,
+        config_json: String,
+    ) {
+        if let Some(record) = self.children.iter_mut().find(|record| record.pid == pid) {
+            record.provider_id = Some(provider_id);
+            record.driver_contract = Some(driver_contract);
+            record.config_json = Some(config_json);
+        }
+    }
+
     /// SIGKILL the package's process group. Called when a bring-up
     /// step after spawn fails (registration timeout, INIT/ACTIVATE
     /// error) so we don't leave orphaned children holding e.g.
@@ -380,10 +427,14 @@ impl PackageLauncher {
     /// Stop all packages launched by soma and abort their
     /// pipe-forwarding tasks. Called on SIGINT/SIGTERM in main.
     pub async fn stop_all(&mut self) -> Result<()> {
-        self.manager
-            .stop_all()
-            .await
-            .context("stop Soma packages")?;
+        let provider_atlas = self.provider_atlas_endpoint();
+        for record in self.children.drain(..).rev() {
+            shutdown_package_runtime(Some(&provider_atlas), &record, Duration::from_millis(500))
+                .await;
+        }
+        if let Err(e) = self.manager.stop_all().await {
+            warn!("stop ProcessManager-owned Soma packages: {e:#}");
+        }
         for task in self.tasks.drain(..) {
             task.abort();
         }
@@ -395,8 +446,12 @@ impl PackageLauncher {
             "{} start -p {} --endpoint {}",
             RBNX_BIN,
             target.package_dir.display(),
-            self.atlas_endpoint
+            self.provider_atlas_endpoint()
         )
+    }
+
+    fn provider_atlas_endpoint(&self) -> String {
+        self.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
     }
 }
 
@@ -411,6 +466,28 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let launcher =
             PackageLauncher::new(tmp.path().join("logs"), "127.0.0.1:50051").expect("launcher");
+        let target = PackageLaunchTarget {
+            kind: PackageKind::Primitive,
+            name: "demo".into(),
+            package_dir: PathBuf::from("/tmp/robonix/examples/test_ci/primitives/demo"),
+            package_manifest_path: PathBuf::from(
+                "/tmp/robonix/examples/test_ci/primitives/demo/package_manifest.yaml",
+            ),
+            manifest_override: None,
+            config: serde_yaml::Value::Null,
+        };
+
+        assert_eq!(
+            launcher.command_line(&target),
+            "rbnx start -p /tmp/robonix/examples/test_ci/primitives/demo --endpoint 127.0.0.1:50051"
+        );
+    }
+
+    #[test]
+    fn command_line_rewrites_bind_all_atlas_to_loopback_for_packages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let launcher =
+            PackageLauncher::new(tmp.path().join("logs"), "0.0.0.0:50051").expect("launcher");
         let target = PackageLaunchTarget {
             kind: PackageKind::Primitive,
             name: "demo".into(),

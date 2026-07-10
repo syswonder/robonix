@@ -1,4 +1,5 @@
-FROM osrf/ros:humble-desktop
+ARG ROS_BASE_IMAGE=osrf/ros:humble-desktop
+FROM ${ROS_BASE_IMAGE}
 
 # ── TUNA mirrors ───────────────────────────────────────────────────
 # Swap apt sources (Ubuntu/ports + ROS 2) to TUNA. Use `find` + sed

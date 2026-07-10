@@ -5,10 +5,12 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 package:
-  name: com.vendor.test_primitive
+  name: robonix.primitive.test_primitive
   version: 0.0.1
-  vendor: vendor
-  description: TODO
+  description: Test primitive fixture.
+  tags: [primitive, test]
+  maintainers:
+    - Test Maintainer <test@example.com>
   license: Apache-2.0
 
 capabilities: []

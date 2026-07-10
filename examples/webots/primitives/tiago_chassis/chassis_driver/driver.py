@@ -119,5 +119,19 @@ def init(cfg):
     return Ok()
 
 
+@tiago_chassis.on_shutdown
+def shutdown():
+    global cmd_vel_pub
+    if cmd_vel_pub is not None:
+        try:
+            from geometry_msgs.msg import Twist  # type: ignore
+            cmd_vel_pub.publish(Twist())
+        except Exception as exc:
+            print(f"[tiago_chassis] shutdown zero Twist failed: {exc}", flush=True)
+        finally:
+            cmd_vel_pub = None
+    return Ok()
+
+
 if __name__ == "__main__":
     tiago_chassis.run()
