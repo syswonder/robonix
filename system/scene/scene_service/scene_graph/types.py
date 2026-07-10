@@ -15,6 +15,7 @@ RELATION_TYPES = [
     "under",
     "inside",
     "contains",
+    "reachable_by",
     "attached_to",
     "part_of",
     "same_object",
@@ -23,6 +24,9 @@ RELATION_TYPES = [
 ]
 
 # Inverse mapping for directed relations.
+# `reachable_by` is intentionally absent: it is emitted one direction only
+# (object → gripper) and has no named inverse in this vocabulary, so a
+# self-inverse would be semantically wrong. It is never flipped.
 INVERSE_RELATIONS: dict[str, str] = {
     "on_top_of": "under",
     "under": "on_top_of",
@@ -68,7 +72,7 @@ class SceneGraphEdge:
     target_id: str
     relation: str
     confidence: float = 0.0
-    method: str = "llm"       # "llm" | "cached" | "llm_fail"
+    method: str = "llm"       # "llm" | "geometric" | "cached" | "llm_fail"
     reason: str = ""
     updated_at: float = field(default_factory=time.time)
     # How many consecutive rebuild rounds this edge has *not* been

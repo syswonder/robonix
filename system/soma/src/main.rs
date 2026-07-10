@@ -98,6 +98,16 @@ async fn main() -> Result<()> {
         .await
         .context("connect to Atlas")?;
 
+    let listen_addr: std::net::SocketAddr = config
+        .listen
+        .parse()
+        .with_context(|| format!("invalid Soma listen address '{}'", config.listen))?;
+    {
+        let probe = std::net::TcpListener::bind(listen_addr)
+            .with_context(|| format!("bind Soma listen address {}", config.listen))?;
+        drop(probe);
+    }
+
     // ── Stage 1: primitive bring-up ──────────────────────────────────
     // Primitives walk REGISTERED → INACTIVE → ACTIVE before we declare
     // soma's own capabilities, so a downstream consumer asking
@@ -114,10 +124,6 @@ async fn main() -> Result<()> {
     }
 
     // ── Soma's own gRPC service registration ─────────────────────────
-    let listen_addr: std::net::SocketAddr = config
-        .listen
-        .parse()
-        .with_context(|| format!("invalid Soma listen address '{}'", config.listen))?;
     let advertised = format!("127.0.0.1:{}", listen_addr.port());
     atlas
         .register_service(&config.provider_id, SOMA_NAMESPACE, "")
@@ -306,6 +312,9 @@ async fn main() -> Result<()> {
         .add_service(RobonixSystemSomaHealthServer::from_arc(svc))
         .serve_with_shutdown(listen_addr, shutdown)
         .await;
+    if let Err(e) = &serve_result {
+        warn!("Soma gRPC server exited with error: {e:#}");
+    }
     // Always abort the stage-2 watcher before tearing down children,
     // so its pipe read doesn't come back and try to reuse a torn-down
     // launcher.

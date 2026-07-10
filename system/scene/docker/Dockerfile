@@ -29,11 +29,13 @@
 # the first time, then reused. Rebuild only when this Dockerfile or
 # requirements/ change.
 
-# Selects the base image AND (via the base's own ENV ROS_DISTRO) the apt
-# package names + the runtime setup.bash path. Override: --build-arg
-# ROS_DISTRO=iron (build.sh wires this from ROBONIX_SCENE_ROS_DISTRO).
+# Selects the ROS package names + runtime setup.bash path. build.sh also passes
+# ROS_BASE_IMAGE, defaulting to a local robonix-ros:<distro>-ros-base alias so
+# BuildKit does not query Docker Hub metadata on every rebuild. Override with
+# ROBONIX_SCENE_ROS_BASE_IMAGE for a mirror, digest-pinned base, or custom image.
 ARG ROS_DISTRO=humble
-FROM ros:${ROS_DISTRO}-ros-base
+ARG ROS_BASE_IMAGE=robonix-ros:humble-ros-base
+FROM ${ROS_BASE_IMAGE}
 
 # ── Build-time proxy helpers ──────────────────────────────────────
 # Usage:
@@ -127,16 +129,22 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # resolved by pip from the default PIP_INDEX_URL (TUNA, set above) — do NOT
 # point pip at aliyun's pypi index here, its large-file throttling stalls
 # pip the same way.
+# The saved filenames MUST be the canonical wheel names (pip parses the
+# name/version/abi from the filename and rejects e.g. "torch.whl" with
+# "Invalid wheel filename"), which would silently drop every build into
+# the slow fallback below after wasting the full aliyun download.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy sh -c 'set -eu; \
         base="https://mirrors.aliyun.com/pytorch-wheels/cu128"; \
-        curl -fSL --retry 5 --retry-delay 2 -C - -o /tmp/torch.whl \
+        tw="torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        tvw="torchvision-0.22.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        curl -fSL --retry 5 --retry-delay 2 -C - -o "/tmp/$tw" \
              "$base/torch-2.7.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
-        curl -fSL --retry 5 --retry-delay 2 -C - -o /tmp/torchvision.whl \
+        curl -fSL --retry 5 --retry-delay 2 -C - -o "/tmp/$tvw" \
              "$base/torchvision-0.22.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
         python3 -m pip install --progress-bar on --timeout 60 --retries 3 \
-             /tmp/torch.whl /tmp/torchvision.whl; \
-        rm -f /tmp/torch.whl /tmp/torchvision.whl' \
+             "/tmp/$tw" "/tmp/$tvw"; \
+        rm -f "/tmp/$tw" "/tmp/$tvw"' \
     || with-build-proxy python3 -m pip install \
         --progress-bar on \
         --timeout 60 \
@@ -210,31 +218,75 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy pip install --no-deps -e /opt/concept-graphs
 
 # Bake CV model weights into the image.
-ENV HF_HOME=/opt/models/hf
+ENV HF_HOME=/opt/models/hf \
+    YOLO_CONFIG_DIR=/opt/ultralytics
 
-RUN mkdir -p /opt/models /opt/models/hf /root/.cache/clip
+RUN mkdir -p /opt/models /opt/models/hf /opt/models/ultralytics /opt/ultralytics
 
 COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
 COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
 
 # Two CLIP-flavored downloads bake in here:
 #   1. open_clip's ViT-B-32 LAION-2B — goes to HF_HOME.
-#   2. openai's `clip` ViT-B/32 — goes to /root/.cache/clip.
+#   2. Ultralytics YOLO-World's text encoder — goes to the Ultralytics
+#      weights_dir under /opt/models/ultralytics.
 #
 # Non-pip model downloads. CN-native: open_clip's weights come from the HF
-# mirror (HF_ENDPOINT, set above); openai's `clip` pulls from Azure's CDN
-# (openaipublic.azureedge.net), which is reachable directly from CN. No proxy
-# needed — keep HF_ENDPOINT pointed at hf-mirror.com instead of unsetting it
-# (unsetting sent open_clip to huggingface.co, which is unreachable from CN).
+# mirror (HF_ENDPOINT, set above). Ultralytics uses openai/clip internally from
+# YOLOWorld.set_classes(); run that exact path at build time so start never
+# downloads the 354 MB ViT-B-32.pt into /scene/weights/clip.
 RUN with-build-proxy sh <<'EOF'
 set -eux
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HUB_DOWNLOAD_TIMEOUT=120
+export YOLO_CONFIG_DIR=/opt/ultralytics
 
 python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
-python3 -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='/root/.cache/clip')"
 
-ls -la /opt/models/ /root/.cache/clip/
+python3 - <<'PY'
+from ultralytics.utils import SETTINGS
+
+SETTINGS.update({
+    "weights_dir": "/opt/models/ultralytics",
+    "datasets_dir": "/tmp/ultralytics/datasets",
+    "runs_dir": "/tmp/ultralytics/runs",
+    "sync": False,
+})
+PY
+
+python3 - <<'PY'
+from pathlib import Path
+from ultralytics.utils import WEIGHTS_DIR
+
+expected = Path("/opt/models/ultralytics")
+if Path(WEIGHTS_DIR) != expected:
+    raise RuntimeError(f"Ultralytics WEIGHTS_DIR={WEIGHTS_DIR!s}, expected {expected!s}")
+
+from ultralytics import YOLO
+
+classes = [
+    "chair", "table", "desk", "couch", "sofa", "bookshelf", "shelf",
+    "cabinet", "drawer", "whiteboard",
+    "monitor", "laptop", "keyboard", "mouse", "computer tower",
+    "monitor stand", "headphones", "webcam", "router", "power strip",
+    "cup", "mug", "water bottle", "thermos", "paper cup",
+    "backpack", "handbag", "book", "notebook", "pen", "pencil",
+    "phone", "tablet",
+    "box", "cardboard box", "tray", "basket", "trash bin",
+    "tool", "screwdriver", "wrench", "tape",
+    "plant", "potted plant", "lamp", "clock", "picture frame",
+    "snack", "fruit", "apple", "banana",
+    "door", "doorway", "fire extinguisher", "person",
+]
+
+model = YOLO("/opt/models/yolov8l-world.pt")
+model.set_classes(classes)
+PY
+
+test -s /opt/models/ultralytics/clip/ViT-B-32.pt
+chmod -R a+rX,u+rwX /opt/ultralytics /opt/models/ultralytics
+
+ls -la /opt/models/ /opt/models/ultralytics/clip/
 EOF
 
 # No global proxy ENV was set, so there is no build-time proxy to clear here.
@@ -243,6 +295,7 @@ EOF
 # live without each deployment having to override.
 ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
     SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
+    YOLO_CONFIG_DIR=/opt/ultralytics \
     SCENE_CLIP_MODEL=ViT-B-32 \
     SCENE_CLIP_PRETRAINED=laion2b_s34b_b79k
 

@@ -4,8 +4,8 @@ relation engine, FastMCP server, and atlas registration together.
 
 Capability owns atlas register / driver lifecycle / MCP HTTP / heartbeat
 (`scene.bootstrap()` + `scene.use_mcp_app(mcp_tools.mcp)`); everything below
-is scene-specific: registry + relations engine, ROS2 ingest hub,
-VLM perception, web debug UI.
+is scene-specific: registry + geometric relation loop, ROS2 ingest hub,
+VLM perception + scene-graph enrichment, web debug UI.
 """
 from __future__ import annotations
 
@@ -47,8 +47,6 @@ from .state import (
     BBox3D,
     ObjectRegistry,
     Pose3D,
-    RelationEngine,
-    SceneObject,
 )
 from .state.object_registry import now_unix
 
@@ -860,8 +858,6 @@ async def _run() -> None:
 
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
-    relations = RelationEngine(registry, period_s=1.0)
-    await relations.start()
     self_tracker = _SelfTracker(registry)
 
     # Object persistence (warm restore across restarts). Created before
@@ -869,6 +865,15 @@ async def _run() -> None:
     # arrive; the embedder is wired in later (only needed for writes). The
     # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
     # prior boot wrote rows — but writes are driven by the scene-graph builder.
+    # Which SLAM map this scene session belongs to. Deploy-controlled until
+    # mapping emits a real map identity — manifest `map_id` wins, else the
+    # SCENE_MAP_ID env, else "default". This is the join key against mapping
+    # and the scope key for ALL of scene's persistent state: object poses are
+    # only valid in their own map's frame, and so are the scene-graph caption/
+    # relation caches. Computed once here so the object store (below) and the
+    # scene-graph cache (further down) partition on the same value.
+    map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
+
     obj_store = None
     if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
         from .persistence import ObjectStore
@@ -876,11 +881,6 @@ async def _run() -> None:
         db_path = os.environ.get(
             "SCENE_OBJECT_MEMORY_DB", "/data/robonix/scene_memory/objects.db"
         )
-        # Which SLAM map's objects to load/store. Deploy-controlled until
-        # mapping emits a real map identity — manifest `map_id` wins, else
-        # the SCENE_MAP_ID env, else "default". Object poses are only valid
-        # in their own map's frame, so persistence is scoped per map.
-        map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
         try:
             obj_store = ObjectStore(db_path, map_id=map_id)
             restored = obj_store.load_all()
@@ -902,9 +902,8 @@ async def _run() -> None:
             )
             obj_store = None
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
-    # supplied later in _start_ros_ingest); relations engine still runs
-    # internally for ingest/web-UI but isn't exposed in the LLM tool
-    # surface anymore.
+    # supplied later in _start_ros_ingest). The geometric relation loop +
+    # scene-graph store are wired further down, once the registry is live.
     mcp_tools.attach_state(registry=registry)
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
@@ -977,21 +976,37 @@ async def _run() -> None:
         *ingest_bg,
     ]
 
-    # ── Scene Graph (LLM-enhanced relation layer) ────────────────────
-    sg_store = None
+    # ── Relation layer ───────────────────────────────────────────────
+    # Fast geometric relations (contact/containment + reachable_by) are
+    # cheap and must reach Pilot within seconds — and even without VLM
+    # creds — so the store and the geometric loop run unconditionally.
+    # SCENE_GRAPH_ENABLED gates only the slow LLM enrichment below.
+    from .scene_graph.geometric_loop import GeometricRelationLoop
+    from .scene_graph.store import SceneGraphStore
+
+    sg_cache_dir = os.environ.get(
+        "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
+    )
+    # Partition the scene-graph caches by the same map_id as the object store,
+    # so caption/relation answers from one map never bleed into another.
+    sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=map_id)
+    log.info(
+        "[scene-graph] cache base=%s partitioned by map_id=%s",
+        sg_cache_dir, map_id,
+    )
+    mcp_tools.attach_scene_graph_store(sg_store)
+    geo_loop = GeometricRelationLoop(registry, sg_store)
+    await geo_loop.start()
+
+    # ── Scene Graph (optional LLM enrichment of the residual) ────────
     sg_stop: asyncio.Event | None = None
     if os.environ.get("SCENE_GRAPH_ENABLED", "true").lower() in ("true", "1", "yes"):
         from .scene_graph.builder import SceneGraphBuilder, SceneGraphConfig, scene_graph_loop
         from .scene_graph.captioner import NodeCaptioner
         from .scene_graph.llm_client import SceneGraphLLMClient
         from .scene_graph.relations import RelationInferer
-        from .scene_graph.store import SceneGraphStore
 
         sg_cfg = SceneGraphConfig()
-        sg_cache_dir = os.environ.get(
-            "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
-        )
-        sg_store = SceneGraphStore(cache_dir=sg_cache_dir)
         sg_llm = SceneGraphLLMClient()
         sg_captioner = NodeCaptioner()
         sg_inferer = RelationInferer(sg_llm)
@@ -1002,6 +1017,7 @@ async def _run() -> None:
             store=sg_store,
             config=sg_cfg,
             object_store=obj_store,
+            perception=perception,
         )
         sg_stop = asyncio.Event()
         bg_tasks.append(
@@ -1010,9 +1026,8 @@ async def _run() -> None:
                 name="scene-graph-loop",
             )
         )
-        mcp_tools.attach_scene_graph_store(sg_store)
         log.info(
-            "scene graph enabled (interval=%.0fs, cache=%s)",
+            "scene graph LLM enrichment enabled (interval=%.0fs, cache=%s)",
             sg_cfg.interval_sec,
             sg_cache_dir,
         )
@@ -1032,7 +1047,6 @@ async def _run() -> None:
     if web_port > 0:
         web_app = web_ui.make_app(
             registry=registry,
-            relations=relations,
             hub=hub,
             detector=perception,
             sg_store=sg_store,
@@ -1071,7 +1085,7 @@ async def _run() -> None:
             await perception.stop()
     with contextlib.suppress(Exception):
         await hub.stop()
-    await relations.stop()
+    await geo_loop.stop()
     for t in bg_tasks:
         t.cancel()
     if web_server is not None:

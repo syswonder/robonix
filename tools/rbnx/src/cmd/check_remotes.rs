@@ -67,6 +67,10 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     Some(s)
 }
 
+fn origin_url(dir: &Path) -> Option<String> {
+    git(dir, &["config", "--get", "remote.origin.url"]).filter(|s| !s.trim().is_empty())
+}
+
 /// Parse a deploy manifest and list its `url:` providers (cloned or not).
 pub fn collect_remote_providers(manifest_path: &Path) -> Result<Vec<RemoteProvider>> {
     let raw = std::fs::read_to_string(manifest_path)
@@ -145,6 +149,10 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
     }
 
     st.local_short = git(&p.dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    if origin_url(&p.dir).is_none() {
+        st.note = Some("local checkout has no origin remote — skipped".into());
+        return st;
+    }
     let branch = target_branch(p);
 
     // Deepen the fetch so HEAD..origin/branch is computable even on the
@@ -173,10 +181,9 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
         "origin",
         &branch,
     ];
-    // github is frequently unreachable from CN networks, so keep this
-    // SHORT — the freshness notice is cosmetic and must never noticeably
-    // delay boot. 6s is plenty for a reachable remote; an unreachable one
-    // fails fast and the check is skipped.
+    // Keep this short: the freshness notice is cosmetic and must never
+    // noticeably delay boot. 6s is plenty for a reachable remote; an
+    // unreachable one fails fast and the check is skipped.
     let timed = Command::new("timeout")
         .arg("6")
         .arg("git")
@@ -235,6 +242,16 @@ pub fn report_outdated(manifest_path: &Path) {
     output::boot_section("checking remote providers for updates (skip: --no-update-check)");
     let mut outdated = Vec::new();
     for p in &remote {
+        if origin_url(&p.dir).is_none() {
+            let st = status_of(p);
+            output::boot_skip(
+                &p.name,
+                st.note
+                    .as_deref()
+                    .unwrap_or("local checkout has no origin remote — skipped"),
+            );
+            continue;
+        }
         output::boot_progress(&p.name, "fetching origin…", 0);
         let st = status_of(p);
         if st.outdated() {

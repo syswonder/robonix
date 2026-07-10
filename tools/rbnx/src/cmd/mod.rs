@@ -39,6 +39,9 @@ const DEFAULT_ENDPOINT: &str = "localhost:50051";
 pub enum Commands {
     /// Build a package (local path or system-installed)
     Build {
+        /// Deployment manifest to build (builds every declared package)
+        #[arg(short = 'f', long, value_name = "FILE", conflicts_with_all = ["path", "global"])]
+        file: Option<PathBuf>,
         /// Local package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
         path: Option<PathBuf>,
@@ -319,9 +322,9 @@ pub enum Commands {
         server: String,
     },
 
-    /// Initialize a new robonix project (creates robonix_manifest.yaml + directory skeleton)
+    /// Initialize a new robot deployment directory (creates robonix_manifest.yaml)
     Init {
-        /// Project name (also used as directory name)
+        /// Robot deployment directory name
         name: String,
         /// Parent directory (default: current directory)
         #[arg(long)]
@@ -385,10 +388,11 @@ pub enum Commands {
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
         Commands::Build {
+            file,
             path,
             global,
             clean,
-        } => run_package::execute_build(config, path, global, clean).await,
+        } => run_package::execute_build(config, file, path, global, clean).await,
         Commands::Start {
             package,
             endpoint,

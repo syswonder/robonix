@@ -123,6 +123,40 @@ rbnx build       # first run pulls model weights + docker images, may take a whi
 rbnx boot
 ```
 
+The simulator launcher supports multiple built-in `.wbt` environments. Select one
+explicitly with `--world` or `ROBONIX_WEBOTS_WORLD`:
+
+```bash
+bash examples/webots/sim/start.sh --world office.wbt
+bash examples/webots/sim/start.sh --world apartment.wbt
+ROBONIX_WEBOTS_WORLD=break_room.wbt bash examples/webots/sim/start.sh
+```
+
+Available worlds in `examples/webots/sim/ros_ws/src/eaios_webots/worlds/`:
+`office.wbt`, `apartment.wbt`, `complete_apartment.wbt`, `break_room.wbt`, and
+`kitchen.wbt`.
+
+`office.wbt` is the fully seeded default path and is the recommended quickstart
+world. For the other built-in worlds, fetch Cyberbotics' official offline asset
+bundle once before launching:
+
+```bash
+ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 \
+  bash examples/webots/sim/start.sh --world apartment.wbt
+```
+
+This downloads `assets-R2025a.zip` from the Webots GitHub release through
+`https://ghfast.top/` by default, extracts it into the persistent
+`webots_cache` Docker volume, and writes a marker so later starts skip the
+download. Use `ROBONIX_WEBOTS_ASSETS_MIRROR` or `ROBONIX_WEBOTS_ASSETS_URL`
+only when your network requires a different mirror/source.
+
+|  |  |
+|---|---|
+| `office.wbt`<br>![office](examples/webots/sim/thumbnails/office.jpg) | `apartment.wbt`<br>![apartment](examples/webots/sim/thumbnails/apartment.jpg) |
+| `complete_apartment.wbt`<br>![complete apartment](examples/webots/sim/thumbnails/complete_apartment.jpg) | `break_room.wbt`<br>![break room](examples/webots/sim/thumbnails/break_room.jpg) |
+| `kitchen.wbt`<br>![kitchen](examples/webots/sim/thumbnails/kitchen.jpg) |  |
+
 Robonix keeps the ROS 2 middleware selectable, but the Webots deploy defaults to
 Zenoh RMW. Our CI and local Webots tests run a single-machine, multi-container
 ROS graph with high-rate TF, RGB-D, lidar, map, Nav2, and scene traffic. Fast
@@ -200,12 +234,15 @@ Dive deeper:
 ## Ecosystem
 
 Robonix is built from small, swappable **packages**, each implementing one or
-more capability contracts under a `robonix/<kind>/<area>/*` namespace (browse
-them in the [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md)).
-Packages come in two flavours:
+more capability contracts under a `robonix/<kind>/<area>/*` namespace. The
+contract definitions are documented in the
+[interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md).
 
-- **Built-in reference packages** ship in this repo under [`services/`](services/) and deploy as-is.
-- **Community packages** live in their own repos and are pulled in at boot via the manifest's `url:` field — fork one as a template to add new hardware or behaviour.
+This repository contains the core runtime, built-in reference services, and
+examples such as Webots/Tiago. Reusable community packages are indexed by the
+[Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/);
+their source stays in separate package repositories instead of being duplicated
+here.
 
 ### Built-in services — [`services/`](services/)
 
@@ -217,39 +254,45 @@ Packages come in two flavours:
 
 > `scene` (3D scene graph) and the core runtime (`atlas`, `executor`, `pilot`, `liaison`) are **system** components under [`system/`](system/), not services.
 
-### Community packages
+### External packages
 
-Standalone repos, cloned at boot via `url:` in the deploy manifest.
+Use the [Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/)
+to find reusable primitive, service, and skill packages maintained outside this
+repository. The catalog also exposes a machine-readable static JSON API:
 
-**Primitives** — one hardware device per package:
+| Method | Path | Parameters |
+| --- | --- | --- |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/packages` | none |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/search` | none; filter client-side |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/package/<package-name>` | `package-name` is the exact `package.name`, URL-encoded |
 
-| Package | Hardware | Namespace |
-|---|---|---|
-| [`ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx) | AgileX Ranger Mini v3 chassis | `robonix/primitive/chassis/*` |
-| [`mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx) | Livox MID-360 — point cloud | `robonix/primitive/lidar/*` |
-| [`mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx) | Livox MID-360 — IMU | `robonix/primitive/imu/*` |
-| [`realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx) | Intel RealSense camera | `robonix/primitive/camera/*` |
+Example:
 
-**Services** — robot-level algorithms:
+```js
+const base = 'https://syswonder.github.io/robonix-package-catalog/api/v1';
+const catalog = await fetch(`${base}/packages`).then(r => r.json());
+const mapping = await fetch(`${base}/package/${encodeURIComponent('robonix.service.mapping')}`)
+  .then(r => r.json());
+```
 
-| Package | What it does | Namespace |
-|---|---|---|
-| [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) | SLAM mapping (RTAB-Map + FAST-LIO2) | `robonix/service/map/*` |
-| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
+Repository naming follows the catalog convention:
 
-**Skills** — LLM-triggered composite tasks:
+- `primitive-[company]-[model]-[primitive_type]-rbnx` for primitive packages.
+- `service-[service_namespace]-rbnx` for service packages.
+- `skill-[skill_namespace]-rbnx` for skill packages.
 
-| Package | What it does | Namespace |
-|---|---|---|
-| [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx) | Autonomous frontier room exploration | `robonix/skill/explore/*` |
-| [`greet_rbnx`](https://github.com/enkerewpo/greet_rbnx) | Greet passers-by — YOLO person detection → VLM line → speak | `robonix/skill/greet/*` |
+To contribute a community package:
 
-**Tools & deployments:**
-
-| Repo | What it is |
-|---|---|
-| [Robonix Skill Toolkit](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit) | Train VLA-based skills: collect teleop data, fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, deploy on a real arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)). |
-| [ranger_mini_deploy](https://github.com/enkerewpo/ranger_mini_deploy) | Full deploy manifest for the AgileX Ranger Mini robot at Syswonder Lab. |
+1. Put the package source in its own GitHub repository. The repository root
+   must contain `package_manifest.yaml`.
+2. In `package_manifest.yaml`, provide catalog metadata under `package`:
+   `name`, `version`, `description`, `tags`, and `maintainers`.
+   `maintainers` is a list of `Name <email@domain>` entries.
+3. Open a pull request to
+   [`syswonder/robonix-package-catalog`](https://github.com/syswonder/robonix-package-catalog)
+   and add only `name` + `repo` to `catalog.yaml`. The catalog CI fetches the
+   package manifest from GitHub, validates the name and metadata, generates the
+   website/API, and deploys it to GitHub Pages.
 
 ## Contributors
 

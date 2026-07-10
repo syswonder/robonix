@@ -622,7 +622,7 @@ async fn stream_capture_and_recognize(
     let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
         // [profile] mic transfer: t_pump=request start; first-chunk latency is
-        // the audio-source startup (e.g. macOS bridge over the network); the
+        // the audio-source startup (e.g. audio client bridge over the network); the
         // chunk count + total audio vs wall time shows transfer throughput.
         let t_pump = tokio::time::Instant::now();
         let mut n_chunks: u32 = 0u32;

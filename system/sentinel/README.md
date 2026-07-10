@@ -1,26 +1,36 @@
-# Sentinel — safety supervision
+# Sentinel - safety supervision
 
-One of the 12 Robonix system components. Intercepts capability calls
-from [executor](../executor/) and enforces safety rules: rate limits,
-allow/deny lists, deny-windows, hard-stops.
+Sentinel is the planned Robonix safety-supervision component. Its job is to
+decide whether a requested capability call is allowed under the current robot
+state, operator identity, scene context, and policy.
 
-**Status — v0.1 minimal, currently embedded in executor.**
+## Current status
 
-In v0.1 sentinel is not a separate process. The dispatch path in
-[`system/executor/src/dispatch/sentinel.rs`](../executor/src/dispatch/sentinel.rs)
-loads `sentinel.yaml` rules at boot and gates each capability call
-through them. Demo coverage:
+Sentinel is not implemented on `dev` yet. There is no `robonix-sentinel`
+binary, no `system/executor/src/dispatch/sentinel.rs`, and no `sentinel.yaml`
+rule loader in Executor.
 
-- rule-driven deny / allow for capability calls,
-- `deny_window` semantics for time-bounded blocks,
-- denied-call telemetry surfaces in chat / TUI.
+Executor currently dispatches validated RTDL `do` nodes directly through Atlas
+to the selected primitive, service, or skill provider. The only safety-related
+controls in the current path are local to the components that already exist,
+for example:
 
-When Sentinel is extracted into its own process it will:
+- Executor plan cancellation and stop points (`cancel_plan`, `stop_plan_at`,
+  `cancel_all_plans`).
+- Liaison access control for text/API users and voiceprint-verified speakers
+  before work enters Pilot/TTS.
+- Provider-side validation in individual primitives and services.
 
-- run alongside executor as a separate component with its own gRPC
-  surface (consumers ask "may I call X under identity Y given the
-  current scene") rather than as an executor-internal module,
-- subscribe to [scene](../scene/) state, [vitals](../vitals/) health,
-  and [keystone](../keystone/) identity so rules can be context-aware
-  rather than purely static,
-- get its own log channel to [scribe](../scribe/).
+Do not rely on this directory for runtime enforcement today.
+
+## Intended role
+
+When Sentinel lands, it should sit on the capability-call path before Executor
+dispatches side-effecting work. The policy decision should be based on:
+
+- the requested contract and arguments,
+- the operator identity and permissions from [keystone](../keystone/),
+- current robot/body health from [vitals](../vitals/),
+- current environment state from [scene](../scene/),
+- explicit safety policy such as allow/deny lists, rate limits, workspace
+  limits, stop windows, and emergency-stop state.

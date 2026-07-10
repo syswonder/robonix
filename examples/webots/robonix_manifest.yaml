@@ -2,6 +2,11 @@ manifestVersion: 1
 name: robonix-webots-example-deploy
 
 env:
+  # Bind scene's semantic store to the same named SLAM map as `mapping`
+  # below (the join key between geometric + semantic maps). Propagated by
+  # `rbnx boot` into the process env, which scene's start.sh forwards as
+  # `-e SCENE_MAP_ID` into the container. Keep this id == mapping's `map_id`.
+  SCENE_MAP_ID: webots_lab
 
 # boot in sequence: system -> soma+scene -> execution -> interaction
 system:
@@ -27,7 +32,7 @@ system:
       model: ${VLM_MODEL}
       api_format: openai
   liaison:
-    listen: 127.0.0.1:50081
+    listen: 0.0.0.0:50081
     log: info
 
 # after booted all the system components, start the devices (primitives)
@@ -74,14 +79,14 @@ primitive:
   - name: audio_driver
     path: ./primitives/audio_driver
     config: {}
-  # macOS-bridge variant (opt-in): relays mic/speaker over a WebSocket from a
-  # macOS box across the LAN. To use it, comment out the audio_driver block
-  # above and uncomment this one, then point host at the Mac's address and run
-  # mac_server/server.py (or server_web.py) on it.
-  # - name: audio_macos_bridge
-  #   path: ./primitives/audio_macos_bridge
+  # audio client bridge variant (opt-in): relays mic/speaker over a WebSocket from a
+  # client machine across the LAN. To use it, comment out the audio_driver block
+  # above and uncomment this one, then point host at the client machine's address
+  # and run client_audio_server/server.py (or server_web.py) on it.
+  # - name: audio_client_bridge
+  #   path: ./primitives/audio_client_bridge
   #   config:
-  #     host: 100.78.199.22       # macOS tailscale address
+  #     host: 127.0.0.1           # client machine address reachable by robonix
   #     port: 60000
 
 # after booted all the primitives, start the services
@@ -98,7 +103,7 @@ service:
   # liaison's voice loop connects to. Captures mic through the
   # robonix/primitive/audio/mic primitive, which `audio_driver` (primitive
   # section above) provides — so voice runs fully local on this host's ALSA
-  # mic. The macOS-bridge variant lives in robonix_manifest.macos_debug.yaml.
+  # mic. The audio client bridge variant can be enabled in this primitive section when the mic/speaker live on a client machine.
   # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
   - name: speech
     path: ../../services/speech
@@ -121,11 +126,13 @@ service:
   # boots services in manifest order; until the defer-queue lands
   # consumers must come after their providers.
   - name: mapping
-    url: https://github.com/enkerewpo/mapping_rbnx
+    url: https://github.com/syswonder/service-map-rbnx
     branch: main
     config:
       algo: rtabmap
       platform: x86_desktop
+      map_id: webots_lab
+      map_mode: mapping
       sensors:
         lidar2d: true # webots do not have 3d pointcloud, so we use 2d lidar
         lidar3d: false
@@ -146,7 +153,7 @@ service:
   # mapping (its /map provider); on_init returns Deferred until mapping is
   # up, so order is a convenience, not a hard requirement.
   - name: nav2
-    url: https://github.com/enkerewpo/nav2_wrapper_rbnx
+    url: https://github.com/syswonder/service-navigation-rbnx
     branch: main
     config:
       params_profile: sim
@@ -157,7 +164,7 @@ service:
 skill:
   # explore_rbnx — autonomous frontier exploration.
   - name: explore
-    url: https://github.com/enkerewpo/explore_rbnx
+    url: https://github.com/syswonder/skill-explore-rbnx
     branch: main
     config:
       # example place holders

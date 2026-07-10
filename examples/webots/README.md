@@ -38,6 +38,37 @@ cd examples/webots
 rbnx boot
 ```
 
+The sim launcher supports multiple built-in worlds:
+
+```bash
+bash examples/webots/sim/start.sh --world office.wbt
+bash examples/webots/sim/start.sh --world apartment.wbt
+bash examples/webots/sim/start.sh --world complete_apartment.wbt
+bash examples/webots/sim/start.sh --world break_room.wbt
+bash examples/webots/sim/start.sh --world kitchen.wbt
+```
+
+You can also pre-export `ROBONIX_WEBOTS_WORLD=<world>.wbt`.
+
+`office.wbt` is the default offline-friendly path because the current seed cache
+ships with it. For `apartment.wbt`, `complete_apartment.wbt`, `break_room.wbt`,
+and `kitchen.wbt`, enable the official Webots offline asset bundle once:
+
+```bash
+ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 \
+  bash examples/webots/sim/start.sh --world apartment.wbt
+```
+
+This downloads Cyberbotics' `assets-R2025a.zip` release asset through
+`https://ghfast.top/` by default and stores it in the persistent Webots cache
+volume. Later runs reuse the cache.
+
+|  |  |
+|---|---|
+| `office.wbt`<br>![office](sim/thumbnails/office.jpg) | `apartment.wbt`<br>![apartment](sim/thumbnails/apartment.jpg) |
+| `complete_apartment.wbt`<br>![complete apartment](sim/thumbnails/complete_apartment.jpg) | `break_room.wbt`<br>![break room](sim/thumbnails/break_room.jpg) |
+| `kitchen.wbt`<br>![kitchen](sim/thumbnails/kitchen.jpg) |  |
+
 Then a third terminal for `rbnx chat`. `rbnx caps` lists the
 capabilities atlas knows about; `rbnx tools` lists the MCP tools
 the LLM agent can call.

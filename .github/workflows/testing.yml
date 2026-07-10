@@ -1,7 +1,8 @@
 # Robonix full-stack testing — real Webots sim + real components + fake VLM.
 #
-# Runs on the self-hosted GPU runner (label `robonix-testing`, pinned to one GPU
-# via the runner's own CUDA_VISIBLE_DEVICES). Cheap checks (fmt/clippy/build/unit)
+# Runs on the self-hosted GPU runner (label `robonix-testing`). The selected
+# GPU is configurable via workflow input, repository/org variable, or runner env.
+# Cheap checks (fmt/clippy/build/unit)
 # live in ci.yml on GitHub-hosted runners and gate every PR; THIS workflow is the
 # heavy GPU testing job and is deliberately NOT exposed to untrusted PR code.
 #
@@ -11,10 +12,11 @@
 # auto-ran here would be arbitrary code execution on our box. Controls:
 #
 #  1. Triggers below are TRUSTED ONLY: `push` to dev/main (already-merged =
-#     reviewed) and manual `workflow_dispatch`. A PR runs the GPU job ONLY when
-#     a maintainer adds the `safe-to-test` label after auditing the diff — the
-#     `if:` on the job enforces that. There is no bare `on: pull_request` that
-#     runs fork code unattended, and we never use `pull_request_target`.
+#     reviewed), manual `workflow_dispatch`, ChatOps `workflow_call`, and a
+#     narrow `pull_request_target` label gate. For direct PR auto-runs, the
+#     workflow source stays on the trusted base branch; the GPU job starts only
+#     after `safe-to-test` was added by admin/maintain and the current PR head
+#     has an admin/maintain APPROVED review.
 #  2. Also turn ON in repo settings: Actions → Fork pull request workflows →
 #     "Require approval for all external contributors".
 #  3. `permissions: contents: read` — the job gets a read-only GITHUB_TOKEN.
@@ -32,7 +34,12 @@ on:
   push:
     branches: [dev, main]
   workflow_dispatch:
-  pull_request:
+    inputs:
+      gpu_id:
+        description: "GPU index visible on the selected self-hosted runner; defaults to vars.ROBONIX_CI_GPU_ID or 0"
+        required: false
+        default: ""
+  pull_request_target:
     types: [labeled, synchronize, reopened]
   # Lets the ChatOps bot (ci-bot.yml) invoke this whole pipeline on an
   # authorized `@robonix-ci test` comment and read back the result summary.
@@ -67,6 +74,10 @@ on:
         description: "pull request head branch when invoked by ChatOps"
         type: string
         required: false
+      pr_base_ref:
+        description: "pull request base branch when invoked by ChatOps"
+        type: string
+        required: false
       pr_head_repo:
         description: "pull request head repository when invoked by ChatOps"
         type: string
@@ -84,8 +95,14 @@ on:
         type: boolean
         required: false
         default: false
+      gpu_id:
+        description: "GPU index visible on the selected self-hosted runner; defaults to vars.ROBONIX_CI_GPU_ID or 0"
+        type: string
+        required: false
     secrets:
       DEEPSEEK_API_KEY:
+        required: false
+      ROBONIX_REPORTS_DEPLOY_KEY:
         required: false
     outputs:
       result:
@@ -97,8 +114,8 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+  issues: read
+  pull-requests: read
 
 jobs:
   # ── Gate 1: cheap, GitHub-hosted, untrusted-safe ──────────────────────────
@@ -109,12 +126,140 @@ jobs:
   security-gate:
     name: Preflight security checks
     runs-on: ubuntu-22.04
+    outputs:
+      safe_to_test_authorized: ${{ steps.safe_to_test.outputs.authorized }}
+      safe_to_test_labeler: ${{ steps.safe_to_test.outputs.labeler }}
+      safe_to_test_permission: ${{ steps.safe_to_test.outputs.permission }}
+      pr_review_approved: ${{ steps.pr_review.outputs.approved }}
+      pr_review_approver: ${{ steps.pr_review.outputs.approver }}
+      pr_review_permission: ${{ steps.pr_review.outputs.permission }}
     steps:
+      - name: Authorize safe-to-test label
+        id: safe_to_test
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'pull_request_target') {
+              core.setOutput('authorized', 'true');
+              core.setOutput('labeler', 'trusted-event');
+              core.setOutput('permission', 'trusted-event');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            const labels = (pr.labels || []).map(l => l.name);
+            if (!labels.includes('safe-to-test')) {
+              core.setOutput('authorized', 'false');
+              core.setOutput('labeler', '');
+              core.setOutput('permission', 'none');
+              core.notice('safe-to-test label is absent; GPU test will be skipped');
+              return;
+            }
+            const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const labeled = [...events].reverse().find(e =>
+              e.event === 'labeled' && e.label && e.label.name === 'safe-to-test' && e.actor && e.actor.login
+            );
+            const labeler = labeled?.actor?.login || '';
+            let permission = 'none';
+            if (labeler) {
+              try {
+                const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner, repo: context.repo.repo, username: labeler,
+                });
+                permission = r.data.permission || 'none';
+              } catch (e) {
+                core.notice(`could not resolve repo permission for safe-to-test labeler @${labeler}: ${e.message}`);
+              }
+            }
+            const authorized = ['admin', 'maintain'].includes(permission);
+            core.setOutput('authorized', String(authorized));
+            core.setOutput('labeler', labeler);
+            core.setOutput('permission', permission);
+            if (!authorized) {
+              core.notice(`safe-to-test was added by @${labeler || 'unknown'} with permission '${permission}', so GPU test will be skipped`);
+            }
+
+      - name: Require maintainer approval for PR Webots testing
+        id: pr_review
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
+          PR_HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
+        with:
+          script: |
+            const prNumber = process.env.PR_NUMBER;
+            if (!prNumber) {
+              core.setOutput('approved', 'true');
+              core.setOutput('approver', 'trusted-event');
+              core.setOutput('permission', 'trusted-event');
+              return;
+            }
+            let headSha = process.env.PR_HEAD_SHA || '';
+            if (!headSha) {
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: Number(prNumber),
+              });
+              headSha = pr.data.head.sha || '';
+            }
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(prNumber),
+              per_page: 100,
+            });
+            const approved = [...reviews].reverse().filter(r =>
+              r.state === 'APPROVED' && (!headSha || r.commit_id === headSha) && r.user && r.user.login
+            );
+            for (const review of approved) {
+              const username = review.user.login;
+              let permission = 'none';
+              try {
+                const r = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username,
+                });
+                permission = r.data.permission || 'none';
+              } catch (e) {
+                core.notice(`could not resolve repo permission for approver @${username}: ${e.message}`);
+              }
+              if (['admin', 'maintain'].includes(permission)) {
+                core.setOutput('approved', 'true');
+                core.setOutput('approver', username);
+                core.setOutput('permission', permission);
+                return;
+              }
+            }
+            core.setOutput('approved', 'false');
+            core.setOutput('approver', '');
+            core.setOutput('permission', 'none');
+            core.notice(`PR #${prNumber} has no current-head APPROVED review from an admin/maintain user; Webots GPU test will be skipped`);
+
       - uses: actions/checkout@v4
         with:
-          # Empty on push/PR/dispatch (checkout uses the triggering ref); set to
-          # the PR head SHA when the ChatOps bot invokes this via workflow_call.
-          ref: ${{ inputs.ref }}
+          # For PR tests, checkout the current base branch first; the next
+          # step merges the PR head locally so stale refs/pull/*/merge refs
+          # cannot make CI test an old base.
+          ref: ${{ (inputs.pr_number != '' || github.event_name == 'pull_request_target') && (inputs.pr_base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch) || inputs.ref }}
+          fetch-depth: ${{ (inputs.pr_number != '' || github.event_name == 'pull_request_target') && '0' || '1' }}
+      - name: Merge PR head into current base
+        if: ${{ inputs.pr_number != '' || github.event_name == 'pull_request_target' }}
+        env:
+          TEST_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin \
+            "+refs/pull/${TEST_PR_NUMBER}/head:refs/remotes/robonix-pr/${TEST_PR_NUMBER}/head"
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              merge --no-edit --no-ff "refs/remotes/robonix-pr/${TEST_PR_NUMBER}/head"
+          git log -1 --oneline
       - name: Scan executable build and runtime files
         run: |
           set -euo pipefail
@@ -138,9 +283,20 @@ jobs:
           echo "forbidden-operation scan clean"
       - name: Scan for committed secrets
         run: |
-          docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:latest \
-            detect --source=/repo --no-banner --redact \
-            || { echo "::error::possible secret in diff"; exit 1; }
+          set -euo pipefail
+          # ChatOps PR tests need full git history for local merge-base
+          # resolution. Never scan .git history here; scan only tracked files
+          # from the merged working tree that will actually run.
+          scan_dir="$RUNNER_TEMP/gitleaks-tree"
+          rm -rf "$scan_dir"
+          mkdir -p "$scan_dir"
+          while IFS= read -r -d '' f; do
+            mkdir -p "$scan_dir/$(dirname "$f")"
+            cp -a "$f" "$scan_dir/$f"
+          done < <(git ls-files -z)
+          docker run --rm -v "$scan_dir:/repo:ro" zricethezav/gitleaks:latest \
+            dir /repo --no-banner --redact \
+            || { echo "::error::possible secret in checked-out tree"; exit 1; }
 
   # ── Gate 2: the GPU testing job itself ────────────────────────────────────
   gpu_testing:
@@ -152,15 +308,16 @@ jobs:
     # with Required reviewers in repo settings if we want GitHub to pause this
     # job before it is assigned to the self-hosted runner.
     environment: gpu-testing
-    # Belt-and-suspenders: require `safe-to-test` for direct PR events.
-    # ChatOps callers must perform their own authorization gate before setting
-    # inputs.authorized=true; ci-bot.yml restricts that to trusted PR comments.
+    # Belt-and-suspenders: direct safe-to-test PR auto-runs require current-head
+    # approval by admin/maintain. ChatOps callers are authorized separately in
+    # ci-bot.yml and do not require PR approval.
     if: >-
       inputs.authorized == true ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request_target' &&
+       needs.security-gate.outputs.safe_to_test_authorized == 'true' &&
+       needs.security-gate.outputs.pr_review_approved == 'true')
     runs-on: [self-hosted, robonix-testing]
     timeout-minutes: 90
     env:
@@ -173,21 +330,23 @@ jobs:
       GRPCIO_PIN: "1.80.0"
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
-      # Pin CI to the runner's reserved 5090. Without this, torch/Webots may
-      # default to GPU0/1, which are often occupied by interactive workloads.
-      CUDA_VISIBLE_DEVICES: "2"
-      ROBONIX_GPU_ID: "2"
-      NVIDIA_VISIBLE_DEVICES: "2"
+      # GPU selection is runner-specific. Priority:
+      # workflow_call input -> repo/org variable -> runner env -> default GPU 0.
+      ROBONIX_CI_GPU_ID_INPUT: ${{ inputs.gpu_id || '' }}
+      ROBONIX_CI_GPU_ID_VAR: ${{ vars.ROBONIX_CI_GPU_ID || '' }}
       RMW_IMPLEMENTATION: "rmw_zenoh_cpp"
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
+      # CI should not depend on external Tencent/FunASR credentials or quota.
+      SPEECH_BACKEND: "mock"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
       ROBONIX_SIM_NETWORK: "bridge"
       ROBONIX_SIM_IPC: "private"
       WEBOTS_HEADLESS_MODE: "nvidia"
       WEBOTS_STREAM: "1"
+      ROBONIX_SIM_PRIVILEGED: "true"
 
     steps:
       - name: Configure network egress policy
@@ -210,6 +369,28 @@ jobs:
             auth.docker.io:443
             production.cloudflare.docker.com:443
 
+      - name: Select runner GPU
+        run: |
+          set -euo pipefail
+          gpu_id="${ROBONIX_CI_GPU_ID_INPUT:-${ROBONIX_CI_GPU_ID_VAR:-${ROBONIX_CI_GPU_ID:-${CUDA_VISIBLE_DEVICES:-${ROBONIX_GPU_ID:-0}}}}}"
+          if [ -z "$gpu_id" ]; then
+            gpu_id=0
+          fi
+          case "$gpu_id" in
+            ''|*[!0-9]*) echo "::error::ROBONIX_CI_GPU_ID must be a numeric GPU index, got '$gpu_id'"; exit 1 ;;
+          esac
+          if ! nvidia-smi --query-gpu=index --format=csv,noheader,nounits | awk '{print $1}' | grep -Fxq "$gpu_id"; then
+            echo "::error::selected GPU index $gpu_id is not present on this runner"
+            nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader,nounits || true
+            exit 1
+          fi
+          {
+            echo "ROBONIX_CI_GPU_ID=$gpu_id"
+            echo "CUDA_VISIBLE_DEVICES=$gpu_id"
+            echo "ROBONIX_GPU_ID=$gpu_id"
+            echo "NVIDIA_VISIBLE_DEVICES=$gpu_id"
+          } >> "$GITHUB_ENV"
+
       - name: Verify GPU health
         run: |
           # NEVER nvidia-smi --gpu-reset / rmmod / driver writes (RTX 5090 GSP
@@ -223,7 +404,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${GITHUB_WORKSPACE:-}" in
-            /home/*/actions-runner/_work/*/*) ;;
+            /home/*/*/_work/*/*) ;;
             *) echo "::error::refusing to reset unexpected workspace: ${GITHUB_WORKSPACE:-<unset>}"; exit 1 ;;
           esac
           mkdir -p "$GITHUB_WORKSPACE"
@@ -239,21 +420,114 @@ jobs:
               busybox:latest sh -c 'find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'
           fi
 
+      - name: Configure Git mirror for checkout
+        if: env.GIT_MIRROR_INSTEADOF == 'true'
+        run: |
+          set -euo pipefail
+          # Keep the checkout mirror scoped to this Actions job. The runner is
+          # also a developer workstation, so CI must not mutate ~/.gitconfig.
+          git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
+          : > "$git_config"
+          git config --file "$git_config" url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
+          fetch-depth: ${{ inputs.pr_number != '' && '0' || '1' }}
+
+      - name: Merge PR head into current base
+        if: ${{ inputs.pr_number != '' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin \
+            "+refs/pull/${{ inputs.pr_number }}/head:refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              merge --no-edit --no-ff "refs/remotes/robonix-pr/${{ inputs.pr_number }}/head"
+          git log -1 --oneline
 
       - name: Initialize submodules
         run: |
           set -euo pipefail
-          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          # Keep the GitHub mirror rewrite process-scoped. The self-hosted
+          # runner is also a developer workstation, so CI must not mutate the
+          # user's global git config.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
+          export GIT_CONFIG_VALUE_0='https://github.com/'
           git submodule sync --recursive
           git submodule update --init --recursive
 
       - name: Configure run isolation
         run: |
           set -euo pipefail
-          suffix=$((RUN_ID % 1000))
+          base_suffix=$((RUN_ID % 1000))
+          suffix=""
+          xdisplay=""
+
+          port_is_listening() {
+            ss -ltn "sport = :$1" | grep -q LISTEN
+          }
+
+          xdisplay_has_live_server() {
+            ps -eo pid=,args= | awk -v d=":$1" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {found=1} END {exit found ? 0 : 1}'
+          }
+
+          remove_stale_x_socket() {
+            display="$1"
+            socket="/tmp/.X11-unix/X${display}"
+            [ -S "$socket" ] || return 0
+            if xdisplay_has_live_server "$display"; then
+              return 1
+            fi
+            echo "removing stale per-run X socket: $socket"
+            rm -f "$socket" 2>/dev/null || sudo -n rm -f "$socket" 2>/dev/null || true
+            if [ -S "$socket" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
+              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "$socket" >/dev/null 2>&1 || true
+            fi
+            [ ! -S "$socket" ]
+          }
+
+          for offset in $(seq 0 199); do
+            candidate_suffix=$(((base_suffix + offset) % 1000))
+            candidate_xdisplay=$((1000 + candidate_suffix))
+            candidate_ports=(
+              $((19000 + candidate_suffix))
+              $((20000 + candidate_suffix))
+              $((21000 + candidate_suffix))
+              $((22000 + candidate_suffix))
+              $((18000 + candidate_suffix))
+              $((23000 + candidate_suffix))
+              $((24000 + candidate_suffix))
+              $((25000 + candidate_suffix))
+              $((26000 + candidate_suffix))
+              $((27000 + candidate_suffix))
+            )
+
+            busy=0
+            for port in "${candidate_ports[@]}"; do
+              if port_is_listening "$port"; then
+                busy=1
+                break
+              fi
+            done
+            [ "$busy" -eq 0 ] || continue
+
+            if [ -S "/tmp/.X11-unix/X${candidate_xdisplay}" ] && ! remove_stale_x_socket "$candidate_xdisplay"; then
+              continue
+            fi
+
+            suffix="$candidate_suffix"
+            xdisplay="$candidate_xdisplay"
+            break
+          done
+
+          if [ -z "$suffix" ] || [ -z "$xdisplay" ]; then
+            echo "::error::could not find an unused per-run port/display slot from base suffix $base_suffix"
+            exit 1
+          fi
+
           atlas_port=$((19000 + suffix))
           executor_port=$((20000 + suffix))
           pilot_port=$((21000 + suffix))
@@ -264,25 +538,12 @@ jobs:
           mapping_port=$((25000 + suffix))
           nav2_port=$((26000 + suffix))
           scene_web_port=$((27000 + suffix))
-          ros_domain_id=$((90 + (RUN_ID % 100)))
-          xdisplay=$((1000 + suffix))
+          ros_domain_id=$((90 + (suffix % 100)))
+          runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_ID}"
+          rm -rf "$runtime_dir"
+          mkdir -p "$runtime_dir"
 
-          if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
-            x_pids=$(ps -eo pid=,args= | awk -v d=":${xdisplay}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
-            if [ -n "$x_pids" ]; then
-              echo "::error::per-run X display already in use: :${xdisplay}"
-              exit 1
-            fi
-            echo "removing stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-            rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || sudo -n rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || true
-            if [ -S "/tmp/.X11-unix/X${xdisplay}" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
-              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "/tmp/.X11-unix/X${xdisplay}" >/dev/null 2>&1 || true
-            fi
-            if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
-              echo "::error::could not remove stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-              exit 1
-            fi
-          fi
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
@@ -300,12 +561,16 @@ jobs:
             echo "ROBONIX_SIM_CONTAINER=ci-${RUN_ID}-sim"
             echo "ROBONIX_SIM_PROJECT=ci-${RUN_ID}"
             echo "ROBONIX_SIM_XDISPLAY=:$xdisplay"
+            echo "ROBONIX_WEBOTS_CACHE_VOLUME=robonix_ci_webots_cache"
             echo "ROBONIX_MAPPING_CONTAINER=ci-${RUN_ID}-mapping"
             echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_ID}-nav2"
             echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_ID}-explore"
             echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_ID}-scene"
-            echo "AGENT_MEMORY_DIR=/tmp/robonix-ci-${RUN_ID}/agent_memory"
-            echo "AGENT_MILVUS_URI=/tmp/robonix-ci-${RUN_ID}/agent_milvus.db"
+            echo "ROBONIX_CI_RUNTIME_DIR=$runtime_dir"
+            echo "AGENT_MEMORY_DIR=$runtime_dir/agent_memory"
+            echo "AGENT_MILVUS_URI=$runtime_dir/agent_milvus.db"
+            echo "MAPPING_MAPS_DIR=$runtime_dir/mapping-maps"
+            echo "SCENE_DATA_DIR=$runtime_dir/scene-data"
             echo "ROS_DOMAIN_ID=$ros_domain_id"
             echo "ROBONIX_DRIVER_INIT_TIMEOUT_S=${ROBONIX_DRIVER_INIT_TIMEOUT_S}"
             echo "ROBONIX_GPU_ID=${ROBONIX_GPU_ID}"
@@ -317,25 +582,22 @@ jobs:
           } >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TOOL_CACHE:-$HOME/.cache}/robonix-models"
 
-          for port in "$atlas_port" "$executor_port" "$pilot_port" "$liaison_port" "$fake_vlm_port" "$stream_port" "$viewer_port" "$mapping_port" "$nav2_port" "$scene_web_port"; do
-            if ss -ltn "sport = :$port" | grep -q LISTEN; then
-              echo "::error::per-run port already in use: $port"
-              exit 1
-            fi
-          done
-
       - name: Configure toolchain and workspace
         run: |
           set -euo pipefail
-          export PATH="$HOME/.local/bin:$PATH"
+          python3 -m venv "$ROBONIX_CI_RUNTIME_DIR/venv"
+          export ROBONIX_HOME="$ROBONIX_CI_RUNTIME_DIR/robonix-home"
+          mkdir -p "$ROBONIX_HOME"
+          echo "ROBONIX_HOME=$ROBONIX_HOME" >> "$GITHUB_ENV"
+          export PATH="$ROBONIX_CI_RUNTIME_DIR/venv/bin:$HOME/.local/bin:$PATH"
+          echo "$ROBONIX_CI_RUNTIME_DIR/venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-          # Keep the mirror rewrite for rbnx build remote provider clones.
-          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
-          # codegen tools pinned to the runtime grpcio version.
-          python3 -m pip install --user "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
+          # codegen tools pinned to the runtime grpcio version. Install them in
+          # a per-job venv so Debian/Ubuntu PEP 668 system Python remains intact.
+          python3 -m pip install "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
           # testing harness (fake VLM + scenario runner) parses YAML scenarios.
-          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+          python3 -m pip install pyyaml
           # Build and use binaries from THIS checkout. Do not mutate or trust the
           # runner user's ~/.cargo/bin; this is a shared Webots host.
           cargo build --workspace
@@ -352,7 +614,13 @@ jobs:
         working-directory: examples/webots
         run: |
           set -euo pipefail
-          rbnx build
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          # Apply the GitHub mirror rewrite only to this build process. Do not
+          # write it to the shared runner user's global git config.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
+          export GIT_CONFIG_VALUE_0='https://github.com/'
+          rbnx build 2>&1 | tee "$RUNNER_TEMP/sim-logs/build-webots-deployment.log"
           # provenance: record exactly which upstream commit each remote built from
           for d in rbnx-boot/cache/*/; do
             [ -d "$d/.git" ] && echo "$(basename "$d") @ $(git -C "$d" rev-parse --short HEAD) $(git -C "$d" log -1 --format=%s)"
@@ -364,6 +632,70 @@ jobs:
           NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"
         run: |
           set -euo pipefail
+          # Avoid Docker Hub metadata checks on every Webots sim rebuild.
+          # The helper creates a local alias and pulls through configured
+          # mirrors on first use.
+          helper="$GITHUB_WORKSPACE/scripts/docker_base_image.sh"
+          if [ -f "$helper" ]; then
+            # shellcheck disable=SC1090
+            source "$helper"
+          else
+            # The reusable workflow may test an older PR merge tree that does not
+            # yet contain scripts/docker_base_image.sh. Keep this minimal fallback
+            # here so CI infrastructure changes do not make old PRs untestable.
+            robonix_ensure_local_base_image() {
+              local dest="$1"
+              local upstream="$2"
+              local mirrors_raw="${ROBONIX_DOCKER_MIRRORS:-${ROBONIX_DOCKER_MIRROR:-docker.m.daocloud.io,dockerproxy.net}}"
+              local image_path="$upstream"
+              local candidates=()
+              if docker image inspect "$dest" >/dev/null 2>&1; then return 0; fi
+              if docker image inspect "$upstream" >/dev/null 2>&1; then
+                echo "[docker-base] tagging cached $upstream as $dest"
+                docker tag "$upstream" "$dest"
+                return 0
+              fi
+              image_path="${image_path#docker.io/}"
+              image_path="${image_path#registry-1.docker.io/}"
+              if [[ "$image_path" != */* ]]; then image_path="library/$image_path"; fi
+              IFS=',' read -r -a _mirror_items <<< "$mirrors_raw"
+              for mirror in "${_mirror_items[@]}"; do
+                mirror="${mirror#${mirror%%[![:space:]]*}}"
+                mirror="${mirror%${mirror##*[![:space:]]}}"
+                [[ -z "$mirror" ]] && continue
+                mirror="${mirror%/}"
+                candidates+=("${mirror}/${image_path}")
+              done
+              candidates+=("$upstream")
+              for candidate in "${candidates[@]}"; do
+                echo "[docker-base] pulling base candidate: $candidate"
+                if docker pull "$candidate"; then docker tag "$candidate" "$dest"; return 0; fi
+                echo "[docker-base] warning: failed to pull $candidate" >&2
+              done
+              echo "[docker-base] error: failed to prepare local base image $dest from $upstream" >&2
+              return 1
+            }
+          fi
+          export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
+          robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
+          export ROBONIX_WEBOTS_CACHE_VOLUME="${ROBONIX_WEBOTS_CACHE_VOLUME:-robonix_ci_webots_cache}"
+          docker volume create "$ROBONIX_WEBOTS_CACHE_VOLUME" >/dev/null
+          cache_count=$(docker run --rm -v "$ROBONIX_WEBOTS_CACHE_VOLUME:/cache" busybox sh -lc 'find /cache -type f 2>/dev/null | wc -l')
+          if [ "${cache_count:-0}" -lt 1000 ]; then
+            seed_volume="${ROBONIX_WEBOTS_SEED_CACHE_VOLUME:-robonix_tiago_sim_webots_cache}"
+            seed_count=0
+            if docker volume inspect "$seed_volume" >/dev/null 2>&1; then
+              seed_count=$(docker run --rm -v "$seed_volume:/seed:ro" busybox sh -lc 'find /seed -type f 2>/dev/null | wc -l')
+            fi
+            if [ "${seed_count:-0}" -lt 1000 ]; then
+              echo "::error::Webots asset cache $ROBONIX_WEBOTS_CACHE_VOLUME is not pre-warmed, and seed volume $seed_volume has only ${seed_count:-0} files. Run ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 bash examples/webots/sim/start.sh once on this runner, then rerun CI."
+              exit 1
+            fi
+            echo "[webots-cache] prewarming $ROBONIX_WEBOTS_CACHE_VOLUME from $seed_volume ($seed_count files)"
+            docker run --rm -v "$seed_volume:/seed:ro" -v "$ROBONIX_WEBOTS_CACHE_VOLUME:/cache" busybox sh -lc 'cp -a /seed/. /cache/'
+          else
+            echo "[webots-cache] using prewarmed $ROBONIX_WEBOTS_CACHE_VOLUME ($cache_count files)"
+          fi
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
           docker compose -p "$ROBONIX_SIM_PROJECT" -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
           # robot publishes /scanner /odom /head_front_camera/* within ~15s.
@@ -379,26 +711,37 @@ jobs:
             fi
             sleep 4
           done
-          sim_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .Gateway}}{{println .Gateway}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
-          if [ -z "$sim_gateway" ]; then
-            echo "::error::cannot determine sim bridge gateway"
-            exit 1
-          fi
-          sim_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
-          if [ -z "$sim_ip" ]; then
-            echo "::error::cannot determine sim bridge IP"
-            exit 1
+          sim_network_mode=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$ROBONIX_SIM_CONTAINER")
+          if [ "$sim_network_mode" = "host" ]; then
+            sim_gateway="127.0.0.1"
+            sim_ip="127.0.0.1"
+            sim_atlas_host="127.0.0.1"
+            zenoh_router_host="127.0.0.1"
+          else
+            sim_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .Gateway}}{{println .Gateway}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
+            if [ -z "$sim_gateway" ] || [ "$sim_gateway" = "invalid IP" ]; then
+              echo "::error::cannot determine sim bridge gateway (network_mode=$sim_network_mode, gateway=$sim_gateway)"
+              exit 1
+            fi
+            sim_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
+            if [ -z "$sim_ip" ] || [ "$sim_ip" = "invalid IP" ]; then
+              echo "::error::cannot determine sim bridge IP (network_mode=$sim_network_mode, ip=$sim_ip)"
+              exit 1
+            fi
+            sim_atlas_host="$sim_gateway"
+            zenoh_router_host="$sim_ip"
           fi
           {
-            echo "ROBONIX_SIM_ATLAS=${sim_gateway}:${ATLAS_PORT}"
-            echo "ROBONIX_ZENOH_ROUTER=tcp/${sim_ip}:7447"
+            echo "ROBONIX_SIM_ATLAS=${sim_atlas_host}:${ATLAS_PORT}"
+            echo "ROBONIX_ZENOH_ROUTER=tcp/${zenoh_router_host}:7447"
             echo "ROBONIX_ZENOH_MODE=client"
             echo "ROBONIX_ZENOH_LISTEN=tcp/${sim_gateway}:0"
             echo "NO_PROXY=127.0.0.1,localhost,${sim_gateway},${sim_ip}"
             echo "no_proxy=127.0.0.1,localhost,${sim_gateway},${sim_ip}"
           } >> "$GITHUB_ENV"
-          echo "sim gateway: $sim_gateway"
-          echo "sim zenoh router: tcp/${sim_ip}:7447"
+          echo "sim network mode: $sim_network_mode"
+          echo "sim atlas: ${sim_atlas_host}:${ATLAS_PORT}"
+          echo "sim zenoh router: tcp/${zenoh_router_host}:7447"
 
       - name: Start deterministic VLM planner
         working-directory: examples/webots
@@ -423,14 +766,16 @@ jobs:
         run: |
           set -euo pipefail
           export VLM_BASE_URL="http://127.0.0.1:${FAKE_VLM_PORT}/v1"
-          mkdir -p "$AGENT_MEMORY_DIR"
+          mkdir -p "$AGENT_MEMORY_DIR" "$MAPPING_MAPS_DIR" "$SCENE_DATA_DIR"
           python3 - <<'PY'
           import os
           from pathlib import Path
 
-          text = Path("robonix_manifest.yaml").read_text()
+          import yaml
+
           env_keys = [
               "ROBONIX_SIM_ATLAS",
+              "ROBONIX_SIM_CONTAINER",
               "ROBONIX_MAPPING_CONTAINER",
               "ROBONIX_NAV2_CONTAINER",
               "ROBONIX_EXPLORE_CONTAINER",
@@ -440,31 +785,44 @@ jobs:
               "SCENE_WEB_PORT",
               "AGENT_MEMORY_DIR",
               "AGENT_MILVUS_URI",
+              "MAPPING_MAPS_DIR",
+              "SCENE_DATA_DIR",
               "ROS_DOMAIN_ID",
               "CUDA_VISIBLE_DEVICES",
               "ROBONIX_GPU_ID",
               "NVIDIA_VISIBLE_DEVICES",
               "AUDIO_MIC_DEVICE",
               "AUDIO_SPEAKER_DEVICE",
+              "SPEECH_BACKEND",
               "SCENE_GRAPH_INTERVAL_SEC",
               "SCENE_GRAPH_MIN_OBSERVATIONS",
               "RMW_IMPLEMENTATION",
               "ROBONIX_ZENOH_ROUTER",
               "ROBONIX_ZENOH_MODE",
               "ROBONIX_ZENOH_LISTEN",
+              "VLM_BASE_URL",
+              "VLM_API_KEY",
+              "VLM_MODEL",
           ]
-          env_block = "\n".join(f"  {key}: {os.environ[key]!r}" for key in env_keys)
-          text = text.replace("env:\n\n# boot", f"env:\n{env_block}\n\n# boot")
-          replacements = {
-              "0.0.0.0:50051": f"0.0.0.0:{os.environ['ATLAS_PORT']}",
-              "127.0.0.1:50051": f"127.0.0.1:{os.environ['ATLAS_PORT']}",
-              "127.0.0.1:50061": f"127.0.0.1:{os.environ['EXECUTOR_PORT']}",
-              "127.0.0.1:50071": f"127.0.0.1:{os.environ['PILOT_PORT']}",
-              "127.0.0.1:50081": f"127.0.0.1:{os.environ['LIAISON_PORT']}",
-          }
-          for old, new in replacements.items():
-              text = text.replace(old, new)
-          Path("robonix_manifest.ci.generated.yaml").write_text(text)
+          manifest = yaml.safe_load(Path("robonix_manifest.yaml").read_text())
+          env = manifest.setdefault("env", {}) or {}
+          manifest["env"] = env
+          for key in env_keys:
+              env[key] = os.environ[key]
+          system = manifest.setdefault("system", {})
+          system.setdefault("atlas", {})["listen"] = f"0.0.0.0:{os.environ['ATLAS_PORT']}"
+          system.setdefault("executor", {})["listen"] = f"127.0.0.1:{os.environ['EXECUTOR_PORT']}"
+          system.setdefault("pilot", {})["listen"] = f"127.0.0.1:{os.environ['PILOT_PORT']}"
+          system.setdefault("pilot", {}).setdefault("vlm", {}).update({
+              "upstream": os.environ["VLM_BASE_URL"],
+              "api_key": os.environ["VLM_API_KEY"],
+              "model": os.environ["VLM_MODEL"],
+              "api_format": "openai",
+          })
+          system.setdefault("liaison", {})["listen"] = f"127.0.0.1:{os.environ['LIAISON_PORT']}"
+          Path("robonix_manifest.ci.generated.yaml").write_text(
+              yaml.safe_dump(manifest, sort_keys=False)
+          )
           PY
           # boot is the deploy supervisor (foreground); run it detached and poll
           # atlas until the expected providers register. ROS talks to the sim
@@ -563,6 +921,64 @@ jobs:
           } | tee -a "$RUNNER_TEMP/sim-logs/map-readiness.txt"
           exit 1
 
+      - name: Wait for scene object detection
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          scene_url="http://127.0.0.1:${SCENE_WEB_PORT}/api/state"
+          state_file="$RUNNER_TEMP/sim-logs/scene-state-readiness.json"
+          echo "waiting for a real non-robot scene object before scenario execution: ${scene_url}"
+          for _ in $(seq 1 180); do
+            if curl -fsS --max-time 2 "$scene_url" -o "$state_file"; then
+              if python3 - "$state_file" <<'SCENE_READY_PY'
+          import json, sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              state = json.load(f)
+          objects = state.get("objects") or []
+          real = []
+          for obj in objects:
+              cls = str(obj.get("cls") or obj.get("label") or "").strip().lower()
+              oid = str(obj.get("id") or "")
+              if cls and cls != "robot" and oid.startswith("scene.object."):
+                  real.append(obj)
+          if not real:
+              sys.exit(1)
+          print(json.dumps([
+              {
+                  "id": o.get("id"),
+                  "cls": o.get("cls") or o.get("label"),
+                  "confidence": o.get("confidence"),
+                  "observation_count": o.get("observation_count"),
+                  "pose": o.get("pose"),
+              }
+              for o in real[:8]
+          ], ensure_ascii=False))
+          SCENE_READY_PY
+              then
+                echo "scene object readiness confirmed"
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+
+          echo "::error::scene did not expose a non-robot object before scenario execution"
+          {
+            echo "=== latest /api/state ==="
+            cat "$state_file" || true
+            echo
+            echo "=== scene.log tail ==="
+            tail -260 "examples/webots/rbnx-boot/logs/scene.log" || true
+            echo
+            echo "=== final caps ==="
+            rbnx caps -v --server "$ROBONIX_CI_ATLAS" || true
+            echo
+            echo "=== rbnx boot tail ==="
+            tail -240 "$RUNNER_TEMP/rbnx-boot.log" || true
+          } | tee -a "$RUNNER_TEMP/sim-logs/scene-readiness.txt"
+          exit 1
+
       - name: Run scenario suite
         id: scenarios
         run: |
@@ -572,6 +988,98 @@ jobs:
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out"
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate boot/shutdown lifecycle
+        # boot → shutdown → re-boot. Proves the runtime keeps
+        # state under <manifest-dir>/rbnx-boot/ (not ~/.robonix/), that
+        # Soma package children are stopped cleanly, and that the stack
+        # can come back up after a clean teardown (the issue #128
+        # regression). The second boot reuses the per-run sim container;
+        # the validator does NOT start a new webots instance. CI leaves
+        # the second boot running so the next step can exercise scenarios
+        # against the restarted stack; the final cleanup step shuts it down.
+        working-directory: examples/webots
+        env:
+          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
+        run: |
+          set -euo pipefail
+          milvus_lock="$(dirname "$AGENT_MILVUS_URI")/.$(basename "$AGENT_MILVUS_URI").lock"
+          export ROBONIX_LIFECYCLE_RESET_PATHS="${MAPPING_MAPS_DIR}:${SCENE_DATA_DIR}:${AGENT_MEMORY_DIR}:${AGENT_MILVUS_URI}:${milvus_lock}"
+          python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
+            --rbnx rbnx \
+            --manifest robonix_manifest.ci.generated.yaml \
+            --server "$ROBONIX_CI_ATLAS" \
+            --sim-container "$ROBONIX_SIM_CONTAINER" \
+            --leave-running \
+            --log-dir "$RUNNER_TEMP/lifecycle-logs" | tee "$RUNNER_TEMP/lifecycle.out"
+
+      - name: Re-run scenario suite after lifecycle validator
+        # After the validator re-boots the stack, run the scenarios one
+        # more time so the report covers both a fresh boot and a
+        # post-shutdown boot. This is what actually exercises the
+        # "restart doesn't crash" fix — the original suite proved
+        # boot-once, this proves boot-after-shutdown.
+        working-directory: examples/webots
+        run: |
+          set -euo pipefail
+          export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
+          # Wait for atlas to settle (the validator just re-booted
+          # everything; reuse the same caps wait).
+          for i in $(seq 1 60); do
+            if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.post-restart.txt" 2>&1 \
+              && grep -q "robonix/service/navigation/navigate" "$RUNNER_TEMP/caps.post-restart.txt" \
+              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
+              echo "post-restart atlas ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "::error::atlas not ready after lifecycle reboot"
+              tail -120 "$RUNNER_TEMP/caps.post-restart.txt" || true
+              exit 1
+            fi
+            sleep 5
+          done
+          # The restart suite is an independent pass over the same scenario set.
+          # save_map is intentionally immutable, so remove the first suite's
+          # test-only saved map before exercising save_map again. Do not touch
+          # the live Webots/RTAB-Map session database (webots_lab).
+          if [ -d "${MAPPING_MAPS_DIR:?}/ci_test_map" ]; then
+            docker run --rm --network none \
+              -v "$MAPPING_MAPS_DIR:/maps:rw" \
+              busybox:latest sh -lc 'rm -rf /maps/ci_test_map' \
+              || sudo -n rm -rf "$MAPPING_MAPS_DIR/ci_test_map" \
+              || rm -rf "$MAPPING_MAPS_DIR/ci_test_map"
+          fi
+          # The fake VLM keeps per-scenario pending-step state so it can avoid
+          # duplicate calls while one RTDL batch is still executing. The first
+          # suite and the post-lifecycle suite are independent test runs, so
+          # restart the deterministic planner before the second suite.
+          if [ -n "${FAKE_VLM_PID:-}" ]; then
+            kill "$FAKE_VLM_PID" 2>/dev/null || true
+          fi
+          for _ in $(seq 1 30); do
+            if ! curl -fsS --noproxy '*' "http://127.0.0.1:${FAKE_VLM_PORT}/v1/models" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.2
+          done
+          echo "[fake-vlm] --- restart after lifecycle validator ---" >>"$RUNNER_TEMP/fake_vlm.log"
+          python3 "$GITHUB_WORKSPACE/testing/fake_vlm/server.py" \
+            --port "$FAKE_VLM_PORT" >>"$RUNNER_TEMP/fake_vlm.log" 2>&1 &
+          export FAKE_VLM_PID="$!"
+          echo "FAKE_VLM_PID=$FAKE_VLM_PID" >> "$GITHUB_ENV"
+          for i in $(seq 1 20); do
+            curl -fsS --noproxy '*' "http://127.0.0.1:${FAKE_VLM_PORT}/v1/models" >/dev/null 2>&1 && break
+            if [ "$i" -eq 20 ]; then
+              echo "::error::fake VLM did not restart after lifecycle validator"
+              tail -120 "$RUNNER_TEMP/fake_vlm.log" || true
+              exit 1
+            fi
+            sleep 0.5
+          done
+          python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
+            --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \
+            | tee "$RUNNER_TEMP/scenarios.restart.out"
 
       - name: Capture runtime logs
         if: always()
@@ -660,14 +1168,20 @@ jobs:
               sleep 1
             done
             if [ -n "$xnum" ] && [ -S "/tmp/.X11-unix/X${xnum}" ]; then
-              echo "::error::stale per-run X socket remains: /tmp/.X11-unix/X${xnum}"
-              exit 1
+              echo "::warning::stale per-run X socket remains after cleanup: /tmp/.X11-unix/X${xnum}"
+              ls -l "/tmp/.X11-unix/X${xnum}" || true
             fi
           fi
           docker volume ls -q --filter "name=ci-${RUN_ID}_" | while read -r vid; do
             [ -n "$vid" ] || continue
             docker volume rm -f "$vid" >/dev/null 2>&1 || true
           done
+
+      - name: Prepare self-contained report viewer assets
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 testing/prepare_report_assets.py --asset-dir "$RUNNER_TEMP/report-assets"
 
       - name: Generate test report
         if: always()
@@ -677,6 +1191,7 @@ jobs:
           REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
           REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
           REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+          REPORT_PR_BASE_REF: ${{ inputs.pr_base_ref || github.event.pull_request.base.ref || '' }}
           REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
           REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
           REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
@@ -782,6 +1297,7 @@ jobs:
               "pr_author": env("REPORT_PR_AUTHOR"),
               "pr_url": env("REPORT_PR_URL"),
               "pr_head_ref": env("REPORT_PR_HEAD_REF"),
+              "pr_base_ref": env("REPORT_PR_BASE_REF"),
               "pr_head_repo": env("REPORT_PR_HEAD_REPO"),
               "pr_head_sha": env("REPORT_PR_HEAD_SHA"),
               "pr_head_commit_url": env("PR_HEAD_COMMIT_URL"),
@@ -819,6 +1335,7 @@ jobs:
             --metadata-json "$RUNNER_TEMP/report-metadata.json" \
             --log-root "testing/logs=$GITHUB_WORKSPACE/testing/logs" \
             --log-root "boot_logs=$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs" \
+            --log-root "lifecycle_logs=$RUNNER_TEMP/lifecycle-logs" \
             --log-root "cache_provider_logs=$cache_log_dir" \
             --log-root "provider_logs=$GITHUB_WORKSPACE/examples/webots/logs" \
             --log-root "scene_logs=$GITHUB_WORKSPACE/system/scene/logs" \
@@ -839,6 +1356,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=$pr_head_commit_url" \
@@ -886,6 +1404,12 @@ jobs:
             ${{ runner.temp }}/rbnx-boot.log
             ${{ runner.temp }}/cache-provider-logs/
             ${{ runner.temp }}/sim-logs/
+            ${{ runner.temp }}/lifecycle.out
+            ${{ runner.temp }}/lifecycle-logs/
+            ${{ runner.temp }}/scenarios.out
+            ${{ runner.temp }}/scenarios.restart.out
+            examples/webots/rbnx-boot/logs/lifecycle-*.log
+            examples/webots/rbnx-boot/processes.json
           if-no-files-found: ignore
 
   report:
@@ -902,6 +1426,7 @@ jobs:
       REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
       REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
       REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+      REPORT_PR_BASE_REF: ${{ inputs.pr_base_ref || github.event.pull_request.base.ref || '' }}
       REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
       REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
       REPORT_TEST_REF: ${{ inputs.ref || github.ref }}
@@ -919,6 +1444,11 @@ jobs:
           pattern: testing-logs-*
           path: dl
           merge-multiple: true
+
+      - name: Prepare self-contained report viewer assets
+        run: |
+          set -euo pipefail
+          python3 testing/prepare_report_assets.py --asset-dir "$RUNNER_TEMP/report-assets"
 
       - name: Build Webots HTML report
         run: |
@@ -945,6 +1475,7 @@ jobs:
             --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_base_ref=${REPORT_PR_BASE_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
             --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
             --metadata "pr_head_commit_url=${pr_head_commit_url}" \
@@ -965,37 +1496,43 @@ jobs:
   publish_report:
     name: Publish Webots report site
     needs: report
-    if: >-
-      always() &&
-      (inputs.authorized == true ||
-       github.event_name == 'push' ||
-       github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'workflow_call')
+    if: always()
     runs-on: ubuntu-22.04
     permissions:
       contents: write
       actions: read
-      pages: write
-      id-token: write
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.publish_url.outputs.report_url }}
     outputs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
-      REPORTS_BRANCH: robonix-ci-reports
+      REPORTS_REPOSITORY: syswonder/robonix-ci-reports
+      REPORTS_BRANCH: main
+      REPORT_BASE_URL: https://syswonder.github.io/robonix-ci-reports
+      PUBLISH_REPORT_SITE: >-
+        ${{ inputs.authorized == true ||
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'workflow_call' }}
     steps:
+      - name: Mark Pages publish skipped for pull request
+        if: env.PUBLISH_REPORT_SITE != 'true'
+        run: |
+          set -euo pipefail
+          echo "Pages publishing is skipped for this pull_request event, but the required job succeeds."
+          echo "Download the testing-report-${GITHUB_RUN_ID} artifact for the generated HTML report." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout repository for report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
 
       - name: Download generated report
+        if: env.PUBLISH_REPORT_SITE == 'true'
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -1003,27 +1540,52 @@ jobs:
           path: report-dl
           merge-multiple: true
 
+      - name: Configure report repository deploy key
+        if: env.PUBLISH_REPORT_SITE == 'true'
+        env:
+          ROBONIX_REPORTS_DEPLOY_KEY: ${{ secrets.ROBONIX_REPORTS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROBONIX_REPORTS_DEPLOY_KEY:-}" ]; then
+            echo "ROBONIX_REPORTS_DEPLOY_KEY is required to publish reports to ${REPORTS_REPOSITORY}" >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ROBONIX_REPORTS_DEPLOY_KEY" > ~/.ssh/robonix_reports
+          chmod 600 ~/.ssh/robonix_reports
+          cat > ~/.ssh/config <<'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/robonix_reports
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
       - name: Restore report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf "$REPORT_SITE_DIR"
-          if git ls-remote --exit-code origin "refs/heads/${REPORTS_BRANCH}" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "${REPORTS_BRANCH}"
-            git worktree add --detach "$REPORT_SITE_DIR" FETCH_HEAD
+          if git ls-remote --exit-code "https://github.com/${REPORTS_REPOSITORY}.git" "refs/heads/${REPORTS_BRANCH}" >/dev/null 2>&1; then
+            git clone --depth=1 --branch "${REPORTS_BRANCH}" \
+              "https://github.com/${REPORTS_REPOSITORY}.git" "$REPORT_SITE_DIR"
           else
             mkdir -p "$REPORT_SITE_DIR"
             git -C "$REPORT_SITE_DIR" init -b "${REPORTS_BRANCH}"
-            git -C "$REPORT_SITE_DIR" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+            git -C "$REPORT_SITE_DIR" remote add origin "git@github.com:${REPORTS_REPOSITORY}.git"
           fi
 
       - name: Stage report site
+        if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
           report_id="${GITHUB_RUN_ID}"
           report_dir="${REPORT_SITE_DIR}/reports/runs/${report_id}"
-          expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          expected_base_url="${REPORT_BASE_URL}"
           expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
           rm -rf "$report_dir"
           mkdir -p "$report_dir" "${REPORT_SITE_DIR}/reports" report-dl
@@ -1049,41 +1611,101 @@ jobs:
           echo "report_url=${expected_report_url}" >> "$GITHUB_OUTPUT"
 
       - name: Persist report history
+        if: env.PUBLISH_REPORT_SITE == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git -C "$REPORT_SITE_DIR" config user.name "github-actions[bot]"
           git -C "$REPORT_SITE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          work_tree="$(mktemp -d)"
+          rsync -a --exclude='.git' "$REPORT_SITE_DIR"/ "$work_tree"/
+          rm -rf "$REPORT_SITE_DIR"
+          mkdir -p "$REPORT_SITE_DIR"
+          git -C "$REPORT_SITE_DIR" init -b "${REPORTS_BRANCH}"
+          git -C "$REPORT_SITE_DIR" remote add origin "git@github.com:${REPORTS_REPOSITORY}.git"
+          git -C "$REPORT_SITE_DIR" config user.name "github-actions[bot]"
+          git -C "$REPORT_SITE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rsync -a "$work_tree"/ "$REPORT_SITE_DIR"/
           git -C "$REPORT_SITE_DIR" add -A
           if git -C "$REPORT_SITE_DIR" diff --cached --quiet; then
             echo "report history unchanged"
             exit 0
           fi
           git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
-          git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
-          git -C "$REPORT_SITE_DIR" remote set-url origin \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.REPORT_SITE_DIR }}
-
-      - name: Deploy Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          git -C "$REPORT_SITE_DIR" push --force origin "HEAD:${REPORTS_BRANCH}"
 
       - name: Set report URL
         id: publish_url
+        if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
-          page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          page_url="${REPORT_BASE_URL}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
+
+      - name: Probe report Pages URL
+        if: env.PUBLISH_REPORT_SITE == 'true'
+        env:
+          REPORT_URL: ${{ steps.publish_url.outputs.report_url }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsSI "$REPORT_URL" >/dev/null; then
+              exit 0
+            fi
+            echo "report URL is not ready yet: ${REPORT_URL} (attempt ${attempt}/30)"
+            sleep 10
+          done
+          echo "::warning::report URL is not reachable yet; GitHub Pages may still be building: ${REPORT_URL}"
+          echo "Report URL is not reachable yet; GitHub Pages may still be building: ${REPORT_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record Pages deployment status
+        if: env.PUBLISH_REPORT_SITE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_URL: ${{ steps.publish_url.outputs.report_url }}
+        run: |
+          set -euo pipefail
+          page_url="${REPORT_BASE_URL}/"
+          deployment_payload="$(mktemp)"
+          status_payload="$(mktemp)"
+          jq -n \
+            --arg ref "${GITHUB_SHA}" \
+            --arg env "robonix-ci-reports" \
+            --arg desc "Robonix Webots report site" \
+            '{
+              ref: $ref,
+              environment: $env,
+              description: $desc,
+              auto_merge: false,
+              required_contexts: []
+            }' > "$deployment_payload"
+          if ! deployment_id="$(
+            gh api \
+              -X POST \
+              "repos/${GITHUB_REPOSITORY}/deployments" \
+              --input "$deployment_payload" \
+              --jq ".id"
+          )"; then
+            echo "::warning::unable to create deployment status record for report site; skipping GitHub deployment metadata"
+            echo "Skipped GitHub deployment metadata for the report site because the workflow token cannot create deployments." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -n \
+            --arg state "success" \
+            --arg target_url "$REPORT_URL" \
+            --arg environment_url "$page_url" \
+            --arg desc "Robonix Webots report is published." \
+            '{
+              state: $state,
+              target_url: $target_url,
+              environment_url: $environment_url,
+              description: $desc
+            }' > "$status_payload"
+          if ! gh api \
+            -X POST \
+            "repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses" \
+            --input "$status_payload" >/dev/null; then
+            echo "::warning::unable to update deployment status for report site; report was still published"
+            echo "Skipped GitHub deployment status update for the report site because the workflow token cannot update deployments." >> "$GITHUB_STEP_SUMMARY"
+          fi

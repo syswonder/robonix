@@ -5,6 +5,12 @@ set -e
 # Usage: ./upload.sh [registry] [tag]
 # Example: ./upload.sh docker.io/username/robonix_ros latest
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/docker_base_image.sh"
+ROBONIX_ROS_DEV_BASE_IMAGE="${ROBONIX_ROS_DEV_BASE_IMAGE:-robonix-osrf-ros:humble-desktop}"
+
 # Default values
 DEFAULT_REGISTRY="docker.io"
 DEFAULT_IMAGE_NAME="robonix_ros"
@@ -34,7 +40,8 @@ echo "[*] Building Docker image..."
 echo "[*] Image: $FULL_IMAGE_NAME"
 
 # Build the image
-docker build -t $FULL_IMAGE_NAME .
+robonix_ensure_local_base_image "$ROBONIX_ROS_DEV_BASE_IMAGE" "osrf/ros:humble-desktop"
+docker build --pull=false --build-arg "ROS_BASE_IMAGE=$ROBONIX_ROS_DEV_BASE_IMAGE" -t "$FULL_IMAGE_NAME" "$SCRIPT_DIR"
 
 # Also tag as latest if a specific tag was provided
 if [ "$TAG" != "latest" ]; then

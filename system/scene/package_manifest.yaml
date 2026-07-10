@@ -28,6 +28,8 @@ package:
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
+stop: docker rm -f "${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
+
 capabilities:
   - name: robonix/system/scene/list_objects
   - name: robonix/system/scene/goal_near

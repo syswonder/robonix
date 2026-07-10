@@ -92,32 +92,134 @@ def value_for_capture(name: str, spec: dict) -> Any:
     return f"simulated-{name}"
 
 
-def assign_path(root: dict, path: str, value: Any, where: dict | None = None) -> None:
-    if path.startswith("$."):
-        path = path[2:]
+def _set_path(root: dict, path: str, value: Any) -> None:
+    if path == "$":
+        if isinstance(value, dict):
+            root.update(value)
+        return
+    if not path.startswith("$."):
+        return
     cur: Any = root
-    tokens = path.split(".") if path else []
+    tokens = path[2:].split(".")
     for token in tokens[:-1]:
         if token.endswith("[]"):
             key = token[:-2]
-            item = dict(where or {})
-            if "label_not" in item:
-                item["label"] = "table"
-                item.pop("label_not", None)
-            if "id_prefix" in item:
-                item["id"] = f"{item.pop('id_prefix')}simulated_001"
-            cur.setdefault(key, [item])
+            cur.setdefault(key, [{}])
             cur = cur[key][0]
         else:
             cur = cur.setdefault(token, {})
-    if not tokens:
-        return
     last = tokens[-1]
     if last.endswith("[]"):
-        key = last[:-2]
-        cur.setdefault(key, [value])
-    elif isinstance(cur, dict):
+        cur.setdefault(last[:-2], [value])
+    else:
         cur[last] = value
+
+
+def _ensure_array(root: dict, path: str) -> list:
+    if not path.startswith("$.") or not path.endswith("[]"):
+        return []
+    cur: Any = root
+    tokens = path[2:-2].split(".")
+    for token in tokens[:-1]:
+        cur = cur.setdefault(token, {})
+    return cur.setdefault(tokens[-1], [])
+
+
+def _value_for_predicate(path: str, op: str, expected: Any) -> Any:
+    key = path.rsplit(".", 1)[-1]
+    if op == "starts_with":
+        return f"{expected}simulated_001"
+    if op == "contains":
+        return f"simulated-{expected}-value"
+    if op == "regex":
+        return "simulated"
+    if op == "ne":
+        if expected == "robot":
+            return "table"
+        return "simulated"
+    if op in {"gt", "gte"}:
+        return float(expected or 0) + 1.0
+    if op in {"lt", "lte"}:
+        return float(expected or 1) - 1.0
+    if op in {"in", "eq"}:
+        if isinstance(expected, list):
+            return expected[0] if expected else "simulated"
+        return expected
+    if key == "id":
+        return "scene.object.simulated_001"
+    if key == "label":
+        return "table"
+    return "simulated"
+
+
+def _apply_predicate_to_item(item: dict, expr: Any) -> None:
+    if not isinstance(expr, dict):
+        return
+    if "all" in expr or "any" in expr:
+        for child in expr.get("all") or expr.get("any") or []:
+            _apply_predicate_to_item(item, child)
+        return
+    if "not" in expr:
+        return
+    path = str(expr.get("path", "$"))
+    if not path.startswith("$."):
+        return
+    key = path[2:]
+    if "." in key or key.endswith("[]"):
+        return
+    item[key] = _value_for_predicate(path, str(expr.get("op", "exists")), expr.get("value"))
+
+
+def _sample_item_for_where(where: Any) -> dict:
+    item = {"id": "scene.object.simulated_001", "label": "table"}
+    _apply_predicate_to_item(item, where)
+    return item
+
+
+def _satisfy_check(root: dict, check: dict) -> None:
+    select = str(check.get("select", "$"))
+    assertion = check.get("assert", {"op": "exists"})
+    if select.endswith("[]"):
+        array = _ensure_array(root, select)
+        where = check.get("where")
+        if not array or (where is not None and not any(scenario_run.check_expr(item, where) for item in array)):
+            array.append(_sample_item_for_where(where))
+        return
+    if isinstance(assertion, dict) and assertion.get("op") == "min_length":
+        current = scenario_run.select_json_values(root, select)
+        if not current or not hasattr(current[0], "__len__") or len(current[0]) < int(assertion.get("value", 1)):
+            _set_path(root, select, [{}])
+    elif isinstance(assertion, dict) and assertion.get("op") not in {None, "exists"}:
+        _set_path(root, select, _value_for_predicate(select, str(assertion.get("op")), assertion.get("value")))
+    else:
+        _set_path(root, select, "simulated")
+
+
+def _satisfy_capture(root: dict, name: str, spec: dict) -> None:
+    if "select" not in spec:
+        return
+    select = str(spec.get("select", "$"))
+    value = value_for_capture(name, spec)
+    if select.endswith("[]"):
+        array = _ensure_array(root, select)
+        item = _sample_item_for_where(spec.get("where"))
+        path = str(spec.get("path", "$"))
+        if path.startswith("$.") and "." not in path[2:] and not path.endswith("[]"):
+            item[path[2:]] = value
+        if not array:
+            array.append(item)
+        else:
+            array[0].update(item)
+    else:
+        path = str(spec.get("path", "$"))
+        if path == "$":
+            _set_path(root, select, value)
+        elif select == "$":
+            _set_path(root, path, value)
+        else:
+            container: dict[str, Any] = {}
+            _set_path(container, path, value)
+            _set_path(root, select, container)
 
 
 def synthetic_text_for_regex(pattern: str) -> str:
@@ -150,22 +252,30 @@ def output_for_expect(expect: dict) -> tuple[str, str]:
     if "text_equals" in output_clause:
         return str(output_clause["text_equals"]), ""
     if "text_regex" in output_clause:
-        return synthetic_text_for_regex(str(output_clause["text_regex"])), ""
+        text = synthetic_text_for_regex(str(output_clause["text_regex"]))
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            value = {}
+        if isinstance(value, dict):
+            for check in output_clause.get("checks", []) or []:
+                if isinstance(check, dict):
+                    _satisfy_check(value, check)
+            for name, spec in (expect.get("capture") or {}).items():
+                if isinstance(spec, dict):
+                    _satisfy_capture(value, str(name), spec)
+            if value:
+                text = json.dumps(value)
+        return text, ""
     value: dict[str, Any] = {}
     if isinstance(output_clause.get("json"), dict):
         value.update(output_clause["json"])
-    for cond in output_clause.get("jsonpath", []) or []:
-        path = str(cond.get("path", ""))
-        if cond.get("min_length"):
-            assign_path(value, path, [{}])
-        elif cond.get("exists"):
-            prefix = str(cond.get("prefix", "value"))
-            assign_path(value, path, f"{prefix}simulated")
-        elif "equals" in cond:
-            assign_path(value, path, cond["equals"])
+    for check in output_clause.get("checks", []) or []:
+        if isinstance(check, dict):
+            _satisfy_check(value, check)
     for name, spec in (expect.get("capture") or {}).items():
         if isinstance(spec, dict):
-            assign_path(value, str(spec.get("jsonpath") or spec.get("field") or ""), value_for_capture(str(name), spec), spec.get("where"))
+            _satisfy_capture(value, str(name), spec)
     return json.dumps(value or {"ok": True}), ""
 
 

@@ -30,7 +30,7 @@ pkill -9 -f "speech_service\\.service" 2>/dev/null || true
 pkill -9 -f "memsearch_service\\.service" 2>/dev/null || true
 pkill -9 -f "scene_service\\.service" 2>/dev/null || true
 pkill -9 -f "audio_driver\\.node" 2>/dev/null || true
-pkill -9 -f "audio_macos_bridge\\.node" 2>/dev/null || true
+pkill -9 -f "audio_client_bridge\\.node" 2>/dev/null || true
 pkill -9 -f "simple_nav\\.atlas_bridge" 2>/dev/null || true
 pkill -9 -f "mapping_service\\.service" 2>/dev/null || true
 

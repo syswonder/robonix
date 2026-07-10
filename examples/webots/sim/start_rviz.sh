@@ -27,13 +27,13 @@ fi
 docker cp "$RVIZ_CFG_HOST" "$SIM_CT":"$RVIZ_CFG_CT" >/dev/null
 docker cp "$SCRIPT_DIR/goal_pose_relay.py" "$SIM_CT":/tmp/goal_pose_relay.py >/dev/null
 
-# goal_pose_relay: rviz "2D Goal Pose" (/goal_pose) -> navigate_to_pose,
+# goal_pose_relay: rviz "2D Goal Pose" (/rviz_goal_pose) -> navigate_to_pose,
 # zero-stamped, because rviz's goal tool stamps wall time even under
 # use_sim_time and the planner can't transform that against the sim-clock
 # TF. Launched detached (docker exec -d survives this shell); idempotent.
 docker exec "$SIM_CT" bash -lc 'pkill -f goal_pose_relay.py 2>/dev/null; true' >/dev/null 2>&1 || true
 sleep 0.3
-docker exec -d "$SIM_CT" bash -lc "source /opt/ros/humble/setup.bash; export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}; exec python3 /tmp/goal_pose_relay.py --ros-args -p use_sim_time:=true > /tmp/goal_pose_relay.log 2>&1"
+docker exec -d "$SIM_CT" bash -lc "source /opt/ros/humble/setup.bash; export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}; exec python3 /tmp/goal_pose_relay.py --ros-args -p use_sim_time:=true -p input_topic:=/rviz_goal_pose > /tmp/goal_pose_relay.log 2>&1"
 
 # Match the rest of the stack: use the same ROS 2 RMW as the sim,
 # mapping, scene, and navigation containers.

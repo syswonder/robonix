@@ -1,20 +1,20 @@
 # `system/scene` — live semantic + geometric map
 
-Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid republished from the SLAM service. Exposes 5 read-only MCP tools that Pilot calls each LLM round, and a self-contained 2D + 3D web viewer.
+Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes read-only MCP tools that Pilot calls during RTDL planning/execution, and a self-contained 2D + 3D web viewer.
 
-This service is **NOT** a memory store (see `spatial_memory_service` for episodic recall) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
+This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
 
 ## What's inside
 
 ```
 system/scene/
 ├── README.md                    ← this file
-├── package_manifest.yaml        Robonix package: 5 MCP capabilities
+├── package_manifest.yaml        Robonix package: scene MCP capabilities
 ├── docker/
 │   ├── Dockerfile               ROS Humble + torch cu124 + CV stack
 │   ├── requirements.txt         scene + concept-graphs deps
 │   ├── _weights/                pre-fetched YOLO-World + MobileSAM .pt
-│   └── no_shm_profile.xml       FastRTPS UDP-only profile
+│   └── entrypoint.sh            container runtime setup, including Zenoh RMW config
 ├── scripts/
 │   ├── build.sh                 rbnx codegen + docker build (+ weight pre-fetch)
 │   └── start.sh                 docker run wrapper used by `rbnx boot`
@@ -22,8 +22,8 @@ system/scene/
 │   ├── service.py               entrypoint: atlas register + asyncio + FastMCP
 │   ├── mcp_tools.py             5 @mcp_contract handlers (thin wrappers)
 │   ├── web.py                   2D + 3D web viewer (Starlette + three.js)
-│   ├── state/                   ObjectRegistry, data assoc, relations, snapshot
-│   ├── geom/                    pointcloud / plane extraction (Open3D)
+│   ├── state/                   ObjectRegistry, data assoc, snapshot
+│   ├── scene_graph/             relations: fast geometric loop (reachable_by) + image-grounded VLM (image_relations.py) + store
 │   ├── ingest/
 │   │   ├── ros_subscribers.py   rclpy hub: /tf2 + topic slots (rgb/depth/lidar/...)
 │   │   ├── capabilities.py      hardware probe → perception tier (metric/visual/geometric)
@@ -107,9 +107,19 @@ RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user 
 ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
 ```
 
-> Native scene shares the **host RMW** rather than forcing the container's own
-> RMW/SHM profile, so it sees the live camera / pointcloud topics the other
-> host nodes publish. Set `ROBONIX_FORCE_CPU=1` to skip CUDA.
+> Native scene uses the same ROS 2 RMW configuration as the host process. Set
+> `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
+> the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set
+> `ROBONIX_FORCE_CPU=1` to skip CUDA.
+
+## Relations (`scene_graph/`)
+
+Relations are produced **VLM-primary**: an image-grounded VLM owns the relational + semantic edges, geometry keeps only the metric robot-actionable ones. Two layers write disjoint slices of one store (`scene_graph/store.py`), composed on read by `get_snapshot()` — the shape the MCP tools (`get_scene_graph` / `list_relations` / `get_object_context`) and `/api/state` consume:
+
+- **Fast geometric loop** (`geometric_loop.py`, ~3 Hz, always on — even without VLM creds). Emits only **`reachable_by`** (a real 3D gripper→object distance the robot acts on). `near` is not an edge (proximity is served by `get_object_context.nearby_objects`). Contact/containment is **no longer** computed here: the old AABB tests misfired on full-volume boxes (couldn't fire "monitor on desk") and same-surface objects (invented "monitor on_top_of keyboard"). A debounce hysteresis band absorbs EMA pose jitter.
+- **Image-grounded VLM** (`builder.py` + `image_relations.py`, ~30 s, gated by `SCENE_GRAPH_ENABLED`). Each rebuild projects the tracked objects into the current RGB keyframe (via the perception detector's `latest_frame_bundle()` — `K` + camera→map transform), draws numbered boxes, and asks the VLM in **one multimodal call** to enumerate the relations among the numbered objects (`on_top_of` / `under` / `inside` / `contains` / `attached_to` / `part_of` / `same_object`); box numbers map back to `object_id`. Reuses the env `VLM_MODEL`/`VLM_REASONING_EFFORT`. Edge hysteresis carries prior edges across a transient empty/failed round.
+
+Why image-grounded: contact/containment is exactly where coordinate-only reasoning fails (perspective, full-volume bboxes), and a VLM reads it holistically from the image. When no camera frame bundle is available (e.g. the visual-tier VLM detector, which has no camera→map transform), the builder **falls back** to the legacy text-only per-pair inference (`SCENE_GRAPH_IMAGE_RELATIONS=false` forces this path). **Object identity must be stable for any of this to be useful** — see the merge/identity knobs below.
 
 ## Build + run
 
@@ -157,7 +167,7 @@ Pilot calls `skill/explore/explore`, polls `status` every few seconds, and lets 
 
 For interactive use: `rbnx chat`, type `explore the environment`; Esc cancels current reasoning, `Ctrl+C` exits.
 
-Within ~15 s of the explore goal landing you should see: the robot moving in rviz / Webots; 2D occupancy updating (web UI left panel); objects accumulating in the 3D panel and the scene registry (`get_snapshot` via `rbnx tools`); live RGB + depth in the cam panel (third column).
+Within ~15 s of the explore goal landing you should see: the robot moving in rviz / Webots; 2D occupancy updating (web UI left panel); objects accumulating in the 3D panel and the scene registry (`list_objects` / `get_scene_graph` via `rbnx tools`); live RGB + depth in the cam panel (third column).
 
 ### Just scene, attached to your own webots/sim
 
@@ -167,14 +177,27 @@ bash scripts/build.sh                # one-time
 bash scripts/start.sh                # docker run, stays foreground
 ```
 
-scene's container joins the host DDS bus (`--network host` + FastRTPS UDP-only) and auto-discovers any provider on atlas declaring a ROS2 `topic_out` interface. Required topics:
+Scene auto-discovers data providers from Atlas. At startup it walks the fixed
+contract list in `scene_service/service.py` (`_SCENE_CONTRACTS`), asks Atlas for
+providers that implement those contracts, connects to their ROS 2 `topic_out`
+interfaces, and subscribes only to what the deployment actually exposes.
 
-* RGB image (`sensor_msgs/Image`)
-* Depth registered to RGB (`sensor_msgs/Image`, 32FC1 metres or 16UC1 mm)
-* `/tf` chain ending at `head_front_camera_rgb_optical_frame` and `base_link` in `map` frame.
-* Optional: `nav_msgs/OccupancyGrid` (for the 2D underlay)
+The default RMW is Zenoh (`RMW_IMPLEMENTATION=rmw_zenoh_cpp`). For single-host
+deployments the default local router/session is used; advanced deployments can
+override it with `ROBONIX_ZENOH_ROUTER`, `ROBONIX_ZENOH_MODE`, and
+`ROBONIX_ZENOH_LISTEN`. Fast DDS can still be tested by setting
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`, but it is not the default path.
 
-If your camera frame isn't `head_front_camera_rgb_optical_frame`, override via env when starting scene:
+Useful input contracts include:
+
+* `robonix/primitive/camera/rgb` (`sensor_msgs/Image`)
+* `robonix/primitive/camera/depth` (`sensor_msgs/Image`, 32FC1 metres or 16UC1 mm)
+* `robonix/primitive/camera/intrinsics` (`sensor_msgs/CameraInfo`)
+* `robonix/primitive/camera/extrinsics` (`geometry_msgs/TransformStamped`)
+* `robonix/service/map/pose` (`geometry_msgs/PoseWithCovarianceStamped`)
+* `robonix/service/map/occupancy_grid` (`nav_msgs/OccupancyGrid`)
+
+If your camera frame is not the deployment default, override it when starting scene:
 
 ```bash
 SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
@@ -220,10 +243,20 @@ plain `humble`.
 | `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / `laion2b_s34b_b79k` | |
 | `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
+| `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
+| `SCENE_CG_CROSS_CLASS_CENTROID_MAX_M` | `0.5` | per-tick class-gate bypass radius: a detection within this of an existing object may merge despite a different class label (handles YOLO label flicker on one fixture) |
+| `SCENE_CG_CROSS_CLASS_IOU_THRESH` / `SCENE_CG_CROSS_CLASS_OVERLAP_THRESH` | `0.30` / `0.50` | periodic class-agnostic collapse: fold two records when AABB IoU ≥ first **or** one-inside-other overlap ≥ second, regardless of class/visual sim. Lower to be more aggressive on a flickering desk (`chair` vs `table` split) |
+| `SCENE_CG_MERGE_OVERLAP_THRESH` / `SCENE_CG_MERGE_VISUAL_SIM_THRESH` | `0.50` / `0.65` | periodic `merge_overlap` pass: fold pairs with pcd-overlap ≥ first **and** CLIP cosine ≥ second |
+| `SCENE_CG_SAME_CLASS_MERGE_DIST_M` | `0.4` | lenient dedup: fold two SAME-class (or same `SCENE_CG_MERGE_CLASS_GROUPS` bucket) records whose centroids are within this distance, regardless of visual sim (kills "one keyboard → three"). `0` disables |
+| `SCENE_CG_MERGE_CLASS_GROUPS` | `` | opt-in confusable-class reconciliation, e.g. `chair,table,desk;sofa,couch` — listed classes share one merge bucket so label flicker across the group collapses while distinct, distant objects stay separate. Empty = off (never relabels) |
+| `SCENE_OBJECT_TTL_SEC` | `30` | how long a soft-evicted (`missing`) object is kept so a re-detection can re-bind its id + observation_count before it is hard-pruned; decouples object identity from per-tick uuid churn |
+| `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
+| `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
 | `SCENE_MAP_ID` | `default` | SLAM map the persisted objects belong to; restore loads only this map's objects (manifest `map_id` overrides) |
+| `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
 
 ## Object memory (warm restore)
 
@@ -253,20 +286,18 @@ map identity to wire in here.
 | Contract                                       | Tool name        | What it does                                                        |
 |------------------------------------------------|------------------|---------------------------------------------------------------------|
 | `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object (id, label, x,y,z, last_seen). LLM filters client-side. |
-| `robonix/system/scene/goal_near`               | `goal_near`      | Map-frame approach pose near a registered object (id → reachable + x + y + yaw + reason). Pass to `navigation/navigate`. |
+| `robonix/system/scene/goal_near`               | `goal_near`      | Map-frame approach pose near a registered object (id -> reachable + x + y + yaw + reason). Pass to `navigation/navigate`. |
+| `robonix/system/scene/get_scene_graph`         | `get_scene_graph` | Current semantic graph nodes and relation edges. |
+| `robonix/system/scene/get_object_context`      | `get_object_context` | One object's graph context plus nearby objects and directly related edges. |
+| `robonix/system/scene/list_relations`          | `list_relations` | Relation edges, optionally filtered by relation type. |
 
-Both are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
+These are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
 
 ```bash
 curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
      -H "Accept: application/json, text/event-stream" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-         "name":"get_snapshot","arguments":{"spec":{
-             "layers":["object","relation"],"region_frame":"map",
-             "region_center_x":0,"region_center_y":0,"region_center_z":0,
-             "region_radius_m":5.0,"freshness_s":30.0,
-             "include_stale":false,"min_confidence":0.0,
-             "max_objects":50}}}}'
+         "name":"list_objects","arguments":{}}}'
 ```
 
 ## Web UI quick tour
@@ -293,6 +324,12 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 **Lots of duplicate objects across the room ("ghosting")** — lower `SCENE_CG_MERGE_THRESHOLD` (default 0.55). Or raise `SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g. big tables) that span >1.5 m.
 
+**One physical object shows as several same-class records** (e.g. one keyboard → three) — raise `SCENE_CG_SAME_CLASS_MERGE_DIST_M` so the lenient same-class proximity collapse folds them; `0` disables it.
+
+**One fixture flickers between two class labels and splits into two records** (e.g. a desk as both `chair` and `table`) — lower `SCENE_CG_CROSS_CLASS_IOU_THRESH` / `SCENE_CG_CROSS_CLASS_OVERLAP_THRESH` so the class-agnostic collapse merges them, or set `SCENE_CG_MERGE_CLASS_GROUPS=chair,table,desk` to treat those labels as one merge bucket.
+
+**Object set collapses (e.g. 9 → 1) within minutes** — a transient cleanup cull used to hard-delete records and reset `observation_count`. Records are now soft-evicted (`missing`) and re-bound by class+pose on re-detection within `SCENE_OBJECT_TTL_SEC`; raise it if objects briefly leave view longer than 30 s.
+
 **"Desk" detected on the floor** — YOLO-World mask leaked past the object's footprint and the depth points are floor. Floor-noise filter already drops detections of falling-class types if `pcd.z_max < 0.30`; adjust the floor_classes list in `perception_concept_graphs.py` if your robot has a low desk.
 
 **No detections firing** — usually a topic mismatch. Check `docker logs robonix_scene` for `auto-discover 'rgb' / 'depth'` lines; if missing, scene didn't find a cap on atlas advertising `robonix/primitive/camera/rgb` over ROS2. `rbnx caps` should list your camera primitive.
@@ -301,7 +338,6 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 - **No write API.** No `IngestObservation`, no `UpdateTaskContext`. Per the spec, scene is a sink.
 - **No subscribe-stream.** `SubscribeUpdates` doesn't fit MCP semantics. Pilot polls.
-- **No episodic memory.** Belongs to `spatial_memory_service`.
-- **No real reachability.** `reachable_by` is a distance stub.
-- **No Sentinel.** `get_safety_context` always returns `status="not_implemented"`.
+- **No episodic memory.** Long-term memory belongs to memory services, not scene.
+- **No direct motion control.** `goal_near` returns an approach pose; navigation is performed by `robonix/service/navigation/navigate`.
 - **No real Tiago URDF in the 3D viz.** The composite primitive proxy is good enough; PAL's `tiago_description` xacro chain is too heavy to ship into the browser. STLs are pre-staged under `static/urdf/meshes/` if anyone wants to wire urdf-loader-three.js.

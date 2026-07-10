@@ -46,8 +46,10 @@ docker rm -f "$CT" >/dev/null 2>&1 || true
 mkdir -p rbnx-build/data
 # Host-persisted scene state. Mounted at /data/robonix in the container so the
 # object-memory DB — and the scene-graph JSON caches, which otherwise die with
-# the --rm container — survive across boots.
-mkdir -p rbnx-build/data/robonix
+# the --rm container — survive across boots. CI sets SCENE_DATA_DIR to keep
+# semantic/object state isolated per run.
+SCENE_HOST_DATA_DIR="${SCENE_DATA_DIR:-$(pwd)/rbnx-build/data/robonix}"
+mkdir -p "$SCENE_HOST_DATA_DIR"
 
 declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
@@ -105,11 +107,22 @@ exec docker run --rm \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
+    -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \
+    -e SCENE_CG_MAX_MERGE_DIST_M="${SCENE_CG_MAX_MERGE_DIST_M:-}" \
+    -e SCENE_CG_CROSS_CLASS_CENTROID_MAX_M="${SCENE_CG_CROSS_CLASS_CENTROID_MAX_M:-}" \
+    -e SCENE_CG_CROSS_CLASS_IOU_THRESH="${SCENE_CG_CROSS_CLASS_IOU_THRESH:-}" \
+    -e SCENE_CG_CROSS_CLASS_OVERLAP_THRESH="${SCENE_CG_CROSS_CLASS_OVERLAP_THRESH:-}" \
+    -e SCENE_CG_MERGE_OVERLAP_THRESH="${SCENE_CG_MERGE_OVERLAP_THRESH:-}" \
+    -e SCENE_CG_MERGE_VISUAL_SIM_THRESH="${SCENE_CG_MERGE_VISUAL_SIM_THRESH:-}" \
+    -e SCENE_CG_SAME_CLASS_MERGE_DIST_M="${SCENE_CG_SAME_CLASS_MERGE_DIST_M:-}" \
+    -e SCENE_CG_MERGE_CLASS_GROUPS="${SCENE_CG_MERGE_CLASS_GROUPS:-}" \
+    -e SCENE_OBJECT_TTL_SEC="${SCENE_OBJECT_TTL_SEC:-}" \
     -e SCENE_PERCEPTION_WAIT_S="${SCENE_PERCEPTION_WAIT_S:-30}" \
     -e SCENE_OPEN_VOCAB_CLASSES="${SCENE_OPEN_VOCAB_CLASSES:-}" \
     -e VLM_BASE_URL="${VLM_BASE_URL:-}" \
     -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
+    -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
     -e SCENE_GRAPH_CAPTION_ENABLED="${SCENE_GRAPH_CAPTION_ENABLED:-true}" \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
@@ -126,7 +139,7 @@ exec docker run --rm \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
-    -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
+    -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
     "$IMG"

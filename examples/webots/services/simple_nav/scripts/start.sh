@@ -6,13 +6,7 @@ set -euo pipefail
 
 SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
 
-cleanup() {
-    docker exec "$SIM_CT" sh -c 'pkill -TERM -f simple_nav.atlas_bridge 2>/dev/null || true' 2>/dev/null || true
-    kill -- "-$$" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-exec docker exec -i \
+exec docker exec \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \

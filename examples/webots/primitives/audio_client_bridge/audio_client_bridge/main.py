@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Audio primitive — macOS-bridge variant.
+"""Audio primitive — audio client bridge variant.
 
 Same Capability surface as `audio_driver` (`robonix/primitive/audio/*`):
 the difference is that mic / speaker PCM doesn't go through ALSA on
 this host — it's relayed over a WebSocket to a small daemon (see
-sibling `mac_server/server.py`) running on a macOS box across the LAN.
+sibling `client_audio_server/server.py`) running on an client machine across the LAN.
 
 Wire format both directions: 16 kHz, mono, s16le PCM, ~100 ms chunks
 (3200 bytes each). Identical to `audio_driver` so liaison's voice
 pipeline never needs to know which backend is loaded.
 
 Config (RBNX_CAP_CONFIG_JSON or env fallbacks):
-  host:  IP / hostname of the macOS box running mac_server (env:
-         AUDIO_BRIDGE_HOST, default 127.0.0.1).
-  port:  TCP port the macOS daemon listens on (env: AUDIO_BRIDGE_PORT,
+  host:  IP / hostname of the client machine running client_audio_server
+         (env: AUDIO_CLIENT_SERVER_HOST, fallback AUDIO_BRIDGE_HOST,
+         default 127.0.0.1).
+  port:  TCP port the client audio device server listens on
+         (env: AUDIO_CLIENT_SERVER_PORT, fallback AUDIO_BRIDGE_PORT,
          default 60000).
 """
 from __future__ import annotations
@@ -31,18 +33,18 @@ from queue import Queue
 from robonix_api import Primitive, Ok, Err, Deferred
 from google.protobuf.empty_pb2 import Empty
 
-audio_macos_bridge = Primitive(
-    id="audio_macos_bridge",
+audio_client_bridge = Primitive(
+    id="audio_client_bridge",
     namespace="robonix/primitive/audio",
 )
-log = logging.getLogger("audio-macos-bridge")
+log = logging.getLogger("audio-client-bridge")
 
 import audio_pb2          # type: ignore  # noqa: E402  (codegen)
 
 import websockets         # type: ignore  # noqa: E402
 
 # Module-state populated by Driver(CMD_INIT). Both endpoints are
-# probed once at init so we fail loudly when the macOS daemon is
+# probed once at init so we fail loudly when the client audio device server is
 # unreachable rather than letting the first mic/speaker call be the
 # discovery moment.
 bridge_host: str | None = None
@@ -59,7 +61,7 @@ def _ws_url(path: str) -> str:
 
 
 def _ws_connect(path: str, **kwargs):
-    """Open a WebSocket to the macOS daemon, always DIRECTLY (never via a proxy).
+    """Open a WebSocket to the client audio device server, always DIRECTLY (never via a proxy).
 
     websockets >= 14 auto-reads all_proxy / http_proxy / https_proxy from the
     environment and tunnels ws:// through it. On a host with all_proxy set (this
@@ -71,10 +73,10 @@ def _ws_connect(path: str, **kwargs):
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
-@audio_macos_bridge.grpc("robonix/primitive/audio/mic")
+@audio_client_bridge.grpc("robonix/primitive/audio/mic")
 def mic_stream(request, context):
     """Server-streaming mic capture — proxies frames coming off the
-    macOS daemon's `/mic` WebSocket as AudioChunk messages.
+    client audio device server's `/mic` WebSocket as AudioChunk messages.
 
     A dedicated asyncio loop runs in a worker thread and shoves binary
     frames into a thread-safe queue; the gRPC handler (sync, called by
@@ -84,7 +86,7 @@ def mic_stream(request, context):
     to live behind a thread boundary."""
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      "macos bridge not initialized — Driver(CMD_INIT) failed or never ran")
+                      "audio client bridge not initialized — Driver(CMD_INIT) failed or never ran")
         return
 
     log.info("mic stream client connected → relaying %s", _ws_url("/mic"))
@@ -135,10 +137,10 @@ def mic_stream(request, context):
         log.info("mic stream client disconnected")
 
 
-@audio_macos_bridge.grpc("robonix/primitive/audio/speaker")
+@audio_client_bridge.grpc("robonix/primitive/audio/speaker")
 def speaker_stream(request_iterator, context):
     """Client-streaming playback — pipes incoming AudioChunk.data to
-    the macOS daemon's `/speaker` WebSocket. Same threading dance as
+    the client audio device server's `/speaker` WebSocket. Same threading dance as
     `mic_stream` but in reverse: the gRPC iterator hands frames to a
     queue, the asyncio coroutine drains the queue and writes them to
     the WebSocket.
@@ -149,7 +151,7 @@ def speaker_stream(request_iterator, context):
     utterances serialized even when Liaison speaks sentence by sentence."""
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      "macos bridge not initialized")
+                      "audio client bridge not initialized")
         return Empty()
 
     log.info("speaker stream client waiting for playback lock")
@@ -157,6 +159,7 @@ def speaker_stream(request_iterator, context):
         log.info("speaker stream client connected → relaying %s", _ws_url("/speaker"))
         q: Queue = Queue(maxsize=64)
         done = threading.Event()
+        pump_error: list[str] = []
 
         async def pump() -> None:
             try:
@@ -167,7 +170,9 @@ def speaker_stream(request_iterator, context):
                             break
                         await ws.send(frame)
             except Exception as e:  # noqa: BLE001
-                log.warning("speaker ws closed: %s", e)
+                msg = str(e) or e.__class__.__name__
+                pump_error.append(msg)
+                log.warning("speaker ws closed: %s", msg)
             finally:
                 done.set()
 
@@ -188,7 +193,14 @@ def speaker_stream(request_iterator, context):
             q.put(None)
             # Give the websocket a moment to drain; don't block forever in
             # case the server side already went away.
-            done.wait(timeout=10.0)
+            if not done.wait(timeout=10.0):
+                context.abort(__import__("grpc").StatusCode.DEADLINE_EXCEEDED,
+                              "speaker websocket did not drain before timeout")
+                return Empty()
+            if pump_error:
+                context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
+                              f"speaker websocket failed: {pump_error[-1]}")
+                return Empty()
             playback_s = total_bytes / float(SAMPLE_RATE * 2)
             if playback_s > 0:
                 time.sleep(min(playback_s + 0.15, 30.0))
@@ -198,14 +210,14 @@ def speaker_stream(request_iterator, context):
 
 # ── device list / select ───────────────────────────────────────────────────
 #
-# Both forward to the macOS daemon's existing /devices and /set_device
+# Both forward to the client audio device server's existing /devices and /set_device
 # WebSocket endpoints (one-shot JSON request/response). The daemon already
 # tracks current_input/output_device; the bridge just shape-shifts JSON
 # into the AudioDevice / Select…Response protobuf types so consumers
 # (rbnx chat audio settings page) see the same surface as audio_driver.
 
 def _ws_request(path: str, body: object | None = None, timeout_s: float = 3.0):
-    """Open a one-shot WS to the mac_server, optionally send a JSON body,
+    """Open a one-shot WS to the client_audio_server, optionally send a JSON body,
     receive one JSON response, close. Sync wrapper around the asyncio API
     so the gRPC servicer thread doesn't have to learn asyncio."""
     async def go():
@@ -217,17 +229,17 @@ def _ws_request(path: str, body: object | None = None, timeout_s: float = 3.0):
     return asyncio.run(go())
 
 
-@audio_macos_bridge.grpc("robonix/primitive/audio/list_devices")
+@audio_client_bridge.grpc("robonix/primitive/audio/list_devices")
 def list_devices(request, context):
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      "macos bridge not initialized")
+                      "audio client bridge not initialized")
         return audio_pb2.ListAudioDevices_Response()
     try:
         payload = _ws_request("/devices")
     except Exception as e:  # noqa: BLE001
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      f"mac_server /devices unreachable: {e}")
+                      f"client_audio_server /devices unreachable: {e}")
         return audio_pb2.ListAudioDevices_Response()
 
     devs = []
@@ -266,26 +278,26 @@ def list_devices(request, context):
     )
 
 
-@audio_macos_bridge.grpc("robonix/primitive/audio/select_device")
+@audio_client_bridge.grpc("robonix/primitive/audio/select_device")
 def select_device(request, context):
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      "macos bridge not initialized")
+                      "audio client bridge not initialized")
         return audio_pb2.SelectAudioDevice_Response()
     kind = (request.kind or "").lower()
     if kind not in ("input", "output"):
         return audio_pb2.SelectAudioDevice_Response(
             ok=False, error=f"kind must be 'input' or 'output', got '{kind}'")
-    # mac_server expects integer ids; normalise back from the wire string.
+    # client_audio_server expects integer ids; normalise back from the wire string.
     raw_id = request.id
     sent_id: int | str | None
     if raw_id == "":
-        sent_id = None  # mac_server falls back to OS default
+        sent_id = None  # client_audio_server falls back to OS default
     else:
         try:
             sent_id = int(raw_id)
         except ValueError:
-            sent_id = raw_id  # forward as string; mac_server will reject if bad
+            sent_id = raw_id  # forward as string; client_audio_server will reject if bad
     body = {kind: sent_id}
     try:
         payload = _ws_request("/set_device", body)
@@ -298,16 +310,24 @@ def select_device(request, context):
 
 
 # ── driver-init lifecycle ──────────────────────────────────────────────────
-@audio_macos_bridge.on_init
+@audio_client_bridge.on_init
 def init(cfg):
-    """Read host/port from cfg + env, probe the macOS daemon's `/health`
+    """Read host/port from cfg + env, probe the client audio device server's `/health`
     endpoint once. Refuse to come up if it's unreachable — atlas defers
     instead of advertising dead interfaces, and consumers see a clear
     error rather than mysteriously empty mic streams."""
     global bridge_host, bridge_port
 
-    bridge_host = (cfg.get("host") or os.environ.get("AUDIO_BRIDGE_HOST", "127.0.0.1")).strip()
-    bridge_port = int(cfg.get("port") or os.environ.get("AUDIO_BRIDGE_PORT", "60000"))
+    bridge_host = (
+        cfg.get("host")
+        or os.environ.get("AUDIO_CLIENT_SERVER_HOST")
+        or os.environ.get("AUDIO_BRIDGE_HOST", "127.0.0.1")
+    ).strip()
+    bridge_port = int(
+        cfg.get("port")
+        or os.environ.get("AUDIO_CLIENT_SERVER_PORT")
+        or os.environ.get("AUDIO_BRIDGE_PORT", "60000")
+    )
 
     log.info("connecting probe → ws://%s:%d/health", bridge_host, bridge_port)
 
@@ -322,15 +342,20 @@ def init(cfg):
     result = asyncio.run(probe())
     if result is None or (isinstance(result, str) and result.startswith("error:")):
         return Err(
-            f"macos bridge unreachable at ws://{bridge_host}:{bridge_port}/health "
-            f"({result}). Start `mac_server/server.py` on the macOS host first."
+            f"audio client bridge unreachable at ws://{bridge_host}:{bridge_port}/health "
+            f"({result}). Start `client_audio_server/server.py` on the macOS host first."
         )
     log.info("bridge healthy: %s", result)
     return Ok()
 
 
+@audio_client_bridge.on_shutdown
+def shutdown():
+    return Ok()
+
+
 def main() -> int:
-    audio_macos_bridge.run()
+    audio_client_bridge.run()
     return 0
 
 

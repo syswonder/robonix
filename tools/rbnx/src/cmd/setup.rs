@@ -24,10 +24,7 @@ fn find_root_upwards(start: &Path) -> Option<PathBuf> {
         if looks_like_robonix_root(cur) {
             return Some(cur.to_path_buf());
         }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => return None,
-        }
+        cur = cur.parent()?;
     }
 }
 

@@ -47,6 +47,7 @@ pub struct Manifest {
     pub package: Package,
     pub build: String,
     pub start: String,
+    pub stop: String,
     pub capabilities: Vec<CapabilityRef>,
     pub depends: Vec<DependsRef>,
     /// True iff the manifest was parsed from legacy fields (id/nodes/build.script).
@@ -64,10 +65,14 @@ pub struct Package {
     pub id: Option<String>,
     #[serde(default)]
     pub version: String,
-    #[serde(default)]
-    pub vendor: String,
+    /// Deprecated package metadata accepted for old manifests. New package
+    /// manifests should use maintainers/tags for catalog metadata.
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub maintainers: Vec<String>,
     #[serde(default)]
     pub license: String,
 }
@@ -118,6 +123,9 @@ struct RawManifest {
     /// New: top-level shell string.
     #[serde(default)]
     start: Option<String>,
+    /// Optional package-owned cleanup command, symmetric with `start`.
+    #[serde(default)]
+    stop: Option<String>,
     /// Legacy: list of nodes, each with its own `start` block.
     #[serde(default)]
     nodes: Vec<LegacyNode>,
@@ -255,6 +263,8 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
         (None, true) => String::new(),
     };
 
+    let stop = raw.stop.unwrap_or_default();
+
     if filename_is_legacy {
         is_legacy = true;
     }
@@ -264,6 +274,7 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
         package,
         build,
         start,
+        stop,
         capabilities: raw.capabilities,
         depends: raw.depends,
         is_legacy,
@@ -279,7 +290,6 @@ impl Manifest {
         for (name, val) in [
             ("package.name", &p.name),
             ("package.version", &p.version),
-            ("package.vendor", &p.vendor),
             ("package.description", &p.description),
             ("package.license", &p.license),
         ] {

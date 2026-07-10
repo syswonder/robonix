@@ -88,8 +88,11 @@ class ObjectStore:
 
     # ── schema ───────────────────────────────────────────────────────────
     def _ensure_collection(self) -> None:
-        """Create the collection + index on first run; no-op when it already
-        exists with the current composite-pk schema.
+        """Create the collection + index on first run; when it already exists
+        with the current composite-pk schema, just load it into memory —
+        milvus-lite 3.x reopens existing collections in "released" state and
+        rejects query/search until an explicit `load_collection` (2.x
+        auto-loaded, so this is a no-op there).
 
         Mirrors the field/index pattern used by system/memory's MilvusStore,
         but with an object-state schema instead of text chunks. A collection
@@ -100,6 +103,7 @@ class ObjectStore:
         recreating it just forces a one-time cold start — never a boot failure."""
         if self._client.has_collection(_COLLECTION):
             if self._schema_current():
+                self._client.load_collection(_COLLECTION)
                 return
             log.warning(
                 "[scene-persist] recreating %s — schema is outdated (missing "
