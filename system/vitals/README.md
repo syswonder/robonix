@@ -47,7 +47,7 @@ For a screen-recording-friendly end-to-end health demo, see
 
 ```bash
 # Terminal 1: Atlas
-robonix-atlas --listen 127.0.0.1:50251 --capabilities capabilities
+robonix-atlas --listen 127.0.0.1:50051 --capabilities capabilities
 
 # Terminal 2: SOMA (spawns health_piper primitive, starts health collection)
 robonix-soma --atlas 127.0.0.1:50051 \
