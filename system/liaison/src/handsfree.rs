@@ -151,6 +151,10 @@ impl HandsfreeController {
         state.state = value.to_string();
         if let Some(error) = error {
             state.last_error = error;
+        } else if value == "listening" {
+            // A connected microphone and a fresh wake listener mean an older
+            // reconnect failure is no longer actionable in the client UI.
+            state.last_error.clear();
         }
     }
 
