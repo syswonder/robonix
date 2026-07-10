@@ -59,6 +59,8 @@ done
 # Host-persisted scene state (object-memory DB + scene-graph caches).
 mkdir -p "$PKG/rbnx-build/data/robonix"
 export SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-$PKG/rbnx-build/data/robonix/scene_graph/cache}"
+export SCENE_ANNOTATIONS_DIR="${SCENE_ANNOTATIONS_DIR:-$PKG/rbnx-build/data/robonix/scene_annotations}"
+mkdir -p "$SCENE_ANNOTATIONS_DIR"
 
 # Service knobs (same defaults the docker run wires via -e).
 export SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}"
