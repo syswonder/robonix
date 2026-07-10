@@ -22,14 +22,16 @@ fi
 # so the names line up. Compensation lives here (camera primitive) — never
 # in mapping/scene.
 docker exec -d "$SIM_CT" bash -lc "
-    source /opt/ros/humble/setup.bash
+    set +u
+    source /opt/ros/humble/setup.bash >/dev/null
     export RMW_IMPLEMENTATION=\"${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}\"
     exec ros2 run tf2_ros static_transform_publisher \
         --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 \
         --frame-id 'Astra rgb' --child-frame-id head_front_camera_rgb_optical_frame
 " &>/dev/null
 docker exec -d "$SIM_CT" bash -lc "
-    source /opt/ros/humble/setup.bash
+    set +u
+    source /opt/ros/humble/setup.bash >/dev/null
     export RMW_IMPLEMENTATION=\"${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}\"
     exec ros2 run tf2_ros static_transform_publisher \
         --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 \
@@ -72,8 +74,22 @@ exec docker exec \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/robonix_mcp_types:/robonix_pkgs/primitives/tiago_camera/robonix_mcp_types" \
   "$SIM_CT" \
   bash -lc 'set -eo pipefail
-            source /opt/ros/humble/setup.bash
+            set +u
+            source /opt/ros/humble/setup.bash >/dev/null
             OVL=/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/ros2_idl/install/setup.bash
-            [ -f "$OVL" ] && source "$OVL" || true
+            [ -f "$OVL" ] && source "$OVL" >/dev/null || true
             cd /robonix_pkgs/primitives/tiago_camera
-            exec python3 -m camera_driver.driver'
+            LOG=/tmp/tiago_camera_driver.log
+            : > "$LOG"
+            python3 -m camera_driver.driver >>"$LOG" 2>&1 &
+            DRIVER_PID=$!
+            tail --pid="$DRIVER_PID" -n +1 -F "$LOG" &
+            TAIL_PID=$!
+            set +e
+            wait "$DRIVER_PID"
+            STATUS=$?
+            set -e
+            kill "$TAIL_PID" 2>/dev/null || true
+            wait "$TAIL_PID" 2>/dev/null || true
+            exit "$STATUS"
+            '

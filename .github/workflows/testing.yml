@@ -424,7 +424,12 @@ jobs:
         if: env.GIT_MIRROR_INSTEADOF == 'true'
         run: |
           set -euo pipefail
-          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          # Keep the checkout mirror scoped to this Actions job. The runner is
+          # also a developer workstation, so CI must not mutate ~/.gitconfig.
+          git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
+          : > "$git_config"
+          git config --file "$git_config" url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
         with:
