@@ -155,8 +155,18 @@ async fn main() -> Result<()> {
 
     // Build the shared service state.
     let svc = VitalsServiceImpl::new();
+    svc.update_self_module_health(&cfg.id)
+        .await
+        .context("initialize Vitals self module health")?;
+    svc.apply_expected_module_config(&cfg.expected_modules)
+        .await;
 
-    module_health_poll::spawn_module_health_poller(atlas.clone(), cfg.id.clone(), svc.clone());
+    module_health_poll::spawn_module_health_poller(
+        atlas.clone(),
+        cfg.id.clone(),
+        svc.clone(),
+        cfg.expected_modules.clone(),
+    );
 
     let soma_rules: Vec<soma_ingest::SomaThresholdRule> =
         match std::fs::read_to_string(&cfg.thresholds_path) {

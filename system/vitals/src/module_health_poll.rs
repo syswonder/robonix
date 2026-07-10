@@ -3,6 +3,11 @@
 // Poll system modules that expose ModuleHealthReport and feed their reports
 // into Vitals' aggregate ModuleHealthStore.
 
+use crate::config::{
+    EXECUTOR_GET_HEALTH_CONTRACT, ExpectedModuleConfig, ExpectedModulePolicy,
+    PILOT_GET_HEALTH_CONTRACT,
+};
+use crate::module_health::{HEALTH_ERROR, HEALTH_OK, HEALTH_WARN, SOURCE_VITALS_SYNTHESIZED_STALE};
 use crate::pb::contracts::{
     robonix_system_executor_get_health_client::RobonixSystemExecutorGetHealthClient,
     robonix_system_pilot_get_health_client::RobonixSystemPilotGetHealthClient,
@@ -14,30 +19,16 @@ use crate::service::VitalsServiceImpl;
 use anyhow::{Context, Result};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tonic::transport::Channel;
 
 const MODULE_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const EXECUTOR_GET_HEALTH_CONTRACT: &str = "robonix/system/executor/get_health";
-const PILOT_GET_HEALTH_CONTRACT: &str = "robonix/system/pilot/get_health";
 
-const TARGETS: &[ModuleHealthPollTarget] = &[
-    ModuleHealthPollTarget {
-        label: "executor",
-        contract_id: EXECUTOR_GET_HEALTH_CONTRACT,
-        client_kind: ModuleHealthClientKind::Executor,
-    },
-    ModuleHealthPollTarget {
-        label: "pilot",
-        contract_id: PILOT_GET_HEALTH_CONTRACT,
-        client_kind: ModuleHealthClientKind::Pilot,
-    },
-];
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ModuleHealthPollTarget {
-    label: &'static str,
-    contract_id: &'static str,
+    expected: ExpectedModuleConfig,
+    label: String,
+    contract_id: String,
     client_kind: ModuleHealthClientKind,
 }
 
@@ -51,19 +42,24 @@ pub fn spawn_module_health_poller(
     mut atlas: AtlasClient,
     consumer_id: String,
     svc: VitalsServiceImpl,
+    expected_modules: Vec<ExpectedModuleConfig>,
 ) {
+    let targets = build_poll_targets(&expected_modules);
+
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(MODULE_HEALTH_POLL_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tick.tick().await; // consume interval's immediate first tick
 
-        let mut available = HashMap::<&'static str, bool>::new();
-        let mut module_keys = HashMap::<&'static str, String>::new();
+        let started_at = Instant::now();
+        let mut available = HashMap::<String, bool>::new();
+        let mut module_keys = HashMap::<String, String>::new();
+        let mut missing_since = HashMap::<String, Instant>::new();
 
         loop {
-            for target in TARGETS {
-                let was_available = available.get(target.label).copied().unwrap_or(false);
-                match poll_target(&mut atlas, &consumer_id, &svc, *target).await {
+            for target in &targets {
+                let was_available = available.get(&target.label).copied().unwrap_or(false);
+                match poll_target(&mut atlas, &consumer_id, &svc, target).await {
                     Ok(success) => {
                         if !was_available {
                             log::info!(
@@ -72,11 +68,12 @@ pub fn spawn_module_health_poller(
                                 target.contract_id
                             );
                         }
-                        module_keys.insert(target.label, success.module_key);
+                        module_keys.insert(target.label.clone(), success.module_key);
+                        missing_since.remove(&target.label);
                         if let Some(event) = success.event {
-                            log_module_event(&event);
+                            log_module_event(&event, target.expected.policy);
                         }
-                        available.insert(target.label, true);
+                        available.insert(target.label.clone(), true);
                     }
                     Err(e) => {
                         if was_available {
@@ -87,13 +84,32 @@ pub fn spawn_module_health_poller(
                                 target.label
                             );
                         }
-                        if let Some(module_key) = module_keys.get(target.label)
-                            && let Some(event) =
-                                svc.synthesize_stale_module_if_expired(module_key).await
-                        {
-                            log_module_event(&event);
+
+                        if let Some(module_key) = module_keys.get(&target.label) {
+                            if let Some(event) = svc
+                                .synthesize_stale_module_if_expired(
+                                    module_key,
+                                    target.expected.policy,
+                                )
+                                .await
+                            {
+                                log_module_event(&event, target.expected.policy);
+                            }
+                        } else if target.expected.policy == ExpectedModulePolicy::Required {
+                            let missing_from = missing_since
+                                .entry(target.label.clone())
+                                .or_insert(started_at);
+                            if missing_from.elapsed()
+                                >= Duration::from_millis(u64::from(target.expected.ttl_ms))
+                                && let Some(event) = svc
+                                    .synthesize_expected_module_unavailable(&target.expected)
+                                    .await
+                            {
+                                log_module_event(&event, target.expected.policy);
+                            }
                         }
-                        available.insert(target.label, false);
+
+                        available.insert(target.label.clone(), false);
                     }
                 }
             }
@@ -101,6 +117,50 @@ pub fn spawn_module_health_poller(
             tick.tick().await;
         }
     });
+}
+
+fn build_poll_targets(expected_modules: &[ExpectedModuleConfig]) -> Vec<ModuleHealthPollTarget> {
+    let mut targets = Vec::new();
+
+    for expected in expected_modules {
+        if expected.policy == ExpectedModulePolicy::Disabled {
+            continue;
+        }
+
+        let Some((client_kind, contract_id)) = known_client(expected) else {
+            if expected.policy == ExpectedModulePolicy::Required && expected.module_id != "vitals" {
+                log::warn!(
+                    "[vitals] required module '{}' has no module-health client adapter yet",
+                    expected.module_id
+                );
+            }
+            continue;
+        };
+
+        targets.push(ModuleHealthPollTarget {
+            expected: expected.clone(),
+            label: expected.module_key(),
+            contract_id,
+            client_kind,
+        });
+    }
+
+    targets
+}
+
+fn known_client(expected: &ExpectedModuleConfig) -> Option<(ModuleHealthClientKind, String)> {
+    let capability = expected.capability.as_deref().unwrap_or_default();
+    match (expected.module_id.as_str(), capability) {
+        ("executor", _) | (_, EXECUTOR_GET_HEALTH_CONTRACT) => Some((
+            ModuleHealthClientKind::Executor,
+            EXECUTOR_GET_HEALTH_CONTRACT.to_string(),
+        )),
+        ("pilot", _) | (_, PILOT_GET_HEALTH_CONTRACT) => Some((
+            ModuleHealthClientKind::Pilot,
+            PILOT_GET_HEALTH_CONTRACT.to_string(),
+        )),
+        _ => None,
+    }
 }
 
 struct ModuleHealthPollSuccess {
@@ -112,10 +172,10 @@ async fn poll_target(
     atlas: &mut AtlasClient,
     consumer_id: &str,
     svc: &VitalsServiceImpl,
-    target: ModuleHealthPollTarget,
+    target: &ModuleHealthPollTarget,
 ) -> Result<ModuleHealthPollSuccess> {
     let (channel_id, provider_id, channel) =
-        atlas_client::connect_to_capability(atlas, consumer_id, target.contract_id)
+        atlas_client::connect_to_capability(atlas, consumer_id, &target.contract_id)
             .await
             .with_context(|| format!("connect module health target '{}'", target.label))?;
 
@@ -150,7 +210,7 @@ fn module_key_for(module: &ModuleHealth) -> String {
     }
 }
 
-fn log_module_event(event: &ModuleHealthEvent) {
+fn log_module_event(event: &ModuleHealthEvent, policy: ExpectedModulePolicy) {
     log::info!(
         "[vitals] module {} health: {} -> {} ({})",
         event.module_key,
@@ -158,7 +218,10 @@ fn log_module_event(event: &ModuleHealthEvent) {
         health_label(event.current_health),
         event.reason_code
     );
-    if event.current_health != crate::module_health::HEALTH_OK {
+
+    let synthesized_optional_stale =
+        policy == ExpectedModulePolicy::Optional && event.source == SOURCE_VITALS_SYNTHESIZED_STALE;
+    if event.current_health != HEALTH_OK && !synthesized_optional_stale {
         log::warn!(
             "[vitals] ALERT: module {} — {}",
             event.module_key,
@@ -199,9 +262,9 @@ async fn call_get_health(
 
 fn health_label(health: u32) -> &'static str {
     match health {
-        crate::module_health::HEALTH_OK => "OK",
-        crate::module_health::HEALTH_WARN => "WARN",
-        crate::module_health::HEALTH_ERROR => "ERROR",
+        HEALTH_OK => "OK",
+        HEALTH_WARN => "WARN",
+        HEALTH_ERROR => "ERROR",
         _ => "UNKNOWN",
     }
 }
