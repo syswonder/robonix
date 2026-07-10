@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     let _ = std::fs::remove_dir_all(&selected_contracts);
     std::fs::create_dir_all(&selected_contracts)?;
-    for name in ["get_yaml.v1.toml", "get_urdf.v1.toml"] {
+    for name in ["get_yaml.v1.toml", "get_urdf.v1.toml", "footprint.v1.toml"] {
         std::fs::copy(contracts_root.join(name), selected_contracts.join(name))?;
     }
 

@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
 use crate::pb::contracts::{
+    robonix_system_soma_footprint_server::RobonixSystemSomaFootprint,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdf,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYaml,
 };
-use crate::pb::soma::{GetUrdfRequest, GetUrdfResponse, GetYamlRequest, GetYamlResponse};
+use crate::pb::geometry_msgs::Point;
+use crate::pb::soma::{
+    GetFootprintRequest, GetFootprintResponse, GetUrdfRequest, GetUrdfResponse, GetYamlRequest,
+    GetYamlResponse,
+};
 use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -22,6 +27,7 @@ impl SomaService {
     fn map_lookup_error(error: StoreError) -> Status {
         match error {
             StoreError::NotFound(_) => Status::not_found(error.to_string()),
+            StoreError::MissingFootprint(_) => Status::failed_precondition(error.to_string()),
         }
     }
 }
@@ -62,10 +68,36 @@ impl RobonixSystemSomaGetUrdf for SomaService {
     }
 }
 
+#[tonic::async_trait]
+impl RobonixSystemSomaFootprint for SomaService {
+    async fn get_footprint(
+        &self,
+        _request: Request<GetFootprintRequest>,
+    ) -> Result<Response<GetFootprintResponse>, Status> {
+        let footprint = self.body.footprint().map_err(Self::map_lookup_error)?;
+        Ok(Response::new(GetFootprintResponse {
+            points: footprint
+                .points
+                .iter()
+                .map(|point| Point {
+                    x: point.x,
+                    y: point.y,
+                    z: 0.0,
+                })
+                .collect(),
+            base_frame: footprint.base_frame.clone(),
+            inscribed_radius_m: footprint.inscribed_radius_m,
+            circumscribed_radius_m: footprint.circumscribed_radius_m,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pb::contracts::{
+        robonix_system_soma_footprint_client::RobonixSystemSomaFootprintClient,
+        robonix_system_soma_footprint_server::RobonixSystemSomaFootprintServer,
         robonix_system_soma_get_urdf_client::RobonixSystemSomaGetUrdfClient,
         robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
         robonix_system_soma_get_yaml_client::RobonixSystemSomaGetYamlClient,
@@ -110,6 +142,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_footprint_returns_the_declared_polygon() {
+        let service = SomaService::new(fixture_body());
+        let response = service
+            .get_footprint(Request::new(GetFootprintRequest {}))
+            .await
+            .expect("get footprint")
+            .into_inner();
+        assert_eq!(response.base_frame, "base_link");
+        assert_eq!(response.points.len(), 4);
+        assert_eq!(response.points[0].x, 0.2);
+        assert_eq!(response.points[0].y, 0.1);
+        assert!((response.inscribed_radius_m - 0.1).abs() < 1e-9);
+    }
+
+    #[tokio::test]
     async fn unknown_robot_maps_to_not_found() {
         let service = SomaService::new(fixture_body());
         let status = service
@@ -131,7 +178,10 @@ mod tests {
                 .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(
                     &service,
                 )))
-                .add_service(RobonixSystemSomaGetUrdfServer::from_arc(service))
+                .add_service(RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(
+                    &service,
+                )))
+                .add_service(RobonixSystemSomaFootprintServer::from_arc(service))
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
                 .expect("serve");
@@ -144,6 +194,10 @@ mod tests {
         let mut urdf_client = RobonixSystemSomaGetUrdfClient::connect(endpoint)
             .await
             .expect("connect urdf");
+        let mut footprint_client =
+            RobonixSystemSomaFootprintClient::connect(format!("http://{addr}"))
+                .await
+                .expect("connect footprint");
 
         let yaml = yaml_client
             .get_yaml(GetYamlRequest {
@@ -159,8 +213,14 @@ mod tests {
             .await
             .expect("get urdf")
             .into_inner();
+        let footprint = footprint_client
+            .get_footprint(GetFootprintRequest {})
+            .await
+            .expect("get footprint")
+            .into_inner();
 
         assert!(yaml.yaml_text.contains("Soma v2 test fixture robot"));
         assert!(urdf.urdf_xml.contains("<link name=\"base_link\"/>"));
+        assert_eq!(footprint.points.len(), 4);
     }
 }
