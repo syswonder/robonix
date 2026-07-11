@@ -25,6 +25,9 @@ uuid.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 robonix-atlas = { path = "../atlas" }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["signal", "process"] }
+
 [build-dependencies]
 robonix-codegen.workspace = true
 tonic-build.workspace = true

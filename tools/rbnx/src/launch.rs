@@ -112,6 +112,32 @@ pub async fn shutdown_package_runtime(
     record: &PackageRuntimeRecord,
     term_wait: Duration,
 ) {
+    let _ = shutdown_package_runtime_checked(atlas_endpoint, record, term_wait, None).await;
+}
+
+/// Checked variant used by persisted boot-state teardown. A boot id is
+/// inherited by every wrapper and provider through `RBNX_BOOT_ID`; requiring a
+/// matching process in the recorded PGID prevents a stale state file from
+/// killing an unrelated process group after PID/PGID reuse.
+pub async fn shutdown_package_runtime_checked(
+    atlas_endpoint: Option<&str>,
+    record: &PackageRuntimeRecord,
+    term_wait: Duration,
+    boot_id: Option<&str>,
+) -> bool {
+    if let Some(boot_id) = boot_id {
+        if !process_group_has_members(record.pgid).await {
+            return true;
+        }
+        if !process_group_has_boot_id(record.pgid, boot_id).await {
+            warn!(
+                "refusing to stop {} pgid {}: no process carries RBNX_BOOT_ID={}",
+                record.name, record.pgid, boot_id
+            );
+            return false;
+        }
+    }
+
     if let (Some(endpoint), Some(provider_id), Some(driver_contract)) = (
         atlas_endpoint,
         record.provider_id.as_deref(),
@@ -162,6 +188,42 @@ pub async fn shutdown_package_runtime(
     }
 
     terminate_process_group(record.pgid, term_wait).await;
+    !process_group_has_members(record.pgid).await
+}
+
+async fn process_group_has_boot_id(pgid: u32, boot_id: &str) -> bool {
+    let output = match Command::new("pgrep")
+        .arg("-g")
+        .arg(pgid.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    let expected = format!("RBNX_BOOT_ID={boot_id}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .any(|pid| {
+            std::fs::read(format!("/proc/{pid}/environ"))
+                .ok()
+                .is_some_and(|env| {
+                    env.split(|byte| *byte == 0)
+                        .any(|entry| entry == expected.as_bytes())
+                })
+        })
+}
+
+/// Linux `/proc/<pid>/stat` field 22. The value is stable for the lifetime of
+/// a process and lets the watchdog distinguish its boot parent from a reused
+/// PID. Returns `None` when procfs is unavailable or the process exited.
+pub fn proc_start_time_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.get(stat.rfind(')')? + 1..)?.trim_start();
+    after_comm.split_whitespace().nth(19)?.parse().ok()
 }
 
 async fn run_package_stop_hook(

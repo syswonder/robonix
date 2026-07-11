@@ -384,7 +384,7 @@ async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
 ) -> anyhow::Result<ExecutorConn> {
-    let (_, _, exec_ch) = atlas_client::connect_to_capability(
+    let (_, executor_provider_id, exec_ch) = atlas_client::connect_to_capability(
         &mut atlas,
         consumer_id,
         "robonix/system/executor/execute",
@@ -393,6 +393,7 @@ async fn build_executor_conn(
     .context("connect_to_capability robonix/system/executor/execute")?;
     Ok(ExecutorConn {
         graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
+        provider_id: executor_provider_id,
     })
 }
 
