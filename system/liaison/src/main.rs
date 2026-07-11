@@ -30,6 +30,9 @@ use access::{AccessControlConfig, AccessDecision};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use pb::contracts::{
+    robonix_system_liaison_handsfree_events_server::{
+        RobonixSystemLiaisonHandsfreeEvents, RobonixSystemLiaisonHandsfreeEventsServer,
+    },
     robonix_system_liaison_handsfree_set_enabled_server::{
         RobonixSystemLiaisonHandsfreeSetEnabled, RobonixSystemLiaisonHandsfreeSetEnabledServer,
     },
@@ -46,7 +49,7 @@ use pb::contracts::{
 };
 use pb::liaison::{
     GetHandsfreeStatusRequest, GetHandsfreeStatusResponse, SetHandsfreeRequest,
-    SetHandsfreeResponse, StartVoiceSessionRequest, VoiceEvent,
+    SetHandsfreeResponse, StartVoiceSessionRequest, VoiceEvent, WatchHandsfreeEventsRequest,
 };
 use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
@@ -67,11 +70,13 @@ const LIAISON_SUBMIT_CONTRACT: &str = "robonix/system/liaison/submit";
 const LIAISON_VOICE_CONTRACT: &str = "robonix/system/liaison/voice";
 const LIAISON_HANDSFREE_SET_CONTRACT: &str = "robonix/system/liaison/handsfree/set_enabled";
 const LIAISON_HANDSFREE_STATUS_CONTRACT: &str = "robonix/system/liaison/handsfree/status";
+const LIAISON_HANDSFREE_EVENTS_CONTRACT: &str = "robonix/system/liaison/handsfree/events";
 const LIAISON_SUBMIT_TOML: &str = "capabilities/system/liaison/submit.v1.toml";
 const LIAISON_VOICE_TOML: &str = "capabilities/system/liaison/voice.v1.toml";
 const LIAISON_HANDSFREE_SET_TOML: &str =
     "capabilities/system/liaison/handsfree/set_enabled.v1.toml";
 const LIAISON_HANDSFREE_STATUS_TOML: &str = "capabilities/system/liaison/handsfree/status.v1.toml";
+const LIAISON_HANDSFREE_EVENTS_TOML: &str = "capabilities/system/liaison/handsfree/events.v1.toml";
 
 /// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1
 const INTENT_SOURCE_TEXT: u32 = 0;
@@ -327,6 +332,18 @@ impl RobonixSystemLiaisonHandsfreeStatus for LiaisonServiceImpl {
         _request: Request<GetHandsfreeStatusRequest>,
     ) -> Result<Response<GetHandsfreeStatusResponse>, Status> {
         Ok(Response::new(self.handsfree.snapshot().await))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemLiaisonHandsfreeEvents for LiaisonServiceImpl {
+    type WatchHandsfreeEventsStream = ReceiverStream<Result<VoiceEvent, Status>>;
+
+    async fn watch_handsfree_events(
+        &self,
+        _request: Request<WatchHandsfreeEventsRequest>,
+    ) -> Result<Response<Self::WatchHandsfreeEventsStream>, Status> {
+        Ok(Response::new(self.handsfree.subscribe_events()))
     }
 }
 
@@ -610,6 +627,20 @@ async fn main() -> Result<()> {
         )
         .await
         .context("declare liaison hands-free status gRPC capability")?;
+    atlas
+        .declare_capability(
+            LIAISON_PROVIDER_ID,
+            LIAISON_HANDSFREE_EVENTS_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                LIAISON_HANDSFREE_EVENTS_TOML,
+                "robonix.contracts.RobonixSystemLiaisonHandsfreeEvents",
+                "/robonix.contracts.RobonixSystemLiaisonHandsfreeEvents/WatchHandsfreeEvents",
+            ),
+        )
+        .await
+        .context("declare liaison hands-free events gRPC capability")?;
     // Liaison has no Driver(CMD_INIT/CMD_ACTIVATE) handshake — it's a Rust binary
     // that's fully ready as soon as the gRPC server is listening. Push the
     // state explicitly so `rbnx caps` shows ACTIVE instead of stopping at
@@ -690,7 +721,10 @@ async fn main() -> Result<()> {
         .add_service(RobonixSystemLiaisonHandsfreeSetEnabledServer::from_arc(
             Arc::clone(&svc),
         ))
-        .add_service(RobonixSystemLiaisonHandsfreeStatusServer::from_arc(svc))
+        .add_service(RobonixSystemLiaisonHandsfreeStatusServer::from_arc(
+            Arc::clone(&svc),
+        ))
+        .add_service(RobonixSystemLiaisonHandsfreeEventsServer::from_arc(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {

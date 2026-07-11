@@ -213,6 +213,7 @@ class ReverseAudioBridge:
     def mic_stream(self, context, audio_pb2):
         if not self._require_client(context):
             return
+        log.info("client microphone stream requested")
         while True:
             try:
                 self._mic_frames.get_nowait()
@@ -229,7 +230,10 @@ class ReverseAudioBridge:
                 except queue.Empty:
                     continue
                 if frame is None:
+                    log.info("client microphone stream ended before frame %d", sequence)
                     break
+                if sequence == 0:
+                    log.info("client microphone first PCM frame: %d bytes", len(frame))
                 yield audio_pb2.AudioChunk(
                     timestamp_ns=time.time_ns(),
                     data=frame,
@@ -239,6 +243,7 @@ class ReverseAudioBridge:
                 sequence += 1
         finally:
             self._send(json.dumps({"type": "mic_stop"}))
+            log.info("client microphone stream stopped after %d frame(s)", sequence)
 
     def speaker_stream(self, request_iterator, context, empty_type):
         if not self._require_client(context):
