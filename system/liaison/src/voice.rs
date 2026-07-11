@@ -33,8 +33,10 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -85,9 +87,37 @@ const DEFAULT_RECORD_SECONDS: u32 = 10;
 /// background noise sits around 50–300, so 500 is a comfortable gap.
 const VAD_SPEECH_RMS: f32 = 500.0;
 const VAD_END_SILENCE_SECS: f32 = 1.2;
+const VAD_NO_SPEECH_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_ASR_LANGUAGE: &str = "";
 const DEFAULT_AUDIO_ENCODING: &str = "pcm_s16le";
 const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct VoiceSessionStream {
+    inner: ReceiverStream<Result<VoiceEvent, Status>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Stream for VoiceSessionStream {
+    type Item = Result<VoiceEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for VoiceSessionStream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 // ── Discovery helpers ────────────────────────────────────────────────────────
 //
@@ -199,7 +229,7 @@ pub async fn start_voice_session(
             KIND_SESSION_STARTED,
             &session_id,
             &format!(
-                "voice session started (vad, record≤{record_seconds}s, tts={}, lang={})",
+                "voice session started (vad, record≤{record_seconds}s, no-speech≤{VAD_NO_SPEECH_TIMEOUT_SECS}s, tts={}, lang={})",
                 req.tts_enabled,
                 if language.is_empty() {
                     "auto"
@@ -211,7 +241,7 @@ pub async fn start_voice_session(
         .await;
 
     let session_id_for_task = session_id.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let outcome = run_session(
             req,
             session_id_for_task.clone(),
@@ -242,7 +272,10 @@ pub async fn start_voice_session(
         }
     });
 
-    Ok(ReceiverStream::new(rx))
+    Ok(VoiceSessionStream {
+        inner: ReceiverStream::new(rx),
+        task,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -627,6 +660,7 @@ async fn stream_capture_and_recognize(
         // the audio-source startup (e.g. audio client bridge over the network); the
         // chunk count + total audio vs wall time shows transfer throughput.
         let t_pump = tokio::time::Instant::now();
+        let no_speech_deadline = t_pump + Duration::from_secs(VAD_NO_SPEECH_TIMEOUT_SECS);
         let mut n_chunks: u32 = 0u32;
         let mut audio_s: f32 = 0.0;
         let mut logged_first = false;
@@ -634,10 +668,15 @@ async fn stream_capture_and_recognize(
         let mut silence_secs: f32 = 0.0;
         let mut first_chunk = true;
         loop {
-            if tokio::time::Instant::now() >= deadline {
+            let active_deadline = if has_spoken {
+                deadline
+            } else {
+                deadline.min(no_speech_deadline)
+            };
+            if tokio::time::Instant::now() >= active_deadline {
                 break;
             }
-            let remaining = deadline - tokio::time::Instant::now();
+            let remaining = active_deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
                     if !logged_first {
@@ -691,6 +730,7 @@ async fn stream_capture_and_recognize(
             (wall as f32 / 1000.0) / audio_s.max(0.001)
         );
     });
+    let _pump_abort_guard = AbortOnDrop(pump_handle.abort_handle());
 
     // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
     // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
@@ -1311,5 +1351,29 @@ mod tests {
             tts_boundary_text(4, String::new(), "final answer"),
             Some("final answer".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_voice_stream_aborts_session_task() {
+        let (_tx, rx) = mpsc::channel(1);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        let stream = VoiceSessionStream {
+            inner: ReceiverStream::new(rx),
+            task,
+        };
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn dropping_abort_guard_aborts_nested_mic_pump() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        drop(AbortOnDrop(abort.clone()));
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        let _ = task.await;
     }
 }
