@@ -107,6 +107,21 @@ def test_map_id_partition_isolation_and_sanitize():
     print("  [PASS] test_map_id_partition_isolation_and_sanitize")
 
 
+def test_delete_map_removes_only_target_partition():
+    with tempfile.TemporaryDirectory() as base:
+        target = AnnotationStore(base, map_id="target", generation=1)
+        other = AnnotationStore(base, map_id="other", generation=1)
+        target.create(kind="room", name="target room", points=ROOM_PTS)
+        other.create(kind="room", name="other room", points=ROOM_PTS)
+
+        assert target.delete_map("target") is True
+        assert target.list() == []
+        assert AnnotationStore(base, map_id="target", generation=1).list() == []
+        assert len(AnnotationStore(base, map_id="other", generation=1).list()) == 1
+        assert target.delete_map("target") is False
+    print("  [PASS] test_delete_map_removes_only_target_partition")
+
+
 def test_atomic_write_leaves_no_tmp():
     with tempfile.TemporaryDirectory() as base:
         s = AnnotationStore(base, map_id="lab", generation=1)
@@ -425,6 +440,7 @@ if __name__ == "__main__":
     test_room_create_is_idempotent_by_name()
     test_update_and_delete()
     test_map_id_partition_isolation_and_sanitize()
+    test_delete_map_removes_only_target_partition()
     test_atomic_write_leaves_no_tmp()
     test_generation_mismatch_marks_stale_on_load()
     test_unknown_generation_preserves_stored_epoch()
