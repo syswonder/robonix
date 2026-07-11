@@ -33,6 +33,10 @@ system:
   liaison:
     listen: 0.0.0.0:50081
     log: info
+    # Disabled until the operator enables it from robonix-client. The client
+    # then supplies its persisted input/output provider selection; no client
+    # address is stored in this deployment.
+    handsfree_enabled: false
 
 # after booted all the system components, start the devices (primitives)
 # the robonix boot "device tree"
@@ -72,21 +76,18 @@ primitive:
       update_rate: 10
       frame_id: lidar
   # ── audio mic/speaker source ─────────────────────────────────────────────
-  # Default: local ALSA via audio_driver. liaison/speech resolve
-  # robonix/primitive/audio/{mic,speaker} from whichever single provider is
-  # active here.
+  # Local ALSA provider. It remains available for robot-local audio.
   - name: audio_driver
     path: ./primitives/audio_driver
     config: {}
-  # audio client bridge variant (opt-in): relays mic/speaker over a WebSocket from a
-  # client machine across the LAN. To use it, comment out the audio_driver block
-  # above and uncomment this one, then point host at the client machine's address
-  # and run client_audio_server/server.py (or server_web.py) on it.
-  # - name: audio_client_bridge
-  #   path: ./primitives/audio_client_bridge
-  #   config:
-  #     host: 127.0.0.1           # client machine address reachable by robonix
-  #     port: 60000
+  # Reverse bridge for a robonix-client audio route. It advertises its
+  # endpoint through Atlas and waits for the client to connect, so neither
+  # this manifest nor Liaison stores a client IP.
+  - name: audio_client_bridge
+    path: ./primitives/audio_client_bridge
+    config:
+      transport: reverse
+      listen_port: 60002
 
 # after booted all the primitives, start the services
 service:
@@ -94,18 +95,16 @@ service:
   # agent. Lives at services/memsearch in the robonix tree; pilot
   # queries it for relevant past context when planning.
   - name: memory
-    path: ../../services/memsearch
+    path: ${ROBONIX_SOURCE_PATH}/services/memsearch
     config:
       backend: sqlite
 
   # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
-  # liaison's voice loop connects to. Captures mic through the
-  # robonix/primitive/audio/mic primitive, which `audio_driver` (primitive
-  # section above) provides — so voice runs fully local on this host's ALSA
-  # mic. The audio client bridge variant can be enabled in this primitive section when the mic/speaker live on a client machine.
+  # liaison's voice loop connects to. The selected audio provider is supplied
+  # by the client for F2, voice steer, and hands-free turns.
   # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
   - name: speech
-    path: ../../services/speech
+    path: ${ROBONIX_SOURCE_PATH}/services/speech
     config:
       disable_whisper: true
       funasr_device: cuda
@@ -117,7 +116,7 @@ service:
   # modal enrolls/lists speakers. Config is env-driven (port 50092,
   # threshold 0.25, device auto) so the manifest block stays empty.
   - name: voiceprint
-    path: ../../services/voiceprint
+    path: ${ROBONIX_SOURCE_PATH}/services/voiceprint
     config: {}
 
   # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
