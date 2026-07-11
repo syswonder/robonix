@@ -1,0 +1,11 @@
+# Read-only observation stream for the robot-local hands-free interaction.
+# It reuses VoiceEvent so clients render it exactly like a push-to-talk turn.
+[contract]
+id = "robonix/system/liaison/handsfree/events"
+version = "1"
+kind = "service"
+idl = "liaison/srv/WatchHandsfreeEvents.srv"
+description = "Subscribe to events from Liaison's robot-local hands-free voice turns."
+
+[mode]
+type = "rpc_server_stream"

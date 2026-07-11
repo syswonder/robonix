@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Request;
 
@@ -19,8 +19,11 @@ use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
     robonix_service_speech_wake_word_client::RobonixServiceSpeechWakeWordClient,
 };
-use crate::pb::liaison::{GetHandsfreeStatusResponse, StartVoiceSessionRequest};
-use crate::{voice, voice::KIND_ASR_FINAL};
+use crate::pb::liaison::{GetHandsfreeStatusResponse, StartVoiceSessionRequest, VoiceEvent};
+use crate::{
+    voice,
+    voice::{KIND_ASR_FINAL, KIND_ERROR},
+};
 
 const MIC_CONTRACT: &str = "robonix/primitive/audio/mic";
 const WAKE_WORD_CONTRACT: &str = "robonix/service/speech/wake_word";
@@ -70,6 +73,7 @@ pub struct HandsfreeController {
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
+    events: broadcast::Sender<VoiceEvent>,
 }
 
 impl HandsfreeController {
@@ -82,6 +86,7 @@ impl HandsfreeController {
         let enabled = config.handsfree_enabled
             && !config.handsfree_mic_provider_id.is_empty()
             && !config.handsfree_speaker_provider_id.is_empty();
+        let (events, _) = broadcast::channel(256);
         Arc::new(Self {
             enabled: AtomicBool::new(enabled),
             config: Mutex::new(config),
@@ -93,6 +98,7 @@ impl HandsfreeController {
             atlas,
             pilot_endpoint_default,
             access,
+            events,
         })
     }
 
@@ -146,6 +152,35 @@ impl HandsfreeController {
         }
     }
 
+    /// Subscribe to the existing VoiceEvent model rather than inventing a
+    /// hands-free-specific client protocol. This stream is observational and
+    /// never drives microphone ownership or task execution.
+    pub fn subscribe_events(&self) -> ReceiverStream<Result<VoiceEvent, tonic::Status>> {
+        let mut source = self.events.subscribe();
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                match source.recv().await {
+                    Ok(event) => {
+                        if tx.send(Ok(event)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("[liaison/handsfree] event observer lagged by {skipped} event(s)");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        ReceiverStream::new(rx)
+    }
+
+    fn publish(&self, event: VoiceEvent) {
+        // A disconnected UI must never block the robot-local interaction.
+        let _ = self.events.send(event);
+    }
+
     async fn set_state(&self, value: &str, error: Option<String>) {
         let mut state = self.state.lock().await;
         state.state = value.to_string();
@@ -190,6 +225,18 @@ impl HandsfreeController {
                     if let Err(error) = self.run_voice_turn().await {
                         let message = format!("{error:#}");
                         warn!("[liaison/handsfree] voice turn failed: {message}");
+                        let session_id = self.config.lock().await.handsfree_session_id.clone();
+                        self.publish(VoiceEvent {
+                            event_kind: KIND_ERROR,
+                            session_id,
+                            text: String::new(),
+                            user_id: String::new(),
+                            confidence: 0.0,
+                            pilot: None,
+                            error: message.clone(),
+                            status_message: String::new(),
+                            timestamp_ms: now_ms(),
+                        });
                         self.set_state("error", Some(message)).await;
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -300,8 +347,9 @@ impl HandsfreeController {
         while let Some(event) = stream.next().await {
             let event = event.map_err(|status| anyhow!(status.to_string()))?;
             if event.event_kind == KIND_ASR_FINAL {
-                self.state.lock().await.last_transcript = event.text;
+                self.state.lock().await.last_transcript = event.text.clone();
             }
+            self.publish(event.clone());
             if !event.error.is_empty() {
                 return Err(anyhow!(event.error));
             }
