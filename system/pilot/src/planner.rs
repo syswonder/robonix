@@ -25,11 +25,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, watch};
 use tonic::Request;
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
 pub struct ExecutorConn {
     pub graph: RobonixSystemExecutorExecuteClient<Channel>,
+    pub provider_id: String,
 }
 
 type CapabilityTarget = (String, String);
@@ -246,6 +248,59 @@ async fn drive_plan(
         .await;
 }
 
+/// Cancel every real task tree owned by this turn before reporting the Pilot
+/// session interrupted. Dropping the Execute stream alone only detaches Pilot;
+/// Executor continues the plan (and synchronous tools such as run_command)
+/// unless its PlanRuntime receives an explicit cancel_plan request.
+async fn cancel_forest_plans(
+    executor: &mut ExecutorConn,
+    forest: &HashMap<String, TreeMeta>,
+    session_id: &str,
+) {
+    let targets: Vec<String> = forest
+        .iter()
+        .filter(|(_, meta)| !meta.control_only)
+        .map(|(plan_id, _)| plan_id.clone())
+        .collect();
+    for target in targets {
+        let control_plan_id = format!("abort-{}", Uuid::new_v4());
+        let plan = Plan {
+            plan_id: control_plan_id.clone(),
+            session_id: session_id.to_string(),
+            round: 0,
+            nodes: vec![RtdlNode {
+                node_kind: RTDL_DO,
+                children: Vec::new(),
+                call: Some(CapabilityCall {
+                    call_id: format!("{control_plan_id}:0"),
+                    provider_id: executor.provider_id.clone(),
+                    contract_id: "robonix/system/executor/builtin/cancel_plan".to_string(),
+                    args_json: serde_json::json!({"plan_id": target, "wait_ms": 5000}).to_string(),
+                }),
+                op_id: next_op_id(),
+                description: format!("abort session plan {target}"),
+            }],
+            root_index: 0,
+        };
+        let cancel = async {
+            let mut stream = executor
+                .graph
+                .execute(Request::new(plan))
+                .await?
+                .into_inner();
+            while stream.message().await?.is_some() {}
+            Ok::<(), tonic::Status>(())
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(7), cancel).await {
+            Ok(Ok(())) => info!("[pilot] canceled executor plan {target} on abort_turn"),
+            Ok(Err(error)) => {
+                warn!("[pilot] cancel executor plan {target} failed: {error}")
+            }
+            Err(_) => warn!("[pilot] cancel executor plan {target} timed out"),
+        }
+    }
+}
+
 /// Render the in-flight forest as a system-prompt block so the LLM can see what
 /// is still running and reference a `plan_id` to cancel it. Empty when no tree
 /// is running. Trees are ordered by numeric plan id for stable output.
@@ -434,7 +489,8 @@ pub async fn run_turn(
     let session_id = task.session_id.clone();
 
     macro_rules! return_interrupted {
-        () => {{
+        ($forest:expr) => {{
+            cancel_forest_plans(executor, $forest, &session_id).await;
             let _ = tx
                 .send(Ok(service::pack(
                     &session_id,
@@ -591,7 +647,7 @@ pub async fn run_turn(
     loop {
         // Check for hard interrupt at the top of every iteration.
         if *cancel_rx.borrow() {
-            return_interrupted!();
+            return_interrupted!(&forest);
         }
 
         if !should_plan {
@@ -610,8 +666,30 @@ pub async fn run_turn(
                         .await;
                     break;
                 }
-                // Not done and nothing running: plan again to make progress.
-                should_plan = true;
+                // An in-progress task with no running tree and no planning event
+                // is deliberately waiting for operator input. Replanning here
+                // turns an empty "wait for instructions" response (or a completed
+                // cancel-only tree) into an unbounded VLM/reply/cancel loop.
+                tokio::select! {
+                    biased;
+                    _ = cancel_rx.changed() => {
+                        return_interrupted!(&forest);
+                    }
+                    steer = steer_rx.recv() => {
+                        match steer {
+                            Some(task) => {
+                                let text = task.text.trim();
+                                if !text.is_empty() {
+                                    info!("[pilot/steer] resuming waiting task: {text}");
+                                    history.push(Message::user(text));
+                                    history::trim(history, MAX_HISTORY);
+                                    should_plan = true;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
                 continue;
             }
             // A tree is still running: block until it emits an event, a steer
@@ -619,7 +697,7 @@ pub async fn run_turn(
             tokio::select! {
                 biased;
                 _ = cancel_rx.changed() => {
-                    return_interrupted!();
+                    return_interrupted!(&forest);
                 }
                 steer = steer_rx.recv() => {
                     if let Some(task) = steer {
@@ -774,7 +852,7 @@ pub async fn run_turn(
                         // Cancel takes priority — checked before every new VLM token.
                         _ = cancel_rx.changed() => {
                             drop(stream);
-                            return_interrupted!();
+                            return_interrupted!(&forest);
                         }
                         item = stream.next() => {
                             let item = match item {
@@ -976,8 +1054,8 @@ pub async fn run_turn(
                 warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
                 break;
             }
-            // should_plan stays false: wait for forest events (or, when the
-            // forest is empty and the task isn't done, the loop top re-plans).
+            // should_plan stays false: wait for a forest event, or for a steer
+            // when an in-progress task has intentionally produced no new tree.
             continue;
         }
 
@@ -1806,7 +1884,20 @@ by planning capability calls available to you.
   - If `memory_search` / `memory_save` / `memory_compact` capabilities are available,
     treat long-term memory as available via those capabilities.
 - Prefer structured output; report capability results concisely.
-- If a capability returns an error, diagnose and retry, or report to the user.
+- If any required capability call fails, times out, returns success=false, or gives an
+  unsafe/unexpected result, stop autonomous task progress. Report what failed and ask
+  the user what to do next. Do not skip ahead, reinterpret the goal, or try new
+  physical actions unless the user confirms.
+- Do not execute a later physical step unless its required earlier steps have succeeded.
+- For semantic navigation, resolve names through Scene before calling navigation:
+  - call Scene `list_objects` first to discover the stable ID for a named room or
+    physical object; pass that exact full ID to the goal tool, never its label,
+    room number, or a guessed ID; use `get_scene_graph` only when object
+    relationships are needed;
+  - named rooms or regions MUST use Scene `goal_room`; never use `goal_near`,
+    Memory coordinates, or guessed coordinates for a room destination;
+  - physical objects MUST use Scene `goal_near` to obtain an approach pose;
+  - call navigation only when Scene returns `reachable=true`.
 - Some later messages may be labelled `Executor feedback for the current task`.
   Treat those as results of capability calls you already planned, not as new
   user requests.

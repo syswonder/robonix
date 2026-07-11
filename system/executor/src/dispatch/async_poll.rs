@@ -27,7 +27,7 @@ pub async fn run_until_terminal(
     node: &NodeEventContext,
     runtime: &PlanRuntime,
 ) -> CapabilityCallResult {
-    let initial = dispatch::dispatch(call, self_provider_id, atlas, runtime).await;
+    let initial = dispatch::dispatch(call, self_provider_id, atlas, runtime, &node.plan_id).await;
     if !initial.success {
         let _ = tx
             .send(Ok(rtdl_wire::node_state_from_result(
