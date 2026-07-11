@@ -15,9 +15,13 @@ the JSON will grow an `occupancy:` field that the canvas overlays).
 """
 from __future__ import annotations
 
+import asyncio
+import math
 import base64
 import io
+import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -27,6 +31,9 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from robonix_api import ATLAS
+
+from .annotations import validate_annotation_fields
 from .state import ObjectRegistry
 
 log = logging.getLogger(__name__)
@@ -371,13 +378,18 @@ def _camera_payload(hub: Any) -> dict:
 
 
 def _state_payload(registry: ObjectRegistry,
-                   hub: Any, sg_store: Any = None) -> dict:
+                   hub: Any, sg_store: Any = None,
+                   anno_store: Any = None,
+                   map_binding: Optional[dict] = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
     sees a half-updated registry. The "relations" field shows the fast
     geometric slice (``reachable_by`` only, under the VLM-primary graph);
     the "scene_graph" field shows the full composed graph (geometric +
-    image-grounded relational/semantic edges)."""
+    image-grounded relational/semantic edges). "annotations" carries the
+    user-drawn rooms/POIs (map-frame meters, same coordinates as objects)
+    and "map_binding" the identity scene is bound to — both consumed by
+    the /user annotation page."""
     objs_dict, _surfaces = _sync_snapshot(registry)
     geo_edges = sg_store.get_geometric_edges() if sg_store is not None else []
     out_objects: list[dict[str, Any]] = []
@@ -427,6 +439,8 @@ def _state_payload(registry: ObjectRegistry,
         "scene_graph": sg_payload,
         "robot": robot_pose,
         "occupancy": _occupancy_payload(hub),
+        "annotations": anno_store.list_json() if anno_store is not None else [],
+        "map_binding": map_binding,
         "stamp_unix": time.time(),
     }
 
@@ -446,24 +460,195 @@ def _sync_snapshot(registry: ObjectRegistry):
     return dict(registry._objects), dict(registry._surfaces)  # noqa: SLF001
 
 
+_MAP_RPC = {
+    "list_maps": (
+        "robonix/service/map/list_maps",
+        "RobonixServiceMapListMapsStub",
+        "ListMaps",
+        "ListMaps_Request",
+    ),
+    "save_map": (
+        "robonix/service/map/save_map",
+        "RobonixServiceMapSaveMapStub",
+        "SaveMap",
+        "SaveMap_Request",
+    ),
+    "load_map": (
+        "robonix/service/map/load_map",
+        "RobonixServiceMapLoadMapStub",
+        "LoadMap",
+        "LoadMap_Request",
+    ),
+    "delete_map": (
+        "robonix/service/map/delete_map",
+        "RobonixServiceMapDeleteMapStub",
+        "DeleteMap",
+        "DeleteMap_Request",
+    ),
+    "pose_estimate": (
+        "robonix/service/map/pose_estimate",
+        "RobonixServiceMapPoseEstimateStub",
+        "PoseEstimate",
+        "PoseEstimate_Request",
+    ),
+    "get_pose": (
+        "robonix/service/map/get_pose",
+        "RobonixServiceMapGetPoseStub",
+        "GetPose",
+        "GetPose_Request",
+    ),
+    "get_mode": (
+        "robonix/service/map/get_mode",
+        "RobonixServiceMapGetModeStub",
+        "GetMode",
+        "GetMode_Request",
+    ),
+}
+
+
+def _pb_to_dict(resp: Any) -> dict:
+    out: dict[str, Any] = {}
+    for field, value in resp.ListFields():
+        out[field.name] = value
+    return out
+
+
+def _map_rpc(op: str, payload: Optional[dict] = None, timeout_s: float = 20.0) -> dict:
+    """Call mapping through the standard robonix/service/map capability.
+
+    The user page talks only to scene HTTP. Scene then resolves mapping via
+    Atlas + gRPC so this does not depend on mapping's debug Web UI or shared
+    container paths.
+    """
+    import grpc  # lazy: web debug imports should not fail without grpc
+    import map_pb2  # type: ignore
+    import robonix_contracts_pb2_grpc as contracts_grpc  # type: ignore
+
+    contract_id, stub_name, method_name, req_name = _MAP_RPC[op]
+    caps = ATLAS.find_capability(contract_id=contract_id, transport="grpc")
+    if not caps:
+        return {"ok": False, "detail": f"no provider for {contract_id}"}
+    cap = caps[0]
+    channel_ref = ATLAS.connect_capability(
+        consumer_id="scene",
+        provider_id=cap.provider_id,
+        contract_id=contract_id,
+        transport="grpc",
+    )
+    try:
+        endpoint = (channel_ref.endpoint or "").strip()
+        if not endpoint:
+            return {"ok": False, "detail": f"{contract_id} resolved to an empty endpoint"}
+        with grpc.insecure_channel(endpoint) as grpc_channel:
+            stub = getattr(contracts_grpc, stub_name)(grpc_channel)
+            req = getattr(map_pb2, req_name)(**(payload or {}))
+            resp = getattr(stub, method_name)(req, timeout=timeout_s)
+        return _pb_to_dict(resp)
+    except grpc.RpcError as e:
+        return {"ok": False, "detail": f"{contract_id} rpc failed: {e.code().name}: {e.details()}"}
+    except Exception as e:  # noqa: BLE001
+        log.exception("scene map rpc %s failed", contract_id)
+        return {"ok": False, "detail": str(e)}
+    finally:
+        channel_ref.close()
+
+
+def _maps_payload() -> dict:
+    out = _map_rpc("list_maps", {})
+    maps = []
+    if out.get("ok"):
+        try:
+            maps = json.loads(str(out.get("maps_json") or "[]"))
+            if not isinstance(maps, list):
+                maps = []
+        except Exception as e:  # noqa: BLE001
+            out = {"ok": False, "detail": f"invalid maps_json from mapping: {e}"}
+    return {"ok": bool(out.get("ok")), "detail": out.get("detail", ""), "maps": maps}
+
+
 def make_app(*, registry: ObjectRegistry,
              hub: Any = None, detector: Any = None,
-             sg_store: Any = None) -> Starlette:
+             sg_store: Any = None, anno_store: Any = None,
+             object_store: Any = None,
+             map_binding: Optional[dict] = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
     Routes:
-      GET /                — 2D top-down map (occupancy grid + objects)
+      GET /                — combined split layout (2D map · 3D · cam)
+      GET /2d              — 2D top-down map (occupancy grid + objects)
       GET /3d              — 3D scene (point clouds + bbox; three.js)
+      GET /cam             — camera stack (live RGB + depth)
+      GET /user            — end-user map page (rooms: draw / rename /
+                             confirm-stale / delete; light object overlay)
       GET /api/state       — JSON for the 2D map
       GET /api/objects3d   — JSON for the 3D viz (per-object pcd + bbox)
+      GET /api/camera      — JSON: latest RGB + depth frames
+      /api/annotations[..] — user annotation CRUD (see below)
+      /api/maps[..]        — scene-owned map library façade over map capabilities
 
     `hub` is the SubscribersHub — passed so the JSON state can include
     the latest OccupancyGrid for the 2D canvas underlay.
     `detector` is the ConceptGraphsDetector — passed so the 3D endpoint
     can serialize its persistent MapObjectList. If None, the 3D page
     just shows an empty world.
+    `anno_store` is the AnnotationStore backing the annotation CRUD; when
+    None (store init failed / disabled) those routes answer 503.
+    `object_store` is the per-map scene object warm-restore store; Save/Load
+    rebinds it so perceived objects follow the same map id as rooms.
+    `map_binding` is a mutable {map_id, mode, generation, source} dict shown
+    by the /user page header and updated by Save/Load actions.
+
+    Annotation API contract (STABLE once shipped — any frontend builds on
+    it; see system/scene/README.md):
+      GET    /api/annotations       → {ok, annotations: [...]}
+      POST   /api/annotations       body {kind, name, points, theta?}
+                                    → {ok, annotation}
+      PUT    /api/annotations/{id}  body: any of {name, points, theta,
+                                    stale:false} → {ok, annotation}
+      DELETE /api/annotations/{id}  → {ok}
+    theta (heading, radians) is poi-only — a room carrying it is a 400.
+    On PUT, theta null/absent means "keep"; a set heading cannot be
+    cleared, only changed (deliberate until the poi UI exists).
+    Errors: 400 invalid body/fields, 404 unknown id, 503 store unavailable;
+    those carry {ok: false, detail}. A store write failure (disk full)
+    deliberately escapes as a plain 500 — the edit was NOT saved and hiding
+    that behind a tidy body would be worse. Coordinates are map-frame
+    meters. Same trust domain as the rest of this LAN debug/UI server —
+    no auth.
     """
+    if map_binding is None:
+        map_binding = {}
+
+    async def _persist_scene_objects(map_id: str) -> int:
+        if object_store is None:
+            return 0
+        if hasattr(object_store, "rebind"):
+            object_store.rebind(map_id)
+        objs, _surfs = await registry.snapshot()
+        pairs = [(o, None) for o in objs.values() if not getattr(o, "missing", False)]
+        if not pairs:
+            return 0
+        return int(await asyncio.to_thread(object_store.persist, pairs))
+
+    async def _restore_scene_objects(map_id: str) -> int:
+        if object_store is None:
+            return 0
+        if hasattr(object_store, "rebind"):
+            object_store.rebind(map_id)
+        restored = await asyncio.to_thread(object_store.load_all)
+        async with registry.lock():
+            for o in restored:
+                registry.restore_object(o)
+        return len(restored)
+
+    def _set_map_binding(map_id: str, mode: str, source: str) -> None:
+        map_binding.update({
+            "map_id": map_id,
+            "mode": mode,
+            "generation": None,
+            "source": source,
+        })
 
     async def index(_request) -> HTMLResponse:
         # Combined split layout: 2D map left, 3D viz right, each with
@@ -477,7 +662,297 @@ def make_app(*, registry: ObjectRegistry,
         return HTMLResponse(_INDEX_HTML)
 
     async def state(_request) -> JSONResponse:
-        return JSONResponse(_state_payload(registry, hub, sg_store))
+        return JSONResponse(
+            _state_payload(registry, hub, sg_store, anno_store, map_binding)
+        )
+
+    # ── annotation CRUD ──────────────────────────────────────────────
+    def _anno_error(status: int, detail: str) -> JSONResponse:
+        return JSONResponse({"ok": False, "detail": detail}, status_code=status)
+
+    async def _anno_body(request) -> Optional[dict]:
+        """Parse the JSON request body; None (→ caller answers 400) when
+        it is missing, malformed, or not an object."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — malformed body is a client error
+            return None
+        return body if isinstance(body, dict) else None
+
+    async def annotations_list(_request) -> JSONResponse:
+        if anno_store is None:
+            return _anno_error(503, "annotation store unavailable")
+        return JSONResponse({"ok": True, "annotations": anno_store.list_json()})
+
+    async def annotations_create(request) -> JSONResponse:
+        """POST /api/annotations — validate {kind, name, points, theta?}
+        and persist a new annotation (returned with its generated id)."""
+        if anno_store is None:
+            return _anno_error(503, "annotation store unavailable")
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        kind = body.get("kind")
+        name = body.get("name", "")
+        points = body.get("points")
+        theta = body.get("theta")
+        err = validate_annotation_fields(kind, name, points, theta)
+        if err:
+            return _anno_error(400, err)
+        ann = anno_store.create(kind=kind, name=name, points=points, theta=theta)
+        return JSONResponse({"ok": True, "annotation": ann.to_json()})
+
+    async def annotations_update(request) -> JSONResponse:
+        """PUT /api/annotations/{id} — partial update: any of name /
+        points / theta / stale:false (the user's "confirm still valid").
+        Provided fields are validated against the annotation's kind."""
+        if anno_store is None:
+            return _anno_error(503, "annotation store unavailable")
+        ann_id = request.path_params["annotation_id"]
+        existing = anno_store.get(ann_id)
+        if existing is None:
+            return _anno_error(404, f"unknown annotation id {ann_id!r}")
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        name = body.get("name")
+        points = body.get("points")
+        theta = body.get("theta")
+        # Validate the would-be merged state so a partial update can never
+        # store something a create would have rejected.
+        err = validate_annotation_fields(
+            existing.kind,
+            name if name is not None else existing.name,
+            points if points is not None else existing.points,
+            theta if theta is not None else existing.theta,
+        )
+        if err:
+            return _anno_error(400, err)
+        clear_stale = body.get("stale") is False
+        ann = anno_store.update(
+            ann_id, name=name, points=points, theta=theta,
+            clear_stale=clear_stale,
+        )
+        if ann is None:  # deleted between get and update — still a 404
+            return _anno_error(404, f"unknown annotation id {ann_id!r}")
+        return JSONResponse({"ok": True, "annotation": ann.to_json()})
+
+    async def annotations_delete(request) -> JSONResponse:
+        """DELETE /api/annotations/{id} — remove the annotation; 404 when
+        the id is unknown (delete is the user's explicit action, so unlike
+        staleness it IS allowed to drop a user asset)."""
+        if anno_store is None:
+            return _anno_error(503, "annotation store unavailable")
+        ann_id = request.path_params["annotation_id"]
+        if not anno_store.delete(ann_id):
+            return _anno_error(404, f"unknown annotation id {ann_id!r}")
+        return JSONResponse({"ok": True})
+
+    async def maps_list(_request) -> JSONResponse:
+        return JSONResponse(await asyncio.to_thread(_maps_payload))
+
+    def _map_exists_in_payload(payload: dict, map_id: str) -> tuple[bool, dict]:
+        for item in payload.get("maps", []):
+            if item.get("map_id") == map_id and item.get("has_spatial_artifact"):
+                return True, item
+        return False, {}
+
+    async def maps_save(request) -> JSONResponse:
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        map_id = str(body.get("map_id") or "").strip()
+        if not map_id:
+            return _anno_error(400, "map_id is required")
+        note = str(body.get("note") or "")
+        before_payload = await asyncio.to_thread(_maps_payload)
+        spatial_exists, existing_map = _map_exists_in_payload(before_payload, map_id)
+        current_bound_id = str(map_binding.get("map_id") or "")
+        current_mode = str(map_binding.get("mode") or "")
+        if spatial_exists:
+            if current_bound_id and current_bound_id != map_id:
+                return _anno_error(409, f"spatial map {map_id} already exists; load it before updating scene annotations/objects")
+            out = {
+                "ok": True,
+                "map_id": map_id,
+                "detail": f"spatial map {map_id} already exists; saved scene annotations/objects only",
+                "spatial_unchanged": True,
+            }
+        else:
+            save_timeout_s = float(os.environ.get("SCENE_MAP_SAVE_TIMEOUT_S", "300"))
+            out = await asyncio.to_thread(
+                _map_rpc,
+                "save_map",
+                {"map_id": map_id, "note": note},
+                save_timeout_s,
+            )
+        object_count = 0
+        object_persist_error = None
+        if out.get("ok"):
+            if anno_store is not None:
+                anno_store.rebind(map_id, generation=None, carry_current=True)
+            try:
+                object_count = await _persist_scene_objects(map_id)
+                out["objects"] = object_count
+            except Exception as e:  # noqa: BLE001
+                object_persist_error = str(e)
+                out["object_persist_error"] = object_persist_error
+            mode_after_save = current_mode if spatial_exists and current_bound_id == map_id and current_mode else "mapping"
+            _set_map_binding(map_id, mode_after_save, "ui_save")
+
+        annotations = anno_store.list_json() if anno_store is not None else []
+        out.setdefault("annotations", len(annotations))
+        if out.get("ok"):
+            maps_payload = await asyncio.to_thread(_maps_payload)
+            saved_map = None
+            for item in maps_payload.get("maps", []):
+                if item.get("map_id") == map_id:
+                    saved_map = item
+                    break
+            validation = {
+                "map_id": map_id,
+                "spatial_ok": bool(saved_map and saved_map.get("has_spatial_artifact") and saved_map.get("spatial_ok") is not False),
+                "artifact_detail": (saved_map or {}).get("artifact_detail") or maps_payload.get("detail") or "map not found after save",
+                "artifact_size": (saved_map or {}).get("artifact_size"),
+                "has_preview": bool(saved_map and saved_map.get("has_preview")),
+                "updated": (saved_map or {}).get("updated"),
+                "object_count": int(object_count or 0),
+                "room_count": sum(1 for a in annotations if a.get("kind") == "room"),
+                "annotation_count": len(annotations),
+                "paths": {
+                    "map_artifact": (saved_map or {}).get("artifact_path") or "not exposed by map provider",
+                    "preview": (saved_map or {}).get("preview_path") or "not exposed by map provider",
+                    "scene_annotations": str(anno_store.path) if anno_store is not None else "annotation store unavailable",
+                },
+                "log": [
+                    f"save_map returned ok={bool(out.get('ok'))}: {out.get('detail') or ''}",
+                    f"map list validation ok={bool(maps_payload.get('ok'))}",
+                    f"spatial artifact check: {(saved_map or {}).get('artifact_detail') or maps_payload.get('detail') or 'unknown'}",
+                ],
+            }
+            if object_persist_error:
+                validation["log"].append(f"object persistence error: {object_persist_error}")
+            out["validation"] = validation
+        return JSONResponse(out, status_code=200 if out.get("ok") else 502)
+
+    async def maps_load(request) -> JSONResponse:
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        map_id = str(body.get("map_id") or "").strip()
+        if not map_id:
+            return _anno_error(400, "map_id is required")
+        mode = str(body.get("mode") or "localization")
+        load_timeout_s = float(os.environ.get("SCENE_MAP_LOAD_TIMEOUT_S", "240"))
+        out = await asyncio.to_thread(_map_rpc, "load_map", {
+            "map_id": map_id,
+            "mode": mode,
+            "has_initial_pose": bool(body.get("has_initial_pose", False)),
+            "x": float(body.get("x") or 0.0),
+            "y": float(body.get("y") or 0.0),
+            "theta": float(body.get("theta") or 0.0),
+        }, load_timeout_s)
+        if out.get("ok"):
+            if anno_store is not None:
+                anno_store.rebind(map_id, generation=None, carry_current=False)
+            try:
+                out["objects_restored"] = await _restore_scene_objects(map_id)
+            except Exception as e:  # noqa: BLE001
+                out["object_restore_error"] = str(e)
+            _set_map_binding(map_id, "localization", "ui_load")
+        return JSONResponse(out, status_code=200 if out.get("ok") else 502)
+
+    async def maps_delete(request) -> JSONResponse:
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        map_id = str(body.get("map_id") or "").strip()
+        if not map_id:
+            return _anno_error(400, "map_id is required")
+        out = await asyncio.to_thread(_map_rpc, "delete_map", {"map_id": map_id})
+        if out.get("ok"):
+            annotations_deleted = False
+            objects_deleted = 0
+            cleanup_errors = []
+            if anno_store is not None:
+                try:
+                    annotations_deleted = bool(anno_store.delete_map(map_id))
+                except Exception as e:  # noqa: BLE001
+                    cleanup_errors.append(f"annotations: {e}")
+            if object_store is not None:
+                try:
+                    objects_deleted = int(await asyncio.to_thread(object_store.delete_map, map_id))
+                except Exception as e:  # noqa: BLE001
+                    cleanup_errors.append(f"objects: {e}")
+            out["scene_cleanup"] = {
+                "annotations_deleted": annotations_deleted,
+                "objects_deleted": objects_deleted,
+            }
+            if cleanup_errors:
+                out["scene_cleanup_error"] = "; ".join(cleanup_errors)
+        return JSONResponse(out, status_code=200 if out.get("ok") else 502)
+
+    async def maps_pose_estimate(request) -> JSONResponse:
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        try:
+            payload = {
+                "x": float(body.get("x")),
+                "y": float(body.get("y")),
+                "theta": float(body.get("theta") or 0.0),
+                "cov_xy": float(body.get("cov_xy") or 0.0),
+                "cov_theta": float(body.get("cov_theta") or 0.0),
+            }
+            if not all(math.isfinite(float(payload[k])) for k in ("x", "y", "theta", "cov_xy", "cov_theta")):
+                raise ValueError("non-finite pose")
+        except Exception:
+            return _anno_error(400, "x/y/theta must be finite numbers")
+
+        def _pose_delta(pose: dict) -> Optional[dict]:
+            if not pose.get("ok"):
+                return None
+            dx = float(pose.get("x", 0.0)) - payload["x"]
+            dy = float(pose.get("y", 0.0)) - payload["y"]
+            dtheta = math.atan2(
+                math.sin(float(pose.get("theta", 0.0)) - payload["theta"]),
+                math.cos(float(pose.get("theta", 0.0)) - payload["theta"]),
+            )
+            return {
+                "dx": dx,
+                "dy": dy,
+                "dtheta": dtheta,
+                "distance_m": math.hypot(dx, dy),
+                "abs_yaw_rad": abs(dtheta),
+            }
+
+        mode_info = await asyncio.to_thread(_map_rpc, "get_mode", {}, 3.0)
+        before = await asyncio.to_thread(_map_rpc, "get_pose", {}, 3.0)
+        out = await asyncio.to_thread(_map_rpc, "pose_estimate", payload)
+        # RTAB-Map relocalization is not instantaneous. Give the pose adapter a
+        # short beat so the UI can show an immediate convergence hint instead
+        # of only "published".
+        await asyncio.sleep(float(os.environ.get("SCENE_POSE_ESTIMATE_FEEDBACK_DELAY_S", "1.2")))
+        after = await asyncio.to_thread(_map_rpc, "get_pose", {}, 3.0)
+        out["requested_pose"] = payload
+        out["mode"] = mode_info
+        out["pose_before"] = before
+        out["pose_after"] = after
+        out["delta_before"] = _pose_delta(before)
+        out["delta_after"] = _pose_delta(after)
+        if out.get("ok"):
+            if after.get("ok") and out["delta_after"]:
+                d = out["delta_after"]
+                mode = str(mode_info.get("mode") or "unknown") if mode_info.get("ok") else "unknown"
+                suffix = "" if mode == "localization" else f"; mode={mode}, pose estimate may not relocalize until a map is loaded in localization mode"
+                out["detail"] = (
+                    f"pose estimate sent to ({payload['x']:.2f}, {payload['y']:.2f}, {payload['theta']:.2f}); "
+                    f"current error {d['distance_m']:.2f} m, yaw {d['abs_yaw_rad']:.2f} rad"
+                    f"{suffix}"
+                )
+            else:
+                out["detail"] = (out.get("detail") or "pose estimate sent") + "; current pose not available yet"
+        return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
     async def index3d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_3D_HTML)
@@ -489,6 +964,9 @@ def make_app(*, registry: ObjectRegistry,
 
     async def cam(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_CAM_HTML)
+
+    async def user_page(_request) -> HTMLResponse:
+        return HTMLResponse(_USER_HTML)
 
     async def camera_state(_request) -> JSONResponse:
         return JSONResponse(_camera_payload(hub))
@@ -504,9 +982,21 @@ def make_app(*, registry: ObjectRegistry,
         Route("/2d", index2d, methods=["GET"]),
         Route("/3d", index3d, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
+        Route("/user", user_page, methods=["GET"]),
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
         Route("/api/camera", camera_state, methods=["GET"]),
+        Route("/api/annotations", annotations_list, methods=["GET"]),
+        Route("/api/annotations", annotations_create, methods=["POST"]),
+        Route("/api/annotations/{annotation_id}", annotations_update,
+              methods=["PUT"]),
+        Route("/api/annotations/{annotation_id}", annotations_delete,
+              methods=["DELETE"]),
+        Route("/api/maps", maps_list, methods=["GET"]),
+        Route("/api/maps/save", maps_save, methods=["POST"]),
+        Route("/api/maps/load", maps_load, methods=["POST"]),
+        Route("/api/maps/delete", maps_delete, methods=["POST"]),
+        Route("/api/maps/pose_estimate", maps_pose_estimate, methods=["POST"]),
     ]
     if static_dir.is_dir():
         routes.append(Mount("/static", StaticFiles(directory=str(static_dir)), name="static"))
@@ -1696,6 +2186,771 @@ _INDEX_3D_HTML = r"""<!doctype html>
     }
     requestAnimationFrame(loop);
   </script>
+</body>
+</html>
+"""
+
+
+# ── User annotation page (/user) ─────────────────────────────────────────────
+# The end-user map page: SLAM occupancy underlay + LIGHTWEIGHT object overlay
+# + user-drawn room polygons, with a draw-a-room flow talking to the
+# /api/annotations CRUD. Deliberately self-contained (own inline JS, no
+# imports from the debug pages' scripts): the two pages evolve independently
+# and a debug-UI tweak must never break the user page. Kept dependency-free
+# like every other page here (no framework, no build step).
+_USER_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>robonix — map & rooms</title>
+  <style>
+    :root { --fg:#e8eaed; --bg:#0e1015; --panel:#161a22; --acc:#7aa7ff;
+            --muted:#7d828b; --warn:#e6c454; --danger:#e06c75; }
+    html, body { background: var(--bg); color: var(--fg); margin: 0; height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+    header { display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+      background: var(--panel); border-bottom: 1px solid #232936; flex: none; }
+    header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+    header .meta { font-size: 12px; color: var(--muted); }
+    header .stale-alert { font-size: 12px; color: var(--warn); display: none; }
+    #main { display: flex; flex: 1; min-height: 0; }
+    #panel { width: 260px; flex: none; background: var(--panel);
+      border-right: 1px solid #232936; display: flex; flex-direction: column; }
+    #panel .actions { padding: 12px; border-bottom: 1px solid #232936; }
+    #map-tools { padding: 10px 12px; border-bottom: 1px solid #232936; display: grid; gap: 8px; }
+    #map-tools label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+    #map-id { width: 100%; box-sizing: border-box; border: 1px solid #33405a; border-radius: 6px;
+      background: #0f131b; color: var(--fg); padding: 6px 8px; font-size: 12px; }
+    #map-actions, .map-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+    #map-status { min-height: 16px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    #map-status.busy { color: var(--acc); }
+    #map-status.ok { color: #8ef0b7; }
+    #map-status.err { color: var(--danger); }
+    #mode-pill { display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 999px;
+      border: 1px solid #33405a; color: var(--muted); font-size: 11px; }
+    #mode-pill.localization { border-color: #3b633f; color: #8ef0b7; background: rgba(64,150,80,.12); }
+    #mode-pill.mapping { border-color: #6a5630; color: var(--warn); background: rgba(230,196,84,.10); }
+    #map-list { display: grid; gap: 6px; max-height: 170px; overflow-y: auto; }
+    .mapitem { border: 1px solid #232936; border-radius: 8px; padding: 7px 8px; font-size: 12px; background: #121721; cursor: pointer; }
+    .mapitem.selected, .mapitem.busy { border-color: var(--acc); }
+    .mapitem .name { font-weight: 700; }
+    .mapitem .sub { color: var(--muted); font-size: 10px; margin: 2px 0 6px; overflow-wrap: anywhere; }
+    .mapitem .map-status { color: var(--acc); font-size: 10px; min-height: 12px; margin-top: 4px; }
+    button:disabled { opacity: .55; cursor: progress; }
+    button { background: #222a3a; color: var(--fg); border: 1px solid #33405a;
+      border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+    button:hover { background: #2a3550; }
+    button.primary { background: #2b4a86; border-color: #3c62ad; }
+    button.primary.active { background: var(--acc); color: #0e1015; }
+    button.small { padding: 2px 7px; font-size: 11px; }
+    button.danger { border-color: #6b3640; color: var(--danger); }
+    #room-list { flex: 1; overflow-y: auto; padding: 8px 12px; }
+    .room { border: 1px solid #232936; border-radius: 8px; padding: 8px 10px;
+      margin-bottom: 8px; font-size: 13px; }
+    .room.selected { border-color: var(--acc); }
+    .room .name { font-weight: 600; }
+    .room .sub { color: var(--muted); font-size: 11px; margin: 3px 0 6px; }
+    .room .badge { color: #0e1015; background: var(--warn); border-radius: 4px;
+      padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 6px; }
+    .room .btns { display: flex; gap: 6px; }
+    #canvas-wrap { position: relative; flex: 1; min-width: 0; }
+    canvas { display: block; width: 100%; height: 100%; background: #14171f; }
+    #hint { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,23,31,.92); border: 1px solid #33405a; color: var(--fg);
+      font-size: 12px; padding: 6px 12px; border-radius: 6px; display: none; }
+    #toast { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,23,31,.95); border: 1px solid #6b3640; color: var(--danger);
+      font-size: 12px; padding: 6px 12px; border-radius: 6px; display: none; }
+    .legend { position: absolute; bottom: 8px; left: 12px; font-size: 11px;
+      color: var(--muted); background: rgba(20,23,31,.85); padding: 4px 8px;
+      border-radius: 4px; }
+    #empty { padding: 10px 2px; color: var(--muted); font-size: 12px; }
+    dialog.modal { width: min(360px, calc(100vw - 32px)); border: 1px solid #33405a;
+      border-radius: 10px; padding: 0; background: #151a23; color: var(--fg);
+      box-shadow: 0 18px 70px rgba(0,0,0,.55); }
+    dialog.modal::backdrop { background: rgba(0,0,0,.55); }
+    .modal-body { padding: 16px; display: grid; gap: 12px; }
+    .modal-title { font-weight: 700; font-size: 14px; }
+    .modal-message { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .modal-input { width: 100%; box-sizing: border-box; border: 1px solid #33405a;
+      border-radius: 7px; background: #0f131b; color: var(--fg); padding: 8px 10px;
+      font-size: 13px; outline: none; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    dialog.report-modal { width: min(720px, calc(100vw - 32px)); }
+    .save-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .save-report-preview { width: 100%; max-height: 300px; object-fit: contain; border: 1px solid #33405a; border-radius: 8px; background: #0e1015; }
+    .save-report-kv { display: grid; grid-template-columns: 120px 1fr; gap: 5px 10px; font-size: 12px; align-content: start; }
+    .save-report-kv .k { color: var(--muted); }
+    .save-report-kv .v { overflow-wrap: anywhere; }
+    .save-report-log { margin: 8px 0 0; padding: 8px; border: 1px solid #283243; border-radius: 8px; background: #0f131b; color: #c9d1d9; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; max-height: 130px; overflow: auto; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Map &amp; rooms</h1>
+    <span class="meta" id="meta">map: —</span>
+    <span class="stale-alert" id="stale-alert">⚠ map was rebuilt — review stale rooms</span>
+  </header>
+  <div id="main">
+    <div id="panel">
+      <div id="map-tools">
+        <label>Map ID<input id="map-id" placeholder="apartment_demo" /></label>
+        <div id="map-actions">
+          <button class="primary" id="btn-save-map">Save current</button>
+          <button id="btn-refresh-maps">Refresh</button>
+          <button id="btn-pose-estimate">Pose estimate</button>
+        </div>
+        <div id="map-status"><span id="map-status-msg">Ready.</span><span class="mode-label">Map mode:</span><span id="mode-pill">unknown</span></div>
+        <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="btn-draw">✏ Annotate room</button>
+      </div>
+      <div id="room-list"><div id="empty">No rooms yet. Click “Annotate room”,
+        then click on the map to outline one (double-click or Enter to finish,
+        Esc to cancel).</div></div>
+    </div>
+    <div id="canvas-wrap">
+      <canvas id="c"></canvas>
+      <div id="hint"></div>
+      <div id="toast"></div>
+      <div class="legend">drag to pan · wheel to zoom · hover a dot for its label</div>
+    </div>
+  </div>
+</div>
+<dialog class="modal" id="room-modal">
+  <form method="dialog" class="modal-body">
+    <div class="modal-title" id="room-modal-title">Room</div>
+    <div class="modal-message" id="room-modal-message"></div>
+    <input class="modal-input" id="room-modal-input" autocomplete="off" />
+    <div class="modal-actions">
+      <button id="room-modal-cancel" value="cancel">Cancel</button>
+      <button class="primary" id="room-modal-ok" value="ok">OK</button>
+    </div>
+  </form>
+</dialog>
+<dialog class="modal report-modal" id="save-modal">
+  <form method="dialog" class="modal-body">
+    <div class="modal-title" id="save-modal-title">Save report</div>
+    <div class="save-report-grid">
+      <img class="save-report-preview" id="save-report-preview" alt="saved map preview" />
+      <div class="save-report-kv" id="save-report-kv"></div>
+    </div>
+    <pre class="save-report-log" id="save-report-log"></pre>
+    <div class="modal-actions">
+      <button class="primary" value="ok">OK</button>
+    </div>
+  </form>
+</dialog>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+function fit() { c.width = c.clientWidth; c.height = c.clientHeight; }
+window.addEventListener('resize', fit); fit();
+
+// ── view transform (world meters ↔ canvas px) ────────────────────────────
+// Unlike the debug page (which chases the robot) the editor keeps a STABLE
+// user-controlled view: drawing needs the map to hold still under the mouse.
+let center = [0, 0];
+let pxPerM = 40;
+let viewInit = false;
+function w2p(x, y) {
+    return [c.width / 2 + (x - center[0]) * pxPerM,
+            c.height / 2 - (y - center[1]) * pxPerM];
+}
+function p2w(px, py) {
+    return [center[0] + (px - c.width / 2) / pxPerM,
+            center[1] - (py - c.height / 2) / pxPerM];
+}
+
+// ── state ────────────────────────────────────────────────────────────────
+let state = null;          // last /api/state payload
+let occImg = null, occMeta = null, occStamp = 0, occLoading = 0;
+let drawMode = false;
+let draft = [];            // in-progress polygon vertices (world coords)
+let mouseWorld = null;     // live cursor position for the rubber-band edge
+let hoverObj = null;
+let selectedId = null;
+let selectedMapId = null;
+let savedMaps = [];
+let mapBusy = false;
+let poseEstimateMode = false;
+let draftSubmitting = false;
+
+const hintEl = document.getElementById('hint');
+function setHint(text) {
+    hintEl.style.display = text ? 'block' : 'none';
+    hintEl.textContent = text || '';
+}
+let toastTimer = null;
+function toast(text) {
+    const t = document.getElementById('toast');
+    t.textContent = text; t.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.style.display = 'none'; }, 4000);
+}
+function setMapStatus(text, kind = '') {
+    const el = document.getElementById('map-status');
+    const msg = document.getElementById('map-status-msg');
+    if (!el || !msg) return;
+    el.className = kind;
+    msg.textContent = text || 'Ready.';
+}
+function setMapBusy(on, label = '') {
+    mapBusy = on;
+    document.querySelectorAll('#map-tools button, .map-btns button').forEach(b => b.disabled = on);
+    if (label) setMapStatus(label, on ? 'busy' : '');
+}
+function mapItemFor(id) {
+    return Array.from(document.querySelectorAll('.mapitem')).find(el => el.dataset.id === id);
+}
+function setMapItemStatus(id, text) {
+    const item = mapItemFor(id);
+    if (!item) return;
+    item.classList.toggle('busy', Boolean(text));
+    const st = item.querySelector('.map-status');
+    if (st) st.textContent = text || '';
+}
+
+// ── rendering ────────────────────────────────────────────────────────────
+function polyCentroid(pts) {
+    let sx = 0, sy = 0;
+    for (const [x, y] of pts) { sx += x; sy += y; }
+    return [sx / pts.length, sy / pts.length];
+}
+
+function draw() {
+    fit();
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (!state) return;
+
+    // occupancy underlay (same decode/anchor math as the debug 2D page:
+    // cell [0,0] at world origin, y flipped because image y grows down).
+    // occStamp only advances on successful decode, so a corrupt frame is
+    // retried on the next poll instead of wedging the underlay.
+    if (state.occupancy && state.occupancy.stamp_ms !== occStamp
+        && state.occupancy.stamp_ms !== occLoading) {
+        occLoading = state.occupancy.stamp_ms;
+        const meta = state.occupancy;
+        const im = new Image();
+        im.onload = () => { occImg = im; occMeta = meta; occStamp = meta.stamp_ms; };
+        im.onerror = () => { occLoading = 0; console.error('occupancy PNG decode failed'); };
+        im.src = 'data:image/png;base64,' + meta.png_b64;
+    }
+    if (occImg && occMeta) {
+        if (!viewInit) {   // first grid: fit it into the viewport once
+            const wM = occMeta.width * occMeta.resolution;
+            const hM = occMeta.height * occMeta.resolution;
+            center = [occMeta.origin_x + wM / 2, occMeta.origin_y + hM / 2];
+            pxPerM = Math.min((c.width - 40) / wM, (c.height - 40) / hM, 120);
+            pxPerM = Math.max(pxPerM, 5);
+            viewInit = true;
+        }
+        const wM = occMeta.width * occMeta.resolution;
+        const hM = occMeta.height * occMeta.resolution;
+        const [x0, y0] = w2p(occMeta.origin_x, occMeta.origin_y + hM);
+        ctx.globalAlpha = 0.9;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(occImg, x0, y0, wM * pxPerM, hM * pxPerM);
+        ctx.globalAlpha = 1.0;
+    } else {
+        ctx.fillStyle = '#7d828b'; ctx.font = '13px sans-serif';
+        ctx.fillText('no map yet — the SLAM map appears here once mapping publishes it', 20, 30);
+    }
+
+    // saved rooms
+    for (const a of (state.annotations || [])) {
+        if (a.kind !== 'room' || a.points.length < 3) continue;
+        const pts = a.points.map(p => w2p(p[0], p[1]));
+        ctx.beginPath();
+        pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        ctx.closePath();
+        const sel = a.annotation_id === selectedId;
+        ctx.fillStyle = a.stale ? 'rgba(230,196,84,0.10)' : 'rgba(122,167,255,0.12)';
+        ctx.fill();
+        ctx.lineWidth = sel ? 2.5 : 1.5;
+        ctx.strokeStyle = a.stale ? '#e6c454' : (sel ? '#a8c4ff' : '#7aa7ff');
+        ctx.setLineDash(a.stale ? [6, 4] : []);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const [cx, cy] = w2p(...polyCentroid(a.points));
+        const label = (a.stale ? '⚠ ' : '') + (a.name || '(unnamed)');
+        ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(label, cx, cy);
+        ctx.fillStyle = a.stale ? '#e6c454' : '#cfe0ff';
+        ctx.fillText(label, cx, cy);
+        ctx.textAlign = 'start';
+    }
+
+    // objects — small translucent dots; label only on hover (readability:
+    // the underlay must stay legible, objects are a light overlay).
+    for (const o of (state.objects || [])) {
+        if (o.cls === 'robot') continue;
+        const [px, py] = w2p(o.pose.x, o.pose.y);
+        ctx.globalAlpha = o.missing ? 0.25 : 0.6;
+        ctx.fillStyle = '#9ab8e8';
+        ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(14,16,21,0.9)';
+        ctx.stroke();
+    }
+    if (hoverObj) {
+        const [px, py] = w2p(hoverObj.pose.x, hoverObj.pose.y);
+        ctx.font = '12px ui-monospace, monospace'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(hoverObj.cls, px + 8, py);
+        ctx.fillStyle = '#cfe0ff';
+        ctx.fillText(hoverObj.cls, px + 8, py);
+    }
+
+    // robot marker (small arrow, subtle)
+    const robot = state.robot;
+    if (robot) {
+        const [rx, ry] = w2p(robot.x, robot.y);
+        const yaw = robot.yaw || 0;
+        ctx.strokeStyle = '#7aa7ff'; ctx.fillStyle = '#7aa7ff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(rx, ry, 5, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx + Math.cos(yaw) * 14, ry - Math.sin(yaw) * 14);
+        ctx.stroke();
+    }
+
+    // draft polygon (draw mode)
+    if (drawMode && draft.length) {
+        const pts = draft.map(p => w2p(p[0], p[1]));
+        ctx.beginPath();
+        pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        if (mouseWorld) { const [mx, my] = w2p(...mouseWorld); ctx.lineTo(mx, my); }
+        ctx.strokeStyle = '#8ef0b7'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+        ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = '#8ef0b7';
+        for (const [x, y] of pts) {
+            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+        }
+    }
+}
+
+function showSaveReport(out, previewDataUrl) {
+    const validation = (out && out.validation) || {};
+    const modal = document.getElementById('save-modal');
+    const title = document.getElementById('save-modal-title');
+    const img = document.getElementById('save-report-preview');
+    const kv = document.getElementById('save-report-kv');
+    const log = document.getElementById('save-report-log');
+    const status = validation.spatial_ok ? 'OK' : 'FAILED';
+    title.textContent = `Save report · ${status}`;
+    img.src = previewDataUrl || '';
+    const paths = validation.paths || {};
+    const rows = [
+        ['Map ID', validation.map_id || out.map_id || '-'],
+        ['Spatial artifact', validation.spatial_ok ? 'ok' : (validation.artifact_detail || 'failed')],
+        ['Artifact size', validation.artifact_size ? `${validation.artifact_size} bytes` : '-'],
+        ['Objects', validation.object_count ?? out.objects ?? '-'],
+        ['Rooms', validation.room_count ?? '-'],
+        ['Annotations', validation.annotation_count ?? out.annotations ?? '-'],
+        ['Updated', validation.updated || '-'],
+        ['Artifact path', paths.map_artifact || '-'],
+        ['Preview path', paths.preview || '-'],
+        ['Room JSON', paths.scene_annotations || '-'],
+    ];
+    kv.innerHTML = rows.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('');
+    log.textContent = (validation.log || []).join('\n') || 'no save log returned';
+    if (typeof modal.showModal === 'function') modal.showModal();
+    else modal.setAttribute('open', '');
+}
+
+// ── map library ──────────────────────────────────────────────────────────
+function preferredMapId() {
+    const input = document.getElementById('map-id');
+    const typed = input && input.value.trim();
+    const bound = state && state.map_binding && state.map_binding.map_id;
+    return typed || bound || 'default';
+}
+function renderMaps() {
+    const list = document.getElementById('map-list');
+    if (!list) return;
+    if (!savedMaps.length) {
+        list.innerHTML = '<div id="empty">No saved maps listed yet.</div>';
+        return;
+    }
+    list.innerHTML = savedMaps.map(m => {
+        const dbLabel = !m.has_spatial_artifact ? 'no spatial artifact' : (m.spatial_ok === false ? 'invalid artifact' : 'spatial artifact');
+        const dbTitle = m.artifact_detail ? ` title="${esc(m.artifact_detail)}"` : '';
+        const canLoad = m.has_spatial_artifact && m.spatial_ok !== false;
+        return `
+      <div class="mapitem ${m.map_id === selectedMapId ? 'selected' : ''} ${canLoad ? '' : 'bad'}" data-id="${esc(m.map_id)}">
+        <div class="name">${esc(m.map_id)}</div>
+        <div class="sub"${dbTitle}>${dbLabel} · ${m.has_preview ? 'preview' : 'no preview'} · ${m.updated || '-'}</div>
+        <div class="map-btns">
+          <button class="small" data-map-act="load" ${canLoad ? '' : 'disabled'}>Load</button>
+          <button class="small danger" data-map-act="delete">Delete</button>
+        </div>
+        <div class="map-status">${canLoad ? '' : esc(m.artifact_detail || 'not loadable')}</div>
+      </div>`;
+    }).join('');
+}
+async function loadMaps() {
+    try {
+        const r = await fetch('/api/maps', { cache: 'no-store' });
+        const out = await r.json();
+        if (!r.ok || !out.ok) { toast(out.detail || 'list maps failed'); return; }
+        savedMaps = out.maps || [];
+        renderMaps();
+    } catch (e) { toast('list maps failed: ' + e); }
+}
+async function saveCurrentMap() {
+    if (mapBusy) return;
+    const id = preferredMapId();
+    document.getElementById('map-id').value = id;
+    selectedMapId = id; renderMaps();
+    draw();
+    const previewDataUrl = c.toDataURL('image/png');
+    setMapBusy(true, `Saving map ${id}...`);
+    toast(`Saving map ${id}...`);
+    const out = await api('POST', '/api/maps/save', { map_id: id, note: 'saved from scene user page' });
+    setMapBusy(false);
+    if (out) {
+        const validation = out.validation || {};
+        const ok = validation.spatial_ok !== false && validation.has_preview !== false;
+        const semanticOnly = Boolean(out.spatial_unchanged);
+        setMapStatus(`${semanticOnly ? 'Updated scene data for' : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; rooms ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
+        toast((semanticOnly ? 'updated scene data for ' : 'saved map ') + (out.map_id || id));
+        await loadMaps();
+        showSaveReport(out, previewDataUrl);
+    }
+    else setMapStatus(`Save ${id} failed. See toast/log for details.`, 'err');
+}
+async function loadSelectedMap(id) {
+    if (mapBusy) return;
+    selectedMapId = id;
+    document.getElementById('map-id').value = id;
+    renderMaps();
+    setMapItemStatus(id, 'loading...');
+    setMapBusy(true, `Loading ${id}; switching mapping to localization mode...`);
+    toast(`Loading ${id}; switching to localization mode...`);
+    const out = await api('POST', '/api/maps/load', { map_id: id, mode: 'localization' });
+    setMapBusy(false);
+    setMapItemStatus(id, '');
+    if (out) {
+        setMapStatus(`Loaded ${id}. Mapping requested localization mode; use Pose estimate if the robot pose is off.`, 'ok');
+        toast('loaded map ' + id + ' · localization mode requested');
+        await loadMaps();
+    } else {
+        setMapStatus(`Load ${id} failed. See toast/log for details.`, 'err');
+    }
+}
+async function deleteSelectedMap(id) {
+    if (mapBusy) return;
+    if (!(await askConfirm('Delete map', `Delete map “${id}”?`))) return;
+    setMapItemStatus(id, 'deleting...');
+    setMapBusy(true, `Deleting map ${id}...`);
+    const out = await api('POST', '/api/maps/delete', { map_id: id });
+    setMapBusy(false);
+    if (out) { setMapStatus(`Deleted ${id}.`, 'ok'); toast('deleted map ' + id); await loadMaps(); }
+    else { setMapItemStatus(id, ''); setMapStatus(`Delete ${id} failed.`, 'err'); }
+}
+function setPoseEstimateMode(on) {
+    poseEstimateMode = on;
+    const btn = document.getElementById('btn-pose-estimate');
+    if (btn) {
+        btn.classList.toggle('primary', on);
+        btn.textContent = on ? 'Click pose on map' : 'Pose estimate';
+    }
+    setHint(on ? 'Click the robot position on the map to publish /initialpose. Heading defaults to 0; refine later with orientation UI.' : '');
+    c.style.cursor = on ? 'crosshair' : (drawMode ? 'crosshair' : 'grab');
+}
+function poseDeltaText(delta) {
+    if (!delta) return 'pose feedback unavailable';
+    return `error ${Number(delta.distance_m || 0).toFixed(2)} m, yaw ${Number(delta.abs_yaw_rad || 0).toFixed(2)} rad`;
+}
+async function sendPoseEstimate(world) {
+    if (mapBusy || !world) return;
+    setPoseEstimateMode(false);
+    const x = world[0], y = world[1], theta = 0.0;
+    setMapBusy(true, `Publishing pose estimate (${x.toFixed(2)}, ${y.toFixed(2)}, ${theta.toFixed(2)})...`);
+    toast(`pose estimate: ${x.toFixed(2)}, ${y.toFixed(2)}`);
+    const out = await api('POST', '/api/maps/pose_estimate', { x, y, theta });
+    setMapBusy(false);
+    if (out) {
+        const msg = `${out.detail || 'Pose estimate sent.'}` +
+            (out.delta_before ? ` · before ${poseDeltaText(out.delta_before)}` : '') +
+            (out.delta_after ? ` · after ${poseDeltaText(out.delta_after)}` : '');
+        setMapStatus(msg, 'ok');
+        toast(out.detail || 'pose estimate sent');
+    } else setMapStatus(`Pose estimate failed for (${x.toFixed(2)}, ${y.toFixed(2)}).`, 'err');
+}
+document.getElementById('btn-save-map').addEventListener('click', saveCurrentMap);
+document.getElementById('btn-refresh-maps').addEventListener('click', async () => { setMapStatus('Refreshing maps...', 'busy'); await loadMaps(); setMapStatus('Map list refreshed.', 'ok'); });
+document.getElementById('btn-pose-estimate').addEventListener('click', () => setPoseEstimateMode(!poseEstimateMode));
+document.getElementById('map-list').addEventListener('click', (ev) => {
+    const item = ev.target.closest('.mapitem');
+    if (!item) return;
+    const id = item.dataset.id;
+    const act = ev.target.dataset && ev.target.dataset.mapAct;
+    if (!act) {
+        selectedMapId = id;
+        document.getElementById('map-id').value = id;
+        renderMaps();
+        setMapStatus(`Selected ${id}. Click Load to enter localization mode.`, 'ok');
+        return;
+    }
+    if (act === 'load') {
+        const m = savedMaps.find(x => x.map_id === id);
+        if (m && (!m.has_spatial_artifact || m.spatial_ok === false)) {
+            setMapStatus(`Map ${id} is not loadable: ${m.artifact_detail || 'invalid spatial artifact'}`, 'err');
+            return;
+        }
+        loadSelectedMap(id);
+    }
+    if (act === 'delete') deleteSelectedMap(id);
+});
+
+// ── side panel ───────────────────────────────────────────────────────────
+function esc(s) {
+    return String(s).replace(/[&<>"']/g,
+        ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+const roomModal = document.getElementById('room-modal');
+const roomModalTitle = document.getElementById('room-modal-title');
+const roomModalMessage = document.getElementById('room-modal-message');
+const roomModalInput = document.getElementById('room-modal-input');
+const roomModalOk = document.getElementById('room-modal-ok');
+const roomModalCancel = document.getElementById('room-modal-cancel');
+
+function askModal({ title, message = '', defaultValue = '', input = true, okText = 'OK', danger = false }) {
+    return new Promise((resolve) => {
+        roomModalTitle.textContent = title;
+        roomModalMessage.textContent = message;
+        roomModalMessage.style.display = message ? 'block' : 'none';
+        roomModalInput.value = defaultValue || '';
+        roomModalInput.style.display = input ? 'block' : 'none';
+        roomModalOk.textContent = okText;
+        roomModalOk.classList.toggle('danger', danger);
+        let done = false;
+        const finish = (value) => {
+            if (done) return;
+            done = true;
+            roomModal.removeEventListener('close', onClose);
+            resolve(value);
+        };
+        const onClose = () => {
+            if (roomModal.returnValue === 'ok') {
+                finish(input ? roomModalInput.value.trim() : true);
+            } else {
+                finish(null);
+            }
+        };
+        roomModal.addEventListener('close', onClose, { once: true });
+        if (typeof roomModal.showModal === 'function') roomModal.showModal();
+        else roomModal.setAttribute('open', '');
+        if (input) {
+            roomModalInput.focus();
+            roomModalInput.select();
+        } else {
+            roomModalOk.focus();
+        }
+    });
+}
+
+function askRoomName(title, defaultValue = '') {
+    return askModal({ title, defaultValue, input: true, okText: 'Save' });
+}
+
+function askConfirm(title, message, okText = 'Delete') {
+    return askModal({ title, message, input: false, okText, danger: true });
+}
+function renderPanel() {
+    const rooms = (state && state.annotations || []).filter(a => a.kind === 'room');
+    const list = document.getElementById('room-list');
+    const anyStale = rooms.some(a => a.stale);
+    document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
+    if (!rooms.length) {
+        list.innerHTML = '<div id="empty">No rooms yet. Click “Annotate room”, ' +
+          'then click on the map to outline one (double-click or Enter to ' +
+          'finish, Esc to cancel).</div>';
+        return;
+    }
+    list.innerHTML = rooms.map(a => `
+      <div class="room ${a.annotation_id === selectedId ? 'selected' : ''}"
+           data-id="${a.annotation_id}">
+        <span class="name">${esc(a.name || '(unnamed)')}</span>
+        ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
+        <div class="sub">${a.points.length} corners</div>
+        <div class="btns">
+          <button class="small" data-act="rename">Rename</button>
+          ${a.stale ? '<button class="small" data-act="confirm">Still valid</button>' : ''}
+          <button class="small danger" data-act="delete">Delete</button>
+        </div>
+      </div>`).join('');
+}
+document.getElementById('room-list').addEventListener('click', async (ev) => {
+    const roomEl = ev.target.closest('.room');
+    if (!roomEl) return;
+    const id = roomEl.dataset.id;
+    const act = ev.target.dataset && ev.target.dataset.act;
+    if (!act) { selectedId = (selectedId === id) ? null : id; renderPanel(); draw(); return; }
+    const room = (state.annotations || []).find(a => a.annotation_id === id);
+    if (!room) return;
+    if (act === 'rename') {
+        const name = await askRoomName('Rename room', room.name);
+        if (name !== null && name) await api('PUT', '/api/annotations/' + id, { name });
+    } else if (act === 'confirm') {
+        await api('PUT', '/api/annotations/' + id, { stale: false });
+    } else if (act === 'delete') {
+        if (await askConfirm('Delete room', `Delete room “${room.name}”?`))
+            await api('DELETE', '/api/annotations/' + id);
+    }
+});
+
+// ── draw mode ────────────────────────────────────────────────────────────
+const btnDraw = document.getElementById('btn-draw');
+function setDrawMode(on) {
+    drawMode = on;
+    draft = [];
+    btnDraw.classList.toggle('active', on);
+    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Annotate room';
+    c.style.cursor = on ? 'crosshair' : 'grab';
+    setHint(on ? 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel' : '');
+    draw();
+}
+btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
+
+async function finishDraft() {
+    if (draftSubmitting) return;
+    if (draft.length < 3) { toast('A room needs at least 3 corners.'); return; }
+    draftSubmitting = true;
+    try {
+        const points = draft.map(p => [p[0], p[1]]);
+        const name = await askRoomName('Create room', '');
+        if (name === null) return;          // keep drawing
+        if (!name) { toast('Room name is required.'); return; }
+        const body = { kind: 'room', name, points };
+        draft = [];
+        const created = await api('POST', '/api/annotations', body);
+        if (created) setDrawMode(false);
+        else { draft = points; draw(); }
+    } finally {
+        draftSubmitting = false;
+    }
+}
+
+// ── canvas input: pan / zoom / vertex clicks / hover ─────────────────────
+let dragging = false, dragMoved = false, lastPos = null;
+c.style.cursor = 'grab';
+c.addEventListener('mousedown', (ev) => {
+    dragging = true; dragMoved = false; lastPos = [ev.offsetX, ev.offsetY];
+});
+window.addEventListener('mouseup', () => { dragging = false; });
+c.addEventListener('mousemove', (ev) => {
+    mouseWorld = p2w(ev.offsetX, ev.offsetY);
+    if (dragging && lastPos) {
+        const dx = ev.offsetX - lastPos[0], dy = ev.offsetY - lastPos[1];
+        if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
+        if (dragMoved) {
+            center = [center[0] - dx / pxPerM, center[1] + dy / pxPerM];
+            lastPos = [ev.offsetX, ev.offsetY];
+        }
+    } else if (!drawMode && state) {
+        hoverObj = null;
+        for (const o of (state.objects || [])) {
+            if (o.cls === 'robot') continue;
+            const [px, py] = w2p(o.pose.x, o.pose.y);
+            if ((px - ev.offsetX) ** 2 + (py - ev.offsetY) ** 2 < 100) { hoverObj = o; break; }
+        }
+    }
+    draw();
+});
+c.addEventListener('click', (ev) => {
+    if (dragMoved) return;              // that was a pan, not a click
+    if (poseEstimateMode) { sendPoseEstimate(p2w(ev.offsetX, ev.offsetY)); return; }
+    if (drawMode) { draft.push(p2w(ev.offsetX, ev.offsetY)); draw(); }
+});
+c.addEventListener('dblclick', (ev) => {
+    ev.preventDefault();
+    if (drawMode) {
+        // the dblclick's two single clicks added two duplicate corners at
+        // the same spot — drop one before closing.
+        if (draft.length > 1) draft.pop();
+        finishDraft();
+    }
+});
+window.addEventListener('keydown', (ev) => {
+    if (!drawMode) return;
+    if (ev.key === 'Escape') setDrawMode(false);
+    if (ev.key === 'Enter' && !ev.repeat) finishDraft();
+});
+c.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+    // zoom about the cursor so the point under the mouse stays put
+    const [wx, wy] = p2w(ev.offsetX, ev.offsetY);
+    pxPerM = Math.min(400, Math.max(3, pxPerM * factor));
+    const [nx, ny] = p2w(ev.offsetX, ev.offsetY);
+    center = [center[0] + (wx - nx), center[1] + (wy - ny)];
+    draw();
+}, { passive: false });
+
+// ── API + polling ────────────────────────────────────────────────────────
+async function api(method, path, body) {
+    try {
+        const r = await fetch(path, {
+            method,
+            headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        const out = await r.json().catch(() => null);
+        if (!r.ok || !out || out.ok === false) {
+            toast((out && out.detail) || (method + ' failed (' + r.status + ')'));
+            return null;
+        }
+        await refresh();
+        return out;
+    } catch (e) { toast('request failed: ' + e); return null; }
+}
+
+async function refresh() {
+    // Only the network fetch/parse is try-guarded (transient by nature);
+    // a bug thrown by the render functions must surface in the console,
+    // not be swallowed once a second forever.
+    let next = null;
+    try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (!r.ok) return;
+        next = await r.json();
+    } catch (_) { return; /* transient; next poll retries */ }
+    state = next;
+    const mb = state.map_binding;
+    const unsavedLive = mb && mb.source === 'default' && !mb.mode;
+    document.getElementById('meta').textContent = mb
+        ? (unsavedLive ? 'map: live session · unsaved' : `map: ${mb.map_id} · ${mb.mode || 'mode unknown'}`)
+        : 'map: —';
+    const modePill = document.getElementById('mode-pill');
+    if (modePill) {
+        const mode = unsavedLive ? 'unsaved live' : ((mb && mb.mode) || 'unknown');
+        modePill.textContent = mode;
+        modePill.className = unsavedLive ? 'mapping' : mode;
+    }
+    const msg = document.getElementById('map-status-msg');
+    if (unsavedLive && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
+        setMapStatus('Live mapping session is not saved yet. Enter a Map ID, then Save current.', 'busy');
+    } else if (mb && mb.mode === 'localization' && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
+        setMapStatus('Localization mode is active. Use Pose estimate if the robot pose is off.', 'ok');
+    }
+    const mapInput = document.getElementById('map-id');
+    if (mapInput && !mapInput.value && mb && mb.map_id && !unsavedLive) mapInput.value = mb.map_id;
+    renderPanel();
+    draw();
+}
+// 1 Hz is plenty for an editor page (the debug page polls at 5 Hz).
+setInterval(refresh, 1000);
+refresh();
+loadMaps();
+</script>
 </body>
 </html>
 """

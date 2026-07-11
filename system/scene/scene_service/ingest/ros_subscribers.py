@@ -44,6 +44,14 @@ def _import_ros():
     # transform is non-identity, and the web UI shows the robot offset
     # from where rviz (which goes through tf) shows it.
     from tf2_ros import Buffer, TransformListener  # type: ignore
+    # map/msg/MapLifecycle comes from the generated ros2_idl overlay
+    # (rbnx codegen --ros2 + colcon build), NOT the ROS distro. Import it
+    # defensively: a deploy without the overlay must lose only the
+    # lifecycle subscription, not every scene subscription.
+    try:
+        from map.msg import MapLifecycle  # type: ignore
+    except ImportError:
+        MapLifecycle = None
     return {
         "rclpy": rclpy,
         "Node": Node,
@@ -65,6 +73,9 @@ def _import_ros():
         "TransformStamped": TransformStamped,
         "Odometry": Odometry,
         "OccupancyGrid": OccupancyGrid,
+        # None when the ros2_idl overlay is missing — _subscribe skips the
+        # spec with a warning instead of crashing the hub.
+        "MapLifecycle": MapLifecycle,
         "Buffer": Buffer,
         "TransformListener": TransformListener,
     }
@@ -166,14 +177,19 @@ class SubscribersHub:
         """Add a new (kind, topic) subscription to a hub already up.
         Used by the background reconciler to absorb topics that come
         online after start(). Returns True if added, False if the
-        kind was already known."""
+        kind was already known — or if the subscription could not be
+        created (missing msg class): committing the slot anyway would
+        make has_kinds() claim a subscription that doesn't exist and
+        pair a success log with the skip warning."""
         if self._ros is None:
             return False
         if spec.kind in self._slots:
             return False
         self._slots[spec.kind] = _LatestSlot()
+        if not self._subscribe(spec):
+            del self._slots[spec.kind]
+            return False
         self.specs.append(spec)
-        self._subscribe(spec)
         log.info("[scene-ros] dynamic add: %s on %s", spec.kind, spec.topic)
         return True
 
@@ -208,9 +224,22 @@ class SubscribersHub:
                 log.debug("[scene-ros] spin tick: %s", e)
 
     # ── subscription wiring ────────────────────────────────────────────────
-    def _subscribe(self, spec: TopicSpec) -> None:
+    def _subscribe(self, spec: TopicSpec) -> bool:
+        """Create the rclpy subscription for one spec. Returns False (with
+        a warning) when the msg class is unavailable — the hub and every
+        other subscription keep running."""
         assert self._ros is not None
-        msg_cls = self._ros[spec.msg_type]
+        msg_cls = self._ros.get(spec.msg_type)
+        if msg_cls is None:
+            # Unknown or unavailable msg class (e.g. MapLifecycle without
+            # the ros2_idl overlay). One subscription degrades, the hub —
+            # and every other subscription — keeps running.
+            log.warning(
+                "[scene-ros] msg type %r unavailable — skipping %s on %s "
+                "(generated interface overlay missing?)",
+                spec.msg_type, spec.kind, spec.topic,
+            )
+            return False
         QoSProfile = self._ros["QoSProfile"]
         ReliabilityPolicy = self._ros["ReliabilityPolicy"]
         DurabilityPolicy = self._ros["DurabilityPolicy"]
@@ -266,6 +295,16 @@ class SubscribersHub:
                 history=HistoryPolicy.KEEP_LAST,
                 depth=5,
             )
+        elif spec.kind == "map_lifecycle":
+            # mapping's identity broadcast is latched (published once per
+            # lifecycle transition); TRANSIENT_LOCAL picks up the cached
+            # sample on a late start.
+            qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
         elif spec.kind == "camera_extrinsics":
             # Static camera mount transform (primitive/camera/extrinsics):
             # genuinely latched (published once), so TRANSIENT_LOCAL is
@@ -300,6 +339,7 @@ class SubscribersHub:
         self._node.create_subscription(msg_cls, spec.topic, _cb, qos)
         log.info("[scene-ros] subscribed: %s on %s (%s, qos=%s)",
                  spec.kind, spec.topic, spec.msg_type, spec.kind)
+        return True
 
     # ── consumer-side accessors ────────────────────────────────────────────
     def latest(self, kind: str) -> tuple[Any, float, int]:
