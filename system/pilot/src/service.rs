@@ -10,12 +10,12 @@ use crate::pb::contracts::{
 use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
-use crate::planner::{self, ExecutorConn};
+use crate::planner::{self, ExecutorConn, TaskState};
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_scribe::{debug, error};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -43,6 +43,7 @@ pub const EVT_FINAL_TEXT: u32 = 4;
 pub const EVT_NODE_STATE: u32 = 5;
 pub const EVT_TASK_STATE: u32 = 6;
 
+#[allow(dead_code)]
 pub enum PilotStreamBody {
     TextChunk(String),
     FinalText(String),
@@ -94,6 +95,15 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
 /// LLM conversation history per `session_id`. Grows across turns; never
 /// expired (turns trim themselves at MAX_HISTORY in planner).
 type Histories = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<Message>>>>>>;
+type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<Option<TaskState>>>>>>;
+
+#[derive(Clone)]
+struct ActiveTurnInput {
+    turn_id: String,
+    tx: mpsc::Sender<Task>,
+}
+
+const SEEN_TASK_IDS_PER_SESSION: usize = 256;
 
 pub struct PilotServiceImpl {
     /// `AtlasClient` is cheap to clone (its inner channel is just a handle);
@@ -107,13 +117,21 @@ pub struct PilotServiceImpl {
     vlm: VlmClient,
     soma_prompt_block: Arc<String>,
     histories: Histories,
+    /// Harness-owned standing goal per session. It survives a transport turn
+    /// that pauses for user input, so the next message cannot silently replace
+    /// unfinished work with a model-authored summary.
+    task_states: TaskStates,
     /// Per-session cancellation senders. `abort_turn` Task signals this
     /// without holding the history lock.
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     /// Per-session steer queues. A Task submitted while a turn is already
     /// running for that session is pushed here as a mid-task steer instead of
     /// starting a second turn; the running `run_turn` drains it.
-    steers: Arc<Mutex<HashMap<String, mpsc::Sender<Task>>>>,
+    steers: Arc<Mutex<HashMap<String, ActiveTurnInput>>>,
+    /// Recently accepted task ids, scoped by session. A client retry with the
+    /// same id is acknowledged exactly once and never starts or steers a turn
+    /// twice. The bounded queue prevents an unbounded session-lifetime set.
+    seen_task_ids: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
     /// Per-session RTDL plan-id counter. Monotonic, never reused, and shared
     /// across every turn of the session so plan ids never reset to 1 on a new
     /// message.
@@ -133,8 +151,10 @@ impl PilotServiceImpl {
             vlm,
             soma_prompt_block: Arc::new(soma_prompt_block),
             histories: Arc::new(Mutex::new(HashMap::new())),
+            task_states: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             steers: Arc::new(Mutex::new(HashMap::new())),
+            seen_task_ids: Arc::new(Mutex::new(HashMap::new())),
             plan_seqs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -146,6 +166,13 @@ impl PilotServiceImpl {
             .clone()
     }
 
+    async fn get_or_create_task_state(&self, session_id: &str) -> Arc<Mutex<Option<TaskState>>> {
+        let mut map = self.task_states.lock().await;
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    }
+
     /// The session's shared, monotonic RTDL plan-id counter, created on first
     /// use and persisted for the process lifetime so ids never reset per turn.
     async fn get_or_create_plan_seq(&self, session_id: &str) -> Arc<AtomicU64> {
@@ -154,17 +181,52 @@ impl PilotServiceImpl {
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone()
     }
+
+    async fn accept_task_id_once(&self, session_id: &str, task_id: &str) -> bool {
+        if task_id.is_empty() {
+            return true;
+        }
+        let mut sessions = self.seen_task_ids.lock().await;
+        let ids = sessions.entry(session_id.to_string()).or_default();
+        if ids.iter().any(|seen| seen == task_id) {
+            return false;
+        }
+        ids.push_back(task_id.to_string());
+        while ids.len() > SEEN_TASK_IDS_PER_SESSION {
+            ids.pop_front();
+        }
+        true
+    }
+}
+
+fn task_context(task: &Task) -> Option<serde_json::Value> {
+    let raw = task.context_json.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    serde_json::from_str(raw).ok()
 }
 
 fn task_is_abort_turn(task: &Task) -> bool {
-    let j = task.context_json.trim();
-    if j.is_empty() {
-        return false;
-    }
-    serde_json::from_str::<serde_json::Value>(j)
-        .ok()
+    task_context(task)
         .and_then(|v| v.get("abort_turn").and_then(|x| x.as_bool()))
         .unwrap_or(false)
+}
+
+fn task_is_steer(task: &Task) -> bool {
+    task_context(task).is_some_and(|v| {
+        v.get("steer").and_then(|x| x.as_bool()).unwrap_or(false)
+            || v.get("interaction_mode").and_then(|x| x.as_str()) == Some("steer")
+    })
+}
+
+fn expected_turn_id(task: &Task) -> Option<String> {
+    task_context(task).and_then(|v| {
+        v.get("expected_turn_id")
+            .and_then(|x| x.as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
 }
 
 #[tonic::async_trait]
@@ -177,11 +239,36 @@ impl RobonixSystemPilot for PilotServiceImpl {
     ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let mut task = request.into_inner();
 
+        if task.session_id.is_empty() {
+            task.session_id = Uuid::new_v4().to_string();
+        }
+        if task.task_id.is_empty() {
+            task.task_id = Uuid::new_v4().to_string();
+        }
+
+        if !self
+            .accept_task_id_once(&task.session_id, &task.task_id)
+            .await
+        {
+            debug!(
+                "[pilot] duplicate task ignored session={} task_id={}",
+                task.session_id, task.task_id
+            );
+            let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
+            return Ok(Response::new(ReceiverStream::new(rx)));
+        }
+
         if task_is_abort_turn(&task) {
             let id = task.session_id.clone();
             let ok = if let Some(tx) = self.cancels.lock().await.get(&id) {
-                let _ = tx.send(true);
-                true
+                tx.send_if_modified(|interrupted| {
+                    if *interrupted {
+                        false
+                    } else {
+                        *interrupted = true;
+                        true
+                    }
+                })
             } else {
                 false
             };
@@ -190,36 +277,60 @@ impl RobonixSystemPilot for PilotServiceImpl {
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
-        if task.session_id.is_empty() {
-            task.session_id = Uuid::new_v4().to_string();
-        }
-
         // Decide — under a single `steers` lock — whether this task is a mid-task
         // steer for an already-live turn or the start of a new turn. Doing the
         // check and the registration atomically prevents a check-then-insert race
         // where two near-simultaneous submits for one session both start a turn.
         let (steer_tx, steer_rx) = mpsc::channel::<Task>(32);
-        let existing_steer = {
+        let explicit_steer = task_is_steer(&task);
+        let expected_turn = expected_turn_id(&task);
+        let existing_turn = {
             let mut steers = self.steers.lock().await;
             match steers.get(&task.session_id) {
                 Some(existing) => Some(existing.clone()),
                 None => {
-                    steers.insert(task.session_id.clone(), steer_tx.clone());
+                    if explicit_steer {
+                        return Err(Status::failed_precondition(
+                            "no active turn to steer for this session",
+                        ));
+                    }
+                    steers.insert(
+                        task.session_id.clone(),
+                        ActiveTurnInput {
+                            turn_id: task.task_id.clone(),
+                            tx: steer_tx.clone(),
+                        },
+                    );
                     None
                 }
             }
         };
-        if let Some(existing) = existing_steer {
+        if let Some(existing) = existing_turn {
+            if !explicit_steer {
+                return Err(Status::already_exists(format!(
+                    "session already has active turn {}; submit explicit steer input instead",
+                    existing.turn_id
+                )));
+            }
+            if let Some(expected) = expected_turn
+                && expected != existing.turn_id
+            {
+                return Err(Status::failed_precondition(format!(
+                    "steer expected turn {expected}, but active turn is {}",
+                    existing.turn_id
+                )));
+            }
             // A turn is already live: hand this to its steer queue and return an
             // empty stream; events keep flowing on that turn's original stream.
             let id = task.session_id.clone();
-            let ok = existing.send(task).await.is_ok();
+            let ok = existing.tx.send(task).await.is_ok();
             debug!("[pilot] steer task for session {id} (queued={ok})");
             let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
         let history_arc = self.get_or_create_history(&task.session_id).await;
+        let task_state_arc = self.get_or_create_task_state(&task.session_id).await;
         let plan_seq = self.get_or_create_plan_seq(&task.session_id).await;
         // what is tokio's tx and rx:
         // https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.Sender.html
@@ -247,7 +358,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                     PilotStreamBody::Status(SessionStatusEvent {
                         session_id: session_id.clone(),
                         state: SessionState::Active as u32,
-                        message: String::new(),
+                        message: format!("turn_id={}", task.task_id),
                     }),
                 )))
                 .await;
@@ -268,9 +379,11 @@ impl RobonixSystemPilot for PilotServiceImpl {
             };
 
             let mut history = history_arc.lock().await;
+            let mut standing_task = task_state_arc.lock().await;
             if let Err(e) = planner::run_turn(
                 &task,
                 &mut history,
+                &mut standing_task,
                 &vlm,
                 &mut executor,
                 &mut atlas_for_turn,
@@ -301,7 +414,7 @@ async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
 ) -> anyhow::Result<ExecutorConn> {
-    let (_, _, exec_ch) = atlas_client::connect_to_capability(
+    let (_, executor_provider_id, exec_ch) = atlas_client::connect_to_capability(
         &mut atlas,
         consumer_id,
         "robonix/system/executor/execute",
@@ -310,12 +423,13 @@ async fn build_executor_conn(
     .context("connect_to_capability robonix/system/executor/execute")?;
     Ok(ExecutorConn {
         graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
+        provider_id: executor_provider_id,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::task_is_abort_turn;
+    use super::{expected_turn_id, task_is_abort_turn, task_is_steer};
     use crate::pb::pilot::Task;
 
     fn task(ctx: &str) -> Task {
@@ -337,5 +451,14 @@ mod tests {
         assert!(!task_is_abort_turn(&task(r#"{"foo":1}"#)));
         assert!(!task_is_abort_turn(&task("")));
         assert!(!task_is_abort_turn(&task("not json")));
+    }
+
+    #[test]
+    fn explicit_steer_and_expected_turn_are_parsed() {
+        let value = task(r#"{"interaction_mode":"steer","expected_turn_id":"turn-7"}"#);
+        assert!(task_is_steer(&value));
+        assert_eq!(expected_turn_id(&value).as_deref(), Some("turn-7"));
+        assert!(task_is_steer(&task(r#"{"steer":true}"#)));
+        assert!(!task_is_steer(&task(r#"{"interaction_mode":"task"}"#)));
     }
 }
