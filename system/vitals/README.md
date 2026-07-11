@@ -184,7 +184,7 @@ primitive:
 ```bash
 # Terminal 1: Atlas
 cargo run --release -p robonix-atlas -- \
-  --listen 127.0.0.1:50251 --capabilities capabilities
+  --listen 127.0.0.1:50051 --capabilities capabilities
 
 # Terminal 2: Vitals (starts gRPC server immediately, retries SOMA in background)
 cargo run --release -p robonix-vitals -- \
