@@ -844,6 +844,10 @@ def make_app(*, registry: ObjectRegistry,
             return _anno_error(400, "map_id is required")
         mode = str(body.get("mode") or "localization")
         load_timeout_s = float(os.environ.get("SCENE_MAP_LOAD_TIMEOUT_S", "240"))
+        before_stamp = 0.0
+        before_count = 0
+        if hub is not None and hub.has("occupancy_grid"):
+            _before_msg, before_stamp, before_count = hub.latest("occupancy_grid")
         out = await asyncio.to_thread(_map_rpc, "load_map", {
             "map_id": map_id,
             "mode": mode,
@@ -853,6 +857,42 @@ def make_app(*, registry: ObjectRegistry,
             "theta": float(body.get("theta") or 0.0),
         }, load_timeout_s)
         if out.get("ok"):
+            # Mapping's LoadMap response means RTAB-Map accepted the database
+            # and PublishMap request. Do not restore semantic state until Scene
+            # has actually observed the resulting occupancy grid; otherwise the
+            # first click only switches the database and a second click appears
+            # necessary to refresh rooms/objects against the loaded map.
+            ready_timeout_s = float(os.environ.get("SCENE_MAP_READY_TIMEOUT_S", "20"))
+            deadline = time.monotonic() + ready_timeout_s
+            occupancy_ready = False
+            while time.monotonic() < deadline:
+                if hub is not None and hub.has("occupancy_grid"):
+                    msg, stamp, count = hub.latest("occupancy_grid")
+                    if (
+                        msg is not None
+                        and int(getattr(msg.info, "width", 0)) > 0
+                        and int(getattr(msg.info, "height", 0)) > 0
+                        and (count > before_count or stamp > before_stamp)
+                    ):
+                        occupancy_ready = True
+                        out["occupancy"] = {
+                            "count": int(count),
+                            "stamp_unix": float(stamp),
+                            "width": int(msg.info.width),
+                            "height": int(msg.info.height),
+                        }
+                        break
+                await asyncio.sleep(0.1)
+            if not occupancy_ready:
+                out = {
+                    **out,
+                    "ok": False,
+                    "detail": (
+                        f"mapping loaded {map_id}, but Scene did not observe a new "
+                        f"occupancy grid within {ready_timeout_s:.1f}s"
+                    ),
+                }
+                return JSONResponse(out, status_code=502)
             if anno_store is not None:
                 anno_store.rebind(map_id, generation=None, carry_current=False)
             try:
