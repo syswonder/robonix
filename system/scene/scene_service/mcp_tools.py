@@ -121,6 +121,40 @@ def _find_annotation_target(object_id: str) -> "Annotation | None":
     return None
 
 
+def _normalize_room_reference(value: str) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def _room_aliases(room: "Annotation") -> set[str]:
+    name = _normalize_room_reference(room.name)
+    aliases = {name}
+    for prefix in ("room ", "room-", "房间 ", "房间"):
+        if name.startswith(prefix) and name[len(prefix):].strip():
+            aliases.add(name[len(prefix):].strip())
+    return aliases
+
+
+def _resolve_room_target(reference: str) -> tuple["Annotation | None", list["Annotation"]]:
+    """Resolve stable ID first, then an exact unique room name/short alias.
+
+    The second return value contains ambiguous candidates. Fuzzy matching is
+    deliberately excluded: navigation must not guess between similar rooms.
+    """
+    exact = _find_annotation_target(reference)
+    if exact is not None and exact.kind == "room":
+        return exact, []
+    if _ANNO_STORE is None:
+        return None, []
+    needle = _normalize_room_reference(reference)
+    matches = [
+        room for room in _ANNO_STORE.list()
+        if room.kind == "room" and needle in _room_aliases(room)
+    ]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
 def _room_id_hint() -> str:
     if _ANNO_STORE is None:
         return "no rooms are currently registered"
@@ -375,15 +409,28 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
     The result never falls outside the room polygon.
     Contract: robonix/system/scene/goal_room.
     """
-    room = _find_annotation_target(req.room_id)
-    if room is None or room.kind != "room":
+    room, ambiguous = _resolve_room_target(req.room_id)
+    if ambiguous:
+        candidates = ", ".join(
+            f"{item.name!r} (id={_annotation_object_id(item)})"
+            for item in ambiguous
+        )
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"unknown room_id '{req.room_id}'; room_id must be the exact "
-                f"stable ID returned by list_objects; {_room_id_hint()}"
+                f"ambiguous room reference '{req.room_id}'; candidates: "
+                f"{candidates}; pass one exact stable ID"
             ),
         )
+    if room is None:
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason=(
+                f"unknown room reference '{req.room_id}'; pass a stable ID or "
+                f"unique room name returned by list_objects; {_room_id_hint()}"
+            ),
+        )
+    stable_room_id = _annotation_object_id(room)
     if _HUB is None or not _HUB.has("occupancy_grid"):
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
@@ -405,7 +452,7 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
     if found is None:
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason=f"no known free pose inside room '{room.name}' ({req.room_id})",
+            reason=f"no known free pose inside room '{room.name}' ({stable_room_id})",
         )
     x, y = found
     if not point_in_polygon(x, y, room.points):
@@ -418,7 +465,7 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
         x=float(x),
         y=float(y),
         yaw=float(room.theta or 0.0),
-        reason=f"safe pose inside room '{room.name}' ({req.room_id})",
+        reason=f"safe pose inside room '{room.name}' ({stable_room_id})",
     )
 
 
