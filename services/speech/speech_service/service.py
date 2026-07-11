@@ -895,10 +895,11 @@ class SpeechWakeWordServicer(SpeechWakeWordBase):
             context.set_details("wake-word backend is unavailable; run the speech package build")
             return speech_pb2.DetectWakeWord_Response(error="wake-word backend unavailable")
         try:
+            # Robonix codegen unwraps the sole request field for a client-stream
+            # RPC. gRPC therefore yields bare audio.AudioChunk messages here,
+            # not DetectWakeWord_Request wrappers.
             keyword = self.backend.detect(
-                bytes(request.chunk.data)
-                for request in request_iterator
-                if request.chunk and request.chunk.data
+                bytes(chunk.data) for chunk in request_iterator if chunk.data
             )
             return speech_pb2.DetectWakeWord_Response(
                 detected=bool(keyword),

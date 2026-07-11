@@ -129,27 +129,31 @@ def _scan_audio_devices_proto():
             note="",
         ))
     ids = {d.id for d in devs}
-    configured_mic = os.environ.get("AUDIO_MIC_DEVICE", "").strip()
-    if configured_mic and configured_mic not in ids:
+    # ALSA plugin devices such as plughw:0,0 are intentionally absent from
+    # arecord/aplay -l. Expose the *active* deployment selections as first-class
+    # choices so a client refresh does not silently replace them with hw:0,0.
+    configured: dict[str, set[str]] = {}
+    for device_id, kind in (
+        (current_input_id, "input"),
+        (current_output_id, "output"),
+        (os.environ.get("AUDIO_MIC_DEVICE", "").strip(), "input"),
+        (os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip(), "output"),
+    ):
+        if device_id:
+            configured.setdefault(device_id, set()).add(kind)
+    for device_id, kinds in configured.items():
+        if device_id in ids:
+            continue
+        kind = "duplex" if kinds == {"input", "output"} else next(iter(kinds))
         devs.append(audio_pb2.AudioDevice(
-            id=configured_mic,
-            name="Configured ALSA input device",
-            kind="input",
+            id=device_id,
+            name="Configured ALSA device",
+            kind=kind,
             is_default=False,
             channels=1,
-            note="configured via AUDIO_MIC_DEVICE",
+            note="active deployment selection",
         ))
-        ids.add(configured_mic)
-    configured_spk = os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip()
-    if configured_spk and configured_spk not in ids:
-        devs.append(audio_pb2.AudioDevice(
-            id=configured_spk,
-            name="Configured ALSA output device",
-            kind="output",
-            is_default=False,
-            channels=1,
-            note="configured via AUDIO_SPEAKER_DEVICE",
-        ))
+        ids.add(device_id)
     return devs
 
 
@@ -183,6 +187,9 @@ def select_device(request, context):
         ).strip()
         if configured:
             valid.add(configured)
+        current = current_input_id if kind == "input" else current_output_id
+        if current:
+            valid.add(current)
         if requested not in valid:
             return audio_pb2.SelectAudioDevice_Response(
                 ok=False, error=f"unknown {kind} id '{requested}'")
@@ -199,27 +206,52 @@ def select_device(request, context):
         new_id = info.device_id
 
     if kind == "input":
+        previous = mic_driver
         if mic_driver is not None:
             try:
                 mic_driver.stop()
             except Exception:  # noqa: BLE001
                 pass
         # Auto-probe hardware sample rate unless explicitly overridden
-        mic_rate = int(os.environ["AUDIO_MIC_SAMPLE_RATE"]) if "AUDIO_MIC_SAMPLE_RATE" in os.environ else probe_mic_sample_rate(new_id)
+        mic_rate = (
+            int(os.environ["AUDIO_MIC_SAMPLE_RATE"])
+            if "AUDIO_MIC_SAMPLE_RATE" in os.environ
+            else previous.sample_rate if previous is not None
+            else probe_mic_sample_rate(new_id)
+        )
         mic_driver = MicDriver(
             device_id=new_id,
             sample_rate=mic_rate,
-            channels=int(os.environ.get("AUDIO_MIC_CHANNELS", "1")),
-            bits_per_sample=int(os.environ.get("AUDIO_MIC_BITS", "16")),
-            chunk_duration_s=int(os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
+            channels=int(os.environ.get(
+                "AUDIO_MIC_CHANNELS",
+                str(previous.channels if previous is not None else 1),
+            )),
+            bits_per_sample=int(os.environ.get(
+                "AUDIO_MIC_BITS",
+                str(previous.bits_per_sample if previous is not None else 16),
+            )),
+            chunk_duration_s=int(os.environ.get(
+                "AUDIO_MIC_CHUNK_MS",
+                str(round((previous.chunk_duration_s if previous is not None else 0.1) * 1000)),
+            )) / 1000.0,
         )
         current_input_id = new_id
     else:
+        previous = speaker_driver
         speaker_driver = SpeakerDriver(
             device_id=new_id,
-            sample_rate=int(os.environ.get("AUDIO_SPEAKER_SAMPLE_RATE", "24000")),
-            channels=int(os.environ.get("AUDIO_SPEAKER_CHANNELS", "1")),
-            bits_per_sample=int(os.environ.get("AUDIO_SPEAKER_BITS", "16")),
+            sample_rate=int(os.environ.get(
+                "AUDIO_SPEAKER_SAMPLE_RATE",
+                str(previous.sample_rate if previous is not None else 24000),
+            )),
+            channels=int(os.environ.get(
+                "AUDIO_SPEAKER_CHANNELS",
+                str(previous.channels if previous is not None else 1),
+            )),
+            bits_per_sample=int(os.environ.get(
+                "AUDIO_SPEAKER_BITS",
+                str(previous.bits_per_sample if previous is not None else 16),
+            )),
         )
         current_output_id = new_id
     return audio_pb2.SelectAudioDevice_Response(ok=True, error="")
