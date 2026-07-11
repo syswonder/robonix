@@ -4,11 +4,14 @@ from scene_service import mcp_tools
 
 
 class _Store:
-    def list(self):
-        return [
+    def __init__(self, rooms=None):
+        self._rooms = rooms or [
             SimpleNamespace(annotation_id="anno.315", kind="room", name="room 315"),
             SimpleNamespace(annotation_id="anno.100", kind="room", name="room 100"),
         ]
+
+    def list(self):
+        return self._rooms
 
 
 def _object(object_id: str, label: str):
@@ -35,3 +38,23 @@ def test_object_hint_ranks_similar_label_first():
     )
     assert hint.index("cardboard box") < hint.index("chair")
     assert "scene.object.cardboard_box_001" in hint
+
+
+def test_room_reference_resolves_stable_id_name_and_short_alias():
+    mcp_tools.attach_annotation_store(_Store())
+    for reference in ("scene.room.anno.315", "room 315", "ROOM   315", "315"):
+        room, ambiguous = mcp_tools._resolve_room_target(reference)
+        assert room is not None
+        assert room.annotation_id == "anno.315"
+        assert ambiguous == []
+
+
+def test_room_reference_reports_ambiguous_aliases_without_guessing():
+    rooms = [
+        SimpleNamespace(annotation_id="anno.a", kind="room", name="room 315"),
+        SimpleNamespace(annotation_id="anno.b", kind="room", name="315"),
+    ]
+    mcp_tools.attach_annotation_store(_Store(rooms))
+    room, ambiguous = mcp_tools._resolve_room_target("315")
+    assert room is None
+    assert [item.annotation_id for item in ambiguous] == ["anno.a", "anno.b"]
