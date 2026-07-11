@@ -189,6 +189,25 @@ class AnnotationStore:
                 self._annotations = {}
                 self._load(current_generation=generation)
 
+    def delete_map(self, map_id: str) -> bool:
+        """Delete exactly one persisted annotation partition.
+
+        Map deletion is an explicit user action. Unlike a map-generation
+        change, it intentionally removes the matching room/POI JSON asset;
+        unrelated map partitions remain untouched. Clearing the current
+        in-memory partition keeps the user page consistent when the deleted
+        map is presently selected.
+        """
+        target = sanitize_map_id(map_id)
+        target_path = self._base / f"{target}.json"
+        with self._lock:
+            existed = target_path.exists()
+            if existed:
+                target_path.unlink()
+            if target == self._map_id:
+                self._annotations = {}
+            return existed
+
     # ── load / save ──────────────────────────────────────────────────────
     def _load(self, current_generation: Optional[int]) -> None:
         """Read the per-map file into memory. Missing file → empty store.
