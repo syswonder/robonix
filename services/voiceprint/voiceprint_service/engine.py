@@ -27,6 +27,7 @@ from typing import Optional
 _MODELSCOPE_ID = "speechbrain/spkrec-ecapa-voxceleb"
 
 import numpy as np
+import soundfile as sf
 import torch
 import torchaudio
 
@@ -58,14 +59,16 @@ class EcapaTdnnEngine:
         self.savedir = Path(savedir) if savedir else _DEFAULT_SAVEDIR
         self.savedir.mkdir(parents=True, exist_ok=True)
         # Resolve the model from ModelScope (returns a local snapshot dir with
-        # the full repo). Passing that dir as `source` makes speechbrain read
-        # every weight locally — it never touches HuggingFace. The snapshot is
-        # cached after the first pull (build.sh pre-warms it).
+        # the full repo). The upstream hyperparams file still names its
+        # Hugging Face repository in `pretrained_path`, so pass an explicit
+        # override as well as the local source. Without it SpeechBrain fetches
+        # checkpoint metadata from Hugging Face despite the local snapshot.
         source = self._resolve_source()
         log.info("Loading ECAPA-TDNN on %s (source=%s, savedir=%s)", self.device, source, self.savedir)
         self.model = SpeakerRecognition.from_hparams(
             source=source,
             savedir=str(self.savedir),
+            overrides={"pretrained_path": str(source)},
             run_opts={"device": self.device},
         )
         log.info("ECAPA-TDNN loaded (embedding_dim=192)")
@@ -82,7 +85,14 @@ class EcapaTdnnEngine:
     # -- public extraction -------------------------------------------------
 
     def extract_from_file(self, path: str) -> np.ndarray:
-        signal, _ = torchaudio.load(path)
+        # Do not use torchaudio.load here: current torchaudio releases route
+        # it through optional torchcodec, which is not needed for the WAV/FLAC
+        # files supported by this service. soundfile is already a declared
+        # runtime dependency and keeps build-time model verification sealed.
+        samples, _ = sf.read(path, dtype="float32", always_2d=True)
+        signal = torch.from_numpy(samples.T)
+        if signal.shape[0] > 1:
+            signal = signal.mean(dim=0, keepdim=True)
         emb = self.model.encode_batch(signal.to(self.device))
         return emb.cpu().numpy().flatten()
 
