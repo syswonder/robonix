@@ -51,6 +51,7 @@ current_output_id: str = ""
 configured_input_id: str = ""
 configured_output_id: str = ""
 _mic_stream_lock = threading.Lock()
+_speaker_stream_lock = threading.Lock()
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
@@ -104,17 +105,33 @@ def speaker_stream(request_iterator, context):
     """Client-streaming playback. Pipes received PCM chunks into aplay;
     SpeakerDriver lazy-starts the subprocess and auto-restarts after
     underruns. Returns Empty on stream close."""
-    if speaker_driver is None:
-        context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      "speaker driver not initialized")
+    grpc = __import__("grpc")
+    if not _speaker_stream_lock.acquire(blocking=False):
+        context.abort(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            "speaker is already in use by another stream",
+        )
         return std_msgs_pb2.Empty()
-    log.info("speaker stream client connected")
+    driver = None
     try:
+        driver = speaker_driver
+        if driver is None:
+            context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "speaker driver not initialized",
+            )
+            return std_msgs_pb2.Empty()
+        log.info("speaker stream client connected")
         for chunk in request_iterator:
             if chunk.data:
-                speaker_driver.play_chunk(bytes(chunk.data))
+                driver.play_chunk(bytes(chunk.data))
     finally:
-        log.info("speaker stream client disconnected")
+        try:
+            if driver is not None:
+                driver.stop()
+                log.info("speaker stream client disconnected")
+        finally:
+            _speaker_stream_lock.release()
     return std_msgs_pb2.Empty()
 
 
@@ -271,23 +288,36 @@ def select_device(request, context):
         finally:
             _mic_stream_lock.release()
     else:
-        previous = speaker_driver
-        speaker_driver = SpeakerDriver(
-            device_id=new_id,
-            sample_rate=int(os.environ.get(
-                "AUDIO_SPEAKER_SAMPLE_RATE",
-                str(previous.sample_rate if previous is not None else 24000),
-            )),
-            channels=int(os.environ.get(
-                "AUDIO_SPEAKER_CHANNELS",
-                str(previous.channels if previous is not None else 1),
-            )),
-            bits_per_sample=int(os.environ.get(
-                "AUDIO_SPEAKER_BITS",
-                str(previous.bits_per_sample if previous is not None else 16),
-            )),
-        )
-        current_output_id = new_id
+        if not _speaker_stream_lock.acquire(blocking=False):
+            return audio_pb2.SelectAudioDevice_Response(
+                ok=False,
+                error="cannot change output device while speaker is streaming",
+            )
+        try:
+            previous = speaker_driver
+            if previous is not None:
+                try:
+                    previous.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            speaker_driver = SpeakerDriver(
+                device_id=new_id,
+                sample_rate=int(os.environ.get(
+                    "AUDIO_SPEAKER_SAMPLE_RATE",
+                    str(previous.sample_rate if previous is not None else 24000),
+                )),
+                channels=int(os.environ.get(
+                    "AUDIO_SPEAKER_CHANNELS",
+                    str(previous.channels if previous is not None else 1),
+                )),
+                bits_per_sample=int(os.environ.get(
+                    "AUDIO_SPEAKER_BITS",
+                    str(previous.bits_per_sample if previous is not None else 16),
+                )),
+            )
+            current_output_id = new_id
+        finally:
+            _speaker_stream_lock.release()
     return audio_pb2.SelectAudioDevice_Response(ok=True, error="")
 
 

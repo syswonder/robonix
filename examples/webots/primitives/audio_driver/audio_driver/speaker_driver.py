@@ -130,22 +130,27 @@ class SpeakerDriver:
     def stop(self) -> None:
         """Stop the aplay subprocess gracefully.
 
-        Closes stdin (signals aplay to finish), then sends SIGTERM.
-        Waits up to 5 seconds, then SIGKILL if necessary.
+        Closing stdin lets aplay drain its device buffer and exit normally.
+        Only send SIGTERM/SIGKILL if it does not exit within the deadline.
         Safe to call multiple times.
         """
         with self._lock:
-            if self._process:
+            process = self._process
+            self._process = None
+            if process:
                 try:
-                    self._process.stdin.close()
+                    process.stdin.close()
                 except Exception:
                     pass
-                self._process.terminate()
                 try:
-                    self._process.wait(timeout=5)
+                    process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    self._process.kill()
-                self._process = None
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=1)
                 log.info("Speaker playback stopped")
 
     @property
