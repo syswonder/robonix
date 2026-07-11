@@ -51,6 +51,10 @@ pub enum Commands {
         /// Clean build (remove rbnx-build before building). Default: incremental.
         #[arg(long)]
         clean: bool,
+        /// Skip the remote-provider freshness check before building cached packages.
+        /// Useful when offline or when the deployment cache is intentionally pinned.
+        #[arg(long)]
+        no_update_check: bool,
     },
     /// Start one package (runs its `start` block; blocks until it exits)
     ///
@@ -397,7 +401,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             path,
             global,
             clean,
-        } => run_package::execute_build(config, file, path, global, clean).await,
+            no_update_check,
+        } => run_package::execute_build(config, file, path, global, clean, no_update_check).await,
         Commands::Start {
             package,
             endpoint,
