@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use robonix_cli::Config;
 
 mod ask;
+pub(crate) mod boot_watchdog;
 mod build;
 mod chat;
 mod check_remotes;
@@ -117,6 +118,16 @@ pub enum Commands {
         /// like a Linux/FreeBSD kernel boot log or Android logcat.
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// Internal detached cleanup process for one `rbnx boot` invocation.
+    #[command(name = "__watch-boot", hide = true)]
+    WatchBoot {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        boot_pid: u32,
+        #[arg(long)]
+        boot_start_time_ticks: Option<u64>,
     },
     /// Update remote (`url:`) providers to their latest upstream commit
     ///
@@ -427,6 +438,11 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             no_update_check,
             verbose,
         } => deploy::execute(config, file, log_dir, skip_system, no_update_check, verbose).await,
+        Commands::WatchBoot {
+            state,
+            boot_pid,
+            boot_start_time_ticks,
+        } => boot_watchdog::execute(state, boot_pid, boot_start_time_ticks).await,
         Commands::Update { path, file } => update::execute(config, path, file).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {

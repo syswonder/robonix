@@ -95,6 +95,17 @@ async fn main() -> Result<()> {
     ensure_loopback_bypasses_proxy();
 
     let cli = Cli::parse();
+    // The detached boot watchdog must not depend on user config, package DB
+    // sync, a terminal, or Scribe initialization. It only reads the persisted
+    // boot state and performs teardown if the exact parent process vanishes.
+    if let cmd::Commands::WatchBoot {
+        state,
+        boot_pid,
+        boot_start_time_ticks,
+    } = &cli.command
+    {
+        return cmd::boot_watchdog::execute(state.clone(), *boot_pid, *boot_start_time_ticks).await;
+    }
     let verbose_boot = matches!(&cli.command, cmd::Commands::Boot { verbose: true, .. });
     prepare_boot_log_dir(&cli.command)?;
 

@@ -411,7 +411,9 @@ async fn execute_call(
             .await
         }
         Ok(None) => {
-            let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
+            let r =
+                crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime, &node.plan_id)
+                    .await;
             let state = if r.success {
                 RtdlNodeStateEnum::Succeeded as u32
             } else {
