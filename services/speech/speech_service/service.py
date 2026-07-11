@@ -895,7 +895,11 @@ class SpeechWakeWordServicer(SpeechWakeWordBase):
             context.set_details("wake-word backend is unavailable; run the speech package build")
             return speech_pb2.DetectWakeWord_Response(error="wake-word backend unavailable")
         try:
-            keyword = self.backend.detect(bytes(chunk.data) for chunk in request_iterator if chunk.data)
+            keyword = self.backend.detect(
+                bytes(request.chunk.data)
+                for request in request_iterator
+                if request.chunk and request.chunk.data
+            )
             return speech_pb2.DetectWakeWord_Response(
                 detected=bool(keyword),
                 keyword=keyword,
