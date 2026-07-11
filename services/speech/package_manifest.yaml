@@ -60,6 +60,7 @@ capabilities:
   - name: robonix/service/speech/driver
   - name: robonix/service/speech/asr
   - name: robonix/service/speech/asr_stream
+  - name: robonix/service/speech/wake_word
   - name: robonix/service/speech/tts
   - name: robonix/service/speech/tts_stream
   - name: robonix/service/speech/dialog

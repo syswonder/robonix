@@ -1,0 +1,9 @@
+# Enable or disable robot-local wake-word interaction.
+bool enabled
+string mic_provider_id
+string speaker_provider_id
+---
+bool ok
+bool enabled
+string state
+string detail

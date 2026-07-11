@@ -1,0 +1,259 @@
+"""Reverse client-audio transport for the robot-side audio primitive.
+
+The client opens one outbound WebSocket to this server.  That keeps the
+network ownership simple: the user only enters the Robonix host in the client;
+the robot never needs a client IP address or an exposed client-side port.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import queue
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+
+import websockets
+
+log = logging.getLogger("audio-client-bridge.reverse")
+
+
+@dataclass
+class _ClientSession:
+    ws: object
+    loop: asyncio.AbstractEventLoop
+
+
+class ReverseAudioBridge:
+    """Expose one connected client as PCM mic/speaker streams."""
+
+    def __init__(self, host: str, port: int, frame_bytes: int) -> None:
+        self.host = host
+        self.port = port
+        self.frame_bytes = frame_bytes
+        self._session: _ClientSession | None = None
+        self._lock = threading.Lock()
+        self._connected = threading.Event()
+        self._mic_frames: queue.Queue[bytes | None] = queue.Queue(maxsize=128)
+        self._pending_controls: dict[str, queue.Queue[dict]] = {}
+        self._pending_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_async: asyncio.Event | None = None
+        self._started = threading.Event()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, name="audio-client-reverse", daemon=True)
+        self._thread.start()
+        if not self._started.wait(timeout=5.0):
+            raise RuntimeError(f"reverse audio listener did not start on {self.host}:{self.port}")
+
+    def stop(self) -> None:
+        loop = self._loop
+        stop_async = self._stop_async
+        if loop is not None and stop_async is not None and loop.is_running():
+            loop.call_soon_threadsafe(stop_async.set)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+        self._thread = None
+        self._connected.clear()
+        self._put_mic(None)
+
+    def is_connected(self) -> bool:
+        """Whether a robonix-client currently owns this reverse session."""
+        return self._connected.is_set()
+
+    def _run(self) -> None:
+        asyncio.run(self._serve())
+
+    async def _serve(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._stop_async = asyncio.Event()
+        async with websockets.serve(self._handler, self.host, self.port, max_size=None):
+            log.info("reverse client bridge listening on ws://%s:%d/client", self.host, self.port)
+            self._started.set()
+            await self._stop_async.wait()
+            with self._lock:
+                session = self._session
+            if session is not None:
+                await session.ws.close(code=1001, reason="audio provider shutting down")
+        self._loop = None
+        self._stop_async = None
+        self._started.clear()
+
+    async def _handler(self, ws) -> None:
+        path = ws.request.path if hasattr(ws, "request") else getattr(ws, "path", "")
+        if path != "/client":
+            await ws.close(code=1008, reason="expected /client")
+            return
+
+        with self._lock:
+            previous = self._session
+            self._session = _ClientSession(ws=ws, loop=asyncio.get_running_loop())
+            self._connected.set()
+        if previous is not None:
+            try:
+                await previous.ws.close(code=1012, reason="replaced by newer client")
+            except Exception:  # noqa: BLE001
+                pass
+        log.info("client reverse-audio session connected: %s", getattr(ws, "remote_address", "unknown"))
+        try:
+            async for message in ws:
+                if isinstance(message, bytes):
+                    self._put_mic(message)
+                    continue
+                self._handle_control(message)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("client reverse-audio session closed: %s", exc)
+        finally:
+            with self._lock:
+                if self._session and self._session.ws is ws:
+                    self._session = None
+                    self._connected.clear()
+                    self._put_mic(None)
+            self._fail_pending_controls("client audio session disconnected")
+            log.info("client reverse-audio session disconnected")
+
+    def _put_mic(self, frame: bytes | None) -> None:
+        try:
+            self._mic_frames.put_nowait(frame)
+        except queue.Full:
+            try:
+                self._mic_frames.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._mic_frames.put_nowait(frame)
+            except queue.Full:
+                pass
+
+    def _handle_control(self, raw: str) -> None:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if body.get("type") == "mic_end":
+            self._put_mic(None)
+            return
+        if body.get("type") != "control_response":
+            return
+        request_id = str(body.get("id") or "")
+        if not request_id:
+            return
+        with self._pending_lock:
+            response = self._pending_controls.get(request_id)
+        if response is not None:
+            response.put_nowait(body)
+
+    def _fail_pending_controls(self, message: str) -> None:
+        with self._pending_lock:
+            pending = list(self._pending_controls.values())
+            self._pending_controls.clear()
+        for response in pending:
+            try:
+                response.put_nowait({"ok": False, "error": message})
+            except queue.Full:
+                pass
+
+    def _send(self, payload: str | bytes) -> bool:
+        with self._lock:
+            session = self._session
+        if session is None:
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(session.ws.send(payload), session.loop)
+            future.result(timeout=3.0)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reverse client send failed: %s", exc)
+            return False
+
+    def control_request(self, op: str, payload: dict | None = None, timeout_s: float = 3.0) -> dict:
+        """Ask the connected client to perform a small local audio operation."""
+        request_id = uuid.uuid4().hex
+        response: queue.Queue[dict] = queue.Queue(maxsize=1)
+        with self._pending_lock:
+            self._pending_controls[request_id] = response
+        try:
+            sent = self._send(
+                json.dumps(
+                    {
+                        "type": "control_request",
+                        "id": request_id,
+                        "op": op,
+                        "payload": payload or {},
+                    }
+                )
+            )
+            if not sent:
+                raise RuntimeError("client audio session disconnected")
+            result = response.get(timeout=timeout_s)
+            if not isinstance(result, dict):
+                raise RuntimeError("invalid client audio control response")
+            return result
+        except queue.Empty as exc:
+            raise RuntimeError(f"client audio control {op} timed out") from exc
+        finally:
+            with self._pending_lock:
+                self._pending_controls.pop(request_id, None)
+
+    def _require_client(self, context) -> bool:
+        if self._connected.wait(timeout=3.0):
+            return True
+        context.abort(
+            __import__("grpc").StatusCode.UNAVAILABLE,
+            "no client audio session connected; start robonix-client and connect it to this robot",
+        )
+        return False
+
+    def mic_stream(self, context, audio_pb2):
+        if not self._require_client(context):
+            return
+        while True:
+            try:
+                self._mic_frames.get_nowait()
+            except queue.Empty:
+                break
+        if not self._send(json.dumps({"type": "mic_start", "sample_rate": 16000, "channels": 1})):
+            context.abort(__import__("grpc").StatusCode.UNAVAILABLE, "client audio session disconnected")
+            return
+        sequence = 0
+        try:
+            while context.is_active():
+                try:
+                    frame = self._mic_frames.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if frame is None:
+                    break
+                yield audio_pb2.AudioChunk(
+                    timestamp_ns=time.time_ns(),
+                    data=frame,
+                    sequence=sequence,
+                    duration_s=len(frame) / 32000.0,
+                )
+                sequence += 1
+        finally:
+            self._send(json.dumps({"type": "mic_stop"}))
+
+    def speaker_stream(self, request_iterator, context, empty_type):
+        if not self._require_client(context):
+            return empty_type()
+        total = 0
+        for chunk in request_iterator:
+            if chunk.data:
+                data = bytes(chunk.data)
+                total += len(data)
+                if not self._send(data):
+                    context.abort(__import__("grpc").StatusCode.UNAVAILABLE, "client audio session disconnected")
+                    return empty_type()
+        self._send(json.dumps({"type": "speaker_end"}))
+        # Preserve serialised speaker semantics without sleeping for a full long
+        # utterance in the gRPC worker.
+        if total:
+            time.sleep(min(total / 32000.0 + 0.1, 5.0))
+        return empty_type()
