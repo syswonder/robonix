@@ -1,5 +1,6 @@
 # robonix/system/scene/goal_near — find a navigation-safe approach pose
-# near a registered scene object. Map-frame (x, y, yaw); pass to
+# near a registered physical scene object. Room annotations are rejected;
+# use robonix/system/scene/goal_room for rooms. Map-frame (x, y, yaw); pass to
 # robonix/service/navigation/navigate after.
 #
 # `reachable=false` when the occupancy grid has no free cell within

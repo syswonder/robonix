@@ -844,6 +844,10 @@ def make_app(*, registry: ObjectRegistry,
             return _anno_error(400, "map_id is required")
         mode = str(body.get("mode") or "localization")
         load_timeout_s = float(os.environ.get("SCENE_MAP_LOAD_TIMEOUT_S", "240"))
+        before_stamp = 0.0
+        before_count = 0
+        if hub is not None and hub.has("occupancy_grid"):
+            _before_msg, before_stamp, before_count = hub.latest("occupancy_grid")
         out = await asyncio.to_thread(_map_rpc, "load_map", {
             "map_id": map_id,
             "mode": mode,
@@ -853,6 +857,42 @@ def make_app(*, registry: ObjectRegistry,
             "theta": float(body.get("theta") or 0.0),
         }, load_timeout_s)
         if out.get("ok"):
+            # Mapping's LoadMap response means RTAB-Map accepted the database
+            # and PublishMap request. Do not restore semantic state until Scene
+            # has actually observed the resulting occupancy grid; otherwise the
+            # first click only switches the database and a second click appears
+            # necessary to refresh rooms/objects against the loaded map.
+            ready_timeout_s = float(os.environ.get("SCENE_MAP_READY_TIMEOUT_S", "20"))
+            deadline = time.monotonic() + ready_timeout_s
+            occupancy_ready = False
+            while time.monotonic() < deadline:
+                if hub is not None and hub.has("occupancy_grid"):
+                    msg, stamp, count = hub.latest("occupancy_grid")
+                    if (
+                        msg is not None
+                        and int(getattr(msg.info, "width", 0)) > 0
+                        and int(getattr(msg.info, "height", 0)) > 0
+                        and (count > before_count or stamp > before_stamp)
+                    ):
+                        occupancy_ready = True
+                        out["occupancy"] = {
+                            "count": int(count),
+                            "stamp_unix": float(stamp),
+                            "width": int(msg.info.width),
+                            "height": int(msg.info.height),
+                        }
+                        break
+                await asyncio.sleep(0.1)
+            if not occupancy_ready:
+                out = {
+                    **out,
+                    "ok": False,
+                    "detail": (
+                        f"mapping loaded {map_id}, but Scene did not observe a new "
+                        f"occupancy grid within {ready_timeout_s:.1f}s"
+                    ),
+                }
+                return JSONResponse(out, status_code=502)
             if anno_store is not None:
                 anno_store.rebind(map_id, generation=None, carry_current=False)
             try:
@@ -2231,7 +2271,8 @@ _USER_HTML = r"""<!doctype html>
       border: 1px solid #33405a; color: var(--muted); font-size: 11px; }
     #mode-pill.localization { border-color: #3b633f; color: #8ef0b7; background: rgba(64,150,80,.12); }
     #mode-pill.mapping { border-color: #6a5630; color: var(--warn); background: rgba(230,196,84,.10); }
-    #map-list { display: grid; gap: 6px; max-height: 170px; overflow-y: auto; }
+    #map-list { display: grid; gap: 5px; max-height: min(24vh, 190px); overflow-y: auto;
+      overscroll-behavior: contain; scrollbar-gutter: stable; }
     .mapitem { border: 1px solid #232936; border-radius: 8px; padding: 7px 8px; font-size: 12px; background: #121721; cursor: pointer; }
     .mapitem.selected, .mapitem.busy { border-color: var(--acc); }
     .mapitem .name { font-weight: 700; }
@@ -2245,12 +2286,16 @@ _USER_HTML = r"""<!doctype html>
     button.primary.active { background: var(--acc); color: #0e1015; }
     button.small { padding: 2px 7px; font-size: 11px; }
     button.danger { border-color: #6b3640; color: var(--danger); }
-    #room-list { flex: 1; overflow-y: auto; padding: 8px 12px; }
-    .room { border: 1px solid #232936; border-radius: 8px; padding: 8px 10px;
-      margin-bottom: 8px; font-size: 13px; }
+    #room-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px 10px;
+      overscroll-behavior: contain; scrollbar-gutter: stable; }
+    .room { --room-color: var(--acc); border: 1px solid #232936;
+      border-left: 3px solid var(--room-color); border-radius: 7px; padding: 6px 8px;
+      margin-bottom: 6px; font-size: 12px; }
     .room.selected { border-color: var(--acc); }
-    .room .name { font-weight: 600; }
-    .room .sub { color: var(--muted); font-size: 11px; margin: 3px 0 6px; }
+    .room .name { font-weight: 650; }
+    .room .swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+      border-radius: 2px; background: var(--room-color); vertical-align: 1px; }
+    .room .sub { color: var(--muted); font-size: 10px; margin: 2px 0 5px 14px; }
     .room .badge { color: #0e1015; background: var(--warn); border-radius: 4px;
       padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 6px; }
     .room .btns { display: flex; gap: 6px; }
@@ -2416,9 +2461,42 @@ function setMapItemStatus(id, text) {
 
 // ── rendering ────────────────────────────────────────────────────────────
 function polyCentroid(pts) {
-    let sx = 0, sy = 0;
-    for (const [x, y] of pts) { sx += x; sy += y; }
-    return [sx / pts.length, sy / pts.length];
+    // Area-weighted polygon centroid. Averaging vertices visibly shifts labels
+    // for irregular rooms because densely sampled edges receive extra weight.
+    let twiceArea = 0, sx = 0, sy = 0;
+    for (let i = 0; i < pts.length; i++) {
+        const [x0, y0] = pts[i];
+        const [x1, y1] = pts[(i + 1) % pts.length];
+        const cross = x0 * y1 - x1 * y0;
+        twiceArea += cross;
+        sx += (x0 + x1) * cross;
+        sy += (y0 + y1) * cross;
+    }
+    if (Math.abs(twiceArea) < 1e-9) {
+        const sum = pts.reduce(([x, y], p) => [x + p[0], y + p[1]], [0, 0]);
+        return [sum[0] / pts.length, sum[1] / pts.length];
+    }
+    return [sx / (3 * twiceArea), sy / (3 * twiceArea)];
+}
+
+const ROOM_COLORS = [
+    { stroke:'#63a7ff', fill:'rgba(99,167,255,.18)', label:'#d8e9ff' },
+    { stroke:'#5fd6a7', fill:'rgba(95,214,167,.18)', label:'#d2f8e9' },
+    { stroke:'#f0aa5d', fill:'rgba(240,170,93,.18)', label:'#ffe7cd' },
+    { stroke:'#c58cff', fill:'rgba(197,140,255,.18)', label:'#eedcff' },
+    { stroke:'#ef7f9c', fill:'rgba(239,127,156,.18)', label:'#ffd9e3' },
+    { stroke:'#55c8dd', fill:'rgba(85,200,221,.18)', label:'#d4f7fc' },
+    { stroke:'#d5c456', fill:'rgba(213,196,86,.18)', label:'#fff6bd' },
+    { stroke:'#8fcf66', fill:'rgba(143,207,102,.18)', label:'#e3f8d5' },
+];
+function roomColor(annotation) {
+    const key = String(annotation.annotation_id || annotation.name || 'room');
+    let hash = 2166136261;
+    for (let i = 0; i < key.length; i++) {
+        hash ^= key.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return ROOM_COLORS[(hash >>> 0) % ROOM_COLORS.length];
 }
 
 function draw() {
@@ -2468,19 +2546,20 @@ function draw() {
         pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
         ctx.closePath();
         const sel = a.annotation_id === selectedId;
-        ctx.fillStyle = a.stale ? 'rgba(230,196,84,0.10)' : 'rgba(122,167,255,0.12)';
+        const color = roomColor(a);
+        ctx.fillStyle = a.stale ? 'rgba(230,196,84,0.12)' : color.fill;
         ctx.fill();
         ctx.lineWidth = sel ? 2.5 : 1.5;
-        ctx.strokeStyle = a.stale ? '#e6c454' : (sel ? '#a8c4ff' : '#7aa7ff');
+        ctx.strokeStyle = a.stale ? '#e6c454' : color.stroke;
         ctx.setLineDash(a.stale ? [6, 4] : []);
         ctx.stroke();
         ctx.setLineDash([]);
         const [cx, cy] = w2p(...polyCentroid(a.points));
         const label = (a.stale ? '⚠ ' : '') + (a.name || '(unnamed)');
-        ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.font = '700 15px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,0.92)';
         ctx.strokeText(label, cx, cy);
-        ctx.fillStyle = a.stale ? '#e6c454' : '#cfe0ff';
+        ctx.fillStyle = a.stale ? '#f4dc78' : color.label;
         ctx.fillText(label, cx, cy);
         ctx.textAlign = 'start';
     }
@@ -2777,8 +2856,8 @@ function renderPanel() {
     }
     list.innerHTML = rooms.map(a => `
       <div class="room ${a.annotation_id === selectedId ? 'selected' : ''}"
-           data-id="${a.annotation_id}">
-        <span class="name">${esc(a.name || '(unnamed)')}</span>
+           data-id="${a.annotation_id}" style="--room-color:${roomColor(a).stroke}">
+        <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || '(unnamed)')}</span>
         ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
         <div class="sub">${a.points.length} corners</div>
         <div class="btns">

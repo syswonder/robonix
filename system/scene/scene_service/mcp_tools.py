@@ -2,7 +2,8 @@
 """FastMCP tool definitions — two read-only handlers, that's it.
 
   list_objects()           → flat list of every object in the registry
-  goal_near(object_id)     → reachable approach pose for that object
+  goal_near(object_id)     → reachable approach pose for a physical object
+  goal_room(room_id)       → reachable pose inside a room polygon
 
 Writes happen on the ingest path (perception → registry); these
 handlers only read. Inputs are codegen-derived ROS dataclasses
@@ -14,12 +15,13 @@ from __future__ import annotations
 import logging
 import math
 import time
-from types import SimpleNamespace
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 from .state import ObjectRegistry, SceneObject
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
+from .geometry import disc_inside_polygon, point_in_polygon, polygon_centroid
 
 if TYPE_CHECKING:
     from .annotations import Annotation, AnnotationStore
@@ -30,6 +32,8 @@ import semantic_map_mcp  # type: ignore
 from semantic_map_mcp import (  # type: ignore
     GoalNear_Request,
     GoalNear_Response,
+    GoalRoom_Request,
+    GoalRoom_Response,
     GetObjectContext_Request,
     GetObjectContext_Response,
     GetSceneGraph_Request,
@@ -88,13 +92,7 @@ def _to_idl(o: SceneObject) -> Object:
 
 
 def _annotation_centroid(a: "Annotation") -> tuple[float, float]:
-    pts = getattr(a, "points", []) or []
-    if not pts:
-        return 0.0, 0.0
-    sx = sum(float(p[0]) for p in pts)
-    sy = sum(float(p[1]) for p in pts)
-    n = max(1, len(pts))
-    return sx / n, sy / n
+    return polygon_centroid(getattr(a, "points", []) or [])
 
 
 def _annotation_object_id(a: "Annotation") -> str:
@@ -117,10 +115,44 @@ def _annotation_to_object(a: "Annotation") -> Object:
 def _find_annotation_target(object_id: str) -> "Annotation | None":
     if _ANNO_STORE is None:
         return None
-    for a in _ANNO_STORE.list():
-        if object_id in (a.annotation_id, _annotation_object_id(a)):
-            return a
+    for annotation in _ANNO_STORE.list():
+        if object_id == _annotation_object_id(annotation):
+            return annotation
     return None
+
+
+def _room_id_hint() -> str:
+    if _ANNO_STORE is None:
+        return "no rooms are currently registered"
+    rooms = [a for a in _ANNO_STORE.list() if a.kind == "room"]
+    if not rooms:
+        return "no rooms are currently registered"
+    candidates = ", ".join(
+        f"{room.name!r} (id={_annotation_object_id(room)})"
+        for room in rooms[:20]
+    )
+    suffix = "" if len(rooms) <= 20 else f", ... {len(rooms) - 20} more"
+    return f"available rooms: {candidates}{suffix}"
+
+
+def _object_id_hint(reference: str, objects: list[SceneObject]) -> str:
+    if not objects:
+        return "no physical objects are currently registered"
+    wanted = str(reference).strip().casefold()
+
+    def score(obj: SceneObject) -> float:
+        object_id = str(obj.object_id).casefold()
+        label = str(obj.cls).casefold()
+        return max(
+            SequenceMatcher(None, wanted, object_id).ratio(),
+            SequenceMatcher(None, wanted, label).ratio(),
+        )
+
+    nearest = sorted(objects, key=score, reverse=True)[:3]
+    candidates = ", ".join(
+        f"{obj.cls!r} (id={obj.object_id})" for obj in nearest
+    )
+    return f"did you mean one of: {candidates}"
 
 
 # ── @mcp_contract handlers ─────────────────────────────────────────────────
@@ -131,8 +163,9 @@ mcp = FastMCP("scene_provider")
 @mcp_contract(mcp, contract_id="robonix/system/scene/list_objects")
 async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     """Return every object the scene registry currently believes
-    exists, as a flat list. The LLM filters client-side by label /
-    distance / etc. — no scoping or filter knobs in the schema.
+    exists, plus room annotations, as a flat list. Use this tool to discover
+    stable object/room IDs before goal_near or goal_room. Use get_scene_graph
+    only when object relationships are needed.
     Contract: robonix/system/scene/list_objects."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
@@ -205,8 +238,11 @@ def _occupancy_bfs(
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/goal_near")
 async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
-    """Find a navigation-safe approach pose near the named object.
+    """Find a navigation-safe approach pose near a physical scene object.
     Returns map-frame (x, y, yaw); pass to navigation/navigate.
+
+    Room annotations are deliberately not accepted. Resolve those through
+    goal_room so the returned pose is constrained to the room polygon.
 
     `reachable=false` when:
       - the object_id isn't in the registry, or
@@ -217,24 +253,15 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
     objs, _surfs = await _REGISTRY.snapshot()
     target = objs.get(req.object_id)
-    ann_target = None
     if target is None:
-        ann_target = _find_annotation_target(req.object_id)
-        if ann_target is None:
-            return GoalNear_Response(
-                reachable=False, x=0.0, y=0.0, yaw=0.0,
-                reason=f"unknown object_id '{req.object_id}'",
-            )
-        tx, ty = _annotation_centroid(ann_target)
-        target = SimpleNamespace(
-            pose=SimpleNamespace(
-                x=float(tx),
-                y=float(ty),
-                z=0.0,
-                yaw=float(ann_target.theta or 0.0),
+        visible = [obj for obj in objs.values() if not obj.missing]
+        return GoalNear_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason=(
+                f"unknown physical object_id '{req.object_id}'; "
+                f"{_object_id_hint(req.object_id, visible)}; "
+                "use goal_room for room annotations"
             ),
-            cls=str(ann_target.name or ann_target.kind),
-            object_id=_annotation_object_id(ann_target),
         )
 
     robot = next(
@@ -288,6 +315,110 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     return GoalNear_Response(
         reachable=True, x=float(gx), y=float(gy), yaw=float(yaw),
         reason=f"approach pose for '{target.cls}' ({req.object_id})",
+    )
+
+
+def _occupancy_room_goal(grid_msg, points) -> tuple[float, float] | None:
+    """Choose the safest free grid cell nearest a room's polygon centroid."""
+    import numpy as np
+
+    polygon = [(float(x), float(y)) for x, y in points]
+    if len(polygon) < 3:
+        return None
+    info = grid_msg.info
+    width, height = int(info.width), int(info.height)
+    resolution = float(info.resolution)
+    origin_x = float(info.origin.position.x)
+    origin_y = float(info.origin.position.y)
+    grid = np.frombuffer(bytes(grid_msg.data), dtype=np.int8).reshape(height, width)
+    # A room destination must be known free space. Unknown cells are not goals.
+    blocked = (grid < 0) | (grid > 50)
+    footprint_radius = _GOAL_NEAR_ROBOT_RADIUS_M + _GOAL_NEAR_CLEARANCE_M
+    inflation_cells = max(1, int(math.ceil(footprint_radius / resolution)))
+    centroid_x, centroid_y = polygon_centroid(polygon)
+
+    min_x = max(0, int((min(x for x, _ in polygon) - origin_x) / resolution))
+    max_x = min(width - 1, int((max(x for x, _ in polygon) - origin_x) / resolution))
+    min_y = max(0, int((min(y for _, y in polygon) - origin_y) / resolution))
+    max_y = min(height - 1, int((max(y for _, y in polygon) - origin_y) / resolution))
+    candidates = []
+    for gy in range(min_y, max_y + 1):
+        wy = origin_y + (gy + 0.5) * resolution
+        for gx in range(min_x, max_x + 1):
+            wx = origin_x + (gx + 0.5) * resolution
+            if not disc_inside_polygon(wx, wy, footprint_radius, polygon):
+                continue
+            if (
+                gx - inflation_cells < 0
+                or gy - inflation_cells < 0
+                or gx + inflation_cells >= width
+                or gy + inflation_cells >= height
+            ):
+                continue
+            local = blocked[
+                gy - inflation_cells: gy + inflation_cells + 1,
+                gx - inflation_cells: gx + inflation_cells + 1,
+            ]
+            if not bool(local.any()):
+                candidates.append(((wx - centroid_x) ** 2 + (wy - centroid_y) ** 2, wx, wy))
+    if not candidates:
+        return None
+    _, x, y = min(candidates)
+    return x, y
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/goal_room")
+async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
+    """Resolve a room annotation to a safe map-frame pose inside its polygon.
+
+    Use this for named rooms and user-defined regions before navigation/navigate.
+    The result never falls outside the room polygon.
+    Contract: robonix/system/scene/goal_room.
+    """
+    room = _find_annotation_target(req.room_id)
+    if room is None or room.kind != "room":
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason=(
+                f"unknown room_id '{req.room_id}'; room_id must be the exact "
+                f"stable ID returned by list_objects; {_room_id_hint()}"
+            ),
+        )
+    if _HUB is None or not _HUB.has("occupancy_grid"):
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason="no occupancy_grid available - mapping not running",
+        )
+    try:
+        msg, _stamp, count = _HUB.latest("occupancy_grid")
+    except Exception as exc:  # noqa: BLE001
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason=f"occupancy_grid hub error: {exc}",
+        )
+    if msg is None or count == 0 or not msg.info.width or not msg.info.height:
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason="occupancy_grid empty - wait for mapping to publish",
+        )
+    found = _occupancy_room_goal(msg, room.points)
+    if found is None:
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason=f"no known free pose inside room '{room.name}' ({req.room_id})",
+        )
+    x, y = found
+    if not point_in_polygon(x, y, room.points):
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason="internal validation rejected a pose outside the room polygon",
+        )
+    return GoalRoom_Response(
+        reachable=True,
+        x=float(x),
+        y=float(y),
+        yaw=float(room.theta or 0.0),
+        reason=f"safe pose inside room '{room.name}' ({req.room_id})",
     )
 
 
@@ -442,6 +573,7 @@ __all__ = [
     "attach_annotation_store",
     "list_objects",
     "goal_near",
+    "goal_room",
     "get_scene_graph",
     "get_object_context",
     "list_relations",
