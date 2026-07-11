@@ -870,6 +870,26 @@ def make_app(*, registry: ObjectRegistry,
         if not map_id:
             return _anno_error(400, "map_id is required")
         out = await asyncio.to_thread(_map_rpc, "delete_map", {"map_id": map_id})
+        if out.get("ok"):
+            annotations_deleted = False
+            objects_deleted = 0
+            cleanup_errors = []
+            if anno_store is not None:
+                try:
+                    annotations_deleted = bool(anno_store.delete_map(map_id))
+                except Exception as e:  # noqa: BLE001
+                    cleanup_errors.append(f"annotations: {e}")
+            if object_store is not None:
+                try:
+                    objects_deleted = int(await asyncio.to_thread(object_store.delete_map, map_id))
+                except Exception as e:  # noqa: BLE001
+                    cleanup_errors.append(f"objects: {e}")
+            out["scene_cleanup"] = {
+                "annotations_deleted": annotations_deleted,
+                "objects_deleted": objects_deleted,
+            }
+            if cleanup_errors:
+                out["scene_cleanup_error"] = "; ".join(cleanup_errors)
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
     async def maps_pose_estimate(request) -> JSONResponse:

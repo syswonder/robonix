@@ -316,6 +316,27 @@ class ObjectStore:
             )
         return objs
 
+    def delete_map(self, map_id: str) -> int:
+        """Delete persisted scene objects belonging to one map partition.
+
+        The collection is shared, so the filter is mandatory: deleting a map
+        must never affect objects captured for another spatial map.
+        """
+        target = _sanitize_map_id(map_id)
+        predicate = f'map_id == "{target}"'
+        try:
+            rows = self._client.query(
+                collection_name=_COLLECTION,
+                filter=predicate,
+                output_fields=["pk"],
+                limit=16384,
+            )
+            if rows:
+                self._client.delete(collection_name=_COLLECTION, filter=predicate)
+            return len(rows)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"delete_map({target}) failed: {e}") from e
+
     # ── lifecycle ────────────────────────────────────────────────────────
     def close(self) -> None:
         """Close the client and release the milvus-lite server so the next
