@@ -84,9 +84,6 @@ pub async fn execute(
     if op == "stop_plan_at" {
         return runtime.stop_plan_at_builtin(call).await;
     }
-    if op == "stop_after_current" {
-        return runtime.stop_after_current_builtin(call).await;
-    }
     if op == "get_plan_status" {
         return runtime.get_plan_status_builtin(call).await;
     }
@@ -186,11 +183,6 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         op: "stop_plan_at",
         description: "Set a stop point on an in-flight RTDL plan: when execution reaches the op with the given op_id, cancel the whole plan. Use 'on_complete' (default) to stop right after that op finishes, or 'on_enter' to stop the moment it is reached, before it runs. op_ids are the per-node identifiers shown in RTDL node_state events.",
         input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to set the stop point on"},"op_id":{"type":"string","description":"Node op_id at which to stop (cancel) the plan"},"when":{"type":"string","enum":["on_enter","on_complete"],"description":"on_enter = before the op runs; on_complete = after it finishes. Default on_complete."}},"required":["plan_id","op_id"]}"#,
-    },
-    BuiltinSpec {
-        op: "stop_after_current",
-        description: "Atomically stop one in-flight sequential RTDL plan after its currently running step completes. Use this directly when the user says 'finish the current step, then stop' or 'do not start the next step'. It takes only plan_id and avoids a get_plan_status round trip. If execution is between steps it stops before the next pending step. It rejects ambiguous parallel plans with multiple running leaves; only then inspect and use stop_plan_at.",
-        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id whose current sequential step may finish, after which the plan stops"}},"required":["plan_id"]}"#,
     },
     BuiltinSpec {
         op: "read_capability_doc",
