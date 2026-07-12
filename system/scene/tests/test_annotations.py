@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -246,7 +247,7 @@ def test_from_json_drops_unknown_keys():
 
 # ── REST API (hand-rolled ASGI, no httpx needed) ────────────────────────────
 
-def _make_web_app(anno_store):
+def _make_web_app(anno_store, **overrides):
     """Import scene_service.web lazily and build an app with only the
     pieces the annotation routes need. When the web import chain is
     unavailable (bare environment): under pytest the caller's test is
@@ -265,11 +266,14 @@ def _make_web_app(anno_store):
         _objects: dict = {}
         _surfaces: dict = {}
 
-    return web_mod.make_app(
-        registry=_StubRegistry(), anno_store=anno_store,
-        map_binding={"map_id": "lab", "mode": "mapping",
-                     "generation": 1, "source": "lifecycle"},
-    )
+    options = {
+        "registry": _StubRegistry(),
+        "anno_store": anno_store,
+        "map_binding": {"map_id": "lab", "mode": "mapping",
+                        "generation": 1, "source": "lifecycle"},
+    }
+    options.update(overrides)
+    return web_mod.make_app(**options)
 
 
 def _call(app, method: str, path: str, body=None):
@@ -342,6 +346,56 @@ def test_rest_crud_roundtrip():
         assert (st, out) == (200, {"ok": True})
         assert store.list() == []
     print("  [PASS] test_rest_crud_roundtrip")
+
+
+def test_map_load_waits_for_new_occupancy_before_rebinding(monkeypatch):
+    try:
+        from scene_service import web as web_mod
+    except ImportError as e:
+        import pytest
+        pytest.skip(f"web deps unavailable: {e}")
+
+    class Hub:
+        loaded = False
+
+        @staticmethod
+        def has(_name):
+            return True
+
+        def latest(self, _name):
+            count = 2 if self.loaded else 1
+            msg = SimpleNamespace(info=SimpleNamespace(width=20, height=12))
+            return msg, float(count), count
+
+    hub = Hub()
+
+    def map_rpc(op, payload, _timeout=30.0):
+        assert op == "load_map"
+        assert payload["map_id"] == "saved_lab"
+        hub.loaded = True
+        return {"ok": True, "detail": "loaded once"}
+
+    monkeypatch.setattr(web_mod, "_map_rpc", map_rpc)
+    with tempfile.TemporaryDirectory() as base:
+        AnnotationStore(base, map_id="saved_lab", generation=1).create(
+            kind="room", name="restored", points=ROOM_PTS,
+        )
+        store = AnnotationStore(base, map_id="live", generation=1)
+        binding = {"map_id": "live", "mode": "mapping",
+                   "generation": 1, "source": "lifecycle"}
+        app = _make_web_app(store, hub=hub, map_binding=binding)
+
+        status, out = _call(
+            app, "POST", "/api/maps/load",
+            {"map_id": "saved_lab", "mode": "localization"},
+        )
+
+        assert status == 200 and out["ok"] is True
+        assert out["occupancy"]["count"] == 2
+        assert binding["map_id"] == "saved_lab"
+        assert binding["mode"] == "localization"
+        assert [room.name for room in store.list()] == ["restored"]
+    print("  [PASS] test_map_load_waits_for_new_occupancy_before_rebinding")
 
 
 def test_rest_validation_and_errors():

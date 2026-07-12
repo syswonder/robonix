@@ -2329,6 +2329,27 @@ _USER_HTML = r"""<!doctype html>
     .save-report-kv .k { color: var(--muted); }
     .save-report-kv .v { overflow-wrap: anywhere; }
     .save-report-log { margin: 8px 0 0; padding: 8px; border: 1px solid #283243; border-radius: 8px; background: #0f131b; color: #c9d1d9; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; max-height: 130px; overflow: auto; }
+    dialog.operation-modal { width: min(460px, calc(100vw - 32px)); }
+    .operation-head { display: flex; align-items: center; gap: 10px; }
+    .operation-spinner { width: 16px; height: 16px; border: 2px solid #33405a;
+      border-top-color: var(--acc); border-radius: 50%; animation: operation-spin .8s linear infinite; }
+    .operation-modal.finished .operation-spinner { animation: none; border-color: #3b633f;
+      background: #8ef0b7; box-shadow: inset 0 0 0 4px #151a23; }
+    .operation-modal.failed .operation-spinner { animation: none; border-color: var(--danger);
+      background: var(--danger); box-shadow: inset 0 0 0 4px #151a23; }
+    @keyframes operation-spin { to { transform: rotate(360deg); } }
+    .operation-steps { display: grid; gap: 7px; margin: 2px 0; }
+    .operation-step { display: grid; grid-template-columns: 16px 1fr; gap: 8px;
+      align-items: center; color: var(--muted); font-size: 12px; }
+    .operation-step::before { content: '○'; color: #526078; }
+    .operation-step.active { color: var(--fg); }
+    .operation-step.active::before { content: '●'; color: var(--acc); }
+    .operation-step.done { color: #8ef0b7; }
+    .operation-step.done::before { content: '✓'; }
+    .operation-detail { margin: 0; padding: 8px; border: 1px solid #283243;
+      border-radius: 8px; background: #0f131b; color: #c9d1d9;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; max-height: 120px; overflow: auto; display: none; }
   </style>
 </head>
 <body>
@@ -2389,6 +2410,21 @@ _USER_HTML = r"""<!doctype html>
     </div>
   </form>
 </dialog>
+<dialog class="modal operation-modal" id="map-operation-modal">
+  <div class="modal-body">
+    <div class="operation-head">
+      <span class="operation-spinner" aria-hidden="true"></span>
+      <div class="modal-title" id="map-operation-title">Working...</div>
+    </div>
+    <div class="modal-message" id="map-operation-message"></div>
+    <div class="operation-steps" id="map-operation-steps"></div>
+    <pre class="operation-detail" id="map-operation-detail"></pre>
+    <div class="modal-actions">
+      <button id="map-operation-close" type="button">Close</button>
+      <button class="primary" id="map-operation-primary" type="button" disabled>Working...</button>
+    </div>
+  </div>
+</dialog>
 <script>
 const c = document.getElementById('c');
 const ctx = c.getContext('2d');
@@ -2423,6 +2459,8 @@ let savedMaps = [];
 let mapBusy = false;
 let poseEstimateMode = false;
 let draftSubmitting = false;
+let mapOperationRetry = null;
+let mapOperationDone = null;
 
 const hintEl = document.getElementById('hint');
 function setHint(text) {
@@ -2445,9 +2483,80 @@ function setMapStatus(text, kind = '') {
 }
 function setMapBusy(on, label = '') {
     mapBusy = on;
-    document.querySelectorAll('#map-tools button, .map-btns button').forEach(b => b.disabled = on);
+    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #btn-draw, #room-list button')
+        .forEach(el => el.disabled = on);
+    if (!on) {
+        renderMaps();
+        renderPanel();
+    }
     if (label) setMapStatus(label, on ? 'busy' : '');
 }
+const mapOperationModal = document.getElementById('map-operation-modal');
+const mapOperationTitle = document.getElementById('map-operation-title');
+const mapOperationMessage = document.getElementById('map-operation-message');
+const mapOperationSteps = document.getElementById('map-operation-steps');
+const mapOperationDetail = document.getElementById('map-operation-detail');
+const mapOperationClose = document.getElementById('map-operation-close');
+const mapOperationPrimary = document.getElementById('map-operation-primary');
+
+function beginMapOperation({ title, message, status, steps }) {
+    mapOperationRetry = null;
+    mapOperationDone = null;
+    mapOperationModal.classList.remove('finished', 'failed');
+    mapOperationTitle.textContent = title;
+    mapOperationMessage.textContent = message;
+    mapOperationSteps.innerHTML = (steps || []).map((step, index) =>
+        `<div class="operation-step ${index === 0 ? 'active' : ''}">${esc(step)}</div>`).join('');
+    mapOperationDetail.textContent = '';
+    mapOperationDetail.style.display = 'none';
+    mapOperationClose.hidden = true;
+    mapOperationPrimary.disabled = true;
+    mapOperationPrimary.textContent = 'Working...';
+    setMapBusy(true, status || message);
+    if (!mapOperationModal.open) {
+        if (typeof mapOperationModal.showModal === 'function') mapOperationModal.showModal();
+        else mapOperationModal.setAttribute('open', '');
+    }
+}
+
+function finishMapOperation({ ok, title, message, detail = '', retry = null, done = null, primaryText = '' }) {
+    setMapBusy(false);
+    mapOperationModal.classList.toggle('finished', ok);
+    mapOperationModal.classList.toggle('failed', !ok);
+    mapOperationTitle.textContent = title;
+    mapOperationMessage.textContent = message;
+    mapOperationSteps.querySelectorAll('.operation-step').forEach(step => {
+        step.classList.remove('active');
+        if (ok) step.classList.add('done');
+    });
+    mapOperationDetail.textContent = detail;
+    mapOperationDetail.style.display = detail ? 'block' : 'none';
+    mapOperationRetry = ok ? null : retry;
+    mapOperationDone = done;
+    mapOperationClose.hidden = ok;
+    mapOperationPrimary.disabled = false;
+    mapOperationPrimary.textContent = primaryText || (ok ? 'Done' : 'Retry');
+}
+
+mapOperationModal.addEventListener('cancel', ev => {
+    if (mapBusy) ev.preventDefault();
+});
+mapOperationClose.addEventListener('click', () => {
+    if (!mapBusy) mapOperationModal.close();
+});
+mapOperationPrimary.addEventListener('click', () => {
+    if (mapBusy) return;
+    if (mapOperationRetry) {
+        const retry = mapOperationRetry;
+        mapOperationRetry = null;
+        retry();
+        return;
+    }
+    const done = mapOperationDone;
+    mapOperationDone = null;
+    mapOperationModal.close();
+    if (done) done();
+});
 function mapItemFor(id) {
     return Array.from(document.querySelectorAll('.mapitem')).find(el => el.dataset.id === id);
 }
@@ -2665,8 +2774,8 @@ function renderMaps() {
         <div class="name">${esc(m.map_id)}</div>
         <div class="sub"${dbTitle}>${dbLabel} · ${m.has_preview ? 'preview' : 'no preview'} · ${m.updated || '-'}</div>
         <div class="map-btns">
-          <button class="small" data-map-act="load" ${canLoad ? '' : 'disabled'}>Load</button>
-          <button class="small danger" data-map-act="delete">Delete</button>
+          <button class="small" data-map-act="load" ${canLoad && !mapBusy ? '' : 'disabled'}>Load</button>
+          <button class="small danger" data-map-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
         </div>
         <div class="map-status">${canLoad ? '' : esc(m.artifact_detail || 'not loadable')}</div>
       </div>`;
@@ -2681,6 +2790,27 @@ async function loadMaps() {
         renderMaps();
     } catch (e) { toast('list maps failed: ' + e); }
 }
+async function mapRequest(path, body) {
+    try {
+        const response = await fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const out = await response.json().catch(() => null);
+        if (!response.ok || !out || out.ok === false) {
+            return {
+                ok: false,
+                out,
+                detail: (out && out.detail) || `request failed (${response.status})`,
+            };
+        }
+        await refresh();
+        return { ok: true, out, detail: out.detail || '' };
+    } catch (error) {
+        return { ok: false, out: null, detail: `request failed: ${error}` };
+    }
+}
 async function saveCurrentMap() {
     if (mapBusy) return;
     const id = preferredMapId();
@@ -2688,20 +2818,48 @@ async function saveCurrentMap() {
     selectedMapId = id; renderMaps();
     draw();
     const previewDataUrl = c.toDataURL('image/png');
-    setMapBusy(true, `Saving map ${id}...`);
-    toast(`Saving map ${id}...`);
-    const out = await api('POST', '/api/maps/save', { map_id: id, note: 'saved from scene user page' });
-    setMapBusy(false);
-    if (out) {
+    const existing = savedMaps.find(item => item.map_id === id && item.has_spatial_artifact);
+    beginMapOperation({
+        title: existing ? `Updating ${id}` : `Saving ${id}`,
+        message: existing
+            ? 'The spatial map already exists. Scene rooms and objects will be updated under the same Map ID.'
+            : 'Keep this page open while the spatial map and Scene data are made reusable.',
+        status: existing ? `Updating Scene data for ${id}...` : `Saving map ${id}...`,
+        steps: existing
+            ? ['Validate existing spatial artifact', 'Persist rooms and Scene objects', 'Verify reusable map entry']
+            : ['Snapshot the live spatial map', 'Persist rooms and Scene objects', 'Verify artifact and preview'],
+    });
+    const result = await mapRequest('/api/maps/save', { map_id: id, note: 'saved from scene user page' });
+    if (result.ok) {
+        const out = result.out;
         const validation = out.validation || {};
         const ok = validation.spatial_ok !== false && validation.has_preview !== false;
         const semanticOnly = Boolean(out.spatial_unchanged);
         setMapStatus(`${semanticOnly ? 'Updated scene data for' : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; rooms ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
         toast((semanticOnly ? 'updated scene data for ' : 'saved map ') + (out.map_id || id));
         await loadMaps();
-        showSaveReport(out, previewDataUrl);
+        finishMapOperation({
+            ok,
+            title: ok ? (semanticOnly ? 'Scene data updated' : 'Map saved') : 'Save validation failed',
+            message: ok
+                ? `${out.map_id || id} is ready to load after a stack restart.`
+                : `${out.map_id || id} was written, but artifact validation did not pass.`,
+            detail: (validation.log || []).join('\n') || out.detail || '',
+            retry: ok ? null : saveCurrentMap,
+            done: ok ? () => showSaveReport(out, previewDataUrl) : null,
+            primaryText: ok ? 'View report' : 'Retry',
+        });
     }
-    else setMapStatus(`Save ${id} failed. See toast/log for details.`, 'err');
+    else {
+        setMapStatus(`Save ${id} failed: ${result.detail}`, 'err');
+        finishMapOperation({
+            ok: false,
+            title: 'Save failed',
+            message: `Nothing was confirmed reusable for Map ID ${id}.`,
+            detail: result.detail,
+            retry: saveCurrentMap,
+        });
+    }
 }
 async function loadSelectedMap(id) {
     if (mapBusy) return;
@@ -2709,17 +2867,40 @@ async function loadSelectedMap(id) {
     document.getElementById('map-id').value = id;
     renderMaps();
     setMapItemStatus(id, 'loading...');
-    setMapBusy(true, `Loading ${id}; switching mapping to localization mode...`);
-    toast(`Loading ${id}; switching to localization mode...`);
-    const out = await api('POST', '/api/maps/load', { map_id: id, mode: 'localization' });
-    setMapBusy(false);
+    beginMapOperation({
+        title: `Loading ${id}`,
+        message: 'The editor is locked until Mapping publishes the loaded occupancy grid and Scene restores the matching semantic data.',
+        status: `Loading ${id}; switching Mapping to localization mode...`,
+        steps: ['Validate saved spatial artifact', 'Switch Mapping to localization mode', 'Wait for a fresh occupancy grid', 'Restore rooms and Scene objects'],
+    });
+    const result = await mapRequest('/api/maps/load', { map_id: id, mode: 'localization' });
     setMapItemStatus(id, '');
-    if (out) {
+    if (result.ok) {
+        const out = result.out;
         setMapStatus(`Loaded ${id}. Mapping requested localization mode; use Pose estimate if the robot pose is off.`, 'ok');
         toast('loaded map ' + id + ' · localization mode requested');
         await loadMaps();
+        const occupancy = out.occupancy || {};
+        finishMapOperation({
+            ok: true,
+            title: 'Map loaded',
+            message: `${id} is active in localization mode. Rooms and Scene objects now use the same Map ID.`,
+            detail: [
+                out.detail || '',
+                occupancy.width ? `occupancy ${occupancy.width} × ${occupancy.height}` : '',
+                Number.isFinite(Number(out.objects_restored)) ? `objects restored: ${out.objects_restored}` : '',
+                out.object_restore_error ? `object restore warning: ${out.object_restore_error}` : '',
+            ].filter(Boolean).join('\n'),
+        });
     } else {
-        setMapStatus(`Load ${id} failed. See toast/log for details.`, 'err');
+        setMapStatus(`Load ${id} failed: ${result.detail}`, 'err');
+        finishMapOperation({
+            ok: false,
+            title: 'Load failed',
+            message: `${id} was not confirmed ready. The editor has not switched its Scene binding.`,
+            detail: result.detail,
+            retry: () => loadSelectedMap(id),
+        });
     }
 }
 async function deleteSelectedMap(id) {
@@ -2766,6 +2947,7 @@ document.getElementById('btn-save-map').addEventListener('click', saveCurrentMap
 document.getElementById('btn-refresh-maps').addEventListener('click', async () => { setMapStatus('Refreshing maps...', 'busy'); await loadMaps(); setMapStatus('Map list refreshed.', 'ok'); });
 document.getElementById('btn-pose-estimate').addEventListener('click', () => setPoseEstimateMode(!poseEstimateMode));
 document.getElementById('map-list').addEventListener('click', (ev) => {
+    if (mapBusy) return;
     const item = ev.target.closest('.mapitem');
     if (!item) return;
     const id = item.dataset.id;
@@ -2861,13 +3043,14 @@ function renderPanel() {
         ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
         <div class="sub">${a.points.length} corners</div>
         <div class="btns">
-          <button class="small" data-act="rename">Rename</button>
-          ${a.stale ? '<button class="small" data-act="confirm">Still valid</button>' : ''}
-          <button class="small danger" data-act="delete">Delete</button>
+          <button class="small" data-act="rename" ${mapBusy ? 'disabled' : ''}>Rename</button>
+          ${a.stale ? `<button class="small" data-act="confirm" ${mapBusy ? 'disabled' : ''}>Still valid</button>` : ''}
+          <button class="small danger" data-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
         </div>
       </div>`).join('');
 }
 document.getElementById('room-list').addEventListener('click', async (ev) => {
+    if (mapBusy) return;
     const roomEl = ev.target.closest('.room');
     if (!roomEl) return;
     const id = roomEl.dataset.id;
@@ -2900,7 +3083,7 @@ function setDrawMode(on) {
 btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
 
 async function finishDraft() {
-    if (draftSubmitting) return;
+    if (mapBusy || draftSubmitting) return;
     if (draft.length < 3) { toast('A room needs at least 3 corners.'); return; }
     draftSubmitting = true;
     try {
@@ -2922,6 +3105,7 @@ async function finishDraft() {
 let dragging = false, dragMoved = false, lastPos = null;
 c.style.cursor = 'grab';
 c.addEventListener('mousedown', (ev) => {
+    if (mapBusy) return;
     dragging = true; dragMoved = false; lastPos = [ev.offsetX, ev.offsetY];
 });
 window.addEventListener('mouseup', () => { dragging = false; });
@@ -2945,11 +3129,13 @@ c.addEventListener('mousemove', (ev) => {
     draw();
 });
 c.addEventListener('click', (ev) => {
+    if (mapBusy) return;
     if (dragMoved) return;              // that was a pan, not a click
     if (poseEstimateMode) { sendPoseEstimate(p2w(ev.offsetX, ev.offsetY)); return; }
     if (drawMode) { draft.push(p2w(ev.offsetX, ev.offsetY)); draw(); }
 });
 c.addEventListener('dblclick', (ev) => {
+    if (mapBusy) return;
     ev.preventDefault();
     if (drawMode) {
         // the dblclick's two single clicks added two duplicate corners at
@@ -2959,12 +3145,14 @@ c.addEventListener('dblclick', (ev) => {
     }
 });
 window.addEventListener('keydown', (ev) => {
+    if (mapBusy) return;
     if (!drawMode) return;
     if (ev.key === 'Escape') setDrawMode(false);
     if (ev.key === 'Enter' && !ev.repeat) finishDraft();
 });
 c.addEventListener('wheel', (ev) => {
     ev.preventDefault();
+    if (mapBusy) return;
     const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
     // zoom about the cursor so the point under the mouse stays put
     const [wx, wy] = p2w(ev.offsetX, ev.offsetY);
