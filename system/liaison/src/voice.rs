@@ -336,6 +336,7 @@ async fn run_session(
             max_seconds,
             &session_id,
             &tx,
+            context_flag(&req.context_json, "barge_in"),
         )
         .await?
     };
@@ -597,6 +598,7 @@ async fn stream_capture_and_recognize(
     max_seconds: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
+    barge_in: bool,
 ) -> Result<(Vec<u8>, String)> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
@@ -624,8 +626,15 @@ async fn stream_capture_and_recognize(
         )))
         .await;
 
+    let mut mic_request = Request::new(());
+    if barge_in {
+        mic_request.metadata_mut().insert(
+            "x-robonix-barge-in",
+            "true".parse().expect("static metadata value"),
+        );
+    }
     let mut mic_stream = mic_client
-        .mic(Request::new(()))
+        .mic(mic_request)
         .await
         .map_err(|e| anyhow::anyhow!("mic rpc failed: {e}"))?
         .into_inner();
@@ -1098,6 +1107,13 @@ fn build_task(
     }
 }
 
+fn context_flag(raw: &str, key: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get(key).and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 fn accumulate_text(ev: &PilotEvent, into: &mut String) {
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_FINAL_TEXT: u32 = 4;
@@ -1351,6 +1367,13 @@ mod tests {
             tts_boundary_text(4, String::new(), "final answer"),
             Some("final answer".to_string())
         );
+    }
+
+    #[test]
+    fn barge_in_metadata_is_explicit_not_inferred_from_voice_mode() {
+        assert!(context_flag(r#"{"barge_in":true}"#, "barge_in"));
+        assert!(!context_flag(r#"{"interaction_mode":"voice"}"#, "barge_in"));
+        assert!(!context_flag("not json", "barge_in"));
     }
 
     #[tokio::test]
