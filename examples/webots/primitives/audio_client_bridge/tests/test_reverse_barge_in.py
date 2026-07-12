@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 from types import SimpleNamespace
 
 from audio_client_bridge.reverse import ReverseAudioBridge, _ClientSession
@@ -65,3 +66,18 @@ def test_send_reports_disconnected_client() -> None:
     bridge = ReverseAudioBridge("127.0.0.1", 0, 3200)
 
     assert bridge._send('{"type":"mic_start"}') is False
+
+
+def test_stale_mic_end_does_not_terminate_new_stream() -> None:
+    bridge = ReverseAudioBridge("127.0.0.1", 0, 3200)
+    old_frames: queue.Queue[bytes | None] = queue.Queue()
+    new_frames: queue.Queue[bytes | None] = queue.Queue()
+    bridge._mic_streams = {"old": old_frames, "new": new_frames}
+    bridge._active_mic_id = "new"
+
+    bridge._handle_control('{"type":"mic_end","stream_id":"old"}')
+    bridge._put_active_mic(b"new-pcm")
+
+    assert old_frames.get_nowait() is None
+    assert new_frames.get_nowait() == b"new-pcm"
+    assert new_frames.empty()
