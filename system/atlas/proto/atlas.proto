@@ -235,7 +235,7 @@ message DeclareCapabilityRequest {
   //                     -> InvalidArgument
   //   - non-empty + no collision        -> stored verbatim
   //   - non-empty + collision + mintable
-  //                     -> Atlas rewrites by appending "~<uuid8>"
+  //                     -> Atlas rewrites by appending "__<uuid8>"
   //   - non-empty + collision + non-mintable
   //                     -> AlreadyExists (caller picks new and retries)
   //
