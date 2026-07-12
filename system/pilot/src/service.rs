@@ -277,7 +277,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             let executor_cancelled =
                 cancel_all_executor_plans(self.atlas.clone(), &self.provider_id).await;
             debug!(
-                "[pilot] abort_turn session {id} (turn_signaled={turn_signaled}, executor={executor_cancelled:?})"
+                "[pilot] deterministic stop session {id} (turn_signaled={turn_signaled}, executor={executor_cancelled:?})"
             );
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
             let message = match executor_cancelled {
@@ -316,9 +316,10 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 Some(existing) => Some(existing.clone()),
                 None => {
                     if explicit_steer {
-                        return Err(Status::failed_precondition(
-                            "no active turn to steer for this session",
-                        ));
+                        debug!(
+                            "[pilot] steer for session {} has no active turn; starting a new turn",
+                            task.session_id
+                        );
                     }
                     steers.insert(
                         task.session_id.clone(),

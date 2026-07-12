@@ -1110,10 +1110,10 @@ pub async fn run_turn(
         if let Some(target) = invalid_cancel_target(&cancel_targets, &forest, &cancel_requested) {
             warn!("[pilot/harness] suppressed stale or duplicate cancel for plan {target}");
             history.push(Message::user(
-                "Pilot harness feedback: that plan is not cancellable now (it already finished or cancellation was already requested). Do not issue another cancel; wait for current executor events or answer the user.",
+                "Pilot harness feedback: that cancel target is not cancellable now (it finished, is a control-only plan, or cancellation was already requested). Continue planning now; re-read In-flight trees and never cancel the query/control plan itself. If the user's unresolved intent is to stop everything, call executor_cancel_all_plans directly instead of listing plans or retrying this target.",
             ));
             history::trim(history, MAX_HISTORY);
-            should_plan = false;
+            should_plan = true;
             continue 'supervisor;
         }
         if let Some(duplicate) = duplicate_in_flight_signature(&call_signatures, &forest) {
@@ -1304,6 +1304,8 @@ Compose multi-step trees; don't drip one node per round. No new capability call 
 {\"op\":\"sequence\",\"op_id\":0,\"description\":\"wait\",\"children\":[]}.\n\
 To stop a running tree, add a do node whose `cap` is the list's cancel-plan capability_name \
 (e.g. `executor.builtin_cancel_plan`), passing the exact plan_id string from the In-flight trees list.\n\
+For an explicit user request to stop/cancel ALL work, call executor_cancel_all_plans directly \
+in one do node. Do NOT call get_all_plans first and do NOT cancel the control/query tree itself.\n\
 Example: {\"content\":\"listing\",\"rtdl_description\":\"list tmp\",\"rtdl\":{\"op\":\"sequence\",\
 \"op_id\":0,\"description\":\"list /tmp\",\"children\":[{\"op\":\"do\",\"op_id\":0,\
 \"description\":\"list the /tmp directory\",\"cap\":\"executor.builtin_list_dir\",\"args\":{\"path\":\"/tmp\"}}]},\
