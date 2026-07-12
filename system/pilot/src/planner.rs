@@ -1269,6 +1269,18 @@ pub async fn run_turn(
                     .await;
                 break;
             }
+            // A long-running tree (monitoring, greeting, navigation, etc.) is
+            // session work, not a reason to swallow a conversational reply.
+            // FinalText closes only the current SubmitTask subscriber; the
+            // supervisor and forest stay alive and accept later steer/tasks.
+            if !assistant_content.trim().is_empty() {
+                let _ = tx
+                    .send(Ok(service::pack(
+                        &session_id,
+                        PilotStreamBody::FinalText(assistant_content.clone()),
+                    )))
+                    .await;
+            }
             if hit_cap {
                 warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
                 break;

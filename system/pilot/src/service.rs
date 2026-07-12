@@ -20,7 +20,7 @@ use robonix_scribe::{debug, error};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -103,6 +103,43 @@ type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<Option<TaskState>>>>>>;
 struct ActiveTurnInput {
     turn_id: String,
     tx: mpsc::Sender<Task>,
+    events: broadcast::Sender<Result<PilotEvent, String>>,
+}
+
+/// Give each SubmitTask caller its own view of the active supervisor stream.
+/// A caller is complete after one user-facing FinalText, while the underlying
+/// supervisor and its long-running RTDL trees may remain alive for later input.
+fn subscribe_turn_events(
+    events: &broadcast::Sender<Result<PilotEvent, String>>,
+) -> ReceiverStream<Result<PilotEvent, Status>> {
+    let mut subscriber = events.subscribe();
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        loop {
+            match subscriber.recv().await {
+                Ok(Ok(event)) => {
+                    let complete = event.event_kind == EVT_FINAL_TEXT;
+                    if tx.send(Ok(event)).await.is_err() || complete {
+                        break;
+                    }
+                }
+                Ok(Err(error)) => {
+                    let _ = tx.send(Err(Status::internal(error))).await;
+                    break;
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let _ = tx
+                        .send(Err(Status::resource_exhausted(format!(
+                            "Pilot event subscriber lagged by {skipped} event(s)"
+                        ))))
+                        .await;
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    ReceiverStream::new(rx)
 }
 
 const SEEN_TASK_IDS_PER_SESSION: usize = 256;
@@ -308,6 +345,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         // check and the registration atomically prevents a check-then-insert race
         // where two near-simultaneous submits for one session both start a turn.
         let (steer_tx, steer_rx) = mpsc::channel::<Task>(32);
+        let (candidate_events, _) = broadcast::channel(128);
         let explicit_steer = task_is_steer(&task);
         let expected_turn = expected_turn_id(&task);
         let existing_turn = {
@@ -326,6 +364,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                         ActiveTurnInput {
                             turn_id: task.task_id.clone(),
                             tx: steer_tx.clone(),
+                            events: candidate_events.clone(),
                         },
                     );
                     None
@@ -333,12 +372,6 @@ impl RobonixSystemPilot for PilotServiceImpl {
             }
         };
         if let Some(existing) = existing_turn {
-            if !explicit_steer {
-                return Err(Status::already_exists(format!(
-                    "session already has active turn {}; submit explicit steer input instead",
-                    existing.turn_id
-                )));
-            }
             if let Some(expected) = expected_turn
                 && expected != existing.turn_id
             {
@@ -347,13 +380,20 @@ impl RobonixSystemPilot for PilotServiceImpl {
                     existing.turn_id
                 )));
             }
-            // A turn is already live: hand this to its steer queue and return an
-            // empty stream; events keep flowing on that turn's original stream.
+            // A turn is already live: every new same-session task is a steer of
+            // that supervisor. Subscribe before queueing it so this caller sees
+            // the response produced for its input instead of receiving an empty
+            // stream and being forced to stop the background plan.
             let id = task.session_id.clone();
+            let rx = subscribe_turn_events(&existing.events);
             let ok = existing.tx.send(task).await.is_ok();
             debug!("[pilot] steer task for session {id} (queued={ok})");
-            let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
-            return Ok(Response::new(ReceiverStream::new(rx)));
+            if !ok {
+                return Err(Status::unavailable(
+                    "active Pilot turn stopped before steer was queued",
+                ));
+            }
+            return Ok(Response::new(rx));
         }
 
         let history_arc = self.get_or_create_history(&task.session_id).await;
@@ -363,7 +403,15 @@ impl RobonixSystemPilot for PilotServiceImpl {
         // https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.Sender.html
         // https://tokio.rs/tokio/tutorial/channels
         // MPSC: Multiple Producer Single Consumer
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
+        let (tx, mut internal_rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
+        let rx = subscribe_turn_events(&candidate_events);
+        let relay_events = candidate_events.clone();
+        tokio::spawn(async move {
+            while let Some(item) = internal_rx.recv().await {
+                let shared = item.map_err(|status| status.message().to_string());
+                let _ = relay_events.send(shared);
+            }
+        });
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
         let vlm = self.vlm.clone();
@@ -431,7 +479,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             steers.lock().await.remove(&session_id);
         });
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+        Ok(Response::new(rx))
     }
 }
 
@@ -475,8 +523,12 @@ async fn build_executor_conn(
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_turn_id, task_is_abort_turn, task_is_steer};
-    use crate::pb::pilot::Task;
+    use super::{
+        EVT_FINAL_TEXT, EVT_STATUS, expected_turn_id, subscribe_turn_events, task_is_abort_turn,
+        task_is_steer,
+    };
+    use crate::pb::pilot::{PilotEvent, Task};
+    use tokio_stream::StreamExt;
 
     fn task(ctx: &str) -> Task {
         Task {
@@ -506,5 +558,36 @@ mod tests {
         assert_eq!(expected_turn_id(&value).as_deref(), Some("turn-7"));
         assert!(task_is_steer(&task(r#"{"steer":true}"#)));
         assert!(!task_is_steer(&task(r#"{"interaction_mode":"task"}"#)));
+    }
+
+    #[tokio::test]
+    async fn submit_subscriber_closes_at_its_final_text_boundary() {
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let mut stream = subscribe_turn_events(&events);
+        events
+            .send(Ok(PilotEvent {
+                event_kind: EVT_STATUS,
+                ..Default::default()
+            }))
+            .unwrap();
+        events
+            .send(Ok(PilotEvent {
+                event_kind: EVT_FINAL_TEXT,
+                final_text: "still running".into(),
+                ..Default::default()
+            }))
+            .unwrap();
+        events
+            .send(Ok(PilotEvent {
+                event_kind: EVT_STATUS,
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert_eq!(stream.next().await.unwrap().unwrap().event_kind, EVT_STATUS);
+        let final_event = stream.next().await.unwrap().unwrap();
+        assert_eq!(final_event.event_kind, EVT_FINAL_TEXT);
+        assert_eq!(final_event.final_text, "still running");
+        assert!(stream.next().await.is_none());
     }
 }
