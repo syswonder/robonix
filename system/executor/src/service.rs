@@ -276,6 +276,19 @@ fn is_operator_node(node_kind: u32) -> bool {
     matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
 }
 
+/// Map a completed leaf call to its RTDL state. Cancellation wins over the
+/// provider result: a command terminated by cancel_plan normally returns
+/// success=false, but that is an expected CANCELED outcome, not a FAILED tool.
+fn leaf_terminal_state(success: bool, cancelled: bool) -> u32 {
+    if cancelled {
+        RtdlNodeStateEnum::Canceled as u32
+    } else if success {
+        RtdlNodeStateEnum::Succeeded as u32
+    } else {
+        RtdlNodeStateEnum::Failed as u32
+    }
+}
+
 /// Emit the terminal event for an `on_enter` stop point on any RTDL node.
 async fn send_stop_on_enter(
     tx: &Sender<Result<RtdlEvent, Status>>,
@@ -411,12 +424,11 @@ async fn execute_call(
             .await
         }
         Ok(None) => {
-            let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
-            let state = if r.success {
-                RtdlNodeStateEnum::Succeeded as u32
-            } else {
-                RtdlNodeStateEnum::Failed as u32
-            };
+            let r =
+                crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime, &node.plan_id)
+                    .await;
+            let cancelled = runtime.is_cancelled(&node.plan_id).await;
+            let state = leaf_terminal_state(r.success, cancelled);
             runtime
                 .record_op_state(&node.plan_id, &node.op_id, state)
                 .await;
@@ -561,7 +573,7 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 #[cfg(test)]
 mod tests {
     use super::{
-        PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
+        PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum, leaf_terminal_state,
         send_operator_terminal, send_stop_on_enter, validate_plan,
     };
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
@@ -575,6 +587,22 @@ mod tests {
             contract_id: "robonix/test/cap".to_string(),
             args_json: "{}".to_string(),
         }
+    }
+
+    #[test]
+    fn canceled_leaf_is_not_reported_as_failed_provider_work() {
+        assert_eq!(
+            leaf_terminal_state(false, true),
+            RtdlNodeStateEnum::Canceled as u32
+        );
+        assert_eq!(
+            leaf_terminal_state(false, false),
+            RtdlNodeStateEnum::Failed as u32
+        );
+        assert_eq!(
+            leaf_terminal_state(true, false),
+            RtdlNodeStateEnum::Succeeded as u32
+        );
     }
 
     fn node(kind: u32, children: Vec<u32>, call: Option<CapabilityCall>) -> RtdlNode {

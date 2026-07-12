@@ -341,6 +341,7 @@ fn is_control_only(plan: &Plan) -> bool {
                 | "get_all_plans"
                 | "get_plan_status"
                 | "stop_plan_at"
+                | "stop_after_current"
         ) {
             return false;
         }
@@ -367,13 +368,16 @@ fn build_forest_block(
          These RTDL trees you dispatched earlier are still running concurrently. \
          To stop one immediately, call `builtin_cancel_plan` with its exact \
          `plan_id` below (or `executor_cancel_all_plans` to stop everything at \
-         once). To stop a plan at a specific step instead of now, first call \
+         once). When the user says to finish the current step but not start the \
+         next one, call `builtin_stop_after_current` directly with the exact \
+         `plan_id`; it atomically arms the boundary and must NOT be preceded by \
+         a status query. To stop at some other explicitly named step, first call \
          `builtin_get_plan_status` with its `plan_id` to read its ops (each op's \
          `op_id`, description, and live state), then call `builtin_stop_plan_at` \
          with that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
          before that op runs, `on_complete` to stop after it finishes) — this \
-         is the correct mechanism when the user asks to finish the current step \
-         and then stop; do not use immediate cancel for a boundary stop. It \
+         and then call `builtin_stop_plan_at`; do not use immediate cancel for \
+         a boundary stop. It \
          cancels the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Only the plan_ids listed here are running; never cancel an id \
@@ -1136,6 +1140,15 @@ pub async fn run_turn(
         let calls = plan_call_count(&graph);
         let call_signatures = plan_call_signatures(&graph);
         let cancel_targets = plan_cancel_targets(&graph);
+        if mixes_control_inspection_with_action(&graph) {
+            warn!("[pilot/harness] suppressed mixed control inspection and action tree");
+            history.push(Message::user(
+                "Pilot harness feedback: get_plan_status/get_all_plans is an inspection whose result is required before deciding how to stop work. Dispatch only that inspection now. Do not put a new action, navigation, shell command, cancel, or stop_plan_at in the same RTDL tree. After its result arrives, first complete the targeted stop/cancel decision; only then dispatch unrelated successor work.",
+            ));
+            history::trim(history, MAX_HISTORY);
+            should_plan = true;
+            continue 'supervisor;
+        }
         if let Some(target) = invalid_cancel_target(&cancel_targets, &forest, &cancel_requested) {
             warn!("[pilot/harness] suppressed stale or duplicate cancel for plan {target}");
             history.push(Message::user(
@@ -1796,6 +1809,22 @@ fn plan_call_count(plan: &Plan) -> usize {
         .count()
 }
 
+fn mixes_control_inspection_with_action(plan: &Plan) -> bool {
+    let leaves: Vec<&str> = plan
+        .nodes
+        .iter()
+        .filter_map(|node| node.call.as_ref())
+        .filter_map(|call| call.contract_id.rsplit('/').next())
+        .collect();
+    let has_inspection = leaves
+        .iter()
+        .any(|leaf| matches!(*leaf, "get_plan_status" | "get_all_plans"));
+    has_inspection
+        && leaves
+            .iter()
+            .any(|leaf| !matches!(*leaf, "get_plan_status" | "get_all_plans"))
+}
+
 fn plan_call_signatures(plan: &Plan) -> HashSet<String> {
     plan.nodes
         .iter()
@@ -2123,6 +2152,11 @@ by planning capability calls available to you.
   work covered by that tree, or when continuing that same tree is unsafe. A
   failure in an independent monitoring, greeting, observation, or query branch
   is not permission to cancel navigation or another physical task.
+- When the latest steer says to let the current step finish but not start its
+  successor, call `builtin_stop_after_current` immediately for that in-flight
+  plan. Do not call get_plan_status first: the extra model round creates a race
+  in which the successor can start. Use get_plan_status + stop_plan_at only for
+  a different explicitly named boundary or an ambiguous parallel plan.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - For semantic navigation, resolve names through Scene before calling navigation:
   - call Scene `list_objects` first to discover the stable ID for a named room or
@@ -2200,9 +2234,9 @@ mod tests {
         TaskState, TreeMeta, append_steer, apply_task_update, build_forest_block,
         duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
         feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
-        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch,
-        start_or_resume_task, task_is_session_end,
+        mixes_control_inspection_with_action, parse_rtdl_assistant_response, parse_task_update,
+        plan_call_signatures, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        skip_memory_prefetch, start_or_resume_task, task_is_session_end,
     };
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
     use serde_json::json;
@@ -2283,6 +2317,8 @@ mod tests {
         );
         let prompt = build_forest_block(&forest, &HashSet::new());
         assert!(prompt.contains("finish the current step"));
+        assert!(prompt.contains("builtin_stop_after_current"));
+        assert!(prompt.contains("must NOT be preceded by"));
         assert!(prompt.contains("do not use immediate cancel for a boundary stop"));
         assert!(prompt.contains("on_complete"));
         assert!(prompt.contains("on_enter"));
@@ -2336,6 +2372,38 @@ mod tests {
             },
         );
         assert!(duplicate_in_flight_signature(&signatures, &forest).is_some());
+    }
+
+    #[test]
+    fn inspection_result_must_arrive_before_new_action_is_admitted() {
+        let plan = Plan {
+            nodes: vec![
+                RtdlNode {
+                    node_kind: RTDL_DO,
+                    call: Some(CapabilityCall {
+                        contract_id: "robonix/system/executor/builtin/get_plan_status".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                RtdlNode {
+                    node_kind: RTDL_DO,
+                    call: Some(CapabilityCall {
+                        contract_id: "robonix/system/executor/builtin/run_command".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(mixes_control_inspection_with_action(&plan));
+
+        let inspection_only = Plan {
+            nodes: vec![plan.nodes[0].clone()],
+            ..Default::default()
+        };
+        assert!(!mixes_control_inspection_with_action(&inspection_only));
     }
 
     #[test]
@@ -2442,6 +2510,7 @@ mod tests {
             "get_all_plans",
             "get_plan_status",
             "stop_plan_at",
+            "stop_after_current",
         ] {
             assert!(is_control_only(&single_do_plan(leaf)), "{leaf}");
         }
