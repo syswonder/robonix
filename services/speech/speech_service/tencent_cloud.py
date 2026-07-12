@@ -106,7 +106,17 @@ class TencentRealtimeASRBackend:
     def recognize_stream(self, pcm_chunks: Iterator[bytes]) -> Iterator[dict]:
         url = self._signed_url()
         last_text = ""
-        with connect(url, max_size=None, open_timeout=5, close_timeout=2) as ws:
+        # Robot deployments may export a proxy for GitHub/model downloads.
+        # Tencent's signed ASR WebSocket must connect directly: inheriting
+        # HTTP_PROXY/ALL_PROXY can route the handshake through a local proxy
+        # and Tencent then reports a misleading resource-package error (4004).
+        with connect(
+            url,
+            max_size=None,
+            open_timeout=5,
+            close_timeout=2,
+            proxy=None,
+        ) as ws:
             first = self._recv_json(ws, timeout_s=5.0)
             if first and first.get("code", 0) != 0:
                 raise RuntimeError(f"Tencent ASR handshake failed: {first}")
