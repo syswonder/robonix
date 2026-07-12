@@ -39,6 +39,8 @@ class ReverseAudioBridge:
         self._mic_frames: queue.Queue[bytes | None] = queue.Queue(maxsize=128)
         self._pending_controls: dict[str, queue.Queue[dict]] = {}
         self._pending_lock = threading.Lock()
+        self._speaker_lock = threading.Lock()
+        self._speaker_epoch = 0
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop_async: asyncio.Event | None = None
@@ -164,6 +166,15 @@ class ReverseAudioBridge:
             session = self._session
         if session is None:
             return False
+
+    def _interrupt_speaker(self) -> None:
+        with self._speaker_lock:
+            self._speaker_epoch += 1
+        self._send(json.dumps({"type": "speaker_stop"}))
+
+    def _current_speaker_epoch(self) -> int:
+        with self._speaker_lock:
+            return self._speaker_epoch
         try:
             future = asyncio.run_coroutine_threadsafe(session.ws.send(payload), session.loop)
             future.result(timeout=3.0)
@@ -219,6 +230,12 @@ class ReverseAudioBridge:
                 self._mic_frames.get_nowait()
             except queue.Empty:
                 break
+        metadata = {item.key: item.value for item in context.invocation_metadata()}
+        if metadata.get("x-robonix-barge-in", "").lower() in {"1", "true", "yes"}:
+            # Explicit F2 / steer capture clears client-local TTS before PCM
+            # starts.  The persistent wake-word listener does not carry this
+            # metadata and therefore never mutes normal replies.
+            self._interrupt_speaker()
         if not self._send(json.dumps({"type": "mic_start", "sample_rate": 16000, "channels": 1})):
             context.abort(__import__("grpc").StatusCode.UNAVAILABLE, "client audio session disconnected")
             return
@@ -249,16 +266,24 @@ class ReverseAudioBridge:
         if not self._require_client(context):
             return empty_type()
         total = 0
-        for chunk in request_iterator:
-            if chunk.data:
-                data = bytes(chunk.data)
-                total += len(data)
-                if not self._send(data):
-                    context.abort(__import__("grpc").StatusCode.UNAVAILABLE, "client audio session disconnected")
-                    return empty_type()
-        self._send(json.dumps({"type": "speaker_end"}))
+        epoch = self._current_speaker_epoch()
+        completed = False
+        try:
+            for chunk in request_iterator:
+                if epoch != self._current_speaker_epoch():
+                    log.info("speaker stream superseded by voice barge-in")
+                    break
+                if chunk.data:
+                    data = bytes(chunk.data)
+                    total += len(data)
+                    if not self._send(data):
+                        context.abort(__import__("grpc").StatusCode.UNAVAILABLE, "client audio session disconnected")
+                        return empty_type()
+            completed = context.is_active() and epoch == self._current_speaker_epoch()
+        finally:
+            self._send(json.dumps({"type": "speaker_end" if completed else "speaker_stop"}))
         # Preserve serialised speaker semantics without sleeping for a full long
         # utterance in the gRPC worker.
-        if total:
+        if completed and total:
             time.sleep(min(total / 32000.0 + 0.1, 5.0))
         return empty_type()

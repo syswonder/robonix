@@ -288,14 +288,44 @@ impl RobonixSystemLiaisonVoice for LiaisonServiceImpl {
         request: Request<StartVoiceSessionRequest>,
     ) -> Result<Response<Self::StartVoiceSessionStream>, Status> {
         let req = request.into_inner();
-        let stream = voice::start_voice_session(
+        self.handsfree.suspend_capture().await;
+        let stream = match voice::start_voice_session(
             req,
             Arc::clone(&self.atlas),
             self.pilot_endpoint_default.clone(),
             Arc::clone(&self.access),
         )
-        .await?;
-        let boxed: Self::StartVoiceSessionStream = Box::pin(stream);
+        .await
+        {
+            Ok(stream) => stream,
+            Err(status) => {
+                self.handsfree.resume_capture().await;
+                return Err(status);
+            }
+        };
+        let (tx, rx) = mpsc::channel(64);
+        let handsfree = Arc::clone(&self.handsfree);
+        tokio::spawn(async move {
+            let mut stream = Box::pin(stream);
+            let mut capture_suspended = true;
+            while let Some(item) = stream.next().await {
+                if capture_suspended
+                    && item
+                        .as_ref()
+                        .is_ok_and(|event| event.event_kind == voice::KIND_ASR_FINAL)
+                {
+                    handsfree.resume_capture().await;
+                    capture_suspended = false;
+                }
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+            }
+            if capture_suspended {
+                handsfree.resume_capture().await;
+            }
+        });
+        let boxed: Self::StartVoiceSessionStream = Box::pin(ReceiverStream::new(rx));
         Ok(Response::new(boxed))
     }
 }
