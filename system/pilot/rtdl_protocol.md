@@ -80,6 +80,12 @@ new request conflicts with what a tree is doing; leave it running when the new
 request is additive. Cancel a given `plan_id` at most once. If the harness says
 an identical call is already in flight, wait for it; never issue a duplicate.
 
+Executor feedback is scoped to the `plan_id` and independent tree named directly
+before the result. A failure blocks only dependent steps in that tree; it does
+not invalidate unrelated in-flight trees. Never cancel navigation or another
+physical tree merely because an independent greet, monitoring, observation, or
+query tree failed.
+
 When the user explicitly asks to stop or cancel all running work, call the
 executor `cancel_all_plans` capability directly in one `do` node. Do not call
 `get_all_plans` first, and never cancel the query/control tree itself.
@@ -138,6 +144,15 @@ Rules:
    into `/explore/CAPABILITY.md`) — those paths live in the provider's own
    container and are unreadable here. A provider not listed in "Capability docs"
    has no manual; call it directly from its `args_schema`.
+9. For a named room or region, current Scene data is authoritative. Call Scene
+   `list_objects`, use the returned stable ID with `goal_room`, and only then
+   call navigation with the reachable pose returned by Scene. A Memory
+   coordinate, grasp pose, observation pose, room label, or guessed ID is not a
+   substitute. Because the navigation arguments depend on the `goal_room`
+   result, these are separate planning rounds.
+10. Treat navigation completion in relation to the resolved requested
+    destination. `SUCCEEDED` for a pose equal to the current pose is a
+    zero-distance no-op; do not describe it as movement to a different place.
 
 Example — dispatch one tree, keep the existing goal (`task_update` null):
 
@@ -155,34 +170,24 @@ Example — dispatch one tree, keep the existing goal (`task_update` null):
   "task_update": null
 }
 
-Example — accept a new goal and dispatch a MULTI-STEP tree for it in one round
-(the steps are known up front, so do not split them across rounds). The two
-independent goals run in `parallel`; the water errand is an ordered `sequence`:
+Example — accept a new goal and dispatch independent work in one `parallel`
+tree (the steps are known up front, so do not split them across rounds):
 
 {
-  "content": "On it — fetching water and starting music at the same time.",
-  "rtdl_description": "fetch water + play music",
+  "content": "I will capture the scene and check battery status together.",
+  "rtdl_description": "snapshot + battery check",
   "rtdl": {
     "op": "parallel",
     "op_id": 0,
-    "description": "fetch water and play music at the same time",
+    "description": "capture the scene and check battery status",
     "children": [
-      {
-        "op": "sequence",
-        "op_id": 0,
-        "description": "fetch water from the kitchen",
-        "children": [
-          { "op": "do", "op_id": 0, "description": "drive to the kitchen", "cap": "nav.navigation_navigate", "args": { "target": "kitchen" } },
-          { "op": "do", "op_id": 0, "description": "grasp the water cup", "cap": "arm.manipulation_grasp", "args": { "object": "water cup" } },
-          { "op": "do", "op_id": 0, "description": "bring the cup back to the user", "cap": "nav.navigation_navigate", "args": { "target": "user" } }
-        ]
-      },
-      { "op": "do", "op_id": 0, "description": "start playing music", "cap": "audio.audio_play", "args": { "track": "music" } }
+      { "op": "do", "op_id": 0, "description": "capture the current scene", "cap": "camera.camera_snapshot", "args": {} },
+      { "op": "do", "op_id": 0, "description": "read current battery status", "cap": "battery.battery_status", "args": {} }
     ]
   },
   "task_update": {
-    "goal": "bring the user water and play music at the same time",
-    "success_criterion": "a water cup is next to the user AND music is playing",
+    "goal": "capture the current scene and report battery status",
+    "success_criterion": "a current image and battery status have both been returned",
     "status": "in_progress"
   }
 }
@@ -205,18 +210,19 @@ just the observation:
   "task_update": null
 }
 
-Example — cancel an in-flight tree the user no longer wants, then re-plan:
+Example — cancel an in-flight tree the user no longer wants. Resolve any new
+semantic destination through Scene in later rounds rather than inventing a
+navigation target:
 
 {
-  "content": "Stopping the patrol and coming back to you.",
-  "rtdl_description": "return to user",
+  "content": "Stopping the patrol first.",
+  "rtdl_description": "stop patrol",
   "rtdl": {
     "op": "sequence",
     "op_id": 0,
-    "description": "stop the patrol and return to the user",
+    "description": "stop the running patrol",
     "children": [
-      { "op": "do", "op_id": 0, "description": "cancel the running patrol tree", "cap": "executor.builtin_cancel_plan", "args": { "plan_id": "PASTE_THE_INFLIGHT_PLAN_ID" } },
-      { "op": "do", "op_id": 0, "description": "drive back to the user", "cap": "nav.navigation_navigate", "args": { "target": "user" } }
+      { "op": "do", "op_id": 0, "description": "cancel the running patrol tree", "cap": "executor.builtin_cancel_plan", "args": { "plan_id": "PASTE_THE_INFLIGHT_PLAN_ID" } }
     ]
   },
   "task_update": null
@@ -225,12 +231,12 @@ Example — cancel an in-flight tree the user no longer wants, then re-plan:
 Example — overall task finished (no new tree, mark done):
 
 {
-  "content": "Done — the water is by you and music is playing.",
+  "content": "Done — the current image and battery status are available.",
   "rtdl_description": "",
   "rtdl": { "op": "sequence", "op_id": 0, "description": "no new work this round", "children": [] },
   "task_update": {
-    "goal": "bring the user water and play music at the same time",
-    "success_criterion": "a water cup is next to the user AND music is playing",
+    "goal": "capture the current scene and report battery status",
+    "success_criterion": "a current image and battery status have both been returned",
     "status": "done"
   }
 }
