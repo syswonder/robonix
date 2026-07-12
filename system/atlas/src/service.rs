@@ -815,7 +815,12 @@ fn resolve_endpoint(
         )));
     }
     for _ in 0..MINT_ATTEMPTS {
-        let candidate = format!("{proposed}~{}", short_uuid());
+        // A ROS 2 private-name marker (`~`) is only legal as the first
+        // character of a topic. Appending `~<uuid>` produced endpoints such
+        // as `/odom~9857059d`, which Atlas returned successfully but every
+        // ROS 2 client rejected. Double underscore is valid inside every ROS
+        // name token and keeps the collision suffix visually distinct.
+        let candidate = format!("{proposed}__{}", short_uuid());
         if !collides(&candidate) {
             return Ok(candidate);
         }
@@ -825,6 +830,51 @@ fn resolve_endpoint(
          after {MINT_ATTEMPTS} attempts (existing providers: {})",
         state.providers.len()
     )))
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn ros2_collision_rewrite_never_appends_private_name_marker() {
+        let mut state = State::default();
+        state.providers.insert(
+            "chassis".to_string(),
+            CapabilityProviderState {
+                id: "chassis".to_string(),
+                kind: pb::Kind::Primitive,
+                namespace: "robonix/primitive/chassis".to_string(),
+                capability_md_path: String::new(),
+                capability_md: String::new(),
+                last_heartbeat_ms: 0,
+                endpoints: vec![DeclaredEndpoint {
+                    contract_id: "robonix/primitive/chassis/odom".to_string(),
+                    transport: Transport::Ros2,
+                    endpoint: "/odom".to_string(),
+                    params: TransportParamsState::Ros2 {
+                        qos_profile: "reliable".to_string(),
+                    },
+                    description: String::new(),
+                }],
+                pushed_state: None,
+                state_detail: String::new(),
+            },
+        );
+
+        let rewritten = resolve_endpoint(
+            &state,
+            Transport::Ros2,
+            "/odom",
+            "robonix/service/map/odom",
+            "mapping",
+        )
+        .expect("ROS 2 collision should be mintable");
+
+        assert!(rewritten.starts_with("/odom__"), "{rewritten}");
+        assert!(!rewritten.contains('~'), "{rewritten}");
+        assert_eq!(rewritten.len(), "/odom__".len() + 8);
+    }
 }
 
 #[derive(Debug)]
