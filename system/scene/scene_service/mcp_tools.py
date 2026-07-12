@@ -128,7 +128,7 @@ def _normalize_room_reference(value: str) -> str:
 def _room_aliases(room: "Annotation") -> set[str]:
     name = _normalize_room_reference(room.name)
     aliases = {name}
-    for prefix in ("room ", "room-", "房间 ", "房间"):
+    for prefix in ("room ", "room-", "房间 ", "房间"):  # i18n-ok: user room aliases
         if name.startswith(prefix) and name[len(prefix):].strip():
             aliases.add(name[len(prefix):].strip())
     return aliases
