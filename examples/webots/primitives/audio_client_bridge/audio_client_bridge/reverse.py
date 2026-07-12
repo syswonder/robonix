@@ -36,7 +36,8 @@ class ReverseAudioBridge:
         self._session: _ClientSession | None = None
         self._lock = threading.Lock()
         self._connected = threading.Event()
-        self._mic_frames: queue.Queue[bytes | None] = queue.Queue(maxsize=128)
+        self._mic_streams: dict[str, queue.Queue[bytes | None]] = {}
+        self._active_mic_id: str | None = None
         self._pending_controls: dict[str, queue.Queue[dict]] = {}
         self._pending_lock = threading.Lock()
         self._speaker_lock = threading.Lock()
@@ -63,7 +64,7 @@ class ReverseAudioBridge:
             self._thread.join(timeout=5.0)
         self._thread = None
         self._connected.clear()
-        self._put_mic(None)
+        self._end_all_mics()
 
     def is_connected(self) -> bool:
         """Whether a robonix-client currently owns this reverse session."""
@@ -106,32 +107,49 @@ class ReverseAudioBridge:
         try:
             async for message in ws:
                 if isinstance(message, bytes):
-                    self._put_mic(message)
+                    self._put_active_mic(message)
                     continue
                 self._handle_control(message)
         except Exception as exc:  # noqa: BLE001
             log.warning("client reverse-audio session closed: %s", exc)
         finally:
+            owns_session = False
             with self._lock:
                 if self._session and self._session.ws is ws:
                     self._session = None
                     self._connected.clear()
-                    self._put_mic(None)
+                    owns_session = True
+            if owns_session:
+                self._end_all_mics()
             self._fail_pending_controls("client audio session disconnected")
             log.info("client reverse-audio session disconnected")
 
-    def _put_mic(self, frame: bytes | None) -> None:
+    @staticmethod
+    def _put_mic(target: queue.Queue[bytes | None], frame: bytes | None) -> None:
         try:
-            self._mic_frames.put_nowait(frame)
+            target.put_nowait(frame)
         except queue.Full:
             try:
-                self._mic_frames.get_nowait()
+                target.get_nowait()
             except queue.Empty:
                 pass
             try:
-                self._mic_frames.put_nowait(frame)
+                target.put_nowait(frame)
             except queue.Full:
                 pass
+
+    def _put_active_mic(self, frame: bytes) -> None:
+        with self._lock:
+            target = self._mic_streams.get(self._active_mic_id or "")
+        if target is not None:
+            self._put_mic(target, frame)
+
+    def _end_all_mics(self) -> None:
+        with self._lock:
+            targets = list(self._mic_streams.values())
+            self._active_mic_id = None
+        for target in targets:
+            self._put_mic(target, None)
 
     def _handle_control(self, raw: str) -> None:
         try:
@@ -139,7 +157,11 @@ class ReverseAudioBridge:
         except json.JSONDecodeError:
             return
         if body.get("type") == "mic_end":
-            self._put_mic(None)
+            stream_id = str(body.get("stream_id") or "")
+            with self._lock:
+                target = self._mic_streams.get(stream_id or self._active_mic_id or "")
+            if target is not None:
+                self._put_mic(target, None)
             return
         if body.get("type") != "control_response":
             return
@@ -225,25 +247,37 @@ class ReverseAudioBridge:
         if not self._require_client(context):
             return
         log.info("client microphone stream requested")
-        while True:
-            try:
-                self._mic_frames.get_nowait()
-            except queue.Empty:
-                break
+        stream_id = uuid.uuid4().hex
+        frames: queue.Queue[bytes | None] = queue.Queue(maxsize=128)
+        with self._lock:
+            previous = self._mic_streams.get(self._active_mic_id or "")
+            self._mic_streams[stream_id] = frames
+            self._active_mic_id = stream_id
+        if previous is not None:
+            self._put_mic(previous, None)
         metadata = {item.key: item.value for item in context.invocation_metadata()}
         if metadata.get("x-robonix-barge-in", "").lower() in {"1", "true", "yes"}:
             # Explicit F2 / steer capture clears client-local TTS before PCM
             # starts.  The persistent wake-word listener does not carry this
             # metadata and therefore never mutes normal replies.
             self._interrupt_speaker()
-        if not self._send(json.dumps({"type": "mic_start", "sample_rate": 16000, "channels": 1})):
-            context.abort(__import__("grpc").StatusCode.UNAVAILABLE, "client audio session disconnected")
-            return
         sequence = 0
         try:
+            start = {
+                "type": "mic_start",
+                "stream_id": stream_id,
+                "sample_rate": 16000,
+                "channels": 1,
+            }
+            if not self._send(json.dumps(start)):
+                context.abort(
+                    __import__("grpc").StatusCode.UNAVAILABLE,
+                    "client audio session disconnected",
+                )
+                return
             while context.is_active():
                 try:
-                    frame = self._mic_frames.get(timeout=0.5)
+                    frame = frames.get(timeout=0.5)
                 except queue.Empty:
                     continue
                 if frame is None:
@@ -259,7 +293,11 @@ class ReverseAudioBridge:
                 )
                 sequence += 1
         finally:
-            self._send(json.dumps({"type": "mic_stop"}))
+            self._send(json.dumps({"type": "mic_stop", "stream_id": stream_id}))
+            with self._lock:
+                self._mic_streams.pop(stream_id, None)
+                if self._active_mic_id == stream_id:
+                    self._active_mic_id = None
             log.info("client microphone stream stopped after %d frame(s)", sequence)
 
     def speaker_stream(self, request_iterator, context, empty_type):
