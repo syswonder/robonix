@@ -80,6 +80,10 @@ new request conflicts with what a tree is doing; leave it running when the new
 request is additive. Cancel a given `plan_id` at most once. If the harness says
 an identical call is already in flight, wait for it; never issue a duplicate.
 
+When the user explicitly asks to stop or cancel all running work, call the
+executor `cancel_all_plans` capability directly in one `do` node. Do not call
+`get_all_plans` first, and never cancel the query/control tree itself.
+
 ### Plan IDs (read this — you do NOT choose them)
 
 Every tree you dispatch is assigned a `plan_id` by the system — a string holding
