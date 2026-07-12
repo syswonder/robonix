@@ -141,6 +141,16 @@ async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Resu
         mark_activated(provider_id);
         return Ok(());
     }
+    if provider.state != atlas_pb::LifecycleState::StateInactive as i32 {
+        let state = lifecycle_state_label(provider.state);
+        anyhow::bail!(
+            "skill {} is {}; automatic activation is only valid from INACTIVE. The executor \
+             will not repeat CMD_ACTIVATE after an activation error; recover or restart the \
+             provider lifecycle first",
+            provider_id,
+            state
+        );
+    }
     info!(
         "[skill-activate] {provider_id} (ns={}, state={}): sending Driver(CMD_ACTIVATE)",
         provider.namespace, provider.state
@@ -211,6 +221,22 @@ async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Resu
     Ok(())
 }
 
+fn lifecycle_state_label(state: i32) -> &'static str {
+    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
+        "REGISTERED"
+    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
+        "INACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
+        "ACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateError as i32 {
+        "ERROR"
+    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
+        "TERMINATED"
+    } else {
+        "UNSPECIFIED"
+    }
+}
+
 /// Mirrors robonix_codegen::contract_gen::contract_id_to_service_name.
 /// `robonix/skill/explore/driver` → `RobonixSkillExploreDriver`. Uniform
 /// PascalCase per `/`-segment, no prefix stripping.
@@ -243,5 +269,27 @@ pub(crate) fn error_result(call: &CapabilityCall, msg: String) -> CapabilityCall
         success: false,
         output: String::new(),
         error: msg,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifecycle_state_label;
+    use robonix_atlas::pb::LifecycleState;
+
+    #[test]
+    fn lifecycle_state_labels_are_actionable() {
+        assert_eq!(
+            lifecycle_state_label(LifecycleState::StateInactive as i32),
+            "INACTIVE"
+        );
+        assert_eq!(
+            lifecycle_state_label(LifecycleState::StateError as i32),
+            "ERROR"
+        );
+        assert_eq!(
+            lifecycle_state_label(LifecycleState::StateTerminated as i32),
+            "TERMINATED"
+        );
     }
 }
