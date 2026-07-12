@@ -234,19 +234,23 @@ class TencentRealtimeASRBackend:
 
     @staticmethod
     def _to_incremental_event(event: dict, last_text: str) -> tuple[dict | None, str]:
-        """Convert Tencent cumulative hypotheses into Liaison's incremental ASR text."""
+        """Hold Tencent's revisable hypothesis until it becomes final.
+
+        Tencent sends cumulative snapshots and may rewrite earlier characters
+        between snapshots.  Liaison's stream contract is append-only, so a
+        revised snapshot cannot be represented as a safe delta (for example
+        ``I may`` may become ``I have already...``). Emitting partials would
+        concatenate every revision.  Keep only the newest snapshot and emit it
+        once when Tencent marks it final.
+        """
         text = event.get("text", "")
         if not text:
             return None, last_text
-        if text.startswith(last_text):
-            delta = text[len(last_text) :]
-        else:
-            delta = text
         last_text = text
-        if not delta and not event.get("is_final", False):
+        if not event.get("is_final", False):
             return None, last_text
         out = dict(event)
-        out["text"] = delta
+        out["text"] = last_text
         return out, last_text
 
 
