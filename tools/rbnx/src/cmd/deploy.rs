@@ -191,6 +191,48 @@ mod tests {
 
         assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
     }
+
+    #[test]
+    fn provider_failure_ignores_later_shutdown_noise() {
+        let path = std::env::temp_dir().join(format!(
+            "rbnx-provider-failure-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"level\":\"info\",\"msg\":\"ready -- awaiting Driver(CMD_INIT)\"}\n",
+                "{\"level\":\"info\",\"msg\":\"[ranger_chassis] state REGISTERED -> ERROR (CAN setup failed: sudo password required)\"}\n",
+                "{\"level\":\"info\",\"msg\":\"shutdown hook completed\"}\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_provider_failure(&path).as_deref(),
+            Some("CAN setup failed: sudo password required")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_failure_accepts_error_level_records() {
+        let path = std::env::temp_dir().join(format!(
+            "rbnx-provider-error-level-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "{\"level\":\"error\",\"msg\":\"camera device disconnected\"}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_provider_failure(&path).as_deref(),
+            Some("camera device disconnected")
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -1983,6 +2025,7 @@ async fn wait_for_soma_stage1(
     let mut frame: usize = 0;
     let mut observed_states: HashMap<String, i32> = HashMap::new();
     let mut active_primitives: HashSet<String> = HashSet::new();
+    let mut reported_failures: HashSet<String> = HashSet::new();
     if output::boot_verbose() {
         output::boot_wait("primitive", "waiting for Soma-managed providers");
     }
@@ -2011,6 +2054,39 @@ async fn wait_for_soma_stage1(
         // and blocks CI. try_wait is non-blocking; Ok(Some(_)) means
         // the child has been reaped and the OS-level status is known.
         if let Ok(Some(status)) = soma_child.try_wait() {
+            let mut provider_failures = Vec::new();
+            for name in primitive_names {
+                let log_file = log_dir.join(format!("{name}.log"));
+                if let Some(cause) = read_provider_failure(&log_file) {
+                    if reported_failures.insert(name.clone()) {
+                        output::boot_fail(
+                            name,
+                            &format!("ERROR; {cause}; log {}", log_file.display()),
+                        );
+                    }
+                    provider_failures.push((name, cause, log_file));
+                }
+            }
+            if !provider_failures.is_empty() {
+                let names = provider_failures
+                    .iter()
+                    .map(|(name, _, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let logs = provider_failures
+                    .iter()
+                    .map(|(_, _, path)| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                output::boot_fail(
+                    "primitive",
+                    &format!("soma exited after provider failure(s): {names}"),
+                );
+                anyhow::bail!(
+                    "Soma exited with {status:?} after provider failure(s): {names}; logs: {logs}"
+                );
+            }
+
             let log_file = log_dir.join("soma.log");
             let tail = read_log_tail(&log_file, 20);
             output::boot_fail(
@@ -2048,7 +2124,13 @@ async fn wait_for_soma_stage1(
                         output::boot_ok(name, "ACTIVE");
                         active_primitives.insert(name.clone());
                     } else if provider.state == atlas_pb::LifecycleState::StateError as i32 {
-                        output::boot_fail(name, "ERROR; see soma.log and provider log");
+                        let log_file = log_dir.join(format!("{name}.log"));
+                        let detail = read_provider_failure(&log_file).map_or_else(
+                            || format!("ERROR; log {}", log_file.display()),
+                            |cause| format!("ERROR; {cause}; log {}", log_file.display()),
+                        );
+                        output::boot_fail(name, &detail);
+                        reported_failures.insert(name.clone());
                     } else if output::boot_verbose() {
                         output::boot_note(name, state);
                     }
@@ -2172,6 +2254,32 @@ fn read_log_tail(path: &Path, max_lines: usize) -> String {
     let lines: Vec<&str> = contents.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].join("\n")
+}
+
+/// Return the provider's actual lifecycle failure rather than whichever
+/// shutdown record happened to be written last. Scribe records are JSONL;
+/// providers commonly report lifecycle transitions at info level, so prefer
+/// `-> ERROR (...)` messages before falling back to an error-level record.
+fn read_provider_failure(path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut error_level_fallback = None;
+    for line in contents.lines().rev() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = record.get("msg").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if let Some((_, cause)) = message.split_once(" -> ERROR (") {
+            return Some(cause.strip_suffix(')').unwrap_or(cause).to_string());
+        }
+        if error_level_fallback.is_none()
+            && record.get("level").and_then(|value| value.as_str()) == Some("error")
+        {
+            error_level_fallback = Some(message.to_string());
+        }
+    }
+    error_level_fallback
 }
 
 async fn soma_grpc_ready(atlas: &mut AtlasClient, contract_id: &str) -> bool {
