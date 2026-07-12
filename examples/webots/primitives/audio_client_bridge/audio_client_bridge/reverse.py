@@ -166,6 +166,13 @@ class ReverseAudioBridge:
             session = self._session
         if session is None:
             return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(session.ws.send(payload), session.loop)
+            future.result(timeout=3.0)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reverse client send failed: %s", exc)
+            return False
 
     def _interrupt_speaker(self) -> None:
         with self._speaker_lock:
@@ -175,13 +182,6 @@ class ReverseAudioBridge:
     def _current_speaker_epoch(self) -> int:
         with self._speaker_lock:
             return self._speaker_epoch
-        try:
-            future = asyncio.run_coroutine_threadsafe(session.ws.send(payload), session.loop)
-            future.result(timeout=3.0)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("reverse client send failed: %s", exc)
-            return False
 
     def control_request(self, op: str, payload: dict | None = None, timeout_s: float = 3.0) -> dict:
         """Ask the connected client to perform a small local audio operation."""

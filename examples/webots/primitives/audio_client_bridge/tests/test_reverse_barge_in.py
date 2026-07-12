@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
-from audio_client_bridge.reverse import ReverseAudioBridge
+from audio_client_bridge.reverse import ReverseAudioBridge, _ClientSession
 
 
 class ActiveContext:
@@ -29,3 +30,38 @@ def test_barge_in_supersedes_inflight_speaker_generation() -> None:
     assert b"old-audio-2" not in sent
     controls = [json.loads(item) for item in sent if isinstance(item, str)]
     assert {control["type"] for control in controls} == {"speaker_stop"}
+
+
+def test_send_forwards_payload_to_connected_client(monkeypatch) -> None:
+    bridge = ReverseAudioBridge("127.0.0.1", 0, 3200)
+    delivered: list[str | bytes] = []
+    marker_loop = object()
+
+    class FakeWebSocket:
+        async def send(self, payload: str | bytes) -> None:
+            delivered.append(payload)
+
+    class FakeFuture:
+        @staticmethod
+        def result(timeout: float) -> None:
+            assert timeout == 3.0
+
+    def run_coroutine(coro, loop):
+        assert loop is marker_loop
+        asyncio.run(coro)
+        return FakeFuture()
+
+    bridge._session = _ClientSession(ws=FakeWebSocket(), loop=marker_loop)
+    monkeypatch.setattr(
+        "audio_client_bridge.reverse.asyncio.run_coroutine_threadsafe",
+        run_coroutine,
+    )
+
+    assert bridge._send('{"type":"mic_start"}') is True
+    assert delivered == ['{"type":"mic_start"}']
+
+
+def test_send_reports_disconnected_client() -> None:
+    bridge = ReverseAudioBridge("127.0.0.1", 0, 3200)
+
+    assert bridge._send('{"type":"mic_start"}') is False
