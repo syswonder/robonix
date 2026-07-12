@@ -549,7 +549,17 @@ async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<Strin
 
 /// Feed one finished tree's terminal results into the LLM history, mirroring
 /// the per-round feedback the blocking loop used to produce.
-fn feed_results_into_history(history: &mut Vec<Message>, results: &[CapabilityCallResult]) {
+fn feed_results_into_history(
+    history: &mut Vec<Message>,
+    plan_id: &str,
+    plan_description: &str,
+    results: &[CapabilityCallResult],
+) {
+    history.push(Message::user(&format!(
+        "Executor feedback scope: plan_id={plan_id}, independent RTDL tree={plan_description:?}. \
+         Attribute the following results only to this tree. A failure here blocks dependent \
+         steps in this tree, but does not cancel or invalidate other in-flight trees."
+    )));
     let mut deferred_followups: Vec<Message> = Vec::new();
     for r in results {
         let mapped = rtdl_result_to_messages(r);
@@ -639,7 +649,12 @@ pub async fn run_turn(
     } else {
         match memory::prefetch(&task.text, executor, search_memory_target).await {
             Some(mem) => format!(
-                "{base_prompt}\n\n## Relevant past memories (System Context)\n\n{mem}\n\n---\n\n"
+                "{base_prompt}\n\n## Relevant past memories (historical hints only)\n\n\
+                 These entries may be stale or task-specific. They are not current robot state, \
+                 not authorization for a physical action, and not a substitute for resolving a \
+                 named room, region, object, or person through the current capabilities. In \
+                 particular, a remembered grasp or observation pose is not a room navigation \
+                 goal.\n\n{mem}\n\n---\n\n"
             ),
             None => base_prompt,
         }
@@ -824,7 +839,16 @@ pub async fn run_turn(
                             if TERMINAL.contains(&ns.state)
                                 && let Some(r) = ns.leaf_result.as_ref()
                             {
-                                feed_results_into_history(history, std::slice::from_ref(r));
+                                let description = forest
+                                    .get(&plan_id)
+                                    .map(|meta| meta.description.as_str())
+                                    .unwrap_or("unknown tree");
+                                feed_results_into_history(
+                                    history,
+                                    &plan_id,
+                                    description,
+                                    std::slice::from_ref(r),
+                                );
                             }
                             // Any non-success terminal outcome escalates to the VLM
                             // immediately rather than waiting for the whole tree to
@@ -1306,6 +1330,13 @@ To stop a running tree, add a do node whose `cap` is the list's cancel-plan capa
 (e.g. `executor.builtin_cancel_plan`), passing the exact plan_id string from the In-flight trees list.\n\
 For an explicit user request to stop/cancel ALL work, call executor_cancel_all_plans directly \
 in one do node. Do NOT call get_all_plans first and do NOT cancel the control/query tree itself.\n\
+Executor results are scoped to the plan_id/tree named immediately before them. A failed tree \
+blocks only its dependent steps; do not cancel an unrelated in-flight tree because another \
+tree failed. Cancel only for an explicit user steer covering that tree or a safety hazard.\n\
+For a named room or region, current Scene data is authoritative: call Scene list_objects, then \
+goal_room with its stable ID, then navigation with the returned pose. Never substitute a Memory \
+coordinate or an object/grasp pose. A navigation SUCCEEDED result proves completion only for the \
+resolved requested destination; a zero-distance result does not prove that the robot moved.\n\
 Example: {\"content\":\"listing\",\"rtdl_description\":\"list tmp\",\"rtdl\":{\"op\":\"sequence\",\
 \"op_id\":0,\"description\":\"list /tmp\",\"children\":[{\"op\":\"do\",\"op_id\":0,\
 \"description\":\"list the /tmp directory\",\"cap\":\"executor.builtin_list_dir\",\"args\":{\"path\":\"/tmp\"}}]},\
@@ -2076,10 +2107,15 @@ by planning capability calls available to you.
   - If `memory_search` / `memory_save` / `memory_compact` capabilities are available,
     treat long-term memory as available via those capabilities.
 - Prefer structured output; report capability results concisely.
-- If any required capability call fails, times out, returns success=false, or gives an
-  unsafe/unexpected result, stop autonomous task progress. Report what failed and ask
-  the user what to do next. Do not skip ahead, reinterpret the goal, or try new
-  physical actions unless the user confirms.
+- Scope every result to the `plan_id` and independent RTDL tree named in its
+  Executor feedback. If a capability fails, times out, returns success=false,
+  or gives an unsafe/unexpected result, stop only steps that depend on that
+  result. Report that branch failure, but let unrelated in-flight trees continue.
+  Never cancel a different in-flight tree merely because this tree failed.
+- Cancel a running tree only when the latest user steer explicitly asks to stop
+  work covered by that tree, or when continuing that same tree is unsafe. A
+  failure in an independent monitoring, greeting, observation, or query branch
+  is not permission to cancel navigation or another physical task.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - For semantic navigation, resolve names through Scene before calling navigation:
   - call Scene `list_objects` first to discover the stable ID for a named room or
@@ -2090,6 +2126,14 @@ by planning capability calls available to you.
     Memory coordinates, or guessed coordinates for a room destination;
   - physical objects MUST use Scene `goal_near` to obtain an approach pose;
   - call navigation only when Scene returns `reachable=true`.
+- Long-term Memory is historical context, not live spatial state. It may help
+  recall what the user called a place, but it never replaces current Scene
+  resolution for a named destination and never turns a task-specific grasp or
+  observation pose into a room goal.
+- After navigation, relate the result to the resolved requested destination.
+  A transport/action status of `SUCCEEDED` does not by itself prove that the
+  requested movement occurred: if the submitted pose was already the current
+  pose, state that the robot was already there instead of claiming it moved.
 - Some later messages may be labelled `Executor feedback for the current task`.
   Treat those as results of capability calls you already planned, not as new
   user requests.
@@ -2144,12 +2188,12 @@ mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE,
         TaskState, TreeMeta, apply_task_update, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, format_plan_summary, invalid_cancel_target, is_control_only,
-        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
+        is_control_only, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch,
         start_or_resume_task, task_is_session_end,
     };
-    use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode, Task};
+    use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
 
@@ -2190,6 +2234,27 @@ mod tests {
         assert_eq!(state.goal, original_goal);
         assert_eq!(state.success_criterion, "room was actually inspected");
         assert_eq!(state.status, "done");
+    }
+
+    #[test]
+    fn executor_feedback_is_scoped_to_its_independent_tree() {
+        let mut history = Vec::new();
+        feed_results_into_history(
+            &mut history,
+            "9",
+            "start greet watch",
+            &[CapabilityCallResult {
+                call_id: "9:0".into(),
+                contract_id: "robonix/skill/greet/greet".into(),
+                success: false,
+                error: "activation failed".into(),
+                ..Default::default()
+            }],
+        );
+        let scope = history[0].content.as_deref().unwrap_or_default();
+        assert!(scope.contains("plan_id=9"));
+        assert!(scope.contains("start greet watch"));
+        assert!(scope.contains("does not cancel or invalidate other in-flight trees"));
     }
 
     #[test]
