@@ -82,7 +82,10 @@ impl TaskState {
     /// its own standing goal and success criterion.
     fn prompt_block(&self) -> String {
         format!(
-            "\n\n## Current overall task\n- goal: {}\n- success_criterion: {}\n- status: {}\n",
+            "\n\n## Current overall task\n- user_instruction_history (oldest to newest): {}\n\
+             - precedence: the newest user instruction overrides any conflicting older \
+             instruction; preserve older work only when it does not conflict\n\
+             - success_criterion: {}\n- status: {}\n",
             self.goal, self.success_criterion, self.status
         )
     }
@@ -369,6 +372,8 @@ fn build_forest_block(
          `op_id`, description, and live state), then call `builtin_stop_plan_at` \
          with that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
          before that op runs, `on_complete` to stop after it finishes) — this \
+         is the correct mechanism when the user asks to finish the current step \
+         and then stop; do not use immediate cancel for a boundary stop. It \
          cancels the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Only the plan_ids listed here are running; never cancel an id \
@@ -1318,8 +1323,10 @@ Beyond `op_id` and `description`, do NOT add other node fields (no `plan_id`, no
 Copy each `cap` EXACTLY from a capability_name in the list below (it is provider-qualified, \
 e.g. `tiago_camera.camera_snapshot`); never invent or shorten names.\n\
 `task_update`: null keeps current progress, or {\"goal\",\"success_criterion\",\"status\"}. \
-The harness owns the goal: copy `goal` EXACTLY from \"Current overall task\" and never rewrite, \
-shorten, replace, or drop unfinished parts. You may refine the default success criterion once. status is the \
+The harness owns the instruction history: copy it EXACTLY from \"Current overall task\" and never \
+rewrite it. Interpret entries chronologically: the newest user instruction overrides conflicting \
+older instructions, while non-conflicting work remains active. You may refine the default success \
+criterion once. status is the \
 string \"in_progress\" or \"done\" (never null), set to \
 \"done\" only when the success_criterion verifiably holds AND no tree in the \
 \"In-flight trees\" list is still running (cancelling a tree does not make the task done — wait \
@@ -2144,9 +2151,12 @@ by planning capability calls available to you.
 
 ## Persistence (READ THIS — most common failure mode)
 The harness owns the overall goal. It is created from the user's message and
-appends later steer/follow-up messages verbatim. Never replace it with your own
-summary, a current sub-step, or only the newest request. When emitting a
-non-null `task_update`, copy its `goal` exactly from \"Current overall task\".
+appends later steer/follow-up messages verbatim as a chronological instruction
+history. The newest user instruction overrides older instructions wherever they
+conflict (for example a change of destination or a request to stop after the
+current step); preserve unrelated ongoing work. Never replace this history with
+your own summary or a current sub-step. When emitting a non-null `task_update`,
+copy its `goal` exactly from \"Current overall task\".
 `task_update` is a progress report, not a set-current-goal command.
 
 The turn ends only when your overall task is `done` (you set
@@ -2187,9 +2197,10 @@ while you wait for an in-flight tree). Do NOT mark the task `done` until it is
 mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE,
-        TaskState, TreeMeta, apply_task_update, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        TaskState, TreeMeta, append_steer, apply_task_update, build_forest_block,
+        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch,
         start_or_resume_task, task_is_session_end,
     };
@@ -2234,6 +2245,47 @@ mod tests {
         assert_eq!(state.goal, original_goal);
         assert_eq!(state.success_criterion, "room was actually inspected");
         assert_eq!(state.status, "done");
+    }
+
+    #[test]
+    fn steer_history_is_chronological_and_latest_instruction_has_precedence() {
+        let mut standing = None;
+        let mut history = Vec::new();
+        start_or_resume_task(&mut standing, "perform step A, then step B");
+        assert!(append_steer(
+            Task {
+                text: "change of plan: stop after step A".into(),
+                ..Default::default()
+            },
+            &mut history,
+            &mut standing,
+        ));
+
+        let state = standing.as_ref().unwrap();
+        let original = state.goal.find("perform step A").unwrap();
+        let steer = state.goal.find("stop after step A").unwrap();
+        assert!(original < steer);
+        let prompt = state.prompt_block();
+        assert!(prompt.contains("oldest to newest"));
+        assert!(prompt.contains("newest user instruction overrides"));
+    }
+
+    #[test]
+    fn forest_prompt_distinguishes_immediate_cancel_from_boundary_stop() {
+        let mut forest = HashMap::new();
+        forest.insert(
+            "4".to_string(),
+            TreeMeta {
+                description: "ordered multi-step task".into(),
+                control_only: false,
+                call_signatures: HashSet::new(),
+            },
+        );
+        let prompt = build_forest_block(&forest, &HashSet::new());
+        assert!(prompt.contains("finish the current step"));
+        assert!(prompt.contains("do not use immediate cancel for a boundary stop"));
+        assert!(prompt.contains("on_complete"));
+        assert!(prompt.contains("on_enter"));
     }
 
     #[test]
