@@ -4,9 +4,11 @@
 // `RobonixSystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
+    robonix_system_executor_cancel_all_plans_client::RobonixSystemExecutorCancelAllPlansClient,
     robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
+use crate::pb::executor::CancelAllRequest;
 use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
@@ -260,7 +262,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
 
         if task_is_abort_turn(&task) {
             let id = task.session_id.clone();
-            let ok = if let Some(tx) = self.cancels.lock().await.get(&id) {
+            let turn_signaled = if let Some(tx) = self.cancels.lock().await.get(&id) {
                 tx.send_if_modified(|interrupted| {
                     if *interrupted {
                         false
@@ -272,8 +274,32 @@ impl RobonixSystemPilot for PilotServiceImpl {
             } else {
                 false
             };
-            debug!("[pilot] abort_turn task for session {id} (signaled={ok})");
-            let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
+            let executor_cancelled =
+                cancel_all_executor_plans(self.atlas.clone(), &self.provider_id).await;
+            debug!(
+                "[pilot] abort_turn session {id} (turn_signaled={turn_signaled}, executor={executor_cancelled:?})"
+            );
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
+            let message = match executor_cancelled {
+                Ok(true) => "stop completed",
+                Ok(false) => "stop reached Executor but cancellation was not accepted",
+                Err(ref error) => error.as_str(),
+            };
+            let state = if executor_cancelled == Ok(true) {
+                SessionState::Completed
+            } else {
+                SessionState::Failed
+            };
+            let _ = tx
+                .send(Ok(pack(
+                    &id,
+                    PilotStreamBody::Status(SessionStatusEvent {
+                        session_id: id.clone(),
+                        state: state as u32,
+                        message: message.to_string(),
+                    }),
+                )))
+                .await;
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
@@ -406,6 +432,25 @@ impl RobonixSystemPilot for PilotServiceImpl {
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
+
+async fn cancel_all_executor_plans(
+    mut atlas: AtlasClient,
+    consumer_id: &str,
+) -> Result<bool, String> {
+    let (_, _, channel) = atlas_client::connect_to_capability(
+        &mut atlas,
+        consumer_id,
+        "robonix/system/executor/cancel_all_plans",
+    )
+    .await
+    .map_err(|error| format!("stop could not reach Executor: {error:#}"))?;
+    let mut client = RobonixSystemExecutorCancelAllPlansClient::new(channel);
+    client
+        .cancel_all(CancelAllRequest::default())
+        .await
+        .map(|response| response.into_inner().success)
+        .map_err(|error| format!("Executor cancellation failed: {error}"))
 }
 
 /// Connect to executor's Execute RPC. Capability discovery (what's available
