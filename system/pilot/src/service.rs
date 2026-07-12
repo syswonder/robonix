@@ -19,7 +19,7 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_scribe::{debug, error};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -104,6 +104,7 @@ struct ActiveTurnInput {
     turn_id: String,
     tx: mpsc::Sender<Task>,
     events: broadcast::Sender<Result<PilotEvent, String>>,
+    reply_generation: Arc<AtomicU64>,
 }
 
 /// Give each SubmitTask caller its own view of the active supervisor stream.
@@ -111,13 +112,23 @@ struct ActiveTurnInput {
 /// supervisor and its long-running RTDL trees may remain alive for later input.
 fn subscribe_turn_events(
     events: &broadcast::Sender<Result<PilotEvent, String>>,
+    reply_generation: &Arc<AtomicU64>,
 ) -> ReceiverStream<Result<PilotEvent, Status>> {
+    let generation = reply_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    let reply_generation = Arc::clone(reply_generation);
     let mut subscriber = events.subscribe();
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
         loop {
             match subscriber.recv().await {
                 Ok(Ok(event)) => {
+                    // A newer same-session SubmitTask owns all subsequent
+                    // user-facing events. Closing this stale view prevents one
+                    // supervisor reply from being rendered by every historical
+                    // request stream while leaving its RTDL trees untouched.
+                    if reply_generation.load(Ordering::Acquire) != generation {
+                        break;
+                    }
                     let complete = event.event_kind == EVT_FINAL_TEXT;
                     if tx.send(Ok(event)).await.is_err() || complete {
                         break;
@@ -346,6 +357,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         // where two near-simultaneous submits for one session both start a turn.
         let (steer_tx, steer_rx) = mpsc::channel::<Task>(32);
         let (candidate_events, _) = broadcast::channel(128);
+        let candidate_reply_generation = Arc::new(AtomicU64::new(0));
         let explicit_steer = task_is_steer(&task);
         let expected_turn = expected_turn_id(&task);
         let existing_turn = {
@@ -365,6 +377,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                             turn_id: task.task_id.clone(),
                             tx: steer_tx.clone(),
                             events: candidate_events.clone(),
+                            reply_generation: Arc::clone(&candidate_reply_generation),
                         },
                     );
                     None
@@ -385,7 +398,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             // the response produced for its input instead of receiving an empty
             // stream and being forced to stop the background plan.
             let id = task.session_id.clone();
-            let rx = subscribe_turn_events(&existing.events);
+            let rx = subscribe_turn_events(&existing.events, &existing.reply_generation);
             let ok = existing.tx.send(task).await.is_ok();
             debug!("[pilot] steer task for session {id} (queued={ok})");
             if !ok {
@@ -404,7 +417,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         // https://tokio.rs/tokio/tutorial/channels
         // MPSC: Multiple Producer Single Consumer
         let (tx, mut internal_rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
-        let rx = subscribe_turn_events(&candidate_events);
+        let rx = subscribe_turn_events(&candidate_events, &candidate_reply_generation);
         let relay_events = candidate_events.clone();
         tokio::spawn(async move {
             while let Some(item) = internal_rx.recv().await {
@@ -563,7 +576,8 @@ mod tests {
     #[tokio::test]
     async fn submit_subscriber_closes_at_its_final_text_boundary() {
         let (events, _) = tokio::sync::broadcast::channel(8);
-        let mut stream = subscribe_turn_events(&events);
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut stream = subscribe_turn_events(&events, &generation);
         events
             .send(Ok(PilotEvent {
                 event_kind: EVT_STATUS,
@@ -589,5 +603,27 @@ mod tests {
         assert_eq!(final_event.event_kind, EVT_FINAL_TEXT);
         assert_eq!(final_event.final_text, "still running");
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn newest_submit_subscriber_exclusively_owns_future_replies() {
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut stale = subscribe_turn_events(&events, &generation);
+        let mut current = subscribe_turn_events(&events, &generation);
+
+        events
+            .send(Ok(PilotEvent {
+                event_kind: EVT_FINAL_TEXT,
+                final_text: "one reply".into(),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert!(stale.next().await.is_none());
+        let final_event = current.next().await.unwrap().unwrap();
+        assert_eq!(final_event.event_kind, EVT_FINAL_TEXT);
+        assert_eq!(final_event.final_text, "one reply");
+        assert!(current.next().await.is_none());
     }
 }
