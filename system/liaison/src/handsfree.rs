@@ -8,9 +8,10 @@ use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
 use serde::Deserialize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Notify, broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Request;
 
@@ -67,6 +68,7 @@ struct RuntimeState {
 
 pub struct HandsfreeController {
     enabled: AtomicBool,
+    suspended: AtomicUsize,
     config: Mutex<HandsfreeConfig>,
     state: Mutex<RuntimeState>,
     changed: Notify,
@@ -74,6 +76,7 @@ pub struct HandsfreeController {
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
     events: broadcast::Sender<VoiceEvent>,
+    active_turns: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl HandsfreeController {
@@ -89,6 +92,7 @@ impl HandsfreeController {
         let (events, _) = broadcast::channel(256);
         Arc::new(Self {
             enabled: AtomicBool::new(enabled),
+            suspended: AtomicUsize::new(0),
             config: Mutex::new(config),
             state: Mutex::new(RuntimeState {
                 state: if enabled { "starting" } else { "disabled" }.to_string(),
@@ -99,6 +103,7 @@ impl HandsfreeController {
             pilot_endpoint_default,
             access,
             events,
+            active_turns: Mutex::new(Vec::new()),
         })
     }
 
@@ -131,6 +136,12 @@ impl HandsfreeController {
             }
         }
         self.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            let mut turns = self.active_turns.lock().await;
+            for turn in turns.drain(..) {
+                turn.abort();
+            }
+        }
         self.set_state(if enabled { "starting" } else { "disabled" }, None)
             .await;
         self.changed.notify_waiters();
@@ -149,6 +160,33 @@ impl HandsfreeController {
             last_wake_ms: state.last_wake_ms,
             last_transcript: state.last_transcript.clone(),
             last_error: state.last_error.clone(),
+        }
+    }
+
+    /// Pause only wake-word microphone ownership while an explicit voice
+    /// capture is active.  Enabled state is preserved and listening resumes
+    /// automatically at ASR final (or on any failed/disconnected capture).
+    pub async fn suspend_capture(&self) {
+        self.suspended.fetch_add(1, Ordering::AcqRel);
+        self.set_state("suspended", None).await;
+        self.changed.notify_waiters();
+    }
+
+    pub async fn resume_capture(&self) {
+        let mut current = self.suspended.load(Ordering::Acquire);
+        while current > 0 {
+            match self.suspended.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+        if self.suspended.load(Ordering::Acquire) == 0 {
+            self.changed.notify_waiters();
         }
     }
 
@@ -197,6 +235,11 @@ impl HandsfreeController {
         loop {
             if !self.enabled.load(Ordering::Acquire) {
                 self.set_state("disabled", None).await;
+                self.changed.notified().await;
+                continue;
+            }
+            if self.suspended.load(Ordering::Acquire) > 0 {
+                self.set_state("suspended", None).await;
                 self.changed.notified().await;
                 continue;
             }
@@ -300,10 +343,14 @@ impl HandsfreeController {
         Ok(response.detected.then_some(response.keyword))
     }
 
-    async fn run_voice_turn(&self) -> Result<()> {
+    async fn run_voice_turn(self: &Arc<Self>) -> Result<()> {
         let config = self.config.lock().await.clone();
+        let is_steer = self.has_active_turn().await;
         let ack = config.handsfree_ack_text.trim();
-        if !ack.is_empty() {
+        // A mid-task wake phrase is itself the acknowledgement.  Starting a
+        // second prompt here would queue behind the reply the user is trying
+        // to interrupt and delay capture by several seconds.
+        if !is_steer && !ack.is_empty() {
             self.set_state("acknowledging", None).await;
             if let Err(error) = voice::play_prompt(
                 &self.atlas,
@@ -332,9 +379,11 @@ impl HandsfreeController {
             voiceprint_node_id: config.handsfree_voiceprint_provider_id.clone(),
             tts_node_id: config.handsfree_speech_provider_id.clone(),
             speaker_node_id: config.handsfree_speaker_provider_id.clone(),
-            context_json:
-                r#"{"client":"robot-handsfree","interaction_mode":"auto","handsfree":true}"#
-                    .to_string(),
+            context_json: if is_steer {
+                r#"{"client":"robot-handsfree","interaction_mode":"steer","steer":true,"barge_in":true,"handsfree":true}"#.to_string()
+            } else {
+                r#"{"client":"robot-handsfree","interaction_mode":"auto","barge_in":false,"handsfree":true}"#.to_string()
+            },
         };
         let mut stream = voice::start_voice_session(
             request,
@@ -353,11 +402,49 @@ impl HandsfreeController {
             if !event.error.is_empty() {
                 return Err(anyhow!(event.error));
             }
+            if event.event_kind == KIND_ASR_FINAL {
+                // Recording ownership ends at ASR final, not when Pilot and
+                // TTS eventually finish.  Continue relaying that turn in the
+                // background and immediately restore wake-word listening so
+                // the user can steer a long-running action.
+                let controller = Arc::clone(self);
+                let handle = tokio::spawn(async move {
+                    while let Some(item) = stream.next().await {
+                        match item {
+                            Ok(event) => {
+                                let failed = !event.error.is_empty();
+                                controller.publish(event.clone());
+                                if failed {
+                                    warn!(
+                                        "[liaison/handsfree] background voice turn failed: {}",
+                                        event.error
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(status) => {
+                                warn!(
+                                    "[liaison/handsfree] background voice stream failed: {status}"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                });
+                self.active_turns.lock().await.push(handle);
+                if self.enabled.load(Ordering::Acquire) {
+                    self.set_state("listening", None).await;
+                }
+                return Ok(());
+            }
         }
-        if self.enabled.load(Ordering::Acquire) {
-            self.set_state("listening", None).await;
-        }
-        Ok(())
+        Err(anyhow!("voice session ended before ASR final"))
+    }
+
+    async fn has_active_turn(&self) -> bool {
+        let mut turns = self.active_turns.lock().await;
+        turns.retain(|turn| !turn.is_finished());
+        !turns.is_empty()
     }
 }
 
