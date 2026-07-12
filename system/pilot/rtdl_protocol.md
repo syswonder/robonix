@@ -15,16 +15,18 @@ Do not output markdown fences, headings, explanations, or any text outside the J
 
 ### Task state (`task_update`)
 
-The harness owns one persistent overall task per conversation. It creates the
-goal from user input and appends every steer/follow-up verbatim, so unfinished
-work cannot disappear. `task_update` reports progress; it is not a
-set-current-goal command:
+The harness owns one persistent overall task per conversation. It creates a
+chronological instruction history from user input and appends every
+steer/follow-up verbatim. Interpret it oldest to newest: the latest instruction
+overrides any conflicting older instruction, while unrelated unfinished work
+remains active. `task_update` reports progress; it is not a set-current-goal
+command:
 
 - `null` — keep the current criterion and status exactly as they are.
 - object with these keys (all required when the value is an object):
-  - `goal`: copy this EXACTLY from the "Current overall task" block. Never
-    summarize, shorten, replace, or drop an unfinished part. The harness ignores
-    attempted replacements.
+  - `goal`: copy the instruction history EXACTLY from the "Current overall
+    task" block. Never summarize, shorten, or rewrite it. The harness ignores
+    attempted replacements; precedence is determined by instruction order.
   - `success_criterion`: how to know the goal is done — concrete and checkable,
     e.g. `"the water cup is next to the user AND music is audibly playing"`.
     You may refine the harness default once; do not later weaken or erase it.
@@ -79,6 +81,11 @@ an in-flight tree when the user steers you is your call: cancel only when the
 new request conflicts with what a tree is doing; leave it running when the new
 request is additive. Cancel a given `plan_id` at most once. If the harness says
 an identical call is already in flight, wait for it; never issue a duplicate.
+
+When a steer asks to finish the current step and then stop, do not immediately
+cancel the tree. Inspect it with `get_plan_status`, then arm `stop_plan_at` on
+the current op with `on_complete`, or on the next op with `on_enter`. Immediate
+`cancel_plan` is only for stopping now.
 
 Executor feedback is scoped to the `plan_id` and independent tree named directly
 before the result. A failure blocks only dependent steps in that tree; it does
