@@ -102,6 +102,11 @@ struct StopPlanAtArgs {
     when: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct StopAfterCurrentArgs {
+    plan_id: String,
+}
+
 impl PlanRuntime {
     /// Register a plan before execution starts.
     ///
@@ -446,6 +451,81 @@ impl PlanRuntime {
         ok_result(call, output)
     }
 
+    /// Atomically stop a sequential plan after its currently running leaf.
+    ///
+    /// This avoids the two-round `get_plan_status` -> `stop_plan_at` race. If
+    /// execution is between leaves, arm `on_enter` on the first pending leaf.
+    /// Multiple running leaves are rejected because "current" is ambiguous.
+    pub async fn stop_after_current_builtin(&self, call: &CapabilityCall) -> CapabilityCallResult {
+        let args: StopAfterCurrentArgs = match serde_json::from_str(&call.args_json) {
+            Ok(args) => args,
+            Err(e) => {
+                return error_result(call, format!("invalid stop_after_current args: {e}"));
+            }
+        };
+        let output = {
+            let mut plans = self.inner.lock().await;
+            let Some(run) = plans.get_mut(&args.plan_id) else {
+                return ok_result(
+                    call,
+                    format!(
+                        "RTDL plan '{}' is not running (already finished or cancelled); no stop point needed.",
+                        args.plan_id
+                    ),
+                );
+            };
+
+            let running: Vec<&OpMeta> = run
+                .ops
+                .iter()
+                .filter(|op| {
+                    op.node_kind == 2
+                        && run
+                            .op_state
+                            .get(&op.op_id)
+                            .is_some_and(|state| *state == RtdlNodeStateEnum::Running as u32)
+                })
+                .collect();
+            if running.len() > 1 {
+                return error_result(
+                    call,
+                    format!(
+                        "stop_after_current: RTDL plan '{}' has {} running leaf ops; current step is ambiguous in a parallel plan. Use get_plan_status and stop_plan_at with an explicit op_id.",
+                        args.plan_id,
+                        running.len()
+                    ),
+                );
+            }
+            if let Some(op) = running.first() {
+                let op_id = op.op_id.clone();
+                let description = op.description.clone();
+                run.stop_points.insert(op_id.clone(), StopWhen::OnComplete);
+                format!(
+                    "Atomic boundary stop armed: RTDL plan '{}' will stop after current op_id={} ({}).",
+                    args.plan_id, op_id, description
+                )
+            } else if let Some(op) = run
+                .ops
+                .iter()
+                .find(|op| op.node_kind == 2 && !run.op_state.contains_key(&op.op_id))
+            {
+                let op_id = op.op_id.clone();
+                let description = op.description.clone();
+                run.stop_points.insert(op_id.clone(), StopWhen::OnEnter);
+                format!(
+                    "Atomic boundary stop armed between steps: RTDL plan '{}' will stop before pending op_id={} ({}).",
+                    args.plan_id, op_id, description
+                )
+            } else {
+                format!(
+                    "RTDL plan '{}' has no running or pending leaf; no stop point needed.",
+                    args.plan_id
+                )
+            }
+        };
+        ok_result(call, output)
+    }
+
     /// Whether the plan has a stop point on `op_id` for the given phase.
     /// Read by the execution loop at each `do` node entry and completion.
     pub async fn should_stop_at(&self, plan_id: &str, op_id: &str, when: StopWhen) -> bool {
@@ -695,6 +775,78 @@ mod tests {
             contract_id: "robonix/system/executor/builtin/stop_plan_at".into(),
             args_json: args_json.into(),
         }
+    }
+
+    fn stop_after_current_call(args_json: &str) -> CapabilityCall {
+        CapabilityCall {
+            call_id: "c".into(),
+            provider_id: "executor".into(),
+            contract_id: "robonix/system/executor/builtin/stop_after_current".into(),
+            args_json: args_json.into(),
+        }
+    }
+
+    async fn record_two_leaf_plan(runtime: &PlanRuntime) {
+        use crate::pb::pilot::{Plan, RtdlNode};
+        runtime.register_plan("p").await;
+        runtime
+            .record_plan_ops(&Plan {
+                plan_id: "p".into(),
+                session_id: "s".into(),
+                round: 0,
+                root_index: 0,
+                nodes: vec![
+                    RtdlNode {
+                        node_kind: 0,
+                        children: vec![1, 2],
+                        op_id: "seq".into(),
+                        description: "sequence".into(),
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: 2,
+                        op_id: "a".into(),
+                        description: "step A".into(),
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: 2,
+                        op_id: "b".into(),
+                        description: "step B".into(),
+                        ..Default::default()
+                    },
+                ],
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn stop_after_current_arms_running_leaf_on_complete() {
+        let runtime = PlanRuntime::default();
+        record_two_leaf_plan(&runtime).await;
+        runtime
+            .record_op_state("p", "a", RtdlNodeStateEnum::Running as u32)
+            .await;
+        let result = runtime
+            .stop_after_current_builtin(&stop_after_current_call(r#"{"plan_id":"p"}"#))
+            .await;
+        assert!(result.success, "{}", result.error);
+        assert!(runtime.should_stop_at("p", "a", StopWhen::OnComplete).await);
+        assert!(!runtime.should_stop_at("p", "b", StopWhen::OnEnter).await);
+    }
+
+    #[tokio::test]
+    async fn stop_after_current_between_steps_arms_next_leaf_on_enter() {
+        let runtime = PlanRuntime::default();
+        record_two_leaf_plan(&runtime).await;
+        runtime
+            .record_op_state("p", "a", RtdlNodeStateEnum::Succeeded as u32)
+            .await;
+        let result = runtime
+            .stop_after_current_builtin(&stop_after_current_call(r#"{"plan_id":"p"}"#))
+            .await;
+        assert!(result.success, "{}", result.error);
+        assert!(runtime.should_stop_at("p", "b", StopWhen::OnEnter).await);
     }
 
     #[tokio::test]
