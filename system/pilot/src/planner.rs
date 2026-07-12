@@ -1232,9 +1232,9 @@ pub async fn run_turn(
 
         log_plan_start(&graph, &rtdl_description, round, calls);
 
-        // Planning narration is model scratch context, not a user reply. It is
-        // retained for the next planning round but only surfaced when the turn
-        // actually completes or deliberately pauses for more user input.
+        // Retain model narration for later planning. Action-producing RTDL
+        // rounds are also streamed below so the current user sees and hears
+        // progress instead of receiving only a final burst after a long task.
         if !assistant_content.is_empty() {
             history.push(Message::assistant(&assistant_content));
             last_content = assistant_content.clone();
@@ -1290,8 +1290,17 @@ pub async fn run_turn(
             continue;
         }
 
+        if !assistant_content.trim().is_empty() {
+            let _ = tx
+                .send(Ok(service::pack(
+                    &session_id,
+                    PilotStreamBody::TextChunk(assistant_content.clone()),
+                )))
+                .await;
+        }
+
         // Non-empty tree: hand the structure to the client and dispatch it to
-        // the forest without leaking planning narration as a premature reply.
+        // the forest after its user-facing narration above.
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -2270,9 +2279,10 @@ while you wait for an in-flight tree). Do NOT mark the task `done` until it is
   verification is wrong — verify first.
 - On the very rare case where the user explicitly cancels, you may stop
   early; otherwise keep going.
-- `content` is user-facing only when the task is complete or when you genuinely
-  need more user input. During planning/execution, keep it empty or concise;
-  the harness will not surface planning narration as a reply.
+- For every action-producing RTDL response, put one concise user-facing progress
+  update in `content` that says what is happening now. Do not repeat an unchanged
+  update. When the task completes or needs clarification, use `content` for the
+  concise final result or question.
 ",
     );
     p
