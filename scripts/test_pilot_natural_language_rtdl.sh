@@ -154,7 +154,7 @@ messages = {
         f"greet 命令是：{greet_cmd}。"
     ),
     "stop_after_a1": (
-        "我改变主意了：让当前 A1 步骤正常完成，但不要开始 A2。"
+        "我改变主意了：请在 A1 任务完成之后停止整个 A 计划。"
         "持续 greet 任务必须继续运行，不要取消它。"
     ),
     "open_area": (
@@ -304,18 +304,20 @@ control_calls = [
     for plan in plans
     for call in plan["calls"]
     if call["contract_id"].rsplit("/", 1)[-1]
-    in {"cancel_plan", "cancel_all_plans", "stop_plan_at", "stop_after_current"}
+    in {"cancel_plan", "cancel_all_plans", "stop_plan_at"}
 ]
 cancel_targets = []
 stop_targets = []
+stop_records = []
 cancel_all_seen = False
 for _plan, call in control_calls:
     leaf = call["contract_id"].rsplit("/", 1)[-1]
     args = json.loads(call["args_json"] or "{}")
     if leaf == "cancel_plan":
         cancel_targets.append(args.get("plan_id"))
-    elif leaf in {"stop_plan_at", "stop_after_current"}:
+    elif leaf == "stop_plan_at":
         stop_targets.append(args.get("plan_id"))
+        stop_records.append(args)
     elif leaf == "cancel_all_plans":
         cancel_all_seen = True
 
@@ -338,7 +340,17 @@ checks = {
 # boundary stop. If A2 was not yet dispatched, latest-steer suppression is the
 # correct behavior and no stop call is required.
 if plan_a2 is not None and plan_a1 is not None and plan_a2["plan_id"] == plan_a1["plan_id"]:
-    checks["A sequence had a targeted boundary stop"] = plan_a1["plan_id"] in stop_targets
+    a1_op = next(
+        call["op_id"]
+        for call in plan_a1["calls"]
+        if "A_RESTAURANT_START" in call["args_json"]
+    )
+    checks["A sequence stopped at the explicit A1 boundary"] = any(
+        record.get("plan_id") == plan_a1["plan_id"]
+        and record.get("op_id") == a1_op
+        and record.get("when", "on_complete") == "on_complete"
+        for record in stop_records
+    )
 else:
     checks["latest steer suppressed undispatched A2"] = "A_MEETING_START" not in labels
 

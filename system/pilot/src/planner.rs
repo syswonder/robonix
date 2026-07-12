@@ -146,6 +146,16 @@ struct TreeMeta {
     /// the first is still in flight; execution latency must not duplicate a
     /// physical or external command.
     call_signatures: HashSet<String>,
+    /// Ordered executable leaves from the original RTDL graph. Keeping these
+    /// visible lets the model target any semantic boundary in one control call
+    /// instead of querying live state first or guessing what "current" means.
+    steps: Vec<TreeStep>,
+}
+
+struct TreeStep {
+    op_id: String,
+    description: String,
+    capability: String,
 }
 
 /// Events fed from per-tree driver tasks back to the supervisor loop. One
@@ -341,12 +351,31 @@ fn is_control_only(plan: &Plan) -> bool {
                 | "get_all_plans"
                 | "get_plan_status"
                 | "stop_plan_at"
-                | "stop_after_current"
         ) {
             return false;
         }
     }
     has_do
+}
+
+fn plan_steps(plan: &Plan) -> Vec<TreeStep> {
+    plan.nodes
+        .iter()
+        .filter(|node| node.node_kind == RTDL_DO)
+        .filter_map(|node| {
+            let call = node.call.as_ref()?;
+            Some(TreeStep {
+                op_id: node.op_id.clone(),
+                description: node.description.clone(),
+                capability: call
+                    .contract_id
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&call.contract_id)
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 fn build_forest_block(
@@ -368,16 +397,16 @@ fn build_forest_block(
          These RTDL trees you dispatched earlier are still running concurrently. \
          To stop one immediately, call `builtin_cancel_plan` with its exact \
          `plan_id` below (or `executor_cancel_all_plans` to stop everything at \
-         once). When the user says to finish the current step but not start the \
-         next one, call `builtin_stop_after_current` directly with the exact \
-         `plan_id`; it atomically arms the boundary and must NOT be preceded by \
-         a status query. To stop at some other explicitly named step, first call \
-         `builtin_get_plan_status` with its `plan_id` to read its ops (each op's \
-         `op_id`, description, and live state), then call `builtin_stop_plan_at` \
-         with that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
-         before that op runs, `on_complete` to stop after it finishes) — this \
-         and then call `builtin_stop_plan_at`; do not use immediate cancel for \
-         a boundary stop. It \
+         once). Every plan's ordered executable steps are listed below. To stop \
+         at any requested semantic boundary (for example after step 8 or after \
+         reaching the restaurant), call `builtin_stop_plan_at` directly with \
+         that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
+         before that op runs, `on_complete` to stop after it finishes). Do not \
+         assume the target is the currently running step, and do not query status \
+         first when the requested boundary is already present in this list. Bind \
+         the user's named boundary literally: `after X` means X/on_complete and \
+         `before X` means X/on_enter. Never rewrite `after X` as `before` its \
+         successor because those are not equivalent in branching/parallel trees. It \
          cancels the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Only the plan_ids listed here are running; never cancel an id \
@@ -390,6 +419,15 @@ fn build_forest_block(
             "- plan_id={} running: {}\n",
             plan_id, meta.description
         ));
+        for (index, step) in meta.steps.iter().enumerate() {
+            block.push_str(&format!(
+                "  {}. op_id={} [{}] {}\n",
+                index + 1,
+                step.op_id,
+                step.capability,
+                step.description
+            ));
+        }
     }
     block
 }
@@ -1257,6 +1295,7 @@ pub async fn run_turn(
                 description: rtdl_description,
                 control_only: is_control_only(&graph),
                 call_signatures,
+                steps: plan_steps(&graph),
             },
         );
         tokio::spawn(drive_plan(
@@ -2152,11 +2191,11 @@ by planning capability calls available to you.
   work covered by that tree, or when continuing that same tree is unsafe. A
   failure in an independent monitoring, greeting, observation, or query branch
   is not permission to cancel navigation or another physical task.
-- When the latest steer says to let the current step finish but not start its
-  successor, call `builtin_stop_after_current` immediately for that in-flight
-  plan. Do not call get_plan_status first: the extra model round creates a race
-  in which the successor can start. Use get_plan_status + stop_plan_at only for
-  a different explicitly named boundary or an ambiguous parallel plan.
+- For any boundary stop, select the explicitly requested step from the ordered
+  in-flight RTDL step list and call `builtin_stop_plan_at` once. The target may
+  be any step in the plan; never assume it means the currently running step.
+  Use `on_complete` for 'after step X' and `on_enter` for 'before step X'.
+  Bind X itself; never substitute X's predecessor or successor.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - For semantic navigation, resolve names through Scene before calling navigation:
   - call Scene `list_objects` first to discover the stable ID for a named room or
@@ -2231,7 +2270,7 @@ while you wait for an in-flight tree). Do NOT mark the task `done` until it is
 mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE,
-        TaskState, TreeMeta, append_steer, apply_task_update, build_forest_block,
+        TaskState, TreeMeta, TreeStep, append_steer, apply_task_update, build_forest_block,
         duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
         feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
         mixes_control_inspection_with_action, parse_rtdl_assistant_response, parse_task_update,
@@ -2313,13 +2352,25 @@ mod tests {
                 description: "ordered multi-step task".into(),
                 control_only: false,
                 call_signatures: HashSet::new(),
+                steps: vec![
+                    TreeStep {
+                        op_id: "op-restaurant".into(),
+                        description: "move to restaurant".into(),
+                        capability: "navigate".into(),
+                    },
+                    TreeStep {
+                        op_id: "op-meeting".into(),
+                        description: "move to meeting room".into(),
+                        capability: "navigate".into(),
+                    },
+                ],
             },
         );
         let prompt = build_forest_block(&forest, &HashSet::new());
-        assert!(prompt.contains("finish the current step"));
-        assert!(prompt.contains("builtin_stop_after_current"));
-        assert!(prompt.contains("must NOT be preceded by"));
-        assert!(prompt.contains("do not use immediate cancel for a boundary stop"));
+        assert!(prompt.contains("op_id=op-restaurant"));
+        assert!(prompt.contains("move to meeting room"));
+        assert!(prompt.contains("target is the currently running step"));
+        assert!(prompt.contains("do not query status"));
         assert!(prompt.contains("on_complete"));
         assert!(prompt.contains("on_enter"));
     }
@@ -2369,6 +2420,7 @@ mod tests {
                 description: "same call".into(),
                 control_only: false,
                 call_signatures: signatures.clone(),
+                steps: Vec::new(),
             },
         );
         assert!(duplicate_in_flight_signature(&signatures, &forest).is_some());
@@ -2415,6 +2467,7 @@ mod tests {
                 description: "drive".into(),
                 control_only: false,
                 call_signatures: HashSet::new(),
+                steps: Vec::new(),
             },
         );
         let targets = vec!["7".to_string()];
@@ -2510,7 +2563,6 @@ mod tests {
             "get_all_plans",
             "get_plan_status",
             "stop_plan_at",
-            "stop_after_current",
         ] {
             assert!(is_control_only(&single_do_plan(leaf)), "{leaf}");
         }
