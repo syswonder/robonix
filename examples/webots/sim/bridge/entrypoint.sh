@@ -43,8 +43,16 @@ NVIDIA_DISPLAY="${ROBONIX_SIM_XDISPLAY:-:48}"
 XNUM="${NVIDIA_DISPLAY#:}"
 ZENOH_ROUTER_PID=""
 _webots_launch_pid=""
+_viewer_pid=""
+_stream_proxy_pid=""
+_stream_keepalive_pid=""
 
 cleanup() {
+  for pid in "${_stream_keepalive_pid:-}" "${_stream_proxy_pid:-}" "${_viewer_pid:-}"; do
+    if [ -n "$pid" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
   if [ -n "${_webots_launch_pid:-}" ]; then
     kill -TERM "${_webots_launch_pid}" 2>/dev/null || true
   fi
@@ -217,13 +225,13 @@ case "${WEBOTS_HEADLESS_MODE:-host}" in
 esac
 
 if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
-  # Serve the streaming-viewer assets from a separate port; the viewer
-  # HTML connects back to the WS server on :1234 (port hard-coded by
-  # webots).
-  (cd /usr/local/webots/resources/web/streaming_viewer \
-     && python3 -m http.server 8080 --bind 0.0.0.0) \
-       >/tmp/viewer-http.log 2>&1 &
-  echo "[entrypoint] viewer HTTP on :8080  ws on :1234"
+  python3 /viewer_server.py >/tmp/viewer-http.log 2>&1 &
+  _viewer_pid=$!
+  python3 /webots_stream_proxy.py >/tmp/webots-stream-proxy.log 2>&1 &
+  _stream_proxy_pid=$!
+  python3 /webots_stream_keepalive.py >/tmp/webots-stream-keepalive.log 2>&1 &
+  _stream_keepalive_pid=$!
+  echo "[entrypoint] viewer HTTP on :8080, optimized WebSocket on :${WEBOTS_FILTER_PORT:-1235}, raw Webots stream on :1234"
 fi
 
 start_zenoh_router

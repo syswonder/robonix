@@ -21,18 +21,14 @@
 services:
   sim:
     ports:
-      - "${ROBONIX_SIM_STREAM_PORT:-1234}:1234"   # Webots WebSocket stream (custom protocol)
-      - "${ROBONIX_SIM_VIEWER_PORT:-8080}:8080"   # streaming-viewer HTML (served by python http.server)
+      - "${ROBONIX_SIM_STREAM_PORT:-1235}:${ROBONIX_SIM_STREAM_PORT:-1235}" # optimized Webots WebSocket stream
+      - "${ROBONIX_SIM_VIEWER_PORT:-8080}:8080"   # cached/proxied streaming viewer
     environment:
       WEBOTS_HEADLESS_MODE: "${WEBOTS_HEADLESS_MODE:-auto}"
       WEBOTS_STREAM: "1"
+      WEBOTS_FILTER_HOST: "0.0.0.0"
+      WEBOTS_FILTER_PORT: "${ROBONIX_SIM_STREAM_PORT:-1235}"
+      WEBOTS_FILTER_UPSTREAM: "ws://127.0.0.1:1234"
       # NVIDIA Container Toolkit needs `graphics` + `display` (on top of
       # the default `utility,compute`) to inject the Xorg-side .so files.
       NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, graphics, display, utility, compute]

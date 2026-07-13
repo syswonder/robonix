@@ -83,9 +83,12 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `start.sh` | User-facing launcher. `bash start.sh`. |
 | `compose.yaml` | Single `sim` service: Webots + eaios_webots + bind-mounts of `../primitives` and `../services` into the container at `/robonix_pkgs`. |
 | `compose.gpu.yaml` | Optional NVIDIA GPU passthrough (auto-merged by `start.sh`). |
-| `compose.stream.yaml` | Optional browser-streaming mode — headless Xorg + webots `--stream`. Merged when `ROBONIX_SIM_STREAM=1`. |
+| `compose.stream.yaml` | Optional browser-streaming mode — headless Xorg, Webots `--stream`, and the bandwidth-optimized browser endpoint. Merged when `ROBONIX_SIM_STREAM=1`. |
 | `bridge/Dockerfile` | Humble + Webots `.deb` + Python deps used by docker-exec'd robonix drivers. |
-| `bridge/entrypoint.sh` | Launch Webots, then `wait` so the container stays alive. Picks display backend per `WEBOTS_HEADLESS_MODE`. |
+| `bridge/entrypoint.sh` | Launch Webots and its browser-stream helpers, then `wait` so the container stays alive. Picks display backend per `WEBOTS_HEADLESS_MODE`. |
+| `bridge/viewer_server.py` | Serve WebotsView locally and proxy/cache remote viewer and world assets. |
+| `bridge/webots_stream_proxy.py` | Forward the live W3D stream while dropping unused robot-window camera payloads. |
+| `bridge/webots_stream_keepalive.py` | Keep externally controlled Webots simulations broadcasting at real-time speed. |
 | `bridge/webots_assets_seed.tar.gz` | Pre-baked office Webots proto/texture cache (offline-fast default world). |
 | `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
 
@@ -113,9 +116,28 @@ GPU-heavy webots 3D view goes to the browser stream.
 
 Open `http://<server>:8080/` in a browser and hit Connect — the WS URL
 is pre-filled with the page's hostname so a third machine doesn't end
-up dialling its own `localhost`. The viewer supports **W3D**
-(interactive WebGL, drag-rotate) and **MJPEG** (image-only fallback
-for low-bandwidth links).
+up dialling its own `localhost`. The viewer uses the optimized W3D endpoint on
+port `1235`: it keeps the interactive WebGL scene and live robot transforms,
+but removes high-rate robot-window camera messages that the standard viewer
+does not consume. Viewer JavaScript, textures, meshes, and world assets are
+proxied and cached by the server, avoiding repeated cross-network downloads.
+
+For a remote machine, forward both endpoints over SSH:
+
+```bash
+ssh -N \
+  -L 18080:127.0.0.1:8080 \
+  -L 11235:127.0.0.1:1235 \
+  user@server
+```
+
+Then open `http://127.0.0.1:18080/?wsPort=11235`. The first load populates the
+viewer cache; later loads reuse it.
+
+Override the ports for parallel deployments with
+`ROBONIX_SIM_VIEWER_PORT` and `ROBONIX_SIM_STREAM_PORT`. The latter is the
+optimized public endpoint; browsers should not connect to Webots' raw port
+`1234` directly.
 
 Backend selection (env on the sim container):
 

@@ -134,7 +134,7 @@ fi
 # bridge/entrypoint.sh.
 if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
   CF+=(-f compose.stream.yaml)
-  echo "[sim/start] stream mode — merging compose.stream.yaml (WS :1234, viewer :8080)"
+  echo "[sim/start] stream mode — merging compose.stream.yaml (optimized WS :${ROBONIX_SIM_STREAM_PORT:-1235}, viewer :${ROBONIX_SIM_VIEWER_PORT:-8080})"
 fi
 
 allow_x11_for_docker() {
@@ -174,18 +174,19 @@ for _ in $(seq 1 60); do
 done
 
 if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
+  viewer_port="${ROBONIX_SIM_VIEWER_PORT:-8080}"
   echo
   echo "[sim/start] ========== webots stream ready =========="
   echo "[sim/start] open ONE of these in a browser:"
   # tailscale first (works from anywhere on the tailnet)
   if command -v tailscale &>/dev/null; then
-    tailscale ip -4 2>/dev/null | sed 's|^|  http://|;s|$|:8080/|'
+    tailscale ip -4 2>/dev/null | awk -v port="$viewer_port" '{print "  http://" $1 ":" port "/"}'
   fi
   # then LAN / global v4 addresses
   ip -4 -o addr show scope global 2>/dev/null \
     | awk '{print $4}' | cut -d/ -f1 \
-    | sed 's|^|  http://|;s|$|:8080/|'
-  echo "[sim/start] the viewer auto-fills ws://<that-host>:1234 — just hit Connect"
+    | awk -v port="$viewer_port" '{print "  http://" $1 ":" port "/"}'
+  echo "[sim/start] the viewer auto-fills ws://<that-host>:${ROBONIX_SIM_STREAM_PORT:-1235} — just hit Connect"
   echo
 fi
 
