@@ -2,11 +2,10 @@
 # default ALSA `audio_driver` package when you want robonix's audio I/O
 # physically on a macOS machine while atlas/pilot/liaison run on Linux.
 #
-# Pairs with the `client_audio_server/server.py` script — that one runs on the
-# client machine and exposes mic capture + speaker playback over a tiny
-# WebSocket protocol; this package runs on the Linux host, registers
-# the usual `robonix/primitive/audio/{mic,speaker,driver}` contracts
-# with atlas, and just relays PCM frames to/from that WebSocket.
+# The client opens one outbound WebSocket to this package on the Linux host.
+# The robot therefore does not store a client IP address. This package
+# registers the usual `robonix/primitive/audio/{mic,speaker,driver}` contracts
+# with Atlas and relays the connected client's PCM frames.
 #
 # Toggle by commenting one line in `examples/webots/robonix_manifest.yaml`:
 #
@@ -16,8 +15,8 @@
 #     - name: audio_client_bridge
 #       path: ./primitives/audio_client_bridge
 #       config:
-#         host: 192.168.1.42      # macOS LAN address running client_audio_server
-#         port: 60000             # default
+#         transport: reverse
+#         listen_port: 60002
 #
 # Same wire format as audio_driver (16 kHz / mono / s16le PCM in
 # AudioChunk frames) so liaison / scene / TTS see no difference.
@@ -26,7 +25,6 @@ manifestVersion: 1
 package:
   name: com.robonix.example.audio_client_bridge
   version: 0.1.0
-  vendor: robonix
   description: Audio primitive that proxies mic/speaker over WebSocket to an client audio device server.
   license: MulanPSL-2.0
 
@@ -55,3 +53,4 @@ capabilities:
   - name: robonix/primitive/audio/driver
   - name: robonix/primitive/audio/list_devices
   - name: robonix/primitive/audio/select_device
+  - name: robonix/primitive/audio/bridge_info
