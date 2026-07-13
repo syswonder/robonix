@@ -4,7 +4,9 @@
 use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
+use crate::pb::contracts::robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient;
 use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
+use crate::pb::executor::ControlPlanRequest;
 use crate::pb::executor::rtdl_event::RtdlEventEnum;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{
@@ -26,13 +28,12 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tonic::Request;
 use tonic::transport::Channel;
-use uuid::Uuid;
 
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
 pub struct ExecutorConn {
     pub graph: RobonixSystemExecutorExecuteClient<Channel>,
-    pub provider_id: String,
+    pub control: RobonixSystemExecutorControlPlanClient<Channel>,
 }
 
 type CapabilityTarget = (String, String);
@@ -293,7 +294,7 @@ async fn drive_plan(
 async fn cancel_forest_plans(
     executor: &mut ExecutorConn,
     forest: &HashMap<String, TreeMeta>,
-    session_id: &str,
+    _session_id: &str,
 ) {
     let targets: Vec<String> = forest
         .iter()
@@ -301,42 +302,155 @@ async fn cancel_forest_plans(
         .map(|(plan_id, _)| plan_id.clone())
         .collect();
     for target in targets {
-        let control_plan_id = format!("abort-{}", Uuid::new_v4());
-        let plan = Plan {
-            plan_id: control_plan_id.clone(),
-            session_id: session_id.to_string(),
-            round: 0,
-            nodes: vec![RtdlNode {
-                node_kind: RTDL_DO,
-                children: Vec::new(),
-                call: Some(CapabilityCall {
-                    call_id: format!("{control_plan_id}:0"),
-                    provider_id: executor.provider_id.clone(),
-                    contract_id: "robonix/system/executor/builtin/cancel_plan".to_string(),
-                    args_json: serde_json::json!({"plan_id": target, "wait_ms": 5000}).to_string(),
-                }),
-                op_id: next_op_id(),
-                description: format!("abort session plan {target}"),
-            }],
-            root_index: 0,
-        };
-        let cancel = async {
-            let mut stream = executor
-                .graph
-                .execute(Request::new(plan))
-                .await?
-                .into_inner();
-            while stream.message().await?.is_some() {}
-            Ok::<(), tonic::Status>(())
-        };
+        let cancel = executor
+            .control
+            .control_plan(Request::new(ControlPlanRequest {
+                action: "cancel".to_string(),
+                plan_id: target.clone(),
+                op_id: String::new(),
+                when: String::new(),
+                wait_ms: 5_000,
+            }));
         match tokio::time::timeout(std::time::Duration::from_secs(7), cancel).await {
-            Ok(Ok(())) => info!("[pilot] canceled executor plan {target} on abort_turn"),
+            Ok(Ok(response)) => {
+                let response = response.into_inner();
+                if response.success {
+                    info!("[pilot] canceled executor plan {target} on abort_turn");
+                } else {
+                    warn!(
+                        "[pilot] cancel executor plan {target} rejected: {}",
+                        response.error
+                    );
+                }
+            }
             Ok(Err(error)) => {
                 warn!("[pilot] cancel executor plan {target} failed: {error}")
             }
             Err(_) => warn!("[pilot] cancel executor plan {target} timed out"),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MetaPlanOp {
+    Cancel {
+        plan_id: String,
+        wait_ms: u64,
+    },
+    CancelAll {
+        wait_ms: u64,
+    },
+    StopAt {
+        plan_id: String,
+        op_id: String,
+        when: String,
+    },
+}
+
+impl MetaPlanOp {
+    fn cancellation_targets(&self, forest: &HashMap<String, TreeMeta>) -> Vec<String> {
+        match self {
+            Self::Cancel { plan_id, .. } => vec![plan_id.clone()],
+            Self::CancelAll { .. } => forest
+                .iter()
+                .filter(|(_, meta)| !meta.control_only)
+                .map(|(plan_id, _)| plan_id.clone())
+                .collect::<Vec<_>>(),
+            Self::StopAt { plan_id, .. } => vec![plan_id.clone()],
+        }
+    }
+}
+
+fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<MetaPlanOp>> {
+    let Some(obj) = rtdl.as_object() else {
+        return Ok(None);
+    };
+    let Some(op) = obj.get("op").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    let string = |key: &str| -> Result<String> {
+        let value = obj
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("meta op `{op}` requires string `{key}`"))?;
+        if value.trim().is_empty() {
+            anyhow::bail!("meta op `{op}` requires non-empty `{key}`");
+        }
+        Ok(value)
+    };
+    let wait_ms = || {
+        obj.get("wait_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(5_000)
+            .min(30_000)
+    };
+    let parsed = match op {
+        "cancel_plan" => MetaPlanOp::Cancel {
+            plan_id: string("plan_id")?,
+            wait_ms: wait_ms(),
+        },
+        "cancel_all" => MetaPlanOp::CancelAll { wait_ms: wait_ms() },
+        "stop_plan_at" => {
+            let when = obj
+                .get("when")
+                .and_then(|value| value.as_str())
+                .unwrap_or("on_complete")
+                .to_string();
+            if !matches!(when.as_str(), "on_enter" | "on_complete") {
+                anyhow::bail!("meta op `stop_plan_at` requires when=on_enter or on_complete");
+            }
+            MetaPlanOp::StopAt {
+                plan_id: string("plan_id")?,
+                op_id: string("target_op_id")?,
+                when,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(parsed))
+}
+
+async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> Result<String> {
+    let request = match op {
+        MetaPlanOp::Cancel { plan_id, wait_ms } => ControlPlanRequest {
+            action: "cancel".to_string(),
+            plan_id: plan_id.clone(),
+            op_id: String::new(),
+            when: String::new(),
+            wait_ms: *wait_ms,
+        },
+        MetaPlanOp::CancelAll { wait_ms } => ControlPlanRequest {
+            action: "cancel_all".to_string(),
+            plan_id: String::new(),
+            op_id: String::new(),
+            when: String::new(),
+            wait_ms: *wait_ms,
+        },
+        MetaPlanOp::StopAt {
+            plan_id,
+            op_id,
+            when,
+        } => ControlPlanRequest {
+            action: "stop_at".to_string(),
+            plan_id: plan_id.clone(),
+            op_id: op_id.clone(),
+            when: when.clone(),
+            wait_ms: 0,
+        },
+    };
+    let timeout = Duration::from_millis(request.wait_ms.saturating_add(2_000).max(2_000));
+    let response = tokio::time::timeout(
+        timeout,
+        executor.control.control_plan(Request::new(request)),
+    )
+    .await
+    .context("Executor plan-control RPC timed out")??
+    .into_inner();
+    if !response.success {
+        anyhow::bail!(response.error);
+    }
+    Ok(response.message)
 }
 
 /// Render the in-flight forest as a system-prompt block so the LLM can see what
@@ -408,12 +522,14 @@ fn build_forest_block(
     let mut block = String::from(
         "\n\n## In-flight trees\n\
          These RTDL trees you dispatched earlier are still running concurrently. \
-         To stop one immediately, call `builtin_cancel_plan` with its exact \
-         `plan_id` below (or `executor_cancel_all_plans` to stop everything at \
-         once). Every plan's ordered executable steps are listed below. To stop \
-         at any requested semantic boundary (for example after step 8 or after \
-         reaching the restaurant), call `builtin_stop_plan_at` directly with \
-         that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
+         Plan control is NOT a capability call and must never be placed inside a \
+         sequence, parallel, or do node. To stop one immediately, emit a root \
+         `cancel_plan` meta op with its exact `plan_id` below; to stop all work, \
+         emit a root `cancel_all` meta op. Every plan's ordered executable steps \
+         are listed below. To stop at a requested semantic boundary (for example \
+         after step 8 or after reaching the restaurant), emit a root \
+         `stop_plan_at` meta op with that `plan_id`, the chosen `target_op_id`, \
+         and `when` (`on_enter` to stop \
          before that op runs, `on_complete` to stop after it finishes). Do not \
          assume the target is the currently running step, and do not query status \
          first when the requested boundary is already present in this list. Bind \
@@ -450,7 +566,7 @@ fn build_forest_block(
 /// A steer is just a `Task` the user submitted while the turn was already
 /// running. Draining is non-blocking; returns whether anything was pulled so
 /// the caller knows to re-plan. The model decides for itself whether the steer
-/// requires cancelling an in-flight tree (via `builtin_cancel_plan`).
+/// requires a root plan-control meta op.
 fn append_steer(
     task: Task,
     history: &mut Vec<Message>,
@@ -791,11 +907,9 @@ pub async fn run_turn(
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
 
-    // Pilot-assigned plan ids: monotonic from 1, never reused — and shared
-    // across every turn of this session (the counter lives in the service's
-    // per-session map), so a new user message never resets numbering. The LLM
-    // never chooses a plan id (it sends -1, which pilot ignores); pilot fills
-    // the real id here. See the "Plan IDs" section of rtdl_protocol.md.
+    // Pilot-assigned plan ids come from one process-global atomic counter.
+    // They are reserved only for normal RTDL trees, never for meta operations,
+    // and are unique even when different sessions dispatch concurrently.
 
     // 3. Forest supervisor loop.
     //
@@ -915,6 +1029,7 @@ pub async fn run_turn(
                             // "re-plan on every node" caused.
                             if is_terminal_executor_state(ns.state)
                                 && ns.state != RtdlNodeStateEnum::Succeeded as u32
+                                && !cancel_requested.contains(&plan_id)
                                 && standing_task.as_ref().is_some_and(|state| !state.is_done())
                             {
                                 should_plan = true;
@@ -967,6 +1082,7 @@ pub async fn run_turn(
                             if should_replan_after_plan_done(
                                 canceled,
                                 requested_cancellation,
+                                cancel_requested.is_empty(),
                                 standing_task.as_ref().is_some_and(|state| !state.is_done()),
                             ) {
                                 should_plan = true;
@@ -1025,7 +1141,7 @@ pub async fn run_turn(
         // recovery plan) instead of crashing the whole turn. The loop yields a
         // valid (narration, tree label, plan, id) tuple for the forest dispatch.
         let mut correction: Option<String> = None;
-        let (assistant_content, rtdl_description, graph, plan_id, task_update, recovered) = loop {
+        let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_update, recovered) = loop {
             let mut messages = vec![Message::system(&format!(
                 "{system_prompt}\n\n{rtdl_prompt}{task_block}{forest_block}"
             ))];
@@ -1139,8 +1255,7 @@ pub async fn run_turn(
             }
 
             let raw_content = content.unwrap_or_default();
-            let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
-            debug!("[pilot/rtdl/raw] plan_id={plan_id} raw_content={raw_content}");
+            debug!("[pilot/rtdl/raw] raw_content={raw_content}");
             let parsed = parse_rtdl_assistant_response(&raw_content).with_context(|| {
                 format!(
                     "parse RTDL assistant response: {}",
@@ -1163,12 +1278,13 @@ pub async fn run_turn(
                     warn!(
                         "[pilot/rtdl] parse failed again round={round}, ending turn gracefully: {e:#}"
                     );
-                    let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
+                    let plan_id = String::new();
                     let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
                     break (
                         rtdl_recovery_final_text(),
                         String::new(),
-                        graph,
+                        Some(graph),
+                        None,
                         plan_id,
                         None,
                         true,
@@ -1177,13 +1293,50 @@ pub async fn run_turn(
             };
 
             debug!(
-                "[pilot/rtdl/raw] plan_id={plan_id} model_rtdl={}",
+                "[pilot/rtdl/raw] model_rtdl={}",
                 serde_json::to_string(&rtdl).unwrap_or_else(|_| "<unserializable>".into())
             );
 
-            // Tentative id: committed to `plan_seq` only if this round actually
-            // dispatches a tree, so empty-rtdl rounds don't burn a plan id and
-            // the ids stay contiguous with the trees the user sees and cancels.
+            match parse_meta_plan_op(&rtdl).context("parse RTDL meta op") {
+                Ok(Some(meta_op)) => {
+                    break (
+                        assistant_content,
+                        rtdl_description,
+                        None,
+                        Some(meta_op),
+                        String::new(),
+                        task_update,
+                        false,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) if correction.is_none() => {
+                    warn!("[pilot/rtdl] meta op invalid round={round}, retrying once: {e:#}");
+                    correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "[pilot/rtdl] meta op invalid again round={round}, ending turn gracefully: {e:#}"
+                    );
+                    let plan_id = String::new();
+                    let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
+                    break (
+                        rtdl_recovery_final_text(),
+                        String::new(),
+                        Some(graph),
+                        None,
+                        plan_id,
+                        None,
+                        true,
+                    );
+                }
+            }
+
+            // Reserve an id atomically only for normal RTDL. Concurrent sessions
+            // cannot observe or dispatch the same id. A failed expansion may
+            // leave a harmless gap, but an id is never reused.
+            let plan_id = (plan_seq.fetch_add(1, Ordering::Relaxed) + 1).to_string();
             match expand_rtdl_to_plan(
                 &rtdl,
                 &target_map,
@@ -1201,7 +1354,8 @@ pub async fn run_turn(
                     break (
                         assistant_content,
                         rtdl_description,
-                        graph,
+                        Some(graph),
+                        None,
                         plan_id,
                         task_update,
                         false,
@@ -1215,12 +1369,13 @@ pub async fn run_turn(
                     warn!(
                         "[pilot/rtdl] expand failed again round={round}, ending turn gracefully: {e:#}"
                     );
-                    let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
+                    let plan_id = String::new();
                     let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
                     break (
                         rtdl_recovery_final_text(),
                         String::new(),
-                        graph,
+                        Some(graph),
+                        None,
                         plan_id,
                         None,
                         true,
@@ -1245,13 +1400,106 @@ pub async fn run_turn(
             break;
         }
 
+        if let Some(meta_op) = meta_op {
+            let targets = meta_op.cancellation_targets(&forest);
+            if let Some(target) = invalid_cancel_target(&targets, &forest, &cancel_requested) {
+                warn!("[pilot/harness] suppressed stale or duplicate meta op for plan {target}");
+                history.push(Message::user(&format!(
+                    "Pilot harness feedback: plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a currently listed plan_id. Do not retry a completed control operation."
+                )));
+                history::trim(history, MAX_HISTORY);
+                should_plan = true;
+                continue 'supervisor;
+            }
+            if let MetaPlanOp::StopAt { plan_id, op_id, .. } = &meta_op
+                && forest
+                    .get(plan_id)
+                    .is_none_or(|meta| !meta.steps.iter().any(|step| step.op_id == *op_id))
+            {
+                warn!("[pilot/harness] suppressed stop_at for unknown op {plan_id}/{op_id}");
+                history.push(Message::user(&format!(
+                    "Pilot harness feedback: RTDL plan {plan_id} has no listed target_op_id {op_id}. Copy an exact op_id from In-flight trees and do not guess which step is current."
+                )));
+                history::trim(history, MAX_HISTORY);
+                should_plan = true;
+                continue 'supervisor;
+            }
+
+            if let Some(updated) = task_update {
+                let changed = apply_task_update(standing_task, updated, false);
+                if changed && let Some(state) = standing_task.as_ref() {
+                    let _ = tx
+                        .send(Ok(service::pack(
+                            &session_id,
+                            PilotStreamBody::TaskState(TaskStateEvent {
+                                goal: state.goal.clone(),
+                                success_criterion: state.success_criterion.clone(),
+                                status: state.status.clone(),
+                            }),
+                        )))
+                        .await;
+                }
+            }
+            if !assistant_content.trim().is_empty() {
+                history.push(Message::assistant(&assistant_content));
+                history::trim(history, MAX_HISTORY);
+                last_content = assistant_content.clone();
+                let _ = tx
+                    .send(Ok(service::pack(
+                        &session_id,
+                        PilotStreamBody::TextChunk(assistant_content),
+                    )))
+                    .await;
+            }
+
+            cancel_requested.extend(targets.iter().cloned());
+            let result = execute_meta_plan_op(executor, &meta_op).await;
+            round += 1;
+            match result {
+                Ok(message) => {
+                    info!("[pilot/control] {message}");
+                    history.push(Message::user(&format!(
+                        "Pilot plan-control result: {message} This was an out-of-band meta operation, not an RTDL tree. Do not issue it again."
+                    )));
+                    history::trim(history, MAX_HISTORY);
+                    let _ = tx
+                        .send(Ok(service::pack(
+                            &session_id,
+                            PilotStreamBody::Status(SessionStatusEvent {
+                                session_id: session_id.clone(),
+                                state: SessionState::Active as u32,
+                                message: "Plan control accepted".to_string(),
+                            }),
+                        )))
+                        .await;
+                    // PlanDone is the durable boundary. Replan only after every
+                    // target in this control batch has left the forest.
+                    should_plan = targets.is_empty();
+                }
+                Err(error) => {
+                    warn!("[pilot/control] meta operation failed: {error:#}");
+                    for target in &targets {
+                        cancel_requested.remove(target);
+                    }
+                    history.push(Message::user(&format!(
+                        "Pilot plan-control failure: {error:#}. The operation was not accepted; inspect the current In-flight trees before deciding whether to retry."
+                    )));
+                    history::trim(history, MAX_HISTORY);
+                    should_plan = true;
+                }
+            }
+            continue 'supervisor;
+        }
+
+        let graph = graph.expect("non-meta RTDL response must carry a graph");
+
         let calls = plan_call_count(&graph);
         let call_signatures = plan_call_signatures(&graph);
         let cancel_targets = plan_cancel_targets(&graph);
         if mixes_control_inspection_with_action(&graph) {
             warn!("[pilot/harness] suppressed mixed control inspection and action tree");
             history.push(Message::user(
-                "Pilot harness feedback: get_plan_status/get_all_plans is an inspection whose result is required before deciding how to stop work. Dispatch only that inspection now. Do not put a new action, navigation, shell command, cancel, or stop_plan_at in the same RTDL tree. After its result arrives, first complete the targeted stop/cancel decision; only then dispatch unrelated successor work.",
+                "Pilot harness feedback: legacy plan-control builtins cannot be mixed with business RTDL. Use a root cancel_plan, cancel_all, or stop_plan_at meta op instead; dispatch successor work only after control completion.",
             ));
             history::trim(history, MAX_HISTORY);
             should_plan = true;
@@ -1260,7 +1508,7 @@ pub async fn run_turn(
         if let Some(target) = invalid_cancel_target(&cancel_targets, &forest, &cancel_requested) {
             warn!("[pilot/harness] suppressed stale or duplicate cancel for plan {target}");
             history.push(Message::user(
-                "Pilot harness feedback: that cancel target is not cancellable now (it finished, is a control-only plan, or cancellation was already requested). Continue planning now; re-read In-flight trees and never cancel the query/control plan itself. If the user's unresolved intent is to stop everything, call executor_cancel_all_plans directly instead of listing plans or retrying this target.",
+                "Pilot harness feedback: that legacy cancel target is not cancellable now. Re-read In-flight trees and use one root plan-control meta op; do not retry a finished target or create a cancel RTDL tree.",
             ));
             history::trim(history, MAX_HISTORY);
             should_plan = true;
@@ -1391,8 +1639,6 @@ pub async fn run_turn(
                 PilotStreamBody::Plan(graph.clone()),
             )))
             .await;
-        // Commit the plan id now that a real tree is being dispatched.
-        plan_seq.fetch_add(1, Ordering::Relaxed);
         cancel_requested.extend(cancel_targets);
         forest.insert(
             plan_id.clone(),
@@ -1441,12 +1687,23 @@ fn build_display_capabilities(
 ) -> Vec<DisplayCapability<'_>> {
     cap_list
         .iter()
+        .filter(|(_, cap)| !is_legacy_plan_control_contract(&cap.contract_id))
         .map(|(provider_id, cap)| DisplayCapability {
             display_name: format!("{}.{}", provider_id, llm_name(&cap.contract_id)),
             provider_id: provider_id.as_str(),
             cap,
         })
         .collect()
+}
+
+fn is_legacy_plan_control_contract(contract_id: &str) -> bool {
+    if !contract_id.starts_with("robonix/system/executor/builtin/") {
+        return false;
+    }
+    matches!(
+        contract_id.rsplit('/').next().unwrap_or_default(),
+        "cancel_plan" | "cancel_all_plans" | "stop_plan_at" | "get_all_plans" | "get_plan_status"
+    )
 }
 
 fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> CapabilityTargetMap {
@@ -1490,10 +1747,12 @@ string \"in_progress\" or \"done\" (never null), set to \
 for it to leave the list first).\n\
 Compose multi-step trees; don't drip one node per round. No new capability call this round = \
 {\"op\":\"sequence\",\"op_id\":0,\"description\":\"wait\",\"children\":[]}.\n\
-To stop a running tree, add a do node whose `cap` is the list's cancel-plan capability_name \
-(e.g. `executor.builtin_cancel_plan`), passing the exact plan_id string from the In-flight trees list.\n\
-For an explicit user request to stop/cancel ALL work, call executor_cancel_all_plans directly \
-in one do node. Do NOT call get_all_plans first and do NOT cancel the control/query tree itself.\n\
+  Plan control is a root meta op, never a capability or nested RTDL node: \
+  {\"op\":\"cancel_plan\",\"plan_id\":\"<listed id>\",\"wait_ms\":5000}, \
+  {\"op\":\"cancel_all\",\"wait_ms\":5000}, or \
+  {\"op\":\"stop_plan_at\",\"plan_id\":\"<listed id>\",\"target_op_id\":\"<listed op id>\",\"when\":\"on_complete\"}. \
+  A meta op is the entire `rtdl` value for that round and cannot be nested in sequence/parallel/do. \
+  Never call a skill's cancel capability yourself; Executor propagates cancellation to the active provider.\n\
 Executor results are scoped to the plan_id/tree named immediately before them. A failed tree \
 blocks only its dependent steps; do not cancel an unrelated in-flight tree because another \
 tree failed. Cancel only for an explicit user steer covering that tree or a safety hazard.\n\
@@ -2024,9 +2283,10 @@ fn invalid_cancel_target(
 fn should_replan_after_plan_done(
     canceled: bool,
     requested_cancellation: bool,
+    cancellation_batch_complete: bool,
     interaction_active: bool,
 ) -> bool {
-    interaction_active && (!canceled || requested_cancellation)
+    interaction_active && (!canceled || (requested_cancellation && cancellation_batch_complete))
 }
 
 /// Render an RTDL node state as a stable human-readable name for logs.
@@ -2380,11 +2640,12 @@ Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE,
-        TaskState, TreeMeta, TreeStep, append_steer, apply_task_update, build_forest_block,
-        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, mixes_control_inspection_with_action, parse_rtdl_assistant_response,
+        CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
+        RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer, apply_task_update,
+        build_forest_block, configured_vlm_idle_timeout, duplicate_in_flight_signature,
+        expand_rtdl_to_plan, extract_json_object, feed_results_into_history, format_plan_summary,
+        invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
+        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
         parse_task_update, plan_call_signatures, rtdl_node_kind_name, rtdl_recovery_final_text,
         rtdl_state_name, should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end,
@@ -2413,10 +2674,70 @@ mod tests {
 
     #[test]
     fn only_requested_cancellation_replans_for_final_confirmation() {
-        assert!(should_replan_after_plan_done(false, false, true));
-        assert!(should_replan_after_plan_done(true, true, true));
-        assert!(!should_replan_after_plan_done(true, false, true));
-        assert!(!should_replan_after_plan_done(true, true, false));
+        assert!(should_replan_after_plan_done(false, false, true, true));
+        assert!(should_replan_after_plan_done(true, true, true, true));
+        assert!(!should_replan_after_plan_done(true, true, false, true));
+        assert!(!should_replan_after_plan_done(true, false, true, true));
+        assert!(!should_replan_after_plan_done(true, true, true, false));
+    }
+
+    #[test]
+    fn root_meta_ops_parse_without_becoming_rtdl_nodes() {
+        assert_eq!(
+            parse_meta_plan_op(&json!({"op":"cancel_plan","plan_id":"7"})).unwrap(),
+            Some(MetaPlanOp::Cancel {
+                plan_id: "7".into(),
+                wait_ms: 5_000,
+            })
+        );
+        assert_eq!(
+            parse_meta_plan_op(&json!({"op":"cancel_all","wait_ms":99_999})).unwrap(),
+            Some(MetaPlanOp::CancelAll { wait_ms: 30_000 })
+        );
+        assert_eq!(
+            parse_meta_plan_op(&json!({
+                "op":"stop_plan_at",
+                "plan_id":"9",
+                "target_op_id":"13",
+                "when":"on_enter"
+            }))
+            .unwrap(),
+            Some(MetaPlanOp::StopAt {
+                plan_id: "9".into(),
+                op_id: "13".into(),
+                when: "on_enter".into(),
+            })
+        );
+        assert!(
+            parse_meta_plan_op(&json!({
+                "op":"stop_plan_at",
+                "plan_id":"9",
+                "target_op_id":"13",
+                "when":"later"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_plan_control_capabilities_are_hidden_from_the_model() {
+        for leaf in [
+            "cancel_plan",
+            "cancel_all_plans",
+            "stop_plan_at",
+            "get_all_plans",
+            "get_plan_status",
+        ] {
+            assert!(is_legacy_plan_control_contract(&format!(
+                "robonix/system/executor/builtin/{leaf}"
+            )));
+        }
+        assert!(!is_legacy_plan_control_contract(
+            "robonix/system/executor/builtin/run_command"
+        ));
+        assert!(!is_legacy_plan_control_contract(
+            "robonix/skill/greet/cancel_plan"
+        ));
     }
 
     #[test]

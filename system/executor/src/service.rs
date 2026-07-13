@@ -5,8 +5,12 @@
 
 use crate::dispatch::{async_poll, async_registry};
 use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
+use crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlan;
 use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
-use crate::pb::executor::{CancelAllResponse, RtdlEvent};
+use crate::pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlans;
+use crate::pb::executor::{
+    CancelAllResponse, ControlPlanResponse, ListActivePlansResponse, RtdlEvent,
+};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::{PlanRuntime, StopWhen};
@@ -470,6 +474,94 @@ impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
             .cancel_all_plans(&self.provider_id, &mut atlas)
             .await;
         Ok(Response::new(CancelAllResponse { success }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemExecutorListActivePlans for ExecutorServiceImpl {
+    async fn list_active_plans(
+        &self,
+        _request: Request<crate::pb::executor::ListActivePlansRequest>,
+    ) -> Result<Response<ListActivePlansResponse>, Status> {
+        Ok(Response::new(ListActivePlansResponse {
+            success: true,
+            plans_json: self.runtime.active_plans_json().await,
+            error: String::new(),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
+    async fn control_plan(
+        &self,
+        request: Request<crate::pb::executor::ControlPlanRequest>,
+    ) -> Result<Response<ControlPlanResponse>, Status> {
+        let request = request.into_inner();
+        let mut atlas = self.atlas.clone();
+        let response = match request.action.as_str() {
+            "cancel" => {
+                let wait_ms = if request.wait_ms == 0 {
+                    5_000
+                } else {
+                    request.wait_ms
+                };
+                let (completed, message) = self
+                    .runtime
+                    .cancel_plan_control(&request.plan_id, wait_ms, &self.provider_id, &mut atlas)
+                    .await;
+                ControlPlanResponse {
+                    success: true,
+                    completed,
+                    message,
+                    error: String::new(),
+                }
+            }
+            "cancel_all" => {
+                let wait_ms = if request.wait_ms == 0 {
+                    5_000
+                } else {
+                    request.wait_ms
+                };
+                let (target_count, completed) = self
+                    .runtime
+                    .cancel_all_plans_except(&self.provider_id, &mut atlas, None, wait_ms)
+                    .await;
+                ControlPlanResponse {
+                    success: true,
+                    completed,
+                    message: format!(
+                        "Cancellation requested for all RTDL plans; target_count={target_count}, completed={completed}."
+                    ),
+                    error: String::new(),
+                }
+            }
+            "stop_at" => match self
+                .runtime
+                .stop_plan_at_control(&request.plan_id, &request.op_id, &request.when)
+                .await
+            {
+                Ok(message) => ControlPlanResponse {
+                    success: true,
+                    completed: true,
+                    message,
+                    error: String::new(),
+                },
+                Err(error) => ControlPlanResponse {
+                    success: false,
+                    completed: true,
+                    message: String::new(),
+                    error,
+                },
+            },
+            action => ControlPlanResponse {
+                success: false,
+                completed: true,
+                message: String::new(),
+                error: format!("unknown plan-control action '{action}'"),
+            },
+        };
+        Ok(Response::new(response))
     }
 }
 
