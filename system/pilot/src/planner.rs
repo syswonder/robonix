@@ -1046,13 +1046,13 @@ pub async fn run_turn(
                     return_interrupted!(&forest);
                 }
                 steer = steer_rx.recv() => {
-                    if let Some(task) = steer {
-                        if append_steer(task, history, standing_task) {
-                            history::trim(history, MAX_HISTORY);
-                            // Re-plan now so the model can react (and decide
-                            // whether to cancel any in-flight tree).
-                            should_plan = true;
-                        }
+                    if let Some(task) = steer
+                        && append_steer(task, history, standing_task)
+                    {
+                        history::trim(history, MAX_HISTORY);
+                        // Re-plan now so the model can react (and decide
+                        // whether to cancel any in-flight tree).
+                        should_plan = true;
                     }
                 }
                 ev = forest_rx.recv() => {
