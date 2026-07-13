@@ -6,6 +6,7 @@
 use crate::pb::contracts::{
     robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient,
     robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
+    robonix_system_executor_list_active_plans_client::RobonixSystemExecutorListActivePlansClient,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
 use crate::pb::executor::ControlPlanRequest;
@@ -546,14 +547,22 @@ async fn build_executor_conn(
     )
     .await
     .context("connect_to_capability robonix/system/executor/control_plan")?;
-    if control_provider_id != executor_provider_id {
+    let (_, active_provider_id, active_ch) = atlas_client::connect_to_capability(
+        &mut atlas,
+        consumer_id,
+        "robonix/system/executor/list_active_plans",
+    )
+    .await
+    .context("connect_to_capability robonix/system/executor/list_active_plans")?;
+    if control_provider_id != executor_provider_id || active_provider_id != executor_provider_id {
         anyhow::bail!(
-            "Executor execute/control capabilities resolved to different providers: {executor_provider_id} vs {control_provider_id}"
+            "Executor execute/control/active capabilities resolved to different providers: {executor_provider_id} vs {control_provider_id} vs {active_provider_id}"
         );
     }
     Ok(ExecutorConn {
         graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
         control: RobonixSystemExecutorControlPlanClient::new(control_ch),
+        active: RobonixSystemExecutorListActivePlansClient::new(active_ch),
     })
 }
 
