@@ -36,12 +36,17 @@ use robonix_soma::deployment::Deployment;
 use robonix_soma::launcher::PackageLauncher;
 use robonix_soma::pb::contracts::{
     robonix_system_soma_footprint_server::RobonixSystemSomaFootprintServer,
+    robonix_system_soma_get_health_server::RobonixSystemSomaGetHealthServer,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYamlServer,
+    robonix_system_soma_health_server::RobonixSystemSomaHealthServer,
 };
 use robonix_soma::service::SomaService;
 use robonix_soma::store::SomaBody;
-use robonix_soma::{GET_FOOTPRINT_CONTRACT, GET_URDF_CONTRACT, GET_YAML_CONTRACT, SOMA_NAMESPACE};
+use robonix_soma::{
+    GET_FOOTPRINT_CONTRACT, GET_HEALTH_CONTRACT, GET_URDF_CONTRACT, GET_YAML_CONTRACT,
+    HEALTH_CONTRACT, SOMA_NAMESPACE,
+};
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +55,8 @@ use tokio::signal::unix::{SignalKind, signal};
 const GET_YAML_TOML: &str = "capabilities/system/soma/get_yaml.v1.toml";
 const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
 const GET_FOOTPRINT_TOML: &str = "capabilities/system/soma/footprint.v1.toml";
+const GET_HEALTH_TOML: &str = "capabilities/system/soma/get_health.v1.toml";
+const HEALTH_TOML: &str = "capabilities/system/soma/health.v1.toml";
 /// Line rbnx writes to the stage-trigger pipe to release soma's
 /// stage 2. Match this exactly in rbnx's `cmd::deploy.rs` — they're
 /// a contract pair, not configurable per deployment.
@@ -104,12 +111,25 @@ async fn main() -> Result<()> {
     // unregistered and non-ACTIVE in Atlas. Robot-state primitives use this
     // single source to publish the URDF-defined ROS TF tree.
     let svc = Arc::new(SomaService::new(Arc::clone(&body)));
+    let runtime_state = svc.runtime();
+    let snapshot_service = Arc::clone(&svc);
+    let snapshot_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        let mut seq = 0_u64;
+        loop {
+            tick.tick().await;
+            seq += 1;
+            snapshot_service.publish_runtime_snapshot(seq).await;
+        }
+    });
     let (body_shutdown_tx, body_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut body_server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(&svc)))
             .add_service(RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaFootprintServer::from_arc(svc))
+            .add_service(RobonixSystemSomaFootprintServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemSomaGetHealthServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemSomaHealthServer::from_arc(svc))
             .serve_with_shutdown(listen_addr, async {
                 let _ = body_shutdown_rx.await;
             })
@@ -122,7 +142,7 @@ async fn main() -> Result<()> {
     );
 
     let mut launcher = PackageLauncher::new(
-        log_dir,
+        log_dir.clone(),
         config.atlas_endpoint.clone(),
         config.listen.clone(),
     )
@@ -194,6 +214,34 @@ async fn main() -> Result<()> {
         .await
         .context("declare Soma footprint gRPC capability")?;
     atlas
+        .declare_capability(
+            &config.provider_id,
+            GET_HEALTH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                GET_HEALTH_TOML,
+                "robonix.contracts.RobonixSystemSomaGetHealth",
+                "/robonix.contracts.RobonixSystemSomaGetHealth/GetHealth",
+            ),
+        )
+        .await
+        .context("declare Soma get_health gRPC capability")?;
+    atlas
+        .declare_capability(
+            &config.provider_id,
+            HEALTH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                HEALTH_TOML,
+                "robonix.contracts.RobonixSystemSomaHealth",
+                "/robonix.contracts.RobonixSystemSomaHealth/StreamHealth",
+            ),
+        )
+        .await
+        .context("declare Soma health stream gRPC capability")?;
+    atlas
         .set_lifecycle_state(
             &config.provider_id,
             atlas_pb::LifecycleState::StateActive,
@@ -201,6 +249,21 @@ async fn main() -> Result<()> {
         )
         .await
         .context("set Soma lifecycle ACTIVE")?;
+    let runtime_dir = log_dir.join("soma-runtime");
+    let runtime_monitor = match robonix_soma::runtime_monitor::start(
+        &mut atlas,
+        &config.provider_id,
+        runtime_state,
+        &runtime_dir,
+    )
+    .await
+    {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            warn!("[soma/state] runtime monitor unavailable: {error:#}");
+            None
+        }
+    };
     let heartbeat_failure = {
         let mut hb = atlas.clone();
         let provider_id = config.provider_id.clone();
@@ -277,6 +340,10 @@ async fn main() -> Result<()> {
     // so its pipe read doesn't come back and try to reuse a torn-down
     // launcher.
     stage2_task.abort();
+    snapshot_task.abort();
+    if let Some(runtime_monitor) = runtime_monitor {
+        runtime_monitor.shutdown(&mut atlas).await;
+    }
     stage2_launcher.lock().await.stop_all().await?;
     serve_result?;
     Ok(())

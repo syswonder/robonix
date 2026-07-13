@@ -27,6 +27,7 @@ mod pb;
 mod planner;
 mod service;
 mod soma_context;
+mod state_context;
 mod vlm;
 
 use anyhow::{Context, Result};
