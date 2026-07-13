@@ -140,7 +140,7 @@ fi
 
 # ── 3. Codegen (.proto + grpc stubs → rbnx-build/codegen/) ──────────────────
 echo "[build] rbnx codegen"
-PATH="$PKG/$VENV/bin:$PATH" rbnx codegen -p "$PKG"
+PATH="$PKG/$VENV/bin:$PATH" rbnx codegen --mcp -p "$PKG"
 
 # The service imports both gRPC stubs (`speech_pb2*`) and MCP dataclasses
 # (`speech_mcp`) at startup. Verify both generated Python roots now so a
