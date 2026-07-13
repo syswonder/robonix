@@ -1,0 +1,15 @@
+[package]
+name = "robonix-sentinel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Sentinel: capability-call safety policy evaluation"
+
+[lib]
+name = "robonix_sentinel"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

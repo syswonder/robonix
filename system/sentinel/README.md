@@ -1,36 +1,33 @@
-# Sentinel - safety supervision
+# Sentinel - capability-call safety policy
 
-Sentinel is the planned Robonix safety-supervision component. Its job is to
-decide whether a requested capability call is allowed under the current robot
-state, operator identity, scene context, and policy.
+Sentinel decides whether a requested capability call is allowed under the
+active rule set before Executor dispatches side-effecting work.
 
-## Current status
+## Current implementation
 
-Sentinel is not implemented on `dev` yet. There is no `robonix-sentinel`
-binary, no `system/executor/src/dispatch/sentinel.rs`, and no `sentinel.yaml`
-rule loader in Executor.
+The `robonix-sentinel` crate provides the first transport-independent policy
+core. It supports:
 
-Executor currently dispatches validated RTDL `do` nodes directly through Atlas
-to the selected primitive, service, or skill provider. The only safety-related
-controls in the current path are local to the components that already exist,
-for example:
+- allow and deny rules with deterministic priority selection;
+- `*` wildcards in contract patterns;
+- local weekday and time windows, including windows that cross midnight;
+- simple numeric JSON argument conditions such as `linear_x > 0.5`;
+- exact user ID or role matching;
+- validation and atomic replacement of the active rule set;
+- default allow when no rule matches.
 
-- Executor plan cancellation and stop points (`cancel_plan`, `stop_plan_at`,
-  `cancel_all_plans`).
-- Liaison access control for text/API users and voiceprint-verified speakers
-  before work enters Pilot/TTS.
-- Provider-side validation in individual primitives and services.
+Equal-priority rules preserve the order supplied to `set_rules`; the first
+matching rule wins.
 
-Do not rely on this directory for runtime enforcement today.
+## Integration boundary
 
-## Intended role
+This crate does not yet enforce runtime calls. Executor must call it before
+dispatch, while Chronos and Keystone must supply canonical time and user roles.
+The gRPC contracts, Atlas registration, persistent rule source, and management
+API remain follow-up integration work.
 
-When Sentinel lands, it should sit on the capability-call path before Executor
-dispatches side-effecting work. The policy decision should be based on:
+Run the focused tests from the repository root:
 
-- the requested contract and arguments,
-- the operator identity and permissions from [keystone](../keystone/),
-- current robot/body health from [vitals](../vitals/),
-- current environment state from [scene](../scene/),
-- explicit safety policy such as allow/deny lists, rate limits, workspace
-  limits, stop windows, and emergency-stop state.
+```bash
+cargo test -p robonix-sentinel
+```
