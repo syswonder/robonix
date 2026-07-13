@@ -77,9 +77,10 @@ class _ProviderBase:
     Args:
         id:        stable provider id (e.g. "webots_tiago_camera_front").
                    Convention: matches `name:` in package_manifest.yaml.
-        namespace: contract_id prefix this provider claims, e.g.
-                   "robonix/primitive/camera". Every declare_capability
-                   call MUST carry a contract_id under this prefix.
+        namespace: primary contract grouping for this provider, e.g.
+                   "robonix/primitive/camera". Domain contracts normally
+                   use this prefix. Shared contracts may opt out; other
+                   mismatches produce diagnostics but remain callable.
         pkg_root:  package root directory; auto-detected from the
                    caller's __file__ when omitted.
         md_path:   absolute path to CAPABILITY.md; defaults to
@@ -231,7 +232,24 @@ class _ProviderBase:
         `description` is the instance-specific natural-language string
         Pilot/LLM sees; empty means "use the contract's generic
         description from the TOML at consume time" (the two are merged,
-        not picked-one-of)."""
+        not picked-one-of). Namespace alignment is advisory: a regular
+        contract outside this provider's primary namespace emits a warning
+        but is still declared; contracts marked `cross_namespace` do not."""
+        contract = ATLAS.query_contract(contract_id)
+        cross_namespace = bool(contract and contract.cross_namespace)
+        namespace = self.namespace.strip("/")
+        normalized_contract = contract_id.strip("/")
+        namespace_matches = normalized_contract == namespace or normalized_contract.startswith(
+            f"{namespace}/"
+        )
+        if not namespace_matches and not cross_namespace:
+            log.warning(
+                "[%s] namespace mismatch: declaring '%s' outside primary "
+                "namespace '%s'; Atlas will accept it and expose a diagnostic",
+                self.id,
+                contract_id,
+                self.namespace,
+            )
         return ATLAS.declare_capability(
             provider_id=self.id,
             contract_id=contract_id,

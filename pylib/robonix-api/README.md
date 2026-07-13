@@ -46,6 +46,17 @@ if __name__ == "__main__":
 
 That's a complete Robonix primitive — registers with Atlas, serves the Driver lifecycle, waits for the upstream topic, declares a ROS 2 capability for downstream consumers, and blocks on SIGTERM.
 
+`namespace` declares the provider's primary contract grouping. Regular
+contracts normally use that prefix. Declaring another contract is allowed;
+robonix-api and Atlas emit a visible warning unless the contract TOML marks it
+as `cross_namespace = true`. The warning is diagnostic and never blocks boot,
+discovery, or calls.
+
+Existing package-local `*/driver` contracts remain supported. A later
+framework migration will provide one built-in lifecycle contract so new
+packages do not need to copy a driver TOML; that migration will retain the
+current form as a compatibility path.
+
 ## What's in the box
 
 - **`ATLAS`** — module-level singleton client (`ATLAS.register`, `ATLAS.find_primitive`, `ATLAS.connect`, ...)
