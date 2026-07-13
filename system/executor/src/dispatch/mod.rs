@@ -78,9 +78,10 @@ pub async fn dispatch(
     self_provider_id: &str,
     atlas: &mut AtlasClient,
     runtime: &PlanRuntime,
+    plan_id: &str,
 ) -> CapabilityCallResult {
     if call.provider_id == self_provider_id {
-        return builtin::execute(call, runtime, self_provider_id, atlas).await;
+        return builtin::execute(call, runtime, self_provider_id, atlas, plan_id).await;
     }
 
     if let Err(e) = ensure_skill_active(atlas, &call.provider_id).await {

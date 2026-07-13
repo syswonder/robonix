@@ -69,6 +69,7 @@ pub async fn execute(
     runtime: &PlanRuntime,
     self_provider_id: &str,
     atlas: &mut AtlasClient,
+    plan_id: &str,
 ) -> CapabilityCallResult {
     let op = call
         .contract_id
@@ -93,7 +94,7 @@ pub async fn execute(
         return read_capability_doc(call, atlas).await;
     }
 
-    let result = run(op, &call.args_json).await;
+    let result = run(op, &call.args_json, runtime, plan_id).await;
     let mut out = CapabilityCallResult {
         call_id: call.call_id.clone(),
         provider_id: call.provider_id.clone(),
@@ -113,13 +114,18 @@ pub async fn execute(
     out
 }
 
-async fn run(op: &str, args_json: &str) -> anyhow::Result<String> {
+async fn run(
+    op: &str,
+    args_json: &str,
+    runtime: &PlanRuntime,
+    plan_id: &str,
+) -> anyhow::Result<String> {
     match op {
         "read_file" => read_file(args_json),
         "write_file" => write_file(args_json),
         "patch_file" => patch_file(args_json),
         "list_dir" => list_dir(args_json),
-        "run_command" => run_command(args_json).await,
+        "run_command" => run_command(args_json, runtime, plan_id).await,
         other => anyhow::bail!("unknown builtin: {}", other),
     }
 }
@@ -336,7 +342,7 @@ const MAX_COMMAND_LEN: usize = 8192;
 /// Command execution timeout.
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-async fn run_command(args: &str) -> anyhow::Result<String> {
+async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow::Result<String> {
     let a: CmdArgs = serde_json::from_str(args)?;
     if a.command.len() > MAX_COMMAND_LEN {
         anyhow::bail!(
@@ -345,14 +351,85 @@ async fn run_command(args: &str) -> anyhow::Result<String> {
             MAX_COMMAND_LEN
         );
     }
-    let child = tokio::process::Command::new("bash")
+    if runtime.is_cancelled(plan_id).await {
+        anyhow::bail!("command canceled before spawn");
+    }
+
+    use std::process::Stdio;
+    let mut command = tokio::process::Command::new("bash");
+    command
         .arg("-c")
         .arg(&a.command)
-        .output();
-    let out = tokio::time::timeout(COMMAND_TIMEOUT, child)
-        .await
-        .map_err(|_| anyhow::anyhow!("command timed out after {}s", COMMAND_TIMEOUT.as_secs()))?
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let child = command
+        .spawn()
         .map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
+    let pgid = child
+        .id()
+        .ok_or_else(|| anyhow::anyhow!("spawned command has no pid"))?;
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+
+    enum StopReason {
+        Canceled,
+        Timeout,
+    }
+    let canceled = async {
+        loop {
+            if runtime.is_cancelled(plan_id).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    tokio::pin!(canceled);
+    let deadline = tokio::time::sleep(COMMAND_TIMEOUT);
+    tokio::pin!(deadline);
+
+    let stop_reason = tokio::select! {
+        result = &mut output => {
+            let out = result.map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
+            return format_command_output(out);
+        }
+        _ = &mut canceled => StopReason::Canceled,
+        _ = &mut deadline => StopReason::Timeout,
+    };
+
+    terminate_command_group(pgid, nix::sys::signal::Signal::SIGTERM);
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut output)
+        .await
+        .is_err()
+    {
+        terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+        let _ = output.await;
+    }
+    match stop_reason {
+        StopReason::Canceled => anyhow::bail!("command canceled"),
+        StopReason::Timeout => {
+            anyhow::bail!("command timed out after {}s", COMMAND_TIMEOUT.as_secs())
+        }
+    }
+}
+
+fn terminate_command_group(pgid: u32, signal: nix::sys::signal::Signal) {
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+    match killpg(Pid::from_raw(pgid as i32), signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(error) => robonix_scribe::warn!(
+            "[executor] signal {:?} command pgid {} failed: {}",
+            signal,
+            pgid,
+            error
+        ),
+    }
+}
+
+fn format_command_output(out: std::process::Output) -> anyhow::Result<String> {
     let mut result = String::new();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
