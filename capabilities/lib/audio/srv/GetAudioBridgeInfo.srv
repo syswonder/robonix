@@ -1,0 +1,8 @@
+# robonix/primitive/audio/bridge_info -- return the reverse-audio listener
+# that a robonix-client should connect to. Only the client-bridge provider
+# exposes this optional contract; fixed local audio drivers do not need it.
+---
+bool reverse
+string endpoint          # ws://<robot-reachable-host>:<port>/client, or empty
+bool connected           # whether a client currently has an active session
+string detail
