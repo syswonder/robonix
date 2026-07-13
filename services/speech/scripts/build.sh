@@ -140,7 +140,20 @@ fi
 
 # ── 3. Codegen (.proto + grpc stubs → rbnx-build/codegen/) ──────────────────
 echo "[build] rbnx codegen"
-rbnx codegen -p "$PKG"
+PATH="$PKG/$VENV/bin:$PATH" rbnx codegen -p "$PKG"
+
+# The service imports both gRPC stubs (`speech_pb2*`) and MCP dataclasses
+# (`speech_mcp`) at startup. Verify both generated Python roots now so a
+# missing runtime PYTHONPATH cannot degrade into a 60-second Atlas
+# registration timeout during `rbnx boot`.
+CODEGEN_PYTHONPATH="$PKG/$BUILD/codegen/proto_gen:$PKG/$BUILD/codegen/robonix_mcp_types"
+PYTHONPATH="$CODEGEN_PYTHONPATH:${PYTHONPATH:-}" "$VENV/bin/python" - <<'PY'
+import speech_mcp
+import speech_pb2
+import speech_pb2_grpc
+
+print("[build] generated Speech gRPC and MCP imports OK")
+PY
 
 # ── 4. Pre-download models (skip with SKIP_MODEL_DOWNLOAD=1) ────────────────
 # Default HF_ENDPOINT to hf-mirror.com for runners where direct model downloads
