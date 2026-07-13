@@ -36,6 +36,8 @@ from semantic_map_mcp import (  # type: ignore
     GoalRoom_Response,
     GetObjectContext_Request,
     GetObjectContext_Response,
+    GetRobotContext_Request,
+    GetRobotContext_Response,
     GetSceneGraph_Request,
     GetSceneGraph_Response,
     ListObjects_Request,
@@ -211,6 +213,81 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     return ListObjects_Response(
         objects=objects,
         stamp_unix=time.time(),
+    )
+
+
+def _polygon_area(points) -> float:
+    polygon = [(float(x), float(y)) for x, y in (points or [])]
+    if len(polygon) < 3:
+        return 0.0
+    return abs(sum(
+        x0 * y1 - x1 * y0
+        for (x0, y0), (x1, y1) in zip(polygon, polygon[1:] + polygon[:1])
+    )) * 0.5
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/get_robot_context")
+async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Response:
+    """Return one coherent map-frame spatial snapshot for Pilot."""
+    snapshot_at = time.time()
+    if _REGISTRY is None:
+        raise RuntimeError("scene mcp_tools.attach_state was never called")
+    objects, _surfaces = await _REGISTRY.snapshot()
+    robot = next((
+        item for item in objects.values()
+        if not item.missing
+        and (getattr(item, "is_robot", False) or str(item.cls).lower() == "robot")
+    ), None)
+    map_id = _ANNO_STORE.map_id if _ANNO_STORE is not None else ""
+    if robot is None:
+        return GetRobotContext_Response(
+            pose_known=False, map_id=map_id, x=0.0, y=0.0, z=0.0, yaw=0.0,
+            room_id="", room_name="", containing_area_ids=[],
+            containing_area_names=[], nearby_objects=[], observed_at_unix=0.0,
+            snapshot_at_unix=snapshot_at, stale=True,
+            reason="robot pose is not available from Scene",
+        )
+
+    x, y = float(robot.pose.x), float(robot.pose.y)
+    containing = []
+    if _ANNO_STORE is not None:
+        containing = [
+            annotation for annotation in _ANNO_STORE.list()
+            if len(annotation.points or []) >= 3
+            and point_in_polygon(x, y, annotation.points)
+        ]
+    rooms = sorted(
+        (annotation for annotation in containing if annotation.kind == "room"),
+        key=lambda annotation: (_polygon_area(annotation.points), annotation.name),
+    )
+    room = rooms[0] if rooms else None
+    containing.sort(key=lambda annotation: (annotation.kind, annotation.name))
+    nearby = []
+    for item in objects.values():
+        if item is robot or item.missing:
+            continue
+        distance = math.hypot(float(item.pose.x) - x, float(item.pose.y) - y)
+        if distance <= 3.0:
+            nearby.append((distance, item))
+    nearby.sort(key=lambda entry: (entry[0], entry[1].object_id))
+
+    observed_at = float(robot.last_seen or 0.0)
+    stale = observed_at <= 0.0 or snapshot_at - observed_at > 2.0
+    reason = "current Scene spatial snapshot"
+    if stale:
+        reason = "Scene robot pose is older than 2 seconds"
+    elif room is None:
+        reason = "robot pose is current but outside every registered room"
+    return GetRobotContext_Response(
+        pose_known=True, map_id=map_id, x=x, y=y, z=float(robot.pose.z),
+        yaw=float(robot.pose.yaw),
+        room_id=_annotation_object_id(room) if room is not None else "",
+        room_name=str(room.name) if room is not None else "",
+        containing_area_ids=[_annotation_object_id(item) for item in containing],
+        containing_area_names=[str(item.name) for item in containing],
+        nearby_objects=[_to_idl(item) for _, item in nearby[:12]],
+        observed_at_unix=observed_at, snapshot_at_unix=snapshot_at,
+        stale=stale, reason=reason,
     )
 
 
@@ -618,6 +695,7 @@ __all__ = [
     "attach_state",
     "attach_scene_graph_store",
     "attach_annotation_store",
+    "get_robot_context",
     "list_objects",
     "goal_near",
     "goal_room",

@@ -111,20 +111,17 @@ async fn main() -> Result<()> {
     // unregistered and non-ACTIVE in Atlas. Robot-state primitives use this
     // single source to publish the URDF-defined ROS TF tree.
     let svc = Arc::new(SomaService::new(Arc::clone(&body)));
-    let snapshot_tx = svc.snapshot_sender();
-    {
-        let svc_cache = Arc::clone(&svc);
-        let mut cache_rx = snapshot_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match cache_rx.recv().await {
-                    Ok(snapshot) => svc_cache.update_snapshot(snapshot).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
+    let runtime_state = svc.runtime();
+    let snapshot_service = Arc::clone(&svc);
+    let snapshot_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        let mut seq = 0_u64;
+        loop {
+            tick.tick().await;
+            seq += 1;
+            snapshot_service.publish_runtime_snapshot(seq).await;
+        }
+    });
     let (body_shutdown_tx, body_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut body_server = tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -145,7 +142,7 @@ async fn main() -> Result<()> {
     );
 
     let mut launcher = PackageLauncher::new(
-        log_dir,
+        log_dir.clone(),
         config.atlas_endpoint.clone(),
         config.listen.clone(),
     )
@@ -243,30 +240,7 @@ async fn main() -> Result<()> {
             ),
         )
         .await
-        .context("declare Soma stream_health gRPC capability")?;
-
-    if deployment.primitives.is_empty() {
-        warn!(
-            "No primitives declared in robonix_manifest.yaml — SOMA health will remain UNKNOWN. \
-             Add a health primitive to the manifest's primitive list."
-        );
-    }
-    {
-        let health_atlas = atlas.clone();
-        let health_body_id = body.robot_id.clone();
-        tokio::spawn(async move {
-            if let Err(error) = robonix_soma::health::start_health_collector(
-                health_atlas,
-                health_body_id,
-                "piper".to_string(),
-                snapshot_tx,
-            )
-            .await
-            {
-                warn!("[soma] health collector failed: {error:#}");
-            }
-        });
-    }
+        .context("declare Soma health stream gRPC capability")?;
     atlas
         .set_lifecycle_state(
             &config.provider_id,
@@ -275,6 +249,21 @@ async fn main() -> Result<()> {
         )
         .await
         .context("set Soma lifecycle ACTIVE")?;
+    let runtime_dir = log_dir.join("soma-runtime");
+    let runtime_monitor = match robonix_soma::runtime_monitor::start(
+        &mut atlas,
+        &config.provider_id,
+        runtime_state,
+        &runtime_dir,
+    )
+    .await
+    {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            warn!("[soma/state] runtime monitor unavailable: {error:#}");
+            None
+        }
+    };
     let heartbeat_failure = {
         let mut hb = atlas.clone();
         let provider_id = config.provider_id.clone();
@@ -351,6 +340,10 @@ async fn main() -> Result<()> {
     // so its pipe read doesn't come back and try to reuse a torn-down
     // launcher.
     stage2_task.abort();
+    snapshot_task.abort();
+    if let Some(runtime_monitor) = runtime_monitor {
+        runtime_monitor.shutdown(&mut atlas).await;
+    }
     stage2_launcher.lock().await.stop_all().await?;
     serve_result?;
     Ok(())
