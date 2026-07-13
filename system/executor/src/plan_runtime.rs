@@ -51,6 +51,8 @@ struct OpMeta {
     op_id: String,
     description: String,
     node_kind: u32,
+    provider_id: String,
+    contract_id: String,
 }
 
 /// When a stop point fires relative to its target op. "Stop" always means
@@ -130,6 +132,16 @@ impl PlanRuntime {
                 op_id: n.op_id.clone(),
                 description: n.description.clone(),
                 node_kind: n.node_kind,
+                provider_id: n
+                    .call
+                    .as_ref()
+                    .map(|call| call.provider_id.clone())
+                    .unwrap_or_default(),
+                contract_id: n
+                    .call
+                    .as_ref()
+                    .map(|call| call.contract_id.clone())
+                    .unwrap_or_default(),
             })
             .collect();
         let description = plan
@@ -194,6 +206,8 @@ impl PlanRuntime {
                     "op_id": op.op_id,
                     "kind": kind_label(op.node_kind),
                     "description": op.description,
+                    "provider_id": op.provider_id,
+                    "contract_id": op.contract_id,
                     "state": state,
                     "stop_point": run.stop_points.get(&op.op_id).map(when_label),
                 })
@@ -238,6 +252,8 @@ impl PlanRuntime {
                         "op_id": op.op_id,
                         "kind": kind_label(op.node_kind),
                         "description": op.description,
+                        "provider_id": op.provider_id,
+                        "contract_id": op.contract_id,
                         "state": run.op_state.get(&op.op_id)
                             .map(|state| state_label(*state))
                             .unwrap_or("pending"),
@@ -889,7 +905,12 @@ mod tests {
                 RtdlNode {
                     node_kind: 2,
                     children: vec![],
-                    call: None,
+                    call: Some(CapabilityCall {
+                        call_id: "camera-1".into(),
+                        provider_id: "realsense_camera".into(),
+                        contract_id: "robonix/primitive/camera/capture".into(),
+                        args_json: "{}".into(),
+                    }),
                     op_id: "2".into(),
                     description: "take snapshot".into(),
                 },
@@ -915,6 +936,8 @@ mod tests {
         assert!(r.output.contains(r#""state":"pending""#));
         assert!(r.output.contains(r#""stop_point":"on_complete""#));
         assert!(r.output.contains(r#""running":true"#));
+        assert!(r.output.contains("realsense_camera"));
+        assert!(r.output.contains("robonix/primitive/camera/capture"));
     }
 
     #[tokio::test]
