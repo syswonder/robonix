@@ -59,7 +59,7 @@ package robonix.atlas;
 //
 // Why two-step registration?
 //   1) RegisterPrimitive / RegisterService / RegisterSkill announces
-//      identity + namespace; heartbeat starts. The provider is on
+//      identity + its primary namespace; heartbeat starts. The provider is on
 //      the registry but cannot yet be called.
 //   2) DeclareCapability, called once per (contract, transport),
 //      late-binds the wire endpoint for that pair. Late so the
@@ -123,9 +123,11 @@ message RegisterRequest {
   // assigns "ephemeral-<uuid>". Convention: id matches `name:` in
   // package_manifest.yaml.
   string id = 1;
-  // Grouping namespace, e.g. "robonix/primitive/camera". Every later
-  // DeclareCapability MUST carry a contract_id under this prefix;
-  // otherwise Atlas rejects with InvalidArgument.
+  // Primary grouping namespace, e.g. "robonix/primitive/camera". This is
+  // classification and diagnostics metadata, not an authorization boundary.
+  // Contracts normally live under this prefix. A contract may explicitly
+  // opt into cross-namespace use; any other mismatch is accepted with a
+  // warning so metadata mistakes remain visible without blocking startup.
   string namespace = 2;
   // Absolute path to the package's CAPABILITY.md, in the *provider's own*
   // filesystem namespace. Recorded for debugging only -- it is NOT
@@ -210,9 +212,8 @@ message TransportParams {
 // gRPC errors:
 //   * NotFound          -- `provider_id` is not registered with Atlas.
 //   * InvalidArgument   -- `transport` is TRANSPORT_UNSPECIFIED;
-//                         `contract_id` is not under the provider's
-//                         declared namespace; `params.kind` does
-//                         not match `transport`; or the conflict-
+//                         `params.kind` does not match `transport`;
+//                         or the conflict-
 //                         resolution rules below resolve to it.
 //   * AlreadyExists     -- duplicate (provider_id, contract_id, transport)
 //                         or a non-mintable endpoint collision.
@@ -235,7 +236,7 @@ message DeclareCapabilityRequest {
   //                     -> InvalidArgument
   //   - non-empty + no collision        -> stored verbatim
   //   - non-empty + collision + mintable
-  //                     -> Atlas rewrites by appending "~<uuid8>"
+  //                     -> Atlas rewrites by appending "__<uuid8>"
   //   - non-empty + collision + non-mintable
   //                     -> AlreadyExists (caller picks new and retries)
   //
@@ -302,6 +303,10 @@ message Capability {
   TransportParams params = 5;
   // Natural-language description (see DeclareCapabilityRequest.description).
   string description = 6;
+  // True when this contract sits outside the provider's primary namespace
+  // and its ContractDescriptor does not opt into cross-namespace use. Atlas
+  // still accepts and serves the capability; this is diagnostic only.
+  bool namespace_mismatch = 7;
 }
 
 // -- CapabilityProvider lifecycle --------------------------------------------
@@ -509,6 +514,10 @@ message ContractDescriptor {
   // are complementary (generic + instance-specific), not
   // alternatives.
   string description = 11;
+  // Allow providers from any primary namespace to implement this contract
+  // without a namespace-mismatch diagnostic. Intended for shared framework
+  // contracts such as lifecycle and health. Defaults to false.
+  bool cross_namespace = 12;
 }
 
 message FieldSpec {

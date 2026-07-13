@@ -1,0 +1,7 @@
+# Stream microphone PCM to the speech service until a configured wake phrase is detected.
+audio/msg/AudioChunk chunk
+---
+bool detected
+string keyword
+float32 confidence
+string error

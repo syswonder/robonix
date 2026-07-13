@@ -159,6 +159,10 @@ service:
       params_profile: sim
       use_sim_time: true
       action_wait_s: 240.0
+      # The simulation goal checker enters at 0.25 m. Keep the terminal
+      # rotation guard inside that boundary so path-alignment turns are not
+      # mistaken for a stuck final-yaw correction.
+      guard_terminal_xy_m: 0.20
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:

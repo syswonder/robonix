@@ -3,7 +3,7 @@
 [contract]
 id      = "robonix/system/liaison/voice"
 version = "1"
-kind    = "system"
+kind    = "service"
 idl     = "liaison/srv/StartVoiceSession.srv"
 description = "Run a voice interaction session through Liaison."
 

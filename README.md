@@ -234,8 +234,11 @@ Dive deeper:
 ## Ecosystem
 
 Robonix is built from small, swappable **packages**, each implementing one or
-more capability contracts under a `robonix/<kind>/<area>/*` namespace. The
-contract definitions are documented in the
+more capability contracts normally grouped under a primary
+`robonix/<kind>/<area>/*` namespace. Shared framework contracts may be
+implemented across those provider namespaces. Namespace mismatches are
+diagnostic rather than a runtime authorization boundary. The contract
+definitions are documented in the
 [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md).
 
 This repository contains the core runtime, built-in reference services, and
