@@ -78,7 +78,12 @@ class TencentRealtimeASRBackend:
         self.filter_punc = int(os.environ.get("TENCENT_ASR_FILTER_PUNC", "0"))
         self.chunk_bytes = int(os.environ.get("TENCENT_ASR_CHUNK_BYTES", "6400"))
         self.recv_timeout_s = float(os.environ.get("TENCENT_ASR_RECV_TIMEOUT", "0.05"))
-        log.info("Tencent ASR initialized (engine=%s)", self.engine)
+        log.info(
+            "Tencent ASR initialized (appid=%s engine=%s credential=%s)",
+            self.creds.appid,
+            self.engine,
+            self._credential_fingerprint(self.creds),
+        )
 
     def recognize(
         self,
@@ -101,7 +106,17 @@ class TencentRealtimeASRBackend:
     def recognize_stream(self, pcm_chunks: Iterator[bytes]) -> Iterator[dict]:
         url = self._signed_url()
         last_text = ""
-        with connect(url, max_size=None, open_timeout=5, close_timeout=2) as ws:
+        # Robot deployments may export a proxy for GitHub/model downloads.
+        # Tencent's signed ASR WebSocket must connect directly: inheriting
+        # HTTP_PROXY/ALL_PROXY can route the handshake through a local proxy
+        # and Tencent then reports a misleading resource-package error (4004).
+        with connect(
+            url,
+            max_size=None,
+            open_timeout=5,
+            close_timeout=2,
+            proxy=None,
+        ) as ws:
             first = self._recv_json(ws, timeout_s=5.0)
             if first and first.get("code", 0) != 0:
                 raise RuntimeError(f"Tencent ASR handshake failed: {first}")
@@ -141,6 +156,12 @@ class TencentRealtimeASRBackend:
                     break
 
     def _signed_url(self) -> str:
+        # Driver(INIT) is allowed to update the manifest-backed Tencent
+        # settings after the service process has started. Refresh the session
+        # snapshot here so a long-lived backend never signs with stale AppID
+        # or credentials captured by an earlier initialization attempt.
+        self.creds = TencentCredentials.from_env()
+        self.engine = os.environ.get("TENCENT_ASR_ENGINE", "16k_zh_en")
         now = int(time.time())
         params = {
             "engine_model_type": self.engine,
@@ -167,6 +188,11 @@ class TencentRealtimeASRBackend:
             f"wss://{self.host}/asr/v2/{self.creds.appid}?"
             f"{query}&signature={quote(signature, safe='')}"
         )
+
+    @staticmethod
+    def _credential_fingerprint(creds: TencentCredentials) -> str:
+        material = f"{creds.appid}\0{creds.secret_id}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()[:12]
 
     def _chunk_pcm(self, audio_data: bytes) -> Iterator[bytes]:
         for i in range(0, len(audio_data), self.chunk_bytes):

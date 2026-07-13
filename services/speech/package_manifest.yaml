@@ -15,10 +15,18 @@
 #   funasr_device:     str   — auto | cuda | cpu (default: auto — try GPU then fall back to CPU on OOM)
 #   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
 #   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
+#   default_speaker_provider_id: str — provider id used by speech/speak when
+#       its request target is empty; explicit request target overrides this
 #   tencent_asr_appid: str   — Tencent Cloud ASR AppID (secret id/key stay in env)
 #   tencent_asr_engine: str  — default 16k_zh_en
+#   tencent_asr_host: str    — default asr.cloud.tencent.com
 #   tencent_tts_voice_type: int — default 1001
 #   tencent_tts_region: str — default ap-guangzhou
+#   tencent_tts_model_type: int — default 1
+#   tencent_tts_sample_rate: int — default 16000
+#   tencent_tts_codec: str — default pcm
+#   tencent_tts_primary_language: int — optional 1=Chinese, 2=English;
+#       omit for automatic Chinese/English selection per utterance
 #   log:               str   — log level (default: info)
 manifestVersion: 1
 
@@ -36,7 +44,7 @@ package:
 build: bash scripts/build.sh
 
 start: |
-  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:${PYTHONPATH:-}"
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
   # Don't redirect stdout/stderr — `rbnx boot` already captures both
   # into rbnx-boot/logs/system_speech.log. A second redirect here would
   # split the log in half and leave the boot-side log empty, which is
@@ -52,6 +60,7 @@ capabilities:
   - name: robonix/service/speech/driver
   - name: robonix/service/speech/asr
   - name: robonix/service/speech/asr_stream
+  - name: robonix/service/speech/wake_word
   - name: robonix/service/speech/tts
   - name: robonix/service/speech/tts_stream
   - name: robonix/service/speech/dialog

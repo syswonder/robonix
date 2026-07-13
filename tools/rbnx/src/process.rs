@@ -379,7 +379,12 @@ impl ProcessManager {
             .env("PYTHONUNBUFFERED", "1")
             .env("SCRIBE_LOG_DIR", &self.log_dir);
         #[cfg(unix)]
-        cmd.process_group(0);
+        if std::env::var_os("RBNX_DEPLOY_MANAGED").is_none() {
+            // A standalone `rbnx start` owns a group for its package. When
+            // boot spawned this wrapper, preserve boot's PGID so one teardown
+            // reaches the wrapper and its actual package process together.
+            cmd.process_group(0);
+        }
 
         let mut child = cmd
             .spawn()

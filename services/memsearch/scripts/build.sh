@@ -54,7 +54,8 @@ VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
 
 # ── 3. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
 FLAGS=(--mcp)
-[[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
+# The complete build directory was already removed above. A second clean here
+# would delete the freshly synchronized venv before model warm-up.
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
@@ -72,6 +73,8 @@ echo "[build] warming ONNX embedding model (so start needs no network)"
 export HF_ENDPOINT
 if ! "$VENV/bin/python" - <<'PY'
 import asyncio, os, tempfile
+from memsearch_service.onnx_compat import configure_onnxruntime
+configure_onnxruntime()
 from memsearch import MemSearch
 d = tempfile.mkdtemp(prefix="memsearch_warm_")
 with open(os.path.join(d, "warm.md"), "w") as f:
@@ -81,9 +84,8 @@ asyncio.run(m.index())
 print("[build]   embedding model cached OK")
 PY
 then
-    echo "[build] WARNING: embedding-model warm failed — start will fall back to" >&2
-    echo "[build]          downloading on first use (check network / HF_ENDPOINT," >&2
-    echo "[build]          then rerun this build online)." >&2
+    echo "[build] error: ONNX embedding-model warm failed" >&2
+    exit 1
 fi
 
 echo "[build] done."

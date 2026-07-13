@@ -16,6 +16,12 @@ dependencies = [
     "mcp",
     "fastmcp",
     "memsearch[onnx]",
+    # Newer official ARM64 wheels abort on Jetson power modes with offline
+    # cores. 1.18.1 plus our explicit SessionOptions path is verified here.
+    "onnxruntime==1.18.1; platform_machine == 'aarch64'",
+    # Keep non-ARM deployments on the current supported line. The disjoint
+    # markers let uv lock both variants without downgrading x86 CI/runners.
+    "onnxruntime>=1.23,<1.24; platform_machine != 'aarch64'",
     "grpcio",
     "grpcio-tools",
     "protobuf",

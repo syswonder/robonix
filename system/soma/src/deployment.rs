@@ -24,6 +24,7 @@
 // against exactly one deployment dir, so we now load it directly.
 
 use anyhow::{Context, Result};
+use robonix_cli::manifest::{deploy_repo_dir_name, prepare_deployment_manifest};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -109,11 +110,23 @@ impl Deployment {
     /// Read one robonix_manifest.yaml and resolve primitive/skill package paths
     /// (both `path:` and `url:` cache locations).
     pub fn load(deployment_path: &Path) -> Result<Self> {
-        let manifest_path = deployment_path.join("robonix_manifest.yaml");
-        let raw = std::fs::read_to_string(&manifest_path)
+        Self::load_manifest(&deployment_path.join("robonix_manifest.yaml"))
+    }
+
+    /// Load the exact manifest selected by `rbnx boot -f`, while keeping its
+    /// parent as the deployment root for local paths and rbnx-boot/cache.
+    pub fn load_manifest(manifest_path: &Path) -> Result<Self> {
+        let deployment_path = manifest_path
+            .parent()
+            .context("deployment manifest has no parent directory")?;
+        let raw = std::fs::read_to_string(manifest_path)
             .with_context(|| format!("read '{}'", manifest_path.display()))?;
-        let manifest: DeployManifest = serde_yaml::from_str(&raw)
+        let raw: serde_yaml::Value = serde_yaml::from_str(&raw)
             .with_context(|| format!("parse '{}'", manifest_path.display()))?;
+        let prepared = prepare_deployment_manifest(raw, None)
+            .with_context(|| format!("prepare '{}'", manifest_path.display()))?;
+        let manifest: DeployManifest = serde_yaml::from_value(prepared)
+            .with_context(|| format!("decode '{}'", manifest_path.display()))?;
         let cache_root = deployment_path.join("rbnx-boot").join("cache");
         let mut skipped = Vec::new();
         let mut primitives = Vec::new();
@@ -151,7 +164,7 @@ impl Deployment {
         }
         Ok(Self {
             deployment_path: deployment_path.to_path_buf(),
-            manifest_path,
+            manifest_path: manifest_path.to_path_buf(),
             primitives,
             skills,
             skipped,
@@ -168,32 +181,11 @@ impl std::fmt::Display for PackageKind {
     }
 }
 
-/// Cache directory name for a url-remote package: the git REPO name
-/// (last path segment of the url, minus `.git`), NOT `entry.name`.
-///
-/// Must stay in lock-step with `rbnx::cmd::deploy::repo_dir_name`. The
-/// rationale is documented there in full; the short version is that
-/// `entry.name` is the per-instance provider id (multiple instances of
-/// one repo can coexist in a deploy manifest), while the cache dir is
-/// one-per-repo. If these two diverge, `rbnx build` populates one path
-/// and soma looks up another, producing a bogus "missing manifest"
-/// failure at stage 2. We can't share the function directly without
-/// pulling rbnx into soma's dep graph, so we duplicate the tiny
-/// implementation and pin them together with tests + comments.
-fn repo_dir_name(url: &str) -> String {
-    url.trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or("pkg")
-        .to_string()
-}
-
 /// Resolve a single deploy entry to its on-disk package directory.
 ///
-/// Mirrors `rbnx::cmd::deploy::resolve_entry_path` exactly: `path:`
+/// Uses the shared deployment manifest rules: `path:`
 /// resolves relative to the deployment dir, `url:` resolves to
-/// `<cache_root>/<repo_dir_name(url)>`. Anything else returns an Err
+/// `<cache_root>/<deploy_repo_dir_name(url)>`. Anything else returns an Err
 /// with a human-readable reason that ends up in the startup report.
 fn resolve_entry(
     deployment_path: &Path,
@@ -209,22 +201,7 @@ fn resolve_entry(
                 deployment_path.join(p)
             }
         }
-        (None, Some(url)) => {
-            // Cache dir MUST be the git repo name (last path segment
-            // of the url, minus `.git`), NOT `entry.name`. This mirrors
-            // `rbnx::cmd::deploy::repo_dir_name` verbatim — see the
-            // contract in tools/rbnx/src/cmd/deploy.rs: a single repo
-            // can back several providers/instances in one deploy
-            // manifest (each with its own `name`/provider_id), and they
-            // must share ONE clone. Keying by `name` here caused soma
-            // to look under `.../cache/<name>/` while `rbnx build`
-            // populated `.../cache/<repo>/` — silently breaking any
-            // package whose provider-id happens to differ from its
-            // repo name (real-world case: `name: explore` +
-            // `url: .../explore_rbnx`).
-            let cache_name = repo_dir_name(url);
-            cache_root.join(cache_name)
-        }
+        (None, Some(url)) => cache_root.join(deploy_repo_dir_name(url)),
         (Some(_), Some(_)) => {
             return Err("package entry has both `path` and `url`; pick one".into());
         }
@@ -324,16 +301,62 @@ mod tests {
     }
 
     #[test]
-    fn repo_dir_name_matches_rbnx_conventions() {
-        // Pin the algorithm to the exact contract in
-        // `rbnx::cmd::deploy::repo_dir_name`. If either side changes,
-        // both must change together.
-        assert_eq!(repo_dir_name("https://github.com/foo/bar"), "bar");
-        assert_eq!(repo_dir_name("https://github.com/foo/bar.git"), "bar");
-        assert_eq!(repo_dir_name("https://github.com/foo/bar/"), "bar");
-        assert_eq!(repo_dir_name("git@github.com:foo/bar_baz.git"), "bar_baz");
+    fn local_path_uses_shared_deployment_env_expansion() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deployment_dir = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deployment_dir).expect("create deploy dir");
+        std::fs::write(
+            deployment_dir.join("robonix_manifest.yaml"),
+            "primitive:\n  - name: local_audio\n    path: ${HOME}/shared-audio\n",
+        )
+        .expect("write manifest");
+
+        let deployment = Deployment::load(&deployment_dir).expect("load deployment");
+        let expected = PathBuf::from(std::env::var("HOME").expect("HOME")).join("shared-audio");
+        assert_eq!(deployment.primitives[0].package_dir, expected);
+    }
+
+    #[test]
+    fn load_manifest_uses_the_selected_profile_not_the_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deployment_dir = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deployment_dir).expect("create deploy dir");
+        std::fs::write(
+            deployment_dir.join("robonix_manifest.yaml"),
+            "primitive:\n  - name: default_base\n    path: packages/default_base\n",
+        )
+        .expect("write default manifest");
+        let selected = deployment_dir.join("robonix_manifest.arm.yaml");
+        std::fs::write(
+            &selected,
+            "primitive:\n  - name: arm_base\n    path: packages/arm_base\n",
+        )
+        .expect("write selected manifest");
+
+        let deployment = Deployment::load_manifest(&selected).expect("load selected profile");
+        assert_eq!(deployment.manifest_path, selected);
+        assert_eq!(deployment.primitives.len(), 1);
+        assert_eq!(deployment.primitives[0].name, "arm_base");
         assert_eq!(
-            repo_dir_name("https://github.com/enkerewpo/explore_rbnx"),
+            deployment.primitives[0].package_dir,
+            deployment_dir.join("packages/arm_base")
+        );
+    }
+
+    #[test]
+    fn repo_dir_name_comes_from_shared_manifest_logic() {
+        assert_eq!(deploy_repo_dir_name("https://github.com/foo/bar"), "bar");
+        assert_eq!(
+            deploy_repo_dir_name("https://github.com/foo/bar.git"),
+            "bar"
+        );
+        assert_eq!(deploy_repo_dir_name("https://github.com/foo/bar/"), "bar");
+        assert_eq!(
+            deploy_repo_dir_name("git@github.com:foo/bar_baz.git"),
+            "bar_baz"
+        );
+        assert_eq!(
+            deploy_repo_dir_name("https://github.com/enkerewpo/explore_rbnx"),
             "explore_rbnx"
         );
     }
