@@ -233,6 +233,29 @@ mod tests {
         );
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn provider_exit_summary_uses_last_structured_message() {
+        let path = std::env::temp_dir().join(format!(
+            "rbnx-provider-exit-summary-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"level\":\"info\",\"msg\":\"Traceback (most recent call last):\"}\n",
+                "{\"level\":\"info\",\"msg\":\"ImportError: generated contract is missing\"}\n",
+                "{\"level\":\"info\",\"msg\":\"Error: scene process exited with status 1\"}\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_provider_exit_summary(&path).as_deref(),
+            Some("Error: scene process exited with status 1")
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -1489,7 +1512,18 @@ pub async fn execute(
         children.len(),
         log_dir.display()
     ));
-    scribe::info("bootstrap", "all components up — waiting for signal");
+    if failures.is_empty() {
+        scribe::info("bootstrap", "all components up — waiting for signal");
+    } else {
+        scribe::info(
+            "bootstrap",
+            &format!(
+                "{} component(s) up, {} package(s) failed — waiting for signal",
+                children.len(),
+                failures.len()
+            ),
+        );
+    }
     output::sub_step("Ctrl-C to tear down (or run `rbnx shutdown` from another shell).");
 
     // Wait for SIGINT / SIGTERM (reusing the streams installed before
@@ -1851,15 +1885,22 @@ async fn spawn_and_init(
     // in their own process groups that only the handler knows about.
     let pgid = sp.pgid;
 
-    let (provider_id, driver_contract) =
-        match wait_for_registration(atlas, &before, &pkg_label, component, spawn_env.log_dir).await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                terminate_process_group(pgid, Duration::from_secs(8)).await;
-                return Err(e);
-            }
-        };
+    let (provider_id, driver_contract) = match wait_for_registration(
+        atlas,
+        &before,
+        &pkg_label,
+        component,
+        spawn_env.log_dir,
+        &mut sp.child,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            terminate_process_group(pgid, Duration::from_secs(8)).await;
+            return Err(e);
+        }
+    };
 
     // Spec: the provider_id this process registers (Python's
     // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
@@ -2277,6 +2318,29 @@ fn read_provider_failure(path: &Path) -> Option<String> {
     error_level_fallback
 }
 
+/// Summarize a package that exited before Atlas registration. Providers often
+/// forward Python tracebacks through Scribe at info level, so the lifecycle-
+/// specific parser above may intentionally return None. In that case the last
+/// structured message is the most useful single-line cause for boot output.
+fn read_provider_exit_summary(path: &Path) -> Option<String> {
+    if let Some(cause) = read_provider_failure(path) {
+        return Some(cause);
+    }
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines().rev() {
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(message) = record.get("msg").and_then(|value| value.as_str())
+            && !message.trim().is_empty()
+        {
+            return Some(message.trim().to_string());
+        }
+        if !line.trim().is_empty() {
+            return Some(line.trim().to_string());
+        }
+    }
+    None
+}
+
 async fn soma_grpc_ready(atlas: &mut AtlasClient, contract_id: &str) -> bool {
     let Ok((channel_id, endpoint, _params)) = atlas
         .connect_capability(
@@ -2462,6 +2526,7 @@ async fn wait_for_registration(
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
+    child: &mut Child,
 ) -> Result<(String, Option<String>)> {
     // One package = one provider. Find the provider that wasn't in `before`.
     // Multiple new providers = deploy bug, fail loud. No heartbeat-based
@@ -2485,6 +2550,35 @@ async fn wait_for_registration(
             }
         } else {
             output::boot_progress(display_label, &detail, frame);
+        }
+        // A package wrapper that exits before registering can never recover.
+        // Detect it on every spinner tick instead of waiting out the full
+        // registration timeout and then continuing with a misleading generic
+        // timeout. The caller still terminates the package PGID so any child
+        // processes left behind by a failed start hook are reaped.
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let log_file = log_path(log_dir, pkg_label);
+                let cause = read_provider_exit_summary(&log_file)
+                    .unwrap_or_else(|| "no diagnostic message in provider log".to_string());
+                output::boot_fail(
+                    display_label,
+                    &format!(
+                        "start process exited ({status}); {cause}; log {}",
+                        log_file.display()
+                    ),
+                );
+                anyhow::bail!(
+                    "[{component}/{pkg_label}] start process exited ({status}) before Atlas registration: {cause}. Log: {}",
+                    log_file.display()
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                anyhow::bail!(
+                    "[{component}/{pkg_label}] inspect start process while waiting for Atlas registration: {error}"
+                );
+            }
         }
         if frame.is_multiple_of(POLLS_PER_TICK as usize) {
             let providers = atlas
