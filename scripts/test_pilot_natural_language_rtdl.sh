@@ -118,6 +118,8 @@ plans = []
 node_events = []
 task_states = []
 final_texts = []
+text_chunks = []
+milestones = {}
 
 
 def rel() -> float:
@@ -132,9 +134,9 @@ def mark_command(start_label: str, duration: int, end_label: str) -> str:
     )
 
 
-a1 = mark_command("A_RESTAURANT_START", 20, "A_RESTAURANT_END")
+a1 = mark_command("A_RESTAURANT_START", 60, "A_RESTAURANT_END")
 a2 = mark_command("A_MEETING_START", 20, "A_MEETING_END")
-c_cmd = mark_command("C_OPEN_START", 30, "C_OPEN_END")
+c_cmd = mark_command("C_OPEN_START", 60, "C_OPEN_END")
 d_cmd = mark_command("D_315_START", 10, "D_315_END")
 greet_cmd = (
     f'printf "%.3f B_GREET_START\\n" "$(date +%s.%N)" >> {trace_q}; '
@@ -184,9 +186,21 @@ async def wait_label(label: str, timeout: float):
     raise RuntimeError(f"timeout waiting for {label}; labels={trace_labels()}")
 
 
-async def collect_original(stream):
+async def wait_final_after(after: float, timeout: float):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(event_time >= after for event_time, _ in final_texts):
+            return
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"timeout waiting for final reply after t={after:.2f}")
+
+
+async def collect_stream(stream):
     async for event in stream:
-        if event.HasField("plan"):
+        if event.text_chunk:
+            text_chunks.append((rel(), event.text_chunk))
+            print(f"[{rel():6.2f}s] TEXT {event.text_chunk[:180]!r}", flush=True)
+        elif event.HasField("plan"):
             plan = event.plan
             calls = []
             for node in plan.nodes:
@@ -221,7 +235,7 @@ async def collect_original(stream):
             task_states.append(event.task_state.status)
             print(f"[{rel():6.2f}s] TASK_STATE {event.task_state.status}", flush=True)
         elif event.final_text:
-            final_texts.append(event.final_text)
+            final_texts.append((rel(), event.final_text))
             print(f"[{rel():6.2f}s] FINAL {event.final_text[:180]!r}", flush=True)
 
 
@@ -238,8 +252,9 @@ async def submit_steer(stub, name: str):
             "expected_turn_id": turn_id,
         }),
     )
-    async for _ in stub.SubmitTask(task):
-        pass
+    collector = asyncio.create_task(collect_stream(stub.SubmitTask(task)))
+    await asyncio.sleep(0)
+    return collector
 
 
 async def main():
@@ -255,30 +270,36 @@ async def main():
             }),
         )
         original_stream = stub.SubmitTask(initial)
-        collector = asyncio.create_task(collect_original(original_stream))
+        collectors = [asyncio.create_task(collect_stream(original_stream))]
 
         await wait_label("A_RESTAURANT_START", 45)
-        await submit_steer(stub, "greet")
+        collectors.append(await submit_steer(stub, "greet"))
         await wait_label("B_GREET_START", 45)
 
         await asyncio.sleep(2)
-        await submit_steer(stub, "stop_after_a1")
-        await wait_label("A_RESTAURANT_END", 20)
+        collectors.append(await submit_steer(stub, "stop_after_a1"))
+        await wait_label("A_RESTAURANT_END", 65)
+        milestones["a_stopped"] = rel()
+        await wait_final_after(milestones["a_stopped"], 45)
         await asyncio.sleep(1)
 
-        await submit_steer(stub, "open_area")
+        collectors.append(await submit_steer(stub, "open_area"))
         await wait_label("C_OPEN_START", 45)
         await asyncio.sleep(5)
-        await submit_steer(stub, "cancel_and_return")
+        collectors.append(await submit_steer(stub, "cancel_and_return"))
         await wait_label("D_315_END", 60)
+        milestones["d_completed"] = rel()
+        await wait_final_after(milestones["d_completed"], 45)
         await wait_label("B_GREET_END", 90)
         await asyncio.sleep(3)
 
-        collector.cancel()
-        try:
-            await collector
-        except asyncio.CancelledError:
-            pass
+        for collector in collectors:
+            collector.cancel()
+        for collector in collectors:
+            try:
+                await collector
+            except asyncio.CancelledError:
+                pass
 
 
 asyncio.run(asyncio.wait_for(main(), timeout=210))
@@ -334,6 +355,16 @@ checks = {
     "cancel targeted C": plan_c is not None and plan_c["plan_id"] in cancel_targets,
     "cancel did not target greet": plan_b is not None and plan_b["plan_id"] not in cancel_targets,
     "cancel_all was never used": not cancel_all_seen,
+    "each RTDL plan had live natural-language feedback": len(text_chunks) >= len(plans),
+    "no final reply was broadcast more than once": len({text for _, text in final_texts}) == len(final_texts),
+    "return completion reply followed D completion": any(
+        event_time >= milestones.get("d_completed", float("inf"))
+        for event_time, _ in final_texts
+    ),
+    "boundary-stop completion reply followed A1 completion": any(
+        event_time >= milestones.get("a_stopped", float("inf"))
+        for event_time, _ in final_texts
+    ),
 }
 
 # If A2 was already placed in the same in-flight tree as A1, Pilot must arm a

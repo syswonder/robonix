@@ -279,6 +279,16 @@ fn expected_turn_id(task: &Task) -> Option<String> {
     })
 }
 
+fn strict_expected_turn(task: &Task) -> bool {
+    task_context(task)
+        .and_then(|value| {
+            value
+                .get("strict_expected_turn")
+                .and_then(|field| field.as_bool())
+        })
+        .unwrap_or(false)
+}
+
 #[tonic::async_trait]
 impl RobonixSystemPilot for PilotServiceImpl {
     type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
@@ -388,10 +398,16 @@ impl RobonixSystemPilot for PilotServiceImpl {
             if let Some(expected) = expected_turn
                 && expected != existing.turn_id
             {
-                return Err(Status::failed_precondition(format!(
-                    "steer expected turn {expected}, but active turn is {}",
-                    existing.turn_id
-                )));
+                if strict_expected_turn(&task) {
+                    return Err(Status::failed_precondition(format!(
+                        "steer expected turn {expected}, but active turn is {}",
+                        existing.turn_id
+                    )));
+                }
+                debug!(
+                    "[pilot] accepting same-session steer with stale expected turn {} (active={})",
+                    expected, existing.turn_id
+                );
             }
             // A turn is already live: every new same-session task is a steer of
             // that supervisor. Subscribe before queueing it so this caller sees
@@ -537,8 +553,8 @@ async fn build_executor_conn(
 #[cfg(test)]
 mod tests {
     use super::{
-        EVT_FINAL_TEXT, EVT_STATUS, expected_turn_id, subscribe_turn_events, task_is_abort_turn,
-        task_is_steer,
+        EVT_FINAL_TEXT, EVT_STATUS, expected_turn_id, strict_expected_turn, subscribe_turn_events,
+        task_is_abort_turn, task_is_steer,
     };
     use crate::pb::pilot::{PilotEvent, Task};
     use tokio_stream::StreamExt;
@@ -569,6 +585,10 @@ mod tests {
         let value = task(r#"{"interaction_mode":"steer","expected_turn_id":"turn-7"}"#);
         assert!(task_is_steer(&value));
         assert_eq!(expected_turn_id(&value).as_deref(), Some("turn-7"));
+        assert!(!strict_expected_turn(&value));
+        assert!(strict_expected_turn(&task(
+            r#"{"expected_turn_id":"turn-7","strict_expected_turn":true}"#
+        )));
         assert!(task_is_steer(&task(r#"{"steer":true}"#)));
         assert!(!task_is_steer(&task(r#"{"interaction_mode":"task"}"#)));
     }
