@@ -42,7 +42,7 @@ use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_cli::launch::{
     CMD_ACTIVATE, CMD_INIT, PackageRuntimeRecord, call_driver_cmd, shutdown_package_runtime,
-    snapshot_provider_ids, wait_for_registration_core,
+    snapshot_provider_ids, terminate_process_group, wait_for_registration_core,
 };
 use robonix_cli::process::ProcessManager;
 use robonix_scribe::{info, warn};
@@ -419,21 +419,11 @@ impl PackageLauncher {
         }
     }
 
-    /// SIGKILL the package's process group. Called when a bring-up
-    /// step after spawn fails (registration timeout, INIT/ACTIVATE
-    /// error) so we don't leave orphaned children holding e.g.
-    /// device locks or gRPC ports. Quiet best-effort — if the
-    /// process already exited, killpg returns ESRCH and we move on.
+    /// Stop a failed package without bypassing provider cleanup.  Providers
+    /// install SIGTERM handlers that run `on_shutdown`; an immediate SIGKILL
+    /// leaves independently-sessioned ROS children behind under PID 1.
     async fn reap(&self, pid: u32) {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-        // Yield once so the kernel has a chance to deliver the
-        // signal before the caller's report-building runs. Not
-        // strictly required — the next atlas poll will still see
-        // the provider drop out — but keeps timings tidy in tests.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        terminate_process_group(pid, Duration::from_secs(8)).await;
     }
 
     /// Stop all packages launched by soma and abort their
@@ -534,5 +524,41 @@ mod tests {
                 .expect("launcher");
 
         assert_eq!(launcher.provider_soma_endpoint(), "127.0.0.1:50091");
+    }
+
+    #[tokio::test]
+    async fn failed_package_reap_runs_sigterm_cleanup_before_exit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marker = tmp.path().join("sigterm-cleanup-ran");
+        let launcher = PackageLauncher::new(
+            tmp.path().join("logs"),
+            "127.0.0.1:50051",
+            "127.0.0.1:50091",
+        )
+        .expect("launcher");
+        let mut child = TokioCommand::new("bash");
+        child
+            .arg("-c")
+            .arg(concat!(
+                "trap 'printf cleaned > \"$MARKER\"; exit 0' TERM; ",
+                "while :; do sleep 0.1; done"
+            ))
+            .env("MARKER", &marker)
+            .process_group(0);
+        let mut child = child.spawn().expect("spawn cleanup probe");
+        let pid = child.id().expect("probe pid");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        launcher.reap(pid).await;
+        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("probe exit timeout")
+            .expect("wait probe");
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("cleanup marker"),
+            "cleaned"
+        );
     }
 }
