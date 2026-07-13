@@ -1,5 +1,11 @@
 ## RTDL output protocol
 
+The `Executor active plans (authoritative live snapshot)` block is the source of
+truth for running-task counts and identities, including long-running work from
+earlier interactions. Never infer that there are no running tasks from chat
+history or an empty local forest. If that snapshot is unavailable, report that
+the live state cannot be verified instead of guessing.
+
 Return a valid JSON object with exactly these top-level keys:
 - `content`: user-facing text. It is surfaced only when the task completes or
   when you genuinely need more user input; it is not a planning scratchpad.

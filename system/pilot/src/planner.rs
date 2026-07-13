@@ -6,8 +6,9 @@ use crate::history;
 use crate::memory;
 use crate::pb::contracts::robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient;
 use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
-use crate::pb::executor::ControlPlanRequest;
+use crate::pb::contracts::robonix_system_executor_list_active_plans_client::RobonixSystemExecutorListActivePlansClient;
 use crate::pb::executor::rtdl_event::RtdlEventEnum;
+use crate::pb::executor::{ControlPlanRequest, ListActivePlansRequest};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode, RtdlNodeState,
@@ -34,6 +35,7 @@ use tonic::transport::Channel;
 pub struct ExecutorConn {
     pub graph: RobonixSystemExecutorExecuteClient<Channel>,
     pub control: RobonixSystemExecutorControlPlanClient<Channel>,
+    pub active: RobonixSystemExecutorListActivePlansClient<Channel>,
 }
 
 type CapabilityTarget = (String, String);
@@ -538,10 +540,12 @@ fn build_forest_block(
          successor because those are not equivalent in branching/parallel trees. It \
          cancels the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
-         re-issue it. Only the plan_ids listed here are running; never cancel an id \
-         not in this list. Do not reuse these ids for new trees. If an in-flight \
-         plan is already executing the same goal, do not cancel or re-issue it; \
-         wait for it to finish.\n",
+         re-issue it. Do not reuse these ids for new trees. If an in-flight plan \
+         is already executing the same goal, do not cancel or re-issue it; wait \
+         for it to finish. This block contains trees owned by the current Pilot \
+         supervisor only. The authoritative Executor snapshot below may contain \
+         additional plans started by an earlier interaction. Never use this \
+         local block alone to answer how many tasks are running.\n",
     );
     for (plan_id, meta) in entries {
         block.push_str(&format!(
@@ -559,6 +563,68 @@ fn build_forest_block(
         }
     }
     block
+}
+
+fn build_executor_active_block(plans_json: Option<&str>) -> String {
+    let Some(raw) = plans_json else {
+        return String::from(
+            "\n\n## Executor active plans (authoritative live snapshot)\n\
+             - status: unavailable\n\
+             The live query failed. Never guess a task count or claim that no \
+             task is running. Tell the user that current execution state could \
+             not be verified.\n",
+        );
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return build_executor_active_block(None);
+    };
+    let Some(plans) = value.get("plans").and_then(serde_json::Value::as_array) else {
+        return build_executor_active_block(None);
+    };
+    let normalized = serde_json::json!({
+        "count": plans.len(),
+        "plans": plans,
+    });
+    format!(
+        "\n\n## Executor active plans (authoritative live snapshot)\n\
+         This is the source of truth for every currently running RTDL plan, \
+         including long-running skills started by earlier interactions. For \
+         questions about running task count, names, state, or cancellation \
+         targets, answer from this snapshot rather than conversation history or \
+         the local forest. A plan remains running while listed here even when \
+         its provider is internally idle or motion-gated. Never say that no task \
+         is running unless count is exactly 0.\n\
+         snapshot_json: {}\n",
+        normalized
+    )
+}
+
+async fn fetch_executor_active_block(executor: &mut ExecutorConn) -> String {
+    let request = executor
+        .active
+        .list_active_plans(Request::new(ListActivePlansRequest::default()));
+    match tokio::time::timeout(Duration::from_secs(2), request).await {
+        Ok(Ok(response)) => {
+            let response = response.into_inner();
+            if response.success {
+                build_executor_active_block(Some(&response.plans_json))
+            } else {
+                warn!(
+                    "[pilot/state] Executor active-plan query rejected: {}",
+                    response.error
+                );
+                build_executor_active_block(None)
+            }
+        }
+        Ok(Err(error)) => {
+            warn!("[pilot/state] Executor active-plan query failed: {error}");
+            build_executor_active_block(None)
+        }
+        Err(_) => {
+            warn!("[pilot/state] Executor active-plan query timed out");
+            build_executor_active_block(None)
+        }
+    }
 }
 
 /// Pull every queued mid-task steer into the LLM history as fresh user input.
@@ -1125,6 +1191,7 @@ pub async fn run_turn(
             .map(TaskState::prompt_block)
             .unwrap_or_default();
         let forest_block = build_forest_block(&forest, &cancel_requested);
+        let executor_active_block = fetch_executor_active_block(executor).await;
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -1143,7 +1210,7 @@ pub async fn run_turn(
         let mut correction: Option<String> = None;
         let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_update, recovered) = loop {
             let mut messages = vec![Message::system(&format!(
-                "{system_prompt}\n\n{rtdl_prompt}{task_block}{forest_block}"
+                "{system_prompt}\n\n{rtdl_prompt}{task_block}{forest_block}{executor_active_block}"
             ))];
             messages.extend(history::sanitize_for_vlm(history));
             if let Some(ref correction) = correction {
@@ -2642,12 +2709,13 @@ mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
         RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer, apply_task_update,
-        build_forest_block, configured_vlm_idle_timeout, duplicate_in_flight_signature,
-        expand_rtdl_to_plan, extract_json_object, feed_results_into_history, format_plan_summary,
-        invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
-        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
-        parse_task_update, plan_call_signatures, rtdl_node_kind_name, rtdl_recovery_final_text,
-        rtdl_state_name, should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
+        build_executor_active_block, build_forest_block, configured_vlm_idle_timeout,
+        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        is_legacy_plan_control_contract, mixes_control_inspection_with_action, parse_meta_plan_op,
+        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end,
     };
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
@@ -2670,6 +2738,23 @@ mod tests {
             configured_vlm_idle_timeout(Some("bad")),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn executor_snapshot_is_authoritative_across_turns() {
+        let block = build_executor_active_block(Some(
+            r#"{"count":99,"plans":[{"plan_id":"8","description":"greet","ops":[]}]}"#,
+        ));
+        assert!(block.contains("\"count\":1"));
+        assert!(block.contains("\"plan_id\":\"8\""));
+        assert!(block.contains("long-running skills started by earlier interactions"));
+    }
+
+    #[test]
+    fn unavailable_executor_snapshot_forbids_guessing_zero() {
+        let block = build_executor_active_block(None);
+        assert!(block.contains("status: unavailable"));
+        assert!(block.contains("Never guess a task count"));
     }
 
     #[test]
