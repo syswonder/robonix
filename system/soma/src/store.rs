@@ -22,6 +22,16 @@ pub struct SomaBody {
     pub urdf_path: PathBuf,
     pub urdf_xml: String,
     pub footprint: Option<Footprint>,
+    pub grippers: Vec<GripperConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GripperConfig {
+    pub component_id: String,
+    pub provider_id: String,
+    pub joint_name: String,
+    pub open_position_m: f64,
+    pub open_tolerance_m: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +104,10 @@ impl SomaBody {
         let urdf_xml = std::fs::read_to_string(&urdf_path)
             .with_context(|| format!("read URDF '{}'", urdf_path.display()))?;
         let footprint = doc.robot.footprint.map(Footprint::from_doc).transpose()?;
+        let yaml_value: serde_yaml::Value = serde_yaml::from_str(&yaml_text)
+            .with_context(|| format!("parse runtime state config in '{}'", yaml_path.display()))?;
+        let mut grippers = Vec::new();
+        collect_grippers(&yaml_value, None, &mut grippers);
         Ok(Self {
             robot_id: doc.robot.id,
             yaml_path: yaml_path.to_path_buf(),
@@ -101,6 +115,7 @@ impl SomaBody {
             urdf_path,
             urdf_xml,
             footprint,
+            grippers,
         })
     }
 
@@ -122,6 +137,102 @@ impl SomaBody {
             .as_ref()
             .ok_or_else(|| StoreError::MissingFootprint(self.robot_id.clone()))
     }
+}
+
+fn collect_grippers(
+    value: &serde_yaml::Value,
+    inherited_joint_provider: Option<&str>,
+    out: &mut Vec<GripperConfig>,
+) {
+    let Some(map) = value.as_mapping() else {
+        if let Some(items) = value.as_sequence() {
+            for item in items {
+                collect_grippers(item, inherited_joint_provider, out);
+            }
+        }
+        return;
+    };
+
+    let provider =
+        joint_state_provider(map).or_else(|| inherited_joint_provider.map(str::to_string));
+    let component_type = yaml_str(map, "type")
+        .or_else(|| yaml_str(map, "part_type"))
+        .unwrap_or_default();
+    if matches!(
+        component_type.as_str(),
+        "parallel_jaw_gripper" | "end_effector"
+    ) {
+        let state = map
+            .get(serde_yaml::Value::String("state".into()))
+            .and_then(serde_yaml::Value::as_mapping);
+        let open_position_m = state.and_then(|m| yaml_f64(m, "open_position_m"));
+        if let (Some(provider_id), Some(open_position_m)) = (provider.clone(), open_position_m) {
+            out.push(GripperConfig {
+                component_id: yaml_str(map, "id").unwrap_or_else(|| "gripper".into()),
+                provider_id,
+                joint_name: state
+                    .and_then(|m| yaml_str(m, "joint_name"))
+                    .unwrap_or_else(|| "gripper".into()),
+                open_position_m,
+                open_tolerance_m: state
+                    .and_then(|m| yaml_f64(m, "open_tolerance_m"))
+                    .unwrap_or(0.002),
+            });
+        }
+    }
+
+    for child_key in ["robot", "tree", "components", "children"] {
+        if let Some(child) = map.get(serde_yaml::Value::String(child_key.into())) {
+            collect_grippers(child, provider.as_deref(), out);
+        }
+    }
+}
+
+fn joint_state_provider(map: &serde_yaml::Mapping) -> Option<String> {
+    for key in ["exports", "provided_by"] {
+        let Some(rows) = map
+            .get(serde_yaml::Value::String(key.into()))
+            .and_then(serde_yaml::Value::as_sequence)
+        else {
+            continue;
+        };
+        for row in rows {
+            let Some(row) = row.as_mapping() else {
+                continue;
+            };
+            let direct_contract = yaml_str(row, "contract");
+            if direct_contract.as_deref() == Some("robonix/primitive/arm/joint_states") {
+                return yaml_str(row, "provider_id");
+            }
+            let provider_id = yaml_str(row, "provider_id");
+            let has_contract = row
+                .get(serde_yaml::Value::String("capabilities".into()))
+                .and_then(serde_yaml::Value::as_sequence)
+                .is_some_and(|caps| {
+                    caps.iter().any(|cap| {
+                        cap.as_mapping()
+                            .and_then(|m| yaml_str(m, "path"))
+                            .as_deref()
+                            == Some("robonix/primitive/arm/joint_states")
+                    })
+                });
+            if has_contract && provider_id.is_some() {
+                return provider_id;
+            }
+        }
+    }
+    None
+}
+
+fn yaml_str(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    map.get(serde_yaml::Value::String(key.into()))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_string)
+}
+
+fn yaml_f64(map: &serde_yaml::Mapping, key: &str) -> Option<f64> {
+    map.get(serde_yaml::Value::String(key.into()))
+        .and_then(serde_yaml::Value::as_f64)
 }
 
 impl Footprint {
@@ -209,5 +320,31 @@ mod tests {
         let body = SomaBody::load(&fixture_yaml()).expect("load body");
         let err = body.resolve("someone_else").expect_err("must not match");
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn reads_calibrated_gripper_state_config() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+robot:
+  components:
+    - id: arm
+      exports:
+        - provider_id: piper_ctl
+          capabilities:
+            - { path: robonix/primitive/arm/joint_states }
+      components:
+        - id: gripper
+          type: parallel_jaw_gripper
+          state: { joint_name: gripper, open_position_m: 0.06937, open_tolerance_m: 0.002 }
+"#,
+        )
+        .unwrap();
+        let mut grippers = Vec::new();
+        collect_grippers(&value, None, &mut grippers);
+        assert_eq!(grippers.len(), 1);
+        assert_eq!(grippers[0].provider_id, "piper_ctl");
+        assert_eq!(grippers[0].joint_name, "gripper");
+        assert!((grippers[0].open_position_m - 0.06937).abs() < 1e-9);
     }
 }
