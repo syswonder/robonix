@@ -27,6 +27,20 @@ each one provides.
 
 The wire schema lives in [`proto/atlas.proto`](proto/atlas.proto).
 
+## Namespace diagnostics
+
+A provider's namespace is its primary grouping for discovery and operator
+output. Domain contracts normally use that prefix, but namespace is not an
+authorization boundary: Atlas accepts and serves a capability whose contract
+id is outside the provider namespace.
+
+Contract TOMLs may set `cross_namespace = true` for shared framework contracts
+that are intentionally implemented across provider domains. Other mismatches
+are logged and returned as `Capability.namespace_mismatch`; `rbnx caps -v`
+shows the warning without changing provider lifecycle state or callability.
+Existing per-namespace contracts, including current `*/driver` contracts,
+remain supported.
+
 ## Build
 
 From the repo root:
