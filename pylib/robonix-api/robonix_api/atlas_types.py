@@ -75,6 +75,7 @@ class Capability:
     contract_id: str
     transport: Transport
     description: str = ""
+    namespace_mismatch: bool = False
     params: GrpcParams | Ros2Params | McpParams | None = None
 
 
@@ -106,6 +107,7 @@ class ContractDescriptor:
     io_srv_type: str = ""
     source_toml_path: str = ""
     description: str = ""
+    cross_namespace: bool = False
     msg_fields: tuple[FieldSpec, ...] = ()
     srv_request_fields: tuple[FieldSpec, ...] = ()
     srv_response_fields: tuple[FieldSpec, ...] = ()
@@ -182,6 +184,7 @@ def from_pb_capability(pb_cap) -> Capability:
         contract_id=pb_cap.contract_id,
         transport=transport,
         description=pb_cap.description,
+        namespace_mismatch=getattr(pb_cap, "namespace_mismatch", False),
         params=from_pb_params(transport, pb_cap.params),
     )
 
@@ -215,6 +218,7 @@ def from_pb_contract(pb_c) -> ContractDescriptor:
         io_srv_type=pb_c.io_srv_type,
         source_toml_path=pb_c.source_toml_path,
         description=pb_c.description,
+        cross_namespace=getattr(pb_c, "cross_namespace", False),
         msg_fields=tuple(from_pb_field_spec(f) for f in pb_c.msg_fields),
         srv_request_fields=tuple(from_pb_field_spec(f) for f in pb_c.srv_request_fields),
         srv_response_fields=tuple(from_pb_field_spec(f) for f in pb_c.srv_response_fields),

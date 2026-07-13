@@ -72,6 +72,7 @@ pub async fn providers(endpoint: &str, json: bool, verbose: bool) -> Result<()> 
                     "capabilities":     r.capabilities.iter().map(|i| serde_json::json!({
                         "contract_id": i.contract_id,
                         "transport":   transport_name(i.transport),
+                        "namespace_mismatch": i.namespace_mismatch,
                     })).collect::<Vec<_>>(),
                 })
             })
@@ -99,22 +100,38 @@ pub async fn providers(endpoint: &str, json: bool, verbose: bool) -> Result<()> 
                 .dimmed()
                 .to_string()
         };
+        let namespace_hint = if provider
+            .capabilities
+            .iter()
+            .any(|cap| cap.namespace_mismatch)
+        {
+            " [namespace mismatch]".yellow().to_string()
+        } else {
+            String::new()
+        };
         println!(
-            "{} {} {} {}{}{}",
+            "{} {} {} {}{}{}{}",
             "●".green(),
             provider.id.bold(),
             state_tag(provider.state),
             provider.namespace.dimmed(),
             cap_count_hint,
+            namespace_hint,
             detail.dimmed()
         );
         if verbose {
             for cap in &provider.capabilities {
+                let mismatch = if cap.namespace_mismatch {
+                    " [namespace mismatch]".yellow().to_string()
+                } else {
+                    String::new()
+                };
                 println!(
-                    "    {} {} {}",
+                    "    {} {} {}{}",
                     "└─".dimmed(),
                     cap.contract_id,
-                    format!("({})", transport_name(cap.transport)).dimmed()
+                    format!("({})", transport_name(cap.transport)).dimmed(),
+                    mismatch
                 );
             }
         }
@@ -155,6 +172,7 @@ pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> 
                 "capabilities":      provider.capabilities.iter().map(|i| serde_json::json!({
                     "contract_id": i.contract_id,
                     "transport":   transport_name(i.transport),
+                    "namespace_mismatch": i.namespace_mismatch,
                 })).collect::<Vec<_>>(),
                 "capability_md":   md,
             });
@@ -167,11 +185,17 @@ pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> 
                 state_tag(provider.state)
             );
             for cap in &provider.capabilities {
+                let mismatch = if cap.namespace_mismatch {
+                    " [namespace mismatch]".yellow().to_string()
+                } else {
+                    String::new()
+                };
                 println!(
-                    "    {} {} ({})",
+                    "    {} {} ({}){}",
                     "└─".dimmed(),
                     cap.contract_id,
-                    transport_name(cap.transport)
+                    transport_name(cap.transport),
+                    mismatch
                 );
             }
             if !md.is_empty() {
@@ -314,6 +338,7 @@ pub async fn contracts(
                     "mode": c.mode,
                     "io_msg_type": c.io_msg_type,
                     "io_srv_type": c.io_srv_type,
+                    "cross_namespace": c.cross_namespace,
                     "source_toml_path": c.source_toml_path,
                     "msg_fields": c.msg_fields.iter().map(|f| serde_json::json!({
                         "name": f.name, "type_name": f.type_name,
@@ -356,11 +381,16 @@ pub async fn contracts(
             "(none)".dimmed().to_string()
         };
         println!(
-            "● {}  {} {} {}",
+            "● {}  {} {} {}{}",
             c.id.bold(),
             format!("[{}]", c.kind).dimmed(),
             format!("mode={}", c.mode).cyan(),
             format!("idl={io}").dimmed(),
+            if c.cross_namespace {
+                " cross-namespace".dimmed().to_string()
+            } else {
+                String::new()
+            },
         );
         if verbose {
             if !c.msg_fields.is_empty() {
