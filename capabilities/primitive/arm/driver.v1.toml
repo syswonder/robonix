@@ -1,0 +1,10 @@
+# Lifecycle interface every arm primitive implementation must declare.
+[contract]
+id = "robonix/primitive/arm/driver"
+version = "1"
+kind = "primitive"
+idl = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for arm primitive providers."
+
+[mode]
+type = "rpc"
