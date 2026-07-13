@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tonic::Request;
 use tonic::transport::Channel;
@@ -54,12 +55,27 @@ fn max_tool_rounds() -> usize {
         .unwrap_or(64)
 }
 
+fn vlm_idle_timeout() -> Duration {
+    configured_vlm_idle_timeout(
+        std::env::var("ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn configured_vlm_idle_timeout(value: Option<&str>) -> Duration {
+    let seconds = value
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30)
+        .clamp(5, 300);
+    Duration::from_secs(seconds)
+}
+
 const MAX_HISTORY: usize = 200;
 
-/// The LLM's persistent overall task for the turn, parsed from the
-/// `task_update` field of the RTDL envelope. `null` in the envelope means
-/// "keep the current task unchanged" and is represented as `None` at the
-/// call site, not as a `TaskState`.
+/// Harness-owned state for the latest user interaction. Long-running work is
+/// represented independently by the RTDL forest; it must not keep older user
+/// text welded into the current goal forever.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TaskState {
     goal: String,
@@ -78,13 +94,10 @@ impl TaskState {
         self.status == "done"
     }
 
-    /// Render the current task as a system-prompt block so the LLM always sees
-    /// its own standing goal and success criterion.
+    /// Render the latest interaction separately from the in-flight forest.
     fn prompt_block(&self) -> String {
         format!(
-            "\n\n## Current overall task\n- user_instruction_history (oldest to newest): {}\n\
-             - precedence: the newest user instruction overrides any conflicting older \
-             instruction; preserve older work only when it does not conflict\n\
+            "\n\n## Current user interaction\n- instruction: {}\n\
              - success_criterion: {}\n- status: {}\n",
             self.goal, self.success_criterion, self.status
         )
@@ -449,11 +462,11 @@ fn append_steer(
     }
     info!("[pilot/steer] mid-task input: {text}");
     history.push(Message::user(text));
-    if let Some(state) = current_task.as_mut() {
-        state.goal.push_str("\nUser steer/follow-up: ");
-        state.goal.push_str(text);
-        state.status = "in_progress".to_string();
-    }
+    *current_task = Some(TaskState {
+        goal: text.to_string(),
+        success_criterion: DEFAULT_SUCCESS_CRITERION.to_string(),
+        status: "in_progress".to_string(),
+    });
     true
 }
 
@@ -477,20 +490,11 @@ fn start_or_resume_task(current_task: &mut Option<TaskState>, user_text: &str) {
     if text.is_empty() {
         return;
     }
-    match current_task {
-        Some(state) if !state.is_done() => {
-            state.goal.push_str("\nUser follow-up: ");
-            state.goal.push_str(text);
-            state.status = "in_progress".to_string();
-        }
-        slot => {
-            *slot = Some(TaskState {
-                goal: text.to_string(),
-                success_criterion: DEFAULT_SUCCESS_CRITERION.to_string(),
-                status: "in_progress".to_string(),
-            });
-        }
-    }
+    *current_task = Some(TaskState {
+        goal: text.to_string(),
+        success_criterion: DEFAULT_SUCCESS_CRITERION.to_string(),
+        status: "in_progress".to_string(),
+    });
 }
 
 /// Apply only progress fields from the model. The user-owned goal is immutable
@@ -512,6 +516,10 @@ fn apply_task_update(
             "[pilot/rtdl] ignoring model goal replacement {:?}; harness goal remains {:?}",
             update.goal, state.goal
         );
+        // The response was sampled for an older interaction. Applying even
+        // its status or success criterion can falsely complete and discard a
+        // newer steer, so reject the entire stale update.
+        return false;
     }
     if state.success_criterion == DEFAULT_SUCCESS_CRITERION
         && !update.success_criterion.trim().is_empty()
@@ -907,6 +915,7 @@ pub async fn run_turn(
                             // "re-plan on every node" caused.
                             if is_terminal_executor_state(ns.state)
                                 && ns.state != RtdlNodeStateEnum::Succeeded as u32
+                                && standing_task.as_ref().is_some_and(|state| !state.is_done())
                             {
                                 should_plan = true;
                             }
@@ -923,7 +932,17 @@ pub async fn run_turn(
                         }
                         Some(ForestEvent::PlanDone { plan_id, results, any_failed, canceled }) => {
                             forest.remove(&plan_id);
-                            cancel_requested.remove(&plan_id);
+                            let requested_cancellation = cancel_requested.remove(&plan_id);
+                            if requested_cancellation {
+                                history.push(Message::user(&format!(
+                                    "Pilot harness event: the requested cancellation of RTDL plan \
+                                     {plan_id} is complete. Do not query or cancel that plan again. \
+                                     Unrelated in-flight trees remain independent. If the current \
+                                     interaction requested only this stop and has no successor action, \
+                                     mark it done and report the completed stop now."
+                                )));
+                                history::trim(history, MAX_HISTORY);
+                            }
                             // Leaf results were already fed per-node (see above);
                             // only surface the batch to the chat UI here.
                             log_plan_complete(&plan_id, &results, any_failed);
@@ -940,13 +959,16 @@ pub async fn run_turn(
                                     PilotStreamBody::BatchResult(batch),
                                 )))
                                 .await;
-                            // A canceled tree finishing is the fulfilment of a
-                            // prior stop request, not new task progress: replanning
-                            // here lets the model re-cancel the siblings it just
-                            // chose to keep, which cancels more trees and fires more
-                            // PlanDone — a self-feeding storm that grows plan ids
-                            // without bound. Only natural completion replans.
-                            if !canceled {
+                            // Re-plan after natural completion or exactly once
+                            // when a cancellation explicitly requested by this
+                            // supervisor is fulfilled. Unsolicited canceled
+                            // events stay quiet, preventing the old self-feeding
+                            // cancel storm across unrelated sibling trees.
+                            if should_replan_after_plan_done(
+                                canceled,
+                                requested_cancellation,
+                                standing_task.as_ref().is_some_and(|state| !state.is_done()),
+                            ) {
                                 should_plan = true;
                             }
                         }
@@ -987,6 +1009,16 @@ pub async fn run_turn(
             .map(TaskState::prompt_block)
             .unwrap_or_default();
         let forest_block = build_forest_block(&forest, &cancel_requested);
+        let _ = tx
+            .send(Ok(service::pack(
+                &session_id,
+                PilotStreamBody::Status(SessionStatusEvent {
+                    session_id: session_id.clone(),
+                    state: SessionState::Active as u32,
+                    message: "Planning the next step".to_string(),
+                }),
+            )))
+            .await;
         // Plan with a single corrective retry (merged from dev #88): if the
         // VLM's RTDL fails to parse or expand, feed the error back and let it
         // fix the reply once; a second failure ends the turn gracefully (empty
@@ -1003,16 +1035,32 @@ pub async fn run_turn(
             }
 
             let planning_revision = forest_revision.load(Ordering::Acquire);
-            let (content, raw_tool_calls) = {
-                let mut stream = vlm
-                    .chat_stream(&messages, &[])
-                    .await
-                    .map_err(|e| anyhow::anyhow!("VLM stream error: {e}"))?;
-
+            let mut vlm_attempt = 0_u8;
+            let (content, raw_tool_calls) = loop {
+                let mut stream =
+                    match tokio::time::timeout(vlm_idle_timeout(), vlm.chat_stream(&messages, &[]))
+                        .await
+                    {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(error)) if vlm_attempt == 0 => {
+                            warn!("[pilot/vlm] opening stream failed; retrying once: {error:#}");
+                            vlm_attempt += 1;
+                            continue;
+                        }
+                        Ok(Err(error)) => {
+                            return Err(anyhow::anyhow!("VLM stream error: {error:#}"));
+                        }
+                        Err(_) if vlm_attempt == 0 => {
+                            warn!("[pilot/vlm] opening stream timed out; retrying once");
+                            vlm_attempt += 1;
+                            continue;
+                        }
+                        Err(_) => return Err(anyhow::anyhow!("VLM stream open timed out")),
+                    };
                 let mut full_text = String::new();
                 let mut tool_calls: Vec<crate::vlm::ToolCall> = Vec::new();
 
-                loop {
+                let receive_result: anyhow::Result<()> = loop {
                     tokio::select! {
                         biased;
                         // Cancel takes priority — checked before every new VLM token.
@@ -1036,8 +1084,8 @@ pub async fn run_turn(
                         item = stream.next() => {
                             let item = match item {
                                 Some(Ok(it)) => it,
-                                Some(Err(e)) => return Err(anyhow::anyhow!("VLM stream recv: {e:#}")),
-                                None => break,
+                                Some(Err(error)) => break Err(anyhow::anyhow!("VLM stream recv: {error:#}")),
+                                None => break Ok(()),
                             };
                             match item {
                                 VlmStreamItem::TextDelta(delta) => full_text.push_str(&delta),
@@ -1045,7 +1093,29 @@ pub async fn run_turn(
                                 VlmStreamItem::Finish => {}
                             }
                         }
+                        _ = tokio::time::sleep(vlm_idle_timeout()) => {
+                            break Err(anyhow::anyhow!("VLM stream idle timeout"));
+                        }
                     }
+                };
+
+                if let Err(error) = receive_result {
+                    if vlm_attempt == 0 {
+                        warn!("[pilot/vlm] {error:#}; retrying once");
+                        let _ = tx
+                            .send(Ok(service::pack(
+                                &session_id,
+                                PilotStreamBody::Status(SessionStatusEvent {
+                                    session_id: session_id.clone(),
+                                    state: SessionState::Active as u32,
+                                    message: "VLM response delayed; retrying once".to_string(),
+                                }),
+                            )))
+                            .await;
+                        vlm_attempt += 1;
+                        continue;
+                    }
+                    return Err(error);
                 }
 
                 let content = if full_text.is_empty() {
@@ -1053,7 +1123,7 @@ pub async fn run_turn(
                 } else {
                     Some(full_text)
                 };
-                (content, tool_calls)
+                break (content, tool_calls);
             };
 
             if forest_revision.load(Ordering::Acquire) != planning_revision {
@@ -1214,8 +1284,7 @@ pub async fn run_turn(
                 "[pilot/rtdl] task_update goal='{}' status='{}'",
                 updated.goal, updated.status
             );
-            let changed =
-                apply_task_update(standing_task, updated, calls == 0 && forest.is_empty());
+            let changed = apply_task_update(standing_task, updated, calls == 0);
             if changed && let Some(state) = standing_task.as_ref() {
                 let _ = tx
                     .send(Ok(service::pack(
@@ -1269,17 +1338,32 @@ pub async fn run_turn(
                     .await;
                 break;
             }
-            // A long-running tree (monitoring, greeting, navigation, etc.) is
-            // session work, not a reason to swallow a conversational reply.
-            // FinalText closes only the current SubmitTask subscriber; the
-            // supervisor and forest stay alive and accept later steer/tasks.
+            // A completed interaction may close while unrelated long-running
+            // work remains. If this interaction is still in progress, keep its
+            // stream open: surface the model text as progress and wait for the
+            // relevant plan result before producing FinalText.
             if !assistant_content.trim().is_empty() {
-                let _ = tx
-                    .send(Ok(service::pack(
-                        &session_id,
-                        PilotStreamBody::FinalText(assistant_content.clone()),
-                    )))
-                    .await;
+                let body = if task_done {
+                    PilotStreamBody::FinalText(assistant_content.clone())
+                } else {
+                    PilotStreamBody::TextChunk(assistant_content.clone())
+                };
+                let _ = tx.send(Ok(service::pack(&session_id, body))).await;
+                if !task_done {
+                    // Status is the narration boundary consumed by Liaison:
+                    // display/TTS the complete progress text now without
+                    // closing the SubmitTask stream.
+                    let _ = tx
+                        .send(Ok(service::pack(
+                            &session_id,
+                            PilotStreamBody::Status(SessionStatusEvent {
+                                session_id: session_id.clone(),
+                                state: SessionState::Active as u32,
+                                message: "Waiting for in-flight work".to_string(),
+                            }),
+                        )))
+                        .await;
+                }
             }
             if hit_cap {
                 warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
@@ -1937,6 +2021,14 @@ fn invalid_cancel_target(
     })
 }
 
+fn should_replan_after_plan_done(
+    canceled: bool,
+    requested_cancellation: bool,
+    interaction_active: bool,
+) -> bool {
+    interaction_active && (!canceled || requested_cancellation)
+}
+
 /// Render an RTDL node state as a stable human-readable name for logs.
 fn rtdl_state_name(state: u32) -> String {
     match RtdlNodeStateEnum::try_from(state as i32) {
@@ -2243,22 +2335,19 @@ by planning capability calls available to you.
   output an empty RTDL sequence. Do not repeat the same observation capability
   just to confirm unchanged data.
 
-## Persistence (READ THIS — most common failure mode)
-The harness owns the overall goal. It is created from the user's message and
-appends later steer/follow-up messages verbatim as a chronological instruction
-history. The newest user instruction overrides older instructions wherever they
-conflict (for example a change of destination or a request to stop after the
-current step); preserve unrelated ongoing work. Never replace this history with
-your own summary or a current sub-step. When emitting a non-null `task_update`,
-copy its `goal` exactly from \"Current overall task\".
-`task_update` is a progress report, not a set-current-goal command.
+## Interaction and execution lifetime
+The harness owns the latest instruction shown in \"Current user interaction\".
+Copy it exactly into a non-null `task_update.goal`; `task_update` reports
+progress and never replaces user intent. Older conversation remains in message
+history. Independently running work appears only in \"In-flight RTDL trees\"
+and may outlive this interaction. Preserve unrelated trees; if the latest
+instruction conflicts with one, target that specific plan with cancel/stop
+before dispatching its replacement.
 
-The turn ends only when your overall task is `done` (you set
-`task_update.status: \"done\"`), every tree you dispatched has finished, and
-there is no pending user input. An empty RTDL sequence alone does NOT end the
-turn — it just means you are dispatching no new tree this round (for example,
-while you wait for an in-flight tree). Do NOT mark the task `done` until it is
-*verifiably* complete. Concretely:
+Mark the current interaction `done` once its own requested outcome is verified,
+even when an unrelated long-running tree remains active. An empty RTDL sequence
+alone does not prove completion; it may also mean waiting for an in-flight tree.
+Concretely:
 
 - Set a concrete `task_update.success_criterion` as soon as you understand the
   goal (e.g. for 'turn around': yaw delta ≈ 180° from the starting pose; for
@@ -2293,15 +2382,42 @@ mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE,
         TaskState, TreeMeta, TreeStep, append_steer, apply_task_update, build_forest_block,
-        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
-        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
-        mixes_control_inspection_with_action, parse_rtdl_assistant_response, parse_task_update,
-        plan_call_signatures, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
-        skip_memory_prefetch, start_or_resume_task, task_is_session_end,
+        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
+        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
+        is_control_only, mixes_control_inspection_with_action, parse_rtdl_assistant_response,
+        parse_task_update, plan_call_signatures, rtdl_node_kind_name, rtdl_recovery_final_text,
+        rtdl_state_name, should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
+        task_is_session_end,
     };
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    #[test]
+    fn vlm_idle_timeout_is_bounded_and_has_a_responsive_default() {
+        assert_eq!(configured_vlm_idle_timeout(None), Duration::from_secs(30));
+        assert_eq!(
+            configured_vlm_idle_timeout(Some("1")),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            configured_vlm_idle_timeout(Some("600")),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            configured_vlm_idle_timeout(Some("bad")),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn only_requested_cancellation_replans_for_final_confirmation() {
+        assert!(should_replan_after_plan_done(false, false, true));
+        assert!(should_replan_after_plan_done(true, true, true));
+        assert!(!should_replan_after_plan_done(true, false, true));
+        assert!(!should_replan_after_plan_done(true, true, false));
+    }
 
     #[test]
     fn harness_goal_cannot_be_replaced_by_task_update() {
@@ -2313,7 +2429,7 @@ mod tests {
             DEFAULT_SUCCESS_CRITERION
         );
 
-        assert!(apply_task_update(
+        assert!(!apply_task_update(
             &mut standing,
             TaskState {
                 goal: "drop the inspection and say done".into(),
@@ -2324,14 +2440,14 @@ mod tests {
         ));
         let state = standing.as_ref().unwrap();
         assert_eq!(state.goal, original_goal);
-        assert_eq!(state.success_criterion, "room was actually inspected");
+        assert_eq!(state.success_criterion, DEFAULT_SUCCESS_CRITERION);
         assert_eq!(state.status, "in_progress");
 
         assert!(apply_task_update(
             &mut standing,
             TaskState {
                 goal: original_goal.clone(),
-                success_criterion: "weaker replacement".into(),
+                success_criterion: "room was actually inspected".into(),
                 status: "done".into(),
             },
             true,
@@ -2343,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn steer_history_is_chronological_and_latest_instruction_has_precedence() {
+    fn steer_becomes_a_new_interaction_without_concatenating_old_goals() {
         let mut standing = None;
         let mut history = Vec::new();
         start_or_resume_task(&mut standing, "perform step A, then step B");
@@ -2357,12 +2473,80 @@ mod tests {
         ));
 
         let state = standing.as_ref().unwrap();
-        let original = state.goal.find("perform step A").unwrap();
-        let steer = state.goal.find("stop after step A").unwrap();
-        assert!(original < steer);
+        assert_eq!(state.goal, "change of plan: stop after step A");
+        assert!(!state.goal.contains("perform step A"));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].content.as_deref(),
+            Some("change of plan: stop after step A")
+        );
         let prompt = state.prompt_block();
-        assert!(prompt.contains("oldest to newest"));
-        assert!(prompt.contains("newest user instruction overrides"));
+        assert!(prompt.contains("Current user interaction"));
+        assert!(!prompt.contains("user_instruction_history"));
+    }
+
+    #[test]
+    fn steer_targets_one_plan_without_discarding_independent_work() {
+        let mut standing = None;
+        let mut history = Vec::new();
+        start_or_resume_task(&mut standing, "go to the meeting room");
+
+        let mut forest = HashMap::new();
+        for (plan_id, description, capability) in [
+            ("11", "navigate to the meeting room", "navigation_navigate"),
+            ("5", "watch for passersby", "greet_greet"),
+        ] {
+            forest.insert(
+                plan_id.to_string(),
+                TreeMeta {
+                    description: description.into(),
+                    control_only: false,
+                    call_signatures: HashSet::new(),
+                    steps: vec![TreeStep {
+                        op_id: format!("op-{plan_id}"),
+                        description: description.into(),
+                        capability: capability.into(),
+                    }],
+                },
+            );
+        }
+
+        assert!(append_steer(
+            Task {
+                text: "cancel the meeting-room trip and return to room 315".into(),
+                ..Default::default()
+            },
+            &mut history,
+            &mut standing,
+        ));
+        assert_eq!(
+            standing.as_ref().unwrap().goal,
+            "cancel the meeting-room trip and return to room 315"
+        );
+
+        let prompt = build_forest_block(&forest, &HashSet::new());
+        assert!(prompt.contains("plan_id=11"));
+        assert!(prompt.contains("plan_id=5"));
+        assert!(prompt.contains("navigate to the meeting room"));
+        assert!(prompt.contains("watch for passersby"));
+        assert_eq!(
+            invalid_cancel_target(&["11".into()], &forest, &HashSet::new()),
+            None
+        );
+        assert_eq!(
+            invalid_cancel_target(&["5".into()], &forest, &HashSet::new()),
+            None
+        );
+
+        let requested = HashSet::from(["11".to_string()]);
+        assert_eq!(
+            invalid_cancel_target(&["11".into()], &forest, &requested),
+            Some("11".to_string())
+        );
+        assert_eq!(
+            invalid_cancel_target(&["5".into()], &forest, &requested),
+            None
+        );
     }
 
     #[test]
