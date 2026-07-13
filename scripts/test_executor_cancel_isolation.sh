@@ -72,11 +72,16 @@ while time.time() < deadline:
 raise SystemExit("executor did not listen within 10s")
 PY
 
-PROTO_GEN="$(find "$ROOT" -path '*/rbnx-build/codegen/proto_gen/robonix_contracts_pb2_grpc.py' -print -quit | xargs dirname)"
-if [[ -z "$PROTO_GEN" || ! -d "$PROTO_GEN" ]]; then
-  echo "generated Python gRPC stubs not found; build one Robonix package first" >&2
+PROTO_SOURCE="$(find "$ROOT/target" -path '*/out/robonix_contracts.proto' -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+if [[ -z "$PROTO_SOURCE" || ! -d "$PROTO_SOURCE" ]]; then
+  echo "generated proto source not found; build Executor first" >&2
   exit 2
 fi
+PROTO_GEN="$WORK/proto_gen"
+mkdir -p "$PROTO_GEN"
+cp "$PROTO_SOURCE"/*.proto "$PROTO_GEN/"
+python3 -m grpc_tools.protoc -I "$PROTO_GEN" \
+  --python_out="$PROTO_GEN" --grpc_python_out="$PROTO_GEN" "$PROTO_GEN"/*.proto
 
 PYTHONPATH="$PROTO_GEN${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EXECUTOR_ADDR" "$TRACE" <<'PY'
 import asyncio
@@ -87,6 +92,7 @@ import sys
 import time
 
 import grpc
+import executor_pb2
 import pilot_pb2
 import robonix_contracts_pb2_grpc as contracts
 
@@ -119,25 +125,6 @@ def bash_call(plan_id: str, call_id: str, op_id: str, description: str, command:
             contract_id="robonix/system/executor/builtin/run_command",
             args_json=json.dumps({"command": command}),
         ),
-    )
-
-
-def control_plan(plan_id: str, op: str, args: dict):
-    return pilot_pb2.Plan(
-        plan_id=plan_id,
-        session_id=session_id,
-        nodes=[pilot_pb2.RtdlNode(
-            node_kind=2,
-            op_id=f"{plan_id}-op",
-            description=f"{op} target plan",
-            call=pilot_pb2.CapabilityCall(
-                call_id=f"{plan_id}:0",
-                provider_id="executor",
-                contract_id=f"robonix/system/executor/builtin/{op}",
-                args_json=json.dumps(args),
-            ),
-        )],
-        root_index=0,
     )
 
 
@@ -216,29 +203,44 @@ async def drive(stub, plan):
 async def main():
     async with grpc.aio.insecure_channel(endpoint) as channel:
         stub = contracts.RobonixSystemExecutorExecuteStub(channel)
+        control = contracts.RobonixSystemExecutorControlPlanStub(channel)
+        active = contracts.RobonixSystemExecutorListActivePlansStub(channel)
         a = asyncio.create_task(drive(stub, plan_a))
         b = asyncio.create_task(drive(stub, plan_b))
 
         await asyncio.sleep(5)
-        stop_a = control_plan(
-            "ctl-stop-A",
-            "stop_plan_at",
-            {"plan_id": "A-route", "op_id": "A-meeting", "when": "on_enter"},
+        before = json.loads(
+            (await active.ListActivePlans(executor_pb2.ListActivePlans_Request())).plans_json
         )
-        await drive(stub, stop_a)
+        assert before["count"] == 2, before
+        stopped = await control.ControlPlan(
+            executor_pb2.ControlPlan_Request(
+                action="stop_at",
+                plan_id="A-route",
+                op_id="A-meeting",
+                when="on_enter",
+            )
+        )
+        assert stopped.success, stopped
 
         await asyncio.sleep(max(0, 12 - rel()))
         c = asyncio.create_task(drive(stub, plan_c))
 
         await asyncio.sleep(5)
-        cancel_c = control_plan(
-            "ctl-cancel-C", "cancel_plan", {"plan_id": "C-open-area", "wait_ms": 5000}
+        cancelled = await control.ControlPlan(
+            executor_pb2.ControlPlan_Request(
+                action="cancel", plan_id="C-open-area", wait_ms=5000
+            )
         )
-        await drive(stub, cancel_c)
+        assert cancelled.success and cancelled.completed, cancelled
         d = asyncio.create_task(drive(stub, plan_d))
 
         await asyncio.gather(a, c, d)
         await b
+        after = json.loads(
+            (await active.ListActivePlans(executor_pb2.ListActivePlans_Request())).plans_json
+        )
+        assert after["count"] == 0, after
 
 
 asyncio.run(main())

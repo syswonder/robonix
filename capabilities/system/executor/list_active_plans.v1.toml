@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/system/executor/list_active_plans"
+version = "1"
+kind    = "service"
+idl     = "executor/srv/ListActivePlans.srv"
+description = "Read the authoritative set of RTDL plans currently owned by Executor without creating a new plan."
+
+[mode]
+type = "rpc"

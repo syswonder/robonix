@@ -89,11 +89,16 @@ wait_port "$EXECUTOR_ADDR"
 PILOT_PID=$!
 wait_port "$PILOT_ADDR"
 
-PROTO_GEN="$(find "$ROOT" -path '*/rbnx-build/codegen/proto_gen/robonix_contracts_pb2_grpc.py' -print -quit | xargs dirname)"
-if [[ -z "$PROTO_GEN" || ! -d "$PROTO_GEN" ]]; then
-  echo "generated Python gRPC stubs not found; build one Robonix package first" >&2
+PROTO_SOURCE="$(find "$ROOT/target" -path '*/out/robonix_contracts.proto' -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+if [[ -z "$PROTO_SOURCE" || ! -d "$PROTO_SOURCE" ]]; then
+  echo "generated proto source not found; build Pilot first" >&2
   exit 2
 fi
+PROTO_GEN="$WORK/proto_gen"
+mkdir -p "$PROTO_GEN"
+cp "$PROTO_SOURCE"/*.proto "$PROTO_GEN/"
+python3 -m grpc_tools.protoc -I "$PROTO_GEN" \
+  --python_out="$PROTO_GEN" --grpc_python_out="$PROTO_GEN" "$PROTO_GEN"/*.proto
 
 PYTHONPATH="$PROTO_GEN${PYTHONPATH:+:$PYTHONPATH}" python3 - "$PILOT_ADDR" "$TRACE" <<'PY'
 import asyncio
@@ -117,6 +122,7 @@ started = time.monotonic()
 plans = []
 node_events = []
 task_states = []
+statuses = []
 final_texts = []
 text_chunks = []
 milestones = {}
@@ -234,6 +240,9 @@ async def collect_stream(stream):
         elif event.HasField("task_state"):
             task_states.append(event.task_state.status)
             print(f"[{rel():6.2f}s] TASK_STATE {event.task_state.status}", flush=True)
+        elif event.HasField("status"):
+            statuses.append(event.status.message)
+            print(f"[{rel():6.2f}s] STATUS {event.status.message}", flush=True)
         elif event.final_text:
             final_texts.append((rel(), event.final_text))
             print(f"[{rel():6.2f}s] FINAL {event.final_text[:180]!r}", flush=True)
@@ -327,21 +336,6 @@ control_calls = [
     if call["contract_id"].rsplit("/", 1)[-1]
     in {"cancel_plan", "cancel_all_plans", "stop_plan_at"}
 ]
-cancel_targets = []
-stop_targets = []
-stop_records = []
-cancel_all_seen = False
-for _plan, call in control_calls:
-    leaf = call["contract_id"].rsplit("/", 1)[-1]
-    args = json.loads(call["args_json"] or "{}")
-    if leaf == "cancel_plan":
-        cancel_targets.append(args.get("plan_id"))
-    elif leaf == "stop_plan_at":
-        stop_targets.append(args.get("plan_id"))
-        stop_records.append(args)
-    elif leaf == "cancel_all_plans":
-        cancel_all_seen = True
-
 checks = {
     "Pilot planned A1": plan_a1 is not None,
     "A1 completed": "A_RESTAURANT_END" in labels,
@@ -352,9 +346,9 @@ checks = {
     "C started but did not finish": "C_OPEN_START" in labels and "C_OPEN_END" not in labels,
     "Pilot planned return task D": plan_d is not None,
     "D completed": "D_315_END" in labels,
-    "cancel targeted C": plan_c is not None and plan_c["plan_id"] in cancel_targets,
-    "cancel did not target greet": plan_b is not None and plan_b["plan_id"] not in cancel_targets,
-    "cancel_all was never used": not cancel_all_seen,
+    "plan control never appeared as an RTDL node": not control_calls,
+    "Pilot reported out-of-band plan control": "Plan control accepted" in statuses,
+    "targeted cancel left greet unaffected": "C_OPEN_END" not in labels and "B_GREET_END" in labels,
     "each RTDL plan had live natural-language feedback": len(text_chunks) >= len(plans),
     "no final reply was broadcast more than once": len({text for _, text in final_texts}) == len(final_texts),
     "return completion reply followed D completion": any(
@@ -367,20 +361,12 @@ checks = {
     ),
 }
 
-# If A2 was already placed in the same in-flight tree as A1, Pilot must arm a
-# boundary stop. If A2 was not yet dispatched, latest-steer suppression is the
-# correct behavior and no stop call is required.
+# If A2 was already placed in the same in-flight tree as A1, the out-of-band
+# boundary stop must prevent it from starting. If A2 was not yet dispatched,
+# latest-steer suppression is the correct behavior.
 if plan_a2 is not None and plan_a1 is not None and plan_a2["plan_id"] == plan_a1["plan_id"]:
-    a1_op = next(
-        call["op_id"]
-        for call in plan_a1["calls"]
-        if "A_RESTAURANT_START" in call["args_json"]
-    )
-    checks["A sequence stopped at the explicit A1 boundary"] = any(
-        record.get("plan_id") == plan_a1["plan_id"]
-        and record.get("op_id") == a1_op
-        and record.get("when", "on_complete") == "on_complete"
-        for record in stop_records
+    checks["A sequence stopped at the explicit A1 boundary"] = (
+        "A_MEETING_START" not in labels and "Plan control accepted" in statuses
     )
 else:
     checks["latest steer suppressed undispatched A2"] = "A_MEETING_START" not in labels

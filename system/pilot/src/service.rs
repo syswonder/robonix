@@ -4,11 +4,11 @@
 // `RobonixSystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
-    robonix_system_executor_cancel_all_plans_client::RobonixSystemExecutorCancelAllPlansClient,
+    robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient,
     robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
-use crate::pb::executor::CancelAllRequest;
+use crate::pb::executor::ControlPlanRequest;
 use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
@@ -182,10 +182,9 @@ pub struct PilotServiceImpl {
     /// same id is acknowledged exactly once and never starts or steers a turn
     /// twice. The bounded queue prevents an unbounded session-lifetime set.
     seen_task_ids: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
-    /// Per-session RTDL plan-id counter. Monotonic, never reused, and shared
-    /// across every turn of the session so plan ids never reset to 1 on a new
-    /// message.
-    plan_seqs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    /// Process-global RTDL plan-id counter. Executor's active table is global,
+    /// so ids must be unique across sessions as well as turns.
+    plan_seq: Arc<AtomicU64>,
 }
 
 impl PilotServiceImpl {
@@ -205,7 +204,7 @@ impl PilotServiceImpl {
             cancels: Arc::new(Mutex::new(HashMap::new())),
             steers: Arc::new(Mutex::new(HashMap::new())),
             seen_task_ids: Arc::new(Mutex::new(HashMap::new())),
-            plan_seqs: Arc::new(Mutex::new(HashMap::new())),
+            plan_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -220,15 +219,6 @@ impl PilotServiceImpl {
         let mut map = self.task_states.lock().await;
         map.entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(None)))
-            .clone()
-    }
-
-    /// The session's shared, monotonic RTDL plan-id counter, created on first
-    /// use and persisted for the process lifetime so ids never reset per turn.
-    async fn get_or_create_plan_seq(&self, session_id: &str) -> Arc<AtomicU64> {
-        let mut map = self.plan_seqs.lock().await;
-        map.entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone()
     }
 
@@ -427,7 +417,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
 
         let history_arc = self.get_or_create_history(&task.session_id).await;
         let task_state_arc = self.get_or_create_task_state(&task.session_id).await;
-        let plan_seq = self.get_or_create_plan_seq(&task.session_id).await;
+        let plan_seq = Arc::clone(&self.plan_seq);
         // what is tokio's tx and rx:
         // https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.Sender.html
         // https://tokio.rs/tokio/tutorial/channels
@@ -519,20 +509,25 @@ async fn cancel_all_executor_plans(
     let (_, _, channel) = atlas_client::connect_to_capability(
         &mut atlas,
         consumer_id,
-        "robonix/system/executor/cancel_all_plans",
+        "robonix/system/executor/control_plan",
     )
     .await
     .map_err(|error| format!("stop could not reach Executor: {error:#}"))?;
-    let mut client = RobonixSystemExecutorCancelAllPlansClient::new(channel);
+    let mut client = RobonixSystemExecutorControlPlanClient::new(channel);
     client
-        .cancel_all(CancelAllRequest::default())
+        .control_plan(ControlPlanRequest {
+            action: "cancel_all".into(),
+            wait_ms: 5_000,
+            ..Default::default()
+        })
         .await
         .map(|response| response.into_inner().success)
         .map_err(|error| format!("Executor cancellation failed: {error}"))
 }
 
-/// Connect to executor's Execute RPC. Capability discovery (what's available
-/// for the LLM to call) is done directly against atlas, not through executor.
+/// Connect to Executor's business-plan and out-of-band control RPCs.
+/// Capability discovery (what the LLM may call) remains Atlas-driven and does
+/// not expose the control RPC as an RTDL capability.
 async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
@@ -544,9 +539,21 @@ async fn build_executor_conn(
     )
     .await
     .context("connect_to_capability robonix/system/executor/execute")?;
+    let (_, control_provider_id, control_ch) = atlas_client::connect_to_capability(
+        &mut atlas,
+        consumer_id,
+        "robonix/system/executor/control_plan",
+    )
+    .await
+    .context("connect_to_capability robonix/system/executor/control_plan")?;
+    if control_provider_id != executor_provider_id {
+        anyhow::bail!(
+            "Executor execute/control capabilities resolved to different providers: {executor_provider_id} vs {control_provider_id}"
+        );
+    }
     Ok(ExecutorConn {
         graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
-        provider_id: executor_provider_id,
+        control: RobonixSystemExecutorControlPlanClient::new(control_ch),
     })
 }
 

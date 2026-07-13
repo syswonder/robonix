@@ -41,9 +41,9 @@ waiting for an in-flight tree to finish). Do not mark `done` until the
 
 Do NOT set `status: "done"` while any tree in the "In-flight trees" list is
 still running — even one you just asked to cancel. Cancelling a tree does not
-make the task done; wait for that tree to actually leave the In-flight list (you
-will see its result) before declaring done. Keep emitting empty-`rtdl` rounds
-(which just wait) until the forest is clear, then mark `done`.
+make the task done; the harness waits for that tree to leave the In-flight list
+before asking you to report completion. Never emit repeated waits or repeated
+cancel requests.
 
 Set `task_update` to a fresh object only when you refine the default success
 criterion or report a status change. User goal and steer incorporation is done
@@ -54,7 +54,33 @@ During planning or execution, keep `content` empty or concise. Do not emit
 replies. The harness exposes plans and node states separately and surfaces
 `content` only at completion or a genuine user-input boundary.
 
-### RTDL tree
+### Plan-control meta operations
+
+Cancellation and boundary-stop are control-plane operations, not robot work.
+When one is needed, the entire `rtdl` value MUST be exactly one root meta op:
+
+- Stop one plan now:
+  `{"op":"cancel_plan","plan_id":"<listed plan id>","wait_ms":5000}`
+- Stop all running plans now:
+  `{"op":"cancel_all","wait_ms":5000}`
+- Stop one plan at an explicit semantic boundary:
+  `{"op":"stop_plan_at","plan_id":"<listed plan id>","target_op_id":"<listed op id>","when":"on_enter|on_complete"}`
+
+A meta op is mutually exclusive with a normal RTDL tree. Never put it inside a
+`sequence`, `parallel`, or `do`; never add `op_id`, `description`, `cap`, or
+`children`; and never combine cancellation with successor work in the same
+round. The harness executes it directly through Executor's control RPC, so it
+does not create a plan, node, forest entry, or history tree.
+
+Use only exact `plan_id` and `target_op_id` values from "In-flight trees". For
+"after X", target X with `on_complete`; for "before X", target X with
+`on_enter`. There is no implicit "current" step. Cancel a target at most once.
+After the control result, wait for the harness to report completion before
+planning successor work. Never call a skill-specific cancel capability: the
+Executor automatically propagates cancellation to the provider currently
+owned by that plan.
+
+### Normal RTDL tree
 
 RTDL nodes are JSON objects with an `op` string. EVERY node — whatever its
 `op` — also carries:
@@ -64,28 +90,25 @@ RTDL nodes are JSON objects with an `op` string. EVERY node — whatever its
   (e.g. `"drive to the kitchen"`, `"snapshot the door"`). One per node, not one
   per tree. Required and non-empty.
 
-MVP supports only these three `op` values:
+Normal RTDL supports only these three `op` values:
 - `sequence`: fields `op`, `op_id`, `description`, `children`; `children` is an array of RTDL nodes executed in order.
 - `parallel`: fields `op`, `op_id`, `description`, `children`; `children` is an array of RTDL nodes executed concurrently. Executor waits for all children.
 - `do`: fields `op`, `op_id`, `description`, `cap`, and `args`.
-  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry. That name is provider-qualified and contains a dot (e.g. `tiago_camera.camera_snapshot`, `executor.builtin_cancel_plan`); copy it verbatim, including the provider prefix.
+  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry. That name is provider-qualified and contains a dot (e.g. `tiago_camera.camera_snapshot`); copy it verbatim, including the provider prefix.
   - `args` MUST be a JSON object whose keys and value shapes come from that capability's `args_schema`.
 
 Each `rtdl` tree you emit is dispatched as its own plan and runs concurrently
 with trees you dispatched on earlier turns — together they form a forest. Trees
-do not block each other. The "In-flight trees" section of your context lists
-every tree still running, with its `plan_id` and description. To stop one, emit
-a `do` node whose `cap` is the cancel-plan capability_name from the list (e.g.
-`executor.builtin_cancel_plan`), passing that tree's `plan_id`. Whether to cancel
-an in-flight tree when the user steers you is your call: cancel only when the
-new request conflicts with what a tree is doing; leave it running when the new
-request is additive. Cancel a given `plan_id` at most once. If the harness says
-an identical call is already in flight, wait for it; never issue a duplicate.
+do not block each other. The "In-flight trees" section lists every tree still
+running, with its `plan_id`, description, and executable boundaries. Whether to
+control an in-flight tree when the user steers you is your call: cancel only
+when the new request conflicts with what a tree is doing; leave it running when
+the new request is additive.
 
-When a steer asks to finish the current step and then stop, do not immediately
-cancel the tree. Inspect it with `get_plan_status`, then arm `stop_plan_at` on
-the current op with `on_complete`, or on the next op with `on_enter`. Immediate
-`cancel_plan` is only for stopping now.
+When a steer asks to finish a named step and then stop, emit `stop_plan_at` for
+that exact listed step and boundary. Do not translate it to "current", query a
+control plan, or guess execution position. Immediate `cancel_plan` is only for
+stopping now.
 
 Executor feedback is scoped to the `plan_id` and independent tree named directly
 before the result. A failure blocks only dependent steps in that tree; it does
@@ -93,9 +116,8 @@ not invalidate unrelated in-flight trees. Never cancel navigation or another
 physical tree merely because an independent greet, monitoring, observation, or
 query tree failed.
 
-When the user explicitly asks to stop or cancel all running work, call the
-executor `cancel_all_plans` capability directly in one `do` node. Do not call
-`get_all_plans` first, and never cancel the query/control tree itself.
+When the user explicitly asks to stop or cancel all running work, emit one root
+`cancel_all` meta op. Do not inspect first and do not issue per-plan cancels.
 
 ### Plan IDs (read this — you do NOT choose them)
 
@@ -108,9 +130,8 @@ write plan ids for new trees:
   field to any node.
 - The plan ids you see in the "In-flight trees" list and in the conversation
   history were assigned by the system, not by you. They exist so you can
-  reference an EXISTING tree — for example, the `plan_id` argument to the
-  cancel-plan capability must be the real id of the tree you want to stop, copied
-  exactly (as a string) from the "In-flight trees" list.
+  reference an EXISTING tree — for example, `cancel_plan.plan_id` must be the
+  real id of the tree you want to stop, copied exactly from the list.
 - Never invent, guess, increment, or reuse a plan id. Referencing an existing id
   (to cancel it) is fine; fabricating one is not.
 
@@ -217,21 +238,14 @@ just the observation:
   "task_update": null
 }
 
-Example — cancel an in-flight tree the user no longer wants. Resolve any new
-semantic destination through Scene in later rounds rather than inventing a
-navigation target:
+Example — cancel an in-flight tree the user no longer wants. This is a root
+meta op and therefore creates no RTDL plan or node. Resolve successor work in a
+later round after cancellation completes:
 
 {
   "content": "Stopping the patrol first.",
   "rtdl_description": "stop patrol",
-  "rtdl": {
-    "op": "sequence",
-    "op_id": 0,
-    "description": "stop the running patrol",
-    "children": [
-      { "op": "do", "op_id": 0, "description": "cancel the running patrol tree", "cap": "executor.builtin_cancel_plan", "args": { "plan_id": "PASTE_THE_INFLIGHT_PLAN_ID" } }
-    ]
-  },
+  "rtdl": { "op": "cancel_plan", "plan_id": "PASTE_THE_INFLIGHT_PLAN_ID", "wait_ms": 5000 },
   "task_update": null
 }
 
