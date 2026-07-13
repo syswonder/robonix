@@ -1,0 +1,17 @@
+# Return the current spatial context used by Pilot before planning.
+---
+bool pose_known
+string map_id
+float64 x
+float64 y
+float64 z
+float64 yaw
+string room_id
+string room_name
+string[] containing_area_ids
+string[] containing_area_names
+Object[] nearby_objects
+float64 observed_at_unix
+float64 snapshot_at_unix
+bool stale
+string reason
