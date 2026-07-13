@@ -471,7 +471,11 @@ async fn run_session(
                         if kind == 0 {
                             seg.push_str(&ev.text_chunk);
                         }
-                        let is_boundary = matches!(kind, 1 | 2 | 4);
+                        // Status (3) is also a narration boundary. Pilot uses
+                        // it after an in-progress no-call round so TTS can play
+                        // the complete progress update without mislabelling it
+                        // as FinalText and closing the interaction stream.
+                        let is_boundary = is_narration_boundary(kind);
                         let say = if is_boundary {
                             let streamed = std::mem::take(&mut seg);
                             if req.tts_enabled {
@@ -1139,6 +1143,10 @@ fn tts_boundary_text(kind: u32, streamed: String, final_text: &str) -> Option<St
     (!streamed.trim().is_empty()).then_some(streamed)
 }
 
+fn is_narration_boundary(kind: u32) -> bool {
+    matches!(kind, 1 | 2 | 3 | 4)
+}
+
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
     VoiceEvent {
         event_kind: kind,
@@ -1366,6 +1374,15 @@ mod tests {
         assert_eq!(
             tts_boundary_text(4, String::new(), "final answer"),
             Some("final answer".to_string())
+        );
+    }
+
+    #[test]
+    fn status_flushes_progress_without_requiring_final_text() {
+        assert!(is_narration_boundary(3));
+        assert_eq!(
+            tts_boundary_text(3, "still navigating".to_string(), ""),
+            Some("still navigating".to_string())
         );
     }
 
