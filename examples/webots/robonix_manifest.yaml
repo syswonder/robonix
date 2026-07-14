@@ -160,8 +160,12 @@ service:
       algo: rtabmap
       platform: x86_desktop
       map_mode: mapping
+      rtabmap_profile: webots_tiago
       rtabmap_inputs: [lidar, rgbd, odom]
-      occupancy_sources: [lidar, depth]
+      # The simulator's planar lidar is deterministic and aligned to odom.
+      # Keep RGB-D available to RTAB-Map without mixing approximately synced
+      # depth rays into the authoritative 2D occupancy grid.
+      occupancy_sources: [lidar]
       sensor_providers:
         lidar2d: tiago_lidar
         rgb: tiago_camera
