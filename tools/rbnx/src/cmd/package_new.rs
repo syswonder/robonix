@@ -32,6 +32,32 @@ fn python_module_name(name: &str) -> String {
     name.replace('-', "_")
 }
 
+fn package_manifest(package_name: &str, ns_kind: &str) -> String {
+    format!(
+        r#"manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: bash scripts/start.sh
+
+package:
+  name: "{package_name}"
+  version: 0.0.1
+  description: "TODO: describe what this {ns_kind} package provides."
+  tags:
+    - {ns_kind}
+    - robonix
+  maintainers:
+    - Your Name <you@example.com>
+  license: Apache-2.0
+
+capabilities: []
+
+depends: []
+"#
+    )
+}
+
 pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<()> {
     validate_name(name)?;
 
@@ -82,29 +108,7 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
     }
 
     // package_manifest.yaml — capabilities default to empty.
-    let manifest = format!(
-        r#"manifestVersion: 1
-
-build: bash scripts/build.sh
-
-start: bash scripts/start.sh
-
-package:
-  name: "{package_name}"
-  version: 0.0.1
-  description: TODO: describe what this {ns_kind} package provides.
-  tags:
-    - {ns_kind}
-    - robonix
-  maintainers:
-    - Your Name <you@example.com>
-  license: Apache-2.0
-
-capabilities: []
-
-depends: []
-"#
-    );
+    let manifest = package_manifest(&package_name, ns_kind);
     std::fs::write(pkg_dir.join("package_manifest.yaml"), manifest)
         .context("failed to write package_manifest.yaml")?;
 
@@ -212,4 +216,48 @@ if __name__ == "__main__":
     output::sub_step(".gitignore");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_manifest_has_complete_package_metadata() {
+        let root: serde_yaml::Value =
+            serde_yaml::from_str(&package_manifest("robonix.service.example", "service")).unwrap();
+        let package = root
+            .get("package")
+            .and_then(|value| value.as_mapping())
+            .unwrap();
+
+        assert_eq!(
+            root.get("manifestVersion").and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        for key in [
+            "name",
+            "version",
+            "description",
+            "license",
+            "tags",
+            "maintainers",
+        ] {
+            assert!(
+                package.contains_key(serde_yaml::Value::String(key.into())),
+                "missing package.{key}"
+            );
+        }
+        assert!(root.get("start").and_then(|value| value.as_str()).is_some());
+        assert!(
+            root.get("capabilities")
+                .and_then(|value| value.as_sequence())
+                .is_some()
+        );
+        assert!(
+            root.get("depends")
+                .and_then(|value| value.as_sequence())
+                .is_some()
+        );
+    }
 }
