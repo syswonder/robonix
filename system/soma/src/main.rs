@@ -36,12 +36,17 @@ use robonix_soma::deployment::Deployment;
 use robonix_soma::launcher::PackageLauncher;
 use robonix_soma::pb::contracts::{
     robonix_system_soma_footprint_server::RobonixSystemSomaFootprintServer,
+    robonix_system_soma_get_health_server::RobonixSystemSomaGetHealthServer,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYamlServer,
+    robonix_system_soma_health_server::RobonixSystemSomaHealthServer,
 };
 use robonix_soma::service::SomaService;
 use robonix_soma::store::SomaBody;
-use robonix_soma::{GET_FOOTPRINT_CONTRACT, GET_URDF_CONTRACT, GET_YAML_CONTRACT, SOMA_NAMESPACE};
+use robonix_soma::{
+    GET_FOOTPRINT_CONTRACT, GET_HEALTH_CONTRACT, GET_URDF_CONTRACT, GET_YAML_CONTRACT,
+    HEALTH_CONTRACT, SOMA_NAMESPACE,
+};
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +55,8 @@ use tokio::signal::unix::{SignalKind, signal};
 const GET_YAML_TOML: &str = "capabilities/system/soma/get_yaml.v1.toml";
 const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
 const GET_FOOTPRINT_TOML: &str = "capabilities/system/soma/footprint.v1.toml";
+const GET_HEALTH_TOML: &str = "capabilities/system/soma/get_health.v1.toml";
+const HEALTH_TOML: &str = "capabilities/system/soma/health.v1.toml";
 /// Line rbnx writes to the stage-trigger pipe to release soma's
 /// stage 2. Match this exactly in rbnx's `cmd::deploy.rs` — they're
 /// a contract pair, not configurable per deployment.
@@ -104,12 +111,28 @@ async fn main() -> Result<()> {
     // unregistered and non-ACTIVE in Atlas. Robot-state primitives use this
     // single source to publish the URDF-defined ROS TF tree.
     let svc = Arc::new(SomaService::new(Arc::clone(&body)));
+    let snapshot_tx = svc.snapshot_sender();
+    {
+        let svc_cache = Arc::clone(&svc);
+        let mut cache_rx = snapshot_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match cache_rx.recv().await {
+                    Ok(snapshot) => svc_cache.update_snapshot(snapshot).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     let (body_shutdown_tx, body_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut body_server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(&svc)))
             .add_service(RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaFootprintServer::from_arc(svc))
+            .add_service(RobonixSystemSomaFootprintServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemSomaGetHealthServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemSomaHealthServer::from_arc(svc))
             .serve_with_shutdown(listen_addr, async {
                 let _ = body_shutdown_rx.await;
             })
@@ -193,6 +216,57 @@ async fn main() -> Result<()> {
         )
         .await
         .context("declare Soma footprint gRPC capability")?;
+    atlas
+        .declare_capability(
+            &config.provider_id,
+            GET_HEALTH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                GET_HEALTH_TOML,
+                "robonix.contracts.RobonixSystemSomaGetHealth",
+                "/robonix.contracts.RobonixSystemSomaGetHealth/GetHealth",
+            ),
+        )
+        .await
+        .context("declare Soma get_health gRPC capability")?;
+    atlas
+        .declare_capability(
+            &config.provider_id,
+            HEALTH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                HEALTH_TOML,
+                "robonix.contracts.RobonixSystemSomaHealth",
+                "/robonix.contracts.RobonixSystemSomaHealth/StreamHealth",
+            ),
+        )
+        .await
+        .context("declare Soma stream_health gRPC capability")?;
+
+    if deployment.primitives.is_empty() {
+        warn!(
+            "No primitives declared in robonix_manifest.yaml — SOMA health will remain UNKNOWN. \
+             Add a health primitive to the manifest's primitive list."
+        );
+    }
+    {
+        let health_atlas = atlas.clone();
+        let health_body_id = body.robot_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = robonix_soma::health::start_health_collector(
+                health_atlas,
+                health_body_id,
+                "piper".to_string(),
+                snapshot_tx,
+            )
+            .await
+            {
+                warn!("[soma] health collector failed: {error:#}");
+            }
+        });
+    }
     atlas
         .set_lifecycle_state(
             &config.provider_id,

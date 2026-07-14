@@ -6,7 +6,11 @@
 use crate::dispatch::{async_poll, async_registry};
 use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
 use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
+use crate::pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealth;
 use crate::pb::executor::{CancelAllResponse, RtdlEvent};
+use crate::pb::module_health::{
+    GetModuleHealthRequest, GetModuleHealthResponse, ModuleHealth, ModuleHealthReport,
+};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::{PlanRuntime, StopWhen};
@@ -24,6 +28,9 @@ use tonic::{Request, Response, Status};
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 const RTDL_DO: u32 = 2;
+const MODULE_HEALTH_SCHEMA_VERSION: u32 = 1;
+const MODULE_HEALTH_OK: u32 = 0;
+const MODULE_HEALTH_TTL_MS: u32 = 5000;
 
 /// `AtlasClient` is cheap to clone — each Execute RPC clones it so per-plan
 /// dispatch runs without serialising on a single mutex.
@@ -461,6 +468,36 @@ impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
     }
 }
 
+#[tonic::async_trait]
+impl RobonixSystemExecutorGetHealth for ExecutorServiceImpl {
+    async fn get_module_health(
+        &self,
+        _request: Request<GetModuleHealthRequest>,
+    ) -> Result<Response<GetModuleHealthResponse>, Status> {
+        Ok(Response::new(GetModuleHealthResponse {
+            report: Some(executor_health_report(&self.provider_id)),
+        }))
+    }
+}
+
+fn executor_health_report(provider_id: &str) -> ModuleHealthReport {
+    ModuleHealthReport {
+        schema_version: MODULE_HEALTH_SCHEMA_VERSION,
+        module: Some(ModuleHealth {
+            module_key: String::new(),
+            module_id: "executor".to_string(),
+            provider_id: provider_id.to_string(),
+            health: MODULE_HEALTH_OK,
+            state: "active".to_string(),
+            reason_code: "OK".to_string(),
+            detail: "executor serving".to_string(),
+            source: String::new(),
+            received_ts_ns: 0,
+            ttl_ms: MODULE_HEALTH_TTL_MS,
+        }),
+    }
+}
+
 /// Validate Plan arena shape before spawning execution work.
 fn validate_plan(plan: &Plan) -> Result<(), String> {
     if plan.nodes.is_empty() {
@@ -561,7 +598,8 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 #[cfg(test)]
 mod tests {
     use super::{
-        PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
+        MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION, MODULE_HEALTH_TTL_MS, PlanRuntime, RTDL_DO,
+        RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum, executor_health_report,
         send_operator_terminal, send_stop_on_enter, validate_plan,
     };
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
@@ -605,6 +643,25 @@ mod tests {
             nodes,
             root_index,
         }
+    }
+
+    #[test]
+    fn executor_health_report_uses_minimal_module_health_v1_fields() {
+        let report = executor_health_report("executor");
+        assert_eq!(report.schema_version, MODULE_HEALTH_SCHEMA_VERSION);
+
+        let module = report.module.expect("module health");
+        assert_eq!(module.module_id, "executor");
+        assert_eq!(module.provider_id, "executor");
+        assert_eq!(module.health, MODULE_HEALTH_OK);
+        assert_eq!(module.state, "active");
+        assert_eq!(module.reason_code, "OK");
+        assert_eq!(module.detail, "executor serving");
+        assert_eq!(module.ttl_ms, MODULE_HEALTH_TTL_MS);
+
+        assert!(module.module_key.is_empty());
+        assert!(module.source.is_empty());
+        assert_eq!(module.received_ts_ns, 0);
     }
 
     #[test]
