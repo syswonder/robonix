@@ -182,6 +182,22 @@ contract list in `scene_service/service.py` (`_SCENE_CONTRACTS`), asks Atlas for
 providers that implement those contracts, connects to their ROS 2 `topic_out`
 interfaces, and subscribes only to what the deployment actually exposes.
 
+For a robot with more than one camera, pin Scene to one RGB-D provider in the
+deployment manifest:
+
+```yaml
+system:
+  scene:
+    camera_provider_id: front_rgbd_camera
+```
+
+The value is the camera package entry's `name` (and therefore its Atlas
+provider id). Scene resolves `rgb`, `depth`, `intrinsics`, and `extrinsics`
+from that same provider so streams and calibration from different cameras are
+never mixed. The selected provider must expose both `camera/rgb` and
+`camera/depth` for RGB-D perception. Omitting `camera_provider_id` preserves
+the legacy auto-discovery behaviour for single-camera deployments.
+
 The default RMW is Zenoh (`RMW_IMPLEMENTATION=rmw_zenoh_cpp`). For single-host
 deployments the default local router/session is used; advanced deployments can
 override it with `ROBONIX_ZENOH_ROUTER`, `ROBONIX_ZENOH_MODE`, and
@@ -196,6 +212,16 @@ Useful input contracts include:
 * `robonix/primitive/camera/extrinsics` (`geometry_msgs/TransformStamped`)
 * `robonix/service/map/pose` (`geometry_msgs/PoseWithCovarianceStamped`)
 * `robonix/service/map/occupancy_grid` (`nav_msgs/OccupancyGrid`)
+
+Scene's robot marker and self context come primarily from
+`robonix/service/map/pose`, not from the camera and not from raw chassis odom.
+The mapping/localization provider must publish a globally corrected
+`PoseWithCovarianceStamped` for `base_link`; Scene adopts its
+`header.frame_id` as the world frame. `service/map/odom` and TF2 are
+compatibility fallbacks. Metric RGB-D projection composes that world-to-base
+pose with `primitive/camera/extrinsics` (`base_link` to camera optical frame).
+A complete URDF published by `robot_description` may provide the equivalent
+TF2 fallback, but new deployments should expose both contracts explicitly.
 
 If your camera frame is not the deployment default, override it when starting scene:
 
