@@ -161,8 +161,11 @@ pub struct Package {
     pub id: Option<String>,
     #[serde(default)]
     pub version: String,
-    /// Deprecated package metadata accepted for old manifests. New package
-    /// manifests should use maintainers/tags for catalog metadata.
+    /// Legacy publisher label retained for manifest compatibility. It is not
+    /// used as package identity or Catalog metadata; new manifests should use
+    /// `name`, `tags`, and `maintainers` instead.
+    #[serde(default)]
+    pub vendor: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -420,5 +423,35 @@ impl Manifest {
             capabilities: self.capabilities.iter().map(|c| c.name.clone()).collect(),
             depends: self.depends.iter().map(|d| d.name.clone()).collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_vendor_is_backward_compatible() {
+        let raw: RawManifest = serde_yaml::from_str(
+            r#"
+manifestVersion: 1
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Legacy package metadata example.
+  license: MulanPSL-2.0
+start: bash scripts/start.sh
+capabilities: []
+"#,
+        )
+        .expect("legacy package.vendor must parse");
+
+        let manifest = normalize(raw, Path::new("package_manifest.yaml"));
+
+        assert_eq!(manifest.package.vendor, "robonix");
+        manifest
+            .validate_and_summarize()
+            .expect("package.vendor must not invalidate an otherwise valid manifest");
     }
 }
