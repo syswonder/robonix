@@ -98,6 +98,9 @@ robot:
   family: mobile_manipulator
   root_part: base
   dimensions: { length_m: 0.84, width_m: 0.56, height_m: 1.20 }
+  footprint:
+    base_frame: base_link
+    points: [[0.42, 0.28], [0.42, -0.28], [-0.42, -0.28], [-0.42, 0.28]]
   mass_kg: 38
   passable_door_width_m: 0.78
   exports:
@@ -155,6 +158,9 @@ Soma preserves the original URDF XML. `get_urdf()` returns that raw XML text.
 | `family` | string | yes | Robot family, such as `mobile_robot`, `mobile_manipulator`, `fixed_dual_arm_desktop`, or `drone`. Custom values are allowed. |
 | `root_part` | string | no | Component id that represents the root body part. |
 | `dimensions` | object | yes | Overall dimensions, usually with `length_m`, `width_m`, and `height_m`. |
+| `footprint` | object | no | Collision polygon consumed by `robonix/system/soma/footprint`. |
+| `footprint.base_frame` | string | with footprint | Frame containing the polygon, normally `base_link`. |
+| `footprint.points` | array | with footprint | At least three finite `[x, y]` metre pairs; the polygon must enclose the origin. |
 | `mass_kg` | float | yes | Overall mass. |
 | `passable_door_width_m` | float | no | Conservative door-width threshold. |
 | `exports` | array | yes | Provider-grouped capabilities available at robot scope. |
@@ -217,6 +223,40 @@ components:
 | `urdf_joint` | string | no | URDF joint represented by this component. |
 | `exports` | array | yes | Provider-grouped capabilities attached to this component. Use `[]` when none are attached. |
 | `components` | array | no | Child components. |
+| `state` | object | no | Runtime-state calibration for this component, such as a gripper joint's open position. |
+
+### Runtime chassis and gripper state
+
+Soma reads live state through standard primitive capabilities; it does not
+depend on a task skill. A mobile-base component should export
+`robonix/primitive/chassis/odom`. Soma reports linear speed, angular speed, and
+`moving` from that provider's odometry.
+
+An arm component should export `robonix/primitive/arm/joint_states`. A gripper
+below that arm may define its open-position calibration:
+
+```yaml
+- id: arm
+  type: manipulator
+  exports:
+    - provider_id: arm_controller
+      capabilities:
+        - { path: robonix/primitive/arm/joint_states, description: "Read arm and gripper joints." }
+  components:
+    - id: gripper
+      type: parallel_jaw_gripper
+      state:
+        joint_name: gripper
+        open_position_m: 0.080
+        open_tolerance_m: 0.003
+      exports: []
+```
+
+`joint_name` must match the incoming JointState name. Measure
+`open_position_m` from an empty, fully open gripper; choose
+`open_tolerance_m` from its feedback noise. Soma reports an open gripper when
+the measured position is within that tolerance and otherwise reports it as
+partially closed or likely holding.
 
 ### Description
 
