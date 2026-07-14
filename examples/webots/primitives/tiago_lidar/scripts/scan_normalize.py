@@ -29,31 +29,10 @@ class Normalizer(Node):
         self.create_subscription(LaserScan, in_topic, self._cb, qos)
         self.get_logger().info(f"normalizing {in_topic} -> {out_topic}")
         self._warned = False
-        # Track inter-scan period so we can synthesise scan_time when
-        # the upstream LaserScan has it as 0 (Webots does — it never
-        # populates scan_time / time_increment, which makes SLAM treat
-        # every scan as instantaneous and ghost-walls form on rotation).
-        self._last_stamp_s: float | None = None
-        self._scan_period_s: float = 0.118    # 8.5 Hz fallback for tiago hokuyo
 
     def _cb(self, msg: LaserScan) -> None:
         out = LaserScan()
         out.header = msg.header
-        # Webots's lidar plugin stamps scans at the END of the sim
-        # step that produced them; the rays were actually sampled at
-        # the START. Pulling the stamp back by ~half a scan period
-        # makes SLAM's tf lookup land near the true sample time
-        # (combined with `use_scan_barycenter`, which then adds
-        # scan_time/2 to recover sample-center). On combined linear+
-        # angular motion this removes the residual ~degree-of-tens
-        # ghost we still saw after the time_increment / angle fixes.
-        offset_s = self._scan_period_s * 0.5
-        sec_total = (msg.header.stamp.sec
-                     + msg.header.stamp.nanosec * 1e-9
-                     - offset_s)
-        if sec_total > 0:
-            out.header.stamp.sec = int(sec_total)
-            out.header.stamp.nanosec = int((sec_total - int(sec_total)) * 1e9)
         if msg.angle_increment < 0.0 or msg.angle_min > msg.angle_max:
             # Standard webots case: flip orientation.
             out.angle_min = float(msg.angle_max)
@@ -73,23 +52,12 @@ class Normalizer(Node):
             out.angle_increment = msg.angle_increment
             out.ranges = msg.ranges
             out.intensities = msg.intensities
-        # Estimate inter-scan period from the stamp deltas (low-pass).
-        cur_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self._last_stamp_s is not None:
-            dt = cur_s - self._last_stamp_s
-            if 0.02 < dt < 1.0:   # ignore obvious outliers / time resets
-                self._scan_period_s = 0.85 * self._scan_period_s + 0.15 * dt
-        self._last_stamp_s = cur_s
-
-        n = len(out.ranges) if out.ranges else 1
-        # Patch scan_time / time_increment when the upstream sets them
-        # to 0 (Webots lidar plugin does). Without these fields SLAM
-        # cannot motion-compensate across the scan duration; with the
-        # robot rotating at 0.5 rad/s and scan_period ~0.12s the
-        # robot turns ~3.5° per scan, which is exactly the ghost-wall
-        # halo we see in rviz.
-        out.scan_time = float(msg.scan_time) if msg.scan_time > 1e-6 else float(self._scan_period_s)
-        out.time_increment = float(msg.time_increment) if msg.time_increment > 1e-9 else float(self._scan_period_s / max(1, n))
+        # Webots renders the whole range image at one simulation timestamp.
+        # Keep that instantaneous-scan contract. Inventing a per-ray time and
+        # moving the stamp backwards associates the scan with an older odom
+        # pose, which duplicates walls whenever the robot rotates.
+        out.scan_time = msg.scan_time
+        out.time_increment = msg.time_increment
         out.range_min = msg.range_min
         out.range_max = msg.range_max
         self.pub.publish(out)

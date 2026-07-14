@@ -85,14 +85,6 @@ def generate_launch_description():
         }],
     )
 
-    footprint_publisher = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        output='screen',
-        arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'base_footprint'],
-    )
-
-
     use_twist_stamped = 'ROS_DISTRO' in os.environ and (os.environ['ROS_DISTRO'] in ['rolling', 'jazzy', 'kilted'])
     if use_twist_stamped:
         mappings = [('/diffdrive_controller/cmd_vel', '/cmd_vel'), ('/diffdrive_controller/odom', '/odom')]
@@ -128,7 +120,6 @@ def generate_launch_description():
         webots,
         webots._supervisor,
         robot_state_publisher, # Ensure robot_state_publisher starts before my_robot_driver if my_robot_driver depends on it.
-        footprint_publisher,
         my_robot_driver,
         waiting_nodes,
         launch.actions.RegisterEventHandler(
@@ -138,4 +129,3 @@ def generate_launch_description():
             )
         )
     ])
-
