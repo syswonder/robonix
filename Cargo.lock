@@ -3146,7 +3146,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "nix 0.31.2",
+ "nix 0.31.3",
  "prost",
  "protoc-bin-vendored",
  "rmcp",
