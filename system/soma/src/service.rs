@@ -73,12 +73,12 @@ impl SomaService {
         let runtime_detail = runtime.warnings.join("; ");
         let mut components = vec![component(
             "body",
-            &runtime_detail,
+            "",
             KIND_BODY,
             &self.body.robot_id,
             HEALTH_OK,
             OP_ACTIVE,
-            "",
+            &runtime_detail,
         )];
         let mut actuators = Vec::new();
         let mut metrics = Vec::new();
@@ -448,6 +448,13 @@ mod tests {
         let snapshot = response.snapshot.expect("snapshot");
         assert_eq!(snapshot.body_id, "test_ci_robot");
         assert_eq!(snapshot.seq, 1);
+        let body = snapshot
+            .components
+            .iter()
+            .find(|component| component.id == "body")
+            .expect("body component");
+        assert!(body.parent_id.is_empty());
+        assert!(body.detail.contains("no chassis odometry sample"));
     }
 
     #[tokio::test]

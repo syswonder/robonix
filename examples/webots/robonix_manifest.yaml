@@ -6,6 +6,10 @@ name: robonix-webots-example-deploy
 # Load later switches mapping to localization mode and binds scene objects +
 # room annotations to the selected saved map. Do not set SCENE_MAP_ID here: a
 # static default would make a first run look like a loaded map.
+# Webots already owns robot_state_publisher and publishes /robot_description,
+# /tf, and /tf_static. Do not add robot-description-rbnx to this simulator
+# manifest; the generic primitive is for deployments without another URDF/TF
+# publisher.
 
 # boot in sequence: system -> soma+scene -> execution -> interaction
 system:
@@ -13,13 +17,26 @@ system:
   atlas:
     listen: 0.0.0.0:50051
     log: info
+  soma:
+    # Webots keeps ROS 2 inside the simulator container. Soma still owns and
+    # exposes the state; only its private topic reader runs beside ROS 2.
+    runtime_reader_command:
+      - docker
+      - exec
+      - robonix_tiago_sim
+      - bash
+      - -lc
+      - source /opt/ros/humble/setup.bash && exec python3 -u /robonix_runtime/soma/soma_runtime_ros.py /robonix_runtime/soma/soma_runtime_sources.json
   # soma+scene layer
   scene:
     log: info
     camera_frame: head_front_camera_rgb_optical_frame
+    camera_provider_id: tiago_camera
   # execution layer
   executor:
-    listen: 127.0.0.1:50061
+    # robonix-client polls Executor for authoritative active RTDL plans.
+    # Bind externally on trusted LAN/Tailscale deployments.
+    listen: 0.0.0.0:50061
     log: info
   # interaction layer
   pilot:
@@ -106,9 +123,22 @@ service:
   - name: speech
     path: ${ROBONIX_SOURCE_PATH}/services/speech
     config:
+      # Empty/unset SPEECH_BACKEND preserves the local backend. Set it to
+      # tencent before build+boot for the lightweight cloud path.
+      speech_backend: ${SPEECH_BACKEND}
       disable_whisper: true
       funasr_device: cuda
       tts_voice: zh-CN-XiaoxiaoNeural
+      default_speaker_provider_id: audio_driver
+      tencent_asr_appid: ${TENCENT_ASR_APPID}
+      # Use the basic realtime-ASR engine so Tencent's monthly free realtime
+      # quota applies. 16k_zh_en is a separately billed large-model engine.
+      tencent_asr_engine: 16k_zh
+      tencent_tts_voice_type: 502003
+      tencent_tts_region: ap-guangzhou
+      tencent_tts_model_type: 1
+      tencent_tts_sample_rate: 16000
+      tencent_tts_codec: pcm
 
   # voiceprint — ECAPA-TDNN speaker identification. Provides
   # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
@@ -129,6 +159,14 @@ service:
     config:
       algo: rtabmap
       platform: x86_desktop
+      map_mode: mapping
+      rtabmap_inputs: [lidar, rgbd, odom]
+      occupancy_sources: [lidar, depth]
+      sensor_providers:
+        lidar2d: tiago_lidar
+        rgb: tiago_camera
+        depth: tiago_camera
+        odom: tiago_chassis
       sensors:
         lidar2d: true # webots do not have 3d pointcloud, so we use 2d lidar
         lidar3d: false
@@ -159,6 +197,10 @@ service:
       # rotation guard inside that boundary so path-alignment turns are not
       # mistaken for a stuck final-yaw correction.
       guard_terminal_xy_m: 0.20
+      provider_ids:
+        map: mapping
+        odom: tiago_chassis
+        scan: tiago_lidar
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:

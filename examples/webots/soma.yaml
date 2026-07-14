@@ -25,12 +25,12 @@ robot:
   mass_kg: 55.0
   passable_door_width_m: 0.80
   exports:
-    - provider_id: tiago_webots_nav2
+    - provider_id: nav2
       capabilities:
         - { path: robonix/service/navigation/navigate, description: "Navigate to a 2D goal in the mapped scene." }
         - { path: robonix/service/navigation/navigate/status, description: "Report the current navigation goal status." }
         - { path: robonix/service/navigation/navigate/cancel, description: "Cancel the active navigation goal." }
-    - provider_id: skill_explore_room
+    - provider_id: explore
       capabilities:
         # Capability paths must match what the explore_rbnx package
         # actually exports in its package_manifest.yaml. The upstream
@@ -46,7 +46,7 @@ robot:
       type: mobile_base
       urdf_link: base_link
       exports:
-        - provider_id: tiago_webots_chassis
+        - provider_id: tiago_chassis
           capabilities:
             - { path: robonix/primitive/chassis/move, description: "Command chassis motion through Webots ROS2 velocity control." }
             - { path: robonix/primitive/chassis/odom, description: "Read odometry from the simulated differential drive base." }
@@ -64,7 +64,7 @@ robot:
       type: rgbd_camera
       urdf_link: head_front_camera_rgb_optical_frame
       exports:
-        - provider_id: tiago_webots_camera
+        - provider_id: tiago_camera
           capabilities:
             - { path: robonix/primitive/camera/snapshot, description: "Capture an RGB image from the Webots head camera." }
             - { path: robonix/primitive/camera/depth_snapshot, description: "Capture a registered depth image from the Webots head camera." }
@@ -75,18 +75,22 @@ robot:
       type: lidar_2d
       urdf_link: hokuyo
       exports:
-        - provider_id: tiago_webots_lidar
+        - provider_id: tiago_lidar
           capabilities:
             - { path: robonix/primitive/lidar/snapshot, description: "Capture a planar laser scan from the simulated Hokuyo lidar." }
     - id: audio
       type: audio_io
       exports:
-        - provider_id: tiago_webots_audio
+        - provider_id: audio_driver
           capabilities:
             - { path: robonix/primitive/audio/mic, description: "Stream microphone audio from the selected host ALSA input device." }
             - { path: robonix/primitive/audio/speaker, description: "Play streamed audio through the selected host ALSA output device." }
             - { path: robonix/primitive/audio/list_devices, description: "List available host ALSA audio devices." }
             - { path: robonix/primitive/audio/select_device, description: "Select the active host ALSA audio device." }
+        - provider_id: audio_client_bridge
+          capabilities:
+            - { path: robonix/primitive/audio/mic, description: "Stream microphone audio from a connected Robonix Client." }
+            - { path: robonix/primitive/audio/speaker, description: "Play speech through a connected Robonix Client." }
 
 description:
   summary: "A Webots TIAGo Lite deployment with chassis, RGB-D camera, planar lidar, audio IO, mapping, navigation, and optional exploration packages."
