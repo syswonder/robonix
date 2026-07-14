@@ -29,7 +29,7 @@ service:
     config:
       speech_backend: tencent
       tencent_asr_appid: "1234567890"
-      tencent_asr_engine: 16k_zh_en
+      tencent_asr_engine: 16k_zh
       tencent_tts_voice_type: 502003
       tencent_tts_region: ap-guangzhou
 ```
@@ -44,7 +44,7 @@ export TENCENTCLOUD_SECRET_KEY=...
 Do not commit Tencent credentials. Put them in the operator shell, a local
 ignored env file, or a machine-local boot wrapper. The AppID and non-secret
 backend settings belong in the deployment manifest. Useful optional knobs:
-`TENCENT_ASR_ENGINE` (default `16k_zh_en`), `TENCENT_TTS_VOICE_TYPE` (default
+`TENCENT_ASR_ENGINE` (default `16k_zh`), `TENCENT_TTS_VOICE_TYPE` (default
 `1001`), and `TENCENT_TTS_REGION` (default `ap-guangzhou`).
 
 With `SPEECH_BACKEND=tencent`, the build installs only the cloud client and

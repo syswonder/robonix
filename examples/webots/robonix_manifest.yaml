@@ -16,7 +16,6 @@ system:
   # basic layer
   atlas:
     listen: 0.0.0.0:50051
-    log: info
   soma:
     # Webots keeps ROS 2 inside the simulator container. Soma still owns and
     # exposes the state; only its private topic reader runs beside ROS 2.
@@ -27,9 +26,10 @@ system:
       - bash
       - -lc
       - source /opt/ros/humble/setup.bash && exec python3 -u /robonix_runtime/soma/soma_runtime_ros.py /robonix_runtime/soma/soma_runtime_sources.json
+  vitals:
+    listen: 0.0.0.0:50093
   # soma+scene layer
   scene:
-    log: info
     camera_frame: head_front_camera_rgb_optical_frame
     camera_provider_id: tiago_camera
   # execution layer
@@ -37,40 +37,25 @@ system:
     # robonix-client polls Executor for authoritative active RTDL plans.
     # Bind externally on trusted LAN/Tailscale deployments.
     listen: 0.0.0.0:50061
-    log: info
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071
-    log: debug
     vlm:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
-      api_format: openai
   liaison:
     listen: 0.0.0.0:50081
-    log: info
-    # Disabled until the operator enables it from robonix-client. The client
-    # then supplies its persisted input/output provider selection; no client
-    # address is stored in this deployment.
-    handsfree_enabled: false
 
 # after booted all the system components, start the devices (primitives)
 # the robonix boot "device tree"
 primitive:
   - name: tiago_chassis
     path: ./primitives/tiago_chassis
-    config:
-      # example place holders
-      can_port: /dev/can0
-      odom_frame: odom
-      base_frame: base_link
+    config: {}
   - name: tiago_camera
     path: ./primitives/tiago_camera
     config:
-      # example place holders
-      serial_no: 1234567890
-      fps: 30
       width: 640
       height: 480
       # Webots Tiago head camera calibration for the intrinsics contract.
@@ -80,7 +65,6 @@ primitive:
       fy: 554.0
       cx: 320.0
       cy: 240.0
-      frame_id: head_front_camera_rgb_optical_frame
       # First-RGB-frame wait at INIT. Webots under a CPU-starved boot (all
       # drivers initialising at once) can take well over a minute to deliver
       # the first frame — lidar alone routinely needs ~70s — so the default
@@ -89,9 +73,7 @@ primitive:
   - name: tiago_lidar
     path: ./primitives/tiago_lidar
     config:
-      # example place holders
-      update_rate: 10
-      frame_id: lidar
+      sentinel_timeout_s: 150
   # ── audio mic/speaker source ─────────────────────────────────────────────
   # Local ALSA provider. It remains available for robot-local audio.
   - name: audio_driver
@@ -102,9 +84,7 @@ primitive:
   # this manifest nor Liaison stores a client IP.
   - name: audio_client_bridge
     path: ./primitives/audio_client_bridge
-    config:
-      transport: reverse
-      listen_port: 60002
+    config: {}
 
 # after booted all the primitives, start the services
 service:
@@ -113,8 +93,7 @@ service:
   # queries it for relevant past context when planning.
   - name: memory
     path: ${ROBONIX_SOURCE_PATH}/services/memsearch
-    config:
-      backend: sqlite
+    config: {}
 
   # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
   # liaison's voice loop connects to. The selected audio provider is supplied
@@ -128,17 +107,9 @@ service:
       speech_backend: ${SPEECH_BACKEND}
       disable_whisper: true
       funasr_device: cuda
-      tts_voice: zh-CN-XiaoxiaoNeural
       default_speaker_provider_id: audio_driver
       tencent_asr_appid: ${TENCENT_ASR_APPID}
-      # Use the basic realtime-ASR engine so Tencent's monthly free realtime
-      # quota applies. 16k_zh_en is a separately billed large-model engine.
-      tencent_asr_engine: 16k_zh
       tencent_tts_voice_type: 502003
-      tencent_tts_region: ap-guangzhou
-      tencent_tts_model_type: 1
-      tencent_tts_sample_rate: 16000
-      tencent_tts_codec: pcm
 
   # voiceprint — ECAPA-TDNN speaker identification. Provides
   # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
@@ -149,35 +120,24 @@ service:
     path: ${ROBONIX_SOURCE_PATH}/services/voiceprint
     config: {}
 
-  # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
-  # depends on `service/map/occupancy_grid` and rbnx-cli currently
-  # boots services in manifest order; until the defer-queue lands
-  # consumers must come after their providers.
+  # Mapping publishes the occupancy, point cloud, pose, and map-management
+  # contracts consumed by Navigation and Scene.
   - name: mapping
     url: https://github.com/syswonder/service-map-rbnx
     branch: main
     config:
-      algo: rtabmap
-      platform: x86_desktop
-      map_mode: mapping
-      rtabmap_profile: webots_tiago
-      rtabmap_inputs: [lidar, rgbd, odom]
+      use_sim_time: true
       # The simulator's planar lidar is deterministic and aligned to odom.
       # Keep RGB-D available to RTAB-Map without mixing approximately synced
       # depth rays into the authoritative 2D occupancy grid.
       occupancy_sources: [lidar]
+      # Complete simulator tuning is owned by this deployment repository.
+      params_file: config/rtabmap_params.yaml
       sensor_providers:
         lidar2d: tiago_lidar
         rgb: tiago_camera
         depth: tiago_camera
         odom: tiago_chassis
-      sensors:
-        lidar2d: true # webots do not have 3d pointcloud, so we use 2d lidar
-        lidar3d: false
-        rgb: true # color image — rtabmap fuses RGB for visual loop closure
-        depth: true # depth image — fills below-lidar-plane obstacles (rgb+depth = RGB-D)
-        imu: false
-        odom: true
 
   # nav2_wrapper_rbnx IS the navigation service for this deploy.
   #
@@ -185,16 +145,15 @@ service:
   # (mapping/occupancy_grid), /odom (chassis/odom), /scan (lidar/lidar) —
   # and drives /cmd_vel via Nav2's navigate_to_pose action. Runs in the
   # `robonix-nav2` docker image (built by `rbnx build`, so the host needs
-  # no ROS2). The `sim` params profile navigates in the odom frame with a
-  # rolling-window costmap, so it needs only odom + a 2D scan and no SLAM
-  # map->odom TF — which is what makes it work in Webots. Listed after
+  # no ROS2). The complete simulator Nav2 configuration is deployment-owned
+  # under config/. Listed after
   # mapping (its /map provider); on_init returns Deferred until mapping is
   # up, so order is a convenience, not a hard requirement.
   - name: nav2
     url: https://github.com/syswonder/service-navigation-rbnx
     branch: main
     config:
-      params_profile: sim
+      params_file: config/nav2_params.yaml
       use_sim_time: true
       action_wait_s: 240.0
       # The simulation goal checker enters at 0.25 m. Keep the terminal
@@ -212,7 +171,4 @@ skill:
   - name: explore
     url: https://github.com/syswonder/skill-explore-rbnx
     branch: main
-    config:
-      # example place holders
-      explore_mode: frontier
-      timeout_s: 600
+    config: {}

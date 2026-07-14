@@ -117,7 +117,7 @@ robonix-vitals --log info \
 | Flag | Env var | Default |
 |------|---------|---------|
 | `--atlas` | `ROBONIX_ATLAS_ENDPOINT` | `127.0.0.1:50051` |
-| `--listen` | `ROBONIX_VITALS_LISTEN` | `127.0.0.1:50091` |
+| `--listen` | `ROBONIX_VITALS_LISTEN` | `127.0.0.1:50093` |
 | `--id` | `ROBONIX_VITALS_PROVIDER_ID` | `vitals` |
 | `--thresholds-path` | `ROBONIX_VITALS_THRESHOLDS_PATH` | `thresholds/example_thresholds.yaml` |
 | `--soma-endpoint` | `ROBONIX_SOMA_ENDPOINT` | — |
