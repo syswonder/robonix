@@ -37,7 +37,7 @@ device selection, audio level display, and the reverse connection lifecycle.
 ### Client side
 
 ```sh
-robonix-client --host <robot-host> --port 50051
+robonix-client --robot-host <robot-host>
 ```
 
 Open **Audio**, select input/output primitives and devices, then apply the

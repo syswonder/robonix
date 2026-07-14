@@ -255,6 +255,7 @@ async fn main() -> Result<()> {
         &config.provider_id,
         runtime_state,
         &runtime_dir,
+        &config.runtime_reader_command,
     )
     .await
     {

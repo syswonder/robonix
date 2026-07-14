@@ -36,6 +36,11 @@ pub struct SomaConfig {
     /// Exact deploy manifest selected by `rbnx boot -f`. Defaults to the
     /// standard manifest next to `robot_yaml`.
     pub deployment_manifest: PathBuf,
+    /// Optional argv used to launch the ROS 2 runtime-state reader. The
+    /// placeholders `{script}` and `{config}` expand to the generated reader
+    /// and source-config paths. An empty list preserves the native default:
+    /// `python3 -u {script} {config}`.
+    pub runtime_reader_command: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -93,11 +98,17 @@ struct FileConfig {
     robot_yaml: Option<PathBuf>,
     #[serde(default)]
     deployment_manifest: Option<PathBuf>,
+    #[serde(default)]
+    runtime_reader_command: Vec<String>,
 }
 
 impl SomaConfig {
     /// Resolve final config from defaults, optional config file, env, and CLI args.
     pub fn resolve(args: Args) -> Result<Self> {
+        let manifest_cfg: FileConfig = match args.config_json.as_deref() {
+            Some(raw) => serde_json::from_str(raw).context("parse Soma --config-json")?,
+            None => FileConfig::default(),
+        };
         let file_cfg = match &args.config {
             Some(path) => load_yaml(path)?,
             None => FileConfig::default(),
@@ -138,6 +149,11 @@ impl SomaConfig {
                 .unwrap_or_else(|| DEFAULT_PROVIDER_ID.to_string()),
             robot_yaml,
             deployment_manifest,
+            runtime_reader_command: if manifest_cfg.runtime_reader_command.is_empty() {
+                file_cfg.runtime_reader_command
+            } else {
+                manifest_cfg.runtime_reader_command
+            },
         })
     }
 
@@ -309,5 +325,28 @@ mod tests {
         let err = SomaConfig::resolve(args).expect_err("no robot_yaml, must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("robot_yaml"), "{msg}");
+    }
+
+    #[test]
+    fn reads_runtime_reader_command_from_manifest_config() {
+        let yaml = repo_root().join("examples/test_ci/soma.yaml");
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            robot_yaml: Some(yaml),
+            deployment_manifest: None,
+            config: None,
+            log: None,
+            config_json: Some(
+                r#"{"runtime_reader_command":["docker","exec","sim","python3","{script}","{config}"]}"#
+                    .into(),
+            ),
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+        assert_eq!(
+            cfg.runtime_reader_command,
+            ["docker", "exec", "sim", "python3", "{script}", "{config}"]
+        );
     }
 }
