@@ -37,7 +37,7 @@ scene = Service(id="scene", namespace="robonix/system/scene")
 from . import mcp_tools
 from . import web as web_ui
 from .annotations import AnnotationStore
-from .ingest.capabilities import plan_perception
+from .ingest.capabilities import plan_perception, provider_for_kind
 from .map_binding import MapBinding, choose_map_binding, read_latched_lifecycle
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
@@ -147,7 +147,8 @@ _LAST_RESOLVED: dict[tuple, tuple] = {}
 
 
 def _build_topic_specs(
-    observations: list[dict], atlas_stub, transport: str
+    observations: list[dict], atlas_stub, transport: str,
+    camera_provider_id: str = "",
 ) -> list[TopicSpec]:
     """Two paths:
 
@@ -167,11 +168,15 @@ def _build_topic_specs(
     """
     pb_t = _resolve_pb_transport(transport)
     if observations:
-        return _resolve_explicit(observations, atlas_stub, pb_t)
-    return _resolve_auto(atlas_stub, pb_t)
+        return _resolve_explicit(
+            observations, atlas_stub, pb_t, camera_provider_id
+        )
+    return _resolve_auto(atlas_stub, pb_t, camera_provider_id)
 
 
-def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
+def _resolve_auto(
+    _unused, pb_transport: int, camera_provider_id: str = ""
+) -> list[TopicSpec]:
     """Walk `_SCENE_CONTRACTS` and use `ATLAS.find_capability` + `connect_capability`
     to resolve each contract. atlas hands out the endpoint via
     ConnectCapability; the cap framework also tracks the channel for
@@ -188,7 +193,13 @@ def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
     for kind, contract_id, msg_type in _SCENE_CONTRACTS:
         if kind in _DEFAULT_DISABLED_KINDS:
             continue
-        spec = _resolve_one_contract(transport, kind, contract_id, msg_type)
+        spec = _resolve_one_contract(
+            transport,
+            kind,
+            contract_id,
+            msg_type,
+            provider_id=provider_for_kind(kind, camera_provider_id),
+        )
         if spec is not None:
             out.append(spec)
     return out
@@ -199,10 +210,16 @@ def _resolve_one_contract(
     kind: str,
     contract_id: str,
     msg_type: str,
+    *,
+    provider_id: str = "",
 ) -> Optional[TopicSpec]:
     """ATLAS.find_capability(contract) → connect_capability → endpoint. Returns None when no
     cap currently advertises the contract over this transport."""
-    caps = ATLAS.find_capability(contract_id=contract_id, transport=transport)
+    caps = ATLAS.find_capability(
+        contract_id=contract_id,
+        transport=transport,
+        provider_id=provider_id,
+    )
     if not caps:
         return None
     cap_view = caps[0]
@@ -281,7 +298,8 @@ def _discover_map_binding(wait_s: float) -> Optional[dict]:
 
 
 def _resolve_explicit(
-    observations: list[dict], atlas_stub, pb_transport: int
+    observations: list[dict], atlas_stub, pb_transport: int,
+    camera_provider_id: str = "",
 ) -> list[TopicSpec]:
     """Manifest-driven override path. Each entry pairs a logical kind
     with a contract id; we go through the same single-contract resolver
@@ -308,7 +326,16 @@ def _resolve_explicit(
                 "or to _SCENE_CONTRACTS in service.py", entry
             )
             continue
-        spec = _resolve_one_contract(Transport(pb_transport), kind, contract, msg_type)
+        provider_id = str(entry.get("provider_id") or "")
+        if not provider_id:
+            provider_id = provider_for_kind(kind, camera_provider_id)
+        spec = _resolve_one_contract(
+            Transport(pb_transport),
+            kind,
+            contract,
+            msg_type,
+            provider_id=provider_id,
+        )
         if spec is not None:
             out.append(spec)
     return out
@@ -383,7 +410,8 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
 
 
 async def _auto_discover_loop(
-    *, atlas_stub, hub, transport: str, explicit: list[dict], period_s: float = 5.0
+    *, atlas_stub, hub, transport: str, explicit: list[dict],
+    camera_provider_id: str = "", period_s: float = 5.0,
 ) -> None:
     """Background reconciler. Re-runs discovery every `period_s` and
     dynamically adds new (kind, topic) subscriptions as they appear.
@@ -396,7 +424,9 @@ async def _auto_discover_loop(
         try:
             await asyncio.sleep(period_s)
             current = hub.has_kinds()
-            specs = _build_topic_specs(explicit, atlas_stub, transport)
+            specs = _build_topic_specs(
+                explicit, atlas_stub, transport, camera_provider_id
+            )
             for spec in specs:
                 if spec.kind not in current:
                     hub.add_spec(spec)
@@ -439,13 +469,23 @@ async def _start_ros_ingest(
     # those references are static and authoritative.
     explicit = config.get("observations") or []
     transport = str(config.get("transport") or "ros2")
-    specs = _build_topic_specs(explicit, atlas_stub, transport)
+    camera_provider_id = str(config.get("camera_provider_id") or "").strip()
+    if camera_provider_id:
+        log.info(
+            "[scene] RGB-D camera pinned to provider %s",
+            camera_provider_id,
+        )
+    specs = _build_topic_specs(
+        explicit, atlas_stub, transport, camera_provider_id
+    )
     if not specs and not explicit:
         attempt = 0
         while not specs:
             attempt += 1
             await asyncio.sleep(2.0)
-            specs = _build_topic_specs(explicit, atlas_stub, transport)
+            specs = _build_topic_specs(
+                explicit, atlas_stub, transport, camera_provider_id
+            )
             if specs:
                 log.info(
                     "[scene] auto-discover: found %d topic(s) on attempt %d",
@@ -494,7 +534,9 @@ async def _start_ros_ingest(
     deadline = time.time() + perception_wait_s
     while time.time() < deadline and not (hub.has("rgb") and hub.has("depth")):
         # Pull fresh specs from atlas and add anything new.
-        new_specs = _build_topic_specs(explicit, atlas_stub, transport)
+        new_specs = _build_topic_specs(
+            explicit, atlas_stub, transport, camera_provider_id
+        )
         for spec in new_specs:
             if spec.kind not in hub.has_kinds():
                 hub.add_spec(spec)
@@ -502,6 +544,16 @@ async def _start_ros_ingest(
             log.info("[scene] perception-wait: rgb+depth now available")
             break
         await asyncio.sleep(2.0)
+
+    if camera_provider_id:
+        missing = [kind for kind in ("rgb", "depth") if not hub.has(kind)]
+        if missing:
+            log.warning(
+                "[scene] camera provider %s is missing required RGB-D "
+                "contract(s): %s",
+                camera_provider_id,
+                ", ".join(missing),
+            )
 
     # ── perception ─────────────────────────────────────────────────────────
     # Which perception tier the current hardware supports is decided by the
@@ -1211,6 +1263,9 @@ async def _run() -> None:
                 hub=hub,
                 transport=str(config.get("transport") or "ros2"),
                 explicit=(config.get("observations") or []),
+                camera_provider_id=str(
+                    config.get("camera_provider_id") or ""
+                ).strip(),
             ),
             name="scene-auto-discover",
         ),

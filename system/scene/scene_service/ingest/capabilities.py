@@ -36,6 +36,19 @@ Tier = Literal["metric", "visual", "geometric"]
 Detector = Optional[Literal["concept_graphs", "vlm"]]
 
 
+CAMERA_KINDS = frozenset({"rgb", "depth", "intrinsics", "camera_extrinsics"})
+
+
+def provider_for_kind(kind: str, camera_provider_id: str = "") -> str:
+    """Return the configured provider pin for a Scene input kind.
+
+    RGB, depth, intrinsics and extrinsics describe one physical RGB-D camera
+    and must therefore resolve from the same provider. Other inputs (mapping,
+    lidar, and so on) remain independently discoverable.
+    """
+    return camera_provider_id if kind in CAMERA_KINDS else ""
+
+
 @dataclass(frozen=True)
 class PerceptionPlan:
     """Resolved perception routing for the current hardware snapshot.
