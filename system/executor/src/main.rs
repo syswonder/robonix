@@ -26,6 +26,7 @@ use dispatch::builtin::BUILTINS;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
+use pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealthServer;
 use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlansServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -76,6 +77,22 @@ async fn main() -> Result<()> {
                 "capabilities/system/executor/execute.v1.toml",
                 "robonix.contracts.RobonixSystemExecutorExecute",
                 "/robonix.contracts.RobonixSystemExecutorExecute/Execute",
+            ),
+        )
+        .await?;
+
+    // Vitals polls this out-of-band endpoint. It is observability metadata,
+    // not an RTDL operation and is never exposed as model-callable work.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/get_health",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/get_health.toml",
+                "robonix.contracts.RobonixSystemExecutorGetHealth",
+                "/robonix.contracts.RobonixSystemExecutorGetHealth/GetModuleHealth",
             ),
         )
         .await?;
@@ -186,7 +203,8 @@ async fn main() -> Result<()> {
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorListActivePlansServer::new(svc))
+        .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorGetHealthServer::new(svc))
         .serve(listen_addr)
         .await
         .context("executor gRPC server failed")?;
