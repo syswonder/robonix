@@ -193,6 +193,36 @@ mod tests {
     }
 
     #[test]
+    fn vitals_receives_typed_manifest_fields() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 0.0.0.0:50093
+provider_id: vitals
+thresholds_path: config/vitals.yaml
+soma_endpoint: 127.0.0.1:50091
+"#,
+        )
+        .unwrap();
+        let args = system_cli_args("vitals", Some(&cfg), Some("0.0.0.0:50051"));
+
+        for expected in [
+            ["--listen", "0.0.0.0:50093"],
+            ["--atlas", "0.0.0.0:50051"],
+            ["--id", "vitals"],
+            ["--thresholds-path", "config/vitals.yaml"],
+            ["--soma-endpoint", "127.0.0.1:50091"],
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == expected[0] && pair[1] == expected[1]),
+                "missing {:?} in {:?}",
+                expected,
+                args
+            );
+        }
+    }
+
+    #[test]
     fn provider_failure_ignores_later_shutdown_noise() {
         let path = std::env::temp_dir().join(format!(
             "rbnx-provider-failure-{}.log",
@@ -1083,6 +1113,13 @@ pub async fn execute(
                 .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            let soma_listen = deploy
+                .system
+                .get("soma")
+                .and_then(|v| v.as_mapping())
+                .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
+                .and_then(|v| v.as_str())
+                .map(|s| s.replacen("0.0.0.0", "127.0.0.1", 1));
             // Atlas's contract registry walks every dir in
             // --capabilities at startup. We seed it with:
             //   1. <robonix_source>/capabilities — the global tree
@@ -1119,6 +1156,7 @@ pub async fn execute(
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
                 ("soma", "robonix-soma"),
+                ("vitals", "robonix-vitals"),
                 ("pilot", "robonix-pilot"),
                 ("liaison", "robonix-liaison"),
             ];
@@ -1128,6 +1166,13 @@ pub async fn execute(
                 }
                 let mut args =
                     system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
+                if *name == "vitals"
+                    && !args.iter().any(|arg| arg == "--soma-endpoint")
+                    && let Some(endpoint) = soma_listen.as_ref()
+                {
+                    args.push("--soma-endpoint".into());
+                    args.push(endpoint.clone());
+                }
                 if *name == "atlas"
                     && !args.iter().any(|a| a == "--capabilities")
                     && let Some(p) = atlas_caps_default.as_ref()
@@ -1293,7 +1338,8 @@ pub async fn execute(
         let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
 
         if !skip_system {
-            let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+            let builtin_names: &[&str] =
+                &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
             for (key, value) in &deploy.system {
                 if builtin_names.contains(&key.as_str()) {
                     continue;
@@ -1704,7 +1750,12 @@ fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> 
         .get(serde_yaml::Value::String("listen".into()))?
         .as_str()?;
     let trimmed = s.trim();
-    if trimmed.is_empty() || !matches!(name, "atlas" | "executor" | "pilot" | "liaison" | "soma") {
+    if trimmed.is_empty()
+        || !matches!(
+            name,
+            "atlas" | "executor" | "pilot" | "liaison" | "soma" | "vitals"
+        )
+    {
         return None;
     }
     Some(trimmed.to_string())
@@ -1839,6 +1890,19 @@ fn system_cli_args(
             push_pair(&mut out, "--provider-id", s("provider_id"));
             push_pair(&mut out, "--robot-yaml", s("robot_yaml"));
             push_pair(&mut out, "--deployment-manifest", s("deployment_manifest"));
+            push_pair(&mut out, "--config", s("config"));
+            push_pair(&mut out, "--log", s("log"));
+        }
+        "vitals" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas").or_else(|| atlas_listen.map(str::to_string)),
+            );
+            push_pair(&mut out, "--id", s("provider_id").or_else(|| s("id")));
+            push_pair(&mut out, "--thresholds-path", s("thresholds_path"));
+            push_pair(&mut out, "--soma-endpoint", s("soma_endpoint"));
             push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--log", s("log"));
         }
