@@ -2,26 +2,45 @@
 
 use crate::pb::contracts::{
     robonix_system_soma_footprint_server::RobonixSystemSomaFootprint,
+    robonix_system_soma_get_health_server::RobonixSystemSomaGetHealth,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdf,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYaml,
+    robonix_system_soma_health_server::RobonixSystemSomaHealth,
 };
 use crate::pb::geometry_msgs::Point;
 use crate::pb::soma::{
-    GetFootprintRequest, GetFootprintResponse, GetUrdfRequest, GetUrdfResponse, GetYamlRequest,
-    GetYamlResponse,
+    GetFootprintRequest, GetFootprintResponse, GetHealthRequest, GetHealthResponse, GetUrdfRequest,
+    GetUrdfResponse, GetYamlRequest, GetYamlResponse, SomaHealthSnapshot, StreamHealthRequest,
 };
 use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
+use tokio::sync::{RwLock, broadcast};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 #[derive(Debug)]
 pub struct SomaService {
     body: Arc<SomaBody>,
+    latest_snapshot: Arc<RwLock<Option<SomaHealthSnapshot>>>,
+    snapshot_tx: broadcast::Sender<SomaHealthSnapshot>,
 }
 
 impl SomaService {
     pub fn new(body: Arc<SomaBody>) -> Self {
-        Self { body }
+        let (snapshot_tx, _) = broadcast::channel(8);
+        Self {
+            body,
+            latest_snapshot: Arc::new(RwLock::new(None)),
+            snapshot_tx,
+        }
+    }
+
+    pub fn snapshot_sender(&self) -> broadcast::Sender<SomaHealthSnapshot> {
+        self.snapshot_tx.clone()
+    }
+
+    pub async fn update_snapshot(&self, snapshot: SomaHealthSnapshot) {
+        *self.latest_snapshot.write().await = Some(snapshot);
     }
 
     fn map_lookup_error(error: StoreError) -> Status {
@@ -65,6 +84,54 @@ impl RobonixSystemSomaGetUrdf for SomaService {
             robot_id: body.robot_id.clone(),
             urdf_xml: body.urdf_xml.clone(),
         }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemSomaGetHealth for SomaService {
+    async fn get_health(
+        &self,
+        _request: Request<GetHealthRequest>,
+    ) -> Result<Response<GetHealthResponse>, Status> {
+        let snapshot = self.latest_snapshot.read().await.clone();
+        Ok(Response::new(GetHealthResponse { snapshot }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemSomaHealth for SomaService {
+    type StreamHealthStream = ReceiverStream<Result<SomaHealthSnapshot, Status>>;
+
+    async fn stream_health(
+        &self,
+        _request: Request<StreamHealthRequest>,
+    ) -> Result<Response<Self::StreamHealthStream>, Status> {
+        let mut rx = self.snapshot_tx.subscribe();
+        let latest = Arc::clone(&self.latest_snapshot);
+        let (tx, out_rx) = tokio::sync::mpsc::channel(16);
+
+        tokio::spawn(async move {
+            if let Some(snapshot) = latest.read().await.clone()
+                && tx.send(Ok(snapshot)).await.is_err()
+            {
+                return;
+            }
+            loop {
+                match rx.recv().await {
+                    Ok(snapshot) => {
+                        if tx.send(Ok(snapshot)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        robonix_scribe::warn!("[soma] health broadcast lagged by {count} frames");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out_rx)))
     }
 }
 

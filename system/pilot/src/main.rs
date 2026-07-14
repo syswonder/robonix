@@ -32,6 +32,7 @@ mod vlm;
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, PILOT_NAMESPACE, PilotConfig};
+use pb::contracts::robonix_system_pilot_get_health_server::RobonixSystemPilotGetHealthServer;
 use pb::contracts::robonix_system_pilot_server::RobonixSystemPilotServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -98,6 +99,21 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared RobonixSystemPilot gRPC at {advertised}");
 
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/pilot/get_health",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/pilot/get_health.toml",
+                "robonix.contracts.RobonixSystemPilotGetHealth",
+                "/robonix.contracts.RobonixSystemPilotGetHealth/GetModuleHealth",
+            ),
+        )
+        .await?;
+    info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
+
     // Pilot has no Driver lifecycle handshake — it's ready as soon as the
     // gRPC server is up. Push ACTIVE so `rbnx caps` doesn't show the
     // legacy-fallback INACTIVE forever.
@@ -137,7 +153,8 @@ async fn main() -> Result<()> {
     info!("robonix-pilot ready on {listen_addr}");
 
     tonic::transport::Server::builder()
-        .add_service(RobonixSystemPilotServer::new(svc))
+        .add_service(RobonixSystemPilotServer::new(svc.clone()))
+        .add_service(RobonixSystemPilotGetHealthServer::new(svc))
         .serve(listen_addr)
         .await
         .context("pilot gRPC server failed")?;

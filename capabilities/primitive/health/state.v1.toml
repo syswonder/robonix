@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/primitive/health/state"
+version = "1"
+kind    = "primitive"
+idl     = "health/srv/GetHealthState.srv"
+
+[mode]
+type = "rpc"
