@@ -1130,6 +1130,14 @@ jobs:
             >"$RUNNER_TEMP/sim-logs/sim-container-image.txt" 2>&1 || true
           # rbnx caps snapshot at end-of-run for post-mortem.
           rbnx caps --server "${ROBONIX_CI_ATLAS:-127.0.0.1:50051}" --json >"$RUNNER_TEMP/sim-logs/caps.final.json" 2>&1 || true
+          # Preserve boot logs before the shutdown step tears down the
+          # deployment directory.  Early Soma/provider failures otherwise
+          # leave only the supervisor tail in rbnx-boot.log.
+          if [ -d "$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs" ]; then
+            rm -rf "$RUNNER_TEMP/sim-logs/rbnx-boot-logs"
+            cp -a "$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs" \
+              "$RUNNER_TEMP/sim-logs/rbnx-boot-logs"
+          fi
 
       - name: Stop run resources
         if: always()
