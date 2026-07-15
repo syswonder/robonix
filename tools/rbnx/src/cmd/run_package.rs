@@ -278,7 +278,7 @@ fn build_deploy_manifest(
     const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
     if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
         let source_root = config.robonix_source_path.as_ref();
-        for (key, _value) in map {
+        for (key, value) in map {
             let Some(key_str) = key.as_str() else {
                 continue;
             };
@@ -300,12 +300,14 @@ fn build_deploy_manifest(
                 ));
                 continue;
             }
+            let (manifest_override, _runtime_config) = manifest::split_system_package_config(value)
+                .with_context(|| format!("parse system/{key_str} package selector"))?;
             entries.push(Resolved {
                 section: "system",
                 name: key_str.to_string(),
                 pkg_dir,
                 url_to_clone: None,
-                manifest_override: None,
+                manifest_override,
             });
         }
     }
@@ -1026,6 +1028,66 @@ mod tests {
         assert!(export.contains(&mcp.display().to_string()));
         assert!(export.ends_with(":${PYTHONPATH:-}"));
         assert!(!root.join("rbnx-build/ws/install/setup.bash").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn system_package_uses_the_deploy_selected_manifest() {
+        let root = temp_root("system-manifest");
+        let source_root = root.join("source");
+        let scene_root = source_root.join("system/scene");
+        let deploy_root = root.join("deploy");
+        fs::create_dir_all(&scene_root).unwrap();
+        fs::create_dir_all(&deploy_root).unwrap();
+        fs::write(
+            scene_root.join("package_manifest.yaml"),
+            r#"manifestVersion: 1
+package:
+  name: test.system.scene
+  version: 0.1.0
+  vendor: test
+  description: default target
+  license: Apache-2.0
+build: touch default-selected
+start: "true"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            scene_root.join("package_manifest.jetson-native.yaml"),
+            r#"manifestVersion: 1
+package:
+  name: test.system.scene
+  version: 0.1.0
+  vendor: test
+  description: Jetson native target
+  license: Apache-2.0
+build: touch jetson-selected
+start: "true"
+"#,
+        )
+        .unwrap();
+        let deploy_manifest = deploy_root.join("robonix_manifest.yaml");
+        fs::write(
+            &deploy_manifest,
+            r#"manifestVersion: 1
+name: system-target-test
+system:
+  scene:
+    manifest: package_manifest.jetson-native.yaml
+    camera_provider_id: front_camera
+"#,
+        )
+        .unwrap();
+        let config = Config {
+            package_storage_path: root.join("packages"),
+            robonix_source_path: Some(source_root),
+        };
+
+        build_deploy_manifest(&deploy_manifest, &config, false, true).unwrap();
+
+        assert!(scene_root.join("jetson-selected").is_file());
+        assert!(!scene_root.join("default-selected").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

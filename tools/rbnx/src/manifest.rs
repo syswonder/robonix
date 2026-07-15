@@ -106,6 +106,32 @@ pub fn expand_deployment_env(s: &str) -> String {
     out
 }
 
+/// Split the optional package-manifest selector from a non-builtin `system:`
+/// package's runtime configuration.
+///
+/// System packages historically used their mapping directly as Driver INIT
+/// config. Keep that shape backward compatible while reserving `manifest` as
+/// the deployment-owned build/start/stop selector. The selector is removed
+/// before the remaining opaque mapping is sent to the provider.
+pub fn split_system_package_config(
+    value: &serde_yaml::Value,
+) -> Result<(Option<String>, serde_yaml::Value)> {
+    let mut config = value.clone();
+    let Some(mapping) = config.as_mapping_mut() else {
+        return Ok((None, config));
+    };
+    let manifest_key = serde_yaml::Value::String("manifest".to_string());
+    let Some(raw_manifest) = mapping.remove(&manifest_key) else {
+        return Ok((None, config));
+    };
+    let manifest = raw_manifest
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("system package `manifest` must be a non-empty string"))?;
+    Ok((Some(manifest.to_string()), config))
+}
+
 fn expand_deployment_yaml(value: &mut serde_yaml::Value) {
     match value {
         serde_yaml::Value::String(s) => *s = expand_deployment_env(s),
@@ -453,5 +479,50 @@ capabilities: []
         manifest
             .validate_and_summarize()
             .expect("package.vendor must not invalidate an otherwise valid manifest");
+    }
+
+    #[test]
+    fn system_package_manifest_is_separate_from_runtime_config() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+manifest: package_manifest.jetson-native.yaml
+camera_provider_id: front_camera
+web_port: 50107
+"#,
+        )
+        .unwrap();
+
+        let (manifest, config) = split_system_package_config(&value).unwrap();
+
+        assert_eq!(
+            manifest.as_deref(),
+            Some("package_manifest.jetson-native.yaml")
+        );
+        assert_eq!(config["camera_provider_id"], "front_camera");
+        assert_eq!(config["web_port"], 50107);
+        assert!(config.get("manifest").is_none());
+    }
+
+    #[test]
+    fn legacy_system_package_config_is_unchanged() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+camera_provider_id: front_camera
+web_port: 50107
+"#,
+        )
+        .unwrap();
+
+        let (manifest, config) = split_system_package_config(&value).unwrap();
+
+        assert!(manifest.is_none());
+        assert_eq!(config, value);
+    }
+
+    #[test]
+    fn system_package_manifest_rejects_non_string_values() {
+        let value: serde_yaml::Value = serde_yaml::from_str("manifest: 42\n").unwrap();
+        let error = split_system_package_config(&value).unwrap_err();
+        assert!(error.to_string().contains("must be a non-empty string"));
     }
 }
