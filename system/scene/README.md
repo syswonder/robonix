@@ -253,32 +253,44 @@ plain `humble`.
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
-| `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
+| `SCENE_OBJECT_MEMORY_ENABLED` | `true` | enable the object snapshot DB backing the map UI's Save/Load (boot warm-restore only under `SCENE_RESTORE_ON_START`) |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
 | `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
 | `SCENE_MAP_BINDING_WAIT_S` | `3.0` | how long the startup probe waits for the lifecycle contract to appear on atlas before falling back to static binding; `0` disables the probe |
 | `SCENE_ANNOTATIONS_DIR` | `/data/robonix/scene_annotations` | per-map JSON files holding user annotations (rooms / POIs); host-mounted like the object DB |
+| `SCENE_MAP_META_DIR` | sibling `scene_maps/` of the annotations dir | epoch sidecar files pairing each saved map with the object-snapshot partition written at its Save (see "Map library") |
+| `SCENE_RESTORE_ON_START` | `false` | LEGACY mode: bind the startup map id, restore its objects at boot, and let the scene-graph builder persist continuously. Default off — a boot starts a fresh live session and objects are only persisted by an explicit Save |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
 
-## Object memory (warm restore)
+## Object memory (Save/Load snapshots)
 
-When `SCENE_OBJECT_MEMORY_ENABLED` is on, scene persists its stable objects to a
-small embedded milvus-lite DB (`SCENE_OBJECT_MEMORY_DB`) at the scene-graph
-builder cadence, and reloads them into the registry at boot. After a restart the
-graph is populated immediately instead of re-accumulating every object through
-the `min_observations` filter; re-observation re-confirms restored objects in
-place (no duplicate ids). Each row carries a caption vector embedded with the
-open_clip text encoder already loaded for perception (512-d, shared with the
-per-object image features), so a future object-search layer can reuse the table.
-The DB is scene-owned — a separate file/process from `system/memory`'s memsearch
-DB — and lives under the host-mounted `/data/robonix`, which also makes the
-scene-graph JSON caches survive boots. Writes are driven by the scene-graph
-builder, so disabling `SCENE_GRAPH_ENABLED` stops new writes (restore still runs).
+When `SCENE_OBJECT_MEMORY_ENABLED` is on, scene keeps an embedded milvus-lite
+DB (`SCENE_OBJECT_MEMORY_DB`) for its stable objects. By default a boot starts
+a **fresh live session** that is never persisted; objects reach the DB only
+when the operator **saves a map** in the map UI, which snapshots the live
+registry together with the spatial artifact, and come back only when that map
+is **loaded** (see "Map library" below for the epoch rules). Each row carries
+a caption vector embedded with the open_clip text encoder already loaded for
+perception (512-d, shared with the per-object image features), so a future
+object-search layer can reuse the table. The DB is scene-owned — a separate
+file/process from `system/memory`'s memsearch DB — and lives under the
+host-mounted `/data/robonix`, which also makes the scene-graph JSON caches
+survive boots.
 
-Persistence is partitioned by the map binding: an object's pose is only
-meaningful in the `map` frame of the SLAM map it was observed on, so restore
-loads exactly the current map's objects and never mixes two maps. The same
-`object_id` may exist on different maps without colliding.
+`SCENE_RESTORE_ON_START=true` selects the LEGACY mode instead: the registry
+warm-restores the startup binding's partition at boot and the scene-graph
+builder persists continuously under it. This mode assumes the map frame never
+changes across those boots — the operator owns that guarantee. Don't mix it
+with map-UI Saves: a Save purges the bare partition the legacy restore reads
+(its rows move into the Save's snapshot), so the next legacy boot restores
+nothing until the builder repopulates.
+
+An object's pose is only meaningful in the exact `map` frame it was observed
+in, so persistence is partitioned by **snapshot**, not merely by map name:
+every Save writes into a fresh partition and restore loads exactly the
+partition saved with the loaded artifact — two builds of a same-named map can
+never mix. The same `object_id` may exist in several snapshots without
+colliding.
 
 The binding itself (`scene_service/map_binding.py`) is learned at startup with
 this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
@@ -287,11 +299,17 @@ this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
 `"default"`. The broadcast needs the generated `map` interface package
 (`rbnx codegen --ros2` → colcon overlay, built by `scripts/build.sh`, sourced
 by the container entrypoint); without it scene falls back to static binding
-with a warning. At runtime scene only WATCHES the broadcast: if mapping's
-identity or `generation` (bumped when the map origin may have changed: reset /
-mapping-mode session start) drifts from the startup binding, scene logs a
-warning and keeps its binding — reacting (flush + re-anchor) is the planned
-lifecycle linkage (P3).
+with a warning. At runtime scene WATCHES the broadcast and reacts to a frame
+epoch change: a `generation` bump on the bound map (mapping reset / re-init
+under scene) **flushes the derived objects** from the registry — their stored
+map-frame coordinates are no longer anchored, and re-observation rebuilds them
+in the new frame — and flags room annotations stale for user confirmation
+(user assets are never deleted automatically). A broadcast naming a different
+map (loaded outside scene's map UI) also flushes stale objects, but scene
+cannot restore the new map's semantic state from there — the log tells the
+operator to Load it in the map UI (or restart scene). A Load performed through
+the map UI updates the same live binding the watcher tracks, so it never
+registers as drift.
 
 ## User annotations (rooms / POIs)
 
@@ -329,6 +347,35 @@ as breaking.** The full annotation list also rides along in `GET /api/state`
 (field `annotations`, next to `map_binding`) so map pages get everything in
 one poll. There is deliberately no atlas/MCP surface yet — exposing rooms to
 Pilot (scene-graph `in_room` edges) is a planned follow-up.
+
+## Map library (Save / Load / Delete)
+
+The `/user` page's map panel drives a scene-owned facade over the map
+capabilities (`POST /api/maps/{save,load,delete}`, `GET /api/maps`,
+`POST /api/maps/pose_estimate`): mapping keeps the spatial artifact, scene
+keeps the matching semantic state, and the facade moves both together so "a
+map" means geometry + objects + rooms as one unit.
+
+**Epoch rule** — the invariant behind every path here: *objects are only ever
+restored from the snapshot written together with the loaded artifact.* Each
+Save allocates a fresh object partition (`<map_id>__s<seq>`), writes the live
+registry into it, commits a sidecar file (`SCENE_MAP_META_DIR`) pointing at
+it only after the write verifies complete, and then purges the previous
+snapshot. Each Load reads the sidecar and restores exactly that partition. A
+map without a sidecar (saved before this mechanism, or a foreign DB) restores
+**no objects** — response field `semantic_snapshot` says so — because rows of
+unknown epoch may anchor to a map frame that no longer exists (the off-map
+"ghost object" bug). Re-save the map to create its snapshot.
+
+Save refuses (409) two epoch hazards rather than corrupting state silently:
+updating an existing map's semantics **from a still-running mapping session**
+(the artifact froze at the original Save while the live frame kept drifting —
+load it in localization mode instead, or delete and re-save), and saving onto
+a map **whose annotations this session never loaded** (the carry would
+overwrite previously saved rooms; load first). Load is transactional on the
+occupancy grid: scene rebinds rooms/objects only after observing a fresh grid
+from the loaded map, and Delete removes the artifact, the annotation file,
+the sidecar, and every object partition of the map.
 
 ## Capabilities exposed
 
