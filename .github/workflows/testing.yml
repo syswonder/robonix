@@ -330,7 +330,6 @@ jobs:
       GRPCIO_PIN: "1.80.0"
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
-      ROBONIX_HOME: "${{ runner.temp }}/robonix-home"
       # GPU selection is runner-specific. Priority:
       # workflow_call input -> repo/org variable -> runner env -> default GPU 0.
       ROBONIX_CI_GPU_ID_INPUT: ${{ inputs.gpu_id || '' }}
@@ -369,6 +368,9 @@ jobs:
             registry-1.docker.io:443
             auth.docker.io:443
             production.cloudflare.docker.com:443
+
+      - name: Configure runner-local Robonix home
+        run: echo "ROBONIX_HOME=$RUNNER_TEMP/robonix-home" >> "$GITHUB_ENV"
 
       - name: Select runner GPU
         run: |
