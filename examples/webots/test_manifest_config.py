@@ -62,6 +62,8 @@ class WebotsDeployConfigTest(unittest.TestCase):
         start = (package / "scripts/start.sh").read_text()
         self.assertNotIn("-m pip install --user", build)
         self.assertIn("rbnx-build/venv", build)
+        self.assertIn("rbnx path robonix-api", build)
+        self.assertIn("import audio_client_bridge.main", build)
         self.assertIn("rbnx-build/venv/bin/python", start)
 
 
