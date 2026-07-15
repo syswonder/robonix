@@ -10,4 +10,10 @@ cd "$PKG_ROOT"
 
 export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${PYTHONPATH:-}"
 
-exec python3 -m audio_client_bridge.main
+PYTHON="$PKG_ROOT/rbnx-build/venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  echo "audio_client_bridge is not built; run 'rbnx build' first" >&2
+  exit 1
+fi
+
+exec "$PYTHON" -m audio_client_bridge.main
