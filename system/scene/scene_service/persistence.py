@@ -23,25 +23,16 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
+from .map_binding import sanitize_map_id as _sanitize_map_id
 from .state.object_registry import BBox3D, Pose3D, SceneObject
 
 log = logging.getLogger(__name__)
 
 _COLLECTION = "scene_objects"
 
-# map_id is interpolated into a milvus filter expression, so restrict it to a
-# safe identifier charset (no quotes / spaces) to keep the predicate injection
-# -free. Anything else is squashed to "_"; empty falls back to "default".
-_MAP_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._\-]")
-
-
-def _sanitize_map_id(raw: Optional[str]) -> str:
-    cleaned = _MAP_ID_UNSAFE.sub("_", (raw or "").strip())
-    return cleaned or "default"
 # open_clip ViT-B-32 text/image features are 512-d (see
 # ingest/perception_concept_graphs.py). Object image features already live in
 # this space, so caption-text vectors are directly comparable for G3.
@@ -85,6 +76,15 @@ class ObjectStore:
     def map_id(self) -> str:
         """The sanitized map id this store is scoped to."""
         return self._map_id
+
+    def rebind(self, map_id: str) -> None:
+        """Switch subsequent reads/writes to another map partition.
+
+        The Milvus collection is shared across maps; rows are filtered by the
+        scalar ``map_id`` field and keyed by ``{map_id}::{object_id}``, so a
+        rebind only changes the partition used by ``persist`` / ``load_all``.
+        """
+        self._map_id = _sanitize_map_id(map_id)
 
     # ── schema ───────────────────────────────────────────────────────────
     def _ensure_collection(self) -> None:
@@ -315,6 +315,27 @@ class ObjectStore:
                 )
             )
         return objs
+
+    def delete_map(self, map_id: str) -> int:
+        """Delete persisted scene objects belonging to one map partition.
+
+        The collection is shared, so the filter is mandatory: deleting a map
+        must never affect objects captured for another spatial map.
+        """
+        target = _sanitize_map_id(map_id)
+        predicate = f'map_id == "{target}"'
+        try:
+            rows = self._client.query(
+                collection_name=_COLLECTION,
+                filter=predicate,
+                output_fields=["pk"],
+                limit=16384,
+            )
+            if rows:
+                self._client.delete(collection_name=_COLLECTION, filter=predicate)
+            return len(rows)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"delete_map({target}) failed: {e}") from e
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def close(self) -> None:
