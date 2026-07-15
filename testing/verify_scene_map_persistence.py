@@ -57,11 +57,16 @@ def docker_python(container: str, code: str, *, env: dict[str, str] | None = Non
     return json.loads(proc.stdout)
 
 
-def mapping_artifact(container: str, map_id: str, timeout: float) -> dict[str, Any]:
+def mapping_artifact(
+    container: str,
+    map_id: str,
+    maps_dir: str,
+    timeout: float,
+) -> dict[str, Any]:
     code = r"""
 import json, os, sqlite3, struct
 mid = os.environ["VERIFY_MAP_ID"]
-base = "/mapping/maps/" + mid
+base = os.path.join(os.environ["VERIFY_MAPS_DIR"], mid)
 png = os.path.join(base, "occupancy.png")
 meta = os.path.join(base, "meta.yaml")
 db = os.path.join(base, "rtabmap.db")
@@ -107,7 +112,12 @@ if os.path.isfile(db):
     res["counts"] = counts
 print(json.dumps(res, ensure_ascii=False))
 """
-    return docker_python(container, code, env={"VERIFY_MAP_ID": map_id}, timeout=timeout)
+    return docker_python(
+        container,
+        code,
+        env={"VERIFY_MAP_ID": map_id, "VERIFY_MAPS_DIR": maps_dir},
+        timeout=timeout,
+    )
 
 
 def live_map(container: str, timeout: float) -> dict[str, Any]:
@@ -186,6 +196,7 @@ def main() -> int:
     ap.add_argument("--map-id", default=f"verify_scene_map_{int(time.time())}")
     ap.add_argument("--note", default="scene map persistence verifier")
     ap.add_argument("--mapping-container", default="robonix_mapping")
+    ap.add_argument("--maps-dir", default="/mapping/maps")
     ap.add_argument("--sim-container", default="robonix_tiago_sim")
     ap.add_argument("--min-artifact-bytes", type=int, default=1_000_000)
     ap.add_argument("--min-nodes", type=int, default=1)
@@ -216,7 +227,12 @@ def main() -> int:
               "object_count" in validation and "room_count" in validation,
               f"objects={validation.get('object_count')} rooms={validation.get('room_count')}", results)
 
-    artifact = mapping_artifact(args.mapping_container, args.map_id, timeout=60.0)
+    artifact = mapping_artifact(
+        args.mapping_container,
+        args.map_id,
+        args.maps_dir,
+        timeout=60.0,
+    )
     print("artifact", json.dumps(artifact, ensure_ascii=False, sort_keys=True))
     check("artifact_directory_exists", bool(artifact.get("exists")), str(artifact.get("base")), results)
     check("artifact_sqlite_exists", bool(artifact.get("db_exists")), str(artifact.get("files")), results)
