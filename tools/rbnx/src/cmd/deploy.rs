@@ -1358,13 +1358,16 @@ pub async fn execute(
                     output::boot_skip(key, "not on disk");
                     continue;
                 }
+                let (manifest_override, runtime_config) =
+                    robonix_cli::manifest::split_system_package_config(value)
+                        .with_context(|| format!("parse system/{key} package selector"))?;
                 let entry = PackageEntry {
                     name: key.clone(),
                     path: Some(pkg_dir.to_string_lossy().into_owned()),
                     url: None,
                     branch: None,
-                    config: value.clone(),
-                    manifest: None,
+                    config: runtime_config,
+                    manifest: manifest_override,
                 };
                 match spawn_and_init("system", &entry, &spawn_env, &mut atlas).await {
                     Ok(sp) => {
