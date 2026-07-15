@@ -16,7 +16,8 @@ rbnx codegen -p "$PKG" "${FLAGS[@]}"
 # the build from a virtualenv and do not guarantee the same interpreter at
 # package start time.
 VENV="$PKG/rbnx-build/venv"
-uv venv --system-site-packages --python "${AUDIO_CLIENT_BRIDGE_PYTHON:-python3}" "$VENV"
+uv venv --allow-existing --system-site-packages \
+  --python "${AUDIO_CLIENT_BRIDGE_PYTHON:-python3}" "$VENV"
 ROBONIX_API="$(rbnx path robonix-api)"
 uv pip install --python "$VENV/bin/python" --quiet "$ROBONIX_API" 'websockets>=12,<16'
 
