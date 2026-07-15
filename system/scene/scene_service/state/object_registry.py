@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """SceneObject registry — the canonical store for everything `system/scene`
-tracks about the world. Pure-Python in-memory at runtime. By default the next
-boot starts fresh, but when scene's object-persistence layer is enabled the
-registry is warm-restored at boot via `restore_object()` (see
-`scene_service/persistence.py`), so stable objects survive a restart instead of
-being re-accumulated through the `min_observations` filter from scratch.
+tracks about the world. Pure-Python in-memory at runtime. A boot starts
+fresh; stable objects come back via `restore_object()` when the operator
+Loads a saved map in the map UI (or, in the legacy `SCENE_RESTORE_ON_START`
+mode, at boot) — see `scene_service/persistence.py` — instead of being
+re-accumulated through the `min_observations` filter from scratch.
 """
 from __future__ import annotations
 
@@ -30,7 +30,8 @@ OBJECT_ATTRIBUTE_KEYS = (
     # Internal tracking keys (not semantic object properties):
     "cg_uuid",       # str  — the concept-graphs MapObjectList uuid currently
                      #        bound to this record (per-process, ephemeral)
-    "restored",      # bool — warm-restored at boot and not yet re-observed;
+    "restored",      # bool — restored from persistence (map Load / legacy
+                     #        boot restore) and not yet re-observed;
                      #        perception re-binds it by class+pose, then clears
 )
 
@@ -163,6 +164,20 @@ class ObjectRegistry:
     def _alloc_surface_id(self) -> str:
         self._surface_counter += 1
         return f"scene.surface.{self._surface_counter:03d}"
+
+    def clear_objects(self) -> int:
+        """Drop every object and surface. Caller MUST hold `lock()`.
+
+        Used by the lifecycle linkage when the map frame epoch changes
+        (mapping reset / re-init): every stored map-frame coordinate is no
+        longer anchored, and this state is derived — re-observation rebuilds
+        it in the new frame. Id counters are NOT reset, so ids stay unique
+        across the flush (restored/old ids never collide with new ones).
+        Returns the number of objects dropped."""
+        n = len(self._objects)
+        self._objects.clear()
+        self._surfaces.clear()
+        return n
 
     # ── object CRUD (caller MUST hold the lock) ────────────────────────────
     def insert_object(
