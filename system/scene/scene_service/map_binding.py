@@ -12,8 +12,9 @@ scene starts (the normal full-boot order) or does not broadcast at all.
 
 `generation` is mapping's map-frame epoch: it bumps whenever the map
 origin may have changed (mapping-mode session start, reset_map) and stays
-put across localization round-trips. P2 records it and warns on runtime
-change; acting on it (flush + re-anchor) is the P3 lifecycle linkage.
+put across localization round-trips. The lifecycle watcher in service.py
+acts on a runtime change: derived objects are flushed (re-observation
+rebuilds them in the new frame) and room annotations are flagged stale.
 
 Split from service.py so the pure precedence rule and the one-shot ROS
 read are unit-testable without atlas.
