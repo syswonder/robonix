@@ -56,6 +56,14 @@ class WebotsDeployConfigTest(unittest.TestCase):
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
+    def test_audio_client_bridge_uses_its_package_environment(self):
+        package = ROOT / "primitives/audio_client_bridge"
+        build = (package / "scripts/build.sh").read_text()
+        start = (package / "scripts/start.sh").read_text()
+        self.assertNotIn("-m pip install --user", build)
+        self.assertIn("rbnx-build/venv", build)
+        self.assertIn("rbnx-build/venv/bin/python", start)
+
 
 if __name__ == "__main__":
     unittest.main()
