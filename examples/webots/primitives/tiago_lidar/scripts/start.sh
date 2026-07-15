@@ -61,8 +61,6 @@ exec docker exec \
     set -eo pipefail
     set +u
     source /opt/ros/humble/setup.bash >/dev/null
-    OVL=/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/ros2_idl/install/setup.bash
-    [ -f "$OVL" ] && source "$OVL" >/dev/null || true
     python3 /robonix_pkgs/primitives/tiago_lidar/scripts/scan_normalize.py \
         --in "$TIAGO_SCAN_RAW_TOPIC" --out "$TIAGO_SCAN_TOPIC" &
     NORM_PID=$!
@@ -82,4 +80,3 @@ exec docker exec \
     wait "$TAIL_PID" 2>/dev/null || true
     exit "$STATUS"
   '''
-
