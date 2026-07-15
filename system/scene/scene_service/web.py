@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -34,6 +35,8 @@ from starlette.staticfiles import StaticFiles
 from robonix_api import ATLAS
 
 from .annotations import validate_annotation_fields
+from .map_binding import sanitize_map_id as _sanitize_map_id
+from .map_meta import make_meta
 from .state import ObjectRegistry
 
 log = logging.getLogger(__name__)
@@ -569,8 +572,9 @@ def _maps_payload() -> dict:
 def make_app(*, registry: ObjectRegistry,
              hub: Any = None, detector: Any = None,
              sg_store: Any = None, anno_store: Any = None,
-             object_store: Any = None,
-             map_binding: Optional[dict] = None) -> Starlette:
+             object_store: Any = None, map_meta: Any = None,
+             map_binding: Optional[dict] = None,
+             ops_lock: Optional[asyncio.Lock] = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
@@ -594,10 +598,18 @@ def make_app(*, registry: ObjectRegistry,
     just shows an empty world.
     `anno_store` is the AnnotationStore backing the annotation CRUD; when
     None (store init failed / disabled) those routes answer 503.
-    `object_store` is the per-map scene object warm-restore store; Save/Load
-    rebinds it so perceived objects follow the same map id as rooms.
+    `object_store` is the scene-object snapshot store. Save writes the live
+    registry into a fresh partition token; Load restores the token the
+    sidecar (`map_meta`) points at. Neither touches the store's own binding.
+    `map_meta` is the MapMetaStore sidecar pairing each saved map with its
+    object partition; when None, Save/Load degrade to annotations-only.
     `map_binding` is a mutable {map_id, mode, generation, source} dict shown
-    by the /user page header and updated by Save/Load actions.
+    by the /user page header, updated by Save/Load actions and by the
+    lifecycle watcher (service.py) on a runtime epoch bump.
+    `ops_lock` serializes Save/Load/Delete with each other AND with the
+    watcher's epoch response (service.py shares the same lock): the handlers
+    suspend at RPC awaits mid-critical-section, and an interleaved flush or
+    second Save would mix sessions/epochs in one snapshot.
 
     Annotation API contract (STABLE once shipped — any frontend builds on
     it; see system/scene/README.md):
@@ -619,34 +631,94 @@ def make_app(*, registry: ObjectRegistry,
     """
     if map_binding is None:
         map_binding = {}
+    if ops_lock is None:
+        ops_lock = asyncio.Lock()
 
-    async def _persist_scene_objects(map_id: str) -> int:
+    async def _persist_scene_objects(partition: str) -> tuple[int, int]:
+        """Snapshot the registry into `partition` — EVERY object, including
+        `missing` ones (known but not currently observed): after a Load the
+        whole restored set is `missing` until re-observed, and filtering it
+        out would commit an empty snapshot over the previous one. Anything
+        in the registry is anchored to the current frame (the watcher and
+        Load flush on epoch changes), so all of it belongs in the snapshot.
+        The ONE exclusion is the self-object (`is_robot`, same predicate as
+        the builder's persist gate): the pose tracker re-creates it from the
+        live pose stream every session, so a restored copy would just sit as
+        a second, frozen robot marker at wherever the robot stood at Save.
+        Returns (written, expected); written < expected means the milvus
+        upsert failed and the snapshot is incomplete — the caller must NOT
+        commit the sidecar to it. Never rebinds the shared store."""
         if object_store is None:
-            return 0
-        if hasattr(object_store, "rebind"):
-            object_store.rebind(map_id)
+            return 0, 0
         objs, _surfs = await registry.snapshot()
-        pairs = [(o, None) for o in objs.values() if not getattr(o, "missing", False)]
+        pairs = [
+            (o, None) for o in objs.values()
+            if not o.attributes.get("is_robot", False)
+        ]
         if not pairs:
-            return 0
-        return int(await asyncio.to_thread(object_store.persist, pairs))
+            return 0, 0
+        written = int(await asyncio.to_thread(
+            object_store.persist, pairs, partition=partition
+        ))
+        return written, len(pairs)
 
-    async def _restore_scene_objects(map_id: str) -> int:
+    async def _restore_scene_objects(partition: str) -> int:
+        """Restore one snapshot partition into the live registry. Raises on
+        a DB read error (strict) — the facade must distinguish "snapshot is
+        empty" from "could not read the snapshot", or a transient error
+        followed by a Save would silently commit an empty snapshot.
+        Never rebinds the shared store."""
         if object_store is None:
             return 0
-        if hasattr(object_store, "rebind"):
-            object_store.rebind(map_id)
-        restored = await asyncio.to_thread(object_store.load_all)
+        restored = await asyncio.to_thread(
+            object_store.load_all, partition=partition, strict=True
+        )
         async with registry.lock():
             for o in restored:
                 registry.restore_object(o)
         return len(restored)
 
-    def _set_map_binding(map_id: str, mode: str, source: str) -> None:
+    def _latched_lifecycle(expected_map_id: str) -> tuple[Optional[int], str]:
+        """(generation, mode) from mapping's latched lifecycle broadcast, or
+        (None, "") when mapping doesn't broadcast (upstream main), no sample
+        arrived yet, or the sample names a DIFFERENT map — a latch lagging
+        behind a Save/Load must not stamp the wrong map's epoch into the
+        sidecar / live binding (the watcher would read the real broadcast as
+        a bump and flush). Enrichment only — the epoch machinery must work
+        without it."""
+        if hub is None or not hub.has("map_lifecycle"):
+            return None, ""
+        try:
+            msg, _stamp, count = hub.latest("map_lifecycle")
+            if msg is None or count == 0:
+                return None, ""
+            if str(msg.map_id) != _sanitize_map_id(expected_map_id):
+                return None, ""
+            return int(msg.generation), str(msg.mode)
+        except Exception:  # noqa: BLE001
+            # Malformed/foreign sample — enrichment only, never a failure.
+            return None, ""
+
+    _RESERVED_MAP_ID = re.compile(r"^\.|__s\d+$")
+
+    def _reserved_map_id_error(map_id: str) -> Optional[JSONResponse]:
+        """400 for map ids colliding with scene-internal namespaces: leading
+        `.` (live-session state, purged at boot) and the `__s<N>` snapshot
+        suffix (a map named `foo__s1` would alias — and Save would purge —
+        map `foo`'s committed snapshot partition)."""
+        if _RESERVED_MAP_ID.search(_sanitize_map_id(map_id)):
+            return _anno_error(400, (
+                f"map_id {map_id!r} uses a reserved scene-internal form "
+                "(leading '.' or '__s<N>' suffix) — pick another name"
+            ))
+        return None
+
+    def _set_map_binding(map_id: str, mode: str, source: str,
+                         generation: Optional[int] = None) -> None:
         map_binding.update({
             "map_id": map_id,
             "mode": mode,
-            "generation": None,
+            "generation": generation,
             "source": source,
         })
 
@@ -764,14 +836,46 @@ def make_app(*, registry: ObjectRegistry,
         map_id = str(body.get("map_id") or "").strip()
         if not map_id:
             return _anno_error(400, "map_id is required")
+        reserved = _reserved_map_id_error(map_id)
+        if reserved is not None:
+            return reserved
+        async with ops_lock:
+            return await _maps_save_locked(map_id, body)
+
+    async def _maps_save_locked(map_id: str, body: dict) -> JSONResponse:
+        """Save body — runs under `ops_lock` (see maps_save)."""
         note = str(body.get("note") or "")
         before_payload = await asyncio.to_thread(_maps_payload)
         spatial_exists, existing_map = _map_exists_in_payload(before_payload, map_id)
         current_bound_id = str(map_binding.get("map_id") or "")
         current_mode = str(map_binding.get("mode") or "")
+        if (anno_store is not None
+                and _sanitize_map_id(map_id) != anno_store.map_id
+                and anno_store.has_saved(map_id)):
+            # The store never loaded this map's annotation file (it is bound
+            # to another partition — typically the live session). Carrying
+            # the live partition over the file would silently destroy
+            # previously saved rooms; a startup binding that happens to name
+            # this map (lifecycle broadcast / env) is NOT a load.
+            return _anno_error(409, (
+                f"map {map_id} already has saved room annotations; load it "
+                "first (or delete the map) instead of overwriting them with "
+                "this live session"
+            ))
         if spatial_exists:
             if current_bound_id and current_bound_id != map_id:
                 return _anno_error(409, f"spatial map {map_id} already exists; load it before updating scene annotations/objects")
+            if current_mode == "mapping":
+                # The artifact was snapshotted at the original Save while the
+                # live frame kept evolving (loop closures) — writing today's
+                # coordinates against that frozen artifact would mis-anchor
+                # every object/room on the next Load.
+                return _anno_error(409, (
+                    f"map {map_id} was saved from this still-running mapping "
+                    "session; its spatial artifact is immutable and the live "
+                    "frame has kept drifting since. Load it in localization "
+                    "mode to edit rooms/objects, or delete it and save anew."
+                ))
             out = {
                 "ok": True,
                 "map_id": map_id,
@@ -789,16 +893,56 @@ def make_app(*, registry: ObjectRegistry,
         object_count = 0
         object_persist_error = None
         if out.get("ok"):
+            gen, broadcast_mode = _latched_lifecycle(map_id)
             if anno_store is not None:
-                anno_store.rebind(map_id, generation=None, carry_current=True)
-            try:
-                object_count = await _persist_scene_objects(map_id)
-                out["objects"] = object_count
-            except Exception as e:  # noqa: BLE001
-                object_persist_error = str(e)
+                anno_store.rebind(map_id, generation=gen, carry_current=True)
+            # Object snapshot: write into a FRESH partition token, commit the
+            # sidecar only once the write is verifiably complete, and only
+            # then purge the previous snapshot (plus any legacy rows under
+            # the bare map id — they belong to frames that no longer exist).
+            # A failure at any point leaves the sidecar at the previous,
+            # still-consistent snapshot.
+            if map_meta is not None and object_store is not None:
+                prev_meta = map_meta.read(map_id)
+                partition, seq = map_meta.next_partition(map_id)
+                try:
+                    # The token repeats after a FAILED save attempt (the
+                    # sidecar only advances on commit) — clear its debris so
+                    # the snapshot holds exactly this attempt's rows.
+                    await asyncio.to_thread(object_store.delete_map, partition)
+                    written, expected = await _persist_scene_objects(partition)
+                    if written < expected:
+                        raise RuntimeError(
+                            f"snapshot incomplete: {written}/{expected} rows written"
+                        )
+                    object_count = written
+                    map_meta.write(make_meta(
+                        map_id, partition, seq,
+                        generation=gen, mode=broadcast_mode,
+                    ))
+                    out["objects"] = object_count
+                    out["snapshot_partition"] = partition
+                    stale_parts = {_sanitize_map_id(map_id)}
+                    if prev_meta is not None:
+                        stale_parts.add(prev_meta.object_partition)
+                    stale_parts.discard(partition)
+                    for part in stale_parts:
+                        try:
+                            await asyncio.to_thread(object_store.delete_map, part)
+                        except Exception as e:  # noqa: BLE001
+                            # Orphan rows cost disk, not correctness — the
+                            # sidecar no longer points at them.
+                            out["stale_partition_cleanup_error"] = str(e)
+                except Exception as e:  # noqa: BLE001
+                    object_persist_error = str(e)
+                    out["object_persist_error"] = object_persist_error
+            elif object_store is not None:
+                object_persist_error = (
+                    "map_meta sidecar unavailable — objects not snapshotted"
+                )
                 out["object_persist_error"] = object_persist_error
             mode_after_save = current_mode if spatial_exists and current_bound_id == map_id and current_mode else "mapping"
-            _set_map_binding(map_id, mode_after_save, "ui_save")
+            _set_map_binding(map_id, mode_after_save, "ui_save", generation=gen)
 
         annotations = anno_store.list_json() if anno_store is not None else []
         out.setdefault("annotations", len(annotations))
@@ -842,6 +986,11 @@ def make_app(*, registry: ObjectRegistry,
         map_id = str(body.get("map_id") or "").strip()
         if not map_id:
             return _anno_error(400, "map_id is required")
+        async with ops_lock:
+            return await _maps_load_locked(map_id, body)
+
+    async def _maps_load_locked(map_id: str, body: dict) -> JSONResponse:
+        """Load body — runs under `ops_lock` (see maps_save)."""
         mode = str(body.get("mode") or "localization")
         load_timeout_s = float(os.environ.get("SCENE_MAP_LOAD_TIMEOUT_S", "240"))
         before_stamp = 0.0
@@ -893,13 +1042,69 @@ def make_app(*, registry: ObjectRegistry,
                     ),
                 }
                 return JSONResponse(out, status_code=502)
-            if anno_store is not None:
-                anno_store.rebind(map_id, generation=None, carry_current=False)
+            # The loaded artifact defines a NEW frame: everything observed
+            # before this load is anchored to the dead pre-load frame — and
+            # the watcher will not catch it (a facade load is deliberately
+            # not drift). Flush first, so the registry ends up holding the
+            # restored snapshot plus post-load observations only.
             try:
-                out["objects_restored"] = await _restore_scene_objects(map_id)
+                async with registry.lock():
+                    flushed = registry.clear_objects()
+                if flushed:
+                    out["objects_flushed"] = flushed
             except Exception as e:  # noqa: BLE001
-                out["object_restore_error"] = str(e)
-            _set_map_binding(map_id, "localization", "ui_load")
+                out["object_flush_error"] = str(e)
+            gen, _broadcast_mode = _latched_lifecycle(map_id)
+            meta = map_meta.read(map_id) if map_meta is not None else None
+            if anno_store is not None:
+                # Localization load keeps the saved map's frame epoch, so the
+                # live broadcast (when present) carries the generation the
+                # rooms were saved under; the sidecar's recorded value is the
+                # fallback. Either lets rebind() re-judge staleness.
+                anno_gen = gen if gen is not None else (
+                    meta.mapping_generation if meta is not None else None
+                )
+                anno_store.rebind(map_id, generation=anno_gen, carry_current=False)
+            if meta is None:
+                # No sidecar → no snapshot known to match this artifact's
+                # frame (pre-epoch save or foreign DB). Restoring the bare
+                # partition would bring back rows from ANY earlier build of
+                # this map — the off-map mis-anchored objects bug.
+                out["objects_restored"] = 0
+                out["semantic_snapshot"] = (
+                    "absent — objects not restored (no epoch sidecar for "
+                    "this map; re-save it to create one)"
+                )
+                # Surface it where the operator is looking (the map dialog
+                # renders `detail`), not only in the log.
+                out["detail"] = (
+                    f"{out.get('detail') or 'loaded'}; no semantic snapshot "
+                    "for this map — objects not restored (rooms still load; "
+                    "re-save the map to snapshot objects)"
+                )
+                log.warning(
+                    "[scene-maps] load %s: no semantic sidecar — restoring "
+                    "no objects (rooms still load; re-save the map to "
+                    "snapshot current objects)", map_id,
+                )
+            else:
+                try:
+                    out["objects_restored"] = await _restore_scene_objects(
+                        meta.object_partition
+                    )
+                    out["snapshot_partition"] = meta.object_partition
+                except Exception as e:  # noqa: BLE001
+                    # Distinguish "could not read the snapshot" from a
+                    # genuinely empty one, in the operator-visible detail —
+                    # saving on top of an unnoticed failed restore would
+                    # commit an empty snapshot.
+                    out["object_restore_error"] = str(e)
+                    out["detail"] = (
+                        f"{out.get('detail') or 'loaded'}; RESTORE FAILED: "
+                        f"{e} — saved objects were NOT loaded; retry the "
+                        "load before saving this map"
+                    )
+            _set_map_binding(map_id, "localization", "ui_load", generation=gen)
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
     async def maps_delete(request) -> JSONResponse:
@@ -909,6 +1114,11 @@ def make_app(*, registry: ObjectRegistry,
         map_id = str(body.get("map_id") or "").strip()
         if not map_id:
             return _anno_error(400, "map_id is required")
+        async with ops_lock:
+            return await _maps_delete_locked(map_id)
+
+    async def _maps_delete_locked(map_id: str) -> JSONResponse:
+        """Delete body — runs under `ops_lock` (see maps_save)."""
         out = await asyncio.to_thread(_map_rpc, "delete_map", {"map_id": map_id})
         if out.get("ok"):
             annotations_deleted = False
@@ -919,11 +1129,36 @@ def make_app(*, registry: ObjectRegistry,
                     annotations_deleted = bool(anno_store.delete_map(map_id))
                 except Exception as e:  # noqa: BLE001
                     cleanup_errors.append(f"annotations: {e}")
+            meta = map_meta.read(map_id) if map_meta is not None else None
+            snapshot_rows_orphaned = False
             if object_store is not None:
-                try:
-                    objects_deleted = int(await asyncio.to_thread(object_store.delete_map, map_id))
-                except Exception as e:  # noqa: BLE001
-                    cleanup_errors.append(f"objects: {e}")
+                # Both the sidecar-pointed snapshot partition and any legacy
+                # rows under the bare map id belong to this map — remove all.
+                parts = {_sanitize_map_id(map_id)}
+                if meta is not None:
+                    parts.add(meta.object_partition)
+                for part in parts:
+                    try:
+                        objects_deleted += int(
+                            await asyncio.to_thread(object_store.delete_map, part)
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        cleanup_errors.append(f"objects[{part}]: {e}")
+                        if meta is not None and part == meta.object_partition:
+                            snapshot_rows_orphaned = True
+            if map_meta is not None:
+                if snapshot_rows_orphaned:
+                    # The sidecar is the only pointer to the rows that just
+                    # failed to delete — keep it so a retried Delete still
+                    # finds them (boot purge only matches `.live*`).
+                    cleanup_errors.append(
+                        "sidecar kept: snapshot rows not deleted — retry delete"
+                    )
+                else:
+                    try:
+                        map_meta.delete(map_id)
+                    except Exception as e:  # noqa: BLE001
+                        cleanup_errors.append(f"sidecar: {e}")
             out["scene_cleanup"] = {
                 "annotations_deleted": annotations_deleted,
                 "objects_deleted": objects_deleted,
