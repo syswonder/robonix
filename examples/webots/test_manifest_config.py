@@ -66,6 +66,16 @@ class WebotsDeployConfigTest(unittest.TestCase):
         self.assertIn("import audio_client_bridge.main", build)
         self.assertIn("rbnx-build/venv/bin/python", start)
 
+    def test_primitive_builds_do_not_touch_a_running_simulator(self):
+        for name in ("tiago_chassis", "tiago_camera", "tiago_lidar"):
+            package = ROOT / "primitives" / name
+            build = (package / "scripts/build.sh").read_text()
+            start = (package / "scripts/start.sh").read_text()
+            self.assertNotIn("docker exec", build, name)
+            self.assertNotIn("robonix_tiago_sim", build, name)
+            self.assertNotIn("--ros2", build, name)
+            self.assertNotIn("ros2_idl/install/setup.bash", start, name)
+
 
 if __name__ == "__main__":
     unittest.main()
