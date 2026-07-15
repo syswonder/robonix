@@ -12,10 +12,10 @@ component's gRPC interface answers correctly on a live deploy.
   pilot    — SubmitTask, via `rbnx ask` with a no-tool chit-chat prompt. We
              assert the stream yields final text and a Completed status with
              zero capability calls (pure conversation, no plan dispatched).
-  executor — Execute(Plan) → RtdlEvent stream, asserted transitively: every
-             scenario in run.py that dispatches a plan proves executor streamed
-             node-state events. Here we additionally assert the executor
-             component is registered/reachable in atlas.
+  executor — list/control RPCs are exercised directly, outside RTDL. We assert
+             that cancel-all completes against an idle executor and does not
+             create a self-referential control plan. Execute(Plan) → RtdlEvent
+             remains asserted transitively by every dispatched scenario.
   liaison  — registered + reachable in atlas (its SubmitTask/StartVoiceSession
              endpoint is advertised). A full direct SubmitTask probe needs the
              liaison gRPC stub from a built deploy and is a documented follow-up.
@@ -47,7 +47,7 @@ def require_audio() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def audio_proto_dir() -> Path:
+def generated_proto_dir() -> Path:
     repo = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd()))
     candidates = [
         repo / "examples/webots/primitives/audio_driver/rbnx-build/codegen/proto_gen",
@@ -61,6 +61,10 @@ def audio_proto_dir() -> Path:
     raise FileNotFoundError(
         "audio_driver generated proto files not found; run `rbnx build` first"
     )
+
+
+# Kept as a descriptive alias for the audio-specific callers below.
+audio_proto_dir = generated_proto_dir
 
 
 def sh(cmd: list[str], log_name: str, timeout: int = 120) -> tuple[str, int]:
@@ -144,11 +148,17 @@ def check_pilot(rbnx: str, server: str) -> list[str]:
 
 
 
-def connect_audio_contract(server: str, contract_id: str):
-    """Open an Atlas channel to audio_driver's gRPC contract."""
+def connect_contract(
+    server: str,
+    *,
+    consumer_id: str,
+    provider_id: str,
+    contract_id: str,
+):
+    """Open an Atlas-managed gRPC channel to one provider contract."""
     import grpc  # type: ignore
 
-    proto = str(audio_proto_dir())
+    proto = str(generated_proto_dir())
     if proto not in sys.path:
         sys.path.insert(0, proto)
     import atlas_pb2  # type: ignore
@@ -157,8 +167,8 @@ def connect_audio_contract(server: str, contract_id: str):
     atlas_channel = grpc.insecure_channel(server)
     atlas = atlas_pb2_grpc.AtlasStub(atlas_channel)
     req = atlas_pb2.ConnectCapabilityRequest(
-        consumer_id="testing/run_interfaces/audio",
-        provider_id="audio_driver",
+        consumer_id=consumer_id,
+        provider_id=provider_id,
         contract_id=contract_id,
         transport=atlas_pb2.TRANSPORT_GRPC,
     )
@@ -169,6 +179,119 @@ def connect_audio_contract(server: str, contract_id: str):
     elif endpoint.startswith("https://"):
         endpoint = endpoint[len("https://"):]
     return resp.channel_id, atlas, grpc.insecure_channel(endpoint)
+
+
+def connect_audio_contract(server: str, contract_id: str):
+    """Open an Atlas channel to audio_driver's gRPC contract."""
+    return connect_contract(
+        server,
+        consumer_id="testing/run_interfaces/audio",
+        provider_id="audio_driver",
+        contract_id=contract_id,
+    )
+
+
+def executor_grpc_class(module, suffix: str):
+    name = f"RobonixSystemExecutor{suffix}"
+    cls = getattr(module, name, None)
+    if cls is None:
+        raise AttributeError(f"executor gRPC class not found: {name}")
+    return cls
+
+
+def check_executor(server: str) -> list[str]:
+    """Exercise Executor's out-of-band plan-control authority directly.
+
+    Plan control is deliberately not an RTDL capability exposed to the model.
+    Calling cancel-all against an idle runtime must complete successfully and
+    must leave the authoritative active-plan table empty.
+    """
+    fails: list[str] = []
+    try:
+        proto = str(generated_proto_dir())
+        if proto not in sys.path:
+            sys.path.insert(0, proto)
+        import atlas_pb2  # type: ignore
+        import executor_pb2  # type: ignore
+        import robonix_contracts_pb2_grpc as contracts_grpc  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        return [f"executor proto imports failed: {e}"]
+
+    opened: list[tuple[object, str]] = []
+
+    def open_contract(contract_id: str):
+        channel_id, atlas, channel = connect_contract(
+            server,
+            consumer_id="testing/run_interfaces/executor",
+            provider_id="executor",
+            contract_id=contract_id,
+        )
+        opened.append((atlas, channel_id))
+        return channel
+
+    snapshots: dict[str, object] = {}
+    try:
+        list_ch = open_contract("robonix/system/executor/list_active_plans")
+        list_stub = executor_grpc_class(
+            contracts_grpc, "ListActivePlansStub"
+        )(list_ch)
+
+        def list_active(label: str) -> dict:
+            response = list_stub.ListActivePlans(
+                executor_pb2.ListActivePlans_Request(), timeout=10
+            )
+            if not response.success:
+                raise RuntimeError(response.error or "ListActivePlans rejected")
+            parsed = json.loads(response.plans_json)
+            snapshots[label] = parsed
+            return parsed
+
+        before = list_active("before")
+        if before.get("count") != 0 or before.get("plans") != []:
+            fails.append(f"executor was not idle before control probe: {before}")
+
+        control_ch = open_contract("robonix/system/executor/control_plan")
+        control_stub = executor_grpc_class(
+            contracts_grpc, "ControlPlanStub"
+        )(control_ch)
+        response = control_stub.ControlPlan(
+            executor_pb2.ControlPlan_Request(
+                action="cancel_all",
+                wait_ms=1_000,
+            ),
+            timeout=5,
+        )
+        snapshots["control"] = {
+            "success": response.success,
+            "completed": response.completed,
+            "message": response.message,
+            "error": response.error,
+        }
+        if not response.success or not response.completed:
+            fails.append(
+                "executor cancel_all did not complete: "
+                f"success={response.success}, completed={response.completed}, "
+                f"error={response.error!r}"
+            )
+
+        after = list_active("after")
+        if after.get("count") != 0 or after.get("plans") != []:
+            fails.append(f"plan-control RPC created or retained a plan: {after}")
+    except Exception as e:  # noqa: BLE001
+        fails.append(f"executor plan-control RPC smoke failed: {e}")
+    finally:
+        (LOG_DIR / "iface.executor_plan_control.json").write_text(
+            json.dumps(snapshots, indent=2, sort_keys=True) + "\n"
+        )
+        for atlas, channel_id in opened:
+            try:
+                atlas.DisconnectCapability(
+                    atlas_pb2.DisconnectCapabilityRequest(channel_id=channel_id),
+                    timeout=5,
+                )
+            except Exception:
+                pass
+    return fails
 
 
 def audio_grpc_class(module, suffix: str):
@@ -274,7 +397,11 @@ def main() -> int:
     args = ap.parse_args()
     LOG_DIR.mkdir(exist_ok=True)
 
-    suites = [("atlas", check_atlas), ("pilot", check_pilot)]
+    suites = [
+        ("atlas", check_atlas),
+        ("pilot", check_pilot),
+        ("executor", lambda _rbnx, server: check_executor(server)),
+    ]
     if require_audio():
         suites.append(("audio", lambda _rbnx, server: check_audio(server)))
     failed = False
