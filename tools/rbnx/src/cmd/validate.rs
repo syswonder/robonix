@@ -24,6 +24,18 @@ pub async fn execute(path: Option<PathBuf>) -> Result<()> {
     let detected = manifest::detect_and_load(&package_root, None)?;
     let summary = detected.manifest.validate_and_summarize()?;
 
+    let is_skill_package = summary.name.starts_with("robonix.skill.")
+        || summary
+            .capabilities
+            .iter()
+            .any(|cap| cap.starts_with("robonix/skill/"));
+    if is_skill_package && !package_root.join("CAPABILITY.md").is_file() {
+        anyhow::bail!(
+            "Skill package is missing CAPABILITY.md at {}",
+            package_root.join("CAPABILITY.md").display()
+        );
+    }
+
     output::check(&format!("Manifest: {}", detected.path.display()));
     output::check(&format!("Package: {} {}", summary.name, summary.version));
 

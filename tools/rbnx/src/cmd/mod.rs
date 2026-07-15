@@ -343,7 +343,8 @@ pub enum Commands {
         /// Package type: primitive, service, or skill
         #[arg(short = 't', long = "type", default_value = "service")]
         pkg_type: String,
-        /// Target package directory to create (when given, --type is ignored)
+        /// Parent directory in which `<name>/` will be created.
+        /// When omitted, defaults to `<cwd>/{primitives|services|skills}`.
         #[arg(long)]
         path: Option<PathBuf>,
     },
