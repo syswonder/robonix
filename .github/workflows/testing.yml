@@ -1001,6 +1001,7 @@ jobs:
             --scene-url "http://127.0.0.1:${SCENE_WEB_PORT}" \
             --map-id "$map_id" \
             --mapping-container "${ROBONIX_MAPPING_CONTAINER:-robonix_mapping}" \
+            --maps-dir "$MAPPING_MAPS_DIR" \
             --sim-container "$ROBONIX_SIM_CONTAINER" \
             --delete-after \
             --timeout 420 | tee "$RUNNER_TEMP/sim-logs/scene-map-persistence.txt"
