@@ -100,7 +100,7 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("rgb",               "robonix/primitive/camera/rgb",        "Image"),
     ("depth",             "robonix/primitive/camera/depth",      "Image"),
     ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
-    ("lidar3d",           "robonix/primitive/lidar/pointcloud",  "PointCloud2"),
+    ("lidar3d",           "robonix/primitive/lidar/lidar3d",     "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
     ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
     ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
@@ -1199,14 +1199,16 @@ async def _run() -> None:
     # Declare each scene MCP tool on atlas. Each handler has
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
     # description / JSON schema stay in sync with the codegen types.
-    for fn in (
+    scene_tools = (
         mcp_tools.list_objects,
         mcp_tools.goal_near,
         mcp_tools.goal_room,
         mcp_tools.get_scene_graph,
         mcp_tools.get_object_context,
+        mcp_tools.get_robot_context,
         mcp_tools.list_relations,
-    ):
+    )
+    for fn in scene_tools:
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
             log.warning(
@@ -1221,7 +1223,11 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 6 MCP tools at %s", scene.mcp_endpoint)
+    log.info(
+        "scene declared %d MCP tools at %s",
+        len(scene_tools),
+        scene.mcp_endpoint,
+    )
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;

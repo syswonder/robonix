@@ -56,6 +56,22 @@ class WebotsDeployConfigTest(unittest.TestCase):
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
+    def test_lidar_manifest_advertises_its_stream_contract(self):
+        package = yaml.safe_load(
+            (
+                ROOT / "primitives" / "tiago_lidar" / "package_manifest.yaml"
+            ).read_text()
+        )
+        advertised = {item["name"] for item in package["capabilities"]}
+        self.assertIn("robonix/primitive/lidar/lidar", advertised)
+        driver = (
+            ROOT / "primitives" / "tiago_lidar" / "lidar_driver" / "driver.py"
+        ).read_text()
+        self.assertIn(
+            'declare_ros2_topic("robonix/primitive/lidar/lidar"',
+            driver,
+        )
+
     def test_audio_primitives_use_reusable_packages(self):
         primitive = entries(self.document, "primitive")
         expected = {

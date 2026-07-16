@@ -30,6 +30,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      - name: IDL comment contract identifiers
+        run: python3 testing/test_contract_idl_comments.py
+
       - name: cargo clippy (lib + bins + tests)
         run: cargo clippy --workspace --tests -- -D warnings
 

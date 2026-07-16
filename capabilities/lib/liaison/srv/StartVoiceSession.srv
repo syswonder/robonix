@@ -1,5 +1,5 @@
 # Voice push-to-talk turn orchestrated entirely inside Liaison.
-# abstract_interface_id: robonix/system/liaison.start_voice_session
+# Contract: robonix/system/liaison/voice
 string  session_id              # empty → server allocates UUID
 string  client_user_id          # hint (e.g. local OS user)
 uint32  record_seconds          # 0 → server default (5s)

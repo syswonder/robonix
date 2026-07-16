@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Checks for Scene's host-codegen/runtime protobuf contract."""
+"""Checks for Scene's build and source-level capability contracts."""
 
+import ast
 import os
 import subprocess
 import unittest
@@ -11,6 +12,56 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SceneBuildConfigTest(unittest.TestCase):
+    def test_ingest_uses_the_canonical_lidar3d_contract(self):
+        tree = ast.parse((ROOT / "scene_service" / "service.py").read_text())
+        contracts = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.target.id == "_SCENE_CONTRACTS":
+                    contracts = ast.literal_eval(node.value)
+                    break
+        self.assertIsNotNone(contracts)
+        by_kind = {
+            kind: (contract_id, msg_type)
+            for kind, contract_id, msg_type in contracts
+        }
+        self.assertEqual(
+            by_kind["lidar3d"],
+            ("robonix/primitive/lidar/lidar3d", "PointCloud2"),
+        )
+
+    def test_every_scene_mcp_tool_is_declared(self):
+        tree = ast.parse((ROOT / "scene_service" / "service.py").read_text())
+        tool_names = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "scene_tools"
+                for target in node.targets
+            ):
+                continue
+            tool_names = [
+                item.attr
+                for item in node.value.elts
+                if isinstance(item, ast.Attribute)
+                and isinstance(item.value, ast.Name)
+                and item.value.id == "mcp_tools"
+            ]
+            break
+        self.assertEqual(
+            tool_names,
+            [
+                "list_objects",
+                "goal_near",
+                "goal_room",
+                "get_scene_graph",
+                "get_object_context",
+                "get_robot_context",
+                "list_relations",
+            ],
+        )
+
     def test_codegen_uses_exact_runtime_compatible_versions(self):
         helper = (ROOT / "scripts" / "run_python_codegen.sh").read_text()
         self.assertIn('PROTOBUF_VERSION="6.33.6"', helper)
