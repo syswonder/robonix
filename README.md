@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=lightgray&style=flat-square" alt="Repo size" />
   <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange&style=flat-square" alt="Top language" />
   <a href="https://syswonder.github.io/robonix-package-catalog/packages/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsyswonder.github.io%2Frobonix-package-catalog%2Fapi%2Fv1%2Fpackages&query=%24.packages.length&label=Robonix%20packages&color=0f766e&style=flat-square" alt="Robonix packages" /></a>
-  <a href="#supported-robots"><img src="https://img.shields.io/badge/Supported%20robots-2-2563eb?style=flat-square" alt="Supported robots: 2" /></a>
+  <a href="#supported-robots"><img src="https://img.shields.io/badge/Supported%20robots-3-2563eb?style=flat-square" alt="Supported robots: 3" /></a>
 </p>
 
 <br />
@@ -43,6 +43,7 @@ capabilities. The long-term goal is simple: **train once, deploy on any robot**.
 | --- | --- | --- | --- | --- |
 | AgileX Ranger Mini v3 | Ranger Mini v3 chassis; Livox MID-360 lidar and IMU; Intel RealSense D435i RGB-D camera; optional AgileX Piper arm; audio | syswonder | [`robot-agilex-ranger_mini_v3`](https://github.com/syswonder/robot-agilex-ranger_mini_v3) | [`robonix.robot.agilex.ranger_mini_v3`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.agilex.ranger_mini_v3/) |
 | DEEP Robotics Lite3 | Lite3 quadruped chassis; Livox MID-360 lidar and IMU; Orbbec Gemini 330-series RGB-D camera | [Bunnycxk](https://github.com/Bunnycxk) | [`robot-deep_robotics-lite3`](https://github.com/syswonder/robot-deep_robotics-lite3) | [`robonix.robot.deep_robotics.lite3`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.deep_robotics.lite3/) |
+| Unitree Go2 | Go2 quadruped chassis; onboard lidar, RGB camera, and IMU | [Origamii520](https://github.com/Origamii520) | [`robot-unitree-go2`](https://github.com/syswonder/robot-unitree-go2) | [`robonix.robot.unitree.go2`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.unitree.go2/) |
 
 Each deployment links the complete robot manifest and its primitive, service,
 and skill dependencies. See the
