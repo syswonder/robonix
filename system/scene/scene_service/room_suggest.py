@@ -12,8 +12,8 @@ gaps left by imperfect SLAM) are narrow necks":
 2. distance transform (DT) of free space,
 3. hill-climb from the seed to the cavity core (a DT local maximum),
 4. sweep a DT threshold downward; a single-step surge of the seed component's
-   area growth (delta ratio > `r_jump`, absolute delta > `a_room_min`,
-   neck width <= `t_neck_max`) means the component leaked through a neck —
+   area growth (delta ratio > `r_jump`, absolute delta > `a_room_min`, neck
+   half-width <= `t_neck_max`) means the component leaked through a neck —
    retreat one notch; the wheel `level` continues past `level` leaks,
 5. expand the thresholded core wall-ward: absorb adjacent steepest-ascent DT
    basins whose peak is below the stop threshold (sub-room pockets), never
@@ -24,8 +24,9 @@ gaps left by imperfect SLAM) are narrow necks":
 Pure functions over numpy arrays; `scipy.ndimage` only. Grids use the raw
 `nav_msgs/OccupancyGrid` conventions: int8 values (-1 unknown / 0 free /
 100 occupied), row-major `[row, col]` with row 0 at world `origin` and +row
-= +y (no image-style vertical flip anywhere in this module). All thresholds
-and areas are metric. Defaults come from the Phase 0 parameter study.
+= +y (no image-style vertical flip anywhere in this module). DT thresholds
+and areas are metric; `k_speckle` and the RDP epsilon are in cells. Defaults
+come from the Phase 0 parameter study.
 """
 from __future__ import annotations
 
@@ -50,7 +51,8 @@ class SuggestParams:
     free_max: int = 0        # grid values in [0, free_max] are free
     k_speckle: int = 3       # cells; despeckle component-size threshold
     t_min: float = 0.3       # m; downsweep lower bound (thinner => not a room)
-    t_step: float = 0.05     # m; downsweep notch = one wheel level
+    t_step: float = 0.05     # m; downsweep notch (wheel level<0 shrinks by
+    #                           notches; level>0 counts leaks, see downsweep)
     r_jump: float = 3.0      # area-delta ratio surge that flags a neck leak
     t_neck_max: float = 0.65  # m; leaks only detected at neck half-width <=
     #                           this (door-scale prior: wider saddles are
@@ -65,7 +67,10 @@ class SuggestResult:
     """Outcome of one suggestion query.
 
     `polygon_cells` vertices are float `(row, col)` grid coordinates;
-    `mask` is the suggested region as a bool grid (None when not ok).
+    `mask` is the suggested region as a READ-ONLY bool grid (None when not
+    ok). `resolution`/`origin_xy` are stamped from the grid the result was
+    computed on, so `to_json()` can never pair a stale result with a newer
+    map's frame.
     """
 
     ok: bool
@@ -74,10 +79,12 @@ class SuggestResult:
     leaked: bool = False
     t_star: float = 0.0
     area_m2: float = 0.0
+    resolution: float = 0.0
+    origin_xy: tuple[float, float] = (0.0, 0.0)
     polygon_cells: tuple[tuple[float, float], ...] = ()
     mask: np.ndarray | None = field(default=None, repr=False, compare=False)
 
-    def to_json(self, resolution: float, origin_xy: tuple[float, float]) -> dict:
+    def to_json(self) -> dict:
         """Serialize for the suggest endpoint: polygon in map-frame meters."""
         return {
             "ok": self.ok,
@@ -86,7 +93,7 @@ class SuggestResult:
             "leaked": self.leaked,
             "area_m2": round(self.area_m2, 3),
             "polygon": [
-                list(cell_to_world(r, c, resolution, origin_xy))
+                list(cell_to_world(r, c, self.resolution, self.origin_xy))
                 for r, c in self.polygon_cells
             ],
         }
@@ -119,7 +126,8 @@ def binarize_occupancy(grid: np.ndarray, free_max: int = 0) -> np.ndarray:
 
     Values in `[0, free_max]` are free; everything else — occupied AND
     unknown (-1) — is boundary. Unmapped space must block suggestions:
-    annotations should never cover cells no sensor has seen.
+    annotations should never cover cells no sensor has seen (beyond speckle
+    scale — sub-`k_speckle` unknown specks are healed by `despeckle`).
     """
     return (grid >= 0) & (grid <= free_max)
 
@@ -127,24 +135,26 @@ def binarize_occupancy(grid: np.ndarray, free_max: int = 0) -> np.ndarray:
 def despeckle(free: np.ndarray, k_cells: int) -> np.ndarray:
     """Remove sensor speckle smaller than `k_cells` from a free mask.
 
-    Obstacle islands are cleared only when fully surrounded by free cells,
-    so genuine wall fragments touching unknown territory survive; isolated
-    free specks (holes in walls / stray rays) are removed unconditionally.
+    Non-free components below `k_cells` are isolated islands inside free
+    space by construction (8-connected labelling merges touching obstacle
+    and unknown cells, so wall fragments anchored in unknown territory sit
+    in a component far larger than any speckle) — heal them to free. Free
+    components below `k_cells` (pinholes in walls, stray rays) are flipped
+    to boundary.
     """
     out = free.copy()
     lab, n = ndimage.label(~free, structure=_BOX3)
     if n:
         sizes = ndimage.sum_labels(np.ones(lab.shape), lab, np.arange(1, n + 1))
-        grown = ndimage.grey_dilation(lab, size=3)
-        for i in np.nonzero(sizes < k_cells)[0] + 1:
-            ring = free[(grown == i) & (lab != i)]
-            if ring.size and ring.all():
-                out[lab == i] = True
+        small = np.nonzero(sizes < k_cells)[0] + 1
+        if small.size:
+            out[np.isin(lab, small)] = True
     lab, n = ndimage.label(out, structure=_BOX3)
     if n:
         sizes = ndimage.sum_labels(np.ones(lab.shape), lab, np.arange(1, n + 1))
-        for i in np.nonzero(sizes < k_cells)[0] + 1:
-            out[lab == i] = False
+        small = np.nonzero(sizes < k_cells)[0] + 1
+        if small.size:
+            out[np.isin(lab, small)] = False
     return out
 
 
@@ -194,8 +204,12 @@ def downsweep(dt: np.ndarray, core: Cell, resolution: float,
     (open space bounded by real walls). Positive `level` (wheel) continues
     through that many leaks (merging across necks); negative `level` raises
     the stop threshold notch-wise (shrinking). Returns (t*, component mask,
-    leaked).
+    leaked); a core thinner than `t_min` yields an empty mask — thresholding
+    it would select the background component, i.e. the entire rest of the
+    map.
     """
+    if float(dt[core]) < params.t_min:
+        return float(params.t_min), np.zeros_like(dt, dtype=bool), False
     ts = np.arange(dt[core], params.t_min - 1e-9, -params.t_step)
     if ts.size == 0:
         ts = np.array([params.t_min])
@@ -231,8 +245,9 @@ def ascent_basins(dt: np.ndarray, free: np.ndarray,
     """Label every free cell with its steepest-ascent DT basin.
 
     Cells are flooded in descending-DT order: each takes the label of its
-    highest already-labeled 8-neighbour when that neighbour is at least as
-    high, else it founds a new basin (it is a regional maximum). Returns
+    highest already-labeled 8-neighbour (necessarily at least as high, given
+    the ordering), else it founds a new basin (a regional maximum — or an
+    equal-DT plateau segment claimed first in processing order). Returns
     `(labels, peak_dt)`: `labels` is int32 with 0 = non-free and basins
     numbered from 1; `peak_dt[k]` is the DT of basin k's founding maximum
     (`peak_dt[0]` = 0).
@@ -297,17 +312,26 @@ def trace_outer_contour(mask: np.ndarray) -> np.ndarray:
     """Moore-neighbour trace of the hole-filled mask's outer contour.
 
     Returns an (N, 2) float array of (row, col) cell coordinates, implicitly
-    closed. A single-cell mask yields that one cell.
+    closed. Termination follows Jacob's criterion — stop only on revisiting
+    the start cell in the same tracing state, never on merely reaching it:
+    an 8-connected region pinched at the start cell passes through it once
+    per lobe, and stopping early would drop whole lobes from the polygon.
+    A pinch cell therefore appears more than once (a degenerate vertex the
+    even-odd fill handles). Single-cell masks yield that one cell; empty
+    masks an empty array.
     """
     m = ndimage.binary_fill_holes(mask)
     ys, xs = np.nonzero(m)
+    if ys.size == 0:
+        return np.empty((0, 2), dtype=float)
     start = (int(ys[0]), int(xs[0]))  # topmost row, then leftmost col
     dirs = ((-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1))
     h, w = m.shape
     contour = [start]
     prev_dir = 6  # backtrack points west of a topmost-leftmost start
     cur = start
-    for _ in range(4 * int(m.sum()) + 8):
+    seen = {(start, prev_dir)}
+    for _ in range(8 * int(m.sum()) + 8):
         for k in range(8):
             i = (prev_dir + 1 + k) % 8  # clockwise from the backtrack direction
             y, x = cur[0] + dirs[i][0], cur[1] + dirs[i][1]
@@ -318,9 +342,13 @@ def trace_outer_contour(mask: np.ndarray) -> np.ndarray:
                 break
         else:
             break  # isolated cell: no neighbours
-        if cur == start and len(contour) > 2:
+        state = (cur, prev_dir)
+        if state in seen:
             break
-    return np.array(contour[:-1] if len(contour) > 1 else contour, dtype=float)
+        seen.add(state)
+    if len(contour) > 1 and contour[-1] == contour[0]:
+        contour = contour[:-1]
+    return np.array(contour, dtype=float)
 
 
 def rdp(points: np.ndarray, eps: float) -> np.ndarray:
@@ -357,9 +385,9 @@ def rasterize_polygon(polygon: np.ndarray, shape: tuple[int, int]) -> np.ndarray
     """Even-odd scanline fill of a (row, col) polygon into a bool mask.
 
     Inverse of polygonization for coverage checks (tests, IoU, previews);
-    vertices outside `shape` are clipped. Edge cells are painted explicitly —
-    the half-open scanline rule alone would drop cells whose centers lie ON
-    the boundary (e.g. a rectangle's bottom row).
+    parts outside `shape` paint nothing (clipped, never wrapped). Edge cells
+    are painted explicitly — the half-open scanline rule alone would drop
+    cells whose centers lie ON the boundary (e.g. a rectangle's bottom row).
     """
     mask = np.zeros(shape, dtype=bool)
     if len(polygon) < 3:
@@ -377,14 +405,18 @@ def rasterize_polygon(polygon: np.ndarray, shape: tuple[int, int]) -> np.ndarray
                 xs.append(x1 + (y - y1) / (y2 - y1) * (x2 - x1))
         xs.sort()
         for a, b in zip(xs[::2], xs[1::2]):
-            mask[row, int(np.ceil(a)):int(np.floor(b)) + 1] = True
+            left = max(int(np.ceil(a)), 0)
+            right = min(int(np.floor(b)), shape[1] - 1)
+            if left <= right:
+                mask[row, left:right + 1] = True
     for i in range(n):
         y1, x1 = polygon[i]
         y2, x2 = polygon[(i + 1) % n]
         steps = int(2 * max(abs(y2 - y1), abs(x2 - x1))) + 2
-        ys = np.clip(np.rint(np.linspace(y1, y2, steps)).astype(int), 0, shape[0] - 1)
-        cs = np.clip(np.rint(np.linspace(x1, x2, steps)).astype(int), 0, shape[1] - 1)
-        mask[ys, cs] = True
+        ys = np.rint(np.linspace(y1, y2, steps)).astype(int)
+        cs = np.rint(np.linspace(x1, x2, steps)).astype(int)
+        ok = (ys >= 0) & (ys < shape[0]) & (cs >= 0) & (cs < shape[1])
+        mask[ys[ok], cs[ok]] = True
     return mask
 
 
@@ -392,35 +424,47 @@ def rasterize_polygon(polygon: np.ndarray, shape: tuple[int, int]) -> np.ndarray
 
 def suggest(grid: np.ndarray, resolution: float, seed: Cell, level: int = 0,
             params: SuggestParams | None = None,
+            origin_xy: tuple[float, float] = (0.0, 0.0),
             pre: tuple[np.ndarray, np.ndarray] | None = None,
             basins: tuple[np.ndarray, np.ndarray] | None = None,
             ) -> SuggestResult:
     """Run the full pipeline: occupancy grid + seed cell (+ wheel level).
 
     `pre` / `basins` accept cached `preprocess()` / `ascent_basins()`
-    results (both depend only on the grid and params, not on seed/level) —
-    `RoomSuggester` supplies them for repeated hovers. Out-of-bounds or
-    non-free seeds and sub-`a_room_min` regions return `ok=False` (the
-    hover-suppression / fall-back-to-manual case).
+    results (both depend only on grid, resolution and params, not on
+    seed/level) — `RoomSuggester` supplies them for repeated hovers.
+    Out-of-bounds, non-free or too-thin seeds and sub-`a_room_min` regions
+    return `ok=False` (the hover-suppression / fall-back-to-manual case).
+    The returned mask is marked read-only: it aliases pipeline state that
+    later queries on the same cached stages must not see mutated.
     """
     p = params or SuggestParams()
+
+    def fail(reason: str, **kw) -> SuggestResult:
+        return SuggestResult(False, reason, level=level, resolution=resolution,
+                             origin_xy=origin_xy, **kw)
+
     free, dt = pre if pre is not None else preprocess(grid, resolution, p)
     h, w = free.shape
     if not (0 <= seed[0] < h and 0 <= seed[1] < w):
-        return SuggestResult(False, "seed outside the grid", level=level)
+        return fail("seed outside the grid")
     if not free[seed]:
-        return SuggestResult(False, "seed not in free space", level=level)
+        return fail("seed not in free space")
     core = anchor(dt, seed)
+    if float(dt[core]) < p.t_min:
+        return fail("cavity below t_min", t_star=float(p.t_min))
     t_star, region0, leaked = downsweep(dt, core, resolution, p, level)
     region = expand(free, region0, t_star,
                     basins if basins is not None else ascent_basins(dt, free))
     area = float(region.sum()) * resolution * resolution
     if area < p.a_room_min:
-        return SuggestResult(False, "region below a_room_min", level=level,
-                             leaked=leaked, t_star=t_star, area_m2=area)
+        return fail("region below a_room_min", leaked=leaked, t_star=t_star,
+                    area_m2=area)
     polygon = rdp(trace_outer_contour(region), p.rdp_eps_cells)
+    region.setflags(write=False)
     return SuggestResult(True, level=level, leaked=leaked, t_star=t_star,
-                         area_m2=area,
+                         area_m2=area, resolution=resolution,
+                         origin_xy=origin_xy,
                          polygon_cells=tuple(map(tuple, polygon.tolist())),
                          mask=region)
 
@@ -438,7 +482,12 @@ class RoomSuggester:
     def __init__(self, grid: np.ndarray, resolution: float,
                  origin_xy: tuple[float, float] = (0.0, 0.0),
                  params: SuggestParams | None = None):
-        self._grid = grid
+        """Bind one grid; heavy stages build lazily. The grid is copied so
+        a caller reusing its buffer cannot silently stale the memoized
+        stages."""
+        if resolution <= 0:
+            raise ValueError(f"resolution must be positive, got {resolution}")
+        self._grid = np.array(grid, copy=True)
         self._resolution = float(resolution)
         self._origin_xy = (float(origin_xy[0]), float(origin_xy[1]))
         self._params = params or SuggestParams()
@@ -455,13 +504,10 @@ class RoomSuggester:
         """Suggestion for a grid-cell seed, using the memoized stages."""
         self._ensure()
         return suggest(self._grid, self._resolution, seed, level=level,
-                       params=self._params, pre=self._pre, basins=self._basins)
+                       params=self._params, origin_xy=self._origin_xy,
+                       pre=self._pre, basins=self._basins)
 
     def suggest_world(self, x: float, y: float, level: int = 0) -> SuggestResult:
         """Suggestion for a map-frame (x, y) meters seed (endpoint entry)."""
         seed = world_to_cell(x, y, self._resolution, self._origin_xy)
         return self.suggest(seed, level=level)
-
-    def to_json(self, result: SuggestResult) -> dict:
-        """Serialize a result of THIS grid (its resolution/origin) for the API."""
-        return result.to_json(self._resolution, self._origin_xy)

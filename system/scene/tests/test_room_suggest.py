@@ -10,9 +10,18 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:  # room_suggest needs scipy — absent on a bare mac checkout
+try:  # probe ONLY the third-party deps — absent on a bare mac checkout.
     import numpy as np
+    from scipy import ndimage
 
+    _IMPORT_ERR = None
+except ModuleNotFoundError as e:  # pragma: no cover - environment-dependent
+    _IMPORT_ERR = e
+
+if _IMPORT_ERR is None:
+    # Deliberately OUTSIDE the try: an ImportError raised by the module
+    # itself (typo'd symbol, broken internal import) must fail the run
+    # loudly, not masquerade as "scipy unavailable" and skip forever.
     from scene_service.room_suggest import (  # noqa: E402
         RoomSuggester,
         SuggestParams,
@@ -20,6 +29,7 @@ try:  # room_suggest needs scipy — absent on a bare mac checkout
         binarize_occupancy,
         cell_to_world,
         despeckle,
+        downsweep,
         expand,
         preprocess,
         rasterize_polygon,
@@ -28,10 +38,6 @@ try:  # room_suggest needs scipy — absent on a bare mac checkout
         trace_outer_contour,
         world_to_cell,
     )
-
-    _IMPORT_ERR = None
-except ImportError as e:  # pragma: no cover - environment-dependent
-    _IMPORT_ERR = e
 
 RES = 0.05  # m/cell, matches the deployed maps
 
@@ -54,7 +60,7 @@ def _unavailable() -> bool:
 # ------------------------------------------------------------------ fixtures
 
 def two_rooms(door_cols=(28, 31), gap_cols=(), unknown_outside=False):
-    """Two 3x2m rooms split by a wall at row 40, joined by a door.
+    """Two rooms (~2.9x1.95m and ~2.9x0.9m) split by a wall, joined by a door.
 
     60x60 grid: room A rows 1..39, room B rows 41..58, wall row 40 with a
     free door at `door_cols` (and optional extra `gap_cols` — a wall defect).
@@ -99,16 +105,20 @@ def test_despeckle_keeps_wall_fragments_touching_unknown():
     g[10, 10] = 100          # 1-cell obstacle speck inside free space
     g[0:3, 5] = -1           # unknown finger
     g[3, 5] = 100            # wall fragment touching it
-    g[15, 15] = 0
-    free = binarize_occupancy(g)
-    free[15, 15] = False     # carve a free pinhole in a wall for the test
     g2 = g.copy()
     g2[14:17, 14:17] = 100
     g2[15, 15] = 0           # 1-cell free speck inside an obstacle block
     out = despeckle(binarize_occupancy(g2), k_cells=3)
     assert out[10, 10]            # obstacle speck healed to free
-    assert not out[3, 5]          # wall fragment kept (borders unknown)
+    assert not out[3, 5]          # wall fragment kept (merges with unknown)
     assert not out[15, 15]        # free speck removed
+    # size-threshold boundary is strict: == k_cells survives, < k_cells goes
+    g3 = np.zeros((20, 20), dtype=np.int8)
+    g3[5, 3:6] = 100              # 3-cell obstacle run
+    g3[12, 3:5] = 100             # 2-cell obstacle run
+    out3 = despeckle(binarize_occupancy(g3), k_cells=3)
+    assert not out3[5, 4], "3-cell component (== k_cells) was wrongly healed"
+    assert out3[12, 3], "2-cell component (< k_cells) survived"
     print("[PASS] test_despeckle_keeps_wall_fragments_touching_unknown")
 
 
@@ -174,7 +184,6 @@ def test_exterior_gap_to_unknown_does_not_spill():
     if _unavailable():
         return
     g = two_rooms(unknown_outside=True)
-    g[41:59, 0] = -1
     g[30:36, 59] = 0  # breach the right outer wall of room A
     g[30:36, 58] = 0
     r = _run(g, (20, 30))
@@ -186,17 +195,20 @@ def test_exterior_gap_to_unknown_does_not_spill():
 # ------------------------------------------------------------ expansion rules
 
 def test_expand_absorbs_pockets_but_not_rival_rooms():
-    """Corner pockets (peak < t*) merge in; the neighbour room never does."""
+    """Enclosed pockets (peak < t*) merge in; the neighbour room never does."""
     if _unavailable():
         return
     g = two_rooms()
-    g[1:6, 1:10] = 100
-    g[6, 1:4] = 0    # carve a shallow nook behind the block (pocket)
+    # a genuinely enclosed nook: obstacle block with a cavity inside,
+    # connected to room A through a 2-cell mouth. Interior DT peak 0.1m,
+    # well below the 0.15m stop threshold -> must be absorbed by expansion.
+    g[1:10, 1:13] = 100
+    g[3:7, 3:11] = 0     # the nook cavity
+    g[4:6, 11:13] = 0    # its mouth into room A
     free, dt = preprocess(g, RES, P)
-    basins = ascent_basins(dt, free)
     r = _run(g, (20, 30))
     assert r.ok
-    assert r.mask[6, 2], "sub-room pocket was not absorbed"
+    assert r.mask[5, 5], "enclosed pocket was not absorbed"
     assert not r.mask[50, 30], "rival cavity absorbed"
     # never a cell outside free space
     assert not (r.mask & ~free).any()
@@ -209,8 +221,6 @@ def test_polygon_hugs_the_region():
     """RDP output stays within eps of the region (both directions)."""
     if _unavailable():
         return
-    from scipy import ndimage
-
     g = two_rooms()
     r = _run(g, (20, 30))
     assert r.ok and len(r.polygon_cells) >= 4
@@ -245,13 +255,47 @@ def test_contour_roundtrip_small_rectangle():
     print("[PASS] test_contour_roundtrip_small_rectangle")
 
 
+def test_contour_covers_diagonal_pinch_lobes():
+    """A region pinched diagonally AT the start cell keeps all its lobes:
+    the trace must pass through the pinch once per lobe (Jacob's stopping
+    criterion), not stop on first return to the start."""
+    if _unavailable():
+        return
+    m = np.zeros((8, 8), dtype=bool)
+    m[0, 1:4] = True          # top lobe; (0,1) is the trace start
+    m[1:4, 0] = True          # bottom lobe, joined only diagonally at (0,1)
+    poly = trace_outer_contour(m)
+    visited = {(int(r), int(c)) for r, c in poly}
+    missing = {tuple(c) for c in np.argwhere(m)} - visited
+    assert not missing, f"contour dropped lobe cells: {missing}"
+    # degenerate/empty masks stay well-defined
+    assert trace_outer_contour(np.zeros((4, 4), bool)).shape == (0, 2)
+    one = np.zeros((4, 4), bool)
+    one[2, 2] = True
+    assert trace_outer_contour(one).tolist() == [[2.0, 2.0]]
+    print("[PASS] test_contour_covers_diagonal_pinch_lobes")
+
+
+def test_rasterize_clips_out_of_grid_polygons():
+    """Polygon parts left of / above the grid paint nothing (no wraparound)."""
+    if _unavailable():
+        return
+    off = np.array([[2.0, -6.0], [2.0, -2.0], [8.0, -2.0], [8.0, -6.0]])
+    assert rasterize_polygon(off, (12, 12)).sum() == 0
+    straddle = np.array([[-2.0, -2.0], [-2.0, 4.0], [3.0, 4.0], [3.0, -2.0]])
+    m = rasterize_polygon(straddle, (12, 12))
+    assert m[:4, :5].any() and not m[:, 5:].any() and not m[4:, :].any()
+    print("[PASS] test_rasterize_clips_out_of_grid_polygons")
+
+
 # ------------------------------------------------------------- wheel levels
 
 def test_level_monotonicity_and_merge():
     """region(level+1) ⊇ region(level); one notch up merges through the door.
 
-    Needs a door wider than t_min (0.5m here) — a narrower throat never
-    enters `{DT >= t}` during the sweep, so there is no leak to pass.
+    Needs a door whose HALF-width (0.25m here) exceeds t_min — a narrower
+    throat never enters `{DT >= t}` during the sweep, so there is no leak
+    to pass.
     """
     if _unavailable():
         return
@@ -267,7 +311,33 @@ def test_level_monotonicity_and_merge():
     assert merged.mask[50, 30], "level +1 did not merge through the door"
     base = _run(g, (20, 30), level=0)
     assert base.leaked and not base.mask[50, 30]
+    # negative levels raise the stop threshold (expansion is basin-granular,
+    # so the mask may not shrink — the branch is pinned via t_star)
+    shrunk = _run(g, (20, 30), level=-2)
+    assert shrunk.t_star > base.t_star + 1e-9, "level<0 did not raise t*"
+    assert not (shrunk.mask & ~base.mask).any()
     print("[PASS] test_level_monotonicity_and_merge")
+
+
+def test_level_two_crosses_two_necks():
+    """In a three-room chain, level counts leaks: +1 reaches the middle
+    room only, +2 reaches the far room too."""
+    if _unavailable():
+        return
+    g = np.full((60, 100), 100, dtype=np.int8)
+    for c0, c1 in ((1, 30), (33, 64), (67, 98)):  # three rooms in a row
+        g[1:59, c0:c1 + 1] = 0
+    # door widths differ so the two necks open at different thresholds —
+    # equal doors open in the same notch and merge as ONE surge
+    g[22:36, 31:33] = 0    # door A<->B, 0.7m
+    g[25:33, 65:67] = 0    # door B<->C, 0.4m
+    r0 = _run(g, (30, 15))
+    r1 = _run(g, (30, 15), level=1)
+    r2 = _run(g, (30, 15), level=2)
+    assert not r0.mask[30, 50] and not r0.mask[30, 80]
+    assert r1.mask[30, 50] and not r1.mask[30, 80], "level 1 must stop at B"
+    assert r2.mask[30, 50] and r2.mask[30, 80], "level 2 must reach C"
+    print("[PASS] test_level_two_crosses_two_necks")
 
 
 # ----------------------------------------------------------- fallback semantics
@@ -292,17 +362,69 @@ def test_bad_seeds_and_tiny_regions_give_no_suggestion():
     print("[PASS] test_bad_seeds_and_tiny_regions_give_no_suggestion")
 
 
+def test_thin_cavity_never_suggests_the_background():
+    """Hovering free space thinner than t_min must give ok=False — never the
+    inverted background component spanning unrelated rooms (the degenerate
+    `dt[core] < t_min` case)."""
+    if _unavailable():
+        return
+    g = np.full((120, 120), 100, dtype=np.int8)
+    g[10:50, 10:50] = 0        # a real room
+    g[70:110, 70:110] = 0      # a second, disconnected room
+    g[60:65, 20:25] = 0        # 0.25m-wide pocket, thinner than t_min 0.3
+    r = suggest(g, RES, (62, 22))  # production defaults
+    assert not r.ok, f"thin cavity suggested area={r.area_m2}"
+    assert r.reason == "cavity below t_min"
+    # the guarded downsweep itself returns an empty component
+    free, dt = preprocess(g, RES, SuggestParams())
+    t_star, region0, leaked = downsweep(dt, (62, 22), RES, SuggestParams())
+    assert not region0.any() and not leaked
+    print("[PASS] test_thin_cavity_never_suggests_the_background")
+
+
+def test_a_room_min_gates_leak_detection():
+    """The surge RATIO alone is not a leak — the absolute delta must also
+    exceed a_room_min. On a hand-built DT staircase (each notch exposes 8
+    cells) a 0.075 m^2 blob fires the ratio (~4.7x) but is under the 0.5 m^2
+    gate, so the sweep continues through it; the 1.0 m^2 blob then triggers
+    the actual leak and the sweep retreats above it."""
+    if _unavailable():
+        return
+    dt = np.zeros((40, 60))
+    for i, c0 in enumerate(range(0, 40, 4)):  # 10 blocks, dt 0.60 -> 0.15
+        dt[5:7, c0:c0 + 4] = 0.60 - 0.05 * i
+    dt[7:37, 24] = 0.30        # mid blob: 30 cells = 0.075 m^2 < a_room_min
+    dt[7:27, 32:52] = 0.20     # big blob: 400 cells = 1.0 m^2 > a_room_min
+    t_star, region0, leaked = downsweep(dt, (5, 0), RES, P)
+    assert leaked and abs(t_star - 0.25) < 1e-9
+    assert region0[20, 24], "sub-a_room_min blob was cut off as a leak"
+    assert not region0[10, 40], "big blob must be cut off as the real leak"
+    print("[PASS] test_a_room_min_gates_leak_detection")
+
+
+def test_anchor_from_near_wall_seed():
+    """A seed one cell off the wall anchors the room's wide interior and
+    yields the same suggestion as a center hover."""
+    if _unavailable():
+        return
+    g = two_rooms()
+    center = _run(g, (20, 30))
+    near_wall = _run(g, (2, 30))
+    assert near_wall.ok
+    assert near_wall.t_star == center.t_star
+    assert (near_wall.mask == center.mask).all()
+    print("[PASS] test_anchor_from_near_wall_seed")
+
+
 # ------------------------------------------------------------------- basins
 
 def test_basin_invariants_on_random_layouts():
     """Basin labelling invariants hold on randomized clutter (fixed seeds):
-    exactly the free cells are labelled, each basin's recorded peak is the
-    max DT over its cells, no basin outranks the DT of its own peak, and
-    the expansion built on the basins contains the core and stays free."""
+    exactly the free cells are labelled, each basin's recorded peak equals
+    the max DT over its cells, the expansion built on the basins contains
+    the core and stays free, and relabelling is deterministic."""
     if _unavailable():
         return
-    from scene_service.room_suggest import downsweep
-
     for seed_val in (3, 11, 27):
         rng = np.random.RandomState(seed_val)
         g = np.full((40, 40), 100, dtype=np.int8)
@@ -344,7 +466,9 @@ def test_cell_world_roundtrip_and_orientation():
 
 
 def test_result_to_json_shape():
-    """Endpoint payload carries metric polygon + flags, no numpy types."""
+    """Endpoint payload carries metric polygon + flags, no numpy types;
+    the frame (resolution/origin) is stamped on the result itself, and a
+    not-ok result serializes to an empty polygon."""
     if _unavailable():
         return
     import json
@@ -352,12 +476,15 @@ def test_result_to_json_shape():
     g = two_rooms()
     s = RoomSuggester(g, RES, origin_xy=(1.0, -1.0), params=P)
     r = s.suggest((20, 30))
-    payload = s.to_json(r)
+    payload = r.to_json()
     json.dumps(payload)  # must be JSON-serializable as-is
     assert payload["ok"] and payload["area_m2"] > 0
     assert all(len(p) == 2 for p in payload["polygon"])
     xs = [p[0] for p in payload["polygon"]]
     assert min(xs) >= 1.0, "polygon not in map-frame meters"
+    bad = s.suggest((40, 5)).to_json()  # seed on the dividing wall
+    json.dumps(bad)
+    assert not bad["ok"] and bad["polygon"] == [] and bad["reason"]
     print("[PASS] test_result_to_json_shape")
 
 
