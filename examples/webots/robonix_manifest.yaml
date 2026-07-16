@@ -29,9 +29,7 @@ system:
   vitals:
     listen: 0.0.0.0:50093
   # soma+scene layer
-  scene:
-    camera_frame: head_front_camera_rgb_optical_frame
-    camera_provider_id: tiago_camera
+  scene: {}
   # execution layer
   executor:
     # robonix-client polls Executor for authoritative active RTDL plans.
