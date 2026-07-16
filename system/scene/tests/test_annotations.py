@@ -502,7 +502,8 @@ def test_user_page_served():
         body = b"".join(m.get("body", b"") for m in sent
                         if m["type"] == "http.response.body")
         assert status == 200
-        assert b"Annotate room" in body and b"/api/annotations" in body
+        assert b"Draw manually" in body and b"/api/annotations" in body
+        assert b"/api/rooms/suggest" in body  # hover suggestion is wired in
     print("  [PASS] test_user_page_served")
 
 

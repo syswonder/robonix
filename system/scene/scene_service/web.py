@@ -2775,7 +2775,13 @@ _USER_HTML = r"""<!doctype html>
     #panel { width: 260px; flex: none; background: var(--panel);
       border-right: 1px solid #232936; display: flex; flex-direction: column; }
     #panel .actions { padding: 12px; border-bottom: 1px solid #232936; }
-    #map-tools { padding: 10px 12px; border-bottom: 1px solid #232936; display: grid; gap: 8px; }
+    #map-lib { border-bottom: 1px solid #232936; }
+    #map-lib summary { cursor: pointer; padding: 10px 12px; font-size: 12px;
+      font-weight: 650; color: var(--fg); user-select: none; }
+    #map-lib summary .summary-sub { color: var(--muted); font-weight: 400; font-size: 11px; }
+    #map-lib[open] summary { border-bottom: 1px solid #232936; }
+    .section-title { font-size: 12px; font-weight: 650; margin-bottom: 8px; }
+    #map-tools { padding: 10px 12px; display: grid; gap: 8px; }
     #map-tools label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
     #map-id { width: 100%; box-sizing: border-box; border: 1px solid #33405a; border-radius: 6px;
       background: #0f131b; color: var(--fg); padding: 6px 8px; font-size: 12px; }
@@ -2882,6 +2888,8 @@ _USER_HTML = r"""<!doctype html>
   </header>
   <div id="main">
     <div id="panel">
+      <details id="map-lib">
+      <summary>Map library <span class="summary-sub">save / load whole maps</span></summary>
       <div id="map-tools">
         <label>Map ID<input id="map-id" placeholder="apartment_demo" /></label>
         <div id="map-actions">
@@ -2892,19 +2900,21 @@ _USER_HTML = r"""<!doctype html>
         <div id="map-status"><span id="map-status-msg">Ready.</span><span class="mode-label">Map mode:</span><span id="mode-pill">unknown</span></div>
         <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
       </div>
+      </details>
       <div class="actions">
-        <button class="primary" id="btn-draw">✏ Annotate room</button>
+        <div class="section-title">Rooms</div>
+        <button class="primary" id="btn-draw">✏ Draw manually</button>
       </div>
-      <div id="room-list"><div id="empty">No rooms yet. Click “Annotate room”,
-        then click on the map to outline one (double-click or Enter to finish,
-        Esc to cancel).</div></div>
+      <div id="room-list"><div id="empty">No rooms yet. Hover the map to get
+        a suggested outline and click to adopt it — or “Draw manually” to
+        outline one corner by corner.</div></div>
     </div>
     <div id="canvas-wrap">
       <canvas id="c"></canvas>
       <div id="hint"></div>
       <div id="toast"></div>
       <div id="scene-status" role="status">loading Scene state…</div>
-      <div class="legend">drag to pan · wheel to zoom · hover a dot for its label</div>
+      <div class="legend">hover free space to pick a room · drag to pan · wheel to zoom</div>
     </div>
   </div>
 </div>
@@ -2999,6 +3009,9 @@ let suggest = null;         // last /api/rooms/suggest payload (ok or not)
 let suggestLevel = 0;       // tolerance notches (Alt+wheel)
 let suggestTimer = null;    // hover debounce
 let suggestSeq = 0;         // drops stale in-flight responses
+let suggestAt = 0;          // fetch time of `suggest` (no-room hint delay)
+let suggestMouse = null;    // world pos the current `suggest` was asked at
+const STARTER_HINT = 'Hover free space on the map — a room outline is suggested automatically';
 
 const hintEl = document.getElementById('hint');
 const sceneStatusEl = document.getElementById('scene-status');
@@ -3146,6 +3159,15 @@ const ROOM_COLORS = [
     { stroke:'#d5c456', fill:'rgba(213,196,86,.18)', label:'#fff6bd' },
     { stroke:'#8fcf66', fill:'rgba(143,207,102,.18)', label:'#e3f8d5' },
 ];
+function polyAreaM2(pts) {
+    // shoelace; points are [[x,y],...] map-frame meters
+    let s = 0;
+    for (let i = 0; i < pts.length; i++) {
+        const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % pts.length];
+        s += x1 * y2 - x2 * y1;
+    }
+    return Math.abs(s) / 2;
+}
 function roomColor(annotation) {
     const key = String(annotation.annotation_id || annotation.name || 'room');
     let hash = 2166136261;
@@ -3269,29 +3291,47 @@ function draw() {
         ctx.stroke();
     }
 
-    // room suggestion preview (hover assist; hidden while drawing/panning)
+    // room suggestion preview (hover assist; hidden while drawing/panning).
+    // Draft-green on purpose: the preview → adopted draft → saved room
+    // colour progression should read as one flow, distinct from the blue
+    // of already-saved rooms.
     if (suggest && suggest.ok && !drawMode && !poseEstimateMode && !dragging) {
         const pts = suggest.polygon.map(p => w2p(p[0], p[1]));
         if (pts.length >= 3) {
             ctx.beginPath();
             pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
             ctx.closePath();
-            ctx.fillStyle = 'rgba(122,167,255,0.16)';
+            ctx.fillStyle = 'rgba(142,240,183,0.15)';
             ctx.fill();
-            ctx.lineWidth = 2; ctx.strokeStyle = '#7aa7ff';
+            ctx.lineWidth = 2; ctx.strokeStyle = '#8ef0b7';
             ctx.setLineDash([7, 5]); ctx.stroke(); ctx.setLineDash([]);
             if (mouseWorld) {
                 const [mx, my] = w2p(...mouseWorld);
                 const badge = suggest.area_m2.toFixed(1) + ' m²'
-                    + (suggestLevel ? ' · lvl ' + suggestLevel : '')
-                    + (suggest.leaked ? ' · at neck' : '');
+                    + (suggestLevel ? ' · tolerance ' + (suggestLevel > 0 ? '+' : '') + suggestLevel : '')
+                    + (suggest.leaked ? ' · stops at an opening' : '');
                 ctx.font = '11px ui-monospace, monospace'; ctx.textBaseline = 'bottom';
                 ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
                 ctx.strokeText(badge, mx + 12, my - 8);
-                ctx.fillStyle = '#cfe0ff';
+                ctx.fillStyle = '#d9f7e6';
                 ctx.fillText(badge, mx + 12, my - 8);
             }
         }
+    }
+    // "nothing here" feedback: hovering a wall / too-thin spot answers
+    // ok:false — show a muted marker after a short still-delay so users can
+    // tell "no room here" from "feature not responding" (no flicker while
+    // sweeping the mouse across walls).
+    if (suggest && !suggest.ok && !drawMode && !poseEstimateMode && !dragging
+        && mouseWorld && suggestMouse
+        && Date.now() - suggestAt >= 280
+        && Math.hypot(mouseWorld[0] - suggestMouse[0], mouseWorld[1] - suggestMouse[1]) < 0.15) {
+        const [mx, my] = w2p(...mouseWorld);
+        ctx.font = '11px ui-monospace, monospace'; ctx.textBaseline = 'bottom';
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.strokeText('× no room here', mx + 12, my - 8);
+        ctx.fillStyle = '#7d828b';
+        ctx.fillText('× no room here', mx + 12, my - 8);
     }
 
     // draft polygon (draw mode)
@@ -3303,8 +3343,8 @@ function draw() {
         ctx.strokeStyle = '#8ef0b7'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
         ctx.stroke(); ctx.setLineDash([]);
         ctx.fillStyle = '#8ef0b7';
-        for (const [x, y] of pts) {
-            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+        for (const [x, y] of pts) {   // 4.5px: big enough to grab for dragging
+            ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2); ctx.fill();
         }
     }
 
@@ -3460,6 +3500,11 @@ async function saveCurrentMap() {
 }
 async function loadSelectedMap(id) {
     if (mapBusy) return;
+    // loading is a whole-robot operation (map switch + mode change + editor
+    // lock) — never one accidental click away
+    if (!(await askConfirm('Load map',
+        `Switch the robot's active map to “${id}”? The current live session ends and the editor locks while it loads.`,
+        'Load'))) return;
     selectedMapId = id;
     document.getElementById('map-id').value = id;
     renderMaps();
@@ -3628,9 +3673,9 @@ function renderPanel() {
     const anyStale = rooms.some(a => a.stale);
     document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
     if (!rooms.length) {
-        list.innerHTML = '<div id="empty">No rooms yet. Click “Annotate room”, ' +
-          'then click on the map to outline one (double-click or Enter to ' +
-          'finish, Esc to cancel).</div>';
+        list.innerHTML = '<div id="empty">No rooms yet. Hover the map to get ' +
+          'a suggested outline and click to adopt it — or “Draw manually” ' +
+          'to outline one corner by corner.</div>';
         return;
     }
     list.innerHTML = rooms.map(a => `
@@ -3638,7 +3683,7 @@ function renderPanel() {
            data-id="${a.annotation_id}" style="--room-color:${roomColor(a).stroke}">
         <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || '(unnamed)')}</span>
         ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
-        <div class="sub">${a.points.length} corners</div>
+        <div class="sub">${polyAreaM2(a.points).toFixed(1)} m² · ${a.points.length} corners</div>
         <div class="btns">
           <button class="small" data-act="rename" ${mapBusy ? 'disabled' : ''}>Rename</button>
           ${a.stale ? `<button class="small" data-act="confirm" ${mapBusy ? 'disabled' : ''}>Still valid</button>` : ''}
@@ -3673,9 +3718,10 @@ function setDrawMode(on) {
     drawMode = on;
     draft = [];
     btnDraw.classList.toggle('active', on);
-    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Annotate room';
+    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Draw manually';
     c.style.cursor = on ? 'crosshair' : 'grab';
-    setHint(on ? 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel' : '');
+    setHint(on ? 'Click to add corners · drag a corner to adjust · double-click or Enter to finish (≥3) · Esc to cancel'
+               : STARTER_HINT);
     draw();
 }
 btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
@@ -3686,7 +3732,11 @@ async function finishDraft() {
     draftSubmitting = true;
     try {
         const points = draft.map(p => [p[0], p[1]]);
-        const name = await askRoomName('Create room', '');
+        const name = await askModal({
+            title: 'Create room',
+            message: 'Cancel keeps the outline as an editable draft — drag corners to adjust, Enter to finish.',
+            defaultValue: '',
+        });
         if (name === null) return;          // keep drawing
         if (!name) { toast('Room name is required.'); return; }
         const body = { kind: 'room', name, points };
@@ -3713,7 +3763,11 @@ function pipWorld(pt, poly) {
 function clearSuggest() {
     clearTimeout(suggestTimer);
     suggestSeq++;                        // orphan any in-flight response
-    if (suggest) { suggest = null; setHint(''); draw(); }
+    if (suggest) {
+        suggest = null;
+        if (!drawMode) setHint(STARTER_HINT);
+        draw();
+    }
     suggestLevel = 0;
 }
 function suggestEligible() {
@@ -3732,9 +3786,12 @@ async function fetchSuggest() {
     } catch (_) { return; /* transient; next hover retries */ }
     if (seq !== suggestSeq || !suggestEligible()) return;  // stale or mode changed
     suggest = out;
+    suggestAt = Date.now();
+    suggestMouse = [x, y];
     setHint(out && out.ok
         ? 'Click to create a room from the suggestion · Alt+wheel adjusts tolerance · Esc dismisses'
-        : '');
+        : STARTER_HINT);
+    if (out && !out.ok) setTimeout(draw, 300);  // repaint for the no-room marker
     draw();
 }
 function scheduleSuggest() {
@@ -3742,20 +3799,41 @@ function scheduleSuggest() {
     // moving inside the current suggestion at the same tolerance: cache hit
     if (suggest && suggest.ok && suggest.level === suggestLevel
         && pipWorld(mouseWorld, suggest.polygon)) return;
+    // leaving the suggested cavity resets the tolerance — a notch dialed
+    // for one room should not silently apply to the next one hovered
+    if (suggest && suggest.ok && !pipWorld(mouseWorld, suggest.polygon)) suggestLevel = 0;
     clearTimeout(suggestTimer);
     suggestTimer = setTimeout(fetchSuggest, 100);
 }
 
 // ── canvas input: pan / zoom / vertex clicks / hover ─────────────────────
 let dragging = false, dragMoved = false, lastPos = null;
+let vertexDrag = -1;   // index of the draft corner being dragged, -1 = none
 c.style.cursor = 'grab';
 c.addEventListener('mousedown', (ev) => {
     if (mapBusy) return;
+    if (drawMode && draft.length) {
+        // grabbing an existing draft corner beats panning: this is how an
+        // adopted suggestion (or any draft) gets adjusted before saving
+        for (let i = 0; i < draft.length; i++) {
+            const [px, py] = w2p(draft[i][0], draft[i][1]);
+            if ((px - ev.offsetX) ** 2 + (py - ev.offsetY) ** 2 < 64) {
+                vertexDrag = i; dragMoved = false;
+                return;
+            }
+        }
+    }
     dragging = true; dragMoved = false; lastPos = [ev.offsetX, ev.offsetY];
 });
-window.addEventListener('mouseup', () => { dragging = false; });
+window.addEventListener('mouseup', () => { dragging = false; vertexDrag = -1; });
 c.addEventListener('mousemove', (ev) => {
     mouseWorld = p2w(ev.offsetX, ev.offsetY);
+    if (vertexDrag >= 0) {
+        draft[vertexDrag] = p2w(ev.offsetX, ev.offsetY);
+        dragMoved = true;   // suppress the corner-append click on release
+        draw();
+        return;
+    }
     if (dragging && lastPos) {
         const dx = ev.offsetX - lastPos[0], dy = ev.offsetY - lastPos[1];
         if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
@@ -3880,6 +3958,11 @@ async function refresh() {
         const mode = unsavedLive ? 'unsaved live' : ((mb && mb.mode) || 'unknown');
         modePill.textContent = mode;
         modePill.className = unsavedLive ? 'mapping' : mode;
+        modePill.title = {
+            'localization': 'The robot follows a loaded saved map. The map itself does not change; rooms you draw are stored for THIS map.',
+            'mapping': 'The robot is building a map as it drives. Save it (once per session) to keep it in the library.',
+            'unsaved live': 'Fresh mapping session — nothing is saved yet. Enter a Map ID and Save to keep this map and its rooms.',
+        }[mode] || 'Mapping has not reported its mode yet.';
     }
     const msg = document.getElementById('map-status-msg');
     if (unsavedLive && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
@@ -3896,6 +3979,7 @@ async function refresh() {
 setInterval(refresh, 1000);
 refresh();
 loadMaps();
+setHint(STARTER_HINT);
 </script>
 </body>
 </html>
