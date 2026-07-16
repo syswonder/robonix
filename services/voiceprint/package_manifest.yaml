@@ -1,5 +1,7 @@
 # Robonix voiceprint service — ECAPA-TDNN one-shot speaker identification.
-# Three atlas-registered capabilities (all gRPC, all on the same listener):
+# One lifecycle interface and four voiceprint RPCs share one listener:
+#
+#   robonix/service/voiceprint/driver            — Driver lifecycle + config
 #
 #   robonix/service/voiceprint/identify         — Identify(audio) → user_id
 #       Consumed by Liaison's voice gating path; LLM-visible only
@@ -13,13 +15,15 @@
 #       Admin RPC. Returns the (user_id, user_name) catalog so the chat
 #       client can hydrate its user list on modal open.
 #
+#   robonix/service/voiceprint/delete  — DeleteEnrolled(user_id) → ok
+#       Admin RPC. Removes one enrolled speaker; absent IDs are a no-op.
+#
 # Service id is `voiceprint` under the `robonix/service/voiceprint`
 # namespace; multiple Service instances can coexist in the same
 # namespace.
 #
-# Runtime config consumed via environment:
-#   VOICEPRINT_PORT        — gRPC listen port (default 50092)
-#   VOICEPRINT_BIND_ADDR   — gRPC bind address (default 0.0.0.0)
+# Runtime config is delivered through Driver(CMD_INIT). Environment variables
+# provide fallbacks when the corresponding config key is absent:
 #   VOICEPRINT_DATA_DIR    — where enrolled.json lives
 #   VOICEPRINT_THRESHOLD   — cosine-similarity gate (default 0.25)
 #   VOICEPRINT_DEVICE      — cuda:0 | cpu (auto-detected)
@@ -49,6 +53,8 @@ stop: |
   pkill -KILL -f "[p]ython -m voiceprint_service.service|[p]ython3 -m voiceprint_service.service|[v]oiceprint_service.service" 2>/dev/null || true
 
 capabilities:
+  - name: robonix/service/voiceprint/driver
   - name: robonix/service/voiceprint/identify
   - name: robonix/service/voiceprint/enroll
   - name: robonix/service/voiceprint/list
+  - name: robonix/service/voiceprint/delete
