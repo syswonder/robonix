@@ -1,0 +1,5 @@
+# Set a quadruped to a named body posture, such as stand, sit, or crouch.
+string posture_name
+---
+bool success
+string message
