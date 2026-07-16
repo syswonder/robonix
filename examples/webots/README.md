@@ -14,16 +14,16 @@ examples/webots/
 ├── primitives/                One device = one package.
 │   ├── tiago_chassis/         /amcl_pose + /cmd_vel  → chassis/{state, move}
 │   ├── tiago_camera/          /head_front_camera/*   → camera/{snapshot, depth_snapshot}
-│   ├── tiago_lidar/           /scanner               → lidar/snapshot
-│   └── audio_driver/          (separate, mic/spkr — old schema, not deployed yet)
+│   └── tiago_lidar/           /scanner               → lidar/snapshot
 ├── services/
 │   └── tiago_nav2/            Nav2 launch + ActionClient wrapper
 └── robonix_manifest.yaml      Top-level deploy manifest.
 ```
 
-Drivers run **inside** the sim container via `docker exec` so they share
-the simulator's DDS graph. They are NOT host-side processes; the host
-only needs `rbnx`, Docker, and an X11 display.
+The three simulator-specific drivers run **inside** the sim container via
+`docker exec` so they share the simulator's DDS graph. Reusable audio
+primitives are fetched from their SysWonder repositories by
+`robonix_manifest.yaml` and run on the host.
 
 ## Bring-up
 
