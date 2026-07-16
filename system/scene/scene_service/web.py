@@ -2824,7 +2824,16 @@ _USER_HTML = r"""<!doctype html>
     .room .btns { display: flex; gap: 6px; }
     #canvas-wrap { position: relative; flex: 1; min-width: 0; }
     canvas { display: block; width: 100%; height: 100%; background: #14171f; }
-    #hint { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    #canvas-wrap.drawing canvas { outline: 2px dashed #8ef0b7; outline-offset: -2px; }
+    #mode-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      display: flex; background: rgba(20,23,31,.95); border: 1px solid #33405a;
+      border-radius: 8px; overflow: hidden; }
+    #mode-bar button { border: none; border-radius: 0; background: transparent;
+      padding: 7px 14px; font-size: 12px; color: var(--muted); }
+    #mode-bar button + button { border-left: 1px solid #33405a; }
+    #mode-bar button.active { background: #2b4a86; color: var(--fg); font-weight: 650; }
+    #mode-bar button.active.drawing { background: #2e5c43; }
+    #hint { position: absolute; top: 52px; left: 50%; transform: translateX(-50%);
       background: rgba(20,23,31,.92); border: 1px solid #33405a; color: var(--fg);
       font-size: 12px; padding: 6px 12px; border-radius: 6px; display: none; }
     #toast { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
@@ -2849,6 +2858,11 @@ _USER_HTML = r"""<!doctype html>
       border-radius: 7px; background: #0f131b; color: var(--fg); padding: 8px 10px;
       font-size: 13px; outline: none; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    /* OK sits FIRST in the DOM so Enter (implicit form submission picks the
+       first submit button) confirms instead of cancelling; CSS order keeps
+       the conventional Cancel-left / OK-right visual layout. */
+    .modal-actions button.primary { order: 2; }
+    .modal-actions button:not(.primary) { order: 1; }
     dialog.report-modal { width: min(720px, calc(100vw - 32px)); }
     .save-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .save-report-preview { width: 100%; max-height: 300px; object-fit: contain; border: 1px solid #33405a; border-radius: 8px; background: #0e1015; }
@@ -2903,18 +2917,21 @@ _USER_HTML = r"""<!doctype html>
       </details>
       <div class="actions">
         <div class="section-title">Rooms</div>
-        <button class="primary" id="btn-draw">✏ Draw manually</button>
       </div>
       <div id="room-list"><div id="empty">No rooms yet. Hover the map to get
-        a suggested outline and click to adopt it — or “Draw manually” to
-        outline one corner by corner.</div></div>
+        a suggested outline and click to adopt it — or switch to ✏ Draw
+        (top of the map) to outline one corner by corner.</div></div>
     </div>
     <div id="canvas-wrap">
       <canvas id="c"></canvas>
+      <div id="mode-bar">
+        <button id="mode-suggest" class="active" title="Hover the map: the room under the cursor is suggested automatically">✨ Suggest</button>
+        <button id="mode-draw" title="Outline a room corner by corner">✏ Draw</button>
+      </div>
       <div id="hint"></div>
       <div id="toast"></div>
       <div id="scene-status" role="status">loading Scene state…</div>
-      <div class="legend">hover free space to pick a room · drag to pan · wheel to zoom</div>
+      <div class="legend" id="legend">hover free space to pick a room · drag to pan · scroll to zoom</div>
     </div>
   </div>
 </div>
@@ -2924,8 +2941,11 @@ _USER_HTML = r"""<!doctype html>
     <div class="modal-message" id="room-modal-message"></div>
     <input class="modal-input" id="room-modal-input" autocomplete="off" />
     <div class="modal-actions">
-      <button id="room-modal-cancel" value="cancel">Cancel</button>
+      <!-- OK first in the DOM: Enter in the input must confirm, not cancel
+           (implicit submission uses the first submit button); CSS `order`
+           keeps Cancel on the left visually. -->
       <button class="primary" id="room-modal-ok" value="ok">OK</button>
+      <button id="room-modal-cancel" value="cancel">Cancel</button>
     </div>
   </form>
 </dialog>
@@ -3011,6 +3031,8 @@ let suggestTimer = null;    // hover debounce
 let suggestSeq = 0;         // drops stale in-flight responses
 let suggestAt = 0;          // fetch time of `suggest` (no-room hint delay)
 let suggestMouse = null;    // world pos the current `suggest` was asked at
+// the tolerance modifier is ev.altKey either way; macs just label it Option
+const MOD_KEY = /mac/i.test(navigator.platform || '') ? 'Option' : 'Alt';
 const STARTER_HINT = 'Hover free space on the map — a room outline is suggested automatically';
 
 const hintEl = document.getElementById('hint');
@@ -3044,7 +3066,7 @@ function setMapStatus(text, kind = '') {
 }
 function setMapBusy(on, label = '') {
     mapBusy = on;
-    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #btn-draw, #room-list button')
+    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #mode-bar button, #room-list button')
         .forEach(el => el.disabled = on);
     if (!on) {
         renderMaps();
@@ -3674,8 +3696,8 @@ function renderPanel() {
     document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
     if (!rooms.length) {
         list.innerHTML = '<div id="empty">No rooms yet. Hover the map to get ' +
-          'a suggested outline and click to adopt it — or “Draw manually” ' +
-          'to outline one corner by corner.</div>';
+          'a suggested outline and click to adopt it — or switch to ✏ Draw ' +
+          '(top of the map) to outline one corner by corner.</div>';
         return;
     }
     list.innerHTML = rooms.map(a => `
@@ -3712,19 +3734,23 @@ document.getElementById('room-list').addEventListener('click', async (ev) => {
 });
 
 // ── draw mode ────────────────────────────────────────────────────────────
-const btnDraw = document.getElementById('btn-draw');
+const modeSuggestBtn = document.getElementById('mode-suggest');
+const modeDrawBtn = document.getElementById('mode-draw');
 function setDrawMode(on) {
     clearSuggest();
     drawMode = on;
     draft = [];
-    btnDraw.classList.toggle('active', on);
-    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Draw manually';
+    modeSuggestBtn.classList.toggle('active', !on);
+    modeDrawBtn.classList.toggle('active', on);
+    modeDrawBtn.classList.toggle('drawing', on);
+    document.getElementById('canvas-wrap').classList.toggle('drawing', on);
     c.style.cursor = on ? 'crosshair' : 'grab';
-    setHint(on ? 'Click to add corners · drag a corner to adjust · double-click or Enter to finish (≥3) · Esc to cancel'
+    setHint(on ? 'Click to add corners · drag a corner to adjust · double-click or Enter to finish (≥3) · Esc to leave'
                : STARTER_HINT);
     draw();
 }
-btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
+modeSuggestBtn.addEventListener('click', () => { setDrawMode(false); modeSuggestBtn.blur(); });
+modeDrawBtn.addEventListener('click', () => { setDrawMode(true); modeDrawBtn.blur(); });
 
 async function finishDraft() {
     if (mapBusy || draftSubmitting) return;
@@ -3789,7 +3815,7 @@ async function fetchSuggest() {
     suggestAt = Date.now();
     suggestMouse = [x, y];
     setHint(out && out.ok
-        ? 'Click to create a room from the suggestion · Alt+wheel adjusts tolerance · Esc dismisses'
+        ? `Click to create a room from the suggestion · ${MOD_KEY}+scroll adjusts tolerance · Esc dismisses`
         : STARTER_HINT);
     if (out && !out.ok) setTimeout(draw, 300);  // repaint for the no-room marker
     draw();
@@ -3883,12 +3909,16 @@ c.addEventListener('dblclick', (ev) => {
 });
 window.addEventListener('keydown', (ev) => {
     if (mapBusy) return;
+    // keys typed into an open dialog or any input belong to that control,
+    // not to the canvas
+    if (document.querySelector('dialog[open]')) return;
+    if (ev.target && /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName)) return;
     if (!drawMode) {
         if (ev.key === 'Escape') clearSuggest();
         return;
     }
     if (ev.key === 'Escape') setDrawMode(false);
-    if (ev.key === 'Enter' && !ev.repeat) finishDraft();
+    if (ev.key === 'Enter' && !ev.repeat) { ev.preventDefault(); finishDraft(); }
 });
 c.addEventListener('wheel', (ev) => {
     ev.preventDefault();
@@ -3980,6 +4010,8 @@ setInterval(refresh, 1000);
 refresh();
 loadMaps();
 setHint(STARTER_HINT);
+document.getElementById('legend').textContent =
+    `hover free space to pick a room · ${MOD_KEY}+scroll = tolerance · drag to pan · scroll to zoom`;
 </script>
 </body>
 </html>
