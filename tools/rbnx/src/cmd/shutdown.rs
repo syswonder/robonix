@@ -26,6 +26,17 @@ pub async fn execute(file: PathBuf) -> Result<()> {
         .context("manifest has no parent directory")?
         .to_path_buf();
 
+    // `rbnx boot` applies the deploy's top-level env before it spawns package
+    // wrappers. Do the same for a separately invoked `rbnx shutdown`, so a
+    // package's manifest `stop:` hook sees the same native/docker/profile
+    // selection as its corresponding `start:` hook.
+    let raw_manifest = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let manifest_value: serde_yaml::Value = serde_yaml::from_str(&raw_manifest)
+        .with_context(|| format!("parse {}", manifest_path.display()))?;
+    super::deploy::prepare_manifest(manifest_value, None)
+        .context("apply top-level deploy env for shutdown hooks")?;
+
     let state_path = teardown::state_path(&manifest_dir);
     if !state_path.exists() {
         anyhow::bail!(
@@ -45,7 +56,7 @@ pub async fn execute(file: PathBuf) -> Result<()> {
         ),
     );
 
-    teardown::teardown(&state.components).await;
+    teardown::teardown(Some(&state.atlas_endpoint), &state.components).await;
 
     // Best-effort: also signal the boot process itself (which is probably
     // already dead because we just killed all its children, but if the

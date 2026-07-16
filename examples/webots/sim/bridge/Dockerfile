@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pciutils \
     python3-pip \
     python3-colcon-common-extensions \
+    unzip \
     ros-humble-nav2-msgs \
     ros-humble-nav2-bringup \
     ros-humble-webots-ros2 \
@@ -61,11 +62,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Default URL uses ghfast.top mirror for reliable access; override with
 # --build-arg WEBOTS_DEB_URL=https://github.com/... for direct GitHub.
 ARG WEBOTS_DEB_URL=https://ghfast.top/https://github.com/cyberbotics/webots/releases/download/R2025a/webots_2025a_amd64.deb
-RUN wget -q -O /tmp/webots.deb "${WEBOTS_DEB_URL}" \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/webots.deb \
-    && rm -f /tmp/webots.deb \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    wget -S --progress=dot:giga -O /tmp/webots.deb "${WEBOTS_DEB_URL}"; \
+    ls -lh /tmp/webots.deb; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends /tmp/webots.deb; \
+    rm -f /tmp/webots.deb; \
+    rm -rf /var/lib/apt/lists/*
 
 # The streaming-viewer's default WS URL is `ws://localhost:1234`, which
 # is wrong for any remote browser (they'd hit their own localhost).

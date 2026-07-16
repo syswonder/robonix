@@ -36,15 +36,17 @@ package:
 build: bash scripts/build.sh
 
 start: |
-  # MUST start through `uv run` so the uv-managed venv at rbnx-build/venv/
-  # is the one in use (auto-syncs deps if pyproject.toml changed since
-  # build, and avoids the silent split between system python + bundled
-  # venv that bit speech earlier). VIRTUAL_ENV + `--active` tells uv to
-  # reuse the venv that build.sh created instead of spawning a new one.
+  # Runtime must not require `uv` on PATH. build.sh owns dependency sync and
+  # creates rbnx-build/venv; start only activates that sealed environment.
   export VIRTUAL_ENV="$(pwd)/rbnx-build/venv"
   export PATH="$VIRTUAL_ENV/bin:$PATH"
-  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:${PYTHONPATH:-}"
-  exec uv run --active python -m voiceprint_service.service
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  exec "$VIRTUAL_ENV/bin/python" -m voiceprint_service.service
+
+stop: |
+  pkill -TERM -f "[p]ython -m voiceprint_service.service|[p]ython3 -m voiceprint_service.service|[v]oiceprint_service.service" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython -m voiceprint_service.service|[p]ython3 -m voiceprint_service.service|[v]oiceprint_service.service" 2>/dev/null || true
 
 capabilities:
   - name: robonix/service/voiceprint/identify

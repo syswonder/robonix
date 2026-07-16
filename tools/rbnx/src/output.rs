@@ -6,6 +6,7 @@
 use colored::*;
 use std::io::{self, Write};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// Monotonic origin for `[ssss.mmm]` boot-line timestamps. Initialised on
@@ -13,6 +14,19 @@ use std::time::Instant;
 /// boot run); subsequent calls measure from that origin so the log reads
 /// like a kernel ring buffer / dmesg trace.
 static BOOT_T0: OnceLock<Instant> = OnceLock::new();
+static BOOT_VERBOSE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_boot_verbose(verbose: bool) {
+    BOOT_VERBOSE.store(verbose, Ordering::Relaxed);
+}
+
+pub fn boot_verbose() -> bool {
+    BOOT_VERBOSE.load(Ordering::Relaxed)
+}
+
+fn clear_progress_prefix() -> &'static str {
+    if boot_verbose() { "" } else { "\r\x1b[K" }
+}
 
 /// Formatted `[ssss.mmm]` prefix relative to BOOT_T0. Width is fixed at
 /// 12 chars (`[1234.567]`) — five-digit boots are unrealistic and we'd
@@ -162,7 +176,8 @@ pub fn boot_start(deploy_name: &str, manifest_path: &str) {
 /// result lands cleanly without a trailing fragment of "registering…".
 pub fn boot_ok(name: &str, detail: &str) {
     println!(
-        "\r\x1b[K{} {}  {:<width$}  {}",
+        "{}{} {}  {:<width$}  {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "[ OK ]".green().bold(),
         name,
@@ -174,7 +189,8 @@ pub fn boot_ok(name: &str, detail: &str) {
 /// `[  ssss.mmm] [FAIL] name              detail` — failed to come up.
 pub fn boot_fail(name: &str, detail: &str) {
     eprintln!(
-        "\r\x1b[K{} {}  {:<width$}  {}",
+        "{}{} {}  {:<width$}  {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "[FAIL]".red().bold(),
         name,
@@ -187,7 +203,8 @@ pub fn boot_fail(name: &str, detail: &str) {
 /// but skipped (not installed / disabled / out-of-scope on this host).
 pub fn boot_skip(name: &str, detail: &str) {
     println!(
-        "\r\x1b[K{} {}  {:<width$}  {}",
+        "{}{} {}  {:<width$}  {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "[SKIP]".yellow(),
         name,
@@ -215,7 +232,8 @@ pub fn boot_note(name: &str, detail: &str) {
 /// green `[ OK ]` "up to date" verdict.
 pub fn boot_update_avail(name: &str, detail: &str) {
     println!(
-        "\r\x1b[K{} {}  {:<width$}  {}",
+        "{}{} {}  {:<width$}  {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "[ ↑  ]".yellow().bold(),
         name,
@@ -252,6 +270,9 @@ pub fn boot_section(label: &str) {
 /// Frames cycle through Braille dots — the systemd spinner most users
 /// recognise from Linux init logs.
 pub fn boot_progress(name: &str, detail: &str, frame: usize) {
+    if boot_verbose() {
+        return;
+    }
     const GLYPHS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let g = GLYPHS[frame % GLYPHS.len()];
     print!(

@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/system/executor/get_health"
+version = "1"
+kind    = "service"
+idl     = "module_health/srv/GetModuleHealth.srv"
+description = "Return the current health report of the Executor module."
+
+[mode]
+type = "rpc"

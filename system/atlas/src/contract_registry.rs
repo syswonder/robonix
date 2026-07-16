@@ -8,8 +8,8 @@
 // truth for "what contracts exist and what's their wire shape".
 //
 // Scope is deliberately small: only the fields current TOMLs actually
-// carry (`[contract]` id/version/kind, `[mode]` type, `[io.msg].msg`,
-// `[io.srv].srv`). Richer metadata (summary / examples / safety /
+// carry (`[contract]` id/version/kind/cross_namespace, `[mode]` type,
+// `[io.msg].msg`, `[io.srv].srv`). Richer metadata (summary / examples / safety /
 // capability-card-style fields) waits until the TOML schema grows.
 
 use anyhow::Context;
@@ -55,6 +55,10 @@ struct ContractSection {
     /// alternatives.
     #[serde(default)]
     description: Option<String>,
+    /// Shared framework contracts can be implemented by providers whose
+    /// primary namespace differs from this contract's id prefix.
+    #[serde(default)]
+    cross_namespace: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,10 +259,9 @@ fn io_types_from_parsed(parsed: &RawContract) -> (String, String) {
 fn parse_idl_path(s: &str) -> Option<(&str, &'static str, &str)> {
     let (stem, kind): (&str, &'static str) = if let Some(rest) = s.strip_suffix(".srv") {
         (rest, "srv")
-    } else if let Some(rest) = s.strip_suffix(".msg") {
-        (rest, "msg")
     } else {
-        return None;
+        let rest = s.strip_suffix(".msg")?;
+        (rest, "msg")
     };
     let parts: Vec<&str> = stem.split('/').filter(|p| !p.is_empty()).collect();
     if parts.is_empty() {
@@ -324,6 +327,7 @@ fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
         io_srv_type,
         source_toml_path: path.to_string_lossy().into_owned(),
         description,
+        cross_namespace: parsed.contract.cross_namespace,
         // Filled later by attach_idl_fields() after every TOML has
         // been loaded. Empty here is the right default.
         msg_fields: Vec::new(),
@@ -506,4 +510,37 @@ pub fn resolve_capabilities_roots(explicit: &[String]) -> Vec<PathBuf> {
         }
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_namespace_is_explicit_and_defaults_to_false() {
+        let shared: RawContract = toml::from_str(
+            r#"
+                [contract]
+                id = "robonix/primitive/health/stream"
+                cross_namespace = true
+
+                [mode]
+                type = "topic_out"
+            "#,
+        )
+        .expect("shared contract TOML");
+        assert!(shared.contract.cross_namespace);
+
+        let regular: RawContract = toml::from_str(
+            r#"
+                [contract]
+                id = "robonix/primitive/camera/rgb"
+
+                [mode]
+                type = "topic_out"
+            "#,
+        )
+        .expect("regular contract TOML");
+        assert!(!regular.contract.cross_namespace);
+    }
 }

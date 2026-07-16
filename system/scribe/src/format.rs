@@ -6,8 +6,8 @@
 //! left-aligned.  Timestamp is local time derived from the nanosecond
 //! UNIX-epoch `ts` field.
 
-use crate::LogRecord;
-use std::io::{self, Write};
+use crate::{Level, LogRecord};
+use std::io::{self, IsTerminal, Write};
 
 /// Tag display width in console output (left-aligned, space-padded).
 const TAG_WIDTH: usize = 24;
@@ -38,7 +38,19 @@ pub fn format_console(record: &LogRecord) -> String {
 pub fn write_console(record: &LogRecord) -> io::Result<()> {
     let line = format_console(record);
     let mut stderr = io::stderr().lock();
-    stderr.write_all(line.as_bytes())
+    let use_color = stderr.is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let color = match record.level {
+        Level::Warn => Some("\x1b[33m"),
+        Level::Error => Some("\x1b[31m"),
+        _ => None,
+    };
+    if use_color && let Some(color) = color {
+        stderr.write_all(color.as_bytes())?;
+        stderr.write_all(line.as_bytes())?;
+        stderr.write_all(b"\x1b[0m")
+    } else {
+        stderr.write_all(line.as_bytes())
+    }
 }
 
 /// Decompose a nanosecond UNIX timestamp into local-time calendar fields

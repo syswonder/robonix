@@ -33,13 +33,34 @@ log = logging.getLogger(__name__)
 class SceneGraphStore:
     """In-memory live graph (two writer slices) + on-disk JSON caches."""
 
-    def __init__(self, cache_dir: str = "/data/robonix/scene_graph/cache") -> None:
+    def __init__(
+        self,
+        cache_dir: str = "/data/robonix/scene_graph/cache",
+        map_id: str | None = None,
+    ) -> None:
+        """Build the live graph + open the on-disk JSON caches.
+
+        When ``map_id`` is given, the caption/relation caches are nested under
+        ``cache_dir/<sanitized map_id>/`` so two SLAM maps never share a cache
+        (caption/relation answers are only valid within the map frame they were
+        computed in — the same per-map isolation the object store gets from its
+        ``"{map_id}::{object_id}"`` composite key). The id is run through
+        ``map_binding.sanitize_map_id`` (the one sanitize rule shared by every
+        map_id-partitioned store; reached via persistence's alias, imported
+        lazily so this stays importable without the milvus backend) so it is a
+        safe path component. With no ``map_id`` the
+        path is unchanged (legacy/"default" behaviour)."""
         self._nodes: dict[str, SceneGraphNode] = {}
         self._geometric_edges: list[SceneGraphEdge] = []
         self._semantic_edges: list[SceneGraphEdge] = []
         self._geometric_updated_at: float = 0.0
         self._semantic_updated_at: float = 0.0
-        self._cache_dir = Path(cache_dir)
+        base = Path(cache_dir)
+        if map_id:
+            from ..persistence import _sanitize_map_id
+
+            base = base / _sanitize_map_id(map_id)
+        self._cache_dir = base
         self._caption_cache: dict[str, str] = {}
         self._relation_cache: dict[str, SceneGraphEdge] = {}
         self._load_caches()

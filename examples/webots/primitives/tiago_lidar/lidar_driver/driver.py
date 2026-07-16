@@ -85,5 +85,10 @@ def init(cfg):
     return Ok()
 
 
+@tiago_lidar.on_shutdown
+def shutdown():
+    return Ok()
+
+
 if __name__ == "__main__":
     tiago_lidar.run()

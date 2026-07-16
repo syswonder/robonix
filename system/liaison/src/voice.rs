@@ -33,8 +33,10 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -85,9 +87,37 @@ const DEFAULT_RECORD_SECONDS: u32 = 10;
 /// background noise sits around 50–300, so 500 is a comfortable gap.
 const VAD_SPEECH_RMS: f32 = 500.0;
 const VAD_END_SILENCE_SECS: f32 = 1.2;
+const VAD_NO_SPEECH_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_ASR_LANGUAGE: &str = "";
 const DEFAULT_AUDIO_ENCODING: &str = "pcm_s16le";
 const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct VoiceSessionStream {
+    inner: ReceiverStream<Result<VoiceEvent, Status>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Stream for VoiceSessionStream {
+    type Item = Result<VoiceEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for VoiceSessionStream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 // ── Discovery helpers ────────────────────────────────────────────────────────
 //
@@ -99,7 +129,7 @@ const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
 /// `ConnectCapability` against the chosen one to actually receive the
 /// endpoint string. Atlas hides endpoints from `query_capabilities` on
 /// purpose; consumers must commit a channel before they can dial.
-async fn resolve_endpoint(
+pub(crate) async fn resolve_endpoint(
     atlas: &Arc<Mutex<AtlasClient>>,
     contract_id: &str,
     pin_provider_id: &str,
@@ -123,10 +153,10 @@ async fn resolve_endpoint(
     let pick: Option<&atlas_pb::CapabilityProvider> = if pin_provider_id.is_empty() {
         auto_pick()
     } else {
-        // Try the pinned provider first; if it isn't in atlas anymore (stale chat
-        // config / pin pointed at a provider that's not in this deploy), fall back
-        // to auto-pick rather than failing hard. The pin is a hint, not a
-        // hard requirement.
+        // A caller that explicitly names a provider is selecting a physical I/O
+        // boundary, not merely expressing a preference. Falling back from a
+        // client bridge to the robot device would silently capture or play on
+        // the wrong machine, so an explicit pin is a hard requirement.
         match providers
             .iter()
             .find(|r| r.id == pin_provider_id || r.namespace == pin_provider_id)
@@ -135,10 +165,10 @@ async fn resolve_endpoint(
             None => {
                 warn!(
                     "[voice] pinned provider '{pin_provider_id}' for {contract_id} not in atlas; \
-                     falling back to auto-pick. Available providers: {:?}",
+                     refusing implicit fallback. Available providers: {:?}",
                     providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
                 );
-                auto_pick()
+                None
             }
         }
     };
@@ -199,7 +229,7 @@ pub async fn start_voice_session(
             KIND_SESSION_STARTED,
             &session_id,
             &format!(
-                "voice session started (vad, record≤{record_seconds}s, tts={}, lang={})",
+                "voice session started (vad, record≤{record_seconds}s, no-speech≤{VAD_NO_SPEECH_TIMEOUT_SECS}s, tts={}, lang={})",
                 req.tts_enabled,
                 if language.is_empty() {
                     "auto"
@@ -211,7 +241,7 @@ pub async fn start_voice_session(
         .await;
 
     let session_id_for_task = session_id.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let outcome = run_session(
             req,
             session_id_for_task.clone(),
@@ -242,7 +272,10 @@ pub async fn start_voice_session(
         }
     });
 
-    Ok(ReceiverStream::new(rx))
+    Ok(VoiceSessionStream {
+        inner: ReceiverStream::new(rx),
+        task,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -303,6 +336,7 @@ async fn run_session(
             max_seconds,
             &session_id,
             &tx,
+            context_flag(&req.context_json, "barge_in"),
         )
         .await?
     };
@@ -438,12 +472,14 @@ async fn run_session(
                             seg.push_str(&ev.text_chunk);
                         }
                         let is_boundary = matches!(kind, 1 | 2 | 4);
-                        let say = if is_boundary && req.tts_enabled && !seg.trim().is_empty() {
-                            Some(std::mem::take(&mut seg))
-                        } else {
-                            if is_boundary {
-                                seg.clear();
+                        let say = if is_boundary {
+                            let streamed = std::mem::take(&mut seg);
+                            if req.tts_enabled {
+                                tts_boundary_text(kind, streamed, &ev.final_text)
+                            } else {
+                                None
                             }
+                        } else {
                             None
                         };
                         let _ = tx
@@ -562,6 +598,7 @@ async fn stream_capture_and_recognize(
     max_seconds: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
+    barge_in: bool,
 ) -> Result<(Vec<u8>, String)> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
@@ -589,8 +626,15 @@ async fn stream_capture_and_recognize(
         )))
         .await;
 
+    let mut mic_request = Request::new(());
+    if barge_in {
+        mic_request.metadata_mut().insert(
+            "x-robonix-barge-in",
+            "true".parse().expect("static metadata value"),
+        );
+    }
     let mut mic_stream = mic_client
-        .mic(Request::new(()))
+        .mic(mic_request)
         .await
         .map_err(|e| anyhow::anyhow!("mic rpc failed: {e}"))?
         .into_inner();
@@ -622,9 +666,10 @@ async fn stream_capture_and_recognize(
     let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
         // [profile] mic transfer: t_pump=request start; first-chunk latency is
-        // the audio-source startup (e.g. macOS bridge over the network); the
+        // the audio-source startup (e.g. audio client bridge over the network); the
         // chunk count + total audio vs wall time shows transfer throughput.
         let t_pump = tokio::time::Instant::now();
+        let no_speech_deadline = t_pump + Duration::from_secs(VAD_NO_SPEECH_TIMEOUT_SECS);
         let mut n_chunks: u32 = 0u32;
         let mut audio_s: f32 = 0.0;
         let mut logged_first = false;
@@ -632,10 +677,15 @@ async fn stream_capture_and_recognize(
         let mut silence_secs: f32 = 0.0;
         let mut first_chunk = true;
         loop {
-            if tokio::time::Instant::now() >= deadline {
+            let active_deadline = if has_spoken {
+                deadline
+            } else {
+                deadline.min(no_speech_deadline)
+            };
+            if tokio::time::Instant::now() >= active_deadline {
                 break;
             }
-            let remaining = deadline - tokio::time::Instant::now();
+            let remaining = active_deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
                     if !logged_first {
@@ -689,6 +739,7 @@ async fn stream_capture_and_recognize(
             (wall as f32 / 1000.0) / audio_s.max(0.001)
         );
     });
+    let _pump_abort_guard = AbortOnDrop(pump_handle.abort_handle());
 
     // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
     // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
@@ -1001,6 +1052,18 @@ async fn synthesize_and_play(
     Ok(())
 }
 
+pub(crate) async fn play_prompt(
+    atlas: &Arc<Mutex<AtlasClient>>,
+    tts_pin: &str,
+    speaker_pin: &str,
+    language: &str,
+    text: &str,
+    session_id: &str,
+) -> Result<()> {
+    let (tx, _rx) = mpsc::channel(2);
+    synthesize_and_play(atlas, tts_pin, speaker_pin, language, text, session_id, &tx).await
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn build_task(
@@ -1044,6 +1107,13 @@ fn build_task(
     }
 }
 
+fn context_flag(raw: &str, key: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get(key).and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 fn accumulate_text(ev: &PilotEvent, into: &mut String) {
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_FINAL_TEXT: u32 = 4;
@@ -1054,6 +1124,19 @@ fn accumulate_text(ev: &PilotEvent, into: &mut String) {
         }
         _ => {}
     }
+}
+
+/// Pick the narration for a completed Pilot stream segment.
+///
+/// FINAL_TEXT is authoritative: some providers emit it without preceding
+/// TEXT_CHUNK events. Returning it here ensures voice sessions do not lose
+/// their final spoken response while text sessions remain unaffected.
+fn tts_boundary_text(kind: u32, streamed: String, final_text: &str) -> Option<String> {
+    const EVT_FINAL_TEXT: u32 = 4;
+    if kind == EVT_FINAL_TEXT && !final_text.trim().is_empty() {
+        return Some(final_text.trim().to_string());
+    }
+    (!streamed.trim().is_empty()).then_some(streamed)
 }
 
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
@@ -1276,5 +1359,44 @@ mod tests {
             &mut buf,
         );
         assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn final_text_is_spoken_without_text_chunks() {
+        assert_eq!(
+            tts_boundary_text(4, String::new(), "final answer"),
+            Some("final answer".to_string())
+        );
+    }
+
+    #[test]
+    fn barge_in_metadata_is_explicit_not_inferred_from_voice_mode() {
+        assert!(context_flag(r#"{"barge_in":true}"#, "barge_in"));
+        assert!(!context_flag(r#"{"interaction_mode":"voice"}"#, "barge_in"));
+        assert!(!context_flag("not json", "barge_in"));
+    }
+
+    #[tokio::test]
+    async fn dropping_voice_stream_aborts_session_task() {
+        let (_tx, rx) = mpsc::channel(1);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        let stream = VoiceSessionStream {
+            inner: ReceiverStream::new(rx),
+            task,
+        };
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn dropping_abort_guard_aborts_nested_mic_pump() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        drop(AbortOnDrop(abort.clone()));
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        let _ = task.await;
     }
 }

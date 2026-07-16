@@ -148,6 +148,30 @@ capability with invalid args (e.g. a required field omitted) so the leaf
 genuinely fails, then a later step recovers. This drives pilot's real
 replan-on-failure path with no test hooks in production code.
 
+
+## Verify scene map persistence
+
+For debugging map save/load regressions, use `testing/verify_scene_map_persistence.py`
+against an already booted Webots deploy. It calls the Scene public map API, then
+uses the mapping and sim containers only as verifiers: SQLite `quick_check`,
+RTAB-Map table counts, preview PNG size, metadata, and the `/map` published
+after load must all agree.
+
+```bash
+# Verify an existing saved map without writing a new artifact.
+python3 testing/verify_scene_map_persistence.py \
+  --map-id codex_preview_fix_20260709_191939 \
+  --skip-save
+
+# Full save -> inspect artifact -> load -> compare live /map.
+python3 testing/verify_scene_map_persistence.py \
+  --map-id manual_apartment_$(date +%Y%m%d_%H%M%S)
+```
+
+This script intentionally does not expose RTAB-Map paths through the Robonix map
+contract. The provider artifact is opaque to normal callers; direct container
+inspection here is a diagnostic check only.
+
 ## Run it by hand after Quickstart
 
 The scenario runner does not start Webots for you. It assumes the local Webots

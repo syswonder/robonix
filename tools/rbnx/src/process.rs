@@ -4,7 +4,6 @@
 // Process management for robonix-cli (start/stop/monitor processes)
 
 use anyhow::{Context, Result};
-use dirs;
 use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,6 +23,10 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub log_file: PathBuf,
     pub hostname: String,
+    #[serde(default)]
+    pub package_path: Option<PathBuf>,
+    #[serde(default)]
+    pub command: String,
 }
 
 /// Process start result with group information
@@ -72,6 +75,30 @@ impl ProcessTreeNode {
     }
 }
 
+/// Resolve the per-deploy process-state path from the log directory.
+///
+/// Two layouts are recognised:
+///
+///   * `<…>/rbnx-boot/logs/`  →  `<…>/rbnx-boot/processes.json` (sits
+///     next to `rbnx-boot/state.json` written by `rbnx boot`/`shutdown`)
+///   * anything else          →  `<log_dir>/../processes.json`
+///     (covers `rbnx start --standalone` on a package whose default
+///     `rbnx-build/logs/` is the log root)
+///
+/// The result is always inside the per-deploy tree — never `~/.robonix/`,
+/// which is reserved for cross-deploy user state.
+fn derive_state_file_path(log_dir: &Path) -> PathBuf {
+    if let Some(parent) = log_dir.parent()
+        && parent.file_name().and_then(|s| s.to_str()) == Some("rbnx-boot")
+    {
+        return parent.join("processes.json");
+    }
+    match log_dir.parent() {
+        Some(p) => p.join("processes.json"),
+        None => log_dir.join("processes.json"),
+    }
+}
+
 /// Manager for processes running capabilities and skills
 pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, // key: "{package_type}::{std_name}"
@@ -93,13 +120,25 @@ impl ProcessManager {
             .to_string_lossy()
             .to_string();
 
-        // State file in ~/.robonix/processes.json
-        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        let state_dir = home_dir.join(".robonix");
-        std::fs::create_dir_all(&state_dir).with_context(|| {
-            format!("Failed to create state directory: {}", state_dir.display())
-        })?;
-        let state_file = state_dir.join("processes.json");
+        // State file lives in the per-deploy root, NOT ~/.robonix/.
+        //
+        // ~/.robonix/ is for cross-deploy user state (config.yaml, chat.yaml,
+        // voiceprint enrollments, installed package db). The package runtime
+        // record belongs to ONE deploy and dies with it, so it must live
+        // inside the deploy tree — the same place `rbnx shutdown` reads
+        // `<manifest-dir>/rbnx-boot/state.json` from — and disappear on
+        // shutdown. A `~/.robonix/processes.json` from a half-killed boot
+        // would otherwise leak across deploys and confuse `rbnx start` on
+        // unrelated packages.
+        //
+        // The deploy root is anchored to the log directory (which
+        // `rbnx start` defaults to `<pkg>/rbnx-build/logs`, and
+        // `rbnx boot` overrides to `<manifest-dir>/rbnx-boot/logs`).
+        // State file is the sibling `processes.json` in the same dir —
+        // or, when a deploy root is unambiguous (`<…>/rbnx-boot/logs`),
+        // inside the `rbnx-boot/` parent so it sits next to
+        // `rbnx-boot/state.json` and `rbnx-boot/logs/`.
+        let state_file = derive_state_file_path(&log_dir);
 
         let mut manager = Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
@@ -123,16 +162,34 @@ impl ProcessManager {
         let content = std::fs::read_to_string(&self.state_file)
             .with_context(|| format!("Failed to read state file: {}", self.state_file.display()))?;
 
-        let processes: Vec<ProcessInfo> = serde_json::from_str(&content).with_context(|| {
-            format!("Failed to parse state file: {}", self.state_file.display())
-        })?;
+        if content.trim().is_empty() {
+            warn!(
+                "Process state file {} is empty; resetting stale runtime state",
+                self.state_file.display()
+            );
+            self.save_state_internal(&HashMap::new())?;
+            return Ok(());
+        }
+
+        let processes: Vec<ProcessInfo> = match serde_json::from_str(&content) {
+            Ok(processes) => processes,
+            Err(err) => {
+                warn!(
+                    "Process state file {} is invalid ({err}); resetting stale runtime state",
+                    self.state_file.display()
+                );
+                self.save_state_internal(&HashMap::new())?;
+                return Ok(());
+            }
+        };
 
         // Verify processes are still running and filter out dead ones
         let mut valid_processes = HashMap::new();
         let original_count = processes.len();
         for process_info in processes {
-            // Check if process is still running
-            if Self::is_process_running(process_info.pid) {
+            // Check if process is still live. `kill(pid, 0)` alone accepts
+            // zombies and PID reuse; validate procfs too when available.
+            if Self::is_process_record_live(&process_info) {
                 let key = format!("{}::{}", process_info.package_type, process_info.std_name);
                 valid_processes.insert(key, process_info);
             } else {
@@ -153,7 +210,70 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Check if a process with given PID is still running
+    /// Check if a persisted process record still points at a live process.
+    fn is_process_record_live(process_info: &ProcessInfo) -> bool {
+        if !Self::is_process_running(process_info.pid) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            if Self::is_process_zombie(process_info.pid) {
+                return false;
+            }
+            let Some(cmdline) = Self::process_cmdline(process_info.pid) else {
+                return false;
+            };
+            if cmdline.trim().is_empty() || cmdline.contains("<defunct>") {
+                return false;
+            }
+            // Old state files did not store command/cwd, which made PID reuse
+            // indistinguishable from a real still-running package. Treat them
+            // as stale after this schema upgrade; new records below carry both.
+            if process_info.command.trim().is_empty() || !cmdline.contains(&process_info.command) {
+                return false;
+            }
+            let Some(expected_cwd) = process_info.package_path.as_ref() else {
+                return false;
+            };
+            if let Ok(actual_cwd) = std::fs::read_link(format!("/proc/{}/cwd", process_info.pid)) {
+                if actual_cwd != *expected_cwd {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    fn is_process_zombie(pid: u32) -> bool {
+        let path = format!("/proc/{pid}/status");
+        let Ok(status) = std::fs::read_to_string(path) else {
+            return true;
+        };
+        status
+            .lines()
+            .find(|line| line.starts_with("State:"))
+            .map(|line| line.contains(" Z") || line.contains(" X"))
+            .unwrap_or(true)
+    }
+
+    #[cfg(unix)]
+    fn process_cmdline(pid: u32) -> Option<String> {
+        let path = format!("/proc/{pid}/cmdline");
+        let raw = std::fs::read(path).ok()?;
+        Some(
+            String::from_utf8_lossy(&raw)
+                .replace('\0', " ")
+                .trim()
+                .to_string(),
+        )
+    }
+
+    /// Check if a process with given PID exists. This is only the first
+    /// liveness probe; callers that use persisted state should prefer
+    /// `is_process_record_live`.
     fn is_process_running(pid: u32) -> bool {
         #[cfg(unix)]
         {
@@ -259,7 +379,12 @@ impl ProcessManager {
             .env("PYTHONUNBUFFERED", "1")
             .env("SCRIBE_LOG_DIR", &self.log_dir);
         #[cfg(unix)]
-        cmd.process_group(0);
+        if std::env::var_os("RBNX_DEPLOY_MANAGED").is_none() {
+            // A standalone `rbnx start` owns a group for its package. When
+            // boot spawned this wrapper, preserve boot's PGID so one teardown
+            // reaches the wrapper and its actual package process together.
+            cmd.process_group(0);
+        }
 
         let mut child = cmd
             .spawn()
@@ -280,6 +405,8 @@ impl ProcessManager {
                     pid,
                     log_file: log_file.clone(),
                     hostname: self.hostname.clone(),
+                    package_path: Some(package_path.to_path_buf()),
+                    command: start_script.to_string(),
                 },
             );
         }
@@ -366,7 +493,7 @@ impl ProcessManager {
 
         if let Some(process_info) = process_info {
             // Verify the process is actually still running
-            if Self::is_process_running(process_info.pid) {
+            if Self::is_process_record_live(&process_info) {
                 return true;
             } else {
                 // Process is dead, remove it from state
@@ -785,3 +912,49 @@ impl ProcessManager {
 // Processes are started as daemon processes and should continue running
 // even after the CLI exits. They can be stopped explicitly using the
 // unregister command or stop_process/stop_all methods.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "robonix-process-test-{label}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn empty_process_state_is_reset_instead_of_fatal() {
+        let root = unique_temp_dir("empty");
+        let log_dir = root.join("rbnx-boot").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        let state_file = root.join("rbnx-boot").join("processes.json");
+        fs::write(&state_file, "").unwrap();
+
+        let manager = ProcessManager::new(log_dir).unwrap();
+
+        assert!(manager.processes.lock().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&state_file).unwrap(), "[]");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_process_state_is_reset_instead_of_fatal() {
+        let root = unique_temp_dir("invalid");
+        let log_dir = root.join("rbnx-boot").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        let state_file = root.join("rbnx-boot").join("processes.json");
+        fs::write(&state_file, "{").unwrap();
+
+        let manager = ProcessManager::new(log_dir).unwrap();
+
+        assert!(manager.processes.lock().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&state_file).unwrap(), "[]");
+        let _ = fs::remove_dir_all(root);
+    }
+}

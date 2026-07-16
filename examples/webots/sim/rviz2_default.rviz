@@ -141,7 +141,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /goal_pose
+        Value: /rviz_goal_pose
       Value: true
     - Alpha: 1
       Buffer Length: 1
@@ -219,8 +219,9 @@ Visualization Manager:
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
       Line color: 128; 128; 0
-    # "2D Goal Pose" publishes a PoseStamped on /goal_pose; goal_pose_relay
-    # forwards it to navigate_to_pose with a zero stamp (latest TF). We use
+    # "2D Goal Pose" publishes a PoseStamped on /rviz_goal_pose;
+    # goal_pose_relay forwards it to navigate_to_pose with a zero stamp
+    # (latest TF). We use
     # this instead of nav2's GoalTool because the GoalTool stamps the goal
     # with the WALL clock even under use_sim_time, which the planner can't
     # transform against the sim-clock map->odom TF (the robot then just
@@ -231,7 +232,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /goal_pose
+        Value: /rviz_goal_pose
     - Class: rviz_default_plugins/SetInitialPose
       Topic:
         Depth: 5
