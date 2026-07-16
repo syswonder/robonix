@@ -574,48 +574,26 @@ def make_app(*, registry: ObjectRegistry,
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
-    Routes:
-      GET /                — combined split layout (2D map · 3D · cam)
-      GET /2d              — 2D top-down map (occupancy grid + objects)
-      GET /3d              — 3D scene (point clouds + bbox; three.js)
-      GET /cam             — camera stack (live RGB + depth)
-      GET /user            — end-user map page (rooms: draw / rename /
-                             confirm-stale / delete; light object overlay)
-      GET /api/state       — JSON for the 2D map
-      GET /api/objects3d   — JSON for the 3D viz (per-object pcd + bbox)
-      GET /api/camera      — JSON: latest RGB + depth frames
-      /api/annotations[..] — user annotation CRUD (see below)
-      /api/maps[..]        — scene-owned map library façade over map capabilities
+    Routes include the combined view at ``/``, dedicated ``/2d``, ``/3d``,
+    ``/cam``, and ``/user`` views, and JSON endpoints under ``/api``.
 
-    `hub` is the SubscribersHub — passed so the JSON state can include
-    the latest OccupancyGrid for the 2D canvas underlay.
-    `detector` is the ConceptGraphsDetector — passed so the 3D endpoint
-    can serialize its persistent MapObjectList. If None, the 3D page
-    just shows an empty world.
-    `anno_store` is the AnnotationStore backing the annotation CRUD; when
-    None (store init failed / disabled) those routes answer 503.
-    `object_store` is the per-map scene object warm-restore store; Save/Load
-    rebinds it so perceived objects follow the same map id as rooms.
-    `map_binding` is a mutable {map_id, mode, generation, source} dict shown
-    by the /user page header and updated by Save/Load actions.
+    ``hub`` supplies the latest occupancy grid. ``detector`` supplies the
+    persistent object map for the 3D endpoint. ``anno_store`` backs annotation
+    CRUD; those routes return HTTP 503 when the store is unavailable.
+    ``object_store`` persists perceived objects per map. ``map_binding`` is a
+    mutable dictionary shown by the user page and updated by Save/Load actions.
 
-    Annotation API contract (STABLE once shipped — any frontend builds on
-    it; see system/scene/README.md):
-      GET    /api/annotations       → {ok, annotations: [...]}
-      POST   /api/annotations       body {kind, name, points, theta?}
-                                    → {ok, annotation}
-      PUT    /api/annotations/{id}  body: any of {name, points, theta,
-                                    stale:false} → {ok, annotation}
-      DELETE /api/annotations/{id}  → {ok}
-    theta (heading, radians) is poi-only — a room carrying it is a 400.
-    On PUT, theta null/absent means "keep"; a set heading cannot be
-    cleared, only changed (deliberate until the poi UI exists).
-    Errors: 400 invalid body/fields, 404 unknown id, 503 store unavailable;
-    those carry {ok: false, detail}. A store write failure (disk full)
-    deliberately escapes as a plain 500 — the edit was NOT saved and hiding
-    that behind a tidy body would be worse. Coordinates are map-frame
-    meters. Same trust domain as the rest of this LAN debug/UI server —
-    no auth.
+    The annotation endpoints are:
+
+    * ``GET /api/annotations`` to list annotations;
+    * ``POST /api/annotations`` to create one;
+    * ``PUT /api/annotations/{id}`` to update one; and
+    * ``DELETE /api/annotations/{id}`` to delete one.
+
+    Invalid fields return HTTP 400, unknown IDs return 404, and an unavailable
+    store returns 503. A storage failure returns 500 because the edit was not
+    saved. Coordinates use the map frame. This LAN debugging server does not
+    implement authentication.
     """
     if map_binding is None:
         map_binding = {}

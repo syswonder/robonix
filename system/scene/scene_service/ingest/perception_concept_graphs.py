@@ -1,37 +1,17 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""ConceptGraphs perception — the *real* one, not just the detection
-frontend.
+"""ConceptGraphs perception and persistent object-map integration.
 
-This module owns a persistent `conceptgraph.slam.slam_classes.MapObjectList`
-and runs the canonical concept-graphs merge pipeline every tick:
+Each tick runs the following pipeline:
 
-    YOLO-World detect (open-vocab via CLIP text encoder)
-        │
-        ▼
-    MobileSAM (bbox-prompted masks)
-        │
-        ▼
-    open_clip ViT-B-32 → per-detection 512-d image feature
-        │
-        ▼
-    detections_to_obj_pcd_and_bbox  (depth + masks + cam_K + trans_pose
-                                     → per-detection o3d.PointCloud +
-                                     OrientedBoundingBox in map frame)
-        │
-        ▼
-    compute_spatial_similarities  (3D pcd-overlap M×N matrix)
-    compute_visual_similarities   (CLIP cosine similarity M×N matrix)
-    aggregate_similarities        (sim_sum)
-        │
-        ▼
-    merge_detections_to_objects   (matched → merge_obj2_into_obj1
-                                   with EMA pose/extent + pcd union;
-                                   unmatched → new map object)
+* YOLO-World detects open-vocabulary objects.
+* MobileSAM creates bounding-box-prompted masks.
+* OpenCLIP produces one visual feature per detection.
+* Depth, masks, camera intrinsics, and pose produce map-frame point clouds.
+* Spatial and visual similarities associate detections with stored objects.
+* Matched detections update objects; unmatched detections create new objects.
 
-This is NOT the old "Hungarian on class+spatial" code that lived in
-scene/state/data_assoc.py. That path over-segmented heavily because it
-couldn't see visual features and treated cabinet/shelf as separate
-even when CLIP would say they're the same physical thing.
+This replaces the earlier class-and-distance-only association path, which
+could not use visual features and frequently over-segmented objects.
 
 The persistent `MapObjectList` is the source of truth. Every tick we
 project it back into scene's `ObjectRegistry` so the existing web UI /

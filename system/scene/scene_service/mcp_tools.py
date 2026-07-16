@@ -355,10 +355,12 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     Room annotations are deliberately not accepted. Resolve those through
     goal_room so the returned pose is constrained to the room polygon.
 
-    `reachable=false` when:
-      - the object_id isn't in the registry, or
-      - mapping isn't running (no occupancy_grid yet), or
-      - no free cell exists within the search radius of the target on the grid.
+    ``reachable=false`` when:
+
+    * the object ID is not in the registry;
+    * mapping is not publishing an occupancy grid; or
+    * no free cell exists within the target search radius.
+
     Contract: robonix/system/scene/goal_near."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")

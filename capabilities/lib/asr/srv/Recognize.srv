@@ -1,5 +1,5 @@
 # ASR one-shot recognition
-# abstract_interface_id: robonix/system/speech/asr
+# Contract: robonix/service/speech/asr
 # Caller sends raw audio bytes; service returns a transcript string.
 uint8[] audio_data
 string encoding       # e.g. "pcm_s16le", "opus", "mp3"

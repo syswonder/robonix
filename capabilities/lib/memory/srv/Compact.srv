@@ -1,4 +1,4 @@
-# robonix/sys/memory/compact — summarize / compact long-term memory (unary RPC).
+# robonix/service/memory/compact — summarize long-term memory (unary RPC).
 # Request: no fields (empty trigger, maps to google.protobuf.Empty on the facade when appropriate).
 ---
 std_msgs/String summary

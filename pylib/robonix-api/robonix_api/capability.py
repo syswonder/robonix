@@ -852,8 +852,11 @@ class _ProviderBase:
 
 
 class Primitive(_ProviderBase):
-    """A hardware / data-source driver CapabilityProvider.
-    e.g. tiago_camera, mid360_lidar, ranger CAN chassis.
+    """A hardware or data-source capability provider.
+
+    Examples include a camera, lidar, or CAN chassis driver.
+
+    Example::
 
         primitive_cam = Primitive(
             id="webots_tiago_camera_front",
@@ -869,9 +872,11 @@ class Primitive(_ProviderBase):
 
 
 class Service(_ProviderBase):
-    """A composed CapabilityProvider built on top of Primitives /
-    Services.  e.g. mapping, navigation, scene; also the platform-
-    internal pilot / executor / scene / memory / liaison services.
+    """A capability provider composed from primitives or other services.
+
+    Examples include mapping, navigation, scene, memory, and speech services.
+
+    Example::
 
         service_mapping = Service(
             id="mapping",
@@ -887,9 +892,11 @@ class Service(_ProviderBase):
 
 
 class Skill(_ProviderBase):
-    """A model-backed, executor-activated CapabilityProvider.  Sits at
-    INACTIVE between calls; the executor flips it to ACTIVE on demand
-    (and MAY flip back when idle, configurable).
+    """A model-backed capability provider activated by Executor on demand.
+
+    A skill starts in ``INACTIVE`` and becomes ``ACTIVE`` when invoked.
+
+    Example::
 
         skill_explore = Skill(
             id="explore",

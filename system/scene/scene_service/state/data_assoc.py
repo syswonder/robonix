@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Cross-frame data association: turn a batch of per-frame `Detection`s
-into either updates of existing SceneObject records or allocations of
-new ones. v1 algorithm:
+"""Associate per-frame detections with persistent scene objects.
 
-  1. spatial gating per class (`_GATE_RADIUS_M`)
-  2. class-match (only same-class candidates considered)
-  3. Hungarian (scipy.optimize.linear_sum_assignment) min-cost matching
-  4. unmatched detections → allocate new SceneObject
-  5. unmatched objects → mark_stale handles them; we don't touch them here
-  6. matched pairs → ObjectRegistry.update_object_pose (EMA blend)
+The version 1 algorithm applies these steps:
+
+1. Gate candidates spatially using a class-specific radius.
+2. Keep candidates with the same class.
+3. Run Hungarian minimum-cost matching.
+4. Allocate objects for unmatched detections.
+5. Leave unmatched-object expiry to ``mark_stale``.
+6. Update matched object poses with an exponential moving average.
 
 Not implemented in v1 (deferred): Kalman filtering, IoU-based gating,
 appearance embeddings, learned association.

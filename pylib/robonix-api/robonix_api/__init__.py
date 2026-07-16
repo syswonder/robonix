@@ -1,26 +1,21 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""robonix-api — Python helpers for writing Robonix CapabilityProviders.
+"""Python helpers for implementing Robonix capability providers.
 
-A package instantiates exactly one of `Primitive`, `Service`, or
-`Skill`. The framework talks to atlas, serves the Driver lifecycle
-gRPC, and wraps the common middleware patterns (rclpy / FastMCP /
-grpcio).
+A package instantiates exactly one :class:`Primitive`, :class:`Service`, or
+:class:`Skill`. The framework communicates with Atlas, serves the Driver
+lifecycle gRPC API, and wraps common rclpy, FastMCP, and grpcio patterns.
 
-Layered API:
+The API has two layers:
 
-  Layer 1 -- always available: declare_capability, connect_capability,
-             on_init/on_activate/on_deactivate/on_shutdown handlers,
-             spawn subprocess, sentinel waits.
+* The always-available layer declares and connects capabilities, binds
+  lifecycle handlers, spawns subprocesses, and waits for sentinels.
+* The optional convenience layer registers gRPC or MCP handlers and creates
+  ROS 2 publishers or subscriptions. A provider that manages middleware
+  directly can call ``declare_capability`` instead.
 
-  Layer 2 -- opt-in convenience: `@provider.provides_grpc(contract)`,
-             `@provider.provides_mcp(contract)`, ROS create_publisher /
-             create_subscription. Skip if you want to drive rclpy /
-             FastMCP / grpcio directly -- just call
-             `provider.declare_capability(...)` to register with atlas.
+Example::
 
-Typical usage:
-
-    from robonix_api import ATLAS, Primitive, Ok, Err, Deferred
+    from robonix_api import Primitive, Ok, Deferred
 
     primitive_mid360 = Primitive(
         id="mid360_lidar",
@@ -34,7 +29,8 @@ Typical usage:
             return Deferred(f"no PointCloud2 on {topic} yet")
         primitive_mid360.create_publisher(
             contract_id="robonix/primitive/lidar/lidar3d",
-            topic=topic, msg_type="PointCloud2",
+            topic=topic,
+            msg_type="PointCloud2",
         )
         return Ok()
 
