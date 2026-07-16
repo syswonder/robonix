@@ -1,0 +1,23 @@
+system/scene/scene_service/web.py
+  s_de863def517d1d::t_b322c8ac54b885 2563-2569,2672-2673,2684,2686-2687,2689-2691,2697,2786-2788,2926-2934,3044-3047,3054,3056,3061-3062,3066,3071-3085,3096-3097,3243-3247,3416-3418,3426,3461,3463-3464,3475-3479,3506-3510,3529-3530,3533-3534,3542-3544,3551,3555-3565,3568,3571-3576,3693-3697,3714
+system/scene/tests/test_annotations.py
+  s_de863def517d1d::t_c09b03c292da64 488-489
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c002c12e05023cee99674e59029f1d113dfddfeb",
+  "prompts": {},
+  "sessions": {
+    "s_de863def517d1d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f65afcb5-6333-4386-aca7-03e78235706e",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
