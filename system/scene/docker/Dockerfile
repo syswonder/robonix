@@ -104,6 +104,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             python3-numpy \
             ros-$ROS_DISTRO-tf2-ros \
             ros-$ROS_DISTRO-tf-transformations \
+            ros-$ROS_DISTRO-rmw-cyclonedds-cpp \
             ros-$ROS_DISTRO-rmw-zenoh-cpp \
             ros-$ROS_DISTRO-zenoh-bridge-dds && \
         rm -rf /var/lib/apt/lists/* \
