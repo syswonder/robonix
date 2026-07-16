@@ -73,8 +73,9 @@ RUN set -eux; \
 # The streaming-viewer's default WS URL is `ws://localhost:1234`, which
 # is wrong for any remote browser (they'd hit their own localhost).
 # Inject a one-line script that rewrites the input from the page's
-# location.hostname before the user clicks Connect.
-RUN sed -i 's|</body>|<script>document.getElementById("IP-input").value="ws://"+location.hostname+":1234";</script></body>|' \
+# location.hostname before the user clicks Connect. The public host port is
+# substituted at container start because parallel bridge runs remap :1234.
+RUN sed -i 's|</body>|<script>document.getElementById("IP-input").value="ws://"+location.hostname+":__ROBONIX_STREAM_PORT__";</script></body>|' \
     /usr/local/webots/resources/web/streaming_viewer/index.html
 
 # Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
@@ -92,7 +93,7 @@ RUN mkdir -p /root/.cache/Cyberbotics/Webots \
 # bind-mounted package dirs under /robonix_pkgs.)
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python3 -m pip install --no-cache-dir \
-    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx
+    "grpcio==1.78.0" "protobuf==6.33.6" mcp "fastmcp>=3" numpy Pillow uvicorn httpx
 
 ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 

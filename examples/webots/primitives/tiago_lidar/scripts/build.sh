@@ -8,5 +8,5 @@ CLEAN="${RBNX_BUILD_CLEAN:-}"
 FLAGS=(--mcp)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 echo "[tiago_lidar/build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+"$PKG/../../scripts/run_python_codegen.sh" "$PKG" "${FLAGS[@]}"
 echo "[tiago_lidar/build] done."

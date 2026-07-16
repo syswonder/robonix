@@ -20,6 +20,22 @@ cd examples/webots
 rbnx boot
 ```
 
+The default above uses host networking. With `ROBONIX_SIM_NETWORK=bridge`, the
+simulator publishes Zenoh only on `127.0.0.1`; the separate host-side
+`rbnx boot` shell must set
+`ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:<mapped-port>`, even when the mapped port is
+the default `7447`:
+
+```bash
+# Terminal 1
+ROBONIX_SIM_NETWORK=bridge ROBONIX_SIM_ZENOH_PORT=17447 bash examples/webots/sim/start.sh
+
+# Terminal 2
+cd examples/webots
+export ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:17447
+rbnx boot
+```
+
 World selection:
 
 ```bash
