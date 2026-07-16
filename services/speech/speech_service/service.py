@@ -1205,6 +1205,7 @@ def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
     caps = ATLAS.find_capability(
         contract_id=_SPEAKER_CONTRACT,
         namespace_prefix=(req.namespace_prefix or ""),
+        transport=Transport.GRPC,
     )
     seen: dict[str, dict] = {}
     for c in caps:
