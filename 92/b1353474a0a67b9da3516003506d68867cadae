@@ -1,0 +1,21 @@
+system/scene/scene_service/room_suggest.py
+  s_de863def517d1d::t_8737107ad6c884 1-467
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "92b1353474a0a67b9da3516003506d68867cadae",
+  "prompts": {},
+  "sessions": {
+    "s_de863def517d1d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f65afcb5-6333-4386-aca7-03e78235706e",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
