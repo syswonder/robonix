@@ -26,6 +26,7 @@ services:
     environment:
       WEBOTS_HEADLESS_MODE: "${WEBOTS_HEADLESS_MODE:-auto}"
       WEBOTS_STREAM: "1"
+      ROBONIX_SIM_STREAM_PUBLIC_PORT: "${ROBONIX_SIM_STREAM_PORT:-1234}"
       # NVIDIA Container Toolkit needs `graphics` + `display` (on top of
       # the default `utility,compute`) to inject the Xorg-side .so files.
       NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"

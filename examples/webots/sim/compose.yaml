@@ -66,6 +66,11 @@ services:
       ROBONIX_SIM_XDISPLAY: "${ROBONIX_SIM_XDISPLAY:-:48}"
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
       RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+      # Package sources and generated stubs are bind-mounted from the host.
+      # Do not leave root-owned __pycache__ directories there when drivers run
+      # through docker exec; those files otherwise make the next clean build
+      # fail with EACCES.
+      PYTHONDONTWRITEBYTECODE: "1"
       # Optional full offline Webots asset library. Default is off: office.wbt
       # uses the seed baked into the image. Set ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
       # before sim/start.sh to download Cyberbotics' assets-R2025a.zip into the

@@ -1,3 +1,5 @@
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -68,6 +70,15 @@ class WebotsDeployConfigTest(unittest.TestCase):
             self.assertNotIn("path", primitive[name])
 
     def test_primitive_builds_do_not_touch_a_running_simulator(self):
+        helper = (ROOT / "scripts" / "run_python_codegen.sh").read_text()
+        self.assertIn('PROTOBUF_VERSION="6.33.6"', helper)
+        self.assertIn('GRPC_TOOLS_VERSION="1.76.0"', helper)
+        self.assertIn('GRPCIO_VERSION="1.78.0"', helper)
+        self.assertIn("generated import smoke OK", helper)
+        self.assertIn("importlib.import_module(module)", helper)
+        dockerfile = (ROOT / "sim" / "bridge" / "Dockerfile").read_text()
+        self.assertIn('"protobuf==6.33.6"', dockerfile)
+        self.assertIn('"grpcio==1.78.0"', dockerfile)
         for name in ("tiago_chassis", "tiago_camera", "tiago_lidar"):
             package = ROOT / "primitives" / name
             build = (package / "scripts/build.sh").read_text()
@@ -76,6 +87,98 @@ class WebotsDeployConfigTest(unittest.TestCase):
             self.assertNotIn("robonix_tiago_sim", build, name)
             self.assertNotIn("--ros2", build, name)
             self.assertNotIn("ros2_idl/install/setup.bash", start, name)
+            self.assertIn("run_python_codegen.sh", build, name)
+
+    def test_bridge_network_drivers_translate_host_loopback(self):
+        helper = (ROOT / "scripts" / "container_network.sh").read_text()
+        self.assertIn("resolve_container_atlas_endpoint", helper)
+        self.assertIn(".NetworkSettings.Networks", helper)
+        self.assertIn("return 1", helper)
+        for name in ("tiago_chassis", "tiago_camera", "tiago_lidar"):
+            start = (ROOT / "primitives" / name / "scripts" / "start.sh").read_text()
+            self.assertIn('source "$WEBOTS_SCRIPTS/container_network.sh"', start)
+            self.assertIn('ROBONIX_ATLAS="$ATLAS_ENDPOINT"', start)
+            self.assertIn('append_no_proxy_hosts', start)
+            self.assertIn('-e NO_PROXY="$NO_PROXY_VALUE"', start)
+            self.assertIn('-e no_proxy="$no_proxy_value"', start)
+
+    def test_container_network_policy_regressions(self):
+        script = ROOT / "tests" / "test_container_network.sh"
+        self.assertTrue(os.access(script, os.X_OK), f"not executable: {script}")
+        completed = subprocess.run(
+            [str(script)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
+
+    def test_retained_simple_nav_uses_shared_container_helpers(self):
+        package = ROOT / "services" / "simple_nav"
+        build = (package / "scripts" / "build.sh").read_text()
+        start = (package / "scripts" / "start.sh").read_text()
+        self.assertIn("run_python_codegen.sh", build)
+        self.assertIn("--mcp --ros2", build)
+        self.assertIn('source "$WEBOTS_SCRIPTS/container_network.sh"', start)
+        self.assertIn('resolve_container_atlas_endpoint "$SIM_CT"', start)
+        self.assertIn('ROBONIX_ATLAS="$ATLAS_ENDPOINT"', start)
+
+    def test_sim_prepares_soma_runtime_mount_before_compose(self):
+        launcher = (ROOT / "sim" / "start.sh").read_text()
+        mkdir = launcher.index('mkdir -p "$SOMA_RUNTIME_DIR"')
+        compose_up = launcher.index('docker compose "${CF[@]}" up --build -d')
+        self.assertLess(mkdir, compose_up)
+        self.assertIn('[[ ! -w "$SOMA_RUNTIME_DIR" ]]', launcher)
+
+    def test_sim_does_not_write_root_owned_python_cache_to_source(self):
+        compose = yaml.safe_load((ROOT / "sim" / "compose.yaml").read_text())
+        environment = compose["services"]["sim"]["environment"]
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+
+    def test_bridge_network_publishes_the_zenoh_router(self):
+        launcher = (ROOT / "sim" / "start.sh").read_text()
+        self.assertIn('CF+=(-f compose.bridge.yaml)', launcher)
+        self.assertIn('ROBONIX_SIM_ZENOH_PORT="${ROBONIX_SIM_ZENOH_PORT:-7447}"', launcher)
+        expected_router = (
+            "ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:${ROBONIX_SIM_ZENOH_PORT}"
+        )
+        self.assertIn(expected_router, launcher)
+        bridge = yaml.safe_load((ROOT / "sim" / "compose.bridge.yaml").read_text())
+        self.assertEqual(
+            bridge["services"]["sim"]["ports"],
+            ["127.0.0.1:${ROBONIX_SIM_ZENOH_PORT:-7447}:7447"],
+        )
+        for readme in (ROOT / "README.md", ROOT / "sim" / "README.md"):
+            documentation = readme.read_text()
+            self.assertIn(
+                "ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:<mapped-port>",
+                documentation,
+            )
+            self.assertIn(
+                "export ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:17447",
+                documentation,
+            )
+
+    def test_stream_viewer_uses_the_mapped_public_ports(self):
+        compose = yaml.safe_load((ROOT / "sim" / "compose.stream.yaml").read_text())
+        environment = compose["services"]["sim"]["environment"]
+        self.assertEqual(
+            environment["ROBONIX_SIM_STREAM_PUBLIC_PORT"],
+            "${ROBONIX_SIM_STREAM_PORT:-1234}",
+        )
+        dockerfile = (ROOT / "sim" / "bridge" / "Dockerfile").read_text()
+        entrypoint = (ROOT / "sim" / "bridge" / "entrypoint.sh").read_text()
+        launcher = (ROOT / "sim" / "start.sh").read_text()
+        self.assertIn("__ROBONIX_STREAM_PORT__", dockerfile)
+        self.assertIn('public_stream_port="${ROBONIX_SIM_STREAM_PUBLIC_PORT:-1234}"', entrypoint)
+        self.assertIn("s/__ROBONIX_STREAM_PORT__/$public_stream_port/g", entrypoint)
+        self.assertIn(":${ROBONIX_SIM_VIEWER_PORT}/", launcher)
+        self.assertIn(":${ROBONIX_SIM_STREAM_PORT} — just hit Connect", launcher)
 
 
 if __name__ == "__main__":

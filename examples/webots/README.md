@@ -38,6 +38,23 @@ cd examples/webots
 rbnx boot
 ```
 
+The commands above use the default host network. If the simulator uses a
+Docker bridge (for example, for parallel isolated runs), its Zenoh router is
+published only on host loopback. In that mode, start the host-side Robonix
+stack with `ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:<mapped-port>`; this setting is
+required even when `<mapped-port>` is the default `7447`:
+
+```bash
+# T1 — isolated simulator
+ROBONIX_SIM_NETWORK=bridge ROBONIX_SIM_ZENOH_PORT=17447 \
+  bash examples/webots/sim/start.sh
+
+# T2 — matching host-side deployment
+cd examples/webots
+export ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:17447
+rbnx boot
+```
+
 The sim launcher supports multiple built-in worlds:
 
 ```bash

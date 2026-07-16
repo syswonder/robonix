@@ -31,6 +31,20 @@ SIM_CT="$ROBONIX_SIM_CONTAINER"
 # because the bash sub-process couldn't find start_rviz.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# Soma writes its generated ROS runtime reader and source description into
+# this host directory during `rbnx boot`; the simulator bind-mounts the same
+# directory at /robonix_runtime/soma. Create it as the invoking user BEFORE
+# Docker Compose sees the bind mount. Otherwise Docker creates it as root and
+# Soma fails as soon as it tries to materialize the reader files.
+SOMA_RUNTIME_DIR="$SCRIPT_DIR/../rbnx-boot/logs/soma-runtime"
+mkdir -p "$SOMA_RUNTIME_DIR"
+if [[ ! -w "$SOMA_RUNTIME_DIR" ]]; then
+    echo "[sim/start] error: Soma runtime directory is not writable: $SOMA_RUNTIME_DIR" >&2
+    echo "[sim/start] Remove the stale root-owned directory, then run this launcher again." >&2
+    exit 1
+fi
+
 # Avoid Docker Hub metadata checks on every compose rebuild. The helper creates
 # a local alias and pulls through configured mirrors on first use.
 # Override ROBONIX_SIM_ROS_BASE_IMAGE for a custom/mirror/digest base.
@@ -113,6 +127,20 @@ if [[ ! -f "$ROBONIX_HOST_XAUTH" ]]; then
 fi
 
 CF=(-f compose.yaml)
+
+# The default host network exposes the simulator's rmw_zenohd directly on
+# localhost:7447. Bridge mode publishes its router on host loopback only. Every
+# host-side `rbnx boot` used with bridge mode MUST receive the exact mapped
+# endpoint through ROBONIX_ZENOH_ROUTER, including when the mapped port is the
+# default 7447; do not rely on rmw_zenoh_cpp discovery across the namespace.
+if [[ "${ROBONIX_SIM_NETWORK:-host}" != "host" ]]; then
+  CF+=(-f compose.bridge.yaml)
+  export ROBONIX_SIM_ZENOH_PORT="${ROBONIX_SIM_ZENOH_PORT:-7447}"
+  echo "[sim/start] bridge Zenoh router: tcp/127.0.0.1:${ROBONIX_SIM_ZENOH_PORT}"
+  echo "[sim/start] REQUIRED in the host rbnx boot shell:"
+  echo "[sim/start]   export ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:${ROBONIX_SIM_ZENOH_PORT}"
+fi
+
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)
   # Auto-select the GPU with most free memory unless user already set ROBONIX_GPU_ID.
@@ -134,7 +162,9 @@ fi
 # bridge/entrypoint.sh.
 if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
   CF+=(-f compose.stream.yaml)
-  echo "[sim/start] stream mode — merging compose.stream.yaml (WS :1234, viewer :8080)"
+  export ROBONIX_SIM_STREAM_PORT="${ROBONIX_SIM_STREAM_PORT:-1234}"
+  export ROBONIX_SIM_VIEWER_PORT="${ROBONIX_SIM_VIEWER_PORT:-8080}"
+  echo "[sim/start] stream mode — WS :${ROBONIX_SIM_STREAM_PORT}, viewer :${ROBONIX_SIM_VIEWER_PORT}"
 fi
 
 allow_x11_for_docker() {
@@ -179,13 +209,13 @@ if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
   echo "[sim/start] open ONE of these in a browser:"
   # tailscale first (works from anywhere on the tailnet)
   if command -v tailscale &>/dev/null; then
-    tailscale ip -4 2>/dev/null | sed 's|^|  http://|;s|$|:8080/|'
+    tailscale ip -4 2>/dev/null | sed "s|^|  http://|;s|$|:${ROBONIX_SIM_VIEWER_PORT}/|"
   fi
   # then LAN / global v4 addresses
   ip -4 -o addr show scope global 2>/dev/null \
     | awk '{print $4}' | cut -d/ -f1 \
-    | sed 's|^|  http://|;s|$|:8080/|'
-  echo "[sim/start] the viewer auto-fills ws://<that-host>:1234 — just hit Connect"
+    | sed "s|^|  http://|;s|$|:${ROBONIX_SIM_VIEWER_PORT}/|"
+  echo "[sim/start] the viewer auto-fills ws://<that-host>:${ROBONIX_SIM_STREAM_PORT} — just hit Connect"
   echo
 fi
 
