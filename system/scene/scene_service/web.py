@@ -686,6 +686,8 @@ def make_app(*, registry: ObjectRegistry,
       GET /api/camera      — JSON: latest RGB + depth frames
       /api/annotations[..] — user annotation CRUD (see below)
       /api/maps[..]        — scene-owned map library façade over map capabilities
+      GET /api/rooms/suggest — room-region suggestion around a hovered point
+                             (read-only, additive; see rooms_suggest)
 
     `hub` is the SubscribersHub — passed so the JSON state can include
     the latest OccupancyGrid for the 2D canvas underlay.
@@ -1417,6 +1419,70 @@ def make_app(*, registry: ObjectRegistry,
                 out["detail"] = (out.get("detail") or "pose estimate sent") + "; current pose not available yet"
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
+    # Room suggestion (hover assist for /user). The heavy per-grid stages
+    # live in a RoomSuggester memoized by hub message count; the lock keeps
+    # concurrent hovers from racing the lazy build. suggest() itself runs on
+    # a worker thread — the first call per grid costs up to a few hundred ms
+    # and must not stall the event loop (cf. the goal_room review finding).
+    _suggest_cache: dict = {"count": 0, "suggester": None}
+    _suggest_lock = asyncio.Lock()
+
+    async def rooms_suggest(request) -> JSONResponse:
+        """GET /api/rooms/suggest?x=<m>&y=<m>&level=<int> — suggest the room
+        region around a map-frame point on the live occupancy grid.
+        Read-only; answers {ok:false, detail} with 400 on bad params and
+        503 when no grid / scipy is available. On success returns the
+        room_suggest JSON payload plus the grid's stamp_ms."""
+        try:
+            x = float(request.query_params["x"])
+            y = float(request.query_params["y"])
+            level = int(request.query_params.get("level", "0"))
+        except (KeyError, ValueError):
+            return JSONResponse(
+                {"ok": False, "detail": "x/y (meters) required; level int"},
+                status_code=400)
+        if not (-1_000_000 < x < 1_000_000 and -1_000_000 < y < 1_000_000):
+            return JSONResponse({"ok": False, "detail": "x/y out of range"},
+                                status_code=400)
+        level = max(-20, min(20, level))
+        if hub is None or not hub.has("occupancy_grid"):
+            return JSONResponse(
+                {"ok": False, "detail": "no occupancy grid yet"},
+                status_code=503)
+        msg, stamp_unix, count = hub.latest("occupancy_grid")
+        if msg is None or count == 0:
+            return JSONResponse(
+                {"ok": False, "detail": "no occupancy grid yet"},
+                status_code=503)
+        try:
+            import numpy as np
+
+            from .room_suggest import RoomSuggester
+        except ImportError as e:
+            return JSONResponse(
+                {"ok": False, "detail": f"suggestion unavailable: {e}"},
+                status_code=503)
+        info = msg.info
+        w, h = int(info.width), int(info.height)
+        if w == 0 or h == 0:
+            return JSONResponse(
+                {"ok": False, "detail": "empty occupancy grid"},
+                status_code=503)
+        async with _suggest_lock:
+            if _suggest_cache["count"] != count or _suggest_cache["suggester"] is None:
+                grid = np.frombuffer(bytes(msg.data), dtype=np.int8).reshape(h, w)
+                _suggest_cache["suggester"] = RoomSuggester(
+                    grid, float(info.resolution),
+                    origin_xy=(float(info.origin.position.x),
+                               float(info.origin.position.y)))
+                _suggest_cache["count"] = count
+            suggester = _suggest_cache["suggester"]
+            result = await asyncio.to_thread(
+                suggester.suggest_world, x, y, level)
+        out = result.to_json()
+        out["stamp_ms"] = int(stamp_unix * 1000)
+        return JSONResponse(out)
+
     async def index3d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_3D_HTML)
 
@@ -1487,6 +1553,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/maps/load", maps_load, methods=["POST"]),
         Route("/api/maps/delete", maps_delete, methods=["POST"]),
         Route("/api/maps/pose_estimate", maps_pose_estimate, methods=["POST"]),
+        Route("/api/rooms/suggest", rooms_suggest, methods=["GET"]),
     ]
     if static_dir.is_dir():
         routes.append(Mount("/static", StaticFiles(directory=str(static_dir)), name="static"))
@@ -2923,6 +2990,16 @@ document.addEventListener('visibilitychange', () => {
     if (!document.hidden) draw();
 });
 
+// ── room suggestion (hover assist) ───────────────────────────────────────
+// Hovering free space asks the backend which room region the cursor is in
+// (Snipaste-style): preview fills in, Alt+wheel widens/narrows the tolerance,
+// click adopts the polygon into the normal create-room flow. A suggestion
+// is a HINT, never a decision — Esc always falls back to manual drawing.
+let suggest = null;         // last /api/rooms/suggest payload (ok or not)
+let suggestLevel = 0;       // tolerance notches (Alt+wheel)
+let suggestTimer = null;    // hover debounce
+let suggestSeq = 0;         // drops stale in-flight responses
+
 const hintEl = document.getElementById('hint');
 const sceneStatusEl = document.getElementById('scene-status');
 function setHint(text) {
@@ -3190,6 +3267,31 @@ function draw() {
         ctx.moveTo(rx, ry);
         ctx.lineTo(rx + Math.cos(yaw) * 14, ry - Math.sin(yaw) * 14);
         ctx.stroke();
+    }
+
+    // room suggestion preview (hover assist; hidden while drawing/panning)
+    if (suggest && suggest.ok && !drawMode && !poseEstimateMode && !dragging) {
+        const pts = suggest.polygon.map(p => w2p(p[0], p[1]));
+        if (pts.length >= 3) {
+            ctx.beginPath();
+            pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(122,167,255,0.16)';
+            ctx.fill();
+            ctx.lineWidth = 2; ctx.strokeStyle = '#7aa7ff';
+            ctx.setLineDash([7, 5]); ctx.stroke(); ctx.setLineDash([]);
+            if (mouseWorld) {
+                const [mx, my] = w2p(...mouseWorld);
+                const badge = suggest.area_m2.toFixed(1) + ' m²'
+                    + (suggestLevel ? ' · lvl ' + suggestLevel : '')
+                    + (suggest.leaked ? ' · at neck' : '');
+                ctx.font = '11px ui-monospace, monospace'; ctx.textBaseline = 'bottom';
+                ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+                ctx.strokeText(badge, mx + 12, my - 8);
+                ctx.fillStyle = '#cfe0ff';
+                ctx.fillText(badge, mx + 12, my - 8);
+            }
+        }
     }
 
     // draft polygon (draw mode)
@@ -3567,6 +3669,7 @@ document.getElementById('room-list').addEventListener('click', async (ev) => {
 // ── draw mode ────────────────────────────────────────────────────────────
 const btnDraw = document.getElementById('btn-draw');
 function setDrawMode(on) {
+    clearSuggest();
     drawMode = on;
     draft = [];
     btnDraw.classList.toggle('active', on);
@@ -3596,6 +3699,53 @@ async function finishDraft() {
     }
 }
 
+// ── room suggestion plumbing ─────────────────────────────────────────────
+function pipWorld(pt, poly) {
+    // even-odd point-in-polygon in world coords (frontend cache hit test)
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [x1, y1] = poly[i], [x2, y2] = poly[j];
+        if ((y1 > pt[1]) !== (y2 > pt[1])
+            && pt[0] < (x2 - x1) * (pt[1] - y1) / (y2 - y1) + x1) inside = !inside;
+    }
+    return inside;
+}
+function clearSuggest() {
+    clearTimeout(suggestTimer);
+    suggestSeq++;                        // orphan any in-flight response
+    if (suggest) { suggest = null; setHint(''); draw(); }
+    suggestLevel = 0;
+}
+function suggestEligible() {
+    return !drawMode && !poseEstimateMode && !mapBusy && !dragging
+        && occMeta !== null && mouseWorld !== null;
+}
+async function fetchSuggest() {
+    if (!suggestEligible()) return;
+    const seq = ++suggestSeq;
+    const [x, y] = mouseWorld;
+    let out = null;
+    try {
+        const r = await fetch(`/api/rooms/suggest?x=${x.toFixed(3)}&y=${y.toFixed(3)}&level=${suggestLevel}`,
+                              { cache: 'no-store' });
+        out = await r.json().catch(() => null);
+    } catch (_) { return; /* transient; next hover retries */ }
+    if (seq !== suggestSeq || !suggestEligible()) return;  // stale or mode changed
+    suggest = out;
+    setHint(out && out.ok
+        ? 'Click to create a room from the suggestion · Alt+wheel adjusts tolerance · Esc dismisses'
+        : '');
+    draw();
+}
+function scheduleSuggest() {
+    if (!suggestEligible()) return;
+    // moving inside the current suggestion at the same tolerance: cache hit
+    if (suggest && suggest.ok && suggest.level === suggestLevel
+        && pipWorld(mouseWorld, suggest.polygon)) return;
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(fetchSuggest, 100);
+}
+
 // ── canvas input: pan / zoom / vertex clicks / hover ─────────────────────
 let dragging = false, dragMoved = false, lastPos = null;
 c.style.cursor = 'grab';
@@ -3620,14 +3770,28 @@ c.addEventListener('mousemove', (ev) => {
             const [px, py] = w2p(o.pose.x, o.pose.y);
             if ((px - ev.offsetX) ** 2 + (py - ev.offsetY) ** 2 < 100) { hoverObj = o; break; }
         }
+        scheduleSuggest();
     }
     draw();
 });
+c.addEventListener('mouseleave', () => { mouseWorld = null; clearSuggest(); });
 c.addEventListener('click', (ev) => {
     if (mapBusy) return;
     if (dragMoved) return;              // that was a pan, not a click
     if (poseEstimateMode) { sendPoseEstimate(p2w(ev.offsetX, ev.offsetY)); return; }
-    if (drawMode) { draft.push(p2w(ev.offsetX, ev.offsetY)); draw(); }
+    if (drawMode) { draft.push(p2w(ev.offsetX, ev.offsetY)); draw(); return; }
+    // adopt the hover suggestion: its polygon becomes the draft and enters
+    // the normal create-room flow (name modal -> POST). Entering draw mode
+    // first means a cancelled name modal leaves the polygon as a visible,
+    // editable draft instead of an invisible one — the suggestion is only
+    // a starting point.
+    if (suggest && suggest.ok && pipWorld(p2w(ev.offsetX, ev.offsetY), suggest.polygon)) {
+        const poly = suggest.polygon.map(p => [p[0], p[1]]);
+        setDrawMode(true);
+        draft = poly;
+        draw();
+        finishDraft();
+    }
 });
 c.addEventListener('dblclick', (ev) => {
     if (mapBusy) return;
@@ -3641,13 +3805,25 @@ c.addEventListener('dblclick', (ev) => {
 });
 window.addEventListener('keydown', (ev) => {
     if (mapBusy) return;
-    if (!drawMode) return;
+    if (!drawMode) {
+        if (ev.key === 'Escape') clearSuggest();
+        return;
+    }
     if (ev.key === 'Escape') setDrawMode(false);
     if (ev.key === 'Enter' && !ev.repeat) finishDraft();
 });
 c.addEventListener('wheel', (ev) => {
     ev.preventDefault();
     if (mapBusy) return;
+    // Alt+wheel = suggestion tolerance (merge through / retreat from necks);
+    // plain wheel stays the canvas zoom (the design doc's bare-wheel knob
+    // would hijack zoom everywhere on the map).
+    if (ev.altKey && !drawMode && !poseEstimateMode) {
+        suggestLevel = Math.min(20, Math.max(-20, suggestLevel + (ev.deltaY < 0 ? 1 : -1)));
+        clearTimeout(suggestTimer);
+        fetchSuggest();
+        return;
+    }
     const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
     // zoom about the cursor so the point under the mouse stays put
     const [wx, wy] = p2w(ev.offsetX, ev.offsetY);

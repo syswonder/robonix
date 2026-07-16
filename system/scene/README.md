@@ -370,6 +370,35 @@ as breaking.** The full annotation list also rides along in `GET /api/state`
 one poll. There is deliberately no atlas/MCP surface yet — exposing rooms to
 Pilot (scene-graph `in_room` edges) is a planned follow-up.
 
+### Room suggestion (hover assist)
+
+Instead of hand-tracing every room polygon, hovering the `/user` canvas asks
+scene which room region the cursor is in and previews it (dashed outline +
+area badge). **Click** adopts the polygon into the normal create-room flow
+(name modal → save; the polygon stays editable), **Alt+wheel** widens/narrows
+the tolerance — one notch merges through or retreats from a detected opening
+— and **Esc** dismisses. A suggestion is a hint, never a decision.
+
+The algorithm (`scene_service/room_suggest.py`) does not assume a well-formed
+SLAM map: it anchors on distance-transform cavities and treats doorways and
+wall gaps alike as narrow necks, so broken walls, speckle and unknown patches
+still yield a sensibly bounded region. Unknown cells always count as
+boundary — a suggestion never covers unmapped space. Openings wider than
+~1.3 m are geometrically indistinguishable from missing walls; the suggestion
+then covers both sides and the wheel/editor is the fallback.
+
+Endpoint (read-only, additive):
+
+| Route | Query | Returns |
+|---|---|---|
+| `GET /api/rooms/suggest` | `x`, `y` (map-frame meters), `level` (int, default 0) | `{ok, polygon: [[x,y]...], area_m2, level, leaked, reason, stamp_ms}` |
+
+`ok: false` (HTTP 200) with a `reason` means "no suggestion here" — seed on
+an obstacle/unknown, or a cavity too thin/small to be a room; `400` bad
+params, `503` no occupancy grid yet. Suggestions are computed on the live
+grid and cached per grid revision; nothing is persisted — only a room the
+user explicitly saves goes through the annotation store.
+
 ## Map library (Save / Load / Delete)
 
 The `/user` page's map panel drives a scene-owned facade over the map
