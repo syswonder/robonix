@@ -57,7 +57,19 @@ FLAGS=(--mcp)
 # The complete build directory was already removed above. A second clean here
 # would delete the freshly synchronized venv before model warm-up.
 echo "[build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+PATH="$PKG/$VENV/bin:$PATH" rbnx codegen -p "$PKG" "${FLAGS[@]}"
+
+CODEGEN_PYTHONPATH="$PKG/$BUILD/codegen/proto_gen:$PKG/$BUILD/codegen/robonix_mcp_types"
+PYTHONPATH="$CODEGEN_PYTHONPATH:${PYTHONPATH:-}" "$VENV/bin/python" - <<'PY'
+import robonix_contracts_pb2_grpc
+import memory_mcp
+
+assert hasattr(
+    robonix_contracts_pb2_grpc,
+    "RobonixServiceMemoryDriverServicer",
+)
+print("[build] Memory lifecycle servicer and MCP imports OK")
+PY
 
 # ── 4. Warm the ONNX embedding model at BUILD time ──────────────────────────
 # The service constructs MemSearch(embedding_provider="onnx") at start, which
@@ -68,22 +80,34 @@ rbnx codegen -p "$PKG" "${FLAGS[@]}"
 # download, runtime only serves — pull the model NOW, into the shared HF cache,
 # by building a throwaway one-doc index exactly like the service will at boot.
 echo "[build] warming ONNX embedding model (so start needs no network)"
-# Default to the CN HuggingFace mirror; override HF_ENDPOINT to change it.
-: "${HF_ENDPOINT:=https://hf-mirror.com}"
+# huggingface_hub needs repository commit and ETag metadata. Some mirrors only
+# redirect downloads to huggingface.co and omit that metadata, so use the
+# library's official endpoint by default. Deployments may still override
+# HF_ENDPOINT explicitly when their mirror implements the full Hub API.
+: "${HF_ENDPOINT:=https://huggingface.co}"
 export HF_ENDPOINT
-if ! "$VENV/bin/python" - <<'PY'
+warmed=0
+for attempt in 1 2 3; do
+    if "$VENV/bin/python" - <<'PY'
 import asyncio, os, tempfile
 from memsearch_service.onnx_compat import configure_onnxruntime
 configure_onnxruntime()
 from memsearch import MemSearch
-d = tempfile.mkdtemp(prefix="memsearch_warm_")
-with open(os.path.join(d, "warm.md"), "w") as f:
-    f.write("# warm\nPrefetch the embedding model at build time.\n")
-m = MemSearch(paths=[d], embedding_provider="onnx", milvus_uri=os.path.join(d, "warm.db"))
-asyncio.run(m.index())
+with tempfile.TemporaryDirectory(prefix="memsearch_warm_") as d:
+    with open(os.path.join(d, "warm.md"), "w") as f:
+        f.write("# warm\nPrefetch the embedding model at build time.\n")
+    m = MemSearch(paths=[d], embedding_provider="onnx", milvus_uri=os.path.join(d, "warm.db"))
+    asyncio.run(m.index())
 print("[build]   embedding model cached OK")
 PY
-then
+    then
+        warmed=1
+        break
+    fi
+    echo "[build] ONNX warm attempt $attempt/3 failed" >&2
+    [[ "$attempt" == "3" ]] || sleep "$((attempt * 2))"
+done
+if [[ "$warmed" != "1" ]]; then
     echo "[build] error: ONNX embedding-model warm failed" >&2
     exit 1
 fi

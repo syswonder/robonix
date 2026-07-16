@@ -1,0 +1,10 @@
+# Lifecycle interface for memory service providers.
+[contract]
+id = "robonix/service/memory/driver"
+version = "1"
+kind = "service"
+idl = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for memory service providers."
+
+[mode]
+type = "rpc"
