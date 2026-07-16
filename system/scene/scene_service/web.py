@@ -2782,10 +2782,20 @@ _USER_HTML = r"""<!doctype html>
     #map-lib[open] summary { border-bottom: 1px solid #232936; }
     .section-title { font-size: 12px; font-weight: 650; margin-bottom: 8px; }
     #map-tools { padding: 10px 12px; display: grid; gap: 8px; }
+    #map-list-head { display: flex; justify-content: space-between; align-items: center;
+      color: var(--muted); font-size: 11px; }
+    #map-save-label { display: block; color: var(--muted); font-size: 11px;
+      border-top: 1px solid #232936; padding-top: 8px; }
+    .save-row { display: flex; gap: 6px; margin-top: 4px; }
+    .save-row input { flex: 1; min-width: 0; }
+    .mapitem .row { display: flex; align-items: center; gap: 6px; }
+    .mapitem .map-btns { margin-left: auto; }
+    .badge-active { color: #0e1015; background: #8ef0b7; border-radius: 4px;
+      padding: 0 5px; font-size: 10px; font-weight: 700; }
     #map-tools label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
     #map-id { width: 100%; box-sizing: border-box; border: 1px solid #33405a; border-radius: 6px;
       background: #0f131b; color: var(--fg); padding: 6px 8px; font-size: 12px; }
-    #map-actions, .map-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+    .map-btns { display: flex; gap: 4px; }
     #map-status { min-height: 16px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     #map-status.busy { color: var(--acc); }
     #map-status.ok { color: #8ef0b7; }
@@ -2903,16 +2913,18 @@ _USER_HTML = r"""<!doctype html>
   <div id="main">
     <div id="panel">
       <details id="map-lib">
-      <summary>Map library <span class="summary-sub">save / load whole maps</span></summary>
+      <summary>Map library<span id="mode-pill">unknown</span><span class="summary-sub" id="map-lib-sub"></span></summary>
       <div id="map-tools">
-        <label>Map ID<input id="map-id" placeholder="apartment_demo" /></label>
-        <div id="map-actions">
-          <button class="primary" id="btn-save-map">Save current</button>
-          <button id="btn-refresh-maps">Refresh</button>
-          <button id="btn-pose-estimate">Pose estimate</button>
-        </div>
-        <div id="map-status"><span id="map-status-msg">Ready.</span><span class="mode-label">Map mode:</span><span id="mode-pill">unknown</span></div>
+        <div id="map-list-head">Saved maps
+          <button class="small" id="btn-refresh-maps" title="Refresh the list">↻</button></div>
         <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
+        <label id="map-save-label">Save the current session as
+          <div class="save-row"><input id="map-id" placeholder="apartment_demo" />
+            <button class="primary" id="btn-save-map">Save</button></div>
+        </label>
+        <div id="map-status"><span id="map-status-msg">Ready.</span></div>
+        <button class="small" id="btn-pose-estimate"
+          title="Localization only: click this, then click the map where the robot actually stands">📍 Pose estimate</button>
       </div>
       </details>
       <div class="actions">
@@ -3009,6 +3021,7 @@ let hoverObj = null;
 let selectedId = null;
 let selectedMapId = null;
 let savedMaps = [];
+let lastActiveId = null;   // re-render the map list only when this changes
 let mapBusy = false;
 let poseEstimateMode = false;
 let draftSubmitting = false;
@@ -3424,19 +3437,25 @@ function renderMaps() {
         list.innerHTML = '<div id="empty">No saved maps listed yet.</div>';
         return;
     }
+    const mb = state && state.map_binding;
+    const activeId = mb && mb.source !== 'default' ? mb.map_id : null;
     list.innerHTML = savedMaps.map(m => {
         const dbLabel = !m.has_spatial_artifact ? 'no spatial artifact' : (m.spatial_ok === false ? 'invalid artifact' : 'spatial artifact');
         const dbTitle = m.artifact_detail ? ` title="${esc(m.artifact_detail)}"` : '';
-        const canLoad = m.has_spatial_artifact && m.spatial_ok !== false;
+        const active = m.map_id === activeId;
+        const canLoad = !active && m.has_spatial_artifact && m.spatial_ok !== false;
         return `
-      <div class="mapitem ${m.map_id === selectedMapId ? 'selected' : ''} ${canLoad ? '' : 'bad'}" data-id="${esc(m.map_id)}">
-        <div class="name">${esc(m.map_id)}</div>
-        <div class="sub"${dbTitle}>${dbLabel} · ${m.has_preview ? 'preview' : 'no preview'} · ${m.updated || '-'}</div>
-        <div class="map-btns">
-          <button class="small" data-map-act="load" ${canLoad && !mapBusy ? '' : 'disabled'}>Load</button>
-          <button class="small danger" data-map-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
+      <div class="mapitem ${m.map_id === selectedMapId ? 'selected' : ''} ${canLoad || active ? '' : 'bad'}" data-id="${esc(m.map_id)}">
+        <div class="row">
+          <span class="name">${esc(m.map_id)}</span>
+          ${active ? '<span class="badge-active" title="The robot is currently running on this map">ACTIVE</span>' : ''}
+          <span class="map-btns">
+            ${active ? '' : `<button class="small" data-map-act="load" ${canLoad && !mapBusy ? '' : 'disabled'}>Load</button>`}
+            <button class="small danger" data-map-act="delete" title="Delete this map" ${mapBusy ? 'disabled' : ''}>✕</button>
+          </span>
         </div>
-        <div class="map-status">${canLoad ? '' : esc(m.artifact_detail || 'not loadable')}</div>
+        <div class="sub"${dbTitle}>${dbLabel} · ${m.has_preview ? 'preview' : 'no preview'} · ${m.updated || '-'}</div>
+        <div class="map-status">${canLoad || active ? '' : esc(m.artifact_detail || 'not loadable')}</div>
       </div>`;
     }).join('');
 }
@@ -3528,7 +3547,6 @@ async function loadSelectedMap(id) {
         `Switch the robot's active map to “${id}”? The current live session ends and the editor locks while it loads.`,
         'Load'))) return;
     selectedMapId = id;
-    document.getElementById('map-id').value = id;
     renderMaps();
     setMapItemStatus(id, 'loading...');
     beginMapOperation({
@@ -3617,10 +3635,8 @@ document.getElementById('map-list').addEventListener('click', (ev) => {
     const id = item.dataset.id;
     const act = ev.target.dataset && ev.target.dataset.mapAct;
     if (!act) {
-        selectedMapId = id;
-        document.getElementById('map-id').value = id;
+        selectedMapId = (selectedMapId === id) ? null : id;
         renderMaps();
-        setMapStatus(`Selected ${id}. Click Load to enter localization mode.`, 'ok');
         return;
     }
     if (act === 'load') {
@@ -3993,6 +4009,20 @@ async function refresh() {
             'mapping': 'The robot is building a map as it drives. Save it (once per session) to keep it in the library.',
             'unsaved live': 'Fresh mapping session — nothing is saved yet. Enter a Map ID and Save to keep this map and its rooms.',
         }[mode] || 'Mapping has not reported its mode yet.';
+    }
+    const libSub = document.getElementById('map-lib-sub');
+    if (libSub) libSub.textContent = mb ? (unsavedLive ? 'live session · unsaved' : (mb.map_id || '')) : '';
+    // pose estimate only means something against a loaded (localization) map
+    const poseBtn = document.getElementById('btn-pose-estimate');
+    if (poseBtn && !mapBusy && !poseEstimateMode) {
+        poseBtn.disabled = !(mb && mb.mode === 'localization');
+    }
+    // the ACTIVE badge lives in the map list: re-render it when the binding
+    // moves (not every poll — innerHTML churn would eat in-flight clicks)
+    const activeNow = mb && mb.source !== 'default' ? mb.map_id : null;
+    if (activeNow !== lastActiveId) {
+        lastActiveId = activeNow;
+        renderMaps();
     }
     const msg = document.getElementById('map-status-msg');
     if (unsavedLive && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
