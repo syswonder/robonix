@@ -17,7 +17,7 @@ class ContractIdlCommentTest(unittest.TestCase):
     def test_identifier_like_comments_reference_registered_contracts(self):
         registered = {
             match.group(1)
-            for path in (ROOT / "capabilities").rglob("*.toml")
+            for path in (ROOT / "capabilities").rglob("*.v1.toml")
             for match in CONTRACT_ID.finditer(path.read_text())
         }
         stale = []
