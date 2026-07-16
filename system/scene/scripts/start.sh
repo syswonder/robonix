@@ -142,6 +142,7 @@ exec docker run --rm \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
+    -e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}" \
     "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
