@@ -1144,7 +1144,7 @@ fn tts_boundary_text(kind: u32, streamed: String, final_text: &str) -> Option<St
 }
 
 fn is_narration_boundary(kind: u32) -> bool {
-    matches!(kind, 1 | 2 | 3 | 4)
+    matches!(kind, 1..=4)
 }
 
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
