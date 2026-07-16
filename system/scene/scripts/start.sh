@@ -35,8 +35,7 @@ CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 
 cleanup() {
-    docker stop "$CT" >/dev/null 2>&1 || true
-    kill -- "-$$" 2>/dev/null || true
+    timeout 15s docker stop "$CT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -46,8 +45,10 @@ docker rm -f "$CT" >/dev/null 2>&1 || true
 mkdir -p rbnx-build/data
 # Host-persisted scene state. Mounted at /data/robonix in the container so the
 # object-memory DB — and the scene-graph JSON caches, which otherwise die with
-# the --rm container — survive across boots.
-mkdir -p rbnx-build/data/robonix
+# the --rm container — survive across boots. CI sets SCENE_DATA_DIR to keep
+# semantic/object state isolated per run.
+SCENE_HOST_DATA_DIR="${SCENE_DATA_DIR:-$(pwd)/rbnx-build/data/robonix}"
+mkdir -p "$SCENE_HOST_DATA_DIR"
 
 declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
@@ -63,6 +64,11 @@ if [[ -n "${ROBONIX_ZENOH_MODE:-}" ]]; then
 fi
 if [[ -n "${ROBONIX_ZENOH_LISTEN:-}" ]]; then
     ZENOH_ARGS+=(-e "ROBONIX_ZENOH_LISTEN=${ROBONIX_ZENOH_LISTEN}")
+fi
+
+declare -a MAP_ID_ARGS=()
+if [[ -n "${SCENE_MAP_ID:-}" ]]; then
+    MAP_ID_ARGS=(-e "SCENE_MAP_ID=${SCENE_MAP_ID}")
 fi
 
 # GPU passthrough: ConceptGraphs perception (YOLO-World + MobileSAM +
@@ -126,18 +132,19 @@ exec docker run --rm \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
     -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \
+    -e SCENE_MAP_LOAD_TIMEOUT_S="${SCENE_MAP_LOAD_TIMEOUT_S:-240}" \
     -e SCENE_GRAPH_MIN_OBSERVATIONS="${SCENE_GRAPH_MIN_OBSERVATIONS:-2}" \
     -e SCENE_GRAPH_MAX_OBJECTS="${SCENE_GRAPH_MAX_OBJECTS:-80}" \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
-    -e SCENE_MAP_ID="${SCENE_MAP_ID:-default}" \
+    "${MAP_ID_ARGS[@]}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
-    -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
+    -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
     "$IMG"

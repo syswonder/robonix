@@ -2,8 +2,11 @@
 """Unit tests for object persistence (warm restore).
 
 The ObjectStore round-trip needs pymilvus + milvus-lite installed; it skips
-cleanly when they aren't. The restore_object counter test is pure Python and
-always runs.
+cleanly when they aren't. The skip guards import BOTH `pymilvus` and
+`milvus_lite`: the backend (`milvus_lite`) is Linux-only, so a dev mac can
+have `pymilvus` importable yet no working store — guarding on `pymilvus`
+alone passes the gate then crashes mid-test. The restore_object counter test
+is pure Python and always runs.
 """
 import os
 import sys
@@ -175,9 +178,10 @@ def test_apply_snapshot_restored_survives_and_far_detection_is_new():
 def test_object_store_roundtrip():
     """persist → fresh ObjectStore → load_all preserves scalar state."""
     try:
+        import milvus_lite  # noqa: F401
         import pymilvus  # noqa: F401
     except Exception:
-        print("  [SKIP] test_object_store_roundtrip (pymilvus not installed)")
+        print("  [SKIP] test_object_store_roundtrip (pymilvus/milvus-lite not installed)")
         return
 
     from scene_service.persistence import ObjectStore
@@ -217,9 +221,10 @@ def test_object_store_roundtrip():
 def test_object_store_upsert_latest_wins():
     """Re-persisting the same object_id overwrites (no version history in v1)."""
     try:
+        import milvus_lite  # noqa: F401
         import pymilvus  # noqa: F401
     except Exception:
-        print("  [SKIP] test_object_store_upsert_latest_wins (pymilvus not installed)")
+        print("  [SKIP] test_object_store_upsert_latest_wins (pymilvus/milvus-lite not installed)")
         return
 
     from scene_service.persistence import ObjectStore
@@ -243,9 +248,10 @@ def test_object_store_map_id_isolation():
     """Objects of one map_id are invisible to another, and the same object_id
     on two maps coexists without overwriting (composite primary key)."""
     try:
+        import milvus_lite  # noqa: F401
         import pymilvus  # noqa: F401
     except Exception:
-        print("  [SKIP] test_object_store_map_id_isolation (pymilvus not installed)")
+        print("  [SKIP] test_object_store_map_id_isolation (pymilvus/milvus-lite not installed)")
         return
 
     from scene_service.persistence import ObjectStore
@@ -286,9 +292,10 @@ def test_legacy_schema_recreated():
     map_id) is dropped + recreated with the composite pk on open, so a stale
     host-mounted DB can't silently defeat per-map isolation."""
     try:
+        import milvus_lite  # noqa: F401
         from pymilvus import DataType, MilvusClient
     except Exception:
-        print("  [SKIP] test_legacy_schema_recreated (pymilvus not installed)")
+        print("  [SKIP] test_legacy_schema_recreated (pymilvus/milvus-lite not installed)")
         return
 
     from scene_service import persistence

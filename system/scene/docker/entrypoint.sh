@@ -16,6 +16,16 @@ set -eo pipefail
 # shellcheck disable=SC1091
 source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
 
+# Robonix ros2_idl overlay (generated `map` interface package — mapping's
+# latched lifecycle broadcast that scene's map binding subscribes to).
+# Built by scripts/build.sh onto the bind-mounted rbnx-build/; when absent
+# scene logs a warning and falls back to static map binding.
+ROS2_IDL_SETUP=/scene/rbnx-build/codegen/ros2_idl/install/setup.bash
+if [ -f "$ROS2_IDL_SETUP" ]; then
+    # shellcheck disable=SC1090
+    source "$ROS2_IDL_SETUP"
+fi
+
 configure_zenoh_session() {
     if [ "${RMW_IMPLEMENTATION:-}" != "rmw_zenoh_cpp" ] || [ -z "${ROBONIX_ZENOH_ROUTER:-}" ]; then
         return 0

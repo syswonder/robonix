@@ -6,7 +6,8 @@
 use anyhow::Result;
 use clap::Parser;
 use robonix_cli::Config;
-use robonix_scribe::{info, warn};
+use robonix_scribe::warn;
+use std::path::{Path, PathBuf};
 
 mod cmd;
 mod pb;
@@ -52,22 +53,63 @@ fn ensure_loopback_bypasses_proxy() {
     }
 }
 
+fn boot_log_dir(command: &cmd::Commands) -> Option<PathBuf> {
+    let cmd::Commands::Boot { file, log_dir, .. } = command else {
+        return None;
+    };
+    if let Some(log_dir) = log_dir {
+        return Some(log_dir.clone());
+    }
+    let manifest = if file.is_absolute() {
+        file.clone()
+    } else {
+        std::env::current_dir().ok()?.join(file)
+    };
+    Some(
+        manifest
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("rbnx-boot")
+            .join("logs"),
+    )
+}
+
+fn prepare_boot_log_dir(command: &cmd::Commands) -> Result<()> {
+    let Some(log_dir) = boot_log_dir(command) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&log_dir)?;
+    for entry in std::fs::read_dir(&log_dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("log") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    // Safety: startup is still single-threaded and Scribe has not been used.
+    unsafe { std::env::set_var("SCRIBE_LOG_DIR", &log_dir) };
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     ensure_loopback_bypasses_proxy();
 
-    // Set Scribe console threshold to Error BEFORE the first scribe call
-    // triggers LazyLock init — otherwise CONSOLE_MIN defaults to Warn and
-    // Warn messages leak to the terminal during boot.
+    let cli = Cli::parse();
+    let verbose_boot = matches!(&cli.command, cmd::Commands::Boot { verbose: true, .. });
+    prepare_boot_log_dir(&cli.command)?;
+
+    // Select the Scribe console threshold before its LazyLock is initialized.
+    // Normal boot keeps package logs in files; verbose boot streams the same
+    // Scribe records to the terminal without introducing a second log path.
     // Safety: no other threads exist yet (tokio runtime not started).
     unsafe {
-        std::env::set_var("SCRIBE_CONSOLE_LEVEL", "error");
+        std::env::set_var(
+            "SCRIBE_CONSOLE_LEVEL",
+            if verbose_boot { "info" } else { "error" },
+        );
     }
 
     robonix_scribe::init("rbnx");
-    info!("rbnx starting");
-
-    let cli = Cli::parse();
 
     let config = Config::load()?;
     config.ensure_storage_dir()?;
@@ -95,4 +137,52 @@ async fn main() -> Result<()> {
     cmd::execute(cli.command, config).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_accepts_explicit_deploy_manifest() {
+        let cli = Cli::try_parse_from(["rbnx", "build", "-f", "robot/robonix_manifest.yaml"])
+            .expect("build -f should parse");
+        match cli.command {
+            cmd::Commands::Build {
+                file, path, global, ..
+            } => {
+                assert_eq!(file, Some("robot/robonix_manifest.yaml".into()));
+                assert!(path.is_none());
+                assert!(global.is_none());
+            }
+            _ => panic!("expected build command"),
+        }
+    }
+
+    #[test]
+    fn build_manifest_conflicts_with_single_package_selectors() {
+        assert!(Cli::try_parse_from(["rbnx", "build", "-f", "deploy.yaml", "-p", "."]).is_err());
+        assert!(Cli::try_parse_from(["rbnx", "build", "-f", "deploy.yaml", "-g", "pkg"]).is_err());
+    }
+
+    #[test]
+    fn boot_accepts_verbose_mode() {
+        let cli = Cli::try_parse_from(["rbnx", "boot", "-v"]).expect("boot -v should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Boot { verbose: true, .. }
+        ));
+    }
+
+    #[test]
+    fn boot_uses_manifest_local_scribe_directory() {
+        let cli = Cli::try_parse_from(["rbnx", "boot", "-f", "robot/robonix_manifest.yaml"])
+            .expect("boot manifest should parse");
+        assert_eq!(
+            boot_log_dir(&cli.command),
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.join("robot/rbnx-boot/logs"))
+        );
+    }
 }

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
@@ -47,24 +48,40 @@ speaker_driver: SpeakerDriver | None = None
 # read back by ListAudioDevices.current_*_id.
 current_input_id: str = ""
 current_output_id: str = ""
+configured_input_id: str = ""
+configured_output_id: str = ""
+_mic_stream_lock = threading.Lock()
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
 @audio_driver.grpc("robonix/primitive/audio/mic")
 def mic_stream(request, context):
-    """Server-streaming mic capture. Drives one arecord subprocess per
-    open client; ALSA only allows one capture handle so concurrent clients
-    share the stream (driver is started by the first call, kept alive
-    while any context is active)."""
-    if mic_driver is None:
-        context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
-                      "mic driver not initialized — Driver(CMD_INIT) failed or never ran")
+    """Server-streaming mic capture with exclusive ALSA ownership.
+
+    One ``MicDriver`` owns one ``arecord`` process. Reject overlapping clients
+    explicitly instead of replacing the shared process handle and leaking the
+    previous recorder.
+    """
+    grpc = __import__("grpc")
+    if not _mic_stream_lock.acquire(blocking=False):
+        context.abort(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            "microphone is already in use by another stream",
+        )
         return
-    log.info("mic stream client connected")
-    mic_driver.start()
+    driver = None
     try:
+        driver = mic_driver
+        if driver is None:
+            context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "mic driver not initialized — Driver(CMD_INIT) failed or never ran",
+            )
+            return
+        log.info("mic stream client connected")
+        driver.start()
         while context.is_active():
-            chunk = mic_driver.read_chunk()
+            chunk = driver.read_chunk()
             if chunk is None:
                 break
             yield audio_pb2.AudioChunk(
@@ -74,8 +91,12 @@ def mic_stream(request, context):
                 duration_s=chunk["duration_s"],
             )
     finally:
-        mic_driver.stop()
-        log.info("mic stream client disconnected")
+        try:
+            if driver is not None:
+                driver.stop()
+                log.info("mic stream client disconnected")
+        finally:
+            _mic_stream_lock.release()
 
 
 @audio_driver.grpc("robonix/primitive/audio/speaker")
@@ -129,27 +150,33 @@ def _scan_audio_devices_proto():
             note="",
         ))
     ids = {d.id for d in devs}
-    configured_mic = os.environ.get("AUDIO_MIC_DEVICE", "").strip()
-    if configured_mic and configured_mic not in ids:
+    # ALSA plugin devices such as plughw:0,0 are intentionally absent from
+    # arecord/aplay -l. Expose the *active* deployment selections as first-class
+    # choices so a client refresh does not silently replace them with hw:0,0.
+    configured: dict[str, set[str]] = {}
+    for device_id, kind in (
+        (current_input_id, "input"),
+        (current_output_id, "output"),
+        (configured_input_id, "input"),
+        (configured_output_id, "output"),
+        (os.environ.get("AUDIO_MIC_DEVICE", "").strip(), "input"),
+        (os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip(), "output"),
+    ):
+        if device_id:
+            configured.setdefault(device_id, set()).add(kind)
+    for device_id, kinds in configured.items():
+        if device_id in ids:
+            continue
+        kind = "duplex" if kinds == {"input", "output"} else next(iter(kinds))
         devs.append(audio_pb2.AudioDevice(
-            id=configured_mic,
-            name="Configured ALSA input device",
-            kind="input",
+            id=device_id,
+            name="Configured ALSA device",
+            kind=kind,
             is_default=False,
             channels=1,
-            note="configured via AUDIO_MIC_DEVICE",
+            note="active deployment selection",
         ))
-        ids.add(configured_mic)
-    configured_spk = os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip()
-    if configured_spk and configured_spk not in ids:
-        devs.append(audio_pb2.AudioDevice(
-            id=configured_spk,
-            name="Configured ALSA output device",
-            kind="output",
-            is_default=False,
-            channels=1,
-            note="configured via AUDIO_SPEAKER_DEVICE",
-        ))
+        ids.add(device_id)
     return devs
 
 
@@ -183,6 +210,12 @@ def select_device(request, context):
         ).strip()
         if configured:
             valid.add(configured)
+        current = current_input_id if kind == "input" else current_output_id
+        if current:
+            valid.add(current)
+        deployment_configured = configured_input_id if kind == "input" else configured_output_id
+        if deployment_configured:
+            valid.add(deployment_configured)
         if requested not in valid:
             return audio_pb2.SelectAudioDevice_Response(
                 ok=False, error=f"unknown {kind} id '{requested}'")
@@ -199,27 +232,60 @@ def select_device(request, context):
         new_id = info.device_id
 
     if kind == "input":
-        if mic_driver is not None:
-            try:
-                mic_driver.stop()
-            except Exception:  # noqa: BLE001
-                pass
-        # Auto-probe hardware sample rate unless explicitly overridden
-        mic_rate = int(os.environ["AUDIO_MIC_SAMPLE_RATE"]) if "AUDIO_MIC_SAMPLE_RATE" in os.environ else probe_mic_sample_rate(new_id)
-        mic_driver = MicDriver(
-            device_id=new_id,
-            sample_rate=mic_rate,
-            channels=int(os.environ.get("AUDIO_MIC_CHANNELS", "1")),
-            bits_per_sample=int(os.environ.get("AUDIO_MIC_BITS", "16")),
-            chunk_duration_s=int(os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
-        )
-        current_input_id = new_id
+        if not _mic_stream_lock.acquire(blocking=False):
+            return audio_pb2.SelectAudioDevice_Response(
+                ok=False,
+                error="cannot change input device while microphone is streaming",
+            )
+        try:
+            previous = mic_driver
+            if previous is not None:
+                try:
+                    previous.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            # Auto-probe hardware sample rate unless explicitly overridden
+            mic_rate = (
+                int(os.environ["AUDIO_MIC_SAMPLE_RATE"])
+                if "AUDIO_MIC_SAMPLE_RATE" in os.environ
+                else previous.sample_rate if previous is not None
+                else probe_mic_sample_rate(new_id)
+            )
+            mic_driver = MicDriver(
+                device_id=new_id,
+                sample_rate=mic_rate,
+                channels=int(os.environ.get(
+                    "AUDIO_MIC_CHANNELS",
+                    str(previous.channels if previous is not None else 1),
+                )),
+                bits_per_sample=int(os.environ.get(
+                    "AUDIO_MIC_BITS",
+                    str(previous.bits_per_sample if previous is not None else 16),
+                )),
+                chunk_duration_s=int(os.environ.get(
+                    "AUDIO_MIC_CHUNK_MS",
+                    str(round((previous.chunk_duration_s if previous is not None else 0.1) * 1000)),
+                )) / 1000.0,
+            )
+            current_input_id = new_id
+        finally:
+            _mic_stream_lock.release()
     else:
+        previous = speaker_driver
         speaker_driver = SpeakerDriver(
             device_id=new_id,
-            sample_rate=int(os.environ.get("AUDIO_SPEAKER_SAMPLE_RATE", "24000")),
-            channels=int(os.environ.get("AUDIO_SPEAKER_CHANNELS", "1")),
-            bits_per_sample=int(os.environ.get("AUDIO_SPEAKER_BITS", "16")),
+            sample_rate=int(os.environ.get(
+                "AUDIO_SPEAKER_SAMPLE_RATE",
+                str(previous.sample_rate if previous is not None else 24000),
+            )),
+            channels=int(os.environ.get(
+                "AUDIO_SPEAKER_CHANNELS",
+                str(previous.channels if previous is not None else 1),
+            )),
+            bits_per_sample=int(os.environ.get(
+                "AUDIO_SPEAKER_BITS",
+                str(previous.bits_per_sample if previous is not None else 16),
+            )),
         )
         current_output_id = new_id
     return audio_pb2.SelectAudioDevice_Response(ok=True, error="")
@@ -228,18 +294,21 @@ def select_device(request, context):
 # ── driver-init lifecycle ──────────────────────────────────────────────────
 @audio_driver.on_init
 def init(cfg):
-    """ALSA scan + device pickup. Honours AUDIO_{MIC,SPEAKER}_DEVICE env
-    overrides; falls back to the auto-detector in alsa_utils. Refuses to
-    come up if neither a mic nor a speaker is available, so atlas defers
-    instead of advertising dead interfaces."""
+    """Configure ALSA from the primitive config, then env, then auto-detect.
+
+    ``mic_device`` and ``speaker_device`` are deploy-level hardware choices;
+    the corresponding ``AUDIO_*`` environment variables remain a backwards
+    compatible operator override for older manifests.
+    """
     global mic_driver, speaker_driver, current_input_id, current_output_id
+    global configured_input_id, configured_output_id
 
     devices = scan_alsa_devices()
     for d in devices:
         log.info("ALSA: %s (%s) in=%s out=%s",
                  d.device_id, d.name, d.is_input, d.is_output)
 
-    mic_id = os.environ.get("AUDIO_MIC_DEVICE", "").strip()
+    mic_id = str(cfg.get("mic_device") or os.environ.get("AUDIO_MIC_DEVICE", "")).strip()
     if mic_id:
         log.info("mic override: %s", mic_id)
         mic_dev_id: str | None = mic_id
@@ -252,7 +321,7 @@ def init(cfg):
             log.warning("no microphone found")
             mic_dev_id = None
 
-    spk_id = os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip()
+    spk_id = str(cfg.get("speaker_device") or os.environ.get("AUDIO_SPEAKER_DEVICE", "")).strip()
     if spk_id:
         log.info("speaker override: %s", spk_id)
         spk_dev_id: str | None = spk_id
@@ -269,24 +338,45 @@ def init(cfg):
         return Err("no ALSA capture or playback device available")
 
     if mic_dev_id is not None:
-        mic_rate = int(os.environ["AUDIO_MIC_SAMPLE_RATE"]) if "AUDIO_MIC_SAMPLE_RATE" in os.environ else probe_mic_sample_rate(mic_dev_id)
+        configured_mic_rate = cfg.get("mic_sample_rate") or os.environ.get("AUDIO_MIC_SAMPLE_RATE")
+        mic_rate = int(configured_mic_rate) if configured_mic_rate else probe_mic_sample_rate(mic_dev_id)
         mic_driver = MicDriver(
             device_id=mic_dev_id,
             sample_rate=mic_rate,
-            channels=int(os.environ.get("AUDIO_MIC_CHANNELS", "1")),
-            bits_per_sample=int(os.environ.get("AUDIO_MIC_BITS", "16")),
-            chunk_duration_s=int(os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
+            channels=int(cfg.get("mic_channels") or os.environ.get("AUDIO_MIC_CHANNELS", "1")),
+            bits_per_sample=int(cfg.get("mic_bits") or os.environ.get("AUDIO_MIC_BITS", "16")),
+            chunk_duration_s=int(cfg.get("mic_chunk_ms") or os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
         )
         current_input_id = mic_dev_id
+        configured_input_id = mic_dev_id
 
     if spk_dev_id is not None:
         speaker_driver = SpeakerDriver(
             device_id=spk_dev_id,
-            sample_rate=int(os.environ.get("AUDIO_SPEAKER_SAMPLE_RATE", "24000")),
-            channels=int(os.environ.get("AUDIO_SPEAKER_CHANNELS", "1")),
-            bits_per_sample=int(os.environ.get("AUDIO_SPEAKER_BITS", "16")),
+            sample_rate=int(cfg.get("speaker_sample_rate") or os.environ.get("AUDIO_SPEAKER_SAMPLE_RATE", "24000")),
+            channels=int(cfg.get("speaker_channels") or os.environ.get("AUDIO_SPEAKER_CHANNELS", "1")),
+            bits_per_sample=int(cfg.get("speaker_bits") or os.environ.get("AUDIO_SPEAKER_BITS", "16")),
         )
         current_output_id = spk_dev_id
+        configured_output_id = spk_dev_id
+    return Ok()
+
+
+@audio_driver.on_shutdown
+def shutdown():
+    global mic_driver, speaker_driver
+    if mic_driver is not None:
+        try:
+            mic_driver.stop()
+        except Exception:
+            pass
+        mic_driver = None
+    if speaker_driver is not None:
+        try:
+            speaker_driver.stop()
+        except Exception:
+            pass
+        speaker_driver = None
     return Ok()
 
 

@@ -29,6 +29,7 @@
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_cli::launch::PackageRuntimeRecord;
 use robonix_cli::output;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -79,8 +80,6 @@ fn driver_init_timeout() -> Duration {
 struct DeployManifest {
     #[serde(default)]
     name: String,
-    #[serde(default)]
-    env: HashMap<String, String>,
     #[serde(default)]
     system: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
@@ -139,14 +138,11 @@ struct PackageEntry {
 /// with its own `name`/provider_id); they must share ONE clone. Keying the
 /// cache dir by `name` would clone the same repo once per instance — and the
 /// directory wouldn't reflect what was actually cloned. Key it by the repo.
+///
+/// Compatibility forwarding entry for sibling commands. The implementation
+/// lives in `robonix_cli::manifest` so Soma and rbnx use one rule.
 pub(crate) fn repo_dir_name(url: &str) -> String {
-    url.trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("pkg")
-        .to_string()
+    robonix_cli::manifest::deploy_repo_dir_name(url)
 }
 
 fn resolve_entry_path(
@@ -163,6 +159,36 @@ fn resolve_entry_path(
         (None, None) => {
             anyhow::bail!("package entry has neither `path` nor `url`")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soma_always_receives_the_selected_boot_manifest() {
+        use serde_yaml::{Mapping, Value};
+
+        let manifest_dir = PathBuf::from("/tmp/ranger-deploy");
+        let selected = manifest_dir.join("robonix_manifest.arm.yaml");
+        let mut soma = Mapping::new();
+        // A stale local value must not make Soma boot the default profile
+        // after `rbnx boot -f <arm-profile>`.
+        soma.insert(
+            Value::String("deployment_manifest".into()),
+            Value::String("robonix_manifest.yaml".into()),
+        );
+        let mut system = HashMap::from([("soma".to_string(), Value::Mapping(soma))]);
+
+        ensure_soma_defaults(&mut system, &manifest_dir, &selected);
+        let args = system_cli_args("soma", system.get("soma"), None);
+        let manifest_arg = args
+            .windows(2)
+            .find(|pair| pair[0] == "--deployment-manifest")
+            .map(|pair| pair[1].as_str());
+
+        assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
     }
 }
 
@@ -260,69 +286,15 @@ fn check_prerequisites(
     Ok(())
 }
 
-// ── env expansion — replace ${VAR} / $VAR in scalar strings ─────────────
-
-fn expand_env_in_str(s: &str) -> String {
-    // We scan the source as bytes (cheap to index) but only care about ASCII
-    // sigils — `$`, `{`, `}`, alphanumerics, underscore — which are all
-    // single-byte in UTF-8. Multi-byte chars are passed through via
-    // `s[..].chars()` so non-ASCII (Chinese paths, en-dashes pasted from
-    // chat, …) stays intact.
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'{' {
-                if let Some(end) = s[i + 2..].find('}') {
-                    let var = &s[i + 2..i + 2 + end];
-                    out.push_str(&std::env::var(var).unwrap_or_default());
-                    i = i + 2 + end + 1;
-                    continue;
-                }
-            } else if bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' {
-                let start = i + 1;
-                let mut end = start;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                let var = &s[start..end];
-                out.push_str(&std::env::var(var).unwrap_or_default());
-                i = end;
-                continue;
-            }
-        }
-        // Walk one full UTF-8 char from the current byte offset, not one
-        // byte. `bytes[i] as char` is a 7-bit cast that would corrupt any
-        // continuation byte of a multi-byte scalar.
-        let ch = s[i..]
-            .chars()
-            .next()
-            .expect("non-empty by while-loop guard");
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-fn expand_yaml(v: &mut serde_yaml::Value) {
-    use serde_yaml::Value;
-    match v {
-        Value::String(s) => *s = expand_env_in_str(s),
-        Value::Sequence(seq) => {
-            for item in seq {
-                expand_yaml(item);
-            }
-        }
-        Value::Mapping(map) => {
-            for (_, val) in map.iter_mut() {
-                expand_yaml(val);
-            }
-        }
-        _ => {}
-    }
+/// Apply top-level deployment variables, then expand every scalar in the
+/// manifest. Build and boot share this preparation path so package locations,
+/// target-manifest selectors, system settings, and package config all resolve
+/// against the same environment.
+pub(super) fn prepare_manifest(
+    root: serde_yaml::Value,
+    robonix_source_path: Option<&Path>,
+) -> Result<serde_yaml::Value> {
+    robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)
 }
 
 /// Make sure `system.soma` exists in the manifest map as a mapping,
@@ -371,7 +343,11 @@ fn expand_yaml(v: &mut serde_yaml::Value) {
 /// stage-1 waiter (see `wait_for_soma_stage1`) will surface soma's
 /// early exit instead of waiting for the timeout. Operators who
 /// want a different name still just set `robot_yaml:` explicitly.
-fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifest_dir: &Path) {
+fn ensure_soma_defaults(
+    system: &mut HashMap<String, serde_yaml::Value>,
+    manifest_dir: &Path,
+    manifest_path: &Path,
+) {
     use serde_yaml::{Mapping, Value};
     let entry = system
         .entry("soma".to_string())
@@ -386,10 +362,20 @@ fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifes
         .as_mapping_mut()
         .expect("promoted to mapping just above");
 
+    // Soma launches primitive and skill packages itself. It therefore must
+    // read the exact deployment file selected by `rbnx boot -f`, not infer a
+    // sibling default manifest from robot_yaml. This is intentionally owned
+    // by the boot command: a stale manifest-local value must not make rbnx
+    // build one profile while Soma starts another.
+    map.insert(
+        Value::String("deployment_manifest".to_string()),
+        Value::String(manifest_path.to_string_lossy().into_owned()),
+    );
+
     // Auto-inject `robot_yaml: <manifest_dir>/soma.yaml` when the
     // operator didn't set it AND the file exists. We check for the
     // key's presence-and-non-emptiness rather than presence alone so
-    // an unset `${ROBOT_YAML}` (which expand_env_in_str turns into
+    // an unset `${ROBOT_YAML}` (which manifest preparation turns into
     // "") still triggers the sidecar lookup. Missing sidecar → leave
     // absent (soma's own config-resolve error is the right signal;
     // stage-1 waiter surfaces the early exit fast).
@@ -410,12 +396,12 @@ fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifes
         }
     }
 
-    for key in ["robot_yaml", "config"] {
+    for key in ["robot_yaml", "deployment_manifest", "config"] {
         let k = Value::String(key.to_string());
         let Some(v) = map.get_mut(&k) else { continue };
         let Some(s) = v.as_str() else { continue };
         // Empty string usually means "${SOME_UNSET_VAR}" got expanded
-        // away by `expand_env_in_str`. Don't paper over that by turning
+        // away by manifest preparation. Don't paper over that by turning
         // it into `manifest_dir/` — leave it empty so soma's own
         // "read Soma config '' … No such file" error still fires and
         // the operator gets a signal instead of a mystery success.
@@ -440,10 +426,13 @@ struct Spawned {
     child: Child,
     pid: u32,
     /// Process group id. Each child is spawned with `process_group(0)` so
-    /// it becomes the leader of a new PGID == its own PID. Tear-down
-    /// signals `-PGID` to take the whole subtree (rbnx start wrapper +
-    /// inner interpreter + any docker-exec wrappers it forked).
+    /// it becomes the leader of a new PGID == its own PID.
     pgid: u32,
+    provider_id: Option<String>,
+    driver_contract: Option<String>,
+    config_json: Option<String>,
+    package_dir: Option<PathBuf>,
+    stop: Option<String>,
 }
 
 fn log_path(log_dir: &Path, name: &str) -> PathBuf {
@@ -515,6 +504,11 @@ async fn spawn_system_binary(
         child,
         pid,
         pgid: pid,
+        provider_id: None,
+        driver_contract: None,
+        config_json: None,
+        package_dir: None,
+        stop: None,
     })
 }
 
@@ -636,14 +630,14 @@ async fn spawn_soma_binary(
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_out, &line);
+            scribe::ingest(&tag_out, &line);
         }
     });
     tokio::spawn(async move {
         let reader = tokio::io::BufReader::new(stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_err, &line);
+            scribe::ingest(&tag_err, &line);
         }
     });
 
@@ -656,6 +650,11 @@ async fn spawn_soma_binary(
             child,
             pid,
             pgid: pid,
+            provider_id: None,
+            driver_contract: None,
+            config_json: None,
+            package_dir: None,
+            stop: None,
         },
         writer,
     ))
@@ -706,6 +705,11 @@ async fn spawn_package(
     } else {
         entry.name.clone()
     };
+    let package_manifest =
+        robonix_cli::manifest::detect_and_load(&pkg_path, entry.manifest.as_deref())
+            .with_context(|| format!("load package manifest for {}", pkg_path.display()))?;
+    let stop = package_manifest.manifest.stop.trim().to_string();
+    let stop = if stop.is_empty() { None } else { Some(stop) };
     // Scribe tag + log-file stem = the provider_id (`entry.name`) verbatim.
     // provider_id is unique per deploy (atlas enforces it), so no kind prefix
     // is needed for disambiguation — `rbnx logs -t <provider_id>` and the file
@@ -754,6 +758,10 @@ async fn spawn_package(
         .arg(&provider_atlas)
         .env("RBNX_INSTANCE_NAME", &name)
         .env("RBNX_INVOCATION_CWD", env.manifest_dir)
+        // `rbnx start` must keep its package shell in this group.  Otherwise
+        // ProcessManager creates a nested PGID and boot's failure teardown
+        // kills only the wrapper, leaving the real package process orphaned.
+        .env("RBNX_DEPLOY_MANAGED", "1")
         .env("SCRIBE_LOG_DIR", env.log_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -812,6 +820,11 @@ async fn spawn_package(
         child,
         pid,
         pgid: pid,
+        provider_id: None,
+        driver_contract: None,
+        config_json: None,
+        package_dir: Some(pkg_path),
+        stop,
     })
 }
 
@@ -823,7 +836,9 @@ pub async fn execute(
     log_dir: Option<PathBuf>,
     skip_system: bool,
     no_update_check: bool,
+    verbose: bool,
 ) -> Result<()> {
+    output::set_boot_verbose(verbose);
     let manifest_path = manifest_path
         .canonicalize()
         .with_context(|| format!("manifest not found: {}", manifest_path.display()))?;
@@ -834,8 +849,12 @@ pub async fn execute(
 
     let raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let mut deploy: DeployManifest = serde_yaml::from_str(&raw)
+    let root: serde_yaml::Value = serde_yaml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let root = prepare_manifest(root, config.robonix_source_path.as_deref())
+        .with_context(|| format!("failed to prepare {}", manifest_path.display()))?;
+    let mut deploy: DeployManifest = serde_yaml::from_value(root)
+        .with_context(|| format!("failed to decode {}", manifest_path.display()))?;
     // Banner + boot header FIRST, so the logo/version and what we're booting
     // lead the output — before the (possibly slow) remote freshness check.
     output::boot_banner();
@@ -847,37 +866,10 @@ pub async fn execute(
         },
         &manifest_path.display().to_string(),
     );
-    scribe::info(
-        "bootstrap",
-        &format!(
-            "booting {} from {}",
-            if deploy.name.is_empty() {
-                "robonix"
-            } else {
-                &deploy.name
-            },
-            manifest_path.display()
-        ),
-    );
-
     // Notice (non-fatal) if any cloned remote provider is behind upstream.
     // `--no-update-check` skips the per-package `git fetch` pass entirely.
     if !no_update_check {
         super::check_remotes::report_outdated(&manifest_path);
-    }
-
-    // Env expansion applies to both the top-level env block and all nested
-    // scalar strings in system / primitive / service / skill configs.
-    for v in deploy.system.values_mut() {
-        expand_yaml(v);
-    }
-    for e in deploy
-        .primitive
-        .iter_mut()
-        .chain(deploy.service.iter_mut())
-        .chain(deploy.skill.iter_mut())
-    {
-        expand_yaml(&mut e.config);
     }
 
     // soma owns primitive + skill bring-up (see
@@ -912,25 +904,12 @@ pub async fn execute(
     let soma_declared = deploy.system.contains_key("soma");
     let soma_implied = !deploy.primitive.is_empty() || !deploy.skill.is_empty();
     if (soma_declared || soma_implied) && !skip_system {
-        ensure_soma_defaults(&mut deploy.system, &manifest_dir);
+        ensure_soma_defaults(&mut deploy.system, &manifest_dir, &manifest_path);
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
-    // Wipe stale per-component logs from prior runs — without this you
-    // can't tell whether `system_speech.log` is from THIS boot or one
-    // ten `rbnx boot` retries ago. Only `*.log` files at the top level
-    // get removed; nested directories (if a future package wants its
-    // own subdir) are left alone.
-    if log_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&log_dir)
-    {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("log") {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
+    // The CLI prepares and clears this directory before Scribe's first log
+    // call. Do not remove files here: Scribe may already hold open handles.
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
@@ -942,21 +921,23 @@ pub async fn execute(
     unsafe {
         std::env::set_var("SCRIBE_LOG_DIR", log_dir.as_os_str());
     }
+    scribe::info(
+        "bootstrap",
+        &format!(
+            "booting {} from {}",
+            if deploy.name.is_empty() {
+                "robonix"
+            } else {
+                &deploy.name
+            },
+            manifest_path.display()
+        ),
+    );
 
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
     let instances_dir = manifest_dir.join("rbnx-boot").join("instances");
     std::fs::create_dir_all(&instances_dir)
         .with_context(|| format!("failed to create instances dir {}", instances_dir.display()))?;
-
-    // Propagate the manifest's `env:` block into our own env so child
-    // processes (which inherit) see it.
-    // set_var is unsafe on edition 2024 (other threads may race). We call
-    // it before spawning any children, so no races in practice.
-    for (k, v) in &deploy.env {
-        unsafe {
-            std::env::set_var(k, expand_env_in_str(v));
-        }
-    }
 
     let mut children: Vec<Spawned> = Vec::new();
     let state_path = teardown::state_path(&manifest_dir);
@@ -1359,7 +1340,7 @@ pub async fn execute(
             &children,
         );
         let providers = component_records(&children);
-        teardown::teardown(&providers).await;
+        teardown::teardown(Some(&atlas_endpoint), &providers).await;
         for sp in &mut children {
             let _ = sp.child.wait().await;
         }
@@ -1382,7 +1363,7 @@ pub async fn execute(
                 &children,
             );
             let providers = component_records(&children);
-            teardown::teardown(&providers).await;
+            teardown::teardown(Some(&atlas_endpoint), &providers).await;
             let _ = std::fs::remove_file(&state_path);
             return Err(e);
         }
@@ -1428,7 +1409,7 @@ pub async fn execute(
         ),
     );
     let providers = component_records(&children);
-    teardown::teardown(&providers).await;
+    teardown::teardown(Some(&atlas_endpoint), &providers).await;
     // Best-effort wait so we get clean "exited" lines in our own log.
     for sp in &mut children {
         let _ = sp.child.wait().await;
@@ -1440,11 +1421,16 @@ pub async fn execute(
 fn component_records(children: &[Spawned]) -> Vec<teardown::ComponentRecord> {
     children
         .iter()
-        .map(|s| teardown::ComponentRecord {
+        .map(|s| PackageRuntimeRecord {
             name: s.name.clone(),
             kind: s.kind.clone(),
             pid: s.pid,
             pgid: s.pgid,
+            provider_id: s.provider_id.clone(),
+            driver_contract: s.driver_contract.clone(),
+            config_json: s.config_json.clone(),
+            package_dir: s.package_dir.as_ref().map(|p| p.display().to_string()),
+            stop: s.stop.clone(),
         })
         .collect()
 }
@@ -1712,6 +1698,7 @@ fn system_cli_args(
             );
             push_pair(&mut out, "--provider-id", s("provider_id"));
             push_pair(&mut out, "--robot-yaml", s("robot_yaml"));
+            push_pair(&mut out, "--deployment-manifest", s("deployment_manifest"));
             push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--log", s("log"));
         }
@@ -1741,7 +1728,7 @@ async fn spawn_and_init(
         .map(|r| r.id)
         .collect();
 
-    let sp = spawn_package(component, entry, spawn_env).await?;
+    let mut sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
 
     // One package = one provider. After spawn, the new provider_id is whatever
@@ -1802,11 +1789,15 @@ async fn spawn_and_init(
         // No driver contract — system providers auto-promote to ACTIVE on
         // their own once gRPC + MCP are listening. We don't drive INIT
         // / ACTIVATE for them.
+        sp.provider_id = Some(provider_id);
         output::boot_ok(short_label(&pkg_label, component), "ACTIVE  (no driver)");
         return Ok(sp);
     };
 
     let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
+    sp.provider_id = Some(provider_id.clone());
+    sp.driver_contract = Some(driver_contract.clone());
+    sp.config_json = Some(config_json.clone());
 
     let display_label = short_label(&pkg_label, component);
     let init_state = match with_spinner(
@@ -1885,6 +1876,10 @@ async fn with_spinner<F, T>(label: &str, msg_prefix: &str, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
+    if output::boot_verbose() {
+        output::boot_wait(label, msg_prefix);
+        return fut.await;
+    }
     use std::time::Instant;
     let started = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -1922,6 +1917,9 @@ async fn wait_for_soma_stage1(
     let started = Instant::now();
     let deadline = started + SOMA_STAGE1_TIMEOUT;
     let mut frame: usize = 0;
+    if output::boot_verbose() {
+        output::boot_wait("soma stage 1", "waiting for primitive readiness");
+    }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
         let detail = if primitive_count == 0 {
@@ -1929,7 +1927,13 @@ async fn wait_for_soma_stage1(
         } else {
             format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
         };
-        output::boot_progress("soma stage 1", &detail, frame);
+        if output::boot_verbose() {
+            if frame > 0 && frame.is_multiple_of(50) {
+                output::boot_note("soma stage 1", &detail);
+            }
+        } else {
+            output::boot_progress("soma stage 1", &detail, frame);
+        }
         // Check every tick whether soma is still alive. If it exited
         // (typically: `missing robot_yaml`, `read Soma config`, port
         // bind failure), surface that immediately with the tail of
@@ -2207,13 +2211,19 @@ async fn wait_for_registration(
     let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
+    if output::boot_verbose() {
+        output::boot_wait(display_label, "registering with atlas");
+    }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
-        output::boot_progress(
-            display_label,
-            &format!("registering with atlas… {elapsed_s:>4.1}s"),
-            frame,
-        );
+        let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
+        if output::boot_verbose() {
+            if frame > 0 && frame.is_multiple_of(50) {
+                output::boot_note(display_label, &detail);
+            }
+        } else {
+            output::boot_progress(display_label, &detail, frame);
+        }
         if frame.is_multiple_of(POLLS_PER_TICK as usize) {
             let providers = atlas
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)

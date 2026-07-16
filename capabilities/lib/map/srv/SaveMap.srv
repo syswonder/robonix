@@ -1,13 +1,12 @@
 # robonix/service/map/save_map — snapshot the current SLAM map to disk (RPC).
-# Persists the live rtabmap database plus portable preview artifacts
-# (occupancy pgm/png, cloud pcd, meta.yaml) under {MAPPING_MAPS_DIR}/<map_id>/.
-# The database keeps receiving updates after the call — this is a durable,
-# loadable checkpoint, not a stop. Reuse the same <map_id> with load_map and
-# with scene's semantic map so the spatial and semantic maps stay aligned.
+# Persists the provider's current spatial map under a stable map_id. Backends
+# may use RTAB-Map, occupancy-grid files, or another representation internally;
+# callers must treat the artifact as opaque and address it only by map_id.
+# Reuse the same map_id with scene's semantic map so spatial and semantic state
+# stays aligned.
 string map_id      # stable id; sanitized to a filesystem-safe directory name
 string note        # optional human note recorded in meta.yaml (may be empty)
 ---
 bool ok
 string map_id          # sanitized id actually written
-string database_path   # absolute path of the saved rtabmap.db
 string detail          # human-readable status / error

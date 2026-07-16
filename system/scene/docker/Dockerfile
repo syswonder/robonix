@@ -129,16 +129,22 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # resolved by pip from the default PIP_INDEX_URL (TUNA, set above) — do NOT
 # point pip at aliyun's pypi index here, its large-file throttling stalls
 # pip the same way.
+# The saved filenames MUST be the canonical wheel names (pip parses the
+# name/version/abi from the filename and rejects e.g. "torch.whl" with
+# "Invalid wheel filename"), which would silently drop every build into
+# the slow fallback below after wasting the full aliyun download.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy sh -c 'set -eu; \
         base="https://mirrors.aliyun.com/pytorch-wheels/cu128"; \
-        curl -fSL --retry 5 --retry-delay 2 -C - -o /tmp/torch.whl \
+        tw="torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        tvw="torchvision-0.22.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        curl -fSL --retry 5 --retry-delay 2 -C - -o "/tmp/$tw" \
              "$base/torch-2.7.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
-        curl -fSL --retry 5 --retry-delay 2 -C - -o /tmp/torchvision.whl \
+        curl -fSL --retry 5 --retry-delay 2 -C - -o "/tmp/$tvw" \
              "$base/torchvision-0.22.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
         python3 -m pip install --progress-bar on --timeout 60 --retries 3 \
-             /tmp/torch.whl /tmp/torchvision.whl; \
-        rm -f /tmp/torch.whl /tmp/torchvision.whl' \
+             "/tmp/$tw" "/tmp/$tvw"; \
+        rm -f "/tmp/$tw" "/tmp/$tvw"' \
     || with-build-proxy python3 -m pip install \
         --progress-bar on \
         --timeout 60 \

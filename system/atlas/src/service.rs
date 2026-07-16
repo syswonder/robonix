@@ -87,6 +87,9 @@ struct DeclaredEndpoint {
     /// Provider-supplied natural-language description for this
     /// Capability. Empty means "fall back to contract default".
     description: String,
+    /// Diagnostic only: this endpoint's contract is outside the provider's
+    /// primary namespace without an explicit cross-namespace opt-in.
+    namespace_mismatch: bool,
 }
 
 fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S::Ok, S::Error> {
@@ -139,6 +142,7 @@ impl CapabilityProviderState {
             transport: e.transport as i32,
             params: Some((&e.params).into()),
             description: e.description.clone(),
+            namespace_mismatch: e.namespace_mismatch,
         }
     }
 }
@@ -211,6 +215,20 @@ fn is_driver_contract(contract_id: &str) -> bool {
     // `capabilities/{primitive,service}/driver.v1.toml` is concretised by
     // the provider to its area at DeclareCapability time.
     contract_id.ends_with("/driver")
+}
+
+/// Return whether a declared contract should carry a namespace diagnostic.
+/// Namespace is advisory: a mismatch never rejects registration or calling.
+fn has_namespace_mismatch(namespace: &str, contract_id: &str, cross_namespace: bool) -> bool {
+    if cross_namespace {
+        return false;
+    }
+    let namespace = namespace.trim_matches('/');
+    let contract_id = contract_id.trim_matches('/');
+    contract_id != namespace
+        && !contract_id
+            .strip_prefix(namespace)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// One open consumer→provider edge. Allocated by `ConnectCapability`,
@@ -472,11 +490,18 @@ impl AtlasRegistry {
             .providers
             .get(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
-        if !contract_id.starts_with(&provider.namespace) {
-            return Err(Status::invalid_argument(format!(
-                "contract_id '{contract_id}' is not under namespace '{}' of capability '{provider_id}'",
+        let cross_namespace = self
+            .contracts
+            .get(&contract_id)
+            .is_some_and(|contract| contract.cross_namespace);
+        let namespace_mismatch =
+            has_namespace_mismatch(&provider.namespace, &contract_id, cross_namespace);
+        if namespace_mismatch {
+            warn!(
+                "[atlas] namespace mismatch: provider '{provider_id}' declares '{contract_id}' \
+                 outside primary namespace '{}'; accepting capability",
                 provider.namespace
-            )));
+            );
         }
         if provider
             .endpoints
@@ -499,6 +524,7 @@ impl AtlasRegistry {
             endpoint: endpoint.clone(),
             params,
             description: description.to_string(),
+            namespace_mismatch,
         });
         info!("[atlas] declare {provider_id} {contract_id} via {transport:?} -> {endpoint}");
         Ok(endpoint)
@@ -815,7 +841,12 @@ fn resolve_endpoint(
         )));
     }
     for _ in 0..MINT_ATTEMPTS {
-        let candidate = format!("{proposed}~{}", short_uuid());
+        // A ROS 2 private-name marker (`~`) is only legal as the first
+        // character of a topic. Appending `~<uuid>` produced endpoints such
+        // as `/odom~9857059d`, which Atlas returned successfully but every
+        // ROS 2 client rejected. Double underscore is valid inside every ROS
+        // name token and keeps the collision suffix visually distinct.
+        let candidate = format!("{proposed}__{}", short_uuid());
         if !collides(&candidate) {
             return Ok(candidate);
         }
@@ -825,6 +856,254 @@ fn resolve_endpoint(
          after {MINT_ATTEMPTS} attempts (existing providers: {})",
         state.providers.len()
     )))
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    fn ros2_params() -> pb::TransportParams {
+        pb::TransportParams {
+            kind: Some(pb::transport_params::Kind::Ros2(pb::Ros2Params {
+                qos_profile: String::new(),
+            })),
+        }
+    }
+
+    #[test]
+    fn namespace_mismatch_is_advisory_and_shared_contracts_are_exempt() {
+        assert!(!has_namespace_mismatch(
+            "robonix/primitive/camera",
+            "robonix/primitive/camera/rgb",
+            false
+        ));
+        assert!(has_namespace_mismatch(
+            "robonix/primitive/camera",
+            "robonix/primitive/health/stream",
+            false
+        ));
+        assert!(!has_namespace_mismatch(
+            "robonix/primitive/camera",
+            "robonix/primitive/health/stream",
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn declare_accepts_namespace_mismatch_and_surfaces_diagnostic() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+
+        registry
+            .declare(
+                "front_camera",
+                "robonix/primitive/health/stream",
+                Transport::Ros2,
+                "/camera_health",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("namespace mismatch must not block declaration");
+
+        let providers = registry
+            .query(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/health/stream",
+                Transport::Ros2,
+            )
+            .await;
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].capabilities.len(), 1);
+        assert!(providers[0].capabilities[0].namespace_mismatch);
+    }
+
+    #[tokio::test]
+    async fn legacy_namespaced_driver_contract_remains_clean() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+
+        registry
+            .declare(
+                "front_camera",
+                "robonix/primitive/camera/driver",
+                Transport::Ros2,
+                "/camera_driver",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("legacy namespaced driver declaration");
+
+        let providers = registry
+            .query(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera/driver",
+                Transport::Ros2,
+            )
+            .await;
+        assert_eq!(providers.len(), 1);
+        assert!(!providers[0].capabilities[0].namespace_mismatch);
+    }
+
+    #[tokio::test]
+    async fn multiple_providers_can_implement_the_same_contract() {
+        let registry = AtlasRegistry::default();
+        for (provider_id, endpoint) in [
+            ("front_camera", "/front_camera_driver"),
+            ("rear_camera", "/rear_camera_driver"),
+        ] {
+            registry
+                .register(
+                    provider_id,
+                    pb::Kind::Primitive,
+                    "robonix/primitive/camera",
+                    "",
+                    "",
+                )
+                .await
+                .expect("provider registration");
+            registry
+                .declare(
+                    provider_id,
+                    "robonix/primitive/camera/driver",
+                    Transport::Ros2,
+                    endpoint,
+                    ros2_params(),
+                    "",
+                )
+                .await
+                .expect("shared contract declaration");
+        }
+
+        let providers = registry
+            .query(
+                "",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera/driver",
+                Transport::Ros2,
+            )
+            .await;
+        assert_eq!(providers.len(), 2);
+        assert!(providers.iter().all(|provider| {
+            provider.capabilities.len() == 1 && !provider.capabilities[0].namespace_mismatch
+        }));
+    }
+
+    #[tokio::test]
+    async fn cross_namespace_contract_suppresses_the_diagnostic() {
+        let root = std::env::temp_dir().join(format!(
+            "robonix-atlas-cross-namespace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temporary capability root");
+        std::fs::write(
+            root.join("health.toml"),
+            r#"[contract]
+id = "robonix/primitive/health/stream"
+cross_namespace = true
+"#,
+        )
+        .expect("write shared contract fixture");
+        let contracts = ContractRegistry::load_from_capabilities_dir(&root)
+            .expect("load shared contract fixture");
+        std::fs::remove_dir_all(&root).expect("remove temporary capability root");
+
+        let registry = AtlasRegistry::with_contracts(contracts);
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "front_camera",
+                "robonix/primitive/health/stream",
+                Transport::Ros2,
+                "/camera_health",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("cross-namespace contract declaration");
+
+        let providers = registry
+            .query(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/health/stream",
+                Transport::Ros2,
+            )
+            .await;
+        assert_eq!(providers.len(), 1);
+        assert!(!providers[0].capabilities[0].namespace_mismatch);
+    }
+
+    #[test]
+    fn ros2_collision_rewrite_never_appends_private_name_marker() {
+        let mut state = State::default();
+        state.providers.insert(
+            "chassis".to_string(),
+            CapabilityProviderState {
+                id: "chassis".to_string(),
+                kind: pb::Kind::Primitive,
+                namespace: "robonix/primitive/chassis".to_string(),
+                capability_md_path: String::new(),
+                capability_md: String::new(),
+                last_heartbeat_ms: 0,
+                endpoints: vec![DeclaredEndpoint {
+                    contract_id: "robonix/primitive/chassis/odom".to_string(),
+                    transport: Transport::Ros2,
+                    endpoint: "/odom".to_string(),
+                    params: TransportParamsState::Ros2 {
+                        qos_profile: "reliable".to_string(),
+                    },
+                    description: String::new(),
+                    namespace_mismatch: false,
+                }],
+                pushed_state: None,
+                state_detail: String::new(),
+            },
+        );
+
+        let rewritten = resolve_endpoint(
+            &state,
+            Transport::Ros2,
+            "/odom",
+            "robonix/service/map/odom",
+            "mapping",
+        )
+        .expect("ROS 2 collision should be mintable");
+
+        assert!(rewritten.starts_with("/odom__"), "{rewritten}");
+        assert!(!rewritten.contains('~'), "{rewritten}");
+        assert_eq!(rewritten.len(), "/odom__".len() + 8);
+    }
 }
 
 #[derive(Debug)]

@@ -1,0 +1,11 @@
+# robonix/system/scene/goal_room - find a navigation-safe pose inside
+# a user-defined room annotation. The returned map-frame pose is always
+# inside the room polygon; pass it to navigation/navigate.
+
+string room_id
+---
+bool reachable
+float64 x
+float64 y
+float64 yaw
+string reason

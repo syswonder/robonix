@@ -32,9 +32,10 @@ pub struct SomaConfig {
     ///   * this file, for robot id and URDF reference
     ///   * the URDF pointed at by `urdf.path` (resolved relative to
     ///     this file)
-    ///   * `robonix_manifest.yaml` next to it, for the primitive/skill
-    ///     lists soma brings up in stages 1 and 2.
     pub robot_yaml: PathBuf,
+    /// Exact deploy manifest selected by `rbnx boot -f`. Defaults to the
+    /// standard manifest next to `robot_yaml`.
+    pub deployment_manifest: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -54,6 +55,9 @@ pub struct Args {
     /// providing it explicitly.
     #[arg(long = "robot-yaml", env = "ROBONIX_SOMA_ROBOT_YAML")]
     pub robot_yaml: Option<PathBuf>,
+
+    #[arg(long = "deployment-manifest", env = "ROBONIX_SOMA_DEPLOYMENT_MANIFEST")]
+    pub deployment_manifest: Option<PathBuf>,
 
     /// Optional YAML file whose keys override the built-in defaults
     /// (below CLI/env in the precedence chain). No file ships with
@@ -87,6 +91,8 @@ struct FileConfig {
     provider_id: Option<String>,
     #[serde(default)]
     robot_yaml: Option<PathBuf>,
+    #[serde(default)]
+    deployment_manifest: Option<PathBuf>,
 }
 
 impl SomaConfig {
@@ -105,6 +111,17 @@ impl SomaConfig {
                  or provide it in --config <yaml>"
             ),
         };
+        let deployment_manifest = args
+            .deployment_manifest
+            .or(file_cfg.deployment_manifest)
+            .map(|path| absolute_path(path, config_dir))
+            .transpose()?
+            .unwrap_or_else(|| {
+                robot_yaml
+                    .parent()
+                    .expect("robot_yaml is absolute")
+                    .join("robonix_manifest.yaml")
+            });
 
         Ok(Self {
             atlas_endpoint: args
@@ -120,6 +137,7 @@ impl SomaConfig {
                 .or(file_cfg.provider_id)
                 .unwrap_or_else(|| DEFAULT_PROVIDER_ID.to_string()),
             robot_yaml,
+            deployment_manifest,
         })
     }
 
@@ -130,6 +148,10 @@ impl SomaConfig {
         self.robot_yaml
             .parent()
             .expect("robot_yaml is an absolute file path")
+    }
+
+    pub fn deployment_manifest(&self) -> &Path {
+        &self.deployment_manifest
     }
 }
 
@@ -192,6 +214,7 @@ mod tests {
             listen: None,
             provider_id: None,
             robot_yaml: Some(yaml.clone()),
+            deployment_manifest: None,
             config: None,
             log: None,
             config_json: None,
@@ -199,9 +222,31 @@ mod tests {
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.robot_yaml, yaml);
         assert_eq!(cfg.manifest_dir(), repo_root().join("examples/test_ci"));
+        assert_eq!(
+            cfg.deployment_manifest(),
+            repo_root().join("examples/test_ci/robonix_manifest.yaml")
+        );
         assert_eq!(cfg.atlas_endpoint, DEFAULT_ATLAS_ENDPOINT);
         assert_eq!(cfg.listen, DEFAULT_LISTEN);
         assert_eq!(cfg.provider_id, DEFAULT_PROVIDER_ID);
+    }
+
+    #[test]
+    fn accepts_explicit_deployment_manifest() {
+        let yaml = repo_root().join("examples/test_ci/soma.yaml");
+        let selected = repo_root().join("examples/test_ci/robonix_manifest.profile.yaml");
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            robot_yaml: Some(yaml),
+            deployment_manifest: Some(selected.clone()),
+            config: None,
+            log: None,
+            config_json: None,
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+        assert_eq!(cfg.deployment_manifest(), selected);
     }
 
     #[test]
@@ -216,6 +261,7 @@ mod tests {
             listen: None,
             provider_id: None,
             robot_yaml: None,
+            deployment_manifest: None,
             config: Some(config_path),
             log: None,
             config_json: None,
@@ -238,6 +284,7 @@ mod tests {
             listen: Some("127.0.0.1:70000".into()),
             provider_id: None,
             robot_yaml: Some(PathBuf::from("/abs/cli.yaml")),
+            deployment_manifest: None,
             config: Some(config_path),
             log: None,
             config_json: None,
@@ -254,6 +301,7 @@ mod tests {
             listen: None,
             provider_id: None,
             robot_yaml: None,
+            deployment_manifest: None,
             config: None,
             log: None,
             config_json: None,

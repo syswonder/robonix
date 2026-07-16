@@ -1,5 +1,5 @@
 # Scene MCP server — current-state semantic + geometric map of the
-# robot's environment. Exposes 5 read-only MCP tools for Pilot.
+# robot's environment. Exposes 6 read-only MCP tools for Pilot.
 #
 # Deployment shape: scene runs in its OWN docker container (image
 # `robonix-scene`, built by scripts/build.sh). Joins host network so:
@@ -28,9 +28,12 @@ package:
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
+stop: docker rm -f "${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
+
 capabilities:
   - name: robonix/system/scene/list_objects
   - name: robonix/system/scene/goal_near
+  - name: robonix/system/scene/goal_room
   - name: robonix/system/scene/get_scene_graph
   - name: robonix/system/scene/get_object_context
   - name: robonix/system/scene/list_relations

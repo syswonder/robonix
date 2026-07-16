@@ -40,6 +40,38 @@ export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ro
 robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
 cd "$SCRIPT_DIR"
 
+# Webots world / robot launch args.
+# Usage:
+#   ./start.sh --world your_new_world.wbt
+#   ROBONIX_WEBOTS_WORLD=your_new_world.wbt ./start.sh
+export ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
+export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --world|-w)
+      export ROBONIX_WEBOTS_WORLD="$2"
+      shift 2
+      ;;
+    --robot|-r)
+      export ROBONIX_WEBOTS_ROBOT="$2"
+      shift 2
+      ;;
+    --help|-h)
+      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]"
+      exit 0
+      ;;
+    *)
+      echo "[sim/start] unknown argument: $1" >&2
+      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+echo "[sim/start] using Webots world: $ROBONIX_WEBOTS_WORLD"
+echo "[sim/start] using robot URDF: $ROBONIX_WEBOTS_ROBOT"
+
 # Auto-detect DISPLAY if the launching shell didn't export one. Probes
 # the standard local X server slots via `xset q`; if any responds, use
 # it. Falls back to :0 so headless / non-X bash still gets a sensible
@@ -105,11 +137,24 @@ if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
   echo "[sim/start] stream mode — merging compose.stream.yaml (WS :1234, viewer :8080)"
 fi
 
-# X11 GUI: ensure docker can reach the local DISPLAY. xhost is harmless
-# on systems without an X server (it just fails silently).
-if command -v xhost &>/dev/null; then
-  xhost +local:docker >/dev/null 2>&1 || true
-fi
+allow_x11_for_docker() {
+  if ! command -v xhost &>/dev/null; then
+    echo "[sim/start] warning: xhost not found; Docker may not be allowed to open DISPLAY=$DISPLAY"
+    return 0
+  fi
+
+  local ok=0
+  xhost +SI:localuser:root >/dev/null 2>&1 && ok=1 || true
+  xhost +local:root >/dev/null 2>&1 && ok=1 || true
+  xhost +local:docker >/dev/null 2>&1 && ok=1 || true
+  if [[ "$ok" != "1" ]]; then
+    echo "[sim/start] warning: failed to authorize Docker for DISPLAY=$DISPLAY"
+    echo "[sim/start] If Webots exits with Qt xcb / 'No protocol specified', run:"
+    echo "[sim/start]   xhost +SI:localuser:root +local:root"
+  fi
+}
+
+allow_x11_for_docker
 
 # Bring sim up detached so we can layer rviz on top before tailing logs.
 docker compose "${CF[@]}" up --build -d
@@ -153,9 +198,7 @@ fi
 # into `docker exec`, independent of the container's internal Xorg :48.
 # So an xrdp / NoMachine user still gets rviz inside their session;
 # webots' 3D view streams to the browser via :8080 separately.
-if command -v xhost &>/dev/null; then
-    xhost +local:docker >/dev/null 2>&1 || true
-fi
+allow_x11_for_docker
 echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
 # Per-user log path: /tmp is shared on multi-tenant boxes and a fixed
 # /tmp/rviz2.log file owned by another user blocks rewrite. ${USER:-rviz}

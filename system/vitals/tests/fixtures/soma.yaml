@@ -1,0 +1,13 @@
+urdf:
+  path: ./minimal.urdf
+  root_link: base_link
+  model_name: test_robot
+
+robot:
+  id: test_robot
+  display_name: "Minimal test robot"
+  family: test_fixture
+  root_part: base
+
+description:
+  summary: "Minimal robot fixture for Vitals health pipeline tests."

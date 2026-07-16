@@ -56,6 +56,8 @@ services:
       XAUTHORITY: /root/.Xauthority
       QT_X11_NO_MITSHM: "1"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROBONIX_WEBOTS_WORLD: "${ROBONIX_WEBOTS_WORLD:-office.wbt}"
+      ROBONIX_WEBOTS_ROBOT: "${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
       # Headless render backend (host|nvidia|xvfb|auto) + display number,
       # forwarded so a deploy can pick GPU-backed offscreen rendering WITHOUT
       # the browser stream (compose.stream.yaml). Lets a CI run render on its
@@ -64,6 +66,14 @@ services:
       ROBONIX_SIM_XDISPLAY: "${ROBONIX_SIM_XDISPLAY:-:48}"
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
       RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+      # Optional full offline Webots asset library. Default is off: office.wbt
+      # uses the seed baked into the image. Set ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
+      # before sim/start.sh to download Cyberbotics' assets-R2025a.zip into the
+      # persistent Webots cache volume, via ghfast.top by default.
+      ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS: "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS:-0}"
+      ROBONIX_WEBOTS_ASSETS_VERSION: "${ROBONIX_WEBOTS_ASSETS_VERSION:-R2025a}"
+      ROBONIX_WEBOTS_ASSETS_URL: "${ROBONIX_WEBOTS_ASSETS_URL:-}"
+      ROBONIX_WEBOTS_ASSETS_MIRROR: "${ROBONIX_WEBOTS_ASSETS_MIRROR:-https://ghfast.top/}"
       # Match docker/run.sh so Webots can use host GL stack when GPU is wired in.
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
       NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-graphics,utility,compute}"
@@ -99,4 +109,8 @@ services:
 
 volumes:
   webots_cache:
+    # Webots assets are immutable cache data. CI can point this at a
+    # pre-warmed runner-local volume so each isolated compose project does not
+    # start with an empty asset cache and block on raw.githubusercontent.com.
+    name: ${ROBONIX_WEBOTS_CACHE_VOLUME:-robonix_tiago_sim_webots_cache}
   webots_local:

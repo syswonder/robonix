@@ -99,6 +99,8 @@ def _log_environment() -> None:
 # unified log instead of being printed to a raw stderr that nobody reads.
 log.info("phase 1/4: importing robonix_api + memsearch backend")
 try:
+    from memsearch_service.onnx_compat import configure_onnxruntime  # noqa: E402
+    configure_onnxruntime()
     from robonix_api import Service, Ok, Err, Deferred  # noqa: E402,F401
     from std_msgs_mcp import Empty, String  # noqa: E402
     from memsearch import MemSearch  # noqa: E402

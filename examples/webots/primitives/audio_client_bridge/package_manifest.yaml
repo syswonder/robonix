@@ -1,0 +1,56 @@
+# Audio primitive (audio client bridge variant) — drop-in replacement for the
+# default ALSA `audio_driver` package when you want robonix's audio I/O
+# physically on a macOS machine while atlas/pilot/liaison run on Linux.
+#
+# The client opens one outbound WebSocket to this package on the Linux host.
+# The robot therefore does not store a client IP address. This package
+# registers the usual `robonix/primitive/audio/{mic,speaker,driver}` contracts
+# with Atlas and relays the connected client's PCM frames.
+#
+# Toggle by commenting one line in `examples/webots/robonix_manifest.yaml`:
+#
+#   primitive:
+#     # - name: audio_driver
+#     #   path: ./primitives/audio_driver
+#     - name: audio_client_bridge
+#       path: ./primitives/audio_client_bridge
+#       config:
+#         transport: reverse
+#         listen_port: 60002
+#
+# Same wire format as audio_driver (16 kHz / mono / s16le PCM in
+# AudioChunk frames) so liaison / scene / TTS see no difference.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.audio_client_bridge
+  version: 0.1.0
+  description: Audio primitive that proxies mic/speaker over WebSocket to an client audio device server.
+  license: MulanPSL-2.0
+
+# Distinct provider_id from `audio_driver` (`.alsa`) so both can co-exist in
+# atlas — the rbnx chat provider_id picker then has a real choice. Same
+# `robonix/primitive/audio/*` contract surface as audio_driver, so
+# consumers (liaison voice path, scene optional audio) don't care
+# which backend is loaded.
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+# 1 package = 1 cap. The client_audio_server daemon on the
+# client side enumerates client audio devices; we surface them through the
+# optional list_devices/select_device contracts so the user can pick
+# which physical mic/speaker the cap's driver routes to. Those client audio
+# devices are driver-internal — not separate robonix caps.
+stop: |
+  pkill -TERM -f "[p]ython3 -m audio_client_bridge.main" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython3 -m audio_client_bridge.main" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/primitive/audio/mic
+  - name: robonix/primitive/audio/speaker
+  - name: robonix/primitive/audio/driver
+  - name: robonix/primitive/audio/list_devices
+  - name: robonix/primitive/audio/select_device
+  - name: robonix/primitive/audio/bridge_info

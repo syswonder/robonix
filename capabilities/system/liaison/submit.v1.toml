@@ -2,7 +2,7 @@
 [contract]
 id      = "robonix/system/liaison/submit"
 version = "1"
-kind    = "system"
+kind    = "service"
 idl     = "liaison/srv/SubmitTask.srv"
 description = "Submit a user task through Liaison and stream Pilot events back."
 

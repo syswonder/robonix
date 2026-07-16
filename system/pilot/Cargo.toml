@@ -24,6 +24,7 @@ robonix-scribe.workspace = true
 uuid.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 async-openai = { workspace = true, features = ["chat-completion"] }
+reqwest.workspace = true
 futures-util = "0.3"
 robonix-atlas = { path = "../atlas" }
 

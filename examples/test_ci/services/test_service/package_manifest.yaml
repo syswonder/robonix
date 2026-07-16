@@ -5,13 +5,15 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 package:
-  name: com.vendor.test_service
+  name: robonix.service.test_service
   version: 0.0.1
-  vendor: vendor
-  description: TODO
+  description: Test service fixture.
+  tags: [service, test]
+  maintainers:
+    - Test Maintainer <test@example.com>
   license: Apache-2.0
 
 capabilities: []
 
 depends:
-  - name: com.vendor.test_pkg_remote
+  - name: robonix.service.test_pkg_remote

@@ -137,10 +137,19 @@ fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf
 
 pub async fn execute_build(
     config: Config,
+    file: Option<PathBuf>,
     path: Option<PathBuf>,
     global: Option<String>,
     clean: bool,
 ) -> Result<()> {
+    if let Some(file) = file {
+        let manifest_path = resolve_local_path_for_filesystem(&file)?;
+        if !manifest_path.is_file() {
+            anyhow::bail!("deployment manifest not found: {}", manifest_path.display());
+        }
+        return build_deploy_manifest(&manifest_path, &config, clean);
+    }
+
     // Deploy-manifest mode: if `path` (or cwd, when -p is omitted)
     // contains a `robonix_manifest.yaml`, build every primitive /
     // service / skill entry it lists. This lets the user run
@@ -185,6 +194,8 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         .with_context(|| format!("read {}", manifest_path.display()))?;
     let root: Value =
         serde_yaml::from_str(&raw).with_context(|| format!("parse {}", manifest_path.display()))?;
+    let root = super::deploy::prepare_manifest(root, config.robonix_source_path.as_deref())
+        .with_context(|| format!("prepare {}", manifest_path.display()))?;
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
 
     output::action(
@@ -621,6 +632,7 @@ pub async fn execute_start(
         .map(|(k, v)| format!("export {}={}", k, shell_escape(v)))
         .collect::<Vec<_>>()
         .join("; ");
+    let pythonpath_export = generated_pythonpath_export(&package_root);
     let start_body = manifest.start.trim();
     let setup_bash = package_root
         .join("rbnx-build")
@@ -632,7 +644,7 @@ pub async fn execute_start(
     } else {
         String::new()
     };
-    let prefix_parts: Vec<String> = [setup_source, exports]
+    let prefix_parts: Vec<String> = [setup_source, exports, pythonpath_export]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
@@ -695,6 +707,32 @@ pub async fn execute_start(
 
     output::success(&format!("Package {} finished", manifest.package.name));
     Ok(())
+}
+
+/// Build the package-local Python import path without touching a colcon
+/// workspace. A real `rbnx-build/ws/install/setup.bash`, when present, is
+/// sourced first; this export then prepends generated stubs while preserving
+/// every Python path contributed by that overlay and the parent environment.
+fn generated_pythonpath_export(package_root: &Path) -> String {
+    let codegen_root = package_root.join("rbnx-build").join("codegen");
+    let mut paths = vec![package_root.to_path_buf()];
+    for path in [
+        codegen_root.join("proto_gen"),
+        codegen_root.join("robonix_mcp_types"),
+    ] {
+        if path.is_dir() {
+            paths.push(path);
+        }
+    }
+    let joined = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    format!(
+        "export PYTHONPATH={}:${{PYTHONPATH:-}}",
+        shell_escape(&joined)
+    )
 }
 
 const CMD_INIT_DELIVERY: u32 = 0;
@@ -949,4 +987,37 @@ fn merge_dotted(root: &mut serde_json::Value, key: &str, v: serde_json::Value) -
         .ok_or_else(|| anyhow::anyhow!("--set {key}: parent is not an object"))?
         .insert(last.to_string(), v);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rbnx-start-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn generated_pythonpath_is_injected_without_a_setup_stub() {
+        let root = temp_root("pythonpath");
+        let proto = root.join("rbnx-build/codegen/proto_gen");
+        let mcp = root.join("rbnx-build/codegen/robonix_mcp_types");
+        fs::create_dir_all(&proto).unwrap();
+        fs::create_dir_all(&mcp).unwrap();
+
+        let export = generated_pythonpath_export(&root);
+
+        assert!(export.contains(&root.display().to_string()));
+        assert!(export.contains(&proto.display().to_string()));
+        assert!(export.contains(&mcp.display().to_string()));
+        assert!(export.ends_with(":${PYTHONPATH:-}"));
+        assert!(!root.join("rbnx-build/ws/install/setup.bash").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

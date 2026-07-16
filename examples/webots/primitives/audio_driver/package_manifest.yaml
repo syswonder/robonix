@@ -18,7 +18,7 @@ package:
 
 # atlas provider_id this package will register at runtime — distinct from
 # `package.name` (which is the deployment identity). The `.alsa` suffix
-# distinguishes this from `audio_macos_bridge` so both can co-exist in
+# distinguishes this from `audio_client_bridge` so both can co-exist in
 # atlas; the provider_id picker in rbnx chat then has a real choice. Both
 # implementations register the same `robonix/primitive/audio/*`
 # contracts, so consumers (liaison voice path, scene optional audio)
@@ -32,6 +32,11 @@ start: bash scripts/start.sh
 # ALSA naturally has many "hw:X,Y" devices behind one driver, so we
 # expose the routing table. These are driver-internal devices, not
 # robonix caps.
+stop: |
+  pkill -TERM -f "[p]ython3 -m audio_driver.main" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython3 -m audio_driver.main" 2>/dev/null || true
+
 capabilities:
   - name: robonix/primitive/audio/mic
   - name: robonix/primitive/audio/speaker

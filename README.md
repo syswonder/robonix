@@ -5,7 +5,7 @@
 <h3 align="center">Robonix — The Embodied AI Operating System</h3>
 
 <p align="center">
-  <em>An EAIOS that turns the robot body into a uniform, capability-first runtime — so models, sensors, and actuators plug in once and reuse everywhere.</em>
+  <em>A system substrate for building embodied intelligence across heterogeneous robots.</em>
 </p>
 
 <p align="center">
@@ -14,27 +14,150 @@
   <img src="https://img.shields.io/github/languages/code-size/syswonder/robonix?color=green&style=flat-square" alt="Code size" />
   <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=lightgray&style=flat-square" alt="Repo size" />
   <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange&style=flat-square" alt="Top language" />
+  <a href="https://syswonder.github.io/robonix-package-catalog/packages/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsyswonder.github.io%2Frobonix-package-catalog%2Fapi%2Fv1%2Fpackages&query=%24.packages.length&label=Robonix%20packages&color=0f766e&style=flat-square" alt="Robonix packages" /></a>
+  <a href="#supported-robots"><img src="https://img.shields.io/badge/Supported%20robots-2-2563eb?style=flat-square" alt="Supported robots: 2" /></a>
 </p>
 
 <br />
 
+## Robonix
+
+Robonix is an operating system for embodied intelligence. It explores how to
+construct a robot's "brain" at the system level: a common substrate on which
+models can perceive, understand, plan, and act through heterogeneous robot
+bodies without being rewritten around every vendor SDK.
+
+Robonix treats AI models and skills as programs and exposes robot hardware as
+discoverable capabilities. This separation lets robot developers integrate a
+body once, while model and skill developers build against shared interfaces for
+cameras, lidar, chassis, arms, mapping, navigation, speech, and other
+capabilities. The long-term goal is simple: **train once, deploy on any robot**.
+
+> [!WARNING]
+> Robonix is in early development. APIs and internal designs may change before
+> a versioned release.
+
+## Supported Robots
+
+| Robot | Integrated hardware | Maintained by | Deployment | Catalog |
+| --- | --- | --- | --- | --- |
+| AgileX Ranger Mini v3 | Ranger Mini v3 chassis; Livox MID-360 lidar and IMU; Intel RealSense D435i RGB-D camera; optional AgileX Piper arm; audio | syswonder | [`robot-agilex-ranger_mini_v3`](https://github.com/syswonder/robot-agilex-ranger_mini_v3) | [`robonix.robot.agilex.ranger_mini_v3`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.agilex.ranger_mini_v3/) |
+| DEEP Robotics Lite3 | Lite3 quadruped chassis; Livox MID-360 lidar and IMU; Orbbec Gemini 330-series RGB-D camera | [Bunnycxk](https://github.com/Bunnycxk) | [`robot-deep_robotics-lite3`](https://github.com/syswonder/robot-deep_robotics-lite3) | [`robonix.robot.deep_robotics.lite3`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.deep_robotics.lite3/) |
+
+Each deployment links the complete robot manifest and its primitive, service,
+and skill dependencies. See the
+[robot catalog](https://syswonder.github.io/robonix-package-catalog/robots/)
+for published integrations.
+
+## Quick Start
+
+Install Robonix:
+
+```bash
+git clone --recursive --branch dev https://github.com/syswonder/robonix.git
+cd robonix
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+make install
+```
+
+Start the Webots simulator in one terminal:
+
+```bash
+export DISPLAY=:0
+bash examples/webots/sim/start.sh
+```
+
+Boot Robonix in a second terminal with any OpenAI-compatible VLM endpoint:
+
+```bash
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export VLM_BASE_URL=https://api.openai.com/v1
+export VLM_API_KEY=sk-...
+export VLM_MODEL=your-model-name
+
+cd examples/webots
+rbnx build
+rbnx boot
+```
+
+Then run `rbnx chat` in a third terminal. Try `go to room 101`, `what can you
+see?`, or `explore the office`. See the
+[Getting Started guide](https://robonix.syswonder.org/getting-started/quickstart.html)
+for the complete walkthrough.
 
 https://github.com/user-attachments/assets/604b2c7f-3b6d-46be-858b-c52acaf686e3
 
+## Services, Skills, and Robot Integrations
 
-## Status
+Robonix grows in two directions: reusable services and skills above the system
+layer, and reusable robot integrations below it. Both use the same package and
+capability model, so a model or skill depends on what a robot can do rather
+than on a particular vendor implementation.
 
-> \[!WARNING]
-> Robonix is in early development. APIs, IDL layouts, and internal designs
-> may change without notice. No API stability until a versioned release.
+### Services and skills
 
-## What it is
+A **service** provides a general capability that many models and skills can
+reuse, such as mapping, navigation, memory, speech, or voice identification.
+Services own their runtime state and interfaces, and a deployment can replace
+one implementation without changing the skills that consume it.
 
-Robonix is the **operating system** between a robot's hardware and an embodied
-LLM/VLM/VLA/WAM brain. It standardises how device drivers, runtime services, user
-skills, and the planner discover and talk to each other; it owns identity,
-configuration, time, transport, logging, health, body model, scene model,
-execution, and safety as named, replaceable components.
+A **skill** is a task-facing package and is the closest Robonix equivalent to an
+application in the operating-system analogy. It may orchestrate several
+services and primitives, wrap a learned VLA policy, or combine model inference
+with scripts and task-specific logic. Exploration, greeting people,
+transporting an object, and grasp-and-place behaviors are examples of skills.
+Skills remain independently installable and can be activated only when a task
+needs them.
+
+Services and skills declare capabilities through Atlas. Pilot can select those
+capabilities while planning, and Executor dispatches the resulting RTDL nodes
+while preserving per-task state, concurrency, and cancellation. Browse current
+drivers, services, and skills in the
+[package catalog](https://syswonder.github.io/robonix-package-catalog/packages/).
+The package badge above is updated from the
+[catalog API](https://syswonder.github.io/robonix-package-catalog/api/v1/packages).
+
+### Hardware and robot deployments
+
+A **primitive** adapts one physical device, such as a camera, lidar, chassis,
+arm, gripper, or audio device, to Robonix capability contracts. A robot
+deployment repository assembles these primitives with the complete body
+description, selected services and skills, and runtime configuration for one
+platform. This gives models and skills one consistent view of each robot.
+Browse complete integrations in the
+[robot catalog](https://syswonder.github.io/robonix-package-catalog/robots/).
+
+### Build services and skills
+
+[template-rbnx](https://github.com/syswonder/template-rbnx) provides a minimal
+service and skill package that can be built and booted without robot hardware.
+Use it to define capability interfaces, configuration, lifecycle hooks, and
+package metadata before connecting the package to a real deployment.
+
+[Robonix Skill Toolkit](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
+supports the VLA skill workflow: collect teleoperation data, fine-tune an
+[OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy the resulting
+skill on a real robot arm such as the
+[AgileX Piper](https://github.com/agilexrobotics/Agilex-College).
+
+## Why an Operating System?
+
+Robonix is more than a set of robot APIs. It provides the shared execution
+environment in which models, skills, services, and hardware providers coexist.
+Models and skills use common capability contracts, while the system handles
+discovery, body and environment state, task execution, provider lifecycle,
+policy checks, cancellation, and structured history.
+
+In the operating-system analogy, models and skills are programs and robot
+capabilities are resources. Long-running and concurrent plans have explicit
+identity and state, so they can be observed, steered, and cancelled without
+embedding these mechanisms independently in every skill.
+
+## System architecture
+
+The system components below keep planning, execution, state, communication,
+health, and safety separate from individual hardware drivers and skills.
 
 | Component                        | Responsibility                                                                          |
 | -------------------------------- | --------------------------------------------------------------------------------------- |
@@ -51,9 +174,9 @@ execution, and safety as named, replaceable components.
 | **[soma](system/soma/)**         | Robot self-description (body model): device topology and primitive abstraction          |
 | **[vitals](system/vitals/)**     | Robot power and component-health monitoring                                             |
 
-On top of system, three open categories — provided as
-contracts (61 standard interfaces in `capabilities/`) and reference
-implementations alongside the system:
+Robot-facing and model- or skill-facing packages fall into three open categories.
+They implement shared contracts from [`capabilities/`](capabilities/) and may be
+replaced independently in each deployment:
 
 * **primitive** — one device per package (camera, lidar, chassis, arm). Lives
   in deployment repos and per-example folders (e.g. `examples/webots/primitives/`).
@@ -87,89 +210,66 @@ has no ROS 2 support, run that provider in a Docker container. Within a single
 Robonix deployment, all ROS 2-based capability providers must use the same
 ROS 2 distribution (Foxy / Humble / Jazzy); **Humble is recommended**.
 
-## Quickstart
+## Webots Environments
+
+The simulator launcher supports multiple built-in `.wbt` environments. Select one
+explicitly with `--world` or `ROBONIX_WEBOTS_WORLD`:
 
 ```bash
-git clone --recursive https://github.com/syswonder/robonix
-cd robonix
-python3 -m pip install --user uv   # if uv is not already installed
-make install   # builds the Cargo workspace and installs
-               # rbnx + robonix-{atlas,pilot,executor,liaison,codegen}
-               # to ~/.cargo/bin, then registers this clone via `rbnx setup`
+bash examples/webots/sim/start.sh --world office.wbt
+bash examples/webots/sim/start.sh --world apartment.wbt
+ROBONIX_WEBOTS_WORLD=break_room.wbt bash examples/webots/sim/start.sh
 ```
 
-The Webots Tiago example (`examples/webots/`) is the standard end-to-end demo.
-Two terminals — the simulator and Robonix itself.
+Available worlds in `examples/webots/sim/ros_ws/src/eaios_webots/worlds/`:
+`office.wbt`, `apartment.wbt`, `complete_apartment.wbt`, `break_room.wbt`, and
+`kitchen.wbt`.
+
+`office.wbt` is the fully seeded default and is recommended for a first run.
+Other worlds may need Cyberbotics' offline asset bundle on their first launch:
 
 ```bash
-# (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
-export DISPLAY=:0
-bash examples/webots/sim/start.sh
+ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 \
+  bash examples/webots/sim/start.sh --world apartment.wbt
+```
 
-# Optional for CI/headless debugging only; normal quickstart uses the Webots GUI above.
-# export ROBONIX_SIM_STREAM=1
-# export WEBOTS_HEADLESS_MODE=auto
-# bash examples/webots/sim/start.sh
+The launcher caches the bundle in the `webots_cache` Docker volume. Network
+mirror overrides are documented in the
+[Webots example](examples/webots/README.md).
 
-# (2) — Robonix: system services + Tiago primitives + Nav2 + scene.
-# Zenoh is the default ROS 2 RMW for this deploy.
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
-export VLM_API_KEY=sk-...
-export VLM_MODEL=gpt-5.5
+|  |  |
+|---|---|
+| `office.wbt`<br>![office](examples/webots/sim/thumbnails/office.jpg) | `apartment.wbt`<br>![apartment](examples/webots/sim/thumbnails/apartment.jpg) |
+| `complete_apartment.wbt`<br>![complete apartment](examples/webots/sim/thumbnails/complete_apartment.jpg) | `break_room.wbt`<br>![break room](examples/webots/sim/thumbnails/break_room.jpg) |
+| `kitchen.wbt`<br>![kitchen](examples/webots/sim/thumbnails/kitchen.jpg) |  |
 
-cd examples/webots
-rbnx build       # first run pulls model weights + docker images, may take a while
+Stop the example with `rbnx shutdown` from `examples/webots`, followed by
+`bash examples/webots/sim/stop.sh` from the repository root.
+
+## Quick Development
+
+The [Robonix package template](https://github.com/syswonder/template-rbnx)
+contains a mock primitive, a service, and a skill that boot without robot
+hardware:
+
+```bash
+git clone https://github.com/syswonder/template-rbnx.git
+cd template-rbnx
+cp .env.example .env
+# Fill in the three VLM values in .env.
+set -a; source .env; set +a
+rbnx build
 rbnx boot
 ```
 
-Robonix keeps the ROS 2 middleware selectable, but the Webots deploy defaults to
-Zenoh RMW. Our CI and local Webots tests run a single-machine, multi-container
-ROS graph with high-rate TF, RGB-D, lidar, map, Nav2, and scene traffic. Fast
-DDS has been less stable in that topology, mainly around discovery and
-cross-container communication, and its DDS discovery/state overhead is heavier.
-Zenoh RMW keeps the ROS 2 APIs unchanged, uses a local `rmw_zenohd` router daemon
-for discovery and routed traffic, and can still use peer-to-peer data paths
-between nodes. The Webots sim container starts the router automatically when
-`RMW_IMPLEMENTATION=rmw_zenoh_cpp`; switch back explicitly with
-`RMW_IMPLEMENTATION=rmw_fastrtps_cpp` when comparing behavior.
+Run `rbnx caps` to inspect the live providers, then try `rbnx chat` and ask the
+robot to say hello. Each example package keeps its manifest, `config.spec`,
+build/start scripts, implementation, and optional capability definitions in
+one directory. Start there, then follow the
+[package integration guide](https://robonix.syswonder.org/integration-guide/package-catalog.html)
+to publish a reusable package.
 
-References: [`rmw_zenoh` design](https://github.com/ros2/rmw_zenoh/blob/rolling/docs/design.md),
-Chovet et al. ["Performance Comparison of ROS2 Middlewares for Multi-robot Mesh Networks in Planetary Exploration"](https://link.springer.com/article/10.1007/s10846-024-02211-2)
-(Table 4 reports Zenoh improving reachability by 146.93% / 58.17%, reducing per-message data overhead by 47.82% / 25.93%, and reducing CPU usage by 41.27% / 39.76%, with higher RAM usage), and Liang et al.
-["A Performance Study on the Throughput and Latency of Zenoh, MQTT, Kafka, and DDS"](https://arxiv.org/abs/2303.09419).
-
-Once `rbnx boot` reports the stack is up:
-
-```bash
-# (3)
-rbnx caps          # list registered capabilities + interfaces
-rbnx chat          # interactive TUI chat with the pilot
-```
-
-Keeping upstream packages fresh: some providers in the manifest are cloned
-from upstream git repos (e.g. `mapping`, `nav2`, `explore` declared with
-`url:`). They are cloned once and reused, so they don't advance on their own.
-`rbnx boot` and `rbnx build` print a notice when a local clone is behind its
-remote; sync to the latest upstream commit with `rbnx update`:
-
-```bash
-rbnx update                  # update every remote provider in this deploy (asks y/N)
-rbnx update -p <package dir>  # or just one package
-```
-
-Tear-down:
-
-```bash
-cd examples/webots && rbnx shutdown    # reads rbnx-boot/state.json,
-                                       # SIGTERMs each component's PGID
-bash examples/webots/sim/stop.sh       # then stop the Webots container
-```
-
-Full first-run walkthrough:
-[**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
-
-## Repository layout
+## Repository Layout
 
 ```
 system/         system components, one directory each
@@ -189,7 +289,7 @@ ones their own `pyproject.toml`. There is no top-level `rust/` /
 `python/` split; the runtime role is what determines where a component
 lives, not the implementation language.
 
-## Architecture
+## Learn More
 
 Dive deeper:
 
@@ -197,15 +297,21 @@ Dive deeper:
 * [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
 * [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
-## Ecosystem
+## Package Model
 
 Robonix is built from small, swappable **packages**, each implementing one or
-more capability contracts under a `robonix/<kind>/<area>/*` namespace (browse
-them in the [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md)).
-Packages come in two flavours:
+more capability contracts normally grouped under a primary
+`robonix/<kind>/<area>/*` namespace. Shared framework contracts may be
+implemented across those provider namespaces. Namespace mismatches are
+diagnostic rather than a runtime authorization boundary. The contract
+definitions are documented in the
+[interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md).
 
-- **Built-in reference packages** ship in this repo under [`services/`](services/) and deploy as-is.
-- **Community packages** live in their own repos and are pulled in at boot via the manifest's `url:` field — fork one as a template to add new hardware or behaviour.
+This repository contains Robonix system components, built-in reference services, and
+examples such as Webots/Tiago. Reusable community packages are indexed by the
+[Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/);
+their source stays in separate package repositories instead of being duplicated
+here.
 
 ### Built-in services — [`services/`](services/)
 
@@ -215,41 +321,63 @@ Packages come in two flavours:
 | [`speech`](services/speech) | `robonix/service/speech/*` | Voice I/O — ASR, TTS (incl. streaming), dialog, speaker listing. |
 | [`voiceprint`](services/voiceprint) | `robonix/service/voiceprint/*` | Speaker identification (ECAPA-TDNN) — enroll / identify / list / delete. |
 
-> `scene` (3D scene graph) and the core runtime (`atlas`, `executor`, `pilot`, `liaison`) are **system** components under [`system/`](system/), not services.
+> `scene` (3D scene graph), `atlas`, `executor`, `pilot`, and `liaison` are
+> **system** components under [`system/`](system/), not services.
 
-### Community packages
+### External packages
 
-Standalone repos, cloned at boot via `url:` in the deploy manifest.
+Use the [Robonix Package Catalog](https://syswonder.github.io/robonix-package-catalog/)
+to find reusable primitive, service, and skill packages maintained outside this
+repository. The catalog also exposes a machine-readable static JSON API:
 
-**Primitives** — one hardware device per package:
+| Method | Path | Parameters |
+| --- | --- | --- |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/packages` | none |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/search` | none; filter client-side |
+| `GET` | `https://syswonder.github.io/robonix-package-catalog/api/v1/package/<package-name>` | `package-name` is the exact `package.name`, URL-encoded |
 
-| Package | Hardware | Namespace |
-|---|---|---|
-| [`ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx) | AgileX Ranger Mini v3 chassis | `robonix/primitive/chassis/*` |
-| [`mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx) | Livox MID-360 — point cloud | `robonix/primitive/lidar/*` |
-| [`mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx) | Livox MID-360 — IMU | `robonix/primitive/imu/*` |
-| [`realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx) | Intel RealSense camera | `robonix/primitive/camera/*` |
+Example:
 
-**Services** — robot-level algorithms:
+```js
+const base = 'https://syswonder.github.io/robonix-package-catalog/api/v1';
+const catalog = await fetch(`${base}/packages`).then(r => r.json());
+const mapping = await fetch(`${base}/package/${encodeURIComponent('robonix.service.mapping')}`)
+  .then(r => r.json());
+```
 
-| Package | What it does | Namespace |
-|---|---|---|
-| [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) | SLAM mapping (RTAB-Map + FAST-LIO2) | `robonix/service/map/*` |
-| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
+Repository naming follows the catalog convention:
 
-**Skills** — LLM-triggered composite tasks:
+- `primitive-[company]-[model]-[primitive_type]-rbnx` for primitive packages.
+- `service-[service_namespace]-rbnx` for service packages.
+- `skill-[skill_namespace]-rbnx` for skill packages.
 
-| Package | What it does | Namespace |
-|---|---|---|
-| [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx) | Autonomous frontier room exploration | `robonix/skill/explore/*` |
-| [`greet_rbnx`](https://github.com/enkerewpo/greet_rbnx) | Greet passers-by — YOLO person detection → VLM line → speak | `robonix/skill/greet/*` |
+To contribute a community package:
 
-**Tools & deployments:**
+1. Put the package source in its own GitHub repository. The repository root
+   must contain `package_manifest.yaml`.
+2. In `package_manifest.yaml`, provide catalog metadata under `package`:
+   `name`, `version`, `description`, `tags`, and `maintainers`.
+   `maintainers` is a list of `Name <email@domain>` entries.
+3. Open a pull request to
+   [`syswonder/robonix-package-catalog`](https://github.com/syswonder/robonix-package-catalog)
+   and add only `name` + `repo` to `catalog.yaml`. The catalog CI fetches the
+   package manifest from GitHub, validates the name and metadata, generates the
+   website/API, and deploys it to GitHub Pages.
 
-| Repo | What it is |
-|---|---|
-| [Robonix Skill Toolkit](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit) | Train VLA-based skills: collect teleop data, fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, deploy on a real arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)). |
-| [ranger_mini_deploy](https://github.com/enkerewpo/ranger_mini_deploy) | Full deploy manifest for the AgileX Ranger Mini robot at Syswonder Lab. |
+## ROS 2 and Zenoh
+
+ROS 2 is an optional Robonix transport rather than a dependency of the system
+itself. Providers that use ROS 2 may run natively or in containers, but all of
+them in one deployment must use the same ROS 2 distribution and RMW
+implementation. Humble is currently recommended for robot deployments.
+
+The Webots deployment uses `rmw_zenoh_cpp` and starts one `rmw_zenohd` router
+for its multi-container ROS graph. Primitive, service, and skill code continues
+to use normal ROS 2 APIs; the deployment selects the RMW through its process
+environment. See the
+[`rmw_zenoh` design](https://github.com/ros2/rmw_zenoh/blob/rolling/docs/design.md)
+and the [robot integration guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html)
+for topology and deployment details.
 
 ## Contributors
 

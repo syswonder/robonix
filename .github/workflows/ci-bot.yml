@@ -25,8 +25,6 @@ on:
 permissions:
   actions: read
   contents: write
-  pages: write
-  id-token: write
   pull-requests: write
   issues: write
 
@@ -177,19 +175,16 @@ jobs:
     permissions:
       contents: write
       actions: read
-      pages: write
-      id-token: write
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.publish_url.outputs.report_url }}
     outputs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
-      REPORTS_BRANCH: robonix-ci-reports
+      REPORTS_REPOSITORY: syswonder/robonix-ci-reports
+      REPORTS_BRANCH: main
+      REPORT_BASE_URL: https://syswonder.github.io/robonix-ci-reports
     steps:
       - name: Checkout trusted report generator
         uses: actions/checkout@v4
@@ -204,19 +199,41 @@ jobs:
           path: dl
           merge-multiple: true
 
+      - name: Configure report repository deploy key
+        env:
+          ROBONIX_REPORTS_DEPLOY_KEY: ${{ secrets.ROBONIX_REPORTS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROBONIX_REPORTS_DEPLOY_KEY:-}" ]; then
+            echo "ROBONIX_REPORTS_DEPLOY_KEY is required to publish reports to ${REPORTS_REPOSITORY}" >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ROBONIX_REPORTS_DEPLOY_KEY" > ~/.ssh/robonix_reports
+          chmod 600 ~/.ssh/robonix_reports
+          cat > ~/.ssh/config <<'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/robonix_reports
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
       - name: Restore report history
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf "$REPORT_SITE_DIR"
-          if git ls-remote --exit-code origin "refs/heads/${REPORTS_BRANCH}" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "${REPORTS_BRANCH}"
-            git worktree add --detach "$REPORT_SITE_DIR" FETCH_HEAD
+          if git ls-remote --exit-code "https://github.com/${REPORTS_REPOSITORY}.git" "refs/heads/${REPORTS_BRANCH}" >/dev/null 2>&1; then
+            git clone --depth=1 --branch "${REPORTS_BRANCH}" \
+              "https://github.com/${REPORTS_REPOSITORY}.git" "$REPORT_SITE_DIR"
           else
             mkdir -p "$REPORT_SITE_DIR"
             git -C "$REPORT_SITE_DIR" init -b "${REPORTS_BRANCH}"
-            git -C "$REPORT_SITE_DIR" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+            git -C "$REPORT_SITE_DIR" remote add origin "git@github.com:${REPORTS_REPOSITORY}.git"
           fi
 
       - name: Prepare self-contained report viewer assets
@@ -244,7 +261,7 @@ jobs:
           set -euo pipefail
           report_id="${{ github.run_id }}"
           report_dir="${REPORT_SITE_DIR}/reports/runs/${report_id}"
-          expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          expected_base_url="${REPORT_BASE_URL}"
           expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
           rm -rf "$report_dir"
           mkdir -p "$report_dir" "${REPORT_SITE_DIR}/reports" dl
@@ -287,62 +304,44 @@ jobs:
           set -euo pipefail
           git -C "$REPORT_SITE_DIR" config user.name "github-actions[bot]"
           git -C "$REPORT_SITE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          work_tree="$(mktemp -d)"
+          rsync -a --exclude='.git' "$REPORT_SITE_DIR"/ "$work_tree"/
+          rm -rf "$REPORT_SITE_DIR"
+          mkdir -p "$REPORT_SITE_DIR"
+          git -C "$REPORT_SITE_DIR" init -b "${REPORTS_BRANCH}"
+          git -C "$REPORT_SITE_DIR" remote add origin "git@github.com:${REPORTS_REPOSITORY}.git"
+          git -C "$REPORT_SITE_DIR" config user.name "github-actions[bot]"
+          git -C "$REPORT_SITE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rsync -a "$work_tree"/ "$REPORT_SITE_DIR"/
           git -C "$REPORT_SITE_DIR" add -A
           if git -C "$REPORT_SITE_DIR" diff --cached --quiet; then
             echo "report history unchanged"
             exit 0
           fi
           git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
-          git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
-          git -C "$REPORT_SITE_DIR" remote set-url origin \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.REPORT_SITE_DIR }}
-
-      - name: Deploy Pages (attempt 1)
-        id: deployment_1
-        continue-on-error: true
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Wait before Pages deploy retry
-        if: steps.deployment_1.outcome != 'success'
-        run: sleep 60
-
-      - name: Deploy Pages (attempt 2)
-        id: deployment_2
-        if: steps.deployment_1.outcome != 'success'
-        continue-on-error: true
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Wait before final Pages deploy retry
-        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
-        run: sleep 120
-
-      - name: Deploy Pages (attempt 3)
-        id: deployment_3
-        if: steps.deployment_1.outcome != 'success' && steps.deployment_2.outcome != 'success'
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          git -C "$REPORT_SITE_DIR" push --force origin "HEAD:${REPORTS_BRANCH}"
 
       - name: Set report URL
         id: publish_url
         run: |
           set -euo pipefail
-          page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          page_url="${REPORT_BASE_URL}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
+
+      - name: Probe report Pages URL
+        env:
+          REPORT_URL: ${{ steps.publish_url.outputs.report_url }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsSI "$REPORT_URL" >/dev/null; then
+              exit 0
+            fi
+            echo "report URL is not ready yet: ${REPORT_URL} (attempt ${attempt}/30)"
+            sleep 10
+          done
+          echo "::warning::report URL is not reachable yet; GitHub Pages may still be building: ${REPORT_URL}"
+          echo "Report URL is not reachable yet; GitHub Pages may still be building: ${REPORT_URL}" >> "$GITHUB_STEP_SUMMARY"
 
   # ── Edit the status comment with the result + failing cases + log pointer ──
   report:
@@ -410,8 +409,16 @@ jobs:
               .slice(0, 500);
             if (summary) {
               const pct = Math.round(summary.rate * 100);
-              const icon = summary.failed === 0 ? '✅' : '❌';
-              lines.push(`### ${icon} robonix CI — ${summary.passed}/${summary.total} passed (${pct}%)`);
+              const jobFailed = outcome === 'failure' || outcome === 'cancelled';
+              const icon = summary.failed === 0 && !jobFailed ? '✅' : '❌';
+              const title = jobFailed && summary.failed === 0
+                ? `job ${outcome} after scenarios (${summary.passed}/${summary.total} scenarios passed, ${pct}%)`
+                : `${summary.passed}/${summary.total} passed (${pct}%)`;
+              lines.push(`### ${icon} robonix CI — ${title}`);
+              if (jobFailed) {
+                lines.push('');
+                lines.push(`Webots job concluded \`${outcome}\` after producing a scenario summary. Treat this as a failed CI run; inspect lifecycle, teardown, report, and raw logs in the action run.`);
+              }
               lines.push('');
               lines.push('| suite | scenario | result | rounds |');
               lines.push('|-------|----------|--------|--------|');
