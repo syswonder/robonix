@@ -75,6 +75,17 @@ class RosContractQosTests(unittest.TestCase):
         )
         self.assertIn("ros-$ROS_DISTRO-rmw-cyclonedds-cpp", dockerfile)
         self.assertIn('-e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}"', start)
+        self.assertIn(
+            '-e ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-0.0.0.0}"',
+            start,
+        )
+        self.assertIn(
+            '-e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}"', start
+        )
+        self.assertIn(
+            '-e SCENE_ANNOTATIONS_DIR="${SCENE_ANNOTATIONS_DIR:-/data/robonix/scene_annotations}"',
+            start,
+        )
 
 
 if __name__ == "__main__":
