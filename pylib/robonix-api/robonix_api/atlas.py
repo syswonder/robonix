@@ -377,8 +377,11 @@ class _Atlas:
         namespace_prefix: str = "",
     ) -> list[Capability]:
         """Flat consumer-facing list of Capabilities matching the filters.
-        Walks Query() and flattens each provider's `capabilities[]`. Each
-        returned `Capability` already carries provider_id / provider_kind."""
+        Walks Query() and flattens each provider's matching
+        `capabilities[]`. Atlas returns whole provider records when any one of
+        their capabilities matches, so the client must apply the capability
+        filters again while flattening. Each returned `Capability` already
+        carries provider_id / provider_kind."""
         providers = self.query(
             kind=provider_kind,
             id=provider_id,
@@ -386,9 +389,17 @@ class _Atlas:
             namespace_prefix=namespace_prefix,
             transport=transport,
         )
+        requested_transport = _resolve_transport(transport)
         out: list[Capability] = []
         for p in providers:
             for c in p.capabilities:
+                if contract_id and c.contract_id != contract_id:
+                    continue
+                if (
+                    requested_transport != Transport.UNSPECIFIED
+                    and c.transport != requested_transport
+                ):
+                    continue
                 out.append(c)
         return out
 
