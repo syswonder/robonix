@@ -176,6 +176,42 @@ class ThresholdValidationTest(unittest.TestCase):
         self.assertEqual(module._threshold_value, 0.4)
 
 
+class DeviceConfigTest(unittest.TestCase):
+    def test_environment_device_remains_a_compatibility_fallback(self) -> None:
+        module, fake_engine = _load_service()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"VOICEPRINT_DEVICE": "cpu"},
+        ):
+            self.assertIsInstance(module.init({"data_dir": tmp}), _Ok)
+            self.assertIsInstance(module.activate(), _Ok)
+
+        self.assertEqual(fake_engine.instances[0].device, "cpu")
+
+    def test_explicit_device_takes_precedence_over_environment(self) -> None:
+        module, fake_engine = _load_service()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"VOICEPRINT_DEVICE": "cuda:0"},
+        ):
+            self.assertIsInstance(
+                module.init({"data_dir": tmp, "device": "cpu"}),
+                _Ok,
+            )
+            self.assertIsInstance(module.activate(), _Ok)
+
+        self.assertEqual(fake_engine.instances[0].device, "cpu")
+
+    def test_invalid_device_fails_init(self) -> None:
+        module, _ = _load_service()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = module.init({"data_dir": tmp, "device": ""})
+
+        self.assertIsInstance(result, _Err)
+        self.assertIn("device must be a non-empty string or null", result.message)
+        self.assertIsNone(module._db)
+
+
 class EnrolledDBConcurrencyTest(unittest.TestCase):
     def test_concurrent_duplicate_id_enrollment_persists_only_one(self) -> None:
         module, _ = _load_service()
