@@ -63,7 +63,7 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_PILOT_PROVIDER_ID")]
     pub id: Option<String>,
 
-    /// LLM API base URL (e.g. "https://api.openai.com/v1").
+    /// LLM API base URL (e.g. <https://api.openai.com/v1>).
     #[arg(long, env = "ROBONIX_VLM_UPSTREAM")]
     pub vlm_upstream: Option<String>,
 
