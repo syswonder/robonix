@@ -77,13 +77,15 @@ primitive:
   # ── audio mic/speaker source ─────────────────────────────────────────────
   # Local ALSA provider. It remains available for robot-local audio.
   - name: audio_driver
-    path: ./primitives/audio_driver
+    url: https://github.com/syswonder/primitive-audio-driver-rbnx
+    branch: main
     config: {}
   # Reverse bridge for a robonix-client audio route. It advertises its
   # endpoint through Atlas and waits for the client to connect, so neither
   # this manifest nor Liaison stores a client IP.
   - name: audio_client_bridge
-    path: ./primitives/audio_client_bridge
+    url: https://github.com/syswonder/primitive-audio-client-bridge-rbnx
+    branch: main
     config: {}
 
 # after booted all the primitives, start the services

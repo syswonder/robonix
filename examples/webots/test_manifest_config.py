@@ -48,23 +48,24 @@ class WebotsDeployConfigTest(unittest.TestCase):
 
     def test_documented_config_specs_exist(self):
         for relative in (
-            "primitives/audio_client_bridge/config.spec",
-            "primitives/audio_driver/config.spec",
             "primitives/tiago_camera/config.spec",
             "primitives/tiago_chassis/config.spec",
             "primitives/tiago_lidar/config.spec",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
-    def test_audio_client_bridge_uses_its_package_environment(self):
-        package = ROOT / "primitives/audio_client_bridge"
-        build = (package / "scripts/build.sh").read_text()
-        start = (package / "scripts/start.sh").read_text()
-        self.assertNotIn("-m pip install --user", build)
-        self.assertIn("rbnx-build/venv", build)
-        self.assertIn("rbnx path robonix-api", build)
-        self.assertIn("import audio_client_bridge.main", build)
-        self.assertIn("rbnx-build/venv/bin/python", start)
+    def test_audio_primitives_use_reusable_packages(self):
+        primitive = entries(self.document, "primitive")
+        expected = {
+            "audio_driver": "https://github.com/syswonder/primitive-audio-driver-rbnx",
+            "audio_client_bridge": (
+                "https://github.com/syswonder/primitive-audio-client-bridge-rbnx"
+            ),
+        }
+        for name, url in expected.items():
+            self.assertEqual(primitive[name]["url"], url)
+            self.assertEqual(primitive[name]["branch"], "main")
+            self.assertNotIn("path", primitive[name])
 
     def test_primitive_builds_do_not_touch_a_running_simulator(self):
         for name in ("tiago_chassis", "tiago_camera", "tiago_lidar"):
