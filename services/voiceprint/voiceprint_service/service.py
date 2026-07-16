@@ -287,7 +287,17 @@ def _configure(cfg: dict) -> None:
     )
     threshold = _validate_threshold(threshold_raw)
     data_dir = Path(cfg.get("data_dir", str(_data_dir())))
-    device = cfg.get("device")
+    device_raw = (
+        cfg["device"]
+        if "device" in cfg
+        else os.environ.get("VOICEPRINT_DEVICE")
+    )
+    if device_raw is None:
+        device = None
+    elif not isinstance(device_raw, str) or not device_raw.strip():
+        raise ValueError("device must be a non-empty string or null")
+    else:
+        device = device_raw.strip()
     resolved = (data_dir, threshold, device)
 
     with _runtime_lock:
