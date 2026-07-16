@@ -1,0 +1,23 @@
+system/scene/scene_service/map_binding.py
+  s_f752c6da4734d7::t_6527767519a506 15-17
+system/scene/scene_service/scene_graph/builder.py
+  s_f752c6da4734d7::t_3a1ccee6731cad 120-123,255-256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "10f9598afdcd5fe8e8b85895e4e5063f3f8a1e76",
+  "prompts": {},
+  "sessions": {
+    "s_f752c6da4734d7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea013aee-56a8-434b-8ff6-0b72995ef458",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

@@ -1,0 +1,21 @@
+system/scene/scene_service/annotations.py
+  s_f752c6da4734d7::t_6e0d313250a084 166-174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d40c254a135f569342e72bf5c4982d079a2fcedb",
+  "prompts": {},
+  "sessions": {
+    "s_f752c6da4734d7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea013aee-56a8-434b-8ff6-0b72995ef458",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

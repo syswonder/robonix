@@ -1,0 +1,21 @@
+system/scene/README.md
+  s_f752c6da4734d7::t_5c39bce504167b 256,261-262,265-293,302-312,351-379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3d5cf54a868f40e8d5bebbbfe47b367e47d6a048",
+  "prompts": {},
+  "sessions": {
+    "s_f752c6da4734d7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea013aee-56a8-434b-8ff6-0b72995ef458",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

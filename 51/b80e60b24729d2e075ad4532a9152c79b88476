@@ -1,0 +1,35 @@
+system/scene/tests/test_annotations.py
+  s_c3d30b7552e447::t_6ac09891048b2d 330
+system/scene/scene_service/map_meta.py
+  s_f752c6da4734d7::t_285115cd412549 1-139
+system/scene/scene_service/persistence.py
+  s_f752c6da4734d7::t_16710572f42675 14-23,83-88,103-106,167-169,217-224,227,234,236,265-269,275-279,281-282,285,295-296,336-339,356-377
+system/scene/scene_service/state/object_registry.py
+  s_f752c6da4734d7::t_d04ab5c6c12055 3-7,33-34,168-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "51b80e60b24729d2e075ad4532a9152c79b88476",
+  "prompts": {},
+  "sessions": {
+    "s_c3d30b7552e447": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "837bc608-0062-4c8f-a736-1fcd973b0e83",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    },
+    "s_f752c6da4734d7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea013aee-56a8-434b-8ff6-0b72995ef458",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

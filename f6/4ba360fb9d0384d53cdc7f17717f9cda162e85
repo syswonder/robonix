@@ -1,0 +1,27 @@
+system/scene/tests/test_annotations.py
+  s_f752c6da4734d7::t_0061c8c151c32c 238-253,520
+system/scene/tests/test_lifecycle_flush.py
+  s_f752c6da4734d7::t_f07caf49ec0243 1-249
+system/scene/tests/test_map_meta.py
+  s_f752c6da4734d7::t_ee5121b4fc6a88 1-98
+system/scene/tests/test_persistence.py
+  s_f752c6da4734d7::t_38987997a985a5 347-385,398
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f64ba360fb9d0384d53cdc7f17717f9cda162e85",
+  "prompts": {},
+  "sessions": {
+    "s_f752c6da4734d7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea013aee-56a8-434b-8ff6-0b72995ef458",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
