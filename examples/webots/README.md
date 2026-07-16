@@ -30,7 +30,7 @@ primitives are fetched from their SysWonder repositories by
 Two terminals only:
 
 ```bash
-# T1 — sim (Ctrl-C stops):
+# T1 — simulator (Ctrl-C stops log following only):
 bash examples/webots/sim/start.sh
 
 # T2 — robonix stack (whatever robonix_manifest.yaml declares):
@@ -90,13 +90,19 @@ Then a third terminal for `rbnx chat`. `rbnx caps` lists the
 capabilities atlas knows about; `rbnx tools` lists the MCP tools
 the LLM agent can call.
 
-To tear everything down: Ctrl-C the `rbnx boot` terminal, OR from
-any other shell:
+The simulator and Robonix deployment have separate lifecycle owners. Stop both
+explicitly from another shell:
 
 ```bash
-cd examples/webots && rbnx shutdown    # SIGTERM each component's PGID
-bash sim/stop.sh                       # then stop the Webots container
+cd examples/webots
+rbnx shutdown     # stop only this Robonix deployment
+bash sim/stop.sh  # stop only the selected Webots Compose project and its RViz wrapper
 ```
+
+When the simulator was started with custom `ROBONIX_SIM_PROJECT` or
+`ROBONIX_SIM_CONTAINER` values, pass the same values to `sim/stop.sh`. The
+simulator stop command never searches for or terminates host-side Robonix
+processes.
 
 `rbnx shutdown` reads `rbnx-boot/state.json` (boot writes it
 incrementally as components come up) and tears them down in

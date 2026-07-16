@@ -7,8 +7,10 @@
 # Auto-detects nvidia-smi to merge compose.gpu.yaml. To force CPU-only,
 # unset CUDA_VISIBLE_DEVICES or set ROBONIX_FORCE_CPU=1.
 #
-# Re-running is safe: docker compose up reuses the running container.
-# Stop with Ctrl-C, or from another terminal: `docker compose -f compose.yaml down`.
+# Re-running is safe: docker compose up reuses the running container and the
+# launcher reuses the RViz wrapper recorded for this simulator instance.
+# Stop this simulator with `bash sim/stop.sh`. Stop a Robonix deployment
+# separately with `rbnx shutdown`.
 set -euo pipefail
 
 # Sim container / compose-project names — overridable via ROBONIX_SIM_CONTAINER
@@ -17,10 +19,6 @@ set -euo pipefail
 # (`name:`, `container_name:`) interpolate the same values. Stream ports are
 # similarly offset via ROBONIX_SIM_STREAM_PORT / ROBONIX_SIM_VIEWER_PORT, and
 # GPU via ROBONIX_GPU_ID. Defaults preserve existing single-deploy behaviour.
-export ROBONIX_SIM_CONTAINER="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
-export ROBONIX_SIM_PROJECT="${ROBONIX_SIM_PROJECT:-robonix_tiago_sim}"
-SIM_CT="$ROBONIX_SIM_CONTAINER"
-
 # Resolve the script's own directory ONCE in absolute form. We cd into
 # it below; afterwards `$(dirname "$0")` no longer points anywhere
 # usable (it's relative to the *original* CWD, which is gone). The
@@ -31,6 +29,14 @@ SIM_CT="$ROBONIX_SIM_CONTAINER"
 # because the bash sub-process couldn't find start_rviz.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# Keep simulator teardown scoped to this exact Compose project/container pair.
+# The PID file records only the RViz wrapper launched for this pair; stop.sh
+# never searches or kills unrelated host processes.
+# shellcheck source=runtime_state.sh
+source "$SCRIPT_DIR/runtime_state.sh"
+robonix_sim_init_runtime_state
+SIM_CT="$ROBONIX_SIM_CONTAINER"
 
 # Soma writes its generated ROS runtime reader and source description into
 # this host directory during `rbnx boot`; the simulator bind-mounts the same
@@ -187,7 +193,8 @@ allow_x11_for_docker() {
 allow_x11_for_docker
 
 # Bring sim up detached so we can layer rviz on top before tailing logs.
-docker compose "${CF[@]}" up --build -d
+DC=(docker compose --project-name "$ROBONIX_SIM_PROJECT" "${CF[@]}")
+"${DC[@]}" up --build -d
 
 # Wait until ros2 inside the container has more than a handful of
 # topics — proxy for "webots controller has spawned the robot and is
@@ -233,9 +240,21 @@ echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
 # Per-user log path: /tmp is shared on multi-tenant boxes and a fixed
 # /tmp/rviz2.log file owned by another user blocks rewrite. ${USER:-rviz}
 # falls back when USER is unset (e.g. cron/system contexts).
-RVIZ_LOG="${TMPDIR:-/tmp}/rviz2-${USER:-rviz}.log"
-bash "$SCRIPT_DIR/start_rviz.sh" >"$RVIZ_LOG" 2>&1 &
+RVIZ_LOG="${TMPDIR:-/tmp}/rviz2-${USER:-rviz}-${ROBONIX_SIM_PROJECT}-${ROBONIX_SIM_CONTAINER}.log"
+recorded_rviz_pid="$(robonix_sim_read_rviz_pid "$ROBONIX_SIM_RVIZ_PID_FILE" 2>/dev/null || true)"
+if [[ -n "$recorded_rviz_pid" ]] \
+    && robonix_sim_rviz_pid_matches "$recorded_rviz_pid" "$SCRIPT_DIR/start_rviz.sh"; then
+    echo "[sim/start] rviz2 wrapper already running (pid $recorded_rviz_pid)"
+else
+    rm -f -- "$ROBONIX_SIM_RVIZ_PID_FILE"
+    bash "$SCRIPT_DIR/start_rviz.sh" >"$RVIZ_LOG" 2>&1 &
+    rviz_pid=$!
+    robonix_sim_record_rviz_pid "$rviz_pid" "$ROBONIX_SIM_RVIZ_PID_FILE"
+    echo "[sim/start] launched rviz2 wrapper (pid $rviz_pid)"
+fi
 echo "[sim/start] rviz2 log: $RVIZ_LOG"
 
-# Stay foreground tailing logs so Ctrl-C is the natural stop pattern.
-exec docker compose "${CF[@]}" logs -f
+# Stay foreground tailing logs. Ctrl-C stops the log follower; run stop.sh to
+# tear down this simulator instance. Robonix components remain owned by
+# `rbnx shutdown` and are never touched here.
+exec "${DC[@]}" logs -f

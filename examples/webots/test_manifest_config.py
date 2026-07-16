@@ -131,9 +131,41 @@ class WebotsDeployConfigTest(unittest.TestCase):
     def test_sim_prepares_soma_runtime_mount_before_compose(self):
         launcher = (ROOT / "sim" / "start.sh").read_text()
         mkdir = launcher.index('mkdir -p "$SOMA_RUNTIME_DIR"')
-        compose_up = launcher.index('docker compose "${CF[@]}" up --build -d')
+        compose_up = launcher.index('"${DC[@]}" up --build -d')
         self.assertLess(mkdir, compose_up)
         self.assertIn('[[ ! -w "$SOMA_RUNTIME_DIR" ]]', launcher)
+
+    def test_sim_stop_is_scoped_to_one_simulator_instance(self):
+        launcher = (ROOT / "sim" / "start.sh").read_text()
+        self.assertIn(
+            'robonix_sim_record_rviz_pid "$rviz_pid" "$ROBONIX_SIM_RVIZ_PID_FILE"',
+            launcher,
+        )
+        self.assertIn(
+            'robonix_sim_rviz_pid_matches "$recorded_rviz_pid"',
+            launcher,
+        )
+
+        stop = (ROOT / "sim" / "stop.sh").read_text()
+        self.assertNotIn("pkill", stop)
+        self.assertNotRegex(stop, r"(?m)^\s*docker\s+(?:exec|rm)\b")
+        self.assertIn('--project-name "$ROBONIX_SIM_PROJECT"', stop)
+        self.assertIn('source "$SCRIPT_DIR/runtime_state.sh"', stop)
+
+        script = ROOT / "tests" / "test_sim_stop_scope.sh"
+        self.assertTrue(os.access(script, os.X_OK), f"not executable: {script}")
+        completed = subprocess.run(
+            [str(script)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
 
     def test_sim_does_not_write_root_owned_python_cache_to_source(self):
         compose = yaml.safe_load((ROOT / "sim" / "compose.yaml").read_text())

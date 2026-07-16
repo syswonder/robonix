@@ -12,13 +12,28 @@ this container at deploy time.
 Start the sim **first**, then `rbnx boot` from `examples/webots/`:
 
 ```bash
-# Terminal 1 — sim (GUI; Ctrl-C to stop):
+# Terminal 1 — simulator (GUI; Ctrl-C stops log following only):
 bash examples/webots/sim/start.sh
 
 # Terminal 2 — robonix:
 cd examples/webots
 rbnx boot
 ```
+
+Stop the two independently managed parts with two explicit commands:
+
+```bash
+cd examples/webots
+rbnx shutdown
+bash sim/stop.sh
+```
+
+`rbnx shutdown` owns the Robonix deployment state. `sim/stop.sh` owns only the
+Compose project selected by `ROBONIX_SIM_PROJECT` and
+`ROBONIX_SIM_CONTAINER`, plus the RViz wrapper PID recorded when that simulator
+was started. If custom values were used for startup, pass the same values when
+stopping it. The simulator stop script does not search for host processes or
+remove package containers.
 
 The default above uses host networking. With `ROBONIX_SIM_NETWORK=bridge`, the
 simulator publishes Zenoh only on `127.0.0.1`; the separate host-side
@@ -75,9 +90,10 @@ only if your network needs a different mirror/source.
 | `kitchen.wbt`<br>![kitchen](thumbnails/kitchen.jpg) |  |
 
 `start.sh` auto-detects `nvidia-smi` and merges `compose.gpu.yaml` when
-present. Force CPU-only with `ROBONIX_FORCE_CPU=1`. The container's name
-is `robonix_tiago_sim` (referenced by every driver package's
-`docker exec`).
+present. Force CPU-only with `ROBONIX_FORCE_CPU=1`. The default container and
+Compose project are both `robonix_tiago_sim`; isolated deployments override
+them with `ROBONIX_SIM_CONTAINER` and `ROBONIX_SIM_PROJECT`, and driver
+packages read the selected container name from the same environment.
 
 ## Requirements
 
