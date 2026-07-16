@@ -67,6 +67,23 @@ current form as a compatibility path.
 
 The Atlas wire protocol (atlas_pb2 / atlas_pb2_grpc) is pre-generated and bundled in the wheel. Per-contract stubs (`robonix_contracts_pb2`, MCP typed dataclasses) are generated **per deployment** by `rbnx codegen` against your contract TOMLs — `robonix-api` automatically picks them up from `<pkg>/rbnx-build/codegen/` at runtime.
 
+## Provider network binding
+
+Provider lifecycle gRPC, user gRPC, and MCP servers keep the compatible
+all-interface default (`0.0.0.0`). A deployment that must make every provider
+local-only sets this before provider construction:
+
+```bash
+export ROBONIX_PROVIDER_BIND_HOST=127.0.0.1
+export ROBONIX_ADVERTISE_HOST=127.0.0.1
+```
+
+`ROBONIX_PROVIDER_BIND_HOST` must be an IPv4 address literal and controls every
+server socket owned by `robonix-api`. When it is a non-wildcard address and no
+advertise override is set, that same address is advertised to Atlas
+automatically. Cross-host deployments should retain `0.0.0.0` and set
+`ROBONIX_ADVERTISE_HOST` to the provider address reachable by consumers.
+
 ## Versioning
 
 `robonix-api` tracks the Robonix v0.1.x series. Wire format and public API are frozen within v0.1.x. Pre-release builds (`0.1.0rc*`) are published to Test PyPI first; stable releases to PyPI.
