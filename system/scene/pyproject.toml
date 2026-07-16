@@ -34,9 +34,10 @@ dependencies = [
     "open3d>=0.18; platform_machine == 'x86_64' and python_version < '3.13'",
     "mcp",
     "fastmcp",
-    "grpcio",
-    "grpcio-tools",
-    "protobuf",
+    # Generated stubs from scripts/run_python_codegen.sh require these runtime
+    # versions. The protobuf compiler stays in its isolated codegen venv.
+    "grpcio==1.80.0",
+    "protobuf==6.33.6",
     "uvicorn",
     "httpx",
     "Pillow",
