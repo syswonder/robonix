@@ -1,0 +1,21 @@
+system/scene/tests/test_room_suggest.py
+  s_de863def517d1d::t_35dbeb12ccc1a3 1-385
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e6b2ca93439e04965da3e91b7e4212539f0ef5b3",
+  "prompts": {},
+  "sessions": {
+    "s_de863def517d1d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f65afcb5-6333-4386-aca7-03e78235706e",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
