@@ -42,7 +42,7 @@ fn open_retry_delay(
 }
 
 /// One message in an OpenAI Chat Completions conversation.
-/// Spec: https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages
+/// Spec: <https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages>
 ///
 /// One struct, four roles (`system` / `user` / `assistant` / `tool`); each
 /// role uses a different subset of the optional fields. `skip_serializing_if`
@@ -57,7 +57,7 @@ fn open_retry_delay(
 ///                                              preceding assistant.tool_calls)
 ///
 /// We use a flat struct with optional fields rather than a tagged enum because
-/// the planner does a lot of generic Vec<Message> manipulation (trim, sanitize,
+/// the planner does a lot of generic `Vec<Message>` manipulation (trim, sanitize,
 /// sliding-window slicing) that's awkward to express through `match` on every
 /// access. Type-safety for "tool messages must have tool_call_id" is delegated
 /// to runtime checks (`history::sanitize_for_vlm`) and the OpenAI server's

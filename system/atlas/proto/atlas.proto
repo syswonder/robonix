@@ -120,8 +120,8 @@ enum Kind {
 
 message RegisterRequest {
   // Stable id, e.g. "webots_tiago_camera_front". Empty => Atlas
-  // assigns "ephemeral-<uuid>". Convention: id matches `name:` in
-  // package_manifest.yaml.
+  // assigns `ephemeral-<uuid>`. Convention: id matches the package instance's
+  // `name:` in the robot deployment manifest.
   string id = 1;
   // Primary grouping namespace, e.g. "robonix/primitive/camera". This is
   // classification and diagnostics metadata, not an authorization boundary.
@@ -231,12 +231,12 @@ message DeclareCapabilityRequest {
   //
   // Conflict resolution:
   //   - empty proposal + mintable transport (ros2)
-  //                     -> Atlas mints "/rbnx/<dotted-contract>/<uuid8>"
+  //                     -> Atlas mints `/rbnx/<dotted-contract>/<uuid8>`
   //   - empty proposal + non-mintable transport (grpc, mcp)
   //                     -> InvalidArgument
   //   - non-empty + no collision        -> stored verbatim
   //   - non-empty + collision + mintable
-  //                     -> Atlas rewrites by appending "__<uuid8>"
+  //                     -> Atlas rewrites by appending `__<uuid8>`
   //   - non-empty + collision + non-mintable
   //                     -> AlreadyExists (caller picks new and retries)
   //
