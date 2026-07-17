@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 /// is also accepted by [`detect_manifest_path`].
 pub const MANIFEST_FILE: &str = "package_manifest.yaml";
 pub const LEGACY_MANIFEST_FILE: &str = "robonix_manifest.yaml";
+pub const SHARED_LIFECYCLE_DRIVER_CONTRACT: &str = "robonix/lifecycle/driver";
 
 /// Cache directory name for a URL-backed deploy package.
 ///
@@ -106,30 +107,79 @@ pub fn expand_deployment_env(s: &str) -> String {
     out
 }
 
-/// Split the optional package-manifest selector from a non-builtin `system:`
+/// Split deployment-owned package fields from a non-builtin `system:`
 /// package's runtime configuration.
 ///
-/// System packages historically used their mapping directly as Driver INIT
-/// config. Keep that shape backward compatible while reserving `manifest` as
-/// the deployment-owned build/start/stop selector. The selector is removed
-/// before the remaining opaque mapping is sent to the provider.
+/// The canonical shape mirrors primitive/service/skill entries:
+/// `manifest:` selects the package manifest and nested `config:` is delivered
+/// through Driver(CMD_INIT). Historical system entries put config keys beside
+/// `manifest`; keep accepting those keys with a migration warning. If both
+/// forms are present, nested `config:` wins on duplicate keys so deployments
+/// can migrate incrementally without changing runtime values.
 pub fn split_system_package_config(
     value: &serde_yaml::Value,
 ) -> Result<(Option<String>, serde_yaml::Value)> {
-    let mut config = value.clone();
-    let Some(mapping) = config.as_mapping_mut() else {
-        return Ok((None, config));
+    let Some(source) = value.as_mapping() else {
+        return Ok((None, value.clone()));
     };
+    let mut fields = source.clone();
     let manifest_key = serde_yaml::Value::String("manifest".to_string());
-    let Some(raw_manifest) = mapping.remove(&manifest_key) else {
-        return Ok((None, config));
+    let config_key = serde_yaml::Value::String("config".to_string());
+    let manifest = match fields.remove(&manifest_key) {
+        Some(raw_manifest) => Some(
+            raw_manifest
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("system package `manifest` must be a non-empty string")
+                })?
+                .to_string(),
+        ),
+        None => None,
     };
-    let manifest = raw_manifest
-        .as_str()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("system package `manifest` must be a non-empty string"))?;
-    Ok((Some(manifest.to_string()), config))
+
+    let nested = fields.remove(&config_key);
+    if nested.is_none() {
+        if !fields.is_empty() {
+            warn!(
+                "system package uses deprecated flat runtime config keys; move them under `config:` (flat keys remain supported for compatibility)"
+            );
+        }
+        return Ok((manifest, serde_yaml::Value::Mapping(fields)));
+    }
+
+    let nested = nested.expect("checked as present above");
+    let nested = match nested {
+        serde_yaml::Value::Null => serde_yaml::Mapping::new(),
+        serde_yaml::Value::Mapping(mapping) => mapping,
+        _ => anyhow::bail!("system package `config` must be a mapping"),
+    };
+    if !fields.is_empty() {
+        warn!(
+            "system package mixes deprecated flat runtime config keys with nested `config:`; nested values take precedence"
+        );
+    }
+    for (key, value) in nested {
+        fields.insert(key, value);
+    }
+    Ok((manifest, serde_yaml::Value::Mapping(fields)))
+}
+
+/// Return whether a deployment entry carries a non-empty runtime config.
+///
+/// A last-resort old artifact with no Driver cannot receive this value because
+/// config is transported only by Driver(CMD_INIT). Keeping this predicate
+/// shared by rbnx and Soma makes both orchestrators report that fallback.
+pub fn runtime_config_has_values(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::Null => false,
+        serde_yaml::Value::String(value) => !value.trim().is_empty(),
+        serde_yaml::Value::Sequence(values) => !values.is_empty(),
+        serde_yaml::Value::Mapping(values) => !values.is_empty(),
+        serde_yaml::Value::Tagged(value) => runtime_config_has_values(&value.value),
+        serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => true,
+    }
 }
 
 fn expand_deployment_yaml(value: &mut serde_yaml::Value) {
@@ -407,6 +457,36 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
 }
 
 impl Manifest {
+    /// Return the Driver written in `capabilities:`, if any.
+    pub fn explicit_lifecycle_driver_contract(&self) -> Result<Option<&str>> {
+        let drivers = self
+            .capabilities
+            .iter()
+            .filter(|capability| capability.name.ends_with("/driver"))
+            .map(|capability| capability.name.as_str())
+            .collect::<Vec<_>>();
+        if drivers.len() > 1 {
+            anyhow::bail!(
+                "package '{}' declares multiple lifecycle Driver contracts: {}; declare at most one shared or legacy Driver, never both",
+                self.package.name,
+                drivers.join(", ")
+            );
+        }
+        Ok(drivers.first().copied())
+    }
+
+    /// Resolve the lifecycle contract selected by this package manifest.
+    ///
+    /// Omission selects the shared Driver so every current provider has a
+    /// managed lifecycle. An explicitly declared legacy namespace Driver is
+    /// preserved exactly. Runtime launchers separately retain a last-resort
+    /// fallback for old generated artifacts that predate the shared stub.
+    pub fn selected_lifecycle_driver_contract(&self) -> Result<&str> {
+        Ok(self
+            .explicit_lifecycle_driver_contract()?
+            .unwrap_or(SHARED_LIFECYCLE_DRIVER_CONTRACT))
+    }
+
     pub fn validate_and_summarize(&self) -> Result<PackageSummary> {
         if self.manifest_version == 0 {
             anyhow::bail!("Invalid 'manifestVersion': must be >= 1");
@@ -432,6 +512,10 @@ impl Manifest {
                  split into multiple packages."
             );
         }
+
+        // Validate lifecycle selection in every package entry point (build,
+        // install, start and validate), before any provider is launched.
+        self.selected_lifecycle_driver_contract()?;
 
         if self.is_legacy {
             warn!(
@@ -486,8 +570,9 @@ capabilities: []
         let value: serde_yaml::Value = serde_yaml::from_str(
             r#"
 manifest: package_manifest.jetson-native.yaml
-camera_provider_id: front_camera
-web_port: 50107
+config:
+  camera_provider_id: front_camera
+  web_port: 50107
 "#,
         )
         .unwrap();
@@ -520,9 +605,106 @@ web_port: 50107
     }
 
     #[test]
+    fn nested_system_config_wins_during_incremental_migration() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+manifest: package_manifest.jetson-native.yaml
+camera_provider_id: legacy_camera
+legacy_only: kept
+config:
+  camera_provider_id: front_camera
+  web_port: 50107
+"#,
+        )
+        .unwrap();
+
+        let (manifest, config) = split_system_package_config(&value).unwrap();
+
+        assert_eq!(
+            manifest.as_deref(),
+            Some("package_manifest.jetson-native.yaml")
+        );
+        assert_eq!(config["camera_provider_id"], "front_camera");
+        assert_eq!(config["legacy_only"], "kept");
+        assert_eq!(config["web_port"], 50107);
+        assert!(config.get("manifest").is_none());
+        assert!(config.get("config").is_none());
+    }
+
+    #[test]
+    fn system_package_config_rejects_non_mapping_values() {
+        let value: serde_yaml::Value = serde_yaml::from_str("config: front_camera\n").unwrap();
+        let error = split_system_package_config(&value).unwrap_err();
+        assert!(error.to_string().contains("`config` must be a mapping"));
+    }
+
+    #[test]
     fn system_package_manifest_rejects_non_string_values() {
         let value: serde_yaml::Value = serde_yaml::from_str("manifest: 42\n").unwrap();
         let error = split_system_package_config(&value).unwrap_err();
         assert!(error.to_string().contains("must be a non-empty string"));
+    }
+
+    #[test]
+    fn runtime_config_values_distinguish_empty_from_undeliverable_config() {
+        for raw in ["null", "{}", "[]", "''"] {
+            let value = serde_yaml::from_str(raw).unwrap();
+            assert!(!runtime_config_has_values(&value), "{raw}");
+        }
+        for raw in [
+            "{web_port: 50107}",
+            "[front_camera]",
+            "front_camera",
+            "false",
+        ] {
+            let value = serde_yaml::from_str(raw).unwrap();
+            assert!(runtime_config_has_values(&value), "{raw}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_driver_omission_selects_shared_and_explicit_legacy_is_preserved() {
+        let manifest_with = |capabilities: Vec<&str>| Manifest {
+            package: Package {
+                name: "test.package".to_string(),
+                ..Package::default()
+            },
+            capabilities: capabilities
+                .into_iter()
+                .map(|name| CapabilityRef {
+                    name: name.to_string(),
+                    path: None,
+                })
+                .collect(),
+            ..Manifest::default()
+        };
+
+        assert_eq!(
+            manifest_with(vec![])
+                .selected_lifecycle_driver_contract()
+                .unwrap(),
+            SHARED_LIFECYCLE_DRIVER_CONTRACT
+        );
+        assert_eq!(
+            manifest_with(vec![SHARED_LIFECYCLE_DRIVER_CONTRACT])
+                .selected_lifecycle_driver_contract()
+                .unwrap(),
+            SHARED_LIFECYCLE_DRIVER_CONTRACT
+        );
+        assert_eq!(
+            manifest_with(vec!["robonix/primitive/camera/driver"])
+                .selected_lifecycle_driver_contract()
+                .unwrap(),
+            "robonix/primitive/camera/driver"
+        );
+
+        let error = manifest_with(vec![
+            SHARED_LIFECYCLE_DRIVER_CONTRACT,
+            "robonix/primitive/camera/driver",
+        ])
+        .selected_lifecycle_driver_contract()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("never both"));
     }
 }

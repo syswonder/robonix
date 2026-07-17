@@ -72,6 +72,18 @@ class WebotsDeployConfigTest(unittest.TestCase):
             driver,
         )
 
+    def test_current_primitive_examples_use_canonical_implicit_shared_driver(self):
+        for name in ("tiago_chassis", "tiago_camera", "tiago_lidar"):
+            manifest = yaml.safe_load(
+                (ROOT / "primitives" / name / "package_manifest.yaml").read_text()
+            )
+            drivers = {
+                entry["name"]
+                for entry in manifest.get("capabilities", [])
+                if entry["name"].endswith("/driver")
+            }
+            self.assertEqual(drivers, set(), name)
+
     def test_audio_primitives_use_reusable_packages(self):
         primitive = entries(self.document, "primitive")
         expected = {
@@ -114,6 +126,11 @@ class WebotsDeployConfigTest(unittest.TestCase):
             start = (ROOT / "primitives" / name / "scripts" / "start.sh").read_text()
             self.assertIn('source "$WEBOTS_SCRIPTS/container_network.sh"', start)
             self.assertIn('ROBONIX_ATLAS="$ATLAS_ENDPOINT"', start)
+            self.assertIn(
+                'ROBONIX_DRIVER_CONTRACT_ID="${ROBONIX_DRIVER_CONTRACT_ID-', start
+            )
+            self.assertIn("ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK", start)
+            self.assertIn("robonix/lifecycle/driver", start)
             self.assertIn('append_no_proxy_hosts', start)
             self.assertIn('-e NO_PROXY="$NO_PROXY_VALUE"', start)
             self.assertIn('-e no_proxy="$no_proxy_value"', start)
@@ -136,13 +153,20 @@ class WebotsDeployConfigTest(unittest.TestCase):
 
     def test_retained_simple_nav_uses_shared_container_helpers(self):
         package = ROOT / "services" / "simple_nav"
+        manifest = yaml.safe_load((package / "package_manifest.yaml").read_text())
         build = (package / "scripts" / "build.sh").read_text()
         start = (package / "scripts" / "start.sh").read_text()
+        capability_names = {entry["name"] for entry in manifest.get("capabilities", [])}
+        self.assertNotIn("robonix/lifecycle/driver", capability_names)
         self.assertIn("run_python_codegen.sh", build)
         self.assertIn("--mcp --ros2", build)
         self.assertIn('source "$WEBOTS_SCRIPTS/container_network.sh"', start)
         self.assertIn('resolve_container_atlas_endpoint "$SIM_CT"', start)
         self.assertIn('ROBONIX_ATLAS="$ATLAS_ENDPOINT"', start)
+        self.assertIn(
+            'ROBONIX_DRIVER_CONTRACT_ID="${ROBONIX_DRIVER_CONTRACT_ID-', start
+        )
+        self.assertIn("ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK", start)
 
     def test_sim_prepares_soma_runtime_mount_before_compose(self):
         launcher = (ROOT / "sim" / "start.sh").read_text()

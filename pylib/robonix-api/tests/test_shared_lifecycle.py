@@ -1,0 +1,427 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+"""Shared lifecycle selection and legacy generated-stub compatibility."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from robonix_api.lifecycle import (
+    CMD_ACTIVATE,
+    CMD_DEACTIVATE,
+    CMD_INIT,
+    CMD_SHUTDOWN,
+    OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
+    SHARED_DRIVER_CONTRACT_ID,
+    build_lifecycle_servicer,
+    lifecycle_contract_for_module,
+    lifecycle_stubs_prove_old_artifact_without_driver,
+)
+from robonix_api.atlas_types import LifecycleState
+from robonix_api.capability import _ProviderBase
+from robonix_api.result import Deferred, Ok
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+class _Response:
+    """Minimal stand-in for generated lifecycle_pb2.Driver_Response."""
+
+    def __init__(self, *, ok: bool, state: str, error: str) -> None:
+        self.ok = ok
+        self.state = state
+        self.error = error
+
+
+class _RpcContext:
+    """Minimal gRPC context that exposes post-RPC completion callbacks."""
+
+    def __init__(self) -> None:
+        self.callbacks: list[object] = []
+
+    def add_callback(self, callback) -> bool:
+        """Record a callback for execution after the response is finished."""
+        self.callbacks.append(callback)
+        return True
+
+    def finish(self) -> None:
+        """Simulate gRPC completing the response."""
+        for callback in self.callbacks:
+            callback()
+
+
+def _grpc_module(*, shared: bool, legacy: bool) -> SimpleNamespace:
+    """Build a fake generated gRPC module for contract selection tests."""
+    attrs: dict[str, object] = {}
+    if shared:
+        attrs["RobonixLifecycleDriverServicer"] = type(
+            "RobonixLifecycleDriverServicer", (), {"Driver": lambda *_: None}
+        )
+        attrs["add_RobonixLifecycleDriverServicer_to_server"] = lambda *_: None
+    if legacy:
+        attrs["RobonixSystemSceneDriverServicer"] = type(
+            "RobonixSystemSceneDriverServicer", (), {"Driver": lambda *_: None}
+        )
+        attrs["add_RobonixSystemSceneDriverServicer_to_server"] = lambda *_: None
+    return SimpleNamespace(**attrs)
+
+
+def test_all_legacy_driver_contracts_remain_available_for_old_manifests() -> None:
+    legacy_contracts = sorted(
+        path
+        for path in (ROOT / "capabilities").glob("**/driver.v1.toml")
+        if path.parent.name != "lifecycle"
+    )
+
+    assert len(legacy_contracts) == 13
+    for path in legacy_contracts:
+        contents = path.read_text()
+        assert "Legacy" in contents, path
+        assert "idl" in contents and "lifecycle/srv/Driver.srv" in contents, path
+
+
+def test_python_and_rust_use_the_same_no_driver_proof_marker() -> None:
+    rust_launch = (ROOT / "tools" / "rbnx" / "src" / "launch.rs").read_text()
+    assert f'"{OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL}"' in rust_launch
+
+
+def test_omitted_manifest_prefers_current_shared_stub() -> None:
+    module = _grpc_module(shared=True, legacy=True)
+    received: list[dict] = []
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        on_init=lambda cfg: received.append(cfg) or Ok(),
+        requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+
+    assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
+    assert built is not None
+    assert built[4] == SHARED_DRIVER_CONTRACT_ID
+    assert not lifecycle_stubs_prove_old_artifact_without_driver(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+    response = built[0].Driver(
+        SimpleNamespace(command=CMD_INIT, config_json='{"camera":"front"}'),
+        None,
+    )
+    assert response.ok is True
+    assert received == [{"camera": "front"}]
+
+
+def test_explicit_shared_driver_with_empty_handlers_reaches_active(caplog) -> None:
+    module = _grpc_module(shared=True, legacy=True)
+    transitions: list[tuple[str | None, str]] = []
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
+        on_state_change=lambda state, detail: transitions.append((state, detail)),
+    )
+
+    assert built is not None
+    servicer = built[0]
+    init_response = servicer.Driver(
+        SimpleNamespace(command=CMD_INIT, config_json="{}"),
+        None,
+    )
+    activate_response = servicer.Driver(
+        SimpleNamespace(command=CMD_ACTIVATE, config_json="{}"),
+        None,
+    )
+    deactivate_response = servicer.Driver(
+        SimpleNamespace(command=CMD_DEACTIVATE, config_json="{}"),
+        None,
+    )
+    shutdown_response = servicer.Driver(
+        SimpleNamespace(command=CMD_SHUTDOWN, config_json="{}"),
+        None,
+    )
+
+    assert init_response.ok is True
+    assert init_response.state == "inactive"
+    assert activate_response.ok is True
+    assert activate_response.state == "active"
+    assert deactivate_response.ok is True
+    assert deactivate_response.state == "inactive"
+    assert shutdown_response.ok is True
+    assert shutdown_response.state == "terminated"
+    assert transitions == [
+        ("inactive", ""),
+        ("active", ""),
+        ("inactive", ""),
+        ("terminated", ""),
+    ]
+    assert "no on_init handler" in caplog.text
+    assert "no on_activate handler" in caplog.text
+    assert "no on_deactivate handler" in caplog.text
+    assert "no on_shutdown handler" in caplog.text
+
+
+def test_legacy_namespace_driver_still_builds_when_shared_stub_is_absent() -> None:
+    module = _grpc_module(shared=False, legacy=True)
+    received: list[dict] = []
+
+    selected = lifecycle_contract_for_module("robonix/system/scene", module)
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        on_init=lambda cfg: received.append(cfg) or Ok(),
+    )
+
+    assert selected == (
+        "robonix/system/scene/driver",
+        "RobonixSystemSceneDriver",
+    )
+    assert built is not None
+    assert built[4] == "robonix/system/scene/driver"
+    response = built[0].Driver(
+        SimpleNamespace(
+            command=CMD_INIT,
+            config_json='{"legacy_option":"still-delivered"}',
+        ),
+        None,
+    )
+    assert response.ok is True
+    assert received == [{"legacy_option": "still-delivered"}]
+
+
+def test_legacy_manifest_selection_wins_when_both_stubs_exist() -> None:
+    module = _grpc_module(shared=True, legacy=True)
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        "robonix/system/scene/driver",
+    )
+
+    assert selected == (
+        "robonix/system/scene/driver",
+        "RobonixSystemSceneDriver",
+    )
+
+
+def test_direct_current_provider_prefers_shared_when_both_stubs_exist() -> None:
+    module = _grpc_module(shared=True, legacy=True)
+
+    selected = lifecycle_contract_for_module("robonix/system/scene", module)
+
+    assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
+
+
+def test_omitted_manifest_old_artifact_falls_back_to_namespace_driver(caplog) -> None:
+    module = _grpc_module(shared=False, legacy=True)
+    received: list[dict] = []
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        on_init=lambda cfg: received.append(cfg) or Ok(),
+        requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+
+    assert selected == (
+        "robonix/system/scene/driver",
+        "RobonixSystemSceneDriver",
+    )
+    assert built is not None
+    assert built[4] == "robonix/system/scene/driver"
+    response = built[0].Driver(
+        SimpleNamespace(command=CMD_INIT, config_json='{"legacy":true}'),
+        None,
+    )
+    assert response.ok is True
+    assert received == [{"legacy": True}]
+    assert "predates robonix/lifecycle/driver" in caplog.text
+
+
+def test_omitted_manifest_oldest_artifact_has_last_resort_no_driver(caplog) -> None:
+    module = _grpc_module(shared=False, legacy=False)
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+
+    assert selected is None
+    assert lifecycle_stubs_prove_old_artifact_without_driver(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+    assert "last-resort compatibility fallback" in caplog.text
+    assert "config cannot be delivered" in caplog.text
+
+
+def test_partial_generated_service_is_not_old_artifact_proof(caplog) -> None:
+    module = SimpleNamespace(
+        RobonixLifecycleDriverServicer=type(
+            "RobonixLifecycleDriverServicer", (), {"Driver": lambda *_: None}
+        )
+    )
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+
+    assert selected is None
+    assert not lifecycle_stubs_prove_old_artifact_without_driver(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
+    )
+    assert "incomplete; refusing compatibility fallback" in caplog.text
+
+
+def test_explicit_shared_selection_does_not_downgrade_when_stub_is_missing(
+    caplog,
+) -> None:
+    module = _grpc_module(shared=False, legacy=True)
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        SHARED_DRIVER_CONTRACT_ID,
+    )
+
+    assert selected is None
+    assert "unavailable in generated stubs" in caplog.text
+
+
+def test_last_resort_no_driver_provider_reports_actual_active_state() -> None:
+    provider = object.__new__(_ProviderBase)
+    provider.id = "legacy.scene"
+    transitions: list[tuple[LifecycleState, str]] = []
+    provider._set_state = (  # type: ignore[method-assign]
+        lambda state, detail="": transitions.append((state, detail))
+    )
+
+    provider._promote_ready_provider_without_driver(
+        None,
+        True,
+        OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
+    )
+
+    assert transitions == [(LifecycleState.ACTIVE, OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL)]
+
+
+def test_strict_missing_driver_does_not_auto_promote() -> None:
+    provider = object.__new__(_ProviderBase)
+    provider.id = "strict.scene"
+    transitions: list[LifecycleState] = []
+    provider._set_state = transitions.append  # type: ignore[method-assign]
+
+    provider._promote_ready_provider_without_driver(None, True, None)
+
+    assert transitions == []
+
+
+def test_shared_driver_delivers_init_config_and_shutdown_to_handlers() -> None:
+    module = _grpc_module(shared=True, legacy=False)
+    received: list[object] = []
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        on_init=lambda cfg: received.append(cfg) or Ok(),
+        on_shutdown=lambda: received.append("shutdown") or Ok(),
+    )
+
+    assert built is not None
+    servicer = built[0]
+    init_response = servicer.Driver(
+        SimpleNamespace(
+            command=CMD_INIT,
+            config_json='{"camera_provider_id":"front_camera","web_port":50107}',
+        ),
+        None,
+    )
+    shutdown_response = servicer.Driver(
+        SimpleNamespace(command=CMD_SHUTDOWN, config_json=""),
+        None,
+    )
+
+    assert init_response.ok is True
+    assert shutdown_response.ok is True
+    assert received == [
+        {"camera_provider_id": "front_camera", "web_port": 50107},
+        "shutdown",
+    ]
+
+
+def test_shutdown_tears_down_server_only_after_rpc_response_finishes() -> None:
+    module = _grpc_module(shared=True, legacy=False)
+    events: list[str] = []
+    context = _RpcContext()
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        on_init=lambda _cfg: Ok(),
+        on_shutdown=lambda: events.append("resources_closed") or Ok(),
+        on_shutdown_complete=lambda: events.append("server_stopped"),
+    )
+
+    assert built is not None
+    response = built[0].Driver(
+        SimpleNamespace(command=CMD_SHUTDOWN, config_json=""),
+        context,
+    )
+
+    assert response.ok is True
+    assert events == ["resources_closed"]
+    assert len(context.callbacks) == 1
+    context.finish()
+    assert events == ["resources_closed", "server_stopped"]
+
+
+def test_deferred_deactivate_keeps_the_provider_in_its_current_state() -> None:
+    module = _grpc_module(shared=True, legacy=False)
+    transitions: list[tuple[str | None, str]] = []
+    reason = "deactivation is not implemented"
+    built = build_lifecycle_servicer(
+        "robonix/system/scene",
+        module,
+        _Response,
+        on_init=lambda _cfg: Ok(),
+        on_deactivate=lambda: Deferred(reason),
+        on_state_change=lambda state, detail: transitions.append((state, detail)),
+    )
+
+    assert built is not None
+    response = built[0].Driver(
+        SimpleNamespace(command=CMD_DEACTIVATE, config_json=""),
+        None,
+    )
+
+    assert response.ok is False
+    assert response.state == "deferred"
+    assert response.error == reason
+    assert transitions == [(None, reason)]

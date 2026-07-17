@@ -55,6 +55,17 @@ serves gRPC on `listen`. Skill packages are held until `rbnx boot` writes
 `stage2\n` into the pipe on `$ROBONIX_SOMA_STAGE_FD` (stage 2). Soma stops
 every package it launched on SIGINT/SIGTERM.
 
+Driver omission canonically selects `robonix/lifecycle/driver`. Soma verifies
+the provider's runtime declaration, delivers entry `config` through
+Driver(CMD_INIT), and activates primitives (skills remain inactive until first
+use). Explicit shared or namespace Driver selections remain valid and strict.
+For an omitted manifest only, an old generated artifact may fall back to its
+namespace Driver; an artifact with no Driver is kept usable only as a
+last-resort fallback, with its actual Atlas state reported and any undeliverable
+config called out. Soma accepts that zero-Driver case only when the SDK has
+published the reserved old-artifact proof in Atlas `state_detail`; an ordinary
+Driver declaration failure remains fatal.
+
 `--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`);
 package stdout/stderr is written through scribe under `$SCRIBE_LOG_DIR` or
 `./logs`.

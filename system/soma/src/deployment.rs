@@ -57,8 +57,8 @@ pub struct PackageLaunchTarget {
     pub manifest_override: Option<String>,
     /// Opaque config block from the manifest, raw serde value. Pushed
     /// to the package via Driver(CMD_INIT, config_json) — never written
-    /// as a config file, never exported as an env var. Matches the
-    /// v0.1 layering invariant in rbnx deploy.rs.
+    /// as a config file, never exported as an env var. Only the last-resort
+    /// old-artifact fallback with no Driver cannot receive it.
     pub config: serde_yaml::Value,
 }
 

@@ -34,14 +34,18 @@
 //
 // All the lifecycle plumbing (`wait_for_registration_core`,
 // `call_driver_cmd`, the timeouts) is reused from `robonix_cli::launch`
-// so soma and rbnx CAN'T drift on FSM semantics.
+// so soma and rbnx CAN'T drift on FSM semantics. Omitted Driver is the
+// canonical shared selection. Only old generated artifacts may fall back to a
+// namespace Driver, or to no Driver as a last resort.
 
 use crate::deployment::{Deployment, PackageKind, PackageLaunchTarget};
 use crate::report::{PackageStartupCheck, PackageStartupStatus, StartupReport};
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
-    CMD_ACTIVATE, CMD_INIT, PackageRuntimeRecord, call_driver_cmd, shutdown_package_runtime,
+    CMD_ACTIVATE, CMD_INIT, OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL, PackageRuntimeRecord,
+    call_driver_cmd, resolve_runtime_driver_contract, shutdown_package_runtime,
     snapshot_provider_ids, terminate_process_group, wait_for_registration_core,
 };
 use robonix_cli::process::ProcessManager;
@@ -170,6 +174,25 @@ impl PackageLauncher {
         }
 
         let command = self.command_line(target);
+        let (expected_driver_contract, allow_old_artifact_fallback) =
+            match robonix_cli::manifest::load_from_path(&target.package_manifest_path).and_then(
+                |manifest| {
+                    manifest.validate_and_summarize()?;
+                    let allow_fallback = manifest.explicit_lifecycle_driver_contract()?.is_none();
+                    Ok((
+                        manifest.selected_lifecycle_driver_contract()?.to_string(),
+                        allow_fallback,
+                    ))
+                },
+            ) {
+                Ok(contract) => contract,
+                Err(error) => {
+                    return PackageStartupStatus::SpawnFailed {
+                        command,
+                        error: format!("selected package manifest: {error:#}"),
+                    };
+                }
+            };
 
         // Snapshot before spawn so wait_for_registration_core can
         // tell us which new provider is OUR child (not some
@@ -238,17 +261,47 @@ impl PackageLauncher {
                 ),
             };
         }
-        let Some(driver_contract) = outcome.driver_contract else {
-            // No driver contract = system-style auto-promotion. We
-            // don't expect this for primitives or skills, but mirror
-            // rbnx's "treat as ACTIVE" behaviour so a misclassified
-            // entry doesn't bring boot down.
-            if let Some(record) = self.children.iter_mut().find(|record| record.pid == pid) {
-                record.provider_id = Some(outcome.provider_id.clone());
+        let driver_contract = match resolve_runtime_driver_contract(
+            &outcome.provider_id,
+            &outcome.provider_namespace,
+            &expected_driver_contract,
+            &outcome.driver_contracts,
+            allow_old_artifact_fallback,
+            outcome.provider_state_detail == OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
+        ) {
+            Ok(contract) => contract,
+            Err(error) => {
+                self.reap(pid).await;
+                return PackageStartupStatus::SpawnFailed {
+                    command,
+                    error: format!("lifecycle: {error:#}"),
+                };
             }
-            warn!("{who}: registered without a */driver capability — skipping INIT/ACTIVATE",);
-            return PackageStartupStatus::Spawned { command };
         };
+        let Some(driver_contract) = driver_contract else {
+            let config_ignored = robonix_cli::manifest::runtime_config_has_values(&target.config);
+            let state = lifecycle_state_label(outcome.provider_state).to_string();
+            self.note_provider_without_driver(pid, outcome.provider_id.clone());
+            warn!(
+                "{who}: old generated artifact has no lifecycle Driver; continuing as a last-resort compatibility fallback (actual Atlas state={state})"
+            );
+            if config_ignored {
+                warn!(
+                    "{who}: config cannot be delivered because the old artifact has no Driver; config was ignored"
+                );
+            }
+            info!("{who}: {state} (last-resort old artifact; no lifecycle Driver)");
+            return PackageStartupStatus::OldArtifactNoDriver {
+                command,
+                config_ignored,
+                state,
+            };
+        };
+        if driver_contract != expected_driver_contract {
+            warn!(
+                "{who}: old generated artifact uses legacy lifecycle Driver '{driver_contract}' instead of '{expected_driver_contract}'; rebuild to refresh shared stubs"
+            );
+        }
 
         let config_json = serde_json::to_string(&target.config).unwrap_or_else(|_| "{}".into());
         self.note_lifecycle(
@@ -419,6 +472,13 @@ impl PackageLauncher {
         }
     }
 
+    /// Record ownership of a last-resort old provider with no lifecycle RPC.
+    fn note_provider_without_driver(&mut self, pid: u32, provider_id: String) {
+        if let Some(record) = self.children.iter_mut().find(|record| record.pid == pid) {
+            record.provider_id = Some(provider_id);
+        }
+    }
+
     /// Stop a failed package without bypassing provider cleanup.  Providers
     /// install SIGTERM handlers that run `on_shutdown`; an immediate SIGKILL
     /// leaves independently-sessioned ROS children behind under PID 1.
@@ -458,6 +518,22 @@ impl PackageLauncher {
 
     fn provider_soma_endpoint(&self) -> String {
         self.soma_endpoint.replacen("0.0.0.0", "127.0.0.1", 1)
+    }
+}
+
+fn lifecycle_state_label(state: i32) -> &'static str {
+    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
+        "REGISTERED"
+    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
+        "INACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
+        "ACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateError as i32 {
+        "ERROR"
+    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
+        "TERMINATED"
+    } else {
+        "STARTING"
     }
 }
 

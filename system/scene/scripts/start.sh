@@ -51,6 +51,8 @@ SCENE_HOST_DATA_DIR="${SCENE_DATA_DIR:-$(pwd)/rbnx-build/data/robonix}"
 mkdir -p "$SCENE_HOST_DATA_DIR"
 
 declare -a EXTRA_MOUNTS=()
+# Deprecated compatibility only. Canonical deployments send
+# system.scene.config through Driver(CMD_INIT) and leave this unset.
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
@@ -106,9 +108,13 @@ exec docker run --rm \
     --ipc=host \
     "${GPU_ARGS[@]}" \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+    -e ROBONIX_DRIVER_CONTRACT_ID="${ROBONIX_DRIVER_CONTRACT_ID-robonix/lifecycle/driver}" \
+    -e ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK="${ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK:-}" \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
+    -e SCENE_CAMERA_FRAME="${SCENE_CAMERA_FRAME:-}" \
+    -e SCENE_BASE_FRAME="${SCENE_BASE_FRAME:-}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
     -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \

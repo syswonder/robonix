@@ -411,6 +411,10 @@ message CapabilityProvider {
   // read this text rather than opening capability_md_path, which is only
   // valid in the provider's own filesystem namespace.
   string capability_md = 9;
+  // Opaque nonce replaced on every successful Register, including same-id
+  // takeover. Launchers snapshot this value so restarting a provider under
+  // its stable id is distinguishable from ordinary heartbeats/state changes.
+  string registration_id = 10;
 }
 
 // Discovery -- one Query RPC with a Kind filter. Python wrappers

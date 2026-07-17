@@ -7,6 +7,7 @@ Capability owns atlas register / driver lifecycle / MCP HTTP / heartbeat
 is scene-specific: registry + geometric relation loop, ROS2 ingest hub,
 VLM perception + scene-graph enrichment, web debug UI.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +18,6 @@ import logging
 import os
 import signal
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
@@ -45,13 +45,16 @@ from .ingest.ros_subscribers import (
     SubscribersHub,
     TopicSpec,
 )
+from .lifecycle_runtime import (
+    SceneLifecycleRuntime,
+    close_scene_runtime_resources,
+)
 from .state import (
     BBox3D,
     ObjectRegistry,
     Pose3D,
 )
 from .state.object_registry import now_unix
-
 
 logging.basicConfig(
     level=os.environ.get("SCENE_LOG_LEVEL", "INFO").upper(),
@@ -60,30 +63,40 @@ logging.basicConfig(
 log = logging.getLogger("scene-service")
 
 
-def _load_config() -> dict:
-    """Read RBNX_CONFIG_FILE if set; otherwise return an empty config.
-    Empty `observations` triggers auto-discovery against atlas — scene
-    asks for every cap with a ROS2 topic_out interface and subscribes
-    by contract leaf. The manifest only needs to populate
-    `observations[]` to override / disable a kind for a deployment.
-    """
-    path = os.environ.get("RBNX_CONFIG_FILE")
-    if not path:
-        return {}
-    try:
-        text = Path(path).read_text()
-        try:
-            cfg = json.loads(text)
-        except json.JSONDecodeError:
-            import yaml  # PyYAML is in deps
+_lifecycle = SceneLifecycleRuntime(log)
 
-            cfg = yaml.safe_load(text) or {}
-    except Exception as e:  # noqa: BLE001
-        log.warning("failed to read %s: %s; using empty config", path, e)
-        return {}
-    if not isinstance(cfg, dict):
-        cfg = {}
-    return cfg
+
+@scene.on_init
+def _on_init(cfg: dict):
+    """Receive the deployment's nested system.scene.config mapping."""
+    return _lifecycle.on_init(cfg)
+
+
+@scene.on_activate
+def _on_activate():
+    """Wait until Scene's async runtime is fully initialized."""
+    return _lifecycle.on_activate()
+
+
+@scene.on_shutdown
+def _on_shutdown():
+    """Wait until Scene's async runtime has released its resources."""
+    return _lifecycle.on_shutdown()
+
+
+@scene.on_deactivate
+def _on_deactivate():
+    """Keep Scene ACTIVE until a real pause/resume lifecycle is implemented."""
+    return _lifecycle.on_deactivate()
+
+
+async def _wait_for_lifecycle_event(event) -> bool:
+    """Wait without blocking asyncio; return false if shutdown wins."""
+    while not event.is_set():
+        if _lifecycle.shutdown_requested.is_set():
+            return False
+        await asyncio.sleep(0.05)
+    return True
 
 
 # scene's input set is fixed: it knows exactly which contracts it consumes.
@@ -97,21 +110,21 @@ def _load_config() -> dict:
 # foreign namespaces; if you want scene to consume your data, declare it
 # under one of these contract ids (which is the whole point of contracts).
 _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
-    ("rgb",               "robonix/primitive/camera/rgb",        "Image"),
-    ("depth",             "robonix/primitive/camera/depth",      "Image"),
-    ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
-    ("lidar3d",           "robonix/primitive/lidar/lidar3d",     "PointCloud2"),
+    ("rgb", "robonix/primitive/camera/rgb", "Image"),
+    ("depth", "robonix/primitive/camera/depth", "Image"),
+    ("lidar2d", "robonix/primitive/lidar/lidar", "LaserScan"),
+    ("lidar3d", "robonix/primitive/lidar/lidar3d", "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
-    ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
-    ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
-    ("odom",              "robonix/service/map/odom",            "Odometry"),
-    ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
+    ("intrinsics", "robonix/primitive/camera/intrinsics", "CameraInfo"),
+    ("pose", "robonix/service/map/pose", "PoseWithCovarianceStamped"),
+    ("odom", "robonix/service/map/odom", "Odometry"),
+    ("occupancy_grid", "robonix/service/map/occupancy_grid", "OccupancyGrid"),
     # Latched {map_id, mode, generation} broadcast from mapping. Startup
     # binding is probed separately (_discover_map_binding, before the hub
     # exists); this hub subscription feeds the runtime mismatch watcher
     # (_lifecycle_watch). Needs the generated `map` interface package
     # (ros2_idl overlay) — the hub skips the row gracefully when missing.
-    ("map_lifecycle",     "robonix/service/map/lifecycle",       "MapLifecycle"),
+    ("map_lifecycle", "robonix/service/map/lifecycle", "MapLifecycle"),
 ]
 
 # Optional manifest opt-out: kinds listed here are dropped even if atlas
@@ -147,7 +160,9 @@ _LAST_RESOLVED: dict[tuple, tuple] = {}
 
 
 def _build_topic_specs(
-    observations: list[dict], atlas_stub, transport: str,
+    observations: list[dict],
+    atlas_stub,
+    transport: str,
     camera_provider_id: str = "",
 ) -> list[TopicSpec]:
     """Two paths:
@@ -168,9 +183,7 @@ def _build_topic_specs(
     """
     pb_t = _resolve_pb_transport(transport)
     if observations:
-        return _resolve_explicit(
-            observations, atlas_stub, pb_t, camera_provider_id
-        )
+        return _resolve_explicit(observations, atlas_stub, pb_t, camera_provider_id)
     return _resolve_auto(atlas_stub, pb_t, camera_provider_id)
 
 
@@ -228,7 +241,9 @@ def _resolve_one_contract(
     except Exception as e:  # noqa: BLE001
         log.warning(
             "[scene] connect_capability(%s/%s) failed: %s",
-            cap_view.provider_id, contract_id, e,
+            cap_view.provider_id,
+            contract_id,
+            e,
         )
         return None
     endpoint = (ch.endpoint or "").strip()
@@ -245,8 +260,12 @@ def _resolve_one_contract(
     if prev != sig:
         log.info(
             "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
-            kind, endpoint, msg_type, qos_profile or "default",
-            contract_id, cap_view.provider_id,
+            kind,
+            endpoint,
+            msg_type,
+            qos_profile or "default",
+            contract_id,
+            cap_view.provider_id,
         )
         _LAST_RESOLVED[(transport, contract_id)] = sig
     return TopicSpec(
@@ -274,14 +293,19 @@ def _discover_map_binding(wait_s: float) -> Optional[dict]:
     while True:
         try:
             spec = _resolve_one_contract(
-                Transport.ROS2, "map_lifecycle",
-                "robonix/service/map/lifecycle", "MapLifecycle",
+                Transport.ROS2,
+                "map_lifecycle",
+                "robonix/service/map/lifecycle",
+                "MapLifecycle",
             )
         except Exception as e:  # noqa: BLE001
             # Probe runs before bootstrap; if atlas isn't reachable yet a
             # wire error must degrade to static binding, not kill startup.
-            log.warning("[scene] lifecycle probe: atlas query failed (%s) — "
-                        "falling back to static map binding", e)
+            log.warning(
+                "[scene] lifecycle probe: atlas query failed (%s) — "
+                "falling back to static map binding",
+                e,
+            )
             return None
         if spec is not None:
             sample = read_latched_lifecycle(spec.topic, timeout_s=5.0)
@@ -298,7 +322,9 @@ def _discover_map_binding(wait_s: float) -> Optional[dict]:
 
 
 def _resolve_explicit(
-    observations: list[dict], atlas_stub, pb_transport: int,
+    observations: list[dict],
+    atlas_stub,
+    pb_transport: int,
     camera_provider_id: str = "",
 ) -> list[TopicSpec]:
     """Manifest-driven override path. Each entry pairs a logical kind
@@ -319,11 +345,14 @@ def _resolve_explicit(
                 "[scene] observation %r: missing kind/contract; skipping", entry
             )
             continue
-        msg_type = str(entry.get("msg_type", "")) or by_contract.get(contract, (kind, ""))[1]
+        msg_type = (
+            str(entry.get("msg_type", "")) or by_contract.get(contract, (kind, ""))[1]
+        )
         if not msg_type:
             log.warning(
                 "[scene] observation %r: no msg_type — add it to the entry "
-                "or to _SCENE_CONTRACTS in service.py", entry
+                "or to _SCENE_CONTRACTS in service.py",
+                entry,
             )
             continue
         provider_id = str(entry.get("provider_id") or "")
@@ -410,8 +439,13 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
 
 
 async def _auto_discover_loop(
-    *, atlas_stub, hub, transport: str, explicit: list[dict],
-    camera_provider_id: str = "", period_s: float = 5.0,
+    *,
+    atlas_stub,
+    hub,
+    transport: str,
+    explicit: list[dict],
+    camera_provider_id: str = "",
+    period_s: float = 5.0,
 ) -> None:
     """Background reconciler. Re-runs discovery every `period_s` and
     dynamically adds new (kind, topic) subscriptions as they appear.
@@ -475,9 +509,7 @@ async def _start_ros_ingest(
             "[scene] RGB-D camera pinned to provider %s",
             camera_provider_id,
         )
-    specs = _build_topic_specs(
-        explicit, atlas_stub, transport, camera_provider_id
-    )
+    specs = _build_topic_specs(explicit, atlas_stub, transport, camera_provider_id)
     if not specs and not explicit:
         attempt = 0
         while not specs:
@@ -518,9 +550,7 @@ async def _start_ros_ingest(
     # every tick, so it tolerates pose/odom showing up later (mapping
     # boots after scene; without this we'd skip task creation forever).
     bg_tasks.append(
-        asyncio.create_task(
-            _self_pose_loop(hub, self_tracker), name="scene-self-pose"
-        )
+        asyncio.create_task(_self_pose_loop(hub, self_tracker), name="scene-self-pose")
     )
 
     # Perception startup races with camera primitive cap registration:
@@ -596,7 +626,12 @@ async def _start_ros_ingest(
                             log.info(
                                 "[scene] camera intrinsics from contract: "
                                 "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
-                                k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                                k.fx,
+                                k.fy,
+                                k.cx,
+                                k.cy,
+                                k.width,
+                                k.height,
                             )
                             intrinsics_logged["ok"] = True
                         return k
@@ -615,7 +650,13 @@ async def _start_ros_ingest(
                     log.warning(
                         "[scene] camera intrinsics fallback: %s "
                         "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
-                        source, k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                        source,
+                        k.fx,
+                        k.fy,
+                        k.cx,
+                        k.cy,
+                        k.width,
+                        k.height,
                     )
                     intrinsics_logged["fallback"] = True
                 return k
@@ -626,6 +667,9 @@ async def _start_ros_ingest(
             or os.environ.get("SCENE_CAMERA_FRAME")
             or "camera_optical_frame"
         )
+        base_frame = str(
+            config.get("base_frame") or os.environ.get("SCENE_BASE_FRAME") or ""
+        )
 
         detector = ConceptGraphsDetector(
             rgb_fetcher_msg=_rgb_msg,
@@ -635,10 +679,9 @@ async def _start_ros_ingest(
             world_frame_fn=lambda: getattr(self_tracker, "world_frame_id", "map"),
             on_detections=lambda dets: _ingest_detections(registry, dets),
             registry=registry,
-            # Pass the hub so the detector can compose camera→world
-            # from atlas-resolved contracts (`service/map/pose` ⊕
-            # `primitive/camera/extrinsics`). tf2 is reserved for the
-            # legacy fallback path.
+            # Pass the hub so the detector can resolve camera→world from the
+            # authoritative TF tree. The pose + camera-extrinsics contracts
+            # remain a validated compatibility fallback when TF is unavailable.
             hub=hub,
             # Detection cadence. The default 0.6 s keeps objects fresh but runs
             # YOLO+CLIP on the GPU continuously; on a shared Jetson GPU that
@@ -647,6 +690,7 @@ async def _start_ros_ingest(
             # speech + perception together.
             period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
             camera_frame=camera_frame,
+            base_frame=base_frame or None,
         )
         await detector.start()
         log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
@@ -994,7 +1038,8 @@ async def _lifecycle_watch(
                 log.warning(
                     "[scene] mapping broadcasts an EPHEMERAL session (empty "
                     "map_id) while scene is bound to %r (source=%s) — set "
-                    "mapping's config.map_id to match", binding.map_id,
+                    "mapping's config.map_id to match",
+                    binding.map_id,
                     binding.source,
                 )
                 warned_ephemeral = True
@@ -1005,7 +1050,10 @@ async def _lifecycle_watch(
             if not confirmed:
                 log.info(
                     "[scene] map binding confirmed by mapping lifecycle: "
-                    "id=%s gen=%d mode=%s", live_id, live_gen, str(msg.mode),
+                    "id=%s gen=%d mode=%s",
+                    live_id,
+                    live_gen,
+                    str(msg.mode),
                 )
                 confirmed = True
                 # Static bindings learn their epoch here; from now on a
@@ -1021,7 +1069,8 @@ async def _lifecycle_watch(
                         # dir); the watcher itself must survive it.
                         log.error(
                             "[scene-anno] generation reconcile failed "
-                            "(annotation staleness may be outdated): %s", e,
+                            "(annotation staleness may be outdated): %s",
+                            e,
                         )
             last_warned = None
             continue
@@ -1033,8 +1082,12 @@ async def _lifecycle_watch(
                 "source=%s) — semantic state may be mis-anchored. Scene keeps "
                 "its startup binding until lifecycle linkage (P3) lands; "
                 "restart scene to rebind.",
-                live_id, live_gen, str(msg.mode),
-                binding.map_id, ref_gen, binding.source,
+                live_id,
+                live_gen,
+                str(msg.mode),
+                binding.map_id,
+                ref_gen,
+                binding.source,
             )
             if anno_store is not None and id_ok and not gen_ok:
                 # Same map, new frame epoch: user-drawn geometry may no
@@ -1048,7 +1101,8 @@ async def _lifecycle_watch(
                     if n:
                         log.warning(
                             "[scene-anno] %d annotation(s) marked stale — "
-                            "confirm or redraw them in the map UI", n,
+                            "confirm or redraw them in the map UI",
+                            n,
                         )
                 except Exception as e:  # noqa: BLE001
                     # Losing the stale marker is recoverable (next boot's
@@ -1056,7 +1110,8 @@ async def _lifecycle_watch(
                     # would silence ALL drift warnings for the session.
                     log.error(
                         "[scene-anno] stale marking failed (annotations "
-                        "may show as fresh until restart): %s", e,
+                        "may show as fresh until restart): %s",
+                        e,
                     )
             if id_ok:
                 # Acknowledge the new epoch so a THIRD epoch is reported
@@ -1068,20 +1123,9 @@ async def _lifecycle_watch(
             last_warned = key
 
 
-# ── main ───────────────────────────────────────────────────────────────────
-async def _run() -> None:
-    config = _load_config()
-
-    # Hand the FastMCP app from mcp_tools to Capability so it owns the
-    # HTTP server. Capability auto-allocates the port (was hand-set to
-    # 50106) and atlas-routes consumers via QueryCapabilities. The 6
-    # tools were already decorated with @mcp_contract on mcp_tools.mcp
-    # at import time; we still need to declare each on atlas — Capability
-    # only auto-declares tools registered via @scene.mcp(), and we kept
-    # the @mcp_contract pattern in mcp_tools to avoid a cyclic-import
-    # rewrite. Manual declare per tool:
-    scene.use_mcp_app(mcp_tools.mcp)
-
+# ── active runtime ─────────────────────────────────────────────────────────
+async def _run_active(config: dict) -> None:
+    """Start Scene resources after Driver(INIT) and Driver(ACTIVATE)."""
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
     self_tracker = _SelfTracker(registry)
@@ -1111,12 +1155,22 @@ async def _run() -> None:
         broadcast, config.get("map_id"), os.environ.get("SCENE_MAP_ID")
     )
     map_id = binding.map_id
-    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in ("true", "1", "yes")
-    scene_state_map_id = map_id if restore_on_start else f".live-{os.getpid()}-{int(time.time())}"
+    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    scene_state_map_id = (
+        map_id if restore_on_start else f".live-{os.getpid()}-{int(time.time())}"
+    )
     log.info(
         "[scene] map binding: id=%s gen=%s source=%s mode=%s restore_on_start=%s state_partition=%s",
-        binding.map_id, binding.generation, binding.source, binding.mode,
-        restore_on_start, scene_state_map_id,
+        binding.map_id,
+        binding.generation,
+        binding.source,
+        binding.mode,
+        restore_on_start,
+        scene_state_map_id,
     )
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # mapping is provably UP but running ephemeral (no map_id) — its
@@ -1127,11 +1181,17 @@ async def _run() -> None:
             "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
             "while scene binds %r from %s — objects stored under this id "
             "won't re-anchor across boots; set mapping's config.map_id to "
-            "match", binding.map_id, binding.source,
+            "match",
+            binding.map_id,
+            binding.source,
         )
 
     obj_store = None
-    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
+    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    ):
         from .persistence import ObjectStore
 
         db_path = os.environ.get(
@@ -1146,7 +1206,10 @@ async def _run() -> None:
                         registry.restore_object(o)
             log.info(
                 "[scene-persist] object store ready: restored %d object(s) (partition=%s, restore_on_start=%s) from %s",
-                len(restored), obj_store.map_id, restore_on_start, db_path,
+                len(restored),
+                obj_store.map_id,
+                restore_on_start,
+                db_path,
             )
         except Exception as e:  # noqa: BLE001
             # Object memory is opted in (default on), so a failure here is not
@@ -1155,7 +1218,8 @@ async def _run() -> None:
             log.error(
                 "[scene-persist] object memory enabled but store init/restore "
                 "failed — persistence OFF for this session (no restore, no "
-                "writes): %s", e,
+                "writes): %s",
+                e,
             )
             obj_store = None
 
@@ -1168,9 +1232,7 @@ async def _run() -> None:
     anno_store: Optional[AnnotationStore] = None
     try:
         anno_store = AnnotationStore(
-            os.environ.get(
-                "SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"
-            ),
+            os.environ.get("SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"),
             map_id=scene_state_map_id,
             generation=binding.generation if restore_on_start else None,
         )
@@ -1178,56 +1240,22 @@ async def _run() -> None:
         log.info(
             "[scene-anno] annotation store ready: %d annotation(s), %d stale "
             "(map_id=%s) at %s",
-            len(anns), sum(a.stale for a in anns), anno_store.map_id,
+            len(anns),
+            sum(a.stale for a in anns),
+            anno_store.map_id,
             anno_store.path,
         )
     except Exception as e:  # noqa: BLE001
         log.error(
             "[scene-anno] annotation store init failed — annotation API "
-            "disabled for this session: %s", e,
+            "disabled for this session: %s",
+            e,
         )
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
     # supplied later in _start_ros_ingest). The geometric relation loop +
     # scene-graph store are wired further down, once the registry is live.
     mcp_tools.attach_state(registry=registry)
     mcp_tools.attach_annotation_store(anno_store)
-
-    # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
-    # keeps running its own asyncio event loop after this returns.
-    scene.bootstrap()
-
-    # Declare each scene MCP tool on atlas. Each handler has
-    # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
-    # description / JSON schema stay in sync with the codegen types.
-    scene_tools = (
-        mcp_tools.list_objects,
-        mcp_tools.goal_near,
-        mcp_tools.goal_room,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.get_robot_context,
-        mcp_tools.list_relations,
-    )
-    for fn in scene_tools:
-        cid = getattr(fn, "_robonix_contract_id", None)
-        if cid is None:
-            log.warning(
-                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
-            )
-            continue
-        in_cls = getattr(fn, "_robonix_input_cls", None)
-        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
-        scene.declare_mcp(
-            cid,
-            scene.mcp_endpoint,
-            description=(fn.__doc__ or "").strip(),
-            input_schema_json=schema,
-        )
-    log.info(
-        "scene declared %d MCP tools at %s",
-        len(scene_tools),
-        scene.mcp_endpoint,
-    )
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -1269,9 +1297,7 @@ async def _run() -> None:
                 hub=hub,
                 transport=str(config.get("transport") or "ros2"),
                 explicit=(config.get("observations") or []),
-                camera_provider_id=str(
-                    config.get("camera_provider_id") or ""
-                ).strip(),
+                camera_provider_id=str(config.get("camera_provider_id") or "").strip(),
             ),
             name="scene-auto-discover",
         ),
@@ -1300,7 +1326,8 @@ async def _run() -> None:
     sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=scene_state_map_id)
     log.info(
         "[scene-graph] cache base=%s partitioned by map_id=%s",
-        sg_cache_dir, map_id,
+        sg_cache_dir,
+        map_id,
     )
     mcp_tools.attach_scene_graph_store(sg_store)
     geo_loop = GeometricRelationLoop(registry, sg_store)
@@ -1309,7 +1336,11 @@ async def _run() -> None:
     # ── Scene Graph (optional LLM enrichment of the residual) ────────
     sg_stop: asyncio.Event | None = None
     if os.environ.get("SCENE_GRAPH_ENABLED", "true").lower() in ("true", "1", "yes"):
-        from .scene_graph.builder import SceneGraphBuilder, SceneGraphConfig, scene_graph_loop
+        from .scene_graph.builder import (
+            SceneGraphBuilder,
+            SceneGraphConfig,
+            scene_graph_loop,
+        )
         from .scene_graph.captioner import NodeCaptioner
         from .scene_graph.llm_client import SceneGraphLLMClient
         from .scene_graph.relations import RelationInferer
@@ -1383,37 +1414,97 @@ async def _run() -> None:
         scene.mcp_endpoint,
         len(config.get("observations", [])),
     )
+    _lifecycle.mark_runtime_ready()
 
-    # Wait for SIGTERM/SIGINT.
-    stop = asyncio.Event()
+    await _wait_for_lifecycle_event(_lifecycle.shutdown_requested)
+    log.info("shutdown requested; tearing down")
+
+    # Driver(SHUTDOWN) must not acknowledge until every producer and owned
+    # task has exited, uvicorn has released its listening socket, and the
+    # milvus-lite lock is closed. The coordinator attempts every step before
+    # surfacing a cleanup error to the lifecycle handler.
+    await close_scene_runtime_resources(
+        background_tasks=bg_tasks,
+        scene_graph_stop=sg_stop,
+        perception=perception,
+        hub=hub,
+        geometric_loop=geo_loop,
+        web_server=web_server,
+        web_task=web_task,
+        object_store=obj_store,
+    )
+
+
+async def _run() -> None:
+    """Register Scene, receive lifecycle config, then run active resources."""
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop.set)
-    await stop.wait()
-    log.info("shutdown signal received; tearing down")
+            loop.add_signal_handler(sig, _lifecycle.request_process_shutdown)
 
-    # Tear down ingest first so we stop mutating the registry…
-    if sg_stop is not None:
-        sg_stop.set()
-    if perception is not None:
-        with contextlib.suppress(Exception):
-            await perception.stop()
-    with contextlib.suppress(Exception):
-        await hub.stop()
-    await geo_loop.stop()
-    for t in bg_tasks:
-        t.cancel()
-    if web_server is not None:
-        web_server.should_exit = True
+    # Capability owns lifecycle gRPC, heartbeat, and MCP HTTP. Bootstrap must
+    # happen before config-dependent resources so rbnx can deliver CMD_INIT.
+    scene.use_mcp_app(mcp_tools.mcp)
+    scene.bootstrap()
 
-    # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.
-    scene._teardown()
+    # These tools are decorated on the FastMCP app rather than through
+    # @scene.mcp(), so declare their existing metadata after bootstrap.
+    scene_tools = (
+        mcp_tools.list_objects,
+        mcp_tools.goal_near,
+        mcp_tools.goal_room,
+        mcp_tools.get_scene_graph,
+        mcp_tools.get_object_context,
+        mcp_tools.get_robot_context,
+        mcp_tools.list_relations,
+    )
+    for fn in scene_tools:
+        cid = getattr(fn, "_robonix_contract_id", None)
+        if cid is None:
+            log.warning(
+                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
+            )
+            continue
+        in_cls = getattr(fn, "_robonix_input_cls", None)
+        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
+        scene.declare_mcp(
+            cid,
+            scene.mcp_endpoint,
+            description=(fn.__doc__ or "").strip(),
+            input_schema_json=schema,
+        )
+    log.info(
+        "scene declared %d MCP tools at %s",
+        len(scene_tools),
+        scene.mcp_endpoint,
+    )
 
-    # Release the milvus-lite lock so the next boot can re-open the .db.
-    if obj_store is not None:
-        with contextlib.suppress(Exception):
-            obj_store.close()
+    run_error: BaseException | None = None
+    try:
+        if not await _wait_for_lifecycle_event(_lifecycle.initialized):
+            return
+        if not await _wait_for_lifecycle_event(_lifecycle.activation_requested):
+            return
+        await _run_active(_lifecycle.config)
+    except BaseException as exc:
+        run_error = exc
+        _lifecycle.mark_runtime_failed(exc)
+        raise
+    finally:
+        # Release the Driver(SHUTDOWN) handler only after active resources are
+        # closed. Its gRPC completion callback tears down the capability server
+        # after the response has left the server. Direct signals have no such
+        # callback, so they tear the capability down here.
+        _lifecycle.mark_shutdown_complete(run_error)
+        if _lifecycle.driver_shutdown_requested.is_set():
+            stopped = await asyncio.to_thread(scene._stopping.wait, 3.0)
+            if not stopped:
+                log.warning(
+                    "Driver(SHUTDOWN) response completion was not observed "
+                    "before process exit"
+                )
+        else:
+            scene._teardown()
 
 
 def main() -> None:

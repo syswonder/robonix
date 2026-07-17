@@ -70,11 +70,9 @@ pub enum Commands {
         /// Registry endpoint (default: 127.0.0.1:50051)
         #[arg(long)]
         endpoint: Option<String>,
-        /// Per-instance config file (JSON or YAML). Materialized into
-        /// `RBNX_CONFIG_FILE` for the start body. Same shape as the per-
-        /// package `config:` block under a deploy `robonix_manifest.yaml`
-        /// — `rbnx boot` writes one of these per package and re-execs
-        /// `rbnx start --config <file>` internally.
+        /// Per-instance config file (JSON or YAML). Decoded and delivered to
+        /// the provider through Driver(CMD_INIT). It has the same shape as a
+        /// package's nested `config:` block in `robonix_manifest.yaml`.
         #[arg(short = 'c', long)]
         config: Option<PathBuf>,
         /// Inline config overrides. Repeatable, dotted-path keys, e.g.

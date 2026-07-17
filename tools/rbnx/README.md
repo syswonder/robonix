@@ -49,8 +49,29 @@ Run `rbnx <cmd> --help` for full flags.
 - `ROBONIX_ATLAS` — atlas endpoint, default `127.0.0.1:50051`.
 - `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
   to pilot at boot.
-- `RBNX_CONFIG_FILE` — explicit path to a config file (overrides
-  `~/.robonix/config.yaml`).
+
+Package instance settings belong in the deployment manifest's nested
+`config:` mapping. `rbnx boot` serializes that mapping and sends it to the
+provider through `Driver(CMD_INIT)`; it does not create a second package
+configuration file.
+
+Package authors normally omit Driver from `capabilities`; rbnx and current
+codegen automatically select and register `robonix/lifecycle/driver`. Explicit
+shared selection is accepted, and one explicitly selected namespace Driver
+remains compatible. Only an old generated artifact that lacks the shared stub
+may fall back to its namespace Driver, or finally to no Driver with a loud
+warning; config cannot be delivered in that last-resort case. Declaring both
+shared and legacy Drivers is rejected.
+
+The compatibility handshake is fail-closed. For an omitted Driver, rbnx
+exports `ROBONIX_DRIVER_CONTRACT_ID=robonix/lifecycle/driver` plus
+`ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`. The SDK still chooses shared
+first. It may substitute only the provider's exact `<namespace>/driver` when
+the shared generated service pair is absent. If both service pairs are wholly
+absent, the SDK publishes the reserved Atlas `state_detail`
+`robonix.lifecycle.old_artifact_no_driver.v1`; only that positive proof allows
+rbnx/Soma to continue without a Driver. Partial stubs and Driver declaration
+failures publish no proof and fail startup, so config is never silently lost.
 
 ## How it finds the source tree
 

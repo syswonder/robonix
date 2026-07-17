@@ -10,9 +10,10 @@ on their own schedule. Keeps GIL contention predictable and means
 the relation engine / MCP server don't stall behind a fat pointcloud
 callback.
 
-Topic names come from atlas channel declarations or
-`RBNX_CONFIG_FILE.observations[]` so a new robot does not need a code edit —
-just declare which topic publishes which observation kind.
+Topic names come from atlas channel declarations or from
+`system.scene.config.observations[]`, delivered through Driver(CMD_INIT), so a
+new robot does not need a code edit—only a declaration of which topic publishes
+each observation kind.
 """
 from __future__ import annotations
 

@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Driver lifecycle gRPC server + per-contract Servicer resolution.
 
-Every Robonix provider declares a `*/driver` capability that `rbnx boot`
-calls Driver(CMD_INIT, config_json) on. The wire shape is fixed by
+Every managed Robonix provider uses the shared
+`robonix/lifecycle/driver` capability that `rbnx boot` calls
+Driver(CMD_INIT, config_json) on. The wire shape is fixed by
 lib/lifecycle/srv/Driver.srv (uint8 command + string config_json →
 bool ok + string state + string error).
 
-Per-namespace generated Servicer classes live in robonix_contracts_pb2_grpc:
-- primitive/<area>/driver  → Primitive<Area>DriverServicer
-- service/<area>/driver    → Service<Area>DriverServicer
-- skill/<area>/driver      → Skill<Area>DriverServicer
+Older generated code may expose only `<provider namespace>/driver`.
+That form remains a compatibility fallback and emits a migration warning;
+new code registers only the shared lifecycle contract.
 
 Users can also declare arbitrary rpc-mode contracts (e.g. `primitive/chassis/move`)
 which generate `PrimitiveChassisMoveServicer` with method `Move`. We resolve
 both via the same `contract_id_to_pascal()` mapping.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -26,10 +27,52 @@ from .result import Deferred, Err, Ok, Result
 log = logging.getLogger("robonix_api.lifecycle")
 
 # Driver.srv command codes (mirrors lib/lifecycle/srv/Driver.srv).
-CMD_INIT       = 0
-CMD_ACTIVATE   = 1
+CMD_INIT = 0
+CMD_ACTIVATE = 1
 CMD_DEACTIVATE = 2
-CMD_SHUTDOWN   = 3
+CMD_SHUTDOWN = 3
+SHARED_DRIVER_CONTRACT_ID = "robonix/lifecycle/driver"
+OLD_ARTIFACT_FALLBACK_ENV = "ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK"
+OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL = "robonix.lifecycle.old_artifact_no_driver.v1"
+
+
+def _generated_service_status(contracts_grpc_module, base: str) -> tuple[bool, bool]:
+    """Return ``(complete, absent)`` for one generated gRPC service pair.
+
+    A partially generated pair is neither complete nor absent and must fail
+    closed; it is not evidence of an old artifact.
+    """
+    servicer = getattr(contracts_grpc_module, f"{base}Servicer", None)
+    add_fn = getattr(contracts_grpc_module, f"add_{base}Servicer_to_server", None)
+    return (
+        servicer is not None and add_fn is not None,
+        servicer is None and add_fn is None,
+    )
+
+
+def lifecycle_stubs_prove_old_artifact_without_driver(
+    namespace: str,
+    contracts_grpc_module,
+    requested_contract_id: str | None,
+    *,
+    allow_old_artifact_fallback: bool,
+) -> bool:
+    """Positive proof used for the managed zero-Driver fallback.
+
+    Permission alone is insufficient: both generated service pairs must be
+    wholly absent. A declaration RPC failure or partial/corrupt generated pair
+    therefore cannot masquerade as an old artifact.
+    """
+    if not allow_old_artifact_fallback:
+        return False
+    requested = (requested_contract_id or "").strip()
+    if requested != SHARED_DRIVER_CONTRACT_ID:
+        return False
+    shared_base = contract_id_to_pascal(SHARED_DRIVER_CONTRACT_ID)
+    legacy_base = contract_id_to_pascal(f"{namespace.strip('/')}/driver")
+    _, shared_absent = _generated_service_status(contracts_grpc_module, shared_base)
+    _, legacy_absent = _generated_service_status(contracts_grpc_module, legacy_base)
+    return shared_absent and legacy_absent
 
 
 def contract_id_to_pascal(contract_id: str) -> str:
@@ -52,9 +95,119 @@ def driver_pascal_for_namespace(namespace: str) -> str:
     return contract_id_to_pascal(f"{namespace.strip('/')}/driver")
 
 
+def lifecycle_contract_for_module(
+    namespace: str,
+    contracts_grpc_module,
+    requested_contract_id: str | None = None,
+    *,
+    allow_old_artifact_fallback: bool = False,
+) -> tuple[str, str] | None:
+    """Select the manifest's lifecycle contract, with legacy compatibility.
+
+    Returns ``(contract_id, generated_service_name)``. A package built with
+    current Robonix contracts selects ``robonix/lifecycle/driver``. During
+    incremental migration, ``rbnx`` supplies the exact Driver ID from the
+    selected package manifest so old and new stubs can coexist safely.
+    """
+    shared_base = contract_id_to_pascal(SHARED_DRIVER_CONTRACT_ID)
+    legacy_contract_id = f"{namespace.strip('/')}/driver"
+    legacy_base = contract_id_to_pascal(legacy_contract_id)
+    shared_available, shared_absent = _generated_service_status(
+        contracts_grpc_module, shared_base
+    )
+    legacy_available, legacy_absent = _generated_service_status(
+        contracts_grpc_module, legacy_base
+    )
+    requested = (
+        requested_contract_id.strip() if requested_contract_id is not None else None
+    )
+
+    if requested == SHARED_DRIVER_CONTRACT_ID:
+        if shared_available:
+            return SHARED_DRIVER_CONTRACT_ID, shared_base
+        if not shared_absent:
+            log.error(
+                "generated lifecycle service %s is incomplete; refusing compatibility fallback",
+                shared_base,
+            )
+            return None
+        if allow_old_artifact_fallback and legacy_available:
+            log.warning(
+                "generated artifact predates %s; falling back to legacy "
+                "lifecycle contract %s. Rebuild the package to refresh stubs",
+                SHARED_DRIVER_CONTRACT_ID,
+                legacy_contract_id,
+            )
+            return legacy_contract_id, legacy_base
+        if allow_old_artifact_fallback:
+            if not legacy_absent:
+                log.error(
+                    "generated lifecycle service %s is incomplete; refusing no-Driver fallback",
+                    legacy_base,
+                )
+                return None
+            log.warning(
+                "generated artifact contains neither %s nor %s; continuing "
+                "without a lifecycle Driver as a last-resort compatibility "
+                "fallback (package config cannot be delivered). Rebuild the package",
+                SHARED_DRIVER_CONTRACT_ID,
+                legacy_contract_id,
+            )
+            return None
+        log.error(
+            "requested lifecycle contract %s is unavailable in generated stubs",
+            requested,
+        )
+        return None
+    if requested == legacy_contract_id and legacy_available:
+        log.warning(
+            "lifecycle contract %s is deprecated; rebuild against %s",
+            legacy_contract_id,
+            SHARED_DRIVER_CONTRACT_ID,
+        )
+        return legacy_contract_id, legacy_base
+    if requested:
+        log.error(
+            "requested lifecycle contract %s is unavailable in generated stubs",
+            requested,
+        )
+        return None
+
+    # Compatibility with older rbnx launchers that encoded omission as an
+    # empty selection. Current rbnx always requests shared and sends a separate
+    # fallback marker; an empty value is therefore never a normal author path.
+    if requested_contract_id is not None:
+        log.warning(
+            "old launcher requested no lifecycle Driver; continuing as a "
+            "last-resort compatibility fallback (package config cannot be delivered)"
+        )
+        return None
+
+    # Direct launches have no manifest selection. Canonical current behavior is
+    # shared-first; namespace legacy is used only when the shared pair is fully
+    # absent, matching managed omission semantics.
+    if shared_available:
+        return SHARED_DRIVER_CONTRACT_ID, shared_base
+    if not shared_absent:
+        log.error("generated lifecycle service %s is incomplete", shared_base)
+        return None
+    if legacy_available:
+        log.warning(
+            "shared lifecycle stubs are absent; direct launch is falling back "
+            "to deprecated contract %s. Rebuild against %s",
+            legacy_contract_id,
+            SHARED_DRIVER_CONTRACT_ID,
+        )
+        return legacy_contract_id, legacy_base
+    if not legacy_absent:
+        log.error("generated lifecycle service %s is incomplete", legacy_base)
+    return None
+
+
 def resolve_servicer(contract_id: str, contracts_grpc_module):
     """Find the generated Servicer class + add-to-server fn + canonical method name
-    for a contract. Returns (servicer_class, method_name, add_fn, pascal_base) or None."""
+    for a contract. Returns (servicer_class, method_name, add_fn, pascal_base) or None.
+    """
     base = contract_id_to_pascal(contract_id)
     servicer_cls = getattr(contracts_grpc_module, f"{base}Servicer", None)
     add_fn = getattr(contracts_grpc_module, f"add_{base}Servicer_to_server", None)
@@ -79,27 +232,24 @@ def bind_user_handler(servicer_cls: type, method_name: str, fn: Callable) -> typ
     handler arity: 1-arg signatures get `(request)`, 2-arg get `(request, context)`."""
     sig = inspect.signature(fn)
     nparams = sum(
-        1 for p in sig.parameters.values()
-        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        1
+        for p in sig.parameters.values()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     )
     if nparams >= 2:
+
         def impl(self, request, context, _fn=fn):
             return _fn(request, context)
+
     else:
+
         def impl(self, request, context, _fn=fn):
             return _fn(request)
-    return type(f"Robonix{servicer_cls.__name__}Impl", (servicer_cls,), {method_name: impl})
 
-
-# TODO: this is just a hack since we don't restrict the namespace - wheatfox, 2026.5
-def _is_skill_namespace(ns: str) -> bool:
-    parts = [p for p in ns.strip("/").split("/") if p]
-    if not parts:
-        return False
-    # Either "robonix/skill/<name>" or "skill/<name>".
-    if parts[0] == "robonix" and len(parts) > 1:
-        return parts[1] == "skill"
-    return parts[0] == "skill"
+    return type(
+        f"Robonix{servicer_cls.__name__}Impl", (servicer_cls,), {method_name: impl}
+    )
 
 
 def build_lifecycle_servicer(
@@ -107,36 +257,49 @@ def build_lifecycle_servicer(
     contracts_grpc_module,
     response_cls,
     *,
-    on_init=None, on_activate=None, on_deactivate=None, on_shutdown=None,
+    on_init=None,
+    on_activate=None,
+    on_deactivate=None,
+    on_shutdown=None,
+    on_shutdown_complete=None,
     on_state_change=None,
     log_tag: str = "robonix_api",
+    requested_contract_id: str | None = None,
+    allow_old_artifact_fallback: bool = False,
 ):
     """Build (without starting a server) the lifecycle Servicer instance.
 
-    Returns `(instance, add_to_server_fn, pascal_base, method_name='Driver')`
-    when codegen emitted a `<namespace>/driver` Servicer for this package, or
-    `None` when the package doesn't have a driver contract (typical for
-    system/* services like memory/scene/speech that have no hardware-init
-    phase — they expose only MCP tools / gRPC RPCs and don't participate in
-    the rbnx-boot Driver(CMD_INIT) handshake).
+    Returns ``(instance, add_to_server_fn, pascal_base,
+    method_name='Driver', contract_id)`` when codegen emitted the shared
+    lifecycle Servicer (preferred) or a legacy ``<namespace>/driver``
+    Servicer. Returns ``None`` when the selected contract is unavailable in
+    the generated stubs.
 
     `on_state_change(state, detail)` is invoked AFTER each handler returns
     ok=true and is the framework's hook for pushing state transitions to
     atlas. State strings: "inactive" / "active" / "error". Capability
     layer wires this; lower-level callers can leave it None.
     """
-    base = driver_pascal_for_namespace(namespace)
+    selected = lifecycle_contract_for_module(
+        namespace,
+        contracts_grpc_module,
+        requested_contract_id,
+        allow_old_artifact_fallback=allow_old_artifact_fallback,
+    )
+    if selected is None:
+        log.info(
+            "[%s] no %s or %s/driver contract — skipping lifecycle servicer",
+            log_tag,
+            SHARED_DRIVER_CONTRACT_ID,
+            namespace,
+        )
+        return None
+    contract_id, base = selected
     servicer_cls = getattr(contracts_grpc_module, f"{base}Servicer", None)
     add_fn = getattr(contracts_grpc_module, f"add_{base}Servicer_to_server", None)
     if servicer_cls is None or add_fn is None:
-        log.info(
-            "[%s] no %s/driver contract — skipping lifecycle servicer "
-            "(this provider doesn't need a Driver(CMD_INIT) handler).",
-            log_tag, namespace,
-        )
+        log.warning("[%s] incomplete generated lifecycle service %s", log_tag, base)
         return None
-
-    is_skill = _is_skill_namespace(namespace)
 
     def _emit_state(target: str | None, detail: str = "") -> None:
         """Push state transition to the Capability layer. `target=None`
@@ -181,7 +344,10 @@ def build_lifecycle_servicer(
             log.warning(
                 "[%s] %s raised — handlers should return Err(...) instead "
                 "of raising. Caught: %s: %s",
-                log_tag, what, type(e).__name__, e,
+                log_tag,
+                what,
+                type(e).__name__,
+                e,
             )
             return Err(f"{type(e).__name__}: {e}")
         if isinstance(ret, (Ok, Err, Deferred)):
@@ -206,50 +372,48 @@ def build_lifecycle_servicer(
         if isinstance(result, Deferred):
             return response_cls(ok=False, state="deferred", error=result.reason)
         # Unreachable — _run_handler has already enforced the type.
-        return response_cls(ok=False, state="error",
-                            error=f"unknown Result variant: {type(result).__name__}")
+        return response_cls(
+            ok=False,
+            state="error",
+            error=f"unknown Result variant: {type(result).__name__}",
+        )
 
     def Driver(self, request, context):  # noqa: N802 — matches generated stub
         cmd = int(request.command)
         log.info("[%s] Driver(cmd=%d) received", log_tag, cmd)
         cfg = parse_cfg(request)
 
-        # CMD_INIT must have a handler — that's where the provider parses
-        # its config + validates dependencies. No reasonable default.
+        def missing_handler_ok(handler_name: str):
+            log.warning(
+                "[%s] no %s handler; applying lifecycle transition as a no-op",
+                log_tag,
+                handler_name,
+            )
+            result = Ok()
+            _post_handler_state(cmd, result)
+            return _to_response(cmd, result)
+
+        # Lifecycle handlers are optional. The shared Driver still provides a
+        # complete state machine for providers that do not need work at a
+        # given transition; a warning keeps the omission visible.
         if cmd == CMD_INIT:
             if on_init is None:
-                err = Err("no on_init handler defined")
-                _post_handler_state(cmd, err)
-                return _to_response(cmd, err)
+                return missing_handler_ok("on_init")
             result = _run_handler(on_init, "on_init", cfg)
             _post_handler_state(cmd, result)
             return _to_response(cmd, result)
 
-        # CMD_ACTIVATE / CMD_DEACTIVATE: optional for primitives /
-        # services (framework returns Ok no-op so rbnx boot's auto-
-        # ACTIVATE succeeds), required for skills (that's where they
-        # allocate / release hot resources — executor eviction depends
-        # on it). Handlers take no args — only on_init receives config.
+        # Handlers take no args — only on_init receives config.
         if cmd == CMD_ACTIVATE:
             if on_activate is None:
-                if is_skill:
-                    err = Err("skill is missing @<provider>.on_activate handler")
-                    _post_handler_state(cmd, err)
-                    return _to_response(cmd, err)
-                _post_handler_state(cmd, Ok())
-                return _to_response(cmd, Ok())
+                return missing_handler_ok("on_activate")
             result = _run_handler(on_activate, "on_activate")
             _post_handler_state(cmd, result)
             return _to_response(cmd, result)
 
         if cmd == CMD_DEACTIVATE:
             if on_deactivate is None:
-                if is_skill:
-                    err = Err("skill is missing @<provider>.on_deactivate handler")
-                    _post_handler_state(cmd, err)
-                    return _to_response(cmd, err)
-                _post_handler_state(cmd, Ok())
-                return _to_response(cmd, Ok())
+                return missing_handler_ok("on_deactivate")
             result = _run_handler(on_deactivate, "on_deactivate")
             _post_handler_state(cmd, result)
             return _to_response(cmd, result)
@@ -260,9 +424,26 @@ def build_lifecycle_servicer(
             if on_shutdown is not None:
                 result = _run_handler(on_shutdown, "on_shutdown")
             else:
+                log.warning(
+                    "[%s] no on_shutdown handler; applying lifecycle transition as a no-op",
+                    log_tag,
+                )
                 result = Ok()
             _post_handler_state(cmd, result)
-            return _to_response(cmd, result)
+            response = _to_response(cmd, result)
+            if on_shutdown_complete is not None:
+                # grpc.ServicerContext.add_callback runs after this RPC has
+                # terminated, so the response is not canceled by stopping the
+                # server that is currently carrying it.
+                add_callback = getattr(context, "add_callback", None)
+                callback_registered = bool(
+                    callable(add_callback) and add_callback(on_shutdown_complete)
+                )
+                if not callback_registered:
+                    # Unit/direct callers may not provide a real gRPC context.
+                    # Production gRPC contexts always take the callback.
+                    on_shutdown_complete()
+            return response
 
         # Unknown command — proto evolved newer than the provider.
         err = Err(f"unknown command code {cmd}")
@@ -270,11 +451,12 @@ def build_lifecycle_servicer(
         return _to_response(cmd, err)
 
     DynServicer = type("RobonixLifecycleServicer", (servicer_cls,), {"Driver": Driver})
-    return DynServicer(), add_fn, base, "Driver"
+    return DynServicer(), add_fn, base, "Driver", contract_id
 
 
 def parse_cfg(request) -> dict:
     import json
+
     s = (request.config_json or "").strip()
     if not s:
         return {}

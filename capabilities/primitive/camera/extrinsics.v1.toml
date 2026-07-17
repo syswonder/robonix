@@ -1,17 +1,13 @@
 # Static camera-mount extrinsics. The camera primitive declares this
-# so downstream consumers (scene's camera-to-world projection, any
-# arm-IK that needs eye-in-hand calibration, multi-camera fusion) can
-# compose `world ← base ← camera_optical` without going through tf2.
+# as a compatibility source for consumers that cannot resolve the
+# selected camera frame through tf2. Scene treats the complete TF tree
+# as authoritative and uses this contract only when that lookup is unavailable.
 #
-# Why this is a contract and not a tf2 lookup:
-#   tf2 is a global ROS side-channel — atlas can't see it, `rbnx caps`
-#   can't list it, `rbnx channels` can't audit it. Two robots that ship
-#   with different camera mount geometries (Tiago vs Ranger Mini) need
-#   different extrinsics, and routing the value through atlas means
-#   the consumer asks for `primitive/camera/extrinsics` and gets the
-#   right transform regardless of which robot is wired in. tf2 stays
-#   available for raw ROS tooling (rviz, ros2 echo) but is not on the
-#   critical path of any robonix capability resolution.
+# Why the compatibility contract remains:
+#   Older deployments may not expose a complete TF chain to Scene. Routing a
+#   reviewed fallback through atlas keeps that dependency visible in `rbnx
+#   caps` / `rbnx channels`, while avoiding a second source of truth whenever
+#   TF already resolves the selected optical frame.
 #
 # Payload: geometry_msgs/TransformStamped — `header.frame_id` is the
 # parent (typically the chassis base link, e.g. `base_link`),
@@ -31,7 +27,7 @@ id      = "robonix/primitive/camera/extrinsics"
 version = "1"
 kind    = "primitive"
 idl     = "common_interfaces/geometry_msgs/msg/TransformStamped.msg"
-description = "Static transform from the robot body frame to the camera optical frame."
+description = "Compatibility static transform from the robot body frame to the camera optical frame when TF is unavailable."
 
 [mode]
 type = "topic_out"

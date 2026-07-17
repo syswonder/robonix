@@ -24,4 +24,3 @@ stop: |
 capabilities:
   - name: robonix/primitive/lidar/lidar
   - name: robonix/primitive/lidar/snapshot
-  - name: robonix/primitive/lidar/driver

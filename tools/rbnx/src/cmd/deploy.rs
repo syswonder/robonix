@@ -12,8 +12,11 @@
 //     `ok=true`. Only after every primitive's driver returns ok do we move
 //     on to `service:` (which can depend on primitive data being ready).
 //     The package's `config:` block is JSON-encoded and delivered ONLY via
-//     Driver(CMD_INIT)'s config_json field. The provider process never sees a
-//     config file or env var — that's the v0.1 layering invariant.
+//     Driver(CMD_INIT)'s config_json field. Omitting Driver is the canonical
+//     way to select the shared lifecycle service. Only a genuinely old
+//     generated artifact may fall back to its namespace Driver or, as a last
+//     resort, run without one (in which case config cannot be delivered).
+//     The provider process never sees a config file or env var.
 //   - `skill:` entries are spawned identically to `service:` — they
 //     need a long-lived process for their MCP tools to be registered
 //     on atlas. The semantic difference (skill = atomic intent
@@ -29,7 +32,11 @@
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
-use robonix_cli::launch::{PackageRuntimeRecord, terminate_process_group};
+use robonix_cli::launch::{
+    OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL, PackageRuntimeRecord, ProviderRegistrationSnapshot,
+    RegistrationOutcome, is_new_provider_registration, resolve_runtime_driver_contract,
+    snapshot_provider_ids, terminate_process_group,
+};
 use robonix_cli::output;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -111,8 +118,9 @@ struct PackageEntry {
     /// branch at clone time. Ignored when `path` is used.
     #[serde(default)]
     branch: Option<String>,
-    /// Opaque config block; serialised to JSON and handed to the package's
-    /// `start` body as `RBNX_CAP_CONFIG_JSON`.
+    /// Opaque config block; serialised to JSON and delivered through
+    /// Driver(CMD_INIT). Only the last-resort no-Driver fallback for an old
+    /// generated artifact cannot receive it; boot reports that explicitly.
     #[serde(default)]
     config: serde_yaml::Value,
     /// Optional package-manifest filename override. A package may ship
@@ -526,6 +534,12 @@ struct Spawned {
     pgid: u32,
     provider_id: Option<String>,
     driver_contract: Option<String>,
+    /// Lifecycle contract selected by this package's exact manifest. Builtin
+    /// system processes are not package-managed and leave this unset.
+    expected_driver_contract: Option<String>,
+    /// True only when Driver was omitted, permitting compatibility with old
+    /// generated artifacts that predate the shared lifecycle stub.
+    allow_old_driver_fallback: bool,
     config_json: Option<String>,
     package_dir: Option<PathBuf>,
     stop: Option<String>,
@@ -602,6 +616,8 @@ async fn spawn_system_binary(
         pgid: pid,
         provider_id: None,
         driver_contract: None,
+        expected_driver_contract: None,
+        allow_old_driver_fallback: false,
         config_json: None,
         package_dir: None,
         stop: None,
@@ -748,6 +764,8 @@ async fn spawn_soma_binary(
             pgid: pid,
             provider_id: None,
             driver_contract: None,
+            expected_driver_contract: None,
+            allow_old_driver_fallback: false,
             config_json: None,
             package_dir: None,
             stop: None,
@@ -804,6 +822,17 @@ async fn spawn_package(
     let package_manifest =
         robonix_cli::manifest::detect_and_load(&pkg_path, entry.manifest.as_deref())
             .with_context(|| format!("load package manifest for {}", pkg_path.display()))?;
+    package_manifest.manifest.validate_and_summarize()?;
+    let explicit_driver_contract = package_manifest
+        .manifest
+        .explicit_lifecycle_driver_contract()?;
+    let allow_old_driver_fallback = explicit_driver_contract.is_none();
+    let expected_driver_contract = Some(
+        package_manifest
+            .manifest
+            .selected_lifecycle_driver_contract()?
+            .to_string(),
+    );
     let stop = package_manifest.manifest.stop.trim().to_string();
     let stop = if stop.is_empty() { None } else { Some(stop) };
     // Scribe tag + log-file stem = the provider_id (`entry.name`) verbatim.
@@ -918,6 +947,8 @@ async fn spawn_package(
         pgid: pid,
         provider_id: None,
         driver_contract: None,
+        expected_driver_contract,
+        allow_old_driver_fallback,
         config_json: None,
         package_dir: Some(pkg_path),
         stop,
@@ -1914,32 +1945,26 @@ fn system_cli_args(
     out
 }
 
-/// Spawn one primitive / service package and wait for it to register
-/// at least one capability with atlas. If the new provider has a `*/driver`
-/// gRPC capability, also drive Driver(CMD_INIT) and pass the entry's
-/// `config:` as `config_json`. Packages that don't declare a driver
-/// (e.g. system packages or new packages that just
-/// don't need init-time wiring) are deployed as-is once their first provider
-/// appears in atlas.
+/// Spawn one package and wait for its provider to register with Atlas.
+///
+/// The selected shared or explicit legacy Driver is verified before
+/// INIT/ACTIVATE and receives the entry's config. Omission canonically selects
+/// shared, while also allowing a narrowly-scoped old-artifact fallback.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
     spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
 ) -> Result<Spawned> {
-    let before: HashSet<String> = atlas
-        .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+    let before = snapshot_provider_ids(atlas)
         .await
-        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?
-        .into_iter()
-        .map(|r| r.id)
-        .collect();
+        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?;
 
     let mut sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
 
-    // One package = one provider. After spawn, the new provider_id is whatever
-    // atlas saw register that wasn't in `before`.
+    // One package = one provider. Atlas may reuse a stable provider id on
+    // takeover, so registration_id (not id alone) correlates this spawn.
 
     // Once the wrapper is up, every error path below must terminate the
     // PGID before bailing — otherwise `?` returns the spawned process to
@@ -1952,7 +1977,7 @@ async fn spawn_and_init(
     // in their own process groups that only the handler knows about.
     let pgid = sp.pgid;
 
-    let (provider_id, driver_contract) = match wait_for_registration(
+    let registration = match wait_for_registration(
         atlas,
         &before,
         &pkg_label,
@@ -1968,6 +1993,8 @@ async fn spawn_and_init(
             return Err(e);
         }
     };
+    let provider_id = registration.provider_id.clone();
+    let provider_state = registration.provider_state;
 
     // Spec: the provider_id this process registers (Python's
     // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
@@ -1994,17 +2021,58 @@ async fn spawn_and_init(
         );
     }
 
-    let Some(driver_contract) = driver_contract else {
-        // No driver contract — system providers auto-promote to ACTIVE on
-        // their own once gRPC + MCP are listening. We don't drive INIT
-        // / ACTIVATE for them.
-        sp.provider_id = Some(provider_id);
-        output::boot_ok(short_label(&pkg_label, component), "ACTIVE  (no driver)");
-        return Ok(sp);
+    sp.provider_id = Some(provider_id.clone());
+    let expected_driver_contract = sp
+        .expected_driver_contract
+        .as_deref()
+        .expect("package spawns always carry a lifecycle selection");
+    let driver_contract = match resolve_runtime_driver_contract(
+        &provider_id,
+        &registration.provider_namespace,
+        expected_driver_contract,
+        &registration.driver_contracts,
+        sp.allow_old_driver_fallback,
+        registration.provider_state_detail == OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
+    ) {
+        Ok(contract) => contract,
+        Err(error) => {
+            let log_file = log_path(spawn_env.log_dir, &pkg_label);
+            output::boot_fail(
+                short_label(&pkg_label, component),
+                &format!("{error}; log {}", log_file.display()),
+            );
+            terminate_process_group(pgid, Duration::from_secs(8)).await;
+            return Err(error).with_context(|| format!("[{component}/{pkg_label}] lifecycle"));
+        }
     };
 
+    let Some(driver_contract) = driver_contract else {
+        let display_label = short_label(&pkg_label, component);
+        output::warning(&format!(
+            "provider '{provider_id}' is a last-resort old generated artifact with no lifecycle Driver; actual Atlas state is {}",
+            lifecycle_state_label(provider_state),
+        ));
+        if robonix_cli::manifest::runtime_config_has_values(&entry.config) {
+            output::warning(&format!(
+                "package '{pkg_label}' has config, but the old artifact has no Driver(CMD_INIT); config was not delivered"
+            ));
+        }
+        output::boot_ok(
+            display_label,
+            &format!(
+                "{} (last-resort old artifact; no lifecycle Driver)",
+                lifecycle_state_label(provider_state),
+            ),
+        );
+        return Ok(sp);
+    };
+    if driver_contract != expected_driver_contract {
+        output::warning(&format!(
+            "provider '{provider_id}' is an old generated artifact; using legacy lifecycle Driver '{driver_contract}' instead of '{expected_driver_contract}'"
+        ));
+    }
+
     let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
-    sp.provider_id = Some(provider_id.clone());
     sp.driver_contract = Some(driver_contract.clone());
     sp.config_json = Some(config_json.clone());
 
@@ -2574,9 +2642,10 @@ fn contract_id_to_service_name(id: &str) -> String {
 }
 
 /// Poll atlas until a provider NOT in `before` appears. Returns the new
-/// `provider_id` plus an optional `driver_contract_id` if the new provider
-/// declared a `*/driver` gRPC capability (signal to the caller that
-/// Driver(CMD_INIT) lifecycle should run).
+/// `provider_id`, settled Atlas state, plus every distinct lifecycle Driver
+/// observed after the declaration settle window. The caller verifies this
+/// list before sending config or lifecycle commands and reports the actual
+/// state if an old artifact has no Driver.
 /// Strip the leading `<component>_` from the boot-log pkg_label.
 /// `system_memory` → `memory`; `primitive_tiago_chassis` → `tiago_chassis`.
 /// Keeps boot-output columns narrow (the section header above already
@@ -2589,16 +2658,15 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
 
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
-    before: &HashSet<String>,
+    before: &ProviderRegistrationSnapshot,
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
     child: &mut Child,
-) -> Result<(String, Option<String>)> {
-    // One package = one provider. Find the provider that wasn't in `before`.
-    // Multiple new providers = deploy bug, fail loud. No heartbeat-based
-    // freshness fallback — every existing ACTIVE provider heartbeats
-    // periodically and would falsely match.
+) -> Result<RegistrationOutcome> {
+    // One package = one provider. Find a new id or changed registration_id.
+    // Multiple changed providers = deploy bug, fail loud. Heartbeat timestamps
+    // are deliberately excluded because every healthy provider updates them.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
@@ -2654,7 +2722,7 @@ async fn wait_for_registration(
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
             let matches: Vec<&atlas_pb::CapabilityProvider> = providers
                 .iter()
-                .filter(|provider| !before.contains(&provider.id))
+                .filter(|provider| is_new_provider_registration(provider, before))
                 .collect();
             if matches.len() > 1 {
                 let log_file = log_path(log_dir, pkg_label);
@@ -2677,27 +2745,24 @@ async fn wait_for_registration(
             }
             if let Some(first) = matches.first() {
                 let provider_id = first.id.clone();
+                let registration_id = first.registration_id.clone();
                 // RegisterPrimitive/Service/Skill and DeclareCapability are
                 // two separate RPCs from the package side — Register lands
                 // first, declares follow within a few hundred ms. Give it
-                // up to a 1 s settle window so we don't false-fire the
-                // "no driver" path on a fast poll. Capped by the outer
+                // up to a 1 s settle window so we don't false-fire a missing
+                // Driver error on a fast poll. Capped by the outer
                 // `deadline` so we never exceed user-facing timeout.
                 let settle_until = Instant::now()
                     .checked_add(Duration::from_millis(1000))
                     .map(|t| t.min(deadline))
                     .unwrap_or(deadline);
                 let mut current: atlas_pb::CapabilityProvider = (*first).clone();
-                let driver_contract_id = loop {
-                    let driver = current.capabilities.iter().find(|cap| {
-                        cap.transport == atlas_pb::Transport::Grpc as i32
-                            && cap.contract_id.ends_with("/driver")
-                    });
-                    if driver.is_some() {
-                        break driver.map(|c| c.contract_id.clone());
-                    }
+                // Consume the complete settle window so a package that
+                // declares both shared and legacy Drivers cannot hide the
+                // second declaration behind the first successful poll.
+                loop {
                     if Instant::now() >= settle_until {
-                        break None;
+                        break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     let providers = atlas
@@ -2705,13 +2770,27 @@ async fn wait_for_registration(
                         .await
                         .with_context(|| format!("[{component}/{pkg_label}] re-poll for driver"))?;
                     match providers.into_iter().find(|p| p.id == provider_id) {
-                        Some(p) => current = p,
+                        Some(p) if p.registration_id == registration_id => current = p,
+                        Some(p) => {
+                            let log_file = log_path(log_dir, pkg_label);
+                            output::boot_fail(
+                                display_label,
+                                &format!(
+                                    "provider '{provider_id}' registration changed during settle — see {}",
+                                    log_file.display(),
+                                ),
+                            );
+                            anyhow::bail!(
+                                "[{component}/{pkg_label}] provider '{provider_id}' registration changed during settle ('{registration_id}' -> '{}'). Log: {}",
+                                p.registration_id,
+                                log_file.display(),
+                            );
+                        }
                         None => {
                             // Provider vanished between the original match
                             // and now (crashed mid-settle, atlas evicted,
-                            // heartbeat lapsed). Report loudly — silently
-                            // returning "no driver" would let downstream
-                            // boot logic march on against a dead process.
+                            // heartbeat lapsed). Report loudly so downstream
+                            // boot logic cannot march on against a dead process.
                             let log_file = log_path(log_dir, pkg_label);
                             output::boot_fail(
                                 display_label,
@@ -2727,8 +2806,27 @@ async fn wait_for_registration(
                             );
                         }
                     }
-                };
-                return Ok((provider_id, driver_contract_id));
+                }
+                let mut driver_contracts = current
+                    .capabilities
+                    .iter()
+                    .filter(|capability| {
+                        capability.transport == atlas_pb::Transport::Grpc as i32
+                            && capability.contract_id.ends_with("/driver")
+                    })
+                    .map(|capability| capability.contract_id.clone())
+                    .collect::<Vec<_>>();
+                driver_contracts.sort();
+                driver_contracts.dedup();
+                return Ok(RegistrationOutcome {
+                    provider_id,
+                    provider_kind: current.kind,
+                    provider_state: current.state,
+                    provider_namespace: current.namespace,
+                    provider_state_detail: current.state_detail,
+                    registration_id: current.registration_id,
+                    driver_contracts,
+                });
             }
         }
         if Instant::now() >= deadline {
