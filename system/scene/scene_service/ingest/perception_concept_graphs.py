@@ -100,7 +100,7 @@ def _resolved_classes() -> list[str]:
 _DEFAULT_YOLO_WORLD_WEIGHTS = "/opt/models/yolov8l-world.pt"
 _DEFAULT_MOBILE_SAM_WEIGHTS = "/opt/models/mobile_sam.pt"
 _DEFAULT_CLIP_MODEL = "ViT-B-32"
-_DEFAULT_CLIP_PRETRAINED = "laion2b_s34b_b79k"
+_DEFAULT_CLIP_PRETRAINED = "/opt/models/open_clip_pytorch_model.bin"
 
 
 # ── Concept-graphs config knobs ──────────────────────────────────────────
