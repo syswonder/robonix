@@ -64,6 +64,16 @@ def contract_id_to_pascal(contract_id: str) -> str:
     return "".join(out)
 
 
+def generated_grpc_metadata(service_base: str, method: str) -> tuple[str, str]:
+    """Return Atlas metadata for a generated ``robonix_contracts.proto`` RPC.
+
+    Generated Python class names omit the protobuf package, while Atlas stores
+    the fully qualified gRPC service and method route used on the wire.
+    """
+    service_name = f"robonix.contracts.{service_base}"
+    return service_name, f"/{service_name}/{method}"
+
+
 def driver_pascal_for_namespace(namespace: str) -> str:
     """`primitive/lidar` → `PrimitiveLidarDriver` (the driver Pascal name)."""
     return contract_id_to_pascal(f"{namespace.strip('/')}/driver")
