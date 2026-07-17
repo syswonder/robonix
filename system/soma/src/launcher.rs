@@ -35,8 +35,8 @@
 // All the lifecycle plumbing (`wait_for_registration_core`,
 // `call_driver_cmd`, the timeouts) is reused from `robonix_cli::launch`
 // so soma and rbnx CAN'T drift on FSM semantics. Omitted Driver is the
-// canonical shared selection. Only old generated artifacts may fall back to a
-// namespace Driver; a provider without a Driver fails startup.
+// canonical shared selection. Only an exact legacy manifest may use a current
+// shared runtime Driver; a provider without exactly one Driver fails startup.
 
 use crate::deployment::{Deployment, PackageKind, PackageLaunchTarget};
 use crate::report::{PackageStartupCheck, PackageStartupStatus, StartupReport};
@@ -173,14 +173,19 @@ impl PackageLauncher {
         }
 
         let command = self.command_line(target);
-        let (expected_driver_contract, allow_legacy_driver_fallback) =
+        let (expected_driver_contract, allow_shared_driver_upgrade) =
             match robonix_cli::manifest::load_from_path(&target.package_manifest_path).and_then(
                 |manifest| {
                     manifest.validate_and_summarize()?;
-                    let allow_fallback = manifest.explicit_lifecycle_driver_contract()?.is_none();
+                    let allow_upgrade =
+                        manifest
+                            .explicit_lifecycle_driver_contract()?
+                            .is_some_and(|contract| {
+                                contract != robonix_cli::manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT
+                            });
                     Ok((
                         manifest.selected_lifecycle_driver_contract()?.to_string(),
-                        allow_fallback,
+                        allow_upgrade,
                     ))
                 },
             ) {
@@ -265,7 +270,7 @@ impl PackageLauncher {
             &outcome.provider_namespace,
             &expected_driver_contract,
             &outcome.driver_contracts,
-            allow_legacy_driver_fallback,
+            allow_shared_driver_upgrade,
         ) {
             Ok(contract) => contract,
             Err(error) => {
@@ -278,7 +283,7 @@ impl PackageLauncher {
         };
         if driver_contract != expected_driver_contract {
             warn!(
-                "{who}: old generated artifact uses legacy lifecycle Driver '{driver_contract}' instead of '{expected_driver_contract}'; rebuild to refresh shared stubs"
+                "{who}: provider publishes shared lifecycle Driver '{driver_contract}' for legacy manifest selection '{expected_driver_contract}'; remove the legacy Driver declaration to finish migration"
             );
         }
 

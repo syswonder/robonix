@@ -58,19 +58,21 @@ configuration file.
 Package authors normally omit Driver from `capabilities`; rbnx and current
 codegen automatically select and register `robonix/lifecycle/driver`. Explicit
 shared selection is accepted, and one explicitly selected namespace Driver
-remains compatible. Only an old generated artifact that lacks the shared stub
-may fall back to its exact namespace Driver. Every provider must declare
-exactly one lifecycle Driver; missing, mismatched, and dual declarations all
-fail startup before config is delivered.
+remains compatible when it exactly matches `<provider namespace>/driver`. A
+legacy manifest may use a current shared runtime Driver while it is migrated;
+the reverse shared-to-legacy substitution is rejected. At runtime every
+provider must expose exactly one lifecycle Driver; missing, mismatched,
+unrelated, and dual registrations all fail startup before config is delivered.
 
 The compatibility handshake is fail-closed. For an omitted Driver, rbnx
-exports `ROBONIX_DRIVER_CONTRACT_ID=robonix/lifecycle/driver` plus
-`ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`. The SDK still chooses shared
-first. It may substitute only the provider's exact `<namespace>/driver` when
-the shared generated service pair is absent. If both service pairs are absent,
-the provider fails with actionable `rbnx build`/manifest migration guidance.
-Partial stubs and Driver declaration failures also fail startup, so config is
-never silently lost and no provider is promoted without a Driver.
+exports `ROBONIX_DRIVER_CONTRACT_ID=robonix/lifecycle/driver` and clears the
+compatibility marker. For an explicit legacy Driver, rbnx exports that exact ID
+plus `ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`; despite its historical
+name, the marker permits only legacy-manifest to shared-runtime migration. The
+SDK uses a complete legacy service pair when present, or a complete shared pair
+when the legacy pair is wholly absent. Partial stubs, zero or multiple runtime
+Drivers, unrelated IDs, and shared-to-legacy fallback all fail startup, so
+config is never silently lost and no provider is promoted without a Driver.
 
 ## How it finds the source tree
 

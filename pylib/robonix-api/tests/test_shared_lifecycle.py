@@ -86,7 +86,7 @@ def test_omitted_manifest_prefers_current_shared_stub() -> None:
         "robonix/system/scene",
         module,
         SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
+        allow_old_artifact_fallback=False,
     )
     built = build_lifecycle_servicer(
         "robonix/system/scene",
@@ -94,7 +94,7 @@ def test_omitted_manifest_prefers_current_shared_stub() -> None:
         _Response,
         on_init=lambda cfg: received.append(cfg) or Ok(),
         requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
+        allow_old_artifact_fallback=False,
     )
 
     assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
@@ -173,12 +173,19 @@ def test_legacy_namespace_driver_still_builds_when_shared_stub_is_absent() -> No
     module = _grpc_module(shared=False, legacy=True)
     received: list[dict] = []
 
-    selected = lifecycle_contract_for_module("robonix/system/scene", module)
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        "robonix/system/scene/driver",
+        allow_old_artifact_fallback=True,
+    )
     built = build_lifecycle_servicer(
         "robonix/system/scene",
         module,
         _Response,
         on_init=lambda cfg: received.append(cfg) or Ok(),
+        requested_contract_id="robonix/system/scene/driver",
+        allow_old_artifact_fallback=True,
     )
 
     assert selected == (
@@ -205,6 +212,7 @@ def test_legacy_manifest_selection_wins_when_both_stubs_exist() -> None:
         "robonix/system/scene",
         module,
         "robonix/system/scene/driver",
+        allow_old_artifact_fallback=True,
     )
 
     assert selected == (
@@ -233,14 +241,16 @@ def test_empty_legacy_launcher_selection_defaults_to_shared() -> None:
     assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
 
 
-def test_omitted_manifest_old_artifact_falls_back_to_namespace_driver(caplog) -> None:
-    module = _grpc_module(shared=False, legacy=True)
+def test_legacy_manifest_upgrades_to_shared_runtime_when_legacy_stub_is_absent(
+    caplog,
+) -> None:
+    module = _grpc_module(shared=True, legacy=False)
     received: list[dict] = []
 
     selected = lifecycle_contract_for_module(
         "robonix/system/scene",
         module,
-        SHARED_DRIVER_CONTRACT_ID,
+        "robonix/system/scene/driver",
         allow_old_artifact_fallback=True,
     )
     built = build_lifecycle_servicer(
@@ -248,23 +258,25 @@ def test_omitted_manifest_old_artifact_falls_back_to_namespace_driver(caplog) ->
         module,
         _Response,
         on_init=lambda cfg: received.append(cfg) or Ok(),
-        requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
+        requested_contract_id="robonix/system/scene/driver",
         allow_old_artifact_fallback=True,
     )
 
     assert selected == (
-        "robonix/system/scene/driver",
-        "RobonixSystemSceneDriver",
+        SHARED_DRIVER_CONTRACT_ID,
+        "RobonixLifecycleDriver",
     )
     assert built is not None
-    assert built[4] == "robonix/system/scene/driver"
+    assert built[4] == SHARED_DRIVER_CONTRACT_ID
     response = built[0].Driver(
         SimpleNamespace(command=CMD_INIT, config_json='{"legacy":true}'),
         None,
     )
     assert response.ok is True
     assert received == [{"legacy": True}]
-    assert "predates robonix/lifecycle/driver" in caplog.text
+    assert "legacy manifest selected" in caplog.text
+    assert "shared runtime Driver" in caplog.text
+    assert "finish migration" in caplog.text
 
 
 def test_omitted_manifest_without_any_driver_stub_fails_with_rebuild_guidance(
@@ -276,7 +288,7 @@ def test_omitted_manifest_without_any_driver_stub_fails_with_rebuild_guidance(
         "robonix/system/scene",
         module,
         SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
+        allow_old_artifact_fallback=False,
     )
 
     assert selected is None
@@ -286,10 +298,9 @@ def test_omitted_manifest_without_any_driver_stub_fails_with_rebuild_guidance(
             module,
             _Response,
             requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
-            allow_old_artifact_fallback=True,
+            allow_old_artifact_fallback=False,
         )
     assert SHARED_DRIVER_CONTRACT_ID in caplog.text
-    assert "robonix/system/scene/driver" in caplog.text
     assert "rbnx build" in caplog.text
 
 
@@ -304,7 +315,7 @@ def test_partial_generated_service_fails_closed(caplog) -> None:
         "robonix/system/scene",
         module,
         SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
+        allow_old_artifact_fallback=False,
     )
 
     assert selected is None
@@ -314,9 +325,9 @@ def test_partial_generated_service_fails_closed(caplog) -> None:
             module,
             _Response,
             requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
-            allow_old_artifact_fallback=True,
+            allow_old_artifact_fallback=False,
         )
-    assert "incomplete; refusing compatibility fallback" in caplog.text
+    assert "incomplete; refusing lifecycle startup" in caplog.text
 
 
 def test_explicit_shared_selection_does_not_downgrade_when_stub_is_missing(
@@ -328,10 +339,55 @@ def test_explicit_shared_selection_does_not_downgrade_when_stub_is_missing(
         "robonix/system/scene",
         module,
         SHARED_DRIVER_CONTRACT_ID,
+        allow_old_artifact_fallback=True,
     )
 
     assert selected is None
     assert "unavailable in generated stubs" in caplog.text
+
+
+def test_legacy_manifest_upgrade_requires_launcher_marker(caplog) -> None:
+    module = _grpc_module(shared=True, legacy=False)
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        "robonix/system/scene/driver",
+    )
+
+    assert selected is None
+    assert "did not mark this as a legacy-manifest upgrade" in caplog.text
+
+
+def test_partial_legacy_stub_rejects_shared_runtime_upgrade(caplog) -> None:
+    module = _grpc_module(shared=True, legacy=False)
+    module.RobonixSystemSceneDriverServicer = type(
+        "RobonixSystemSceneDriverServicer", (), {"Driver": lambda *_: None}
+    )
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        "robonix/system/scene/driver",
+        allow_old_artifact_fallback=True,
+    )
+
+    assert selected is None
+    assert "incomplete; refusing shared-runtime upgrade" in caplog.text
+
+
+def test_unrelated_legacy_driver_selection_is_rejected(caplog) -> None:
+    module = _grpc_module(shared=True, legacy=True)
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        "robonix/primitive/camera/driver",
+        allow_old_artifact_fallback=True,
+    )
+
+    assert selected is None
+    assert "unrelated to provider namespace" in caplog.text
 
 
 def test_provider_base_has_no_implicit_active_promotion_hook() -> None:

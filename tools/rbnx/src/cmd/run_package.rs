@@ -27,12 +27,14 @@ use std::time::Duration;
 /// should `export RBNX_INVOCATION_CWD="$(pwd)"` before `cd`+`cargo run`. If unset, `std::env::current_dir()` is used.
 pub(crate) const RBNX_INVOCATION_CWD: &str = "RBNX_INVOCATION_CWD";
 
-/// Return the single migration warning emitted by `rbnx start` when the
-/// selected package still explicitly declares a namespace Driver.
+/// Return the migration warning emitted by `rbnx start` for a non-shared
+/// Driver declaration. Runtime registration later proves whether it is the
+/// provider's exact namespace legacy contract before accepting it.
 ///
 /// The warning lives in `rbnx`, rather than in a language SDK, so native and
 /// non-Python providers receive the same guidance. Legacy contracts remain
-/// fully supported; the warning only describes the incremental migration.
+/// exact namespace legacy contracts remain supported; the warning only
+/// describes the incremental migration.
 fn lifecycle_driver_migration_warning(
     package_name: &str,
     explicit_driver_contract: Option<&str>,
@@ -46,9 +48,10 @@ fn lifecycle_driver_migration_warning(
         return None;
     }
     Some(format!(
-        "package '{package_name}' declares legacy lifecycle contract \
-         '{driver_contract}'; it remains supported. New packages should \
-         omit Driver to select '{}' automatically; do not declare both",
+        "package '{package_name}' declares non-shared lifecycle contract \
+         '{driver_contract}'; only the exact <provider namespace>/driver form \
+         is backward-compatible and may use a shared runtime Driver. Remove the \
+         legacy declaration to select '{}' automatically; do not declare both",
         manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT,
     ))
 }
@@ -614,12 +617,13 @@ pub async fn execute_start(
     // task below). Empty inputs still deliver Driver(CMD_INIT, "{}") so a
     // standalone `rbnx start` follows the same lifecycle as `rbnx boot`.
     let has_explicit_config = config_file.is_some() || !set_overrides.is_empty();
-    // Omission is the canonical managed-lifecycle selection. The fallback
-    // bit is exported separately so an old generated artifact may substitute
-    // only its exact namespace Driver when the shared stub is absent.
+    // Omission is the canonical shared selection. Only one explicit legacy
+    // selection may opt into a current shared runtime while manifests migrate;
+    // omitted and explicit shared selections never downgrade to legacy.
     let explicit_driver_contract = manifest.explicit_lifecycle_driver_contract()?;
     let expected_driver_contract = manifest.selected_lifecycle_driver_contract()?.to_string();
-    let allow_legacy_driver_fallback = explicit_driver_contract.is_none();
+    let allow_shared_driver_upgrade = explicit_driver_contract
+        .is_some_and(|contract| contract != manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT);
     let has_driver_capability = true;
     let deploy_managed = std::env::var_os("RBNX_DEPLOY_MANAGED").is_some();
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
@@ -656,10 +660,10 @@ pub async fn execute_start(
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
     env.insert("SCRIBE_LOG_DIR".to_string(), log_dir.display().to_string());
-    // The exact selection and compatibility permission are distinct. Current
-    // omission exports the shared Driver plus a marker that lets an old SDK
-    // artifact fall back to its exact namespace Driver; explicit shared/legacy
-    // selections remain strict.
+    // The exact selection and compatibility permission are distinct. The
+    // historical marker name is retained across wrapper/container boundaries,
+    // but it is now true only for a legacy manifest that may use shared runtime
+    // stubs. Shared selections never receive downgrade permission.
     env.insert(
         "ROBONIX_DRIVER_CONTRACT_ID".to_string(),
         expected_driver_contract.clone(),
@@ -668,7 +672,7 @@ pub async fn execute_start(
     // never accidentally inherit omission's downgrade permission.
     env.insert(
         "ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK".to_string(),
-        if allow_legacy_driver_fallback {
+        if allow_shared_driver_upgrade {
             "1"
         } else {
             "0"
@@ -745,7 +749,7 @@ pub async fn execute_start(
                 before_snapshot,
                 json,
                 expected_driver_contract.clone(),
-                allow_legacy_driver_fallback,
+                allow_shared_driver_upgrade,
             ))
         } else {
             None
@@ -759,7 +763,7 @@ pub async fn execute_start(
     // package.name only for a bare standalone `rbnx start` with no instance.
     let instance_name =
         std::env::var("RBNX_INSTANCE_NAME").unwrap_or_else(|_| manifest.package.name.clone());
-    let result = if let Some((mut atlas, before, json, expected_contract, allow_legacy_fallback)) =
+    let result = if let Some((mut atlas, before, json, expected_contract, allow_shared_upgrade)) =
         standalone_lifecycle
     {
         // `start_process` blocks for the package lifetime, so run it alongside
@@ -806,7 +810,7 @@ pub async fn execute_start(
             &mut atlas,
             &before,
             &expected_contract,
-            allow_legacy_fallback,
+            allow_shared_upgrade,
             json,
         );
         tokio::pin!(lifecycle);
@@ -904,7 +908,7 @@ async fn drive_standalone_lifecycle(
     atlas: &mut AtlasClient,
     before: &ProviderRegistrationSnapshot,
     expected_driver_contract: &str,
-    allow_legacy_driver_fallback: bool,
+    allow_shared_driver_upgrade: bool,
     config_json: String,
 ) -> Result<()> {
     let outcome = wait_for_registration_core(atlas, before, "rbnx start").await?;
@@ -913,11 +917,11 @@ async fn drive_standalone_lifecycle(
         &outcome.provider_namespace,
         expected_driver_contract,
         &outcome.driver_contracts,
-        allow_legacy_driver_fallback,
+        allow_shared_driver_upgrade,
     )?;
     if driver_contract != expected_driver_contract {
         output::warning(&format!(
-            "provider '{}' is an old generated artifact; using legacy lifecycle Driver '{}' instead of '{}'",
+            "provider '{}' publishes shared lifecycle Driver '{}' for legacy manifest selection '{}'; remove the legacy Driver declaration to finish migration",
             outcome.provider_id, driver_contract, expected_driver_contract,
         ));
     }
@@ -1116,7 +1120,9 @@ mod tests {
         assert!(warning.contains("test.camera"));
         assert!(warning.contains("robonix/primitive/camera/driver"));
         assert!(warning.contains("robonix/lifecycle/driver"));
-        assert!(warning.contains("remains supported"));
+        assert!(warning.contains("is backward-compatible"));
+        assert!(warning.contains("exact <provider namespace>/driver"));
+        assert!(warning.contains("shared runtime Driver"));
         assert!(warning.contains("do not declare both"));
     }
 

@@ -641,20 +641,36 @@ pub struct RegistrationOutcome {
     pub driver_contracts: Vec<String>,
 }
 
-/// Resolve the runtime Driver while optionally tolerating old generated code.
+/// Resolve the single runtime Driver selected by a package manifest.
 ///
-/// Exact manifest selections stay strict. Only callers whose manifest omitted
-/// Driver pass `allow_legacy_driver_fallback=true`: the shared Driver remains
-/// preferred, one namespace Driver may substitute when the old stubs lack the
-/// shared service. A missing Driver is always fatal, as are multiple or
-/// mismatched declarations.
+/// Omitted and explicit shared selections accept only the shared Driver. An
+/// exact legacy `<provider namespace>/driver` selection may opt into the
+/// forward-compatible shared runtime Driver while manifests are migrated. A
+/// missing Driver is always fatal, as are multiple, unrelated, or reverse
+/// shared-to-legacy substitutions.
 pub fn resolve_runtime_driver_contract(
     provider_id: &str,
     provider_namespace: &str,
     expected: &str,
     observed: &[String],
-    allow_legacy_driver_fallback: bool,
+    allow_shared_driver_upgrade: bool,
 ) -> Result<String> {
+    const SHARED: &str = "robonix/lifecycle/driver";
+    let namespace = provider_namespace.trim_matches('/');
+    let exact_legacy = if namespace.is_empty() {
+        (expected != SHARED && expected.ends_with("/driver")).then(|| expected.to_string())
+    } else {
+        Some(format!("{namespace}/driver"))
+    };
+    let expected_is_supported = expected == SHARED || exact_legacy.as_deref() == Some(expected);
+    if !expected_is_supported {
+        anyhow::bail!(
+            "provider '{provider_id}' selected unsupported lifecycle Driver '{expected}'; expected '{SHARED}' or exact namespace Driver '{}'",
+            exact_legacy
+                .as_deref()
+                .unwrap_or("<provider namespace>/driver")
+        );
+    }
     if observed.len() > 1 {
         anyhow::bail!(
             "provider '{provider_id}' registered multiple lifecycle Drivers: {}; expected exactly '{expected}'",
@@ -662,11 +678,10 @@ pub fn resolve_runtime_driver_contract(
         );
     }
     if observed.is_empty() {
-        let legacy = format!("{}/driver", provider_namespace.trim_end_matches('/'));
         anyhow::bail!(
-            "provider '{provider_id}' registered without a lifecycle Driver; expected '{expected}'{}; rebuild the package with `rbnx build` to refresh generated stubs or migrate the manifest to an exact supported Driver",
-            if allow_legacy_driver_fallback && expected == "robonix/lifecycle/driver" {
-                format!(" or compatible legacy '{legacy}'")
+            "provider '{provider_id}' registered without a lifecycle Driver; expected exactly one Driver: '{expected}'{}; rebuild the package with `rbnx build` to refresh generated stubs or migrate the manifest",
+            if allow_shared_driver_upgrade && exact_legacy.as_deref() == Some(expected) {
+                format!(" or upgraded shared '{SHARED}'")
             } else {
                 String::new()
             }
@@ -675,10 +690,9 @@ pub fn resolve_runtime_driver_contract(
     if observed[0] == expected {
         return Ok(observed[0].clone());
     }
-    let legacy_fallback = format!("{}/driver", provider_namespace.trim_end_matches('/'));
-    if allow_legacy_driver_fallback
-        && expected == "robonix/lifecycle/driver"
-        && observed[0] == legacy_fallback
+    if allow_shared_driver_upgrade
+        && exact_legacy.as_deref() == Some(expected)
+        && observed[0] == SHARED
     {
         return Ok(observed[0].clone());
     }
@@ -969,12 +983,33 @@ mod tests {
     }
 
     #[test]
-    fn omitted_manifest_allows_only_shared_or_exact_legacy_driver() {
+    fn only_exact_legacy_manifest_may_upgrade_to_shared_runtime() {
         assert_eq!(
             resolve_runtime_driver_contract(
                 "camera",
                 "robonix/primitive/camera",
                 SHARED,
+                &[SHARED.to_string()],
+                false,
+            )
+            .unwrap(),
+            SHARED
+        );
+        let unmarked_upgrade = resolve_runtime_driver_contract(
+            "camera",
+            "robonix/primitive/camera",
+            LEGACY,
+            &[SHARED.to_string()],
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unmarked_upgrade.contains("expected 'robonix/primitive/camera/driver'"));
+        assert_eq!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                LEGACY,
                 &[SHARED.to_string()],
                 true,
             )
@@ -985,7 +1020,7 @@ mod tests {
             resolve_runtime_driver_contract(
                 "camera",
                 "robonix/primitive/camera",
-                SHARED,
+                LEGACY,
                 &[LEGACY.to_string()],
                 true,
             )
@@ -995,39 +1030,51 @@ mod tests {
         let missing = resolve_runtime_driver_contract(
             "camera",
             "robonix/primitive/camera",
-            SHARED,
+            LEGACY,
             &[],
             true,
         )
         .unwrap_err()
         .to_string();
         assert!(missing.contains("without a lifecycle Driver"));
-        assert!(missing.contains("robonix/lifecycle/driver"));
         assert!(missing.contains("robonix/primitive/camera/driver"));
+        assert!(missing.contains("robonix/lifecycle/driver"));
         assert!(missing.contains("rbnx build"));
-        assert!(
-            resolve_runtime_driver_contract(
-                "camera",
-                "robonix/primitive/camera",
-                SHARED,
-                &["robonix/primitive/lidar/driver".to_string()],
-                true,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("expected 'robonix/lifecycle/driver'")
-        );
+
+        let reverse = resolve_runtime_driver_contract(
+            "camera",
+            "robonix/primitive/camera",
+            SHARED,
+            &[LEGACY.to_string()],
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(reverse.contains("expected 'robonix/lifecycle/driver'"));
+
         assert!(
             resolve_runtime_driver_contract(
                 "camera",
                 "robonix/primitive/camera",
                 LEGACY,
-                &[],
+                &["robonix/primitive/lidar/driver".to_string()],
                 true,
             )
             .unwrap_err()
             .to_string()
-            .contains("without a lifecycle Driver")
+            .contains("expected 'robonix/primitive/camera/driver'")
+        );
+        assert!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                "robonix/primitive/lidar/driver",
+                &["robonix/primitive/lidar/driver".to_string()],
+                true,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported lifecycle Driver")
         );
     }
 
