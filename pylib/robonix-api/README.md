@@ -55,23 +55,23 @@ discovery, or calls.
 Current codegen provides the shared `robonix/lifecycle/driver` contract, and
 package authors normally omit Driver from the manifest: rbnx and robonix-api
 select/register shared automatically. Explicit shared selection remains valid,
-and an explicitly selected exact `<namespace>/driver` remains compatible.
-Every provider must expose exactly one lifecycle Driver. When an omitted
-manifest is run with old generated stubs that lack shared, the SDK may fall
-back to the exact namespace Driver. If neither service was generated, startup
-fails with rebuild/migration guidance instead of promoting the provider to
-`ACTIVE`. An omitted lifecycle *handler* is different: it logs a warning and
+and an explicitly selected exact `<namespace>/driver` remains compatible. A
+legacy manifest may use current shared runtime stubs while it is migrated, but
+a shared selection never downgrades to legacy. Every provider must expose
+exactly one lifecycle Driver; zero, multiple, unrelated, and partial generated
+services fail with rebuild/migration guidance instead of promoting the provider
+to `ACTIVE`. An omitted lifecycle *handler* is different: it logs a warning and
 completes that transition as an `Ok` no-op, so the Driver can still walk the
 provider through `REGISTERED → INACTIVE → ACTIVE`.
 
-Managed omission is signaled as a shared request plus
-`ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`. The SDK falls back only when
-the generated shared service pair is wholly absent: first to the exact
-`<namespace>/driver`. If that pair is also absent, or if either generated pair
-is partial, startup fails and asks the operator to rebuild generated stubs or
-migrate the manifest. A failed Driver declaration is also fatal. Direct
-launches prefer shared whenever it exists and otherwise accept only the exact
-legacy Driver.
+Managed omission and explicit shared selection request
+`robonix/lifecycle/driver` with the compatibility marker cleared. An explicit
+exact legacy selection sets `ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`;
+despite its historical name, the marker permits only a legacy manifest whose
+legacy generated service pair is wholly absent to use the complete shared
+pair. If the selected pair is partial, neither permitted pair exists, or Driver
+declaration fails, startup is fatal. Direct launches with no selection use
+shared only; direct exact-legacy launches use legacy when that service exists.
 
 ## What's in the box
 

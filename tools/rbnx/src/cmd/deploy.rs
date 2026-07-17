@@ -13,9 +13,9 @@
 //     on to `service:` (which can depend on primitive data being ready).
 //     The package's `config:` block is JSON-encoded and delivered ONLY via
 //     Driver(CMD_INIT)'s config_json field. Omitting Driver is the canonical
-//     way to select the shared lifecycle service. A genuinely old generated
-//     artifact may fall back only to its exact namespace Driver. A provider
-//     without a lifecycle Driver fails startup.
+//     way to select the shared lifecycle service. An exact legacy manifest may
+//     use a current shared runtime Driver while it is migrated. A provider
+//     without exactly one lifecycle Driver fails startup.
 //     The provider process never sees a config file or env var.
 //   - `skill:` entries are spawned identically to `service:` — they
 //     need a long-lived process for their MCP tools to be registered
@@ -537,9 +537,9 @@ struct Spawned {
     /// Lifecycle contract selected by this package's exact manifest. Builtin
     /// system processes are not package-managed and leave this unset.
     expected_driver_contract: Option<String>,
-    /// True only when Driver was omitted, permitting an old generated artifact
-    /// to substitute its exact namespace Driver for the shared lifecycle stub.
-    allow_legacy_driver_fallback: bool,
+    /// True only for an explicit legacy selection, permitting a current shared
+    /// runtime Driver while the manifest is migrated.
+    allow_shared_driver_upgrade: bool,
     config_json: Option<String>,
     package_dir: Option<PathBuf>,
     stop: Option<String>,
@@ -617,7 +617,7 @@ async fn spawn_system_binary(
         provider_id: None,
         driver_contract: None,
         expected_driver_contract: None,
-        allow_legacy_driver_fallback: false,
+        allow_shared_driver_upgrade: false,
         config_json: None,
         package_dir: None,
         stop: None,
@@ -765,7 +765,7 @@ async fn spawn_soma_binary(
             provider_id: None,
             driver_contract: None,
             expected_driver_contract: None,
-            allow_legacy_driver_fallback: false,
+            allow_shared_driver_upgrade: false,
             config_json: None,
             package_dir: None,
             stop: None,
@@ -826,7 +826,9 @@ async fn spawn_package(
     let explicit_driver_contract = package_manifest
         .manifest
         .explicit_lifecycle_driver_contract()?;
-    let allow_legacy_driver_fallback = explicit_driver_contract.is_none();
+    let allow_shared_driver_upgrade = explicit_driver_contract.is_some_and(|contract| {
+        contract != robonix_cli::manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT
+    });
     let expected_driver_contract = Some(
         package_manifest
             .manifest
@@ -948,7 +950,7 @@ async fn spawn_package(
         provider_id: None,
         driver_contract: None,
         expected_driver_contract,
-        allow_legacy_driver_fallback,
+        allow_shared_driver_upgrade,
         config_json: None,
         package_dir: Some(pkg_path),
         stop,
@@ -1953,9 +1955,9 @@ fn system_cli_args(
 /// Spawn one package and wait for its provider to register with Atlas.
 ///
 /// The selected shared or explicit legacy Driver is verified before
-/// INIT/ACTIVATE and receives the entry's config. Omission canonically selects
-/// shared, while allowing only a narrowly scoped exact namespace fallback for
-/// old generated artifacts.
+/// INIT/ACTIVATE and receives the entry's config. Omission and explicit shared
+/// selections stay shared-only; only an exact namespace legacy selection may
+/// accept an upgraded shared runtime Driver.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
@@ -2035,7 +2037,7 @@ async fn spawn_and_init(
         &registration.provider_namespace,
         expected_driver_contract,
         &registration.driver_contracts,
-        sp.allow_legacy_driver_fallback,
+        sp.allow_shared_driver_upgrade,
     ) {
         Ok(contract) => contract,
         Err(error) => {
@@ -2051,7 +2053,7 @@ async fn spawn_and_init(
 
     if driver_contract != expected_driver_contract {
         output::warning(&format!(
-            "provider '{provider_id}' is an old generated artifact; using legacy lifecycle Driver '{driver_contract}' instead of '{expected_driver_contract}'"
+            "provider '{provider_id}' publishes shared lifecycle Driver '{driver_contract}' for legacy manifest selection '{expected_driver_contract}'; remove the legacy Driver declaration to finish migration"
         ));
     }
 
