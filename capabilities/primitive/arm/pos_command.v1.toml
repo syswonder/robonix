@@ -1,0 +1,14 @@
+# Cartesian end-effector command sink. Consumers publish a target pose for
+# the arm's end effector; the arm provider is responsible for whatever
+# internal IK / Cartesian controller is needed to reach it. Gripper aperture
+# is NOT part of this contract — grippers are commanded through
+# joint_command as an extra named joint. Frame convention matches end_pose.
+[contract]
+id = "robonix/primitive/arm/pos_command"
+version = "1"
+kind = "primitive"
+idl = "common_interfaces/geometry_msgs/msg/Pose.msg"
+description = "Target end-effector pose input in the arm provider's documented base frame."
+
+[mode]
+type = "topic_in"
