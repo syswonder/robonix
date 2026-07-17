@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,15 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 # the scenario layer, not here, so this stays deploy-agnostic. Extra required
 # substrings can be passed via ROBONIX_REQUIRE (comma-separated).
 REQUIRED_COMPONENTS = ["system/pilot", "system/executor", "system/liaison"]
+GENERATED_PROTO_FILES = (
+    "atlas_pb2.py",
+    "atlas_pb2_grpc.py",
+    "audio_pb2.py",
+    "executor_pb2.py",
+    "robonix_contracts_pb2.py",
+    "robonix_contracts_pb2_grpc.py",
+)
+AUDIO_PROVIDER_NAME = "audio_driver"
 
 
 def require_audio() -> bool:
@@ -47,19 +57,140 @@ def require_audio() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def generated_proto_dir() -> Path:
-    repo = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd()))
-    candidates = [
-        repo / "examples/webots/primitives/audio_driver/rbnx-build/codegen/proto_gen",
-        repo / "examples/webots/primitives/audio_driver/proto_gen",
+def _yaml_scalar(value: str) -> str:
+    """Decode the simple quoted or unquoted scalars used by deploy entries."""
+    value = value.strip()
+    if value[:1] in {'"', "'"} and value[-1:] == value[:1]:
+        return value[1:-1]
+    return value.split(" #", 1)[0].strip()
+
+
+def _audio_source_from_manifest(manifest: Path) -> tuple[str, str] | None:
+    """Return the selected audio entry's ``(path|url, value)`` pair.
+
+    The deployment schema writes list entries with ``- name:`` first. Parsing
+    only that small stable surface keeps this harness stdlib-only; CI installs
+    PyYAML for scenarios, but interface discovery should also work locally
+    before that optional dependency is installed.
+    """
+    if not manifest.is_file():
+        return None
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    current_indent = -1
+    for raw_line in manifest.read_text().splitlines():
+        stripped = raw_line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw_line) - len(stripped)
+        item = re.match(r"-\s+name\s*:\s*(.+)$", stripped)
+        if item:
+            if current is not None:
+                entries.append(current)
+            current = {"name": _yaml_scalar(item.group(1))}
+            current_indent = indent
+            continue
+        if current is not None and indent <= current_indent:
+            entries.append(current)
+            current = None
+        if current is not None:
+            source = re.match(r"(path|url)\s*:\s*(.+)$", stripped)
+            if source:
+                current[source.group(1)] = _yaml_scalar(source.group(2))
+    if current is not None:
+        entries.append(current)
+    for entry in entries:
+        if entry.get("name") != AUDIO_PROVIDER_NAME:
+            continue
+        for source_kind in ("url", "path"):
+            if entry.get(source_kind):
+                return source_kind, entry[source_kind]
+    return None
+
+
+def _remote_repo_name(url: str) -> str:
+    """Mirror rbnx's URL-cache basename rule for one remote package."""
+    name = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    if not name or name in {".", ".."}:
+        raise ValueError(f"invalid package URL basename: {url!r}")
+    return name
+
+
+def _proto_dirs_for_package(package_root: Path) -> list[Path]:
+    """Return current and pre-rbnx-build generated-proto layouts in order."""
+    return [
+        package_root / "rbnx-build/codegen/proto_gen",
+        package_root / "proto_gen",
     ]
-    for cand in candidates:
-        has_atlas = (cand / "atlas_pb2.py").exists()
-        has_contracts = (cand / "robonix_contracts_pb2_grpc.py").exists()
-        if has_atlas and has_contracts:
-            return cand
+
+
+def generated_proto_dir(
+    deployment_dir: Path | None = None,
+    workspace: Path | None = None,
+) -> Path:
+    """Resolve one complete generated tree for the selected deployment.
+
+    Remote packages are built under ``<deployment>/rbnx-boot/cache/<repo>``.
+    Resolve the audio package from that deployment's manifest before trying
+    the historical in-tree locations, so a stale legacy build cannot shadow
+    the package that ``rbnx build`` and ``rbnx boot`` actually selected.
+    """
+    if workspace is None:
+        configured_workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
+        workspace = (
+            Path(configured_workspace)
+            if configured_workspace
+            else Path(__file__).resolve().parents[1]
+        )
+    workspace = workspace.resolve()
+    if deployment_dir is None:
+        configured = os.environ.get("ROBONIX_DEPLOYMENT_DIR", "").strip()
+        deployment_dir = (
+            Path(configured) if configured else workspace / "examples/webots"
+        )
+    if not deployment_dir.is_absolute():
+        deployment_dir = workspace / deployment_dir
+    deployment_dir = deployment_dir.resolve()
+
+    package_roots: list[Path] = []
+    source = _audio_source_from_manifest(deployment_dir / "robonix_manifest.yaml")
+    if source is not None:
+        source_kind, value = source
+        if source_kind == "url":
+            package_roots.append(
+                deployment_dir / "rbnx-boot/cache" / _remote_repo_name(value)
+            )
+        else:
+            expanded = Path(os.path.expandvars(os.path.expanduser(value)))
+            package_roots.append(
+                expanded if expanded.is_absolute() else deployment_dir / expanded
+            )
+
+    # Keep the known external cache location as a deterministic fallback for
+    # generated/older deployment manifests that omit the source entry.
+    package_roots.append(deployment_dir / "rbnx-boot/cache/primitive-audio-driver-rbnx")
+    # Intentional compatibility for old checkouts where audio lived in-tree.
+    package_roots.append(deployment_dir / "primitives/audio_driver")
+
+    candidates: list[Path] = []
+    for root in package_roots:
+        for candidate in _proto_dirs_for_package(root.resolve()):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    missing_by_candidate: list[str] = []
+    for candidate in candidates:
+        missing = [
+            name for name in GENERATED_PROTO_FILES if not (candidate / name).is_file()
+        ]
+        if not missing:
+            return candidate
+        missing_by_candidate.append(f"{candidate} (missing {', '.join(missing)})")
+    searched = "; ".join(missing_by_candidate)
     raise FileNotFoundError(
-        "audio_driver generated proto files not found; run `rbnx build` first"
+        f"generated interface proto files not found for deployment {deployment_dir}; "
+        f"searched {searched}; run `rbnx build` in that deployment first"
     )
 
 
