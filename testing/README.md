@@ -217,6 +217,14 @@ python3 testing/run.py --server "$ROBONIX_ATLAS" \
   --summary-json /tmp/robonix-local-summary.json
 ```
 
+Interface proto discovery defaults to the Webots deployment at
+`examples/webots`. For another booted deployment, set
+`ROBONIX_DEPLOYMENT_DIR` to its directory (absolute, or relative to
+`GITHUB_WORKSPACE`). The harness resolves the selected manifest's audio package
+under `<deployment>/rbnx-boot/cache/<repository>/rbnx-build/codegen/proto_gen`
+first, while retaining the historical in-tree `primitives/audio_driver`
+layouts as compatibility fallbacks.
+
 For a targeted live run:
 
 ```bash
