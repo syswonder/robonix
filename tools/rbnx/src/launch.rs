@@ -217,11 +217,22 @@ async fn process_group_has_boot_id(pgid: u32, boot_id: &str) -> bool {
         Ok(output) if output.status.success() => output,
         _ => return false,
     };
-    let expected = format!("RBNX_BOOT_ID={boot_id}");
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.trim().parse::<u32>().ok())
-        .any(|pid| process_has_environment_entry(pid, expected.as_bytes()))
+        .any(|pid| process_has_boot_id(pid, boot_id))
+}
+
+/// Prove that one process carries the exact boot ownership marker inherited
+/// from its `rbnx boot` parent. This is also the portable identity fallback for
+/// the detached watchdog on targets (notably macOS) without Linux procfs start
+/// ticks. Inspection failure is a mismatch so stale PIDs are never trusted.
+pub fn process_has_boot_id(pid: u32, boot_id: &str) -> bool {
+    if boot_id.is_empty() {
+        return false;
+    }
+    let expected = format!("RBNX_BOOT_ID={boot_id}");
+    process_has_environment_entry(pid, expected.as_bytes())
 }
 
 /// Linux exposes the immutable exec environment as NUL-delimited procfs
@@ -329,10 +340,45 @@ fn process_has_environment_entry(_pid: u32, _expected: &[u8]) -> bool {
 /// Linux `/proc/<pid>/stat` field 22. The value is stable for the lifetime of
 /// a process and lets the watchdog distinguish its boot parent from a reused
 /// PID. Returns `None` when procfs is unavailable or the process exited.
+#[cfg(target_os = "linux")]
 pub fn proc_start_time_ticks(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = stat.get(stat.rfind(')')? + 1..)?.trim_start();
     after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Darwin process start time from `PROC_PIDTBSDINFO`, normalized to
+/// microseconds since the Unix epoch. Unlike `/proc`, this is available on a
+/// stock macOS host and remains stable across the process lifetime.
+#[cfg(target_os = "macos")]
+pub fn proc_start_time_ticks(pid: u32) -> Option<u64> {
+    let pid = i32::try_from(pid).ok()?;
+    let mut info = std::mem::MaybeUninit::<nix::libc::proc_bsdinfo>::zeroed();
+    let info_size = std::mem::size_of::<nix::libc::proc_bsdinfo>();
+    // SAFETY: `info` points to `info_size` writable bytes of the exact struct
+    // requested by PROC_PIDTBSDINFO. A full-size return initializes it.
+    let written = unsafe {
+        nix::libc::proc_pidinfo(
+            pid,
+            nix::libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            i32::try_from(info_size).ok()?,
+        )
+    };
+    if usize::try_from(written).ok()? != info_size {
+        return None;
+    }
+    // SAFETY: the kernel reported that it filled the complete structure.
+    let info = unsafe { info.assume_init() };
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn proc_start_time_ticks(_pid: u32) -> Option<u64> {
+    None
 }
 
 async fn run_package_stop_hook(
@@ -889,13 +935,22 @@ mod tests {
     use super::{
         PackageRuntimeRecord, atlas_pb, is_new_provider_registration,
         linux_proc_status_is_not_zombie, macos_procargs_has_environment_entry,
-        macos_ps_state_is_not_zombie, process_group_has_members, resolve_runtime_driver_contract,
-        shutdown_package_runtime_checked, terminate_process_group_guarded,
-        validate_runtime_driver_contracts,
+        macos_ps_state_is_not_zombie, proc_start_time_ticks, process_group_has_members,
+        resolve_runtime_driver_contract, shutdown_package_runtime_checked,
+        terminate_process_group_guarded, validate_runtime_driver_contracts,
     };
 
     const SHARED: &str = "robonix/lifecycle/driver";
     const LEGACY: &str = "robonix/primitive/camera/driver";
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn live_process_start_identity_is_available_and_stable() {
+        let first = proc_start_time_ticks(std::process::id())
+            .expect("supported host must expose a live process start identity");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert_eq!(proc_start_time_ticks(std::process::id()), Some(first));
+    }
 
     #[test]
     fn runtime_driver_must_exactly_match_shared_or_legacy_selection() {

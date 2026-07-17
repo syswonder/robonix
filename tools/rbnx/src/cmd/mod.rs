@@ -126,6 +126,8 @@ pub enum Commands {
         boot_pid: u32,
         #[arg(long)]
         boot_start_time_ticks: Option<u64>,
+        #[arg(long)]
+        boot_id: String,
     },
     /// Update remote (`url:`) providers to their latest upstream commit
     ///
@@ -440,7 +442,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             state,
             boot_pid,
             boot_start_time_ticks,
-        } => boot_watchdog::execute(state, boot_pid, boot_start_time_ticks).await,
+            boot_id,
+        } => boot_watchdog::execute(state, boot_pid, boot_start_time_ticks, boot_id).await,
         Commands::Update { path, file } => update::execute(config, path, file).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {
