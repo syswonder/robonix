@@ -12,9 +12,8 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::Config;
 use robonix_cli::launch::{
-    CMD_ACTIVATE, CMD_INIT, OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL, ProviderRegistrationSnapshot,
-    call_driver_cmd, resolve_runtime_driver_contract, snapshot_provider_ids,
-    wait_for_registration_core,
+    CMD_ACTIVATE, CMD_INIT, ProviderRegistrationSnapshot, call_driver_cmd,
+    resolve_runtime_driver_contract, snapshot_provider_ids, wait_for_registration_core,
 };
 use robonix_cli::manifest;
 use robonix_cli::output;
@@ -616,11 +615,11 @@ pub async fn execute_start(
     // standalone `rbnx start` follows the same lifecycle as `rbnx boot`.
     let has_explicit_config = config_file.is_some() || !set_overrides.is_empty();
     // Omission is the canonical managed-lifecycle selection. The fallback
-    // bit is exported separately so only genuinely old generated artifacts
-    // may substitute a namespace Driver (or, last-resort, no Driver).
+    // bit is exported separately so an old generated artifact may substitute
+    // only its exact namespace Driver when the shared stub is absent.
     let explicit_driver_contract = manifest.explicit_lifecycle_driver_contract()?;
     let expected_driver_contract = manifest.selected_lifecycle_driver_contract()?.to_string();
-    let allow_old_artifact_fallback = explicit_driver_contract.is_none();
+    let allow_legacy_driver_fallback = explicit_driver_contract.is_none();
     let has_driver_capability = true;
     let deploy_managed = std::env::var_os("RBNX_DEPLOY_MANAGED").is_some();
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
@@ -659,7 +658,8 @@ pub async fn execute_start(
     env.insert("SCRIBE_LOG_DIR".to_string(), log_dir.display().to_string());
     // The exact selection and compatibility permission are distinct. Current
     // omission exports the shared Driver plus a marker that lets an old SDK
-    // artifact fall back; explicit shared/legacy selections remain strict.
+    // artifact fall back to its exact namespace Driver; explicit shared/legacy
+    // selections remain strict.
     env.insert(
         "ROBONIX_DRIVER_CONTRACT_ID".to_string(),
         expected_driver_contract.clone(),
@@ -668,7 +668,7 @@ pub async fn execute_start(
     // never accidentally inherit omission's downgrade permission.
     env.insert(
         "ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK".to_string(),
-        if allow_old_artifact_fallback {
+        if allow_legacy_driver_fallback {
             "1"
         } else {
             "0"
@@ -745,8 +745,7 @@ pub async fn execute_start(
                 before_snapshot,
                 json,
                 expected_driver_contract.clone(),
-                allow_old_artifact_fallback,
-                has_explicit_config,
+                allow_legacy_driver_fallback,
             ))
         } else {
             None
@@ -760,14 +759,8 @@ pub async fn execute_start(
     // package.name only for a bare standalone `rbnx start` with no instance.
     let instance_name =
         std::env::var("RBNX_INSTANCE_NAME").unwrap_or_else(|_| manifest.package.name.clone());
-    let result = if let Some((
-        mut atlas,
-        before,
-        json,
-        expected_contract,
-        allow_old_fallback,
-        config_was_explicit,
-    )) = standalone_lifecycle
+    let result = if let Some((mut atlas, before, json, expected_contract, allow_legacy_fallback)) =
+        standalone_lifecycle
     {
         // `start_process` blocks for the package lifetime, so run it alongside
         // registration/lifecycle driving. On lifecycle failure, stop the exact
@@ -813,8 +806,7 @@ pub async fn execute_start(
             &mut atlas,
             &before,
             &expected_contract,
-            allow_old_fallback,
-            config_was_explicit,
+            allow_legacy_fallback,
             json,
         );
         tokio::pin!(lifecycle);
@@ -912,8 +904,7 @@ async fn drive_standalone_lifecycle(
     atlas: &mut AtlasClient,
     before: &ProviderRegistrationSnapshot,
     expected_driver_contract: &str,
-    allow_old_artifact_fallback: bool,
-    config_was_explicit: bool,
+    allow_legacy_driver_fallback: bool,
     config_json: String,
 ) -> Result<()> {
     let outcome = wait_for_registration_core(atlas, before, "rbnx start").await?;
@@ -922,23 +913,8 @@ async fn drive_standalone_lifecycle(
         &outcome.provider_namespace,
         expected_driver_contract,
         &outcome.driver_contracts,
-        allow_old_artifact_fallback,
-        outcome.provider_state_detail == OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
+        allow_legacy_driver_fallback,
     )?;
-    let Some(driver_contract) = driver_contract else {
-        output::warning(&format!(
-            "provider '{}' is an old generated artifact with no lifecycle Driver; \
-             continuing as a last-resort compatibility fallback (actual Atlas state={})",
-            outcome.provider_id,
-            lifecycle_state_label(outcome.provider_state),
-        ));
-        if config_was_explicit {
-            output::warning(
-                "Config was supplied but cannot be delivered because the old artifact has no Driver",
-            );
-        }
-        return Ok(());
-    };
     if driver_contract != expected_driver_contract {
         output::warning(&format!(
             "provider '{}' is an old generated artifact; using legacy lifecycle Driver '{}' instead of '{}'",
@@ -979,22 +955,6 @@ async fn drive_standalone_lifecycle(
 
 fn should_activate_standalone_provider(provider_kind: i32) -> bool {
     provider_kind != atlas_pb::Kind::Skill as i32
-}
-
-fn lifecycle_state_label(state: i32) -> &'static str {
-    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
-        "REGISTERED"
-    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
-        "INACTIVE"
-    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
-        "ACTIVE"
-    } else if state == atlas_pb::LifecycleState::StateError as i32 {
-        "ERROR"
-    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
-        "TERMINATED"
-    } else {
-        "STARTING"
-    }
 }
 
 /// Materialize a per-instance config from `--config <file>` plus

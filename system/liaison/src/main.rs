@@ -30,6 +30,8 @@ use access::{AccessControlConfig, AccessDecision};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use pb::contracts::{
+    robonix_lifecycle_driver_client::RobonixLifecycleDriverClient,
+    robonix_lifecycle_driver_server::{RobonixLifecycleDriver, RobonixLifecycleDriverServer},
     robonix_system_liaison_handsfree_events_server::{
         RobonixSystemLiaisonHandsfreeEvents, RobonixSystemLiaisonHandsfreeEventsServer,
     },
@@ -51,6 +53,7 @@ use pb::liaison::{
     GetHandsfreeStatusRequest, GetHandsfreeStatusResponse, SetHandsfreeRequest,
     SetHandsfreeResponse, StartVoiceSessionRequest, VoiceEvent, WatchHandsfreeEventsRequest,
 };
+use pb::lifecycle::{DriverRequest, DriverResponse};
 use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
@@ -77,6 +80,153 @@ const LIAISON_HANDSFREE_SET_TOML: &str =
     "capabilities/system/liaison/handsfree/set_enabled.v1.toml";
 const LIAISON_HANDSFREE_STATUS_TOML: &str = "capabilities/system/liaison/handsfree/status.v1.toml";
 const LIAISON_HANDSFREE_EVENTS_TOML: &str = "capabilities/system/liaison/handsfree/events.v1.toml";
+const SHARED_DRIVER_CONTRACT: &str = "robonix/lifecycle/driver";
+const CMD_INIT: u32 = 0;
+const CMD_ACTIVATE: u32 = 1;
+const CMD_DEACTIVATE: u32 = 2;
+const CMD_SHUTDOWN: u32 = 3;
+
+#[derive(Clone)]
+struct SystemLifecycleDriver {
+    atlas: AtlasClient,
+    provider_id: String,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl SystemLifecycleDriver {
+    fn new(atlas: AtlasClient, provider_id: String) -> Self {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        Self {
+            atlas,
+            provider_id,
+            shutdown_tx,
+        }
+    }
+
+    /// Apply one no-op lifecycle callback and publish its authoritative state
+    /// to Atlas. Unknown commands and rejected Atlas transitions are errors.
+    async fn transition(&self, command: u32) -> Result<&'static str> {
+        let (state, label) = lifecycle_target(command)
+            .ok_or_else(|| anyhow!("unknown lifecycle command code {command}"))?;
+        let mut atlas = self.atlas.clone();
+        atlas
+            .set_lifecycle_state(&self.provider_id, state, "")
+            .await
+            .with_context(|| format!("publish lifecycle state for '{}'", self.provider_id))?;
+        if command == CMD_SHUTDOWN {
+            self.shutdown_tx.send_replace(true);
+        }
+        Ok(label)
+    }
+
+    fn subscribe_shutdown(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixLifecycleDriver for SystemLifecycleDriver {
+    /// Serve the shared Driver RPC and report callback/transition failures in
+    /// the stable DriverResponse envelope used by launchers.
+    async fn driver(
+        &self,
+        request: Request<DriverRequest>,
+    ) -> std::result::Result<Response<DriverResponse>, Status> {
+        let response = match self.transition(request.into_inner().command).await {
+            Ok(state) => DriverResponse {
+                ok: true,
+                state: state.to_string(),
+                error: String::new(),
+            },
+            Err(error) => DriverResponse {
+                ok: false,
+                state: "error".to_string(),
+                error: format!("{error:#}"),
+            },
+        };
+        Ok(Response::new(response))
+    }
+}
+
+fn lifecycle_target(command: u32) -> Option<(atlas_pb::LifecycleState, &'static str)> {
+    match command {
+        CMD_INIT => Some((atlas_pb::LifecycleState::StateInactive, "inactive")),
+        CMD_ACTIVATE => Some((atlas_pb::LifecycleState::StateActive, "active")),
+        CMD_DEACTIVATE => Some((atlas_pb::LifecycleState::StateInactive, "inactive")),
+        CMD_SHUTDOWN => Some((atlas_pb::LifecycleState::StateTerminated, "terminated")),
+        _ => None,
+    }
+}
+
+/// Wait until Driver(CMD_SHUTDOWN) has published TERMINATED. A watch channel
+/// preserves a shutdown sent before this particular waiter starts polling.
+async fn wait_for_driver_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
+}
+
+/// Return a loopback endpoint for an unspecified bind address so the process
+/// can self-dial without changing the endpoint it advertises through Atlas.
+fn startup_driver_endpoint(listen_addr: std::net::SocketAddr) -> String {
+    let ip = match listen_addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        }
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        }
+        ip => ip,
+    };
+    std::net::SocketAddr::new(ip, listen_addr.port()).to_string()
+}
+
+/// Connect to this process's just-spawned Driver endpoint. Retries only the
+/// bounded bind/startup window; a connected endpoint is returned immediately.
+async fn connect_startup_driver(
+    endpoint: &str,
+) -> Result<RobonixLifecycleDriverClient<tonic::transport::Channel>> {
+    let endpoint = if endpoint.starts_with("http") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match RobonixLifecycleDriverClient::connect(endpoint.clone()).await {
+            Ok(client) => return Ok(client),
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error).context("connect startup lifecycle Driver"),
+        }
+    }
+}
+
+/// Invoke one startup lifecycle command through the real generated Driver RPC
+/// and reject an `ok=false` response as a startup failure.
+async fn call_startup_driver(
+    client: &mut RobonixLifecycleDriverClient<tonic::transport::Channel>,
+    command: u32,
+) -> Result<String> {
+    let response = client
+        .driver(DriverRequest {
+            command,
+            config_json: "{}".to_string(),
+        })
+        .await
+        .context("call startup lifecycle Driver")?
+        .into_inner();
+    if !response.ok {
+        anyhow::bail!("startup lifecycle Driver failed: {}", response.error);
+    }
+    Ok(response.state)
+}
 
 /// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1
 const INTENT_SOURCE_TEXT: u32 = 0;
@@ -604,6 +754,21 @@ async fn main() -> Result<()> {
     atlas
         .declare_capability(
             LIAISON_PROVIDER_ID,
+            SHARED_DRIVER_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/lifecycle/driver.v1.toml",
+                "robonix.contracts.RobonixLifecycleDriver",
+                "/robonix.contracts.RobonixLifecycleDriver/Driver",
+            ),
+        )
+        .await
+        .context("declare liaison shared lifecycle Driver")?;
+    let lifecycle = SystemLifecycleDriver::new(atlas.clone(), LIAISON_PROVIDER_ID.to_string());
+    atlas
+        .declare_capability(
+            LIAISON_PROVIDER_ID,
             LIAISON_SUBMIT_CONTRACT,
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -671,37 +836,7 @@ async fn main() -> Result<()> {
         )
         .await
         .context("declare liaison hands-free events gRPC capability")?;
-    // Liaison has no Driver(CMD_INIT/CMD_ACTIVATE) handshake — it's a Rust binary
-    // that's fully ready as soon as the gRPC server is listening. Push the
-    // state explicitly so `rbnx caps` shows ACTIVE instead of stopping at
-    // the legacy-fallback INACTIVE that atlas infers from the first declare.
-    if let Err(e) = atlas
-        .set_lifecycle_state(
-            LIAISON_PROVIDER_ID,
-            atlas_pb::LifecycleState::StateActive,
-            "",
-        )
-        .await
-    {
-        warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
-    }
-    info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
-    info!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
-
-    {
-        let mut hb = atlas.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(20));
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                if let Err(e) = hb.heartbeat(LIAISON_PROVIDER_ID).await {
-                    warn!("heartbeat failed: {e:#}");
-                }
-            }
-        });
-    }
-
+    let mut heartbeat_atlas = atlas.clone();
     let atlas = Arc::new(Mutex::new(atlas));
     let access = Arc::new(AccessControlConfig::from_env());
     info!(
@@ -730,6 +865,67 @@ async fn main() -> Result<()> {
     );
     handsfree.spawn();
 
+    let svc = Arc::new(LiaisonServiceImpl {
+        pipeline: Arc::clone(&pipeline),
+        atlas: Arc::clone(&atlas),
+        pilot_endpoint_default: pilot_http.clone(),
+        access,
+        handsfree,
+    });
+    let server_shutdown = lifecycle.subscribe_shutdown();
+    let server_lifecycle = lifecycle.clone();
+    let mut server_task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(RobonixLifecycleDriverServer::new(server_lifecycle))
+            .add_service(RobonixSystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemLiaisonVoiceServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemLiaisonHandsfreeSetEnabledServer::from_arc(
+                Arc::clone(&svc),
+            ))
+            .add_service(RobonixSystemLiaisonHandsfreeStatusServer::from_arc(
+                Arc::clone(&svc),
+            ))
+            .add_service(RobonixSystemLiaisonHandsfreeEventsServer::from_arc(svc))
+            .serve_with_shutdown(listen_addr, wait_for_driver_shutdown(server_shutdown))
+            .await
+    });
+    let startup_endpoint = startup_driver_endpoint(listen_addr);
+    let mut startup_driver = tokio::select! {
+        client = connect_startup_driver(&startup_endpoint) => client?,
+        result = &mut server_task => {
+            result.context("join Liaison gRPC server")?
+                .context("Liaison gRPC server failed before readiness")?;
+            anyhow::bail!("Liaison gRPC server stopped before readiness");
+        }
+    };
+    call_startup_driver(&mut startup_driver, CMD_INIT)
+        .await
+        .context("initialize liaison lifecycle")?;
+    call_startup_driver(&mut startup_driver, CMD_ACTIVATE)
+        .await
+        .context("activate liaison lifecycle")?;
+    drop(startup_driver);
+
+    let shutdown = lifecycle.subscribe_shutdown();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(20));
+        tick.tick().await;
+        let shutdown = wait_for_driver_shutdown(shutdown);
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                _ = tick.tick() => {
+                    if let Err(e) = heartbeat_atlas.heartbeat(LIAISON_PROVIDER_ID).await {
+                        warn!("heartbeat failed: {e:#}");
+                    }
+                }
+            }
+        }
+    });
+    info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
+    info!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
+
     let source = std::env::var("ROBONIX_LIAISON_SOURCE").unwrap_or_default();
     let text_handle: Option<tokio::task::JoinHandle<Result<()>>> = if source == "text" {
         info!("activating stdin text loop (headless mode)");
@@ -738,32 +934,22 @@ async fn main() -> Result<()> {
         None
     };
 
-    let svc = Arc::new(LiaisonServiceImpl {
-        pipeline,
-        atlas: Arc::clone(&atlas),
-        pilot_endpoint_default: pilot_http,
-        access,
-        handsfree,
-    });
-    let server = tonic::transport::Server::builder()
-        .add_service(RobonixSystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
-        .add_service(RobonixSystemLiaisonVoiceServer::from_arc(Arc::clone(&svc)))
-        .add_service(RobonixSystemLiaisonHandsfreeSetEnabledServer::from_arc(
-            Arc::clone(&svc),
-        ))
-        .add_service(RobonixSystemLiaisonHandsfreeStatusServer::from_arc(
-            Arc::clone(&svc),
-        ))
-        .add_service(RobonixSystemLiaisonHandsfreeEventsServer::from_arc(svc))
-        .serve(listen_addr);
-
     if let Some(handle) = text_handle {
         tokio::select! {
-            res = server => { res?; }
-            res = handle => { res??; }
+            res = &mut server_task => {
+                res.context("join Liaison gRPC server")?
+                    .context("Liaison gRPC server failed")?;
+            }
+            res = handle => {
+                res??;
+                server_task.abort();
+            }
         }
     } else {
-        server.await?;
+        server_task
+            .await
+            .context("join Liaison gRPC server")?
+            .context("Liaison gRPC server failed")?;
     }
 
     Ok(())
@@ -797,6 +983,145 @@ fn plan_calls(plan: &Plan) -> Vec<&CapabilityCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pb::contracts::robonix_lifecycle_driver_client::RobonixLifecycleDriverClient;
+    use robonix_atlas::service::{AtlasRegistry, serve_atlas};
+    use std::net::SocketAddr;
+
+    fn reserve_address() -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        listener.local_addr().expect("reserved address")
+    }
+
+    #[test]
+    fn startup_dial_rewrites_unspecified_addresses() {
+        assert_eq!(
+            startup_driver_endpoint("0.0.0.0:51001".parse().unwrap()),
+            "127.0.0.1:51001"
+        );
+        assert_eq!(
+            startup_driver_endpoint("[::]:51001".parse().unwrap()),
+            "[::1]:51001"
+        );
+    }
+
+    /// Dial a just-spawned Driver server, retrying only the short startup race.
+    async fn connect_driver(
+        endpoint: String,
+    ) -> RobonixLifecycleDriverClient<tonic::transport::Channel> {
+        let mut last_error = None;
+        for _ in 0..50 {
+            match RobonixLifecycleDriverClient::connect(endpoint.clone()).await {
+                Ok(client) => return client,
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "connect Driver: {:#}",
+            last_error.expect("connection error")
+        );
+    }
+
+    /// Exercise the generated Driver client against the real tonic endpoint
+    /// and verify that both RPCs publish their lifecycle states to Atlas.
+    #[tokio::test]
+    async fn shared_driver_rpc_is_callable() {
+        let atlas_addr = reserve_address();
+        let registry = Arc::new(AtlasRegistry::default());
+        let atlas_server = tokio::spawn(serve_atlas(Arc::clone(&registry), atlas_addr));
+        let mut atlas = AtlasClient::connect_with_retry(
+            format!("http://{atlas_addr}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("connect test Atlas");
+        let provider_id = "liaison-driver-rpc-test";
+        atlas
+            .register_service(provider_id, LIAISON_NAMESPACE, "")
+            .await
+            .expect("register test Provider");
+
+        let driver_addr = reserve_address();
+        atlas
+            .declare_capability(
+                provider_id,
+                SHARED_DRIVER_CONTRACT,
+                atlas_pb::Transport::Grpc,
+                &driver_addr.to_string(),
+                atlas_client::grpc_params(
+                    "capabilities/lifecycle/driver.v1.toml",
+                    "robonix.contracts.RobonixLifecycleDriver",
+                    "/robonix.contracts.RobonixLifecycleDriver/Driver",
+                ),
+            )
+            .await
+            .expect("declare shared Driver");
+        let lifecycle = SystemLifecycleDriver::new(atlas.clone(), provider_id.to_string());
+        let server_shutdown = lifecycle.subscribe_shutdown();
+        let driver_server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(RobonixLifecycleDriverServer::new(lifecycle))
+                .serve_with_shutdown(driver_addr, wait_for_driver_shutdown(server_shutdown)),
+        );
+        let mut client = connect_driver(format!("http://{driver_addr}")).await;
+
+        let init = client
+            .driver(DriverRequest {
+                command: CMD_INIT,
+                config_json: "{}".to_string(),
+            })
+            .await
+            .expect("Driver INIT RPC")
+            .into_inner();
+        assert!(init.ok, "{}", init.error);
+        assert_eq!(init.state, "inactive");
+        let activate = client
+            .driver(DriverRequest {
+                command: CMD_ACTIVATE,
+                config_json: String::new(),
+            })
+            .await
+            .expect("Driver ACTIVATE RPC")
+            .into_inner();
+        assert!(activate.ok, "{}", activate.error);
+        assert_eq!(activate.state, "active");
+
+        let shutdown = client
+            .driver(DriverRequest {
+                command: CMD_SHUTDOWN,
+                config_json: String::new(),
+            })
+            .await
+            .expect("Driver SHUTDOWN RPC")
+            .into_inner();
+        assert!(shutdown.ok, "{}", shutdown.error);
+        assert_eq!(shutdown.state, "terminated");
+        tokio::time::timeout(Duration::from_secs(2), driver_server)
+            .await
+            .expect("Driver server did not stop after SHUTDOWN")
+            .expect("join Driver server")
+            .expect("graceful Driver server shutdown");
+
+        let provider = atlas
+            .query(
+                atlas_pb::Kind::Service,
+                provider_id,
+                "",
+                "",
+                atlas_pb::Transport::Unspecified,
+            )
+            .await
+            .expect("query test Provider")
+            .pop()
+            .expect("test Provider");
+        assert_eq!(
+            provider.state,
+            atlas_pb::LifecycleState::StateTerminated as i32
+        );
+
+        atlas_server.abort();
+    }
 
     #[test]
     fn ensure_user_id_fills_default_for_text() {

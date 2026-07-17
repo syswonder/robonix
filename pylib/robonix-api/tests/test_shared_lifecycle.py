@@ -4,18 +4,17 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from robonix_api.lifecycle import (
     CMD_ACTIVATE,
     CMD_DEACTIVATE,
     CMD_INIT,
     CMD_SHUTDOWN,
-    OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
     SHARED_DRIVER_CONTRACT_ID,
     build_lifecycle_servicer,
     lifecycle_contract_for_module,
-    lifecycle_stubs_prove_old_artifact_without_driver,
 )
-from robonix_api.atlas_types import LifecycleState
 from robonix_api.capability import _ProviderBase
 from robonix_api.result import Deferred, Ok
 
@@ -78,11 +77,6 @@ def test_all_legacy_driver_contracts_remain_available_for_old_manifests() -> Non
         assert "idl" in contents and "lifecycle/srv/Driver.srv" in contents, path
 
 
-def test_python_and_rust_use_the_same_no_driver_proof_marker() -> None:
-    rust_launch = (ROOT / "tools" / "rbnx" / "src" / "launch.rs").read_text()
-    assert f'"{OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL}"' in rust_launch
-
-
 def test_omitted_manifest_prefers_current_shared_stub() -> None:
     module = _grpc_module(shared=True, legacy=True)
     received: list[dict] = []
@@ -105,12 +99,6 @@ def test_omitted_manifest_prefers_current_shared_stub() -> None:
     assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
     assert built is not None
     assert built[4] == SHARED_DRIVER_CONTRACT_ID
-    assert not lifecycle_stubs_prove_old_artifact_without_driver(
-        "robonix/system/scene",
-        module,
-        SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
-    )
     response = built[0].Driver(
         SimpleNamespace(command=CMD_INIT, config_json='{"camera":"front"}'),
         None,
@@ -221,6 +209,18 @@ def test_direct_current_provider_prefers_shared_when_both_stubs_exist() -> None:
     assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
 
 
+def test_empty_legacy_launcher_selection_defaults_to_shared() -> None:
+    module = _grpc_module(shared=True, legacy=True)
+
+    selected = lifecycle_contract_for_module(
+        "robonix/system/scene",
+        module,
+        "",
+    )
+
+    assert selected == (SHARED_DRIVER_CONTRACT_ID, "RobonixLifecycleDriver")
+
+
 def test_omitted_manifest_old_artifact_falls_back_to_namespace_driver(caplog) -> None:
     module = _grpc_module(shared=False, legacy=True)
     received: list[dict] = []
@@ -255,7 +255,9 @@ def test_omitted_manifest_old_artifact_falls_back_to_namespace_driver(caplog) ->
     assert "predates robonix/lifecycle/driver" in caplog.text
 
 
-def test_omitted_manifest_oldest_artifact_has_last_resort_no_driver(caplog) -> None:
+def test_omitted_manifest_without_any_driver_stub_fails_with_rebuild_guidance(
+    caplog,
+) -> None:
     module = _grpc_module(shared=False, legacy=False)
 
     selected = lifecycle_contract_for_module(
@@ -266,17 +268,20 @@ def test_omitted_manifest_oldest_artifact_has_last_resort_no_driver(caplog) -> N
     )
 
     assert selected is None
-    assert lifecycle_stubs_prove_old_artifact_without_driver(
-        "robonix/system/scene",
-        module,
-        SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
-    )
-    assert "last-resort compatibility fallback" in caplog.text
-    assert "config cannot be delivered" in caplog.text
+    with pytest.raises(RuntimeError, match=r"no usable lifecycle Driver.*rbnx build"):
+        build_lifecycle_servicer(
+            "robonix/system/scene",
+            module,
+            _Response,
+            requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
+            allow_old_artifact_fallback=True,
+        )
+    assert SHARED_DRIVER_CONTRACT_ID in caplog.text
+    assert "robonix/system/scene/driver" in caplog.text
+    assert "rbnx build" in caplog.text
 
 
-def test_partial_generated_service_is_not_old_artifact_proof(caplog) -> None:
+def test_partial_generated_service_fails_closed(caplog) -> None:
     module = SimpleNamespace(
         RobonixLifecycleDriverServicer=type(
             "RobonixLifecycleDriverServicer", (), {"Driver": lambda *_: None}
@@ -291,12 +296,14 @@ def test_partial_generated_service_is_not_old_artifact_proof(caplog) -> None:
     )
 
     assert selected is None
-    assert not lifecycle_stubs_prove_old_artifact_without_driver(
-        "robonix/system/scene",
-        module,
-        SHARED_DRIVER_CONTRACT_ID,
-        allow_old_artifact_fallback=True,
-    )
+    with pytest.raises(RuntimeError, match=r"no usable lifecycle Driver.*rbnx build"):
+        build_lifecycle_servicer(
+            "robonix/system/scene",
+            module,
+            _Response,
+            requested_contract_id=SHARED_DRIVER_CONTRACT_ID,
+            allow_old_artifact_fallback=True,
+        )
     assert "incomplete; refusing compatibility fallback" in caplog.text
 
 
@@ -315,32 +322,8 @@ def test_explicit_shared_selection_does_not_downgrade_when_stub_is_missing(
     assert "unavailable in generated stubs" in caplog.text
 
 
-def test_last_resort_no_driver_provider_reports_actual_active_state() -> None:
-    provider = object.__new__(_ProviderBase)
-    provider.id = "legacy.scene"
-    transitions: list[tuple[LifecycleState, str]] = []
-    provider._set_state = (  # type: ignore[method-assign]
-        lambda state, detail="": transitions.append((state, detail))
-    )
-
-    provider._promote_ready_provider_without_driver(
-        None,
-        True,
-        OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
-    )
-
-    assert transitions == [(LifecycleState.ACTIVE, OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL)]
-
-
-def test_strict_missing_driver_does_not_auto_promote() -> None:
-    provider = object.__new__(_ProviderBase)
-    provider.id = "strict.scene"
-    transitions: list[LifecycleState] = []
-    provider._set_state = transitions.append  # type: ignore[method-assign]
-
-    provider._promote_ready_provider_without_driver(None, True, None)
-
-    assert transitions == []
+def test_provider_base_has_no_implicit_active_promotion_hook() -> None:
+    assert not hasattr(_ProviderBase, "_promote_ready_provider_without_driver")
 
 
 def test_shared_driver_delivers_init_config_and_shutdown_to_handlers() -> None:

@@ -16,11 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let idl_root = repo_root.join("capabilities/lib");
     let contracts_root = repo_root.join("capabilities/system/soma");
+    let lifecycle_driver = repo_root.join("capabilities/lifecycle/driver.v1.toml");
     let proto_out = PathBuf::from(std::env::var("OUT_DIR")?);
     let selected_contracts = proto_out.join("selected_contracts");
 
     println!("cargo:rerun-if-changed={}", idl_root.display());
     println!("cargo:rerun-if-changed={}", contracts_root.display());
+    println!("cargo:rerun-if-changed={}", lifecycle_driver.display());
     println!("cargo:rerun-if-changed=build.rs");
     let _ = std::fs::remove_dir_all(&selected_contracts);
     std::fs::create_dir_all(&selected_contracts)?;
@@ -33,6 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         std::fs::copy(contracts_root.join(name), selected_contracts.join(name))?;
     }
+    std::fs::copy(
+        lifecycle_driver,
+        selected_contracts.join("lifecycle_driver.v1.toml"),
+    )?;
 
     let mut resolver = msg_parser::MsgResolver::new(std::slice::from_ref(&idl_root))?;
     let mut idl_skips = 0usize;

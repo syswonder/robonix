@@ -3,8 +3,8 @@
 # so package authors do not need to duplicate an identical driver TOML.
 # Package manifests normally omit Driver; current codegen and runtime select
 # this shared contract automatically. Explicit shared and legacy namespace
-# selections remain supported. Only old generated artifacts may fall back to
-# a namespace Driver or, last-resort, no Driver. No package may declare both.
+# selections remain supported. Old generated artifacts may fall back only to
+# their exact namespace Driver. No package may declare both forms.
 [contract]
 id              = "robonix/lifecycle/driver"
 version         = "1"
