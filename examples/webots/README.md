@@ -133,10 +133,13 @@ The deploy manifest references these via `${VLM_*}`.
      package's `scripts/start.sh` — for tiago drivers that's a
      `docker exec` into the sim container that runs the Python driver).
    - Polls atlas until the package registers its first capability.
-   - If the new provider declared a `*/driver` gRPC capability, also calls
-     `LifecycleDriver.Driver(CMD_INIT, config_json)` to initialize it.
-     Providers without a `*/driver` capability are deployed as soon as they
-     register (no init dance) — tiago drivers fall in this bucket.
+   - Verifies that the provider declared exactly one lifecycle Driver. Omitted
+     package declarations select `robonix/lifecycle/driver`; an old generated
+     package may use only its exact namespace Driver. A provider with neither
+     fails startup and must be rebuilt or migrated.
+   - Calls `Driver(CMD_INIT, config_json)`, then `Driver(CMD_ACTIVATE)` for
+     primitives and services. Missing lifecycle callbacks are warning-only
+     no-ops inside the Driver, not permission to run without the Driver.
 3. Sits on Ctrl-C / SIGTERM, then tears down all children.
 
 ## How the LLM picks tools

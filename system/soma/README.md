@@ -60,11 +60,11 @@ the provider's runtime declaration, delivers entry `config` through
 Driver(CMD_INIT), and activates primitives (skills remain inactive until first
 use). Explicit shared or namespace Driver selections remain valid and strict.
 For an omitted manifest only, an old generated artifact may fall back to its
-namespace Driver; an artifact with no Driver is kept usable only as a
-last-resort fallback, with its actual Atlas state reported and any undeliverable
-config called out. Soma accepts that zero-Driver case only when the SDK has
-published the reserved old-artifact proof in Atlas `state_detail`; an ordinary
-Driver declaration failure remains fatal.
+exact namespace Driver. If neither the shared nor exact legacy Driver exists,
+Soma records a startup failure with rebuild/migration guidance and reaps the
+package. Missing, mismatched, dual, and failed Driver declarations are fatal;
+If neither the shared binding nor the exact legacy binding exists, Soma fails
+the package startup and reports the rebuild/migration error.
 
 `--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`);
 package stdout/stderr is written through scribe under `$SCRIBE_LOG_DIR` or

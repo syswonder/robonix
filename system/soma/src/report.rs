@@ -32,18 +32,8 @@ pub struct PackageStartupCheck {
 #[derive(Debug)]
 pub enum PackageStartupStatus {
     MissingManifest,
-    Spawned {
-        command: String,
-    },
-    OldArtifactNoDriver {
-        command: String,
-        config_ignored: bool,
-        state: String,
-    },
-    SpawnFailed {
-        command: String,
-        error: String,
-    },
+    Spawned { command: String },
+    SpawnFailed { command: String, error: String },
 }
 
 impl StartupReport {
@@ -79,14 +69,6 @@ impl StartupReport {
                 PackageStartupStatus::Spawned { command } => eprintln!(
                     "  [ OK ] {} {}: cmd={}",
                     package.kind, package.name, command
-                ),
-                PackageStartupStatus::OldArtifactNoDriver {
-                    command,
-                    config_ignored,
-                    state,
-                } => eprintln!(
-                    "  [WARN] {} {}: {} (last-resort old artifact; no lifecycle Driver; config_ignored={}) cmd={}",
-                    package.kind, package.name, state, config_ignored, command
                 ),
                 PackageStartupStatus::SpawnFailed { command, error } => eprintln!(
                     "  [FAIL] {} {}: {} cmd={}",

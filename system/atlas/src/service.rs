@@ -26,6 +26,7 @@ pub use pb::Transport;
 
 /// How many times Atlas tries to mint a unique endpoint before giving up.
 const MINT_ATTEMPTS: usize = 16;
+const SHARED_LIFECYCLE_DRIVER_CONTRACT: &str = "robonix/lifecycle/driver";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -126,9 +127,8 @@ struct CapabilityProviderState {
     capability_md: String,
     last_heartbeat_ms: u64,
     endpoints: Vec<DeclaredEndpoint>,
-    /// Last value reported by SetLifecycleState. None for Providers
-    /// that never push, in which case `state()` falls back to the
-    /// "first non-driver capability declare -> INACTIVE" inference.
+    /// Last value reported by SetLifecycleState. Providers remain REGISTERED
+    /// until their lifecycle Driver explicitly publishes a transition.
     #[serde(serialize_with = "serialize_pushed_state")]
     pushed_state: Option<pb::LifecycleState>,
     state_detail: String,
@@ -173,23 +173,19 @@ impl From<&CapabilityProviderState> for pb::CapabilityProvider {
 
 impl CapabilityProviderState {
     /// Lifecycle state. The provider pushes via SetLifecycleState whenever its
-    /// on_init / on_activate / on_deactivate handler returns; that pushed
-    /// value wins. For legacy providers that never push, fall back to "any
-    /// non-driver capability declared → INACTIVE" (preserves behaviour
-    /// for code still on the old register-then-declare-only flow).
+    /// on_init / on_activate / on_deactivate handler returns. Capability
+    /// declaration alone never implies successful initialization.
     fn state(&self) -> pb::LifecycleState {
-        if let Some(s) = self.pushed_state {
-            return s;
-        }
-        let any_non_driver = self
-            .endpoints
+        self.pushed_state
+            .unwrap_or(pb::LifecycleState::StateRegistered)
+    }
+
+    /// Return whether this Provider has the one shared or exact legacy
+    /// lifecycle Driver that is allowed to promote it to ACTIVE.
+    fn has_driver(&self) -> bool {
+        self.endpoints
             .iter()
-            .any(|e| !is_driver_contract(&e.contract_id));
-        if any_non_driver {
-            pb::LifecycleState::StateInactive
-        } else {
-            pb::LifecycleState::StateRegistered
-        }
+            .any(|endpoint| is_driver_contract(&self.namespace, &endpoint.contract_id))
     }
 }
 
@@ -213,10 +209,66 @@ fn is_legal_transition(prev: pb::LifecycleState, next: pb::LifecycleState) -> bo
     }
 }
 
-fn is_driver_contract(contract_id: &str) -> bool {
-    // Current providers use the shared `robonix/lifecycle/driver`; legacy
-    // per-namespace lifecycle contracts remain valid during migration.
-    contract_id.ends_with("/driver")
+fn is_driver_contract(namespace: &str, contract_id: &str) -> bool {
+    if contract_id == SHARED_LIFECYCLE_DRIVER_CONTRACT {
+        return true;
+    }
+    let namespace = namespace.trim_matches('/');
+    contract_id == format!("{namespace}/driver")
+}
+
+/// Mirror codegen's stable contract-id to tonic service-name mapping for the
+/// shared Driver and exact namespace-legacy Driver compatibility path.
+fn driver_service_name(contract_id: &str) -> String {
+    contract_id
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .flat_map(|segment| segment.split('_').filter(|part| !part.is_empty()))
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Require a selected lifecycle Driver to expose the generated tonic ABI.
+/// Contract id alone is insufficient because launchers call this exact path.
+fn validate_driver_abi(
+    namespace: &str,
+    contract_id: &str,
+    transport: Transport,
+    params: &TransportParamsState,
+) -> Result<(), Status> {
+    if !is_driver_contract(namespace, contract_id) {
+        return Ok(());
+    }
+    if transport != Transport::Grpc {
+        return Err(Status::invalid_argument(format!(
+            "lifecycle Driver '{contract_id}' must use GRPC transport"
+        )));
+    }
+    let service_name = format!("robonix.contracts.{}", driver_service_name(contract_id));
+    let method = format!("/{service_name}/Driver");
+    match params {
+        TransportParamsState::Grpc {
+            service_name: actual_service,
+            method: actual_method,
+            ..
+        } if actual_service == &service_name && actual_method == &method => Ok(()),
+        TransportParamsState::Grpc {
+            service_name: actual_service,
+            method: actual_method,
+            ..
+        } => Err(Status::invalid_argument(format!(
+            "lifecycle Driver '{contract_id}' must use service_name='{service_name}' and method='{method}', got service_name='{actual_service}' method='{actual_method}'"
+        ))),
+        _ => Err(Status::invalid_argument(format!(
+            "lifecycle Driver '{contract_id}' requires gRPC params"
+        ))),
+    }
 }
 
 /// Return whether a declared contract should carry a namespace diagnostic.
@@ -416,10 +468,9 @@ impl AtlasRegistry {
     /// Update the provider's lifecycle state. Returns the previous value (or
     /// the inferred fallback when nothing's been pushed yet) so callers
     /// can log "X went INACTIVE → ACTIVE" without a separate query.
-    /// Validation is **soft**: illegal transitions log a warn but the
-    /// new state is still stored. Strict validation will land later
-    /// once telemetry confirms there are no spurious illegal
-    /// transitions during atlas/provider startup-race conditions.
+    /// Illegal transitions are rejected without mutating the Provider. ACTIVE
+    /// additionally requires one declared shared or exact legacy Driver, so a
+    /// Provider cannot advertise readiness without a callable lifecycle path.
     pub async fn set_lifecycle_state(
         &self,
         provider_id: &str,
@@ -438,11 +489,17 @@ impl AtlasRegistry {
             .get_mut(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
         let prev = provider.state();
+        if new_state == pb::LifecycleState::StateActive && !provider.has_driver() {
+            return Err(Status::failed_precondition(format!(
+                "provider '{provider_id}' cannot become ACTIVE without lifecycle Driver '{}' or exact legacy '{}/driver'",
+                SHARED_LIFECYCLE_DRIVER_CONTRACT,
+                provider.namespace.trim_matches('/'),
+            )));
+        }
         if !is_legal_transition(prev, new_state) {
-            warn!(
-                "[atlas] illegal transition {provider_id}: {:?} -> {:?} (storing anyway, soft-validation v0.1)",
-                prev, new_state
-            );
+            return Err(Status::failed_precondition(format!(
+                "illegal lifecycle transition for provider '{provider_id}': {prev:?} -> {new_state:?}"
+            )));
         }
         provider.pushed_state = Some(new_state);
         provider.state_detail = detail.trim().to_string();
@@ -494,6 +551,7 @@ impl AtlasRegistry {
             .providers
             .get(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
+        validate_driver_abi(&provider.namespace, &contract_id, transport, &params)?;
         let cross_namespace = self
             .contracts
             .get(&contract_id)
@@ -507,10 +565,11 @@ impl AtlasRegistry {
                 provider.namespace
             );
         }
-        if is_driver_contract(&contract_id)
-            && let Some(existing) = provider.endpoints.iter().find(|endpoint| {
-                is_driver_contract(&endpoint.contract_id) && endpoint.contract_id != contract_id
-            })
+        if is_driver_contract(&provider.namespace, &contract_id)
+            && let Some(existing) = provider
+                .endpoints
+                .iter()
+                .find(|endpoint| is_driver_contract(&provider.namespace, &endpoint.contract_id))
         {
             return Err(Status::failed_precondition(format!(
                 "provider '{provider_id}' already declares lifecycle Driver '{}'; cannot also declare '{contract_id}'",
@@ -885,6 +944,31 @@ mod endpoint_tests {
         }
     }
 
+    fn grpc_params_for(contract_id: &str) -> pb::TransportParams {
+        let service_name = format!("robonix.contracts.{}", driver_service_name(contract_id));
+        pb::TransportParams {
+            kind: Some(pb::transport_params::Kind::Grpc(pb::GrpcParams {
+                proto_file: "robonix_contracts.proto".to_string(),
+                method: format!("/{service_name}/Driver"),
+                service_name,
+            })),
+        }
+    }
+
+    fn grpc_params() -> pb::TransportParams {
+        grpc_params_for(SHARED_LIFECYCLE_DRIVER_CONTRACT)
+    }
+
+    fn grpc_params_with(service_name: &str, method: &str) -> pb::TransportParams {
+        pb::TransportParams {
+            kind: Some(pb::transport_params::Kind::Grpc(pb::GrpcParams {
+                proto_file: "robonix_contracts.proto".to_string(),
+                service_name: service_name.to_string(),
+                method: method.to_string(),
+            })),
+        }
+    }
+
     #[test]
     fn namespace_mismatch_is_advisory_and_shared_contracts_are_exempt() {
         assert!(!has_namespace_mismatch(
@@ -1048,9 +1132,9 @@ mod endpoint_tests {
             .declare(
                 "front_camera",
                 "robonix/primitive/camera/driver",
-                Transport::Ros2,
-                "/camera_driver",
-                ros2_params(),
+                Transport::Grpc,
+                "127.0.0.1:51010",
+                grpc_params_for("robonix/primitive/camera/driver"),
                 "",
             )
             .await
@@ -1061,7 +1145,7 @@ mod endpoint_tests {
                 "front_camera",
                 pb::Kind::Primitive,
                 "robonix/primitive/camera/driver",
-                Transport::Ros2,
+                Transport::Grpc,
             )
             .await;
         assert_eq!(providers.len(), 1);
@@ -1085,9 +1169,9 @@ mod endpoint_tests {
             .declare(
                 "front_camera",
                 "robonix/primitive/camera/driver",
-                Transport::Ros2,
-                "/camera_driver",
-                ros2_params(),
+                Transport::Grpc,
+                "127.0.0.1:51011",
+                grpc_params_for("robonix/primitive/camera/driver"),
                 "",
             )
             .await
@@ -1097,9 +1181,9 @@ mod endpoint_tests {
             .declare(
                 "front_camera",
                 "robonix/lifecycle/driver",
-                Transport::Ros2,
-                "/shared_driver",
-                ros2_params(),
+                Transport::Grpc,
+                "127.0.0.1:51012",
+                grpc_params(),
                 "",
             )
             .await
@@ -1109,11 +1193,283 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn one_provider_cannot_declare_the_shared_driver_twice() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "front_camera",
+                SHARED_LIFECYCLE_DRIVER_CONTRACT,
+                Transport::Grpc,
+                "127.0.0.1:51001",
+                grpc_params(),
+                "",
+            )
+            .await
+            .expect("first shared Driver declaration");
+
+        let error = registry
+            .declare(
+                "front_camera",
+                SHARED_LIFECYCLE_DRIVER_CONTRACT,
+                Transport::Grpc,
+                "127.0.0.1:51013",
+                grpc_params(),
+                "",
+            )
+            .await
+            .expect_err("second shared Driver transport must be rejected");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("cannot also declare"));
+    }
+
+    /// A lifecycle contract id cannot promote an unrelated transport or tonic
+    /// route into the selected Driver slot; rejected attempts store nothing.
+    #[tokio::test]
+    async fn driver_declaration_requires_the_generated_grpc_abi() {
+        let registry = AtlasRegistry::default();
+        for (provider_id, contract_id, port) in [
+            ("shared_camera", SHARED_LIFECYCLE_DRIVER_CONTRACT, 51016),
+            ("legacy_camera", "robonix/primitive/camera/driver", 51017),
+        ] {
+            registry
+                .register(
+                    provider_id,
+                    pb::Kind::Primitive,
+                    "robonix/primitive/camera",
+                    "",
+                    "",
+                )
+                .await
+                .expect("provider registration");
+            let expected_service =
+                format!("robonix.contracts.{}", driver_service_name(contract_id));
+            let expected_method = format!("/{expected_service}/Driver");
+            for (transport, params, failure) in [
+                (Transport::Ros2, ros2_params(), "transport"),
+                (
+                    Transport::Grpc,
+                    grpc_params_with("robonix.contracts.NotTheDriver", &expected_method),
+                    "service_name",
+                ),
+                (
+                    Transport::Grpc,
+                    grpc_params_with(&expected_service, "/robonix.contracts.NotTheDriver/Call"),
+                    "method",
+                ),
+            ] {
+                let error = registry
+                    .declare(
+                        provider_id,
+                        contract_id,
+                        transport,
+                        &format!("127.0.0.1:{port}"),
+                        params,
+                        "",
+                    )
+                    .await
+                    .expect_err("malformed Driver ABI must be rejected");
+                assert_eq!(error.code(), tonic::Code::InvalidArgument);
+                assert!(error.message().contains(failure), "{error}");
+            }
+
+            registry
+                .declare(
+                    provider_id,
+                    contract_id,
+                    Transport::Grpc,
+                    &format!("127.0.0.1:{port}"),
+                    grpc_params_for(contract_id),
+                    "",
+                )
+                .await
+                .expect("valid generated Driver ABI");
+            registry
+                .set_lifecycle_state(provider_id, pb::LifecycleState::StateInactive, "")
+                .await
+                .expect("REGISTERED to INACTIVE");
+            registry
+                .set_lifecycle_state(provider_id, pb::LifecycleState::StateActive, "")
+                .await
+                .expect("INACTIVE to ACTIVE");
+        }
+    }
+
+    #[tokio::test]
+    async fn active_without_an_exact_driver_is_rejected_without_mutation() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "front_camera",
+                "robonix/primitive/other/driver",
+                Transport::Ros2,
+                "/unrelated_driver",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("unrelated capability declaration remains advisory");
+
+        let error = registry
+            .set_lifecycle_state(
+                "front_camera",
+                pb::LifecycleState::StateActive,
+                "must not persist",
+            )
+            .await
+            .expect_err("ACTIVE without an exact Driver must fail");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("without lifecycle Driver"));
+
+        let provider = registry
+            .query(
+                "front_camera",
+                pb::Kind::Primitive,
+                "",
+                Transport::Unspecified,
+            )
+            .await
+            .pop()
+            .expect("provider after rejected transition");
+        assert_eq!(
+            provider.state,
+            pb::LifecycleState::StateRegistered as i32,
+            "the rejected state must not be stored"
+        );
+        assert!(provider.state_detail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_and_exact_legacy_drivers_both_allow_active() {
+        let registry = AtlasRegistry::default();
+        for (provider_id, driver_contract) in [
+            ("shared_camera", SHARED_LIFECYCLE_DRIVER_CONTRACT),
+            ("legacy_camera", "robonix/primitive/camera/driver"),
+        ] {
+            registry
+                .register(
+                    provider_id,
+                    pb::Kind::Primitive,
+                    "robonix/primitive/camera",
+                    "",
+                    "",
+                )
+                .await
+                .expect("provider registration");
+            registry
+                .declare(
+                    provider_id,
+                    driver_contract,
+                    Transport::Grpc,
+                    &format!(
+                        "127.0.0.1:{}",
+                        if provider_id == "shared_camera" {
+                            51002
+                        } else {
+                            51003
+                        }
+                    ),
+                    grpc_params_for(driver_contract),
+                    "",
+                )
+                .await
+                .expect("Driver declaration");
+            registry
+                .set_lifecycle_state(provider_id, pb::LifecycleState::StateInactive, "")
+                .await
+                .expect("REGISTERED to INACTIVE");
+            registry
+                .set_lifecycle_state(provider_id, pb::LifecycleState::StateActive, "")
+                .await
+                .expect("INACTIVE to ACTIVE");
+        }
+
+        let providers = registry
+            .query("", pb::Kind::Primitive, "", Transport::Unspecified)
+            .await;
+        assert_eq!(providers.len(), 2);
+        assert!(
+            providers
+                .iter()
+                .all(|provider| { provider.state == pb::LifecycleState::StateActive as i32 })
+        );
+    }
+
+    #[tokio::test]
+    async fn illegal_transition_is_rejected_without_mutation() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "front_camera",
+                SHARED_LIFECYCLE_DRIVER_CONTRACT,
+                Transport::Grpc,
+                "127.0.0.1:51004",
+                grpc_params(),
+                "",
+            )
+            .await
+            .expect("shared Driver declaration");
+
+        let error = registry
+            .set_lifecycle_state(
+                "front_camera",
+                pb::LifecycleState::StateActive,
+                "must not persist",
+            )
+            .await
+            .expect_err("REGISTERED to ACTIVE must fail");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("illegal lifecycle transition"));
+
+        let provider = registry
+            .query(
+                "front_camera",
+                pb::Kind::Primitive,
+                "",
+                Transport::Unspecified,
+            )
+            .await
+            .pop()
+            .expect("provider after rejected transition");
+        assert_eq!(provider.state, pb::LifecycleState::StateRegistered as i32);
+        assert!(provider.state_detail.is_empty());
+    }
+
+    #[tokio::test]
     async fn multiple_providers_can_implement_the_same_contract() {
         let registry = AtlasRegistry::default();
         for (provider_id, endpoint) in [
-            ("front_camera", "/front_camera_driver"),
-            ("rear_camera", "/rear_camera_driver"),
+            ("front_camera", "127.0.0.1:51014"),
+            ("rear_camera", "127.0.0.1:51015"),
         ] {
             registry
                 .register(
@@ -1129,9 +1485,9 @@ mod endpoint_tests {
                 .declare(
                     provider_id,
                     "robonix/primitive/camera/driver",
-                    Transport::Ros2,
+                    Transport::Grpc,
                     endpoint,
-                    ros2_params(),
+                    grpc_params_for("robonix/primitive/camera/driver"),
                     "",
                 )
                 .await
@@ -1143,7 +1499,7 @@ mod endpoint_tests {
                 "",
                 pb::Kind::Primitive,
                 "robonix/primitive/camera/driver",
-                Transport::Ros2,
+                Transport::Grpc,
             )
             .await;
         assert_eq!(providers.len(), 2);

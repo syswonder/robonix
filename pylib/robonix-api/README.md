@@ -55,22 +55,23 @@ discovery, or calls.
 Current codegen provides the shared `robonix/lifecycle/driver` contract, and
 package authors normally omit Driver from the manifest: rbnx and robonix-api
 select/register shared automatically. Explicit shared selection remains valid,
-and explicitly selected `<namespace>/driver` contracts remain compatible.
-When an omitted manifest is run with genuinely old generated stubs, the SDK
-falls back to the namespace Driver; no Driver is allowed only as a loud
-last-resort fallback, where manifest config cannot be delivered. An omitted
-lifecycle *handler* is different: it logs a warning and completes that
-transition as an `Ok` no-op, so the provider can still walk
-`REGISTERED → INACTIVE → ACTIVE`.
+and an explicitly selected exact `<namespace>/driver` remains compatible.
+Every provider must expose exactly one lifecycle Driver. When an omitted
+manifest is run with old generated stubs that lack shared, the SDK may fall
+back to the exact namespace Driver. If neither service was generated, startup
+fails with rebuild/migration guidance instead of promoting the provider to
+`ACTIVE`. An omitted lifecycle *handler* is different: it logs a warning and
+completes that transition as an `Ok` no-op, so the Driver can still walk the
+provider through `REGISTERED → INACTIVE → ACTIVE`.
 
 Managed omission is signaled as a shared request plus
 `ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`. The SDK falls back only when
 the generated shared service pair is wholly absent: first to the exact
-`<namespace>/driver`, then—only when that pair is also wholly absent—to a
-no-Driver runtime marked in Atlas as
-`robonix.lifecycle.old_artifact_no_driver.v1`. A partial generated pair or a
-failed Driver declaration is not old-artifact proof and remains a startup
-error. Direct launches also prefer shared whenever it exists.
+`<namespace>/driver`. If that pair is also absent, or if either generated pair
+is partial, startup fails and asks the operator to rebuild generated stubs or
+migrate the manifest. A failed Driver declaration is also fatal. Direct
+launches prefer shared whenever it exists and otherwise accept only the exact
+legacy Driver.
 
 ## What's in the box
 

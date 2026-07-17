@@ -49,11 +49,8 @@ from .atlas_types import (
 from .codegen import ensure_proto_gen, find_pkg_root
 from .lifecycle import (
     OLD_ARTIFACT_FALLBACK_ENV,
-    OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
-    SHARED_DRIVER_CONTRACT_ID,
     bind_user_handler,
     build_lifecycle_servicer,
-    lifecycle_stubs_prove_old_artifact_without_driver,
     resolve_servicer,
 )
 from .ros import RosBackend, resolve_msg_type
@@ -223,27 +220,6 @@ class _ProviderBase:
             _set_lifecycle_state(self.id, new_state, detail)
         except Exception:  # noqa: BLE001
             pass
-
-    def _promote_ready_provider_without_driver(
-        self,
-        driver_decl: tuple[str, str, str] | None,
-        registered_ok: bool,
-        fallback_state_detail: str | None,
-    ) -> None:
-        """Keep truly old no-Driver providers usable after registration.
-
-        Current managed launches always build/register a Driver. Promotion is
-        reserved for a marked old-artifact fallback (and direct launches with
-        no rbnx selection); a strict explicit selection that is unavailable
-        stays REGISTERED so its launcher can fail it loudly.
-        """
-        if driver_decl is None and registered_ok and fallback_state_detail is not None:
-            log.warning(
-                "[%s] no lifecycle Driver is available; promoting to ACTIVE "
-                "only as a last-resort compatibility fallback",
-                self.id,
-            )
-            self._set_state(LifecycleState.ACTIVE, fallback_state_detail)
 
     # -- Layer 1: raw atlas declares ---------------------------------------
 
@@ -702,34 +678,12 @@ class _ProviderBase:
         # 2a. Driver lifecycle servicer. Omitted manifests are the canonical
         # shared selection: current rbnx exports the shared ID and a distinct
         # compatibility marker. That marker permits old generated artifacts
-        # to use a namespace Driver, or no Driver only as a last resort.
+        # to use their exact namespace Driver; if neither binding exists,
+        # startup fails.
         requested_driver_contract = os.environ.get("ROBONIX_DRIVER_CONTRACT_ID")
         allow_old_artifact_fallback = os.environ.get(
             OLD_ARTIFACT_FALLBACK_ENV, ""
         ).strip().lower() in {"1", "true", "yes", "on"}
-        proven_managed_old_artifact = lifecycle_stubs_prove_old_artifact_without_driver(
-            self.namespace,
-            contracts_grpc,
-            requested_driver_contract,
-            allow_old_artifact_fallback=allow_old_artifact_fallback,
-        )
-        # Direct/old-launcher compatibility is also permitted only when both
-        # service pairs are wholly absent. Reuse the proof helper by modelling
-        # that no-manifest selection as a fallback-marked shared request.
-        proven_direct_old_artifact = (
-            requested_driver_contract is None or requested_driver_contract.strip() == ""
-        ) and lifecycle_stubs_prove_old_artifact_without_driver(
-            self.namespace,
-            contracts_grpc,
-            SHARED_DRIVER_CONTRACT_ID,
-            allow_old_artifact_fallback=True,
-        )
-        no_driver_fallback_detail = (
-            OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL
-            if proven_managed_old_artifact or proven_direct_old_artifact
-            else None
-        )
-        driver_decl: tuple[str, str, str] | None = None
         lifecycle_info = build_lifecycle_servicer(
             self.namespace,
             contracts_grpc,
@@ -744,16 +698,15 @@ class _ProviderBase:
             requested_contract_id=requested_driver_contract,
             allow_old_artifact_fallback=allow_old_artifact_fallback,
         )
-        if lifecycle_info is not None:
-            (
-                lifecycle_inst,
-                lifecycle_add_fn,
-                driver_base,
-                driver_method,
-                driver_contract_id,
-            ) = lifecycle_info
-            lifecycle_add_fn(lifecycle_inst, server)
-            driver_decl = (driver_contract_id, driver_base, driver_method)
+        (
+            lifecycle_inst,
+            lifecycle_add_fn,
+            driver_base,
+            driver_method,
+            driver_contract_id,
+        ) = lifecycle_info
+        lifecycle_add_fn(lifecycle_inst, server)
+        driver_decl = (driver_contract_id, driver_base, driver_method)
 
         # 2b. user @provider.provides_grpc handlers
         user_grpc_decls: list[tuple[str, str, str, str]] = []
@@ -803,21 +756,25 @@ class _ProviderBase:
 
         # 3. atlas-declare every gRPC capability
         endpoint = f"{self._advertise_host()}:{self._driver_port}"
-        if driver_decl is not None:
-            driver_contract_id, driver_base, driver_method = driver_decl
-            try:
-                self.declare_capability(
-                    contract_id=driver_contract_id,
-                    endpoint=endpoint,
-                    transport=Transport.GRPC,
-                    params=GrpcParams(
-                        proto_file="robonix_contracts.proto",
-                        service_name=driver_base,
-                        method=driver_method,
-                    ),
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning("DeclareCapability(driver) failed: %s", e)
+        driver_contract_id, driver_base, driver_method = driver_decl
+        try:
+            self.declare_capability(
+                contract_id=driver_contract_id,
+                endpoint=endpoint,
+                transport=Transport.GRPC,
+                params=GrpcParams(
+                    proto_file="robonix_contracts.proto",
+                    service_name=driver_base,
+                    method=driver_method,
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            server.stop(grace=0)
+            self._driver_server = None
+            raise RuntimeError(
+                f"[{self.id}] failed to declare required lifecycle Driver "
+                f"'{driver_contract_id}' with Atlas; provider startup cannot continue"
+            ) from e
         for contract_id, service_name, method, desc in user_grpc_decls:
             try:
                 self.declare_capability(
@@ -843,15 +800,6 @@ class _ProviderBase:
         # 5. heartbeat — pass the provider's stop Event so the thread
         # exits on _teardown instead of pinging atlas after TERMINATED.
         self._heartbeat_thread = ATLAS.start_heartbeat(self.id, stop=self._stopping)
-
-        # 6. Only old/direct artifacts that genuinely lack a Driver auto-ready.
-        # Normal omitted manifests have a shared Driver and wait for the
-        # launcher to drive INIT/ACTIVATE like every other managed provider.
-        self._promote_ready_provider_without_driver(
-            driver_decl,
-            registered_ok,
-            no_driver_fallback_detail,
-        )
 
     def _start_mcp_server(self) -> None:
         import socket

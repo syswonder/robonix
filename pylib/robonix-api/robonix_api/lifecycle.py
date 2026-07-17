@@ -33,7 +33,6 @@ CMD_DEACTIVATE = 2
 CMD_SHUTDOWN = 3
 SHARED_DRIVER_CONTRACT_ID = "robonix/lifecycle/driver"
 OLD_ARTIFACT_FALLBACK_ENV = "ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK"
-OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL = "robonix.lifecycle.old_artifact_no_driver.v1"
 
 
 def _generated_service_status(contracts_grpc_module, base: str) -> tuple[bool, bool]:
@@ -48,31 +47,6 @@ def _generated_service_status(contracts_grpc_module, base: str) -> tuple[bool, b
         servicer is not None and add_fn is not None,
         servicer is None and add_fn is None,
     )
-
-
-def lifecycle_stubs_prove_old_artifact_without_driver(
-    namespace: str,
-    contracts_grpc_module,
-    requested_contract_id: str | None,
-    *,
-    allow_old_artifact_fallback: bool,
-) -> bool:
-    """Positive proof used for the managed zero-Driver fallback.
-
-    Permission alone is insufficient: both generated service pairs must be
-    wholly absent. A declaration RPC failure or partial/corrupt generated pair
-    therefore cannot masquerade as an old artifact.
-    """
-    if not allow_old_artifact_fallback:
-        return False
-    requested = (requested_contract_id or "").strip()
-    if requested != SHARED_DRIVER_CONTRACT_ID:
-        return False
-    shared_base = contract_id_to_pascal(SHARED_DRIVER_CONTRACT_ID)
-    legacy_base = contract_id_to_pascal(f"{namespace.strip('/')}/driver")
-    _, shared_absent = _generated_service_status(contracts_grpc_module, shared_base)
-    _, legacy_absent = _generated_service_status(contracts_grpc_module, legacy_base)
-    return shared_absent and legacy_absent
 
 
 def contract_id_to_pascal(contract_id: str) -> str:
@@ -139,24 +113,26 @@ def lifecycle_contract_for_module(
                 legacy_contract_id,
             )
             return legacy_contract_id, legacy_base
-        if allow_old_artifact_fallback:
-            if not legacy_absent:
-                log.error(
-                    "generated lifecycle service %s is incomplete; refusing no-Driver fallback",
-                    legacy_base,
-                )
-                return None
-            log.warning(
-                "generated artifact contains neither %s nor %s; continuing "
-                "without a lifecycle Driver as a last-resort compatibility "
-                "fallback (package config cannot be delivered). Rebuild the package",
-                SHARED_DRIVER_CONTRACT_ID,
+        if legacy_available:
+            log.error(
+                "requested lifecycle contract %s is unavailable in generated stubs; "
+                "compatible legacy Driver %s exists but explicit selections do not downgrade",
+                requested,
                 legacy_contract_id,
             )
             return None
+        if not legacy_absent:
+            log.error(
+                "generated lifecycle service %s is incomplete; refusing lifecycle startup",
+                legacy_base,
+            )
+            return None
         log.error(
-            "requested lifecycle contract %s is unavailable in generated stubs",
-            requested,
+            "generated artifact contains neither required lifecycle Driver %s "
+            "nor compatible legacy Driver %s; rebuild the package with `rbnx build` "
+            "to refresh generated stubs, or migrate an explicit legacy declaration",
+            SHARED_DRIVER_CONTRACT_ID,
+            legacy_contract_id,
         )
         return None
     if requested == legacy_contract_id and legacy_available:
@@ -168,24 +144,16 @@ def lifecycle_contract_for_module(
         return legacy_contract_id, legacy_base
     if requested:
         log.error(
-            "requested lifecycle contract %s is unavailable in generated stubs",
+            "requested lifecycle contract %s is unavailable in generated stubs; "
+            "rebuild the package with `rbnx build` or migrate the manifest to %s",
             requested,
+            SHARED_DRIVER_CONTRACT_ID,
         )
         return None
 
-    # Compatibility with older rbnx launchers that encoded omission as an
-    # empty selection. Current rbnx always requests shared and sends a separate
-    # fallback marker; an empty value is therefore never a normal author path.
-    if requested_contract_id is not None:
-        log.warning(
-            "old launcher requested no lifecycle Driver; continuing as a "
-            "last-resort compatibility fallback (package config cannot be delivered)"
-        )
-        return None
-
-    # Direct launches have no manifest selection. Canonical current behavior is
-    # shared-first; namespace legacy is used only when the shared pair is fully
-    # absent, matching managed omission semantics.
+    # Direct launches and older launchers that encoded omission as an empty
+    # selection still follow the canonical shared-first rule. Namespace legacy
+    # is used only when the shared pair is wholly absent.
     if shared_available:
         return SHARED_DRIVER_CONTRACT_ID, shared_base
     if not shared_absent:
@@ -201,6 +169,14 @@ def lifecycle_contract_for_module(
         return legacy_contract_id, legacy_base
     if not legacy_absent:
         log.error("generated lifecycle service %s is incomplete", legacy_base)
+        return None
+    log.error(
+        "generated artifact contains neither required lifecycle Driver %s nor "
+        "compatible legacy Driver %s; rebuild the package with `rbnx build` "
+        "to refresh generated stubs",
+        SHARED_DRIVER_CONTRACT_ID,
+        legacy_contract_id,
+    )
     return None
 
 
@@ -272,8 +248,9 @@ def build_lifecycle_servicer(
     Returns ``(instance, add_to_server_fn, pascal_base,
     method_name='Driver', contract_id)`` when codegen emitted the shared
     lifecycle Servicer (preferred) or a legacy ``<namespace>/driver``
-    Servicer. Returns ``None`` when the selected contract is unavailable in
-    the generated stubs.
+    Servicer. Raises ``RuntimeError`` when neither the selected shared Driver
+    nor the exact compatible legacy Driver exists in generated stubs. A
+    provider is never allowed to continue without a lifecycle Driver.
 
     `on_state_change(state, detail)` is invoked AFTER each handler returns
     ok=true and is the framework's hook for pushing state transitions to
@@ -287,13 +264,14 @@ def build_lifecycle_servicer(
         allow_old_artifact_fallback=allow_old_artifact_fallback,
     )
     if selected is None:
-        log.info(
-            "[%s] no %s or %s/driver contract — skipping lifecycle servicer",
-            log_tag,
-            SHARED_DRIVER_CONTRACT_ID,
-            namespace,
+        legacy_contract_id = f"{namespace.strip('/')}/driver"
+        raise RuntimeError(
+            f"[{log_tag}] no usable lifecycle Driver was generated: expected "
+            f"'{requested_contract_id or SHARED_DRIVER_CONTRACT_ID}' or compatible "
+            f"legacy '{legacy_contract_id}'. Rebuild the package with `rbnx build` "
+            "to refresh generated stubs, or migrate the manifest to the shared "
+            f"'{SHARED_DRIVER_CONTRACT_ID}' Driver"
         )
-        return None
     contract_id, base = selected
     servicer_cls = getattr(contracts_grpc_module, f"{base}Servicer", None)
     add_fn = getattr(contracts_grpc_module, f"add_{base}Servicer_to_server", None)

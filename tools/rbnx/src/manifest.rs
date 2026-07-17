@@ -166,22 +166,6 @@ pub fn split_system_package_config(
     Ok((manifest, serde_yaml::Value::Mapping(fields)))
 }
 
-/// Return whether a deployment entry carries a non-empty runtime config.
-///
-/// A last-resort old artifact with no Driver cannot receive this value because
-/// config is transported only by Driver(CMD_INIT). Keeping this predicate
-/// shared by rbnx and Soma makes both orchestrators report that fallback.
-pub fn runtime_config_has_values(value: &serde_yaml::Value) -> bool {
-    match value {
-        serde_yaml::Value::Null => false,
-        serde_yaml::Value::String(value) => !value.trim().is_empty(),
-        serde_yaml::Value::Sequence(values) => !values.is_empty(),
-        serde_yaml::Value::Mapping(values) => !values.is_empty(),
-        serde_yaml::Value::Tagged(value) => runtime_config_has_values(&value.value),
-        serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => true,
-    }
-}
-
 fn expand_deployment_yaml(value: &mut serde_yaml::Value) {
     match value {
         serde_yaml::Value::String(s) => *s = expand_deployment_env(s),
@@ -479,8 +463,9 @@ impl Manifest {
     ///
     /// Omission selects the shared Driver so every current provider has a
     /// managed lifecycle. An explicitly declared legacy namespace Driver is
-    /// preserved exactly. Runtime launchers separately retain a last-resort
-    /// fallback for old generated artifacts that predate the shared stub.
+    /// preserved exactly. Runtime launchers may select the exact legacy
+    /// namespace Driver when an older generated package lacks the shared
+    /// binding; if neither binding exists, startup fails.
     pub fn selected_lifecycle_driver_contract(&self) -> Result<&str> {
         Ok(self
             .explicit_lifecycle_driver_contract()?
@@ -643,23 +628,6 @@ config:
         let value: serde_yaml::Value = serde_yaml::from_str("manifest: 42\n").unwrap();
         let error = split_system_package_config(&value).unwrap_err();
         assert!(error.to_string().contains("must be a non-empty string"));
-    }
-
-    #[test]
-    fn runtime_config_values_distinguish_empty_from_undeliverable_config() {
-        for raw in ["null", "{}", "[]", "''"] {
-            let value = serde_yaml::from_str(raw).unwrap();
-            assert!(!runtime_config_has_values(&value), "{raw}");
-        }
-        for raw in [
-            "{web_port: 50107}",
-            "[front_camera]",
-            "front_camera",
-            "false",
-        ] {
-            let value = serde_yaml::from_str(raw).unwrap();
-            assert!(runtime_config_has_values(&value), "{raw}");
-        }
     }
 
     #[test]

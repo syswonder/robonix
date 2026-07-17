@@ -13,9 +13,9 @@
 //     on to `service:` (which can depend on primitive data being ready).
 //     The package's `config:` block is JSON-encoded and delivered ONLY via
 //     Driver(CMD_INIT)'s config_json field. Omitting Driver is the canonical
-//     way to select the shared lifecycle service. Only a genuinely old
-//     generated artifact may fall back to its namespace Driver or, as a last
-//     resort, run without one (in which case config cannot be delivered).
+//     way to select the shared lifecycle service. A genuinely old generated
+//     artifact may fall back only to its exact namespace Driver. A provider
+//     without a lifecycle Driver fails startup.
 //     The provider process never sees a config file or env var.
 //   - `skill:` entries are spawned identically to `service:` — they
 //     need a long-lived process for their MCP tools to be registered
@@ -33,9 +33,9 @@ use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
-    OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL, PackageRuntimeRecord, ProviderRegistrationSnapshot,
-    RegistrationOutcome, is_new_provider_registration, resolve_runtime_driver_contract,
-    snapshot_provider_ids, terminate_process_group,
+    PackageRuntimeRecord, ProviderRegistrationSnapshot, RegistrationOutcome,
+    is_new_provider_registration, resolve_runtime_driver_contract, snapshot_provider_ids,
+    terminate_process_group,
 };
 use robonix_cli::output;
 use serde::Deserialize;
@@ -119,8 +119,8 @@ struct PackageEntry {
     #[serde(default)]
     branch: Option<String>,
     /// Opaque config block; serialised to JSON and delivered through
-    /// Driver(CMD_INIT). Only the last-resort no-Driver fallback for an old
-    /// generated artifact cannot receive it; boot reports that explicitly.
+    /// Driver(CMD_INIT). Startup fails if the provider does not declare its
+    /// selected shared or exact compatible legacy lifecycle Driver.
     #[serde(default)]
     config: serde_yaml::Value,
     /// Optional package-manifest filename override. A package may ship
@@ -537,9 +537,9 @@ struct Spawned {
     /// Lifecycle contract selected by this package's exact manifest. Builtin
     /// system processes are not package-managed and leave this unset.
     expected_driver_contract: Option<String>,
-    /// True only when Driver was omitted, permitting compatibility with old
-    /// generated artifacts that predate the shared lifecycle stub.
-    allow_old_driver_fallback: bool,
+    /// True only when Driver was omitted, permitting an old generated artifact
+    /// to substitute its exact namespace Driver for the shared lifecycle stub.
+    allow_legacy_driver_fallback: bool,
     config_json: Option<String>,
     package_dir: Option<PathBuf>,
     stop: Option<String>,
@@ -617,7 +617,7 @@ async fn spawn_system_binary(
         provider_id: None,
         driver_contract: None,
         expected_driver_contract: None,
-        allow_old_driver_fallback: false,
+        allow_legacy_driver_fallback: false,
         config_json: None,
         package_dir: None,
         stop: None,
@@ -765,7 +765,7 @@ async fn spawn_soma_binary(
             provider_id: None,
             driver_contract: None,
             expected_driver_contract: None,
-            allow_old_driver_fallback: false,
+            allow_legacy_driver_fallback: false,
             config_json: None,
             package_dir: None,
             stop: None,
@@ -826,7 +826,7 @@ async fn spawn_package(
     let explicit_driver_contract = package_manifest
         .manifest
         .explicit_lifecycle_driver_contract()?;
-    let allow_old_driver_fallback = explicit_driver_contract.is_none();
+    let allow_legacy_driver_fallback = explicit_driver_contract.is_none();
     let expected_driver_contract = Some(
         package_manifest
             .manifest
@@ -948,7 +948,7 @@ async fn spawn_package(
         provider_id: None,
         driver_contract: None,
         expected_driver_contract,
-        allow_old_driver_fallback,
+        allow_legacy_driver_fallback,
         config_json: None,
         package_dir: Some(pkg_path),
         stop,
@@ -1954,7 +1954,8 @@ fn system_cli_args(
 ///
 /// The selected shared or explicit legacy Driver is verified before
 /// INIT/ACTIVATE and receives the entry's config. Omission canonically selects
-/// shared, while also allowing a narrowly-scoped old-artifact fallback.
+/// shared, while allowing only a narrowly scoped exact namespace fallback for
+/// old generated artifacts.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
@@ -1999,8 +2000,6 @@ async fn spawn_and_init(
         }
     };
     let provider_id = registration.provider_id.clone();
-    let provider_state = registration.provider_state;
-
     // Spec: the provider_id this process registers (Python's
     // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
     // for this entry. Mismatch is a deploy bug — surfacing it here
@@ -2036,8 +2035,7 @@ async fn spawn_and_init(
         &registration.provider_namespace,
         expected_driver_contract,
         &registration.driver_contracts,
-        sp.allow_old_driver_fallback,
-        registration.provider_state_detail == OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
+        sp.allow_legacy_driver_fallback,
     ) {
         Ok(contract) => contract,
         Err(error) => {
@@ -2051,26 +2049,6 @@ async fn spawn_and_init(
         }
     };
 
-    let Some(driver_contract) = driver_contract else {
-        let display_label = short_label(&pkg_label, component);
-        output::warning(&format!(
-            "provider '{provider_id}' is a last-resort old generated artifact with no lifecycle Driver; actual Atlas state is {}",
-            lifecycle_state_label(provider_state),
-        ));
-        if robonix_cli::manifest::runtime_config_has_values(&entry.config) {
-            output::warning(&format!(
-                "package '{pkg_label}' has config, but the old artifact has no Driver(CMD_INIT); config was not delivered"
-            ));
-        }
-        output::boot_ok(
-            display_label,
-            &format!(
-                "{} (last-resort old artifact; no lifecycle Driver)",
-                lifecycle_state_label(provider_state),
-            ),
-        );
-        return Ok(sp);
-    };
     if driver_contract != expected_driver_contract {
         output::warning(&format!(
             "provider '{provider_id}' is an old generated artifact; using legacy lifecycle Driver '{driver_contract}' instead of '{expected_driver_contract}'"
@@ -2647,10 +2625,9 @@ fn contract_id_to_service_name(id: &str) -> String {
 }
 
 /// Poll atlas until a provider NOT in `before` appears. Returns the new
-/// `provider_id`, settled Atlas state, plus every distinct lifecycle Driver
-/// observed after the declaration settle window. The caller verifies this
-/// list before sending config or lifecycle commands and reports the actual
-/// state if an old artifact has no Driver.
+/// `provider_id` plus every distinct lifecycle Driver observed after the
+/// declaration settle window. The caller verifies this list before sending
+/// config or lifecycle commands.
 /// Strip the leading `<component>_` from the boot-log pkg_label.
 /// `system_memory` → `memory`; `primitive_tiago_chassis` → `tiago_chassis`.
 /// Keeps boot-output columns narrow (the section header above already
@@ -2826,9 +2803,7 @@ async fn wait_for_registration(
                 return Ok(RegistrationOutcome {
                     provider_id,
                     provider_kind: current.kind,
-                    provider_state: current.state,
                     provider_namespace: current.namespace,
-                    provider_state_detail: current.state_detail,
                     registration_id: current.registration_id,
                     driver_contracts,
                 });

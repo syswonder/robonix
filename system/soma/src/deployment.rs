@@ -56,9 +56,8 @@ pub struct PackageLaunchTarget {
     /// right start path runs for THIS deployment target.
     pub manifest_override: Option<String>,
     /// Opaque config block from the manifest, raw serde value. Pushed
-    /// to the package via Driver(CMD_INIT, config_json) — never written
-    /// as a config file, never exported as an env var. Only the last-resort
-    /// old-artifact fallback with no Driver cannot receive it.
+    /// to the package via its required Driver(CMD_INIT, config_json) — never
+    /// written as a config file and never exported as an env var.
     pub config: serde_yaml::Value,
 }
 

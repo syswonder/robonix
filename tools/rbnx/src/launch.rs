@@ -3,7 +3,7 @@
 // Cross-component package bring-up primitives.
 //
 // `rbnx boot` and Soma both need to: spawn a package process, wait for it
-// to register a CapabilityProvider on Atlas, optionally find that
+// to register a CapabilityProvider on Atlas, find that
 // provider's `*/driver` capability, and drive `Driver(CMD_INIT)` /
 // `Driver(CMD_ACTIVATE)` over gRPC. Historically this lived entirely
 // inside `cmd::deploy.rs` and was tangled with terminal UI (`output::*`).
@@ -63,11 +63,6 @@ pub const CMD_ACTIVATE: u32 = 1;
 pub const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 pub const CMD_SHUTDOWN: u32 = 3;
-/// Positive proof published by the Python SDK only when a fallback-marked
-/// package's generated module contains neither shared nor namespace Driver
-/// stubs. Launchers require this marker before accepting zero Drivers.
-pub const OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL: &str = "robonix.lifecycle.old_artifact_no_driver.v1";
-
 /// Max time we'll wait for a freshly spawned package to register its
 /// driver capability with atlas before giving up.
 pub const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -631,10 +626,8 @@ pub fn is_new_provider_registration(
 /// Outcome of `wait_for_registration_core`:
 ///   * `provider_id` — the new provider that appeared after `before`.
 ///   * `provider_kind` — Atlas provider kind, used to keep skills INACTIVE.
-///   * `provider_state` — settled Atlas lifecycle state for fallback reporting.
 ///   * `provider_namespace` — primary namespace used to validate the exact
 ///     namespace Driver allowed for old-artifact fallback.
-///   * `provider_state_detail` — carries positive no-Driver fallback proof.
 ///   * `driver_contracts` — every distinct `*/driver` gRPC capability
 ///     observed after the declaration settle window. The launch owner must
 ///     validate this list against the exact selected package manifest before
@@ -643,9 +636,7 @@ pub fn is_new_provider_registration(
 pub struct RegistrationOutcome {
     pub provider_id: String,
     pub provider_kind: i32,
-    pub provider_state: i32,
     pub provider_namespace: String,
-    pub provider_state_detail: String,
     pub registration_id: String,
     pub driver_contracts: Vec<String>,
 }
@@ -653,18 +644,17 @@ pub struct RegistrationOutcome {
 /// Resolve the runtime Driver while optionally tolerating old generated code.
 ///
 /// Exact manifest selections stay strict. Only callers whose manifest omitted
-/// Driver pass `allow_old_artifact_fallback=true`: the shared Driver remains
+/// Driver pass `allow_legacy_driver_fallback=true`: the shared Driver remains
 /// preferred, one namespace Driver may substitute when the old stubs lack the
-/// shared service, and no Driver is the last-resort compatibility result.
-/// Multiple declarations are always ambiguous and rejected.
+/// shared service. A missing Driver is always fatal, as are multiple or
+/// mismatched declarations.
 pub fn resolve_runtime_driver_contract(
     provider_id: &str,
     provider_namespace: &str,
     expected: &str,
     observed: &[String],
-    allow_old_artifact_fallback: bool,
-    old_artifact_no_driver_proof: bool,
-) -> Result<Option<String>> {
+    allow_legacy_driver_fallback: bool,
+) -> Result<String> {
     if observed.len() > 1 {
         anyhow::bail!(
             "provider '{provider_id}' registered multiple lifecycle Drivers: {}; expected exactly '{expected}'",
@@ -672,30 +662,25 @@ pub fn resolve_runtime_driver_contract(
         );
     }
     if observed.is_empty() {
-        if allow_old_artifact_fallback
-            && expected == "robonix/lifecycle/driver"
-            && old_artifact_no_driver_proof
-        {
-            return Ok(None);
-        }
-        if allow_old_artifact_fallback && expected == "robonix/lifecycle/driver" {
-            anyhow::bail!(
-                "provider '{provider_id}' registered without the shared lifecycle Driver and did not publish old-artifact no-Driver proof"
-            );
-        }
+        let legacy = format!("{}/driver", provider_namespace.trim_end_matches('/'));
         anyhow::bail!(
-            "provider '{provider_id}' registered without required lifecycle Driver '{expected}'"
+            "provider '{provider_id}' registered without a lifecycle Driver; expected '{expected}'{}; rebuild the package with `rbnx build` to refresh generated stubs or migrate the manifest to an exact supported Driver",
+            if allow_legacy_driver_fallback && expected == "robonix/lifecycle/driver" {
+                format!(" or compatible legacy '{legacy}'")
+            } else {
+                String::new()
+            }
         );
     }
     if observed[0] == expected {
-        return Ok(Some(observed[0].clone()));
+        return Ok(observed[0].clone());
     }
     let legacy_fallback = format!("{}/driver", provider_namespace.trim_end_matches('/'));
-    if allow_old_artifact_fallback
+    if allow_legacy_driver_fallback
         && expected == "robonix/lifecycle/driver"
         && observed[0] == legacy_fallback
     {
-        return Ok(Some(observed[0].clone()));
+        return Ok(observed[0].clone());
     }
     anyhow::bail!(
         "provider '{provider_id}' registered lifecycle Driver '{}', expected '{expected}' from the selected package manifest",
@@ -711,9 +696,7 @@ pub fn validate_runtime_driver_contracts(
     expected: &str,
     observed: &[String],
 ) -> Result<String> {
-    resolve_runtime_driver_contract(provider_id, "", expected, observed, false, false)?.ok_or_else(
-        || anyhow::anyhow!("strict lifecycle validation unexpectedly resolved no Driver"),
-    )
+    resolve_runtime_driver_contract(provider_id, "", expected, observed, false)
 }
 
 fn runtime_driver_contracts(provider: &atlas_pb::CapabilityProvider) -> Vec<String> {
@@ -826,9 +809,7 @@ pub async fn wait_for_registration_core(
             return Ok(RegistrationOutcome {
                 provider_id,
                 provider_kind: current.kind,
-                provider_state: current.state,
                 provider_namespace: current.namespace,
-                provider_state_detail: current.state_detail,
                 registration_id: current.registration_id,
                 driver_contracts,
             });
@@ -969,7 +950,8 @@ mod tests {
         let missing = validate_runtime_driver_contracts("camera", SHARED, &[])
             .unwrap_err()
             .to_string();
-        assert!(missing.contains("without required"));
+        assert!(missing.contains("without a lifecycle Driver"));
+        assert!(missing.contains("rbnx build"));
 
         let mismatch = validate_runtime_driver_contracts("camera", SHARED, &[LEGACY.to_string()])
             .unwrap_err()
@@ -987,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_manifest_allows_only_old_artifact_driver_fallbacks() {
+    fn omitted_manifest_allows_only_shared_or_exact_legacy_driver() {
         assert_eq!(
             resolve_runtime_driver_contract(
                 "camera",
@@ -995,10 +977,9 @@ mod tests {
                 SHARED,
                 &[SHARED.to_string()],
                 true,
-                false,
             )
             .unwrap(),
-            Some(SHARED.to_string())
+            SHARED
         );
         assert_eq!(
             resolve_runtime_driver_contract(
@@ -1007,36 +988,23 @@ mod tests {
                 SHARED,
                 &[LEGACY.to_string()],
                 true,
-                false,
             )
             .unwrap(),
-            Some(LEGACY.to_string())
+            LEGACY
         );
-        assert_eq!(
-            resolve_runtime_driver_contract(
-                "camera",
-                "robonix/primitive/camera",
-                SHARED,
-                &[],
-                true,
-                true,
-            )
-            .unwrap(),
-            None
-        );
-        assert!(
-            resolve_runtime_driver_contract(
-                "camera",
-                "robonix/primitive/camera",
-                SHARED,
-                &[],
-                true,
-                false,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("did not publish old-artifact")
-        );
+        let missing = resolve_runtime_driver_contract(
+            "camera",
+            "robonix/primitive/camera",
+            SHARED,
+            &[],
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("without a lifecycle Driver"));
+        assert!(missing.contains("robonix/lifecycle/driver"));
+        assert!(missing.contains("robonix/primitive/camera/driver"));
+        assert!(missing.contains("rbnx build"));
         assert!(
             resolve_runtime_driver_contract(
                 "camera",
@@ -1044,7 +1012,6 @@ mod tests {
                 SHARED,
                 &["robonix/primitive/lidar/driver".to_string()],
                 true,
-                false,
             )
             .unwrap_err()
             .to_string()
@@ -1057,11 +1024,10 @@ mod tests {
                 LEGACY,
                 &[],
                 true,
-                true,
             )
             .unwrap_err()
             .to_string()
-            .contains("without required")
+            .contains("without a lifecycle Driver")
         );
     }
 
