@@ -13,7 +13,12 @@ use std::time::Duration;
 
 use super::teardown;
 
-pub fn spawn(state_path: &Path, boot_pid: u32, boot_start_time_ticks: Option<u64>) -> Result<()> {
+pub fn spawn(
+    state_path: &Path,
+    boot_pid: u32,
+    boot_start_time_ticks: Option<u64>,
+    boot_id: &str,
+) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
     let exe = std::env::current_exe().context("resolve rbnx binary for boot watchdog")?;
@@ -24,6 +29,8 @@ pub fn spawn(state_path: &Path, boot_pid: u32, boot_start_time_ticks: Option<u64
         .arg(state_path)
         .arg("--boot-pid")
         .arg(boot_pid.to_string())
+        .arg("--boot-id")
+        .arg(boot_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -49,17 +56,13 @@ pub async fn execute(
     state_path: PathBuf,
     boot_pid: u32,
     boot_start_time_ticks: Option<u64>,
+    boot_id: String,
 ) -> Result<()> {
     loop {
         if !state_path.exists() {
             return Ok(());
         }
-        let alive = match boot_start_time_ticks {
-            Some(expected) => {
-                robonix_cli::launch::proc_start_time_ticks(boot_pid) == Some(expected)
-            }
-            None => robonix_cli::launch::proc_start_time_ticks(boot_pid).is_some(),
-        };
+        let alive = watched_boot_is_alive(boot_pid, boot_start_time_ticks, &boot_id);
         if !alive {
             break;
         }
@@ -67,12 +70,16 @@ pub async fn execute(
     }
 
     let state = teardown::read_state(&state_path)?;
-    if !matches_watched_boot(&state, boot_pid, boot_start_time_ticks) {
+    if !matches_watched_boot(&state, boot_pid, boot_start_time_ticks, &boot_id) {
         return Ok(());
     }
-    let boot_id = (!state.boot_id.is_empty()).then_some(state.boot_id.as_str());
-    let complete =
-        teardown::teardown(Some(&state.atlas_endpoint), &state.components, boot_id).await;
+    let state_boot_id = (!state.boot_id.is_empty()).then_some(state.boot_id.as_str());
+    let complete = teardown::teardown(
+        Some(&state.atlas_endpoint),
+        &state.components,
+        state_boot_id,
+    )
+    .await;
     if !complete {
         return Ok(());
     }
@@ -81,7 +88,9 @@ pub async fn execute(
     // remove the file if it still belongs to the parent we watched.
     if teardown::read_state(&state_path)
         .ok()
-        .is_some_and(|current| matches_watched_boot(&current, boot_pid, boot_start_time_ticks))
+        .is_some_and(|current| {
+            matches_watched_boot(&current, boot_pid, boot_start_time_ticks, &boot_id)
+        })
     {
         let _ = std::fs::remove_file(&state_path);
     }
@@ -92,11 +101,68 @@ fn matches_watched_boot(
     state: &teardown::BootState,
     boot_pid: u32,
     boot_start_time_ticks: Option<u64>,
+    boot_id: &str,
 ) -> bool {
     state.boot_pid == boot_pid
+        && state.boot_id == boot_id
         && match (boot_start_time_ticks, state.boot_start_time_ticks) {
             (Some(expected), Some(actual)) => expected == actual,
             (Some(_), None) => false,
             (None, _) => true,
         }
+}
+
+fn watched_boot_is_alive(boot_pid: u32, boot_start_time_ticks: Option<u64>, boot_id: &str) -> bool {
+    match boot_start_time_ticks {
+        Some(expected) => robonix_cli::launch::proc_start_time_ticks(boot_pid) == Some(expected),
+        None => robonix_cli::launch::process_has_boot_id(boot_pid, boot_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn boot_identity_fixture_process() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn missing_start_ticks_fall_back_to_exact_live_boot_id() {
+        let boot_id = format!("watchdog-live-parent-{}", std::process::id());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cmd::boot_watchdog::tests::boot_identity_fixture_process",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("RBNX_BOOT_ID", &boot_id)
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut matched = false;
+        while std::time::Instant::now() < deadline {
+            if watched_boot_is_alive(child.id(), None, &boot_id) {
+                matched = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matched,
+            "live boot parent must survive the no-procfs fallback"
+        );
+        assert!(!watched_boot_is_alive(
+            child.id(),
+            None,
+            "different-boot-id"
+        ));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

@@ -1098,7 +1098,12 @@ pub async fn execute(
             components: Vec::new(),
         },
     )?;
-    super::boot_watchdog::spawn(&state_path, std::process::id(), boot_start_time_ticks)?;
+    super::boot_watchdog::spawn(
+        &state_path,
+        std::process::id(),
+        boot_start_time_ticks,
+        &boot_id,
+    )?;
     let spawn_env = PackageSpawnEnv {
         log_dir: &log_dir,
         cache_root: &cache_root,

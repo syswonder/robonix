@@ -102,9 +102,16 @@ async fn main() -> Result<()> {
         state,
         boot_pid,
         boot_start_time_ticks,
+        boot_id,
     } = &cli.command
     {
-        return cmd::boot_watchdog::execute(state.clone(), *boot_pid, *boot_start_time_ticks).await;
+        return cmd::boot_watchdog::execute(
+            state.clone(),
+            *boot_pid,
+            *boot_start_time_ticks,
+            boot_id.clone(),
+        )
+        .await;
     }
     let verbose_boot = matches!(&cli.command, cmd::Commands::Boot { verbose: true, .. });
     prepare_boot_log_dir(&cli.command)?;
