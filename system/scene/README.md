@@ -13,7 +13,7 @@ system/scene/
 ├── docker/
 │   ├── Dockerfile               ROS Humble + torch cu124 + CV stack
 │   ├── requirements.txt         scene + concept-graphs deps
-│   ├── _weights/                pre-fetched YOLO-World + MobileSAM .pt
+│   ├── _weights/                pre-fetched YOLO, MobileSAM + OpenCLIP weights
 │   └── entrypoint.sh            container runtime setup, including Zenoh RMW config
 ├── scripts/
 │   ├── build.sh                 rbnx codegen + docker build (+ weight pre-fetch)
@@ -131,7 +131,8 @@ cd robonix/rust && make install      # rbnx + atlas + pilot + executor + codegen
 
 # Build the scene image once. Pulls torch+cu124 wheels and the
 # concept-graphs source; pre-fetches YOLO-World + MobileSAM .pt to
-# docker/_weights/ so the docker layer stays cache-friendly.
+# docker/_weights/ so the docker layer stays cache-friendly. This includes the
+# OpenCLIP checkpoint, avoiding Hugging Face metadata calls inside BuildKit.
 #
 # Pick the ROS distro BEFORE this first build (default humble) — see
 # "ROS distro" below. e.g.  ROBONIX_SCENE_ROS_DISTRO=jazzy bash scripts/build.sh
@@ -231,6 +232,26 @@ runtime the container sources that distro's `setup.bash`; nothing else in
 scene references a distro. Default builds (variable unset) are unchanged —
 plain `humble`.
 
+### Offline-friendly Docker frontend and model cache
+
+Scene uses the Docker/BuildKit daemon's bundled Dockerfile frontend by
+default, so a cached rebuild does not need to query the `docker/dockerfile`
+registry tag. Builders that require a pinned or mirrored frontend can opt in:
+
+```bash
+ROBONIX_SCENE_BUILDKIT_SYNTAX=registry.example/docker/dockerfile:1.7@sha256:<digest> \
+    bash scripts/build.sh
+```
+
+Model files are downloaded on the host with retries, staged under the ignored
+`docker/_weights/` build context, and reused through
+`ROBONIX_MODEL_CACHE_DIR`. OpenCLIP uses the staged
+`open_clip_pytorch_model.bin` directly instead of resolving a symbolic model
+name through the Hugging Face metadata API. `RBNX_HF_MIRROR` selects the
+Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
+`https://huggingface.co` file URL is always tried as a fallback. Set
+`RBNX_HF_MIRROR=` to skip the mirror.
+
 ## Configuration knobs (env vars)
 
 | Env | Default | Notes |
@@ -240,7 +261,7 @@ plain `humble`.
 | `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera providers before falling back |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
-| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / `laion2b_s34b_b79k` | |
+| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
 | `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |

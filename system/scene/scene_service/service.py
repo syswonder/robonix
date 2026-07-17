@@ -100,11 +100,14 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("rgb",               "robonix/primitive/camera/rgb",        "Image"),
     ("depth",             "robonix/primitive/camera/depth",      "Image"),
     ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
-    ("lidar3d",           "robonix/primitive/lidar/pointcloud",  "PointCloud2"),
+    ("lidar3d",           "robonix/primitive/lidar/lidar3d",     "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
     ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
     ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
-    ("odom",              "robonix/service/map/odom",            "Odometry"),
+    # Mapping may reuse external chassis odometry and then intentionally does
+    # not redeclare map/odom. Consume the primitive's canonical continuous
+    # odometry contract directly; map-corrected pose still comes from TF/pose.
+    ("odom",              "robonix/primitive/chassis/odom",      "Odometry"),
     ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
     # Latched {map_id, mode, generation} broadcast from mapping. Startup
     # binding is probed separately (_discover_map_binding, before the hub
