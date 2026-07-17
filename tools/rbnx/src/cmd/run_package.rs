@@ -12,7 +12,9 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::Config;
 use robonix_cli::launch::{
-    CMD_ACTIVATE, CMD_INIT, call_driver_cmd, snapshot_provider_ids, wait_for_registration_core,
+    CMD_ACTIVATE, CMD_INIT, OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL, ProviderRegistrationSnapshot,
+    call_driver_cmd, resolve_runtime_driver_contract, snapshot_provider_ids,
+    wait_for_registration_core,
 };
 use robonix_cli::manifest;
 use robonix_cli::output;
@@ -25,6 +27,32 @@ use std::time::Duration;
 /// When `cargo run` runs from `robonix/rust`, the process cwd is not the user's shell cwd — wrappers
 /// should `export RBNX_INVOCATION_CWD="$(pwd)"` before `cd`+`cargo run`. If unset, `std::env::current_dir()` is used.
 pub(crate) const RBNX_INVOCATION_CWD: &str = "RBNX_INVOCATION_CWD";
+
+/// Return the single migration warning emitted by `rbnx start` when the
+/// selected package still explicitly declares a namespace Driver.
+///
+/// The warning lives in `rbnx`, rather than in a language SDK, so native and
+/// non-Python providers receive the same guidance. Legacy contracts remain
+/// fully supported; the warning only describes the incremental migration.
+fn lifecycle_driver_migration_warning(
+    package_name: &str,
+    explicit_driver_contract: Option<&str>,
+) -> Option<String> {
+    let Some(driver_contract) = explicit_driver_contract else {
+        // Omission is the canonical author-facing form: current codegen and
+        // the SDK automatically provide the shared lifecycle Driver.
+        return None;
+    };
+    if driver_contract == manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT {
+        return None;
+    }
+    Some(format!(
+        "package '{package_name}' declares legacy lifecycle contract \
+         '{driver_contract}'; it remains supported. New packages should \
+         omit Driver to select '{}' automatically; do not declare both",
+        manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT,
+    ))
+}
 
 /// POSIX-shell single-quoted escape, used when we synthesise `export FOO=...`
 /// fragments to inject into a package's `start` body.
@@ -587,23 +615,21 @@ pub async fn execute_start(
     // task below). Empty inputs still deliver Driver(CMD_INIT, "{}") so a
     // standalone `rbnx start` follows the same lifecycle as `rbnx boot`.
     let has_explicit_config = config_file.is_some() || !set_overrides.is_empty();
-    let driver_contracts = manifest
-        .capabilities
-        .iter()
-        .filter(|capability| capability.name.ends_with("/driver"))
-        .map(|capability| capability.name.clone())
-        .collect::<Vec<_>>();
-    if driver_contracts.len() > 1 {
-        anyhow::bail!(
-            "package '{}' declares multiple */driver capabilities: {}; standalone lifecycle requires exactly one",
-            manifest.package.name,
-            driver_contracts.join(", ")
-        );
-    }
-    let expected_driver_contract = driver_contracts.first().cloned();
-    let has_driver_capability = expected_driver_contract.is_some();
+    // Omission is the canonical managed-lifecycle selection. The fallback
+    // bit is exported separately so only genuinely old generated artifacts
+    // may substitute a namespace Driver (or, last-resort, no Driver).
+    let explicit_driver_contract = manifest.explicit_lifecycle_driver_contract()?;
+    let expected_driver_contract = manifest.selected_lifecycle_driver_contract()?.to_string();
+    let allow_old_artifact_fallback = explicit_driver_contract.is_none();
+    let has_driver_capability = true;
     let deploy_managed = std::env::var_os("RBNX_DEPLOY_MANAGED").is_some();
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
+
+    if let Some(message) =
+        lifecycle_driver_migration_warning(&manifest.package.name, explicit_driver_contract)
+    {
+        output::warning(&message);
+    }
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
     // owned by the package itself).  When `rbnx boot` spawns us, it sets
@@ -631,14 +657,28 @@ pub async fn execute_start(
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
     env.insert("SCRIBE_LOG_DIR".to_string(), log_dir.display().to_string());
+    // The exact selection and compatibility permission are distinct. Current
+    // omission exports the shared Driver plus a marker that lets an old SDK
+    // artifact fall back; explicit shared/legacy selections remain strict.
+    env.insert(
+        "ROBONIX_DRIVER_CONTRACT_ID".to_string(),
+        expected_driver_contract.clone(),
+    );
+    // Always overwrite any inherited marker so an explicit selection can
+    // never accidentally inherit omission's downgrade permission.
+    env.insert(
+        "ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK".to_string(),
+        if allow_old_artifact_fallback {
+            "1"
+        } else {
+            "0"
+        }
+        .to_string(),
+    );
     if has_explicit_config && should_drive_standalone_init(has_driver_capability, deploy_managed) {
         output::sub_step("Config: will deliver via Driver(CMD_INIT) post-register");
     } else if has_explicit_config && deploy_managed {
         output::sub_step("Config: deployment owner will deliver Driver(CMD_INIT)");
-    } else if has_explicit_config {
-        output::warning(
-            "Config supplied, but the package manifest declares no */driver capability; config cannot be delivered",
-        );
     }
     // Force unbuffered stdout/stderr in any Python child the package's
     // start body launches. Without this, Python block-buffers stdout
@@ -704,9 +744,9 @@ pub async fn execute_start(
                 atlas,
                 before_snapshot,
                 json,
-                expected_driver_contract
-                    .clone()
-                    .expect("standalone lifecycle requires a driver contract"),
+                expected_driver_contract.clone(),
+                allow_old_artifact_fallback,
+                has_explicit_config,
             ))
         } else {
             None
@@ -720,7 +760,15 @@ pub async fn execute_start(
     // package.name only for a bare standalone `rbnx start` with no instance.
     let instance_name =
         std::env::var("RBNX_INSTANCE_NAME").unwrap_or_else(|_| manifest.package.name.clone());
-    let result = if let Some((mut atlas, before, json, expected_contract)) = standalone_lifecycle {
+    let result = if let Some((
+        mut atlas,
+        before,
+        json,
+        expected_contract,
+        allow_old_fallback,
+        config_was_explicit,
+    )) = standalone_lifecycle
+    {
         // `start_process` blocks for the package lifetime, so run it alongside
         // registration/lifecycle driving. On lifecycle failure, stop the exact
         // package process group instead of leaving a REGISTERED/ERROR provider.
@@ -761,7 +809,14 @@ pub async fn execute_start(
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
-        let lifecycle = drive_standalone_lifecycle(&mut atlas, &before, &expected_contract, json);
+        let lifecycle = drive_standalone_lifecycle(
+            &mut atlas,
+            &before,
+            &expected_contract,
+            allow_old_fallback,
+            config_was_explicit,
+            json,
+        );
         tokio::pin!(lifecycle);
         tokio::select! {
             lifecycle_result = &mut lifecycle => {
@@ -855,21 +910,46 @@ fn normalize_atlas_endpoint(endpoint: &str) -> String {
 /// correlation.
 async fn drive_standalone_lifecycle(
     atlas: &mut AtlasClient,
-    before: &std::collections::HashSet<String>,
+    before: &ProviderRegistrationSnapshot,
     expected_driver_contract: &str,
+    allow_old_artifact_fallback: bool,
+    config_was_explicit: bool,
     config_json: String,
 ) -> Result<()> {
     let outcome = wait_for_registration_core(atlas, before, "rbnx start").await?;
-    let driver_contract = require_expected_driver_contract(
+    let driver_contract = resolve_runtime_driver_contract(
         &outcome.provider_id,
-        outcome.driver_contract.as_deref(),
+        &outcome.provider_namespace,
         expected_driver_contract,
+        &outcome.driver_contracts,
+        allow_old_artifact_fallback,
+        outcome.provider_state_detail == OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL,
     )?;
+    let Some(driver_contract) = driver_contract else {
+        output::warning(&format!(
+            "provider '{}' is an old generated artifact with no lifecycle Driver; \
+             continuing as a last-resort compatibility fallback (actual Atlas state={})",
+            outcome.provider_id,
+            lifecycle_state_label(outcome.provider_state),
+        ));
+        if config_was_explicit {
+            output::warning(
+                "Config was supplied but cannot be delivered because the old artifact has no Driver",
+            );
+        }
+        return Ok(());
+    };
+    if driver_contract != expected_driver_contract {
+        output::warning(&format!(
+            "provider '{}' is an old generated artifact; using legacy lifecycle Driver '{}' instead of '{}'",
+            outcome.provider_id, driver_contract, expected_driver_contract,
+        ));
+    }
 
     let init_state = call_driver_cmd(
         atlas,
         &outcome.provider_id,
-        driver_contract,
+        &driver_contract,
         CMD_INIT,
         config_json.clone(),
         "rbnx start",
@@ -883,7 +963,7 @@ async fn drive_standalone_lifecycle(
         let state = call_driver_cmd(
             atlas,
             &outcome.provider_id,
-            driver_contract,
+            &driver_contract,
             CMD_ACTIVATE,
             config_json,
             "rbnx start",
@@ -901,22 +981,20 @@ fn should_activate_standalone_provider(provider_kind: i32) -> bool {
     provider_kind != atlas_pb::Kind::Skill as i32
 }
 
-fn require_expected_driver_contract<'a>(
-    provider_id: &str,
-    observed: Option<&'a str>,
-    expected: &str,
-) -> Result<&'a str> {
-    let Some(observed) = observed else {
-        anyhow::bail!(
-            "provider '{provider_id}' registered without required driver contract '{expected}'"
-        );
-    };
-    if observed != expected {
-        anyhow::bail!(
-            "provider '{provider_id}' declared driver contract '{observed}', expected '{expected}' from the package manifest"
-        );
+fn lifecycle_state_label(state: i32) -> &'static str {
+    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
+        "REGISTERED"
+    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
+        "INACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
+        "ACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateError as i32 {
+        "ERROR"
+    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
+        "TERMINATED"
+    } else {
+        "STARTING"
     }
-    Ok(observed)
 }
 
 /// Materialize a per-instance config from `--config <file>` plus
@@ -1056,29 +1134,30 @@ mod tests {
     }
 
     #[test]
-    fn standalone_lifecycle_requires_the_manifest_driver_contract() {
+    fn shared_driver_contract_needs_no_migration_warning() {
         assert_eq!(
-            require_expected_driver_contract(
-                "camera-a",
-                Some("robonix/primitive/camera/driver"),
-                "robonix/primitive/camera/driver",
-            )
-            .unwrap(),
-            "robonix/primitive/camera/driver"
+            lifecycle_driver_migration_warning("test.scene", Some("robonix/lifecycle/driver"),),
+            None
         );
-        let missing =
-            require_expected_driver_contract("camera-a", None, "robonix/primitive/camera/driver")
-                .unwrap_err()
-                .to_string();
-        assert!(missing.contains("registered without required driver contract"));
-        let mismatch = require_expected_driver_contract(
-            "lidar-b",
-            Some("robonix/primitive/lidar/driver"),
-            "robonix/primitive/camera/driver",
+    }
+
+    #[test]
+    fn omitted_driver_is_the_canonical_shared_selection() {
+        assert_eq!(lifecycle_driver_migration_warning("test.scene", None), None);
+    }
+
+    #[test]
+    fn legacy_driver_contract_gets_one_actionable_migration_warning() {
+        let warning = lifecycle_driver_migration_warning(
+            "test.camera",
+            Some("robonix/primitive/camera/driver"),
         )
-        .unwrap_err()
-        .to_string();
-        assert!(mismatch.contains("expected 'robonix/primitive/camera/driver'"));
+        .unwrap();
+        assert!(warning.contains("test.camera"));
+        assert!(warning.contains("robonix/primitive/camera/driver"));
+        assert!(warning.contains("robonix/lifecycle/driver"));
+        assert!(warning.contains("remains supported"));
+        assert!(warning.contains("do not declare both"));
     }
 
     #[test]
@@ -1125,7 +1204,8 @@ name: system-target-test
 system:
   scene:
     manifest: package_manifest.jetson-native.yaml
-    camera_provider_id: front_camera
+    config:
+      camera_provider_id: front_camera
 "#,
         )
         .unwrap();

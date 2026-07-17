@@ -1,0 +1,17 @@
+# Shared lifecycle interface implemented by every managed provider.
+# Providers keep their own provider_id and namespace; this contract is shared
+# so package authors do not need to duplicate an identical driver TOML.
+# Package manifests normally omit Driver; current codegen and runtime select
+# this shared contract automatically. Explicit shared and legacy namespace
+# selections remain supported. Only old generated artifacts may fall back to
+# a namespace Driver or, last-resort, no Driver. No package may declare both.
+[contract]
+id              = "robonix/lifecycle/driver"
+version         = "1"
+kind            = "service"
+idl             = "lifecycle/srv/Driver.srv"
+description     = "Initialize, activate, deactivate, or shut down a managed provider."
+cross_namespace = true
+
+[mode]
+type = "rpc"

@@ -44,7 +44,7 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 
 1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the live RGB frame. Class list is a 55-entry indoor-office vocabulary; override at runtime via `SCENE_OPEN_VOCAB_CLASSES=cup,chair,...`.
 2. **Segment.** MobileSAM, prompted with each YOLO bbox, produces a per-detection mask.
-3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract — the real per-deployment camera, exactly as extrinsics come from the camera's tf2/URDF rather than a scene-side env var. There is no hardcoded-default fallback: guessing `K` scales every point by `fx/fy` and silently misplaces objects, so when no usable intrinsics are wired the detector *waits* (logs `waiting for camera intrinsics`) instead. The world transform comes from atlas-resolved contracts, not tf2: `T(world ← base_link)` from `service/map/pose` and `T(base_link ← camera_optical)` from `primitive/camera/extrinsics`, composed into a single 4×4. The world frame name is whatever `header.frame_id` the localizer publishes — never a hardcoded `"map"`. tf2 stays only as a last-resort fallback for legacy stacks where the camera primitive hasn't declared `extrinsics` yet (logged once via "no pose contract resolved"). Reading `/odom` directly is **NOT** acceptable — once SLAM corrects `map → odom`, the registry drifts away from rviz.
+3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract — the real per-deployment camera. There is no hardcoded-default fallback: guessing `K` scales every point by `fx/fy` and silently misplaces objects, so when no usable intrinsics are wired the detector *waits* (logs `waiting for camera intrinsics`) instead. The world transform comes from the robot's TF tree first: Scene asks for `T(world ← selected_camera_optical)` so the full URDF/static chain and SLAM's `map → odom` correction stay intact. Only when that TF lookup is unavailable does the compatibility path compose `T(world ← body)` from `service/map/pose` (or odom) with `T(body ← camera_optical)` from `primitive/camera/extrinsics`. The selected pose source determines `body`; the extrinsics parent must match that same frame. The world frame name is whatever `header.frame_id` the localizer publishes — never a hardcoded `"map"` once a sample exists.
 4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + 3D-AABB IoU drives the concept-graphs merge pipeline: `compute_spatial_similarities` + `compute_visual_similarities` + `aggregate_similarities` + `merge_detections_to_objects`. Three hard gates filter the agg_sim matrix:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
    * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
@@ -188,7 +188,10 @@ deployment manifest:
 ```yaml
 system:
   scene:
-    camera_provider_id: front_rgbd_camera
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      camera_provider_id: front_rgbd_camera
+      web_port: 50107
 ```
 
 The value is the camera package entry's `name` (and therefore its Atlas
@@ -197,6 +200,14 @@ from that same provider so streams and calibration from different cameras are
 never mixed. The selected provider must expose both `camera/rgb` and
 `camera/depth` for RGB-D perception. Omitting `camera_provider_id` preserves
 the legacy auto-discovery behaviour for single-camera deployments.
+
+Scene supports lifecycle initialization, activation, and clean shutdown.
+`CMD_DEACTIVATE` is not yet a pause operation: Scene rejects it as deferred and
+remains `ACTIVE`, because its ROS subscriptions, perception workers, and Web UI
+cannot currently be paused atomically. Use `CMD_SHUTDOWN` to stop Scene. A
+successful shutdown reply is sent only after perception, ROS, graph/background
+tasks, the Web UI serving task/socket, and the object store have all closed, so
+an immediate restart can rebind the same web port.
 
 The default RMW is Zenoh (`RMW_IMPLEMENTATION=rmw_zenoh_cpp`). For single-host
 deployments the default local router/session is used; advanced deployments can
@@ -211,17 +222,37 @@ Useful input contracts include:
 * `robonix/primitive/camera/intrinsics` (`sensor_msgs/CameraInfo`)
 * `robonix/primitive/camera/extrinsics` (`geometry_msgs/TransformStamped`)
 * `robonix/service/map/pose` (`geometry_msgs/PoseWithCovarianceStamped`)
+* `robonix/service/map/odom` (`nav_msgs/Odometry`, compatibility fallback)
 * `robonix/service/map/occupancy_grid` (`nav_msgs/OccupancyGrid`)
 
 Scene's robot marker and self context come primarily from
 `robonix/service/map/pose`, not from the camera and not from raw chassis odom.
 The mapping/localization provider must publish a globally corrected
-`PoseWithCovarianceStamped` for `base_link`; Scene adopts its
+`PoseWithCovarianceStamped` for the configured robot body (`base_link` by
+default); Scene adopts its
 `header.frame_id` as the world frame. `service/map/odom` and TF2 are
-compatibility fallbacks. Metric RGB-D projection composes that world-to-base
-pose with `primitive/camera/extrinsics` (`base_link` to camera optical frame).
-A complete URDF published by `robot_description` may provide the equivalent
-TF2 fallback, but new deployments should expose both contracts explicitly.
+not equivalent pose sources: TF is authoritative, corrected pose is the first
+contract fallback, and raw odometry is the final contract fallback. Metric
+RGB-D projection resolves the selected camera
+frame directly through TF first. Only when that lookup is unavailable does
+Scene compose the pose with `primitive/camera/extrinsics`. In that fallback
+message, `header.frame_id` must be the expected robot body frame (`base_link`
+by default), `child_frame_id` must equal the selected camera optical frame, and
+`transform` is `T(parent ← child)`: it
+converts points from the camera optical frame into the parent frame. Scene
+rejects missing or mismatched frame ids instead of composing incompatible
+frames. Deployments with a complete URDF and TF tree should not publish a
+second transform with the opposite direction.
+
+For robots whose body frame is not `base_link`, set `base_frame` under
+`system.scene.config` (or `SCENE_BASE_FRAME`). This is an assertion about the
+body represented by the fallback pose and the required parent of camera
+extrinsics. If odometry is selected, its non-empty `child_frame_id` must match
+the assertion or that sample is rejected. When `base_frame` is omitted, a
+preferred `PoseWithCovarianceStamped` represents `base_link`; an odometry-only
+fallback uses that selected message's own `child_frame_id` (then `base_link` if
+the field is empty). An unselected odometry sample never changes the frame used
+for a preferred pose sample.
 
 If your camera frame is not the deployment default, override it when starting scene:
 

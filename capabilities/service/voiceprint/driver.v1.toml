@@ -1,4 +1,6 @@
-# Lifecycle interface for the Voiceprint service.
+# Legacy namespace-specific lifecycle contract for Voiceprint services.
+# Existing manifests remain supported; new packages omit Driver and use the
+# shared contract automatically. A package must not declare both contracts.
 # `rbnx boot` sends the package instance configuration through
 # Driver(CMD_INIT, config_json) before promoting the provider to ACTIVE.
 [contract]
@@ -6,7 +8,7 @@ id = "robonix/service/voiceprint/driver"
 version = "1"
 kind = "service"
 idl = "lifecycle/srv/Driver.srv"
-description = "Lifecycle and per-instance configuration for Voiceprint providers."
+description = "Legacy-compatible lifecycle and configuration interface for Voiceprint providers."
 
 [mode]
 type = "rpc"

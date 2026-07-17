@@ -7,11 +7,50 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class SceneBuildConfigTest(unittest.TestCase):
+    def test_every_scene_manifest_uses_canonical_implicit_shared_driver(self):
+        for filename in (
+            "package_manifest.yaml",
+            "package_manifest.jetson-native.yaml",
+            "package_manifest.jetson-docker.yaml",
+        ):
+            manifest = yaml.safe_load((ROOT / filename).read_text())
+            capability_names = {
+                capability["name"] for capability in manifest["capabilities"]
+            }
+            self.assertNotIn("robonix/lifecycle/driver", capability_names, filename)
+            self.assertNotIn("robonix/system/scene/driver", capability_names, filename)
+
+    def test_scene_wires_explicit_lifecycle_handlers(self):
+        tree = ast.parse((ROOT / "scene_service" / "service.py").read_text())
+        decorators = {
+            decorator.attr
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Attribute)
+            and isinstance(decorator.value, ast.Name)
+            and decorator.value.id == "scene"
+        }
+
+        self.assertTrue(
+            {"on_init", "on_activate", "on_deactivate", "on_shutdown"}.issubset(
+                decorators
+            )
+        )
+
+    def test_scene_container_forwards_runtime_selection_and_frame_overrides(self):
+        start_script = (ROOT / "scripts" / "start.sh").read_text()
+        self.assertIn("ROBONIX_DRIVER_CONTRACT_ID", start_script)
+        self.assertIn("ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK", start_script)
+        self.assertIn('-e SCENE_CAMERA_FRAME="${SCENE_CAMERA_FRAME:-}"', start_script)
+        self.assertIn('-e SCENE_BASE_FRAME="${SCENE_BASE_FRAME:-}"', start_script)
+
     def test_ingest_uses_the_canonical_lidar3d_contract(self):
         tree = ast.parse((ROOT / "scene_service" / "service.py").read_text())
         contracts = None
@@ -22,8 +61,7 @@ class SceneBuildConfigTest(unittest.TestCase):
                     break
         self.assertIsNotNone(contracts)
         by_kind = {
-            kind: (contract_id, msg_type)
-            for kind, contract_id, msg_type in contracts
+            kind: (contract_id, msg_type) for kind, contract_id, msg_type in contracts
         }
         self.assertEqual(
             by_kind["lidar3d"],

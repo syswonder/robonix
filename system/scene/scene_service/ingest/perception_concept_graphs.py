@@ -380,6 +380,10 @@ class ConceptGraphsDetector:
         # map→odom and the chassis_pose drifts out of map frame.
         hub: Any = None,
         camera_frame: str = "camera_optical_frame",
+        # Body frame asserted for the compatibility pose + extrinsics chain.
+        # It must match odometry.child_frame_id when odometry is selected.
+        # Without it, pose means base_link while odometry uses its own child.
+        base_frame: Optional[str] = None,
     ) -> None:
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
@@ -397,6 +401,7 @@ class ConceptGraphsDetector:
         self._clip_pretrained = clip_pretrained
         self._hub = hub
         self._camera_frame = camera_frame
+        self._base_frame = (base_frame or "").strip().lstrip("/")
         self._world_frame_fn = world_frame_fn or (lambda: "map")
 
         self._yolo: Any = None
@@ -1562,22 +1567,22 @@ class ConceptGraphsDetector:
 
         Three paths, in order of preference:
 
-          1. **Atlas-resolved contracts (preferred).** Compose
+          1. **tf2 (authoritative).** Look up the selected camera frame
+             directly against the world frame advertised by the localizer.
+             This preserves the complete URDF/static-transform chain and
+             avoids choosing between duplicate transform sources.
+
+          2. **Atlas-resolved compatibility contracts.** Only when tf2 is
+             unavailable, compose
              `T(world ← base) ⊕ T(base ← camera_optical)` from the
              two slots:
                - `service/map/pose` (or `service/map/odom`) — robot
                  pose in world frame, supplied by mapping/AMCL/mocap.
                - `primitive/camera/extrinsics` — static camera mount
                  transform supplied by the camera primitive itself.
-             No tf2 involvement; both legs are visible to atlas, so
-             `rbnx caps`/`rbnx channels` see every dependency.
-
-          2. **tf2 fallback.** When the camera primitive hasn't
-             declared `extrinsics` yet (legacy primitives that still
-             use static_transform_publisher only), look up the camera
-             frame against the world frame the localizer is
-             advertising. World frame name comes from the pose stream's
-             `header.frame_id`, never a hardcoded constant.
+             The extrinsics message is accepted only when its parent is the
+             body frame returned by that selected pose source and its child
+             is the selected camera frame.
 
           3. **Naive fallback.** No pose stream and no tf either —
              compose chassis_pose with a yaw-only rotation and a
@@ -1586,20 +1591,27 @@ class ConceptGraphsDetector:
         """
         import numpy as np
 
-        # Path 1: contracts.
-        T_pose = self._slot_pose_4x4()
-        T_ext = self._slot_extrinsics_4x4()
-        if T_pose is not None and T_ext is not None:
-            return (T_pose @ T_ext).astype(np.float32)
-
-        # Path 2: tf2 fallback. Prefer the world frame the localizer
-        # is publishing; only fall back to "map" when we have nothing
-        # at all to go on.
+        # Path 1: the TF tree is authoritative. Prefer the world frame the
+        # localizer is publishing; use "map" only when no pose sample has
+        # identified it yet.
         if self._hub is not None:
             world_frame = self._world_frame_fn() or "map"
             T = self._hub.lookup_transform_4x4(self._camera_frame, world_frame)
             if T is not None:
                 return T.astype(np.float32)
+
+        # Path 2: compatibility contracts, used only when TF lookup is not
+        # available. Carry the selected pose source's body frame into the
+        # extrinsics validator; an unselected odometry sample must never change
+        # the coordinate chain chosen for a preferred pose sample.
+        pose_transform = self._slot_pose_transform()
+        if pose_transform is not None:
+            T_pose, pose_body_frame = pose_transform
+            T_ext = self._slot_extrinsics_4x4(pose_body_frame)
+        else:
+            T_pose, T_ext = None, None
+        if T_pose is not None and T_ext is not None:
+            return (T_pose @ T_ext).astype(np.float32)
 
         # Path 3: naive composition (bring-up only).
         chassis = self._chassis()
@@ -1622,11 +1634,16 @@ class ConceptGraphsDetector:
         ], dtype=np.float32)
         return T_bm @ T_cb
 
-    def _slot_pose_4x4(self):
-        """Read the latest pose from the `pose` (preferred) or `odom`
-        slot and return a 4×4 `T(world ← base_link)` matrix, or None
-        if neither slot has a sample yet."""
-        import numpy as np
+    def _slot_pose_transform(self):
+        """Return ``(T(world ← body), body_frame)`` for the chosen sample.
+
+        ``pose`` is preferred and represents configured ``base_frame`` or
+        ``base_link`` because PoseWithCovarianceStamped has no child-frame
+        field. ``odom`` instead derives the body from its own child_frame_id;
+        an explicit base_frame is an assertion and rejects a conflicting
+        odometry sample. The returned frame must be passed to extrinsics
+        validation so both matrices describe one coordinate chain.
+        """
         if self._hub is None:
             return None
         for kind in ("pose", "odom"):
@@ -1635,24 +1652,75 @@ class ConceptGraphsDetector:
             msg, stamp_unix, _count = self._hub.latest(kind)
             if msg is None or stamp_unix <= 0:
                 continue
+            body_frame = self._body_frame_for_pose_source(kind, msg)
+            if body_frame is None:
+                continue
             p = msg.pose.pose if hasattr(msg, "pose") and hasattr(msg.pose, "pose") else msg.pose
             q = p.orientation
-            return _quat_xyz_to_matrix(
-                float(q.x), float(q.y), float(q.z), float(q.w),
-                float(p.position.x), float(p.position.y), float(p.position.z),
+            return (
+                _quat_xyz_to_matrix(
+                    float(q.x), float(q.y), float(q.z), float(q.w),
+                    float(p.position.x), float(p.position.y), float(p.position.z),
+                ),
+                body_frame,
             )
         return None
 
-    def _slot_extrinsics_4x4(self):
+    def _body_frame_for_pose_source(self, kind: str, msg):
+        """Resolve and validate the body frame for one selected pose source."""
+        configured = getattr(self, "_base_frame", "").strip().lstrip("/")
+        if kind != "odom":
+            return configured or "base_link"
+        odom_child = str(getattr(msg, "child_frame_id", "")).strip().lstrip("/")
+        if configured and odom_child and odom_child != configured:
+            signature = (odom_child, configured)
+            if getattr(self, "_invalid_odom_body_signature", None) != signature:
+                log.warning(
+                    "ignoring odometry with child frame %r; configured "
+                    "base_frame asserts %r",
+                    odom_child,
+                    configured,
+                )
+                self._invalid_odom_body_signature = signature
+            return None
+        return configured or odom_child or "base_link"
+
+    def _slot_extrinsics_4x4(self, expected_parent: str | None = None):
         """Read the static camera-mount transform (TransformStamped
         from `primitive/camera/extrinsics`) and return a 4×4
-        `T(base_link ← camera_optical)` matrix, or None if the camera
-        primitive hasn't declared the contract."""
+        `T(body ← selected_camera_frame)` matrix. Reject missing or mismatched
+        parent/child frame ids rather than composing transforms from
+        incompatible coordinate frames. Production callers pass the body
+        frame returned by `_slot_pose_transform`; the optional default exists
+        only for direct compatibility probes and never inspects odometry."""
         import numpy as np
         if self._hub is None or not self._hub.has("camera_extrinsics"):
             return None
         msg, stamp_unix, _count = self._hub.latest("camera_extrinsics")
         if msg is None or stamp_unix <= 0:
+            return None
+        parent_frame = str(getattr(getattr(msg, "header", None), "frame_id", ""))
+        child_frame = str(getattr(msg, "child_frame_id", ""))
+        parent_frame = parent_frame.strip().lstrip("/")
+        child_frame = child_frame.strip().lstrip("/")
+        expected_parent = str(
+            expected_parent
+            or getattr(self, "_base_frame", "")
+            or "base_link"
+        ).strip().lstrip("/")
+        expected_child = self._camera_frame.strip().lstrip("/")
+        if parent_frame != expected_parent or child_frame != expected_child:
+            signature = (parent_frame, child_frame, expected_parent, expected_child)
+            if getattr(self, "_invalid_extrinsics_signature", None) != signature:
+                log.warning(
+                    "ignoring camera extrinsics with frames %r ← %r; expected "
+                    "%r ← %r",
+                    parent_frame,
+                    child_frame,
+                    expected_parent,
+                    expected_child,
+                )
+                self._invalid_extrinsics_signature = signature
             return None
         t = msg.transform.translation
         q = msg.transform.rotation
@@ -2008,9 +2076,8 @@ def _quat_xyz_to_matrix(qx: float, qy: float, qz: float, qw: float,
                         tx: float, ty: float, tz: float):
     """Quaternion + translation → 4×4 homogeneous transform.
 
-    Used by the camera-to-world composer when building the transform
-    from atlas-resolved contract slots (pose + extrinsics) instead of
-    tf2 — a per-slot replacement for `lookup_transform_4x4`.
+    Used by the camera-to-world compatibility path when TF is unavailable
+    and Scene composes the pose and validated extrinsics contract slots.
     """
     import numpy as np
     n = qx * qx + qy * qy + qz * qz + qw * qw

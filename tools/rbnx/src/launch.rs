@@ -17,7 +17,8 @@
 // What's here vs what's not:
 //   * `wait_for_registration_core` — atlas-side poll loop, no UI. Accepts
 //     a `before` snapshot so callers can reason about "which provider
-//     appeared because of this spawn." Returns `(provider_id, driver_contract)`.
+//     appeared because of this spawn." Returns the provider plus every
+//     lifecycle Driver observed during declaration settling.
 //   * `call_driver_cmd` — one Driver(cmd) RPC against a freshly-connected
 //     channel, no UI. Returns the response's `state` string.
 //   * `CMD_*` constants and the `DRIVER_*_TIMEOUT` values — single source
@@ -46,7 +47,7 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -62,6 +63,10 @@ pub const CMD_ACTIVATE: u32 = 1;
 pub const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 pub const CMD_SHUTDOWN: u32 = 3;
+/// Positive proof published by the Python SDK only when a fallback-marked
+/// package's generated module contains neither shared nor namespace Driver
+/// stubs. Launchers require this marker before accepting zero Drivers.
+pub const OLD_ARTIFACT_NO_DRIVER_STATE_DETAIL: &str = "robonix.lifecycle.old_artifact_no_driver.v1";
 
 /// Max time we'll wait for a freshly spawned package to register its
 /// driver capability with atlas before giving up.
@@ -187,10 +192,19 @@ pub async fn shutdown_package_runtime_checked(
         run_package_stop_hook(record, stop, atlas_endpoint).await;
     }
 
-    terminate_process_group(record.pgid, term_wait).await;
+    if !terminate_process_group_guarded(record.pgid, term_wait, boot_id).await {
+        warn!(
+            "refusing to finish shutdown of {} pgid {}: boot ownership changed before signaling",
+            record.name, record.pgid
+        );
+        return false;
+    }
     !process_group_has_members(record.pgid).await
 }
 
+/// Prove that at least one process in a recorded group still carries the exact
+/// inherited boot id. Enumeration or environment-inspection failure is an
+/// ownership failure so checked teardown cannot signal a stale numeric PGID.
 async fn process_group_has_boot_id(pgid: u32, boot_id: &str) -> bool {
     let output = match Command::new("pgrep")
         .arg("-g")
@@ -207,14 +221,109 @@ async fn process_group_has_boot_id(pgid: u32, boot_id: &str) -> bool {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.trim().parse::<u32>().ok())
-        .any(|pid| {
-            std::fs::read(format!("/proc/{pid}/environ"))
-                .ok()
-                .is_some_and(|env| {
-                    env.split(|byte| *byte == 0)
-                        .any(|entry| entry == expected.as_bytes())
-                })
-        })
+        .any(|pid| process_has_environment_entry(pid, expected.as_bytes()))
+}
+
+/// Linux exposes the immutable exec environment as NUL-delimited procfs
+/// bytes. Failure to read it means ownership is unproven, so stale-PGID
+/// protection refuses teardown rather than guessing.
+#[cfg(target_os = "linux")]
+fn process_has_environment_entry(pid: u32, expected: &[u8]) -> bool {
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .ok()
+        .is_some_and(|env| env.split(|byte| *byte == 0).any(|entry| entry == expected))
+}
+
+/// Parse a Darwin `KERN_PROCARGS2` buffer and look for one exact environment
+/// entry after the executable path and argc-counted argv strings. `None`
+/// denotes malformed/incomplete kernel data rather than a proven mismatch.
+#[cfg(any(target_os = "macos", test))]
+fn macos_procargs_has_environment_entry(buffer: &[u8], expected: &[u8]) -> Option<bool> {
+    let argc_bytes: [u8; std::mem::size_of::<i32>()] =
+        buffer.get(..std::mem::size_of::<i32>())?.try_into().ok()?;
+    let argc = usize::try_from(i32::from_ne_bytes(argc_bytes)).ok()?;
+    let mut cursor = std::mem::size_of::<i32>();
+
+    cursor += buffer.get(cursor..)?.iter().position(|byte| *byte == 0)? + 1;
+    while buffer.get(cursor) == Some(&0) {
+        cursor += 1;
+    }
+    for _ in 0..argc {
+        cursor += buffer.get(cursor..)?.iter().position(|byte| *byte == 0)? + 1;
+    }
+
+    while cursor < buffer.len() {
+        while buffer.get(cursor) == Some(&0) {
+            cursor += 1;
+        }
+        if cursor == buffer.len() {
+            break;
+        }
+        let tail = buffer.get(cursor..)?;
+        let end = tail.iter().position(|byte| *byte == 0)?;
+        if &tail[..end] == expected {
+            return Some(true);
+        }
+        cursor += end + 1;
+    }
+    Some(false)
+}
+
+/// macOS has no procfs. Read `KERN_PROCARGS2` directly so persisted shutdown
+/// can prove that a live process group belongs to its recorded boot without
+/// parsing human-formatted `ps` output.
+#[cfg(target_os = "macos")]
+fn process_has_environment_entry(pid: u32, expected: &[u8]) -> bool {
+    use std::ptr::null_mut;
+
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_PROCARGS2, pid];
+    let mut buffer_size = 0;
+    // SAFETY: the MIB is initialized and its length is correct. A null output
+    // pointer asks sysctl for the required byte count only.
+    if unsafe {
+        nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            null_mut(),
+            &mut buffer_size,
+            null_mut(),
+            0,
+        )
+    } != 0
+        || buffer_size == 0
+    {
+        return false;
+    }
+
+    let mut buffer = vec![0_u8; buffer_size];
+    // SAFETY: `buffer` owns `buffer_size` writable bytes and sysctl receives
+    // that exact capacity. The kernel updates `buffer_size` to bytes written.
+    if unsafe {
+        nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            buffer.as_mut_ptr().cast(),
+            &mut buffer_size,
+            null_mut(),
+            0,
+        )
+    } != 0
+        || buffer_size > buffer.len()
+    {
+        return false;
+    }
+    buffer.truncate(buffer_size);
+    macos_procargs_has_environment_entry(&buffer, expected) == Some(true)
+}
+
+/// Unknown targets cannot prove boot ownership yet, so checked teardown must
+/// refuse the process group instead of risking a PID/PGID-reuse kill.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_has_environment_entry(_pid: u32, _expected: &[u8]) -> bool {
+    false
 }
 
 /// Linux `/proc/<pid>/stat` field 22. The value is stable for the lifetime of
@@ -266,27 +375,62 @@ async fn run_package_stop_hook(
 
 /// TERM one wrapper process group, wait until it exits, then KILL stragglers.
 pub async fn terminate_process_group(pgid: u32, term_wait: Duration) {
+    let _ = terminate_process_group_guarded(pgid, term_wait, None).await;
+}
+
+/// Signal one process group while optionally preserving its recorded boot
+/// identity across slow Driver/stop cleanup and the TERM grace period. Returns
+/// false only when a live group no longer proves the expected boot id.
+async fn terminate_process_group_guarded(
+    pgid: u32,
+    term_wait: Duration,
+    boot_id: Option<&str>,
+) -> bool {
     use nix::sys::signal::{Signal, killpg};
     use nix::unistd::Pid;
+    if let Some(boot_id) = boot_id {
+        if !process_group_has_members(pgid).await {
+            return true;
+        }
+        if !process_group_has_boot_id(pgid, boot_id).await {
+            // The group may have finished between the liveness and ownership
+            // probes (common after Driver(SHUTDOWN)). Only refuse if a live
+            // group still exists after the failed identity lookup.
+            return !process_group_has_members(pgid).await;
+        }
+    }
+
     let pgid_raw = pgid;
     let pgid = Pid::from_raw(pgid as i32);
     match killpg(pgid, Signal::SIGTERM) {
         Ok(()) => {}
-        Err(nix::errno::Errno::ESRCH) => return,
+        Err(nix::errno::Errno::ESRCH) => return true,
         Err(e) => warn!("SIGTERM pgid {} failed: {e}", pgid),
     }
 
     let deadline = Instant::now() + term_wait;
     while Instant::now() < deadline {
         if !process_group_has_members(pgid_raw).await {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    if let Some(boot_id) = boot_id {
+        if !process_group_has_members(pgid_raw).await {
+            return true;
+        }
+        if !process_group_has_boot_id(pgid_raw, boot_id).await {
+            return !process_group_has_members(pgid_raw).await;
+        }
+    }
     let _ = killpg(pgid, Signal::SIGKILL);
+    true
 }
 
+/// Return whether a group contains at least one non-zombie process. Tooling or
+/// metadata failures count as non-empty so shutdown never skips Driver/TERM or
+/// removes persisted state based on inconclusive process inspection.
 async fn process_group_has_members(pgid: u32) -> bool {
     let output = match Command::new("pgrep")
         .arg("-g")
@@ -300,26 +444,86 @@ async fn process_group_has_members(pgid: u32) -> bool {
         Err(_) => return true,
     };
     if !output.status.success() {
-        return false;
+        // pgrep reserves exit 1 for "no processes matched". Treat every
+        // execution/tooling failure conservatively so shutdown cannot erase
+        // state or skip cleanup merely because process inspection failed.
+        return output.status.code() != Some(1);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().any(|line| {
-        line.trim()
-            .parse::<u32>()
-            .map(process_is_not_zombie)
-            .unwrap_or(true)
+    for line in stdout.lines() {
+        let Ok(pid) = line.trim().parse::<u32>() else {
+            return true;
+        };
+        if process_is_not_zombie(pid).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// Linux reports zombie state through procfs. Missing or malformed process
+/// metadata is treated as live: the caller must not skip Driver/TERM cleanup
+/// based on an inconclusive inspection.
+#[cfg(target_os = "linux")]
+async fn process_is_not_zombie(pid: u32) -> bool {
+    let status_path = format!("/proc/{pid}/status");
+    let Ok(status) = std::fs::read_to_string(status_path) else {
+        return true;
+    };
+    linux_proc_status_is_not_zombie(&status)
+}
+
+#[cfg(any(target_os = "linux", test))]
+/// Parse Linux's `State:` record, treating absent/malformed state as live.
+fn linux_proc_status_is_not_zombie(status: &str) -> bool {
+    !status.lines().any(|line| {
+        line.strip_prefix("State:")
+            .is_some_and(|state| state.trim_start().starts_with('Z'))
     })
 }
 
-fn process_is_not_zombie(pid: u32) -> bool {
-    let status_path = format!("/proc/{pid}/status");
-    let Ok(status) = std::fs::read_to_string(status_path) else {
-        return false;
-    };
-    !status
+/// Parse the one-letter Darwin `ps` state field. Missing output is
+/// inconclusive; `Z` (with optional suffix flags) is the only zombie state.
+#[cfg(any(target_os = "macos", test))]
+fn macos_ps_state_is_not_zombie(status: &str) -> Option<bool> {
+    status
         .lines()
-        .any(|line| line.starts_with("State:") && line.contains("Z"))
+        .find_map(|line| line.trim().chars().next())
+        .map(|state| state != 'Z')
+}
+
+/// Darwin has no procfs, and libproc omits already-exited zombie processes.
+/// Query the machine-readable `ps` state field; inspection failures count as
+/// live so cleanup is never skipped on inconclusive evidence.
+#[cfg(target_os = "macos")]
+async fn process_is_not_zombie(pid: u32) -> bool {
+    let output = match Command::new("ps")
+        .arg("-o")
+        .arg("state=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => return true,
+    };
+    if output.status.success() {
+        return macos_ps_state_is_not_zombie(&String::from_utf8_lossy(&output.stdout))
+            .unwrap_or(true);
+    }
+    true
+}
+
+/// Other Unix targets still get safe shutdown semantics even when no native
+/// zombie-state backend has been added: a PID reported by `pgrep` counts as a
+/// live member instead of risking a false empty-group result.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn process_is_not_zombie(_pid: u32) -> bool {
+    true
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -349,32 +553,136 @@ pub fn contract_id_to_service_name(id: &str) -> String {
         .collect::<String>()
 }
 
-/// Snapshot the set of currently-registered provider ids on Atlas. Use
-/// before spawning a package; pass the result to
-/// `wait_for_registration_core` so it can detect the new provider that
-/// shows up afterwards. Returns ids only (no kind/capability info), to
-/// keep the wire query cheap.
-pub async fn snapshot_provider_ids(atlas: &mut AtlasClient) -> Result<HashSet<String>> {
+/// Snapshot provider ids and their opaque registration generations. Stable
+/// package ids may be taken over on restart, so ids alone cannot correlate a
+/// spawn; `registration_id` changes on every successful Atlas Register but not
+/// on heartbeat/state/capability updates.
+pub type ProviderRegistrationSnapshot = HashMap<String, String>;
+
+pub async fn snapshot_provider_ids(
+    atlas: &mut AtlasClient,
+) -> Result<ProviderRegistrationSnapshot> {
     Ok(atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
         .await
         .context("pre-spawn atlas snapshot")?
         .into_iter()
-        .map(|r| r.id)
+        .map(|provider| (provider.id, provider.registration_id))
         .collect())
+}
+
+/// True when `provider` did not exist in the snapshot or has since taken over
+/// its stable id with a new Atlas registration generation.
+pub fn is_new_provider_registration(
+    provider: &atlas_pb::CapabilityProvider,
+    before: &ProviderRegistrationSnapshot,
+) -> bool {
+    before
+        .get(&provider.id)
+        .is_none_or(|registration_id| registration_id != &provider.registration_id)
 }
 
 /// Outcome of `wait_for_registration_core`:
 ///   * `provider_id` — the new provider that appeared after `before`.
 ///   * `provider_kind` — Atlas provider kind, used to keep skills INACTIVE.
-///   * `driver_contract` — if the new provider also declared a
-///     `*/driver` gRPC capability within the settle window, its
-///     contract_id; otherwise `None` (no Driver(CMD_*) lifecycle).
+///   * `provider_state` — settled Atlas lifecycle state for fallback reporting.
+///   * `provider_namespace` — primary namespace used to validate the exact
+///     namespace Driver allowed for old-artifact fallback.
+///   * `provider_state_detail` — carries positive no-Driver fallback proof.
+///   * `driver_contracts` — every distinct `*/driver` gRPC capability
+///     observed after the declaration settle window. The launch owner must
+///     validate this list against the exact selected package manifest before
+///     sending lifecycle commands.
 #[derive(Debug, Clone)]
 pub struct RegistrationOutcome {
     pub provider_id: String,
     pub provider_kind: i32,
-    pub driver_contract: Option<String>,
+    pub provider_state: i32,
+    pub provider_namespace: String,
+    pub provider_state_detail: String,
+    pub registration_id: String,
+    pub driver_contracts: Vec<String>,
+}
+
+/// Resolve the runtime Driver while optionally tolerating old generated code.
+///
+/// Exact manifest selections stay strict. Only callers whose manifest omitted
+/// Driver pass `allow_old_artifact_fallback=true`: the shared Driver remains
+/// preferred, one namespace Driver may substitute when the old stubs lack the
+/// shared service, and no Driver is the last-resort compatibility result.
+/// Multiple declarations are always ambiguous and rejected.
+pub fn resolve_runtime_driver_contract(
+    provider_id: &str,
+    provider_namespace: &str,
+    expected: &str,
+    observed: &[String],
+    allow_old_artifact_fallback: bool,
+    old_artifact_no_driver_proof: bool,
+) -> Result<Option<String>> {
+    if observed.len() > 1 {
+        anyhow::bail!(
+            "provider '{provider_id}' registered multiple lifecycle Drivers: {}; expected exactly '{expected}'",
+            observed.join(", ")
+        );
+    }
+    if observed.is_empty() {
+        if allow_old_artifact_fallback
+            && expected == "robonix/lifecycle/driver"
+            && old_artifact_no_driver_proof
+        {
+            return Ok(None);
+        }
+        if allow_old_artifact_fallback && expected == "robonix/lifecycle/driver" {
+            anyhow::bail!(
+                "provider '{provider_id}' registered without the shared lifecycle Driver and did not publish old-artifact no-Driver proof"
+            );
+        }
+        anyhow::bail!(
+            "provider '{provider_id}' registered without required lifecycle Driver '{expected}'"
+        );
+    }
+    if observed[0] == expected {
+        return Ok(Some(observed[0].clone()));
+    }
+    let legacy_fallback = format!("{}/driver", provider_namespace.trim_end_matches('/'));
+    if allow_old_artifact_fallback
+        && expected == "robonix/lifecycle/driver"
+        && observed[0] == legacy_fallback
+    {
+        return Ok(Some(observed[0].clone()));
+    }
+    anyhow::bail!(
+        "provider '{provider_id}' registered lifecycle Driver '{}', expected '{expected}' from the selected package manifest",
+        observed[0]
+    )
+}
+
+/// Enforce that Atlas exposes exactly the lifecycle Driver selected by the
+/// package manifest. This check runs before INIT, so config can never be sent
+/// to a missing, mismatched, or ambiguous runtime service.
+pub fn validate_runtime_driver_contracts(
+    provider_id: &str,
+    expected: &str,
+    observed: &[String],
+) -> Result<String> {
+    resolve_runtime_driver_contract(provider_id, "", expected, observed, false, false)?.ok_or_else(
+        || anyhow::anyhow!("strict lifecycle validation unexpectedly resolved no Driver"),
+    )
+}
+
+fn runtime_driver_contracts(provider: &atlas_pb::CapabilityProvider) -> Vec<String> {
+    let mut contracts = provider
+        .capabilities
+        .iter()
+        .filter(|capability| {
+            capability.transport == atlas_pb::Transport::Grpc as i32
+                && capability.contract_id.ends_with("/driver")
+        })
+        .map(|capability| capability.contract_id.clone())
+        .collect::<Vec<_>>();
+    contracts.sort();
+    contracts.dedup();
+    contracts
 }
 
 /// Poll atlas until a provider NOT in `before` appears, then briefly
@@ -395,7 +703,7 @@ pub struct RegistrationOutcome {
 /// can tell which spawn this poll belonged to.
 pub async fn wait_for_registration_core(
     atlas: &mut AtlasClient,
-    before: &HashSet<String>,
+    before: &ProviderRegistrationSnapshot,
     who: &str,
 ) -> Result<RegistrationOutcome> {
     // Poll cadence is decoupled from any spinner refresh: we just sleep
@@ -411,7 +719,7 @@ pub async fn wait_for_registration_core(
             .with_context(|| format!("[{who}] poll atlas"))?;
         let matches: Vec<&atlas_pb::CapabilityProvider> = providers
             .iter()
-            .filter(|provider| !before.contains(&provider.id))
+            .filter(|provider| is_new_provider_registration(provider, before))
             .collect();
         if matches.len() > 1 {
             let cap_ids: Vec<&str> = matches.iter().map(|r| r.id.as_str()).collect();
@@ -423,27 +731,25 @@ pub async fn wait_for_registration_core(
         }
         if let Some(first) = matches.first() {
             let provider_id = first.id.clone();
+            let registration_id = first.registration_id.clone();
             // RegisterPrimitive/Service/Skill and DeclareCapability are
             // two separate RPCs from the package side — Register lands
             // first, declares follow within a few hundred ms. Give it
-            // up to a 1s settle window so we don't false-fire the
-            // "no driver" path on a fast poll. Capped by the outer
+            // up to a 1s settle window so we don't false-fire a missing
+            // Driver error on a fast poll. Capped by the outer
             // deadline so we never exceed the user-facing timeout.
             let settle_until = Instant::now()
                 .checked_add(Duration::from_millis(1000))
                 .map(|t| t.min(deadline))
                 .unwrap_or(deadline);
             let mut current: atlas_pb::CapabilityProvider = (*first).clone();
-            let driver_contract = loop {
-                let driver = current.capabilities.iter().find(|cap| {
-                    cap.transport == atlas_pb::Transport::Grpc as i32
-                        && cap.contract_id.ends_with("/driver")
-                });
-                if driver.is_some() {
-                    break driver.map(|c| c.contract_id.clone());
-                }
+            // Always consume the whole settle window. RegisterProvider and
+            // DeclareCapability are separate RPCs; returning after the first
+            // Driver would hide a second shared/legacy declaration and make
+            // lifecycle ownership ambiguous.
+            loop {
                 if Instant::now() >= settle_until {
-                    break None;
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let providers = atlas
@@ -451,24 +757,34 @@ pub async fn wait_for_registration_core(
                     .await
                     .with_context(|| format!("[{who}] re-poll for driver"))?;
                 match providers.into_iter().find(|p| p.id == provider_id) {
-                    Some(p) => current = p,
+                    Some(p) if p.registration_id == registration_id => current = p,
+                    Some(p) => {
+                        anyhow::bail!(
+                            "[{who}] provider '{provider_id}' registration changed during settle ('{registration_id}' -> '{}')",
+                            p.registration_id,
+                        );
+                    }
                     None => {
                         // Provider vanished between the original match
                         // and now (crashed mid-settle, atlas evicted,
-                        // heartbeat lapsed). Caller's downstream logic
-                        // would silently treat "no driver" as fine and
-                        // march on against a dead process; instead fail
+                        // heartbeat lapsed). Caller's downstream logic must
+                        // not march on against a dead process; instead fail
                         // here so the caller can log + reap.
                         anyhow::bail!(
                             "[{who}] provider '{provider_id}' unregistered during settle window",
                         );
                     }
                 }
-            };
+            }
+            let driver_contracts = runtime_driver_contracts(&current);
             return Ok(RegistrationOutcome {
                 provider_id,
                 provider_kind: current.kind,
-                driver_contract,
+                provider_state: current.state,
+                provider_namespace: current.namespace,
+                provider_state_detail: current.state_detail,
+                registration_id: current.registration_id,
+                driver_contracts,
             });
         }
         if Instant::now() >= deadline {
@@ -566,4 +882,330 @@ pub async fn call_driver_cmd(
         );
     }
     Ok(r.state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PackageRuntimeRecord, atlas_pb, is_new_provider_registration,
+        linux_proc_status_is_not_zombie, macos_procargs_has_environment_entry,
+        macos_ps_state_is_not_zombie, process_group_has_members, resolve_runtime_driver_contract,
+        shutdown_package_runtime_checked, terminate_process_group_guarded,
+        validate_runtime_driver_contracts,
+    };
+
+    const SHARED: &str = "robonix/lifecycle/driver";
+    const LEGACY: &str = "robonix/primitive/camera/driver";
+
+    #[test]
+    fn runtime_driver_must_exactly_match_shared_or_legacy_selection() {
+        assert_eq!(
+            validate_runtime_driver_contracts("camera", SHARED, &[SHARED.to_string()]).unwrap(),
+            SHARED
+        );
+        assert_eq!(
+            validate_runtime_driver_contracts("camera", LEGACY, &[LEGACY.to_string()]).unwrap(),
+            LEGACY
+        );
+    }
+
+    #[test]
+    fn runtime_driver_rejects_missing_mismatched_and_dual_declarations() {
+        let missing = validate_runtime_driver_contracts("camera", SHARED, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("without required"));
+
+        let mismatch = validate_runtime_driver_contracts("camera", SHARED, &[LEGACY.to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("expected 'robonix/lifecycle/driver'"));
+
+        let dual = validate_runtime_driver_contracts(
+            "camera",
+            SHARED,
+            &[SHARED.to_string(), LEGACY.to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(dual.contains("multiple lifecycle Drivers"));
+    }
+
+    #[test]
+    fn omitted_manifest_allows_only_old_artifact_driver_fallbacks() {
+        assert_eq!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                SHARED,
+                &[SHARED.to_string()],
+                true,
+                false,
+            )
+            .unwrap(),
+            Some(SHARED.to_string())
+        );
+        assert_eq!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                SHARED,
+                &[LEGACY.to_string()],
+                true,
+                false,
+            )
+            .unwrap(),
+            Some(LEGACY.to_string())
+        );
+        assert_eq!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                SHARED,
+                &[],
+                true,
+                true,
+            )
+            .unwrap(),
+            None
+        );
+        assert!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                SHARED,
+                &[],
+                true,
+                false,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("did not publish old-artifact")
+        );
+        assert!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                SHARED,
+                &["robonix/primitive/lidar/driver".to_string()],
+                true,
+                false,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("expected 'robonix/lifecycle/driver'")
+        );
+        assert!(
+            resolve_runtime_driver_contract(
+                "camera",
+                "robonix/primitive/camera",
+                LEGACY,
+                &[],
+                true,
+                true,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("without required")
+        );
+    }
+
+    #[test]
+    fn registration_snapshot_detects_same_id_takeover_but_not_same_generation() {
+        let before =
+            std::collections::HashMap::from([("camera".to_string(), "registration-a".to_string())]);
+        let provider = |id: &str, registration_id: &str| atlas_pb::CapabilityProvider {
+            id: id.to_string(),
+            registration_id: registration_id.to_string(),
+            ..Default::default()
+        };
+
+        assert!(!is_new_provider_registration(
+            &provider("camera", "registration-a"),
+            &before,
+        ));
+        assert!(is_new_provider_registration(
+            &provider("camera", "registration-b"),
+            &before,
+        ));
+        assert!(is_new_provider_registration(
+            &provider("lidar", "registration-a"),
+            &before,
+        ));
+    }
+
+    #[test]
+    fn linux_proc_status_zombie_detection_is_conservative() {
+        assert!(!linux_proc_status_is_not_zombie(
+            "Name:\tworker\nState:\tZ (zombie)\n"
+        ));
+        assert!(linux_proc_status_is_not_zombie(
+            "Name:\tworker\nState:\tS (sleeping)\n"
+        ));
+        assert!(linux_proc_status_is_not_zombie("Name:\tworker\n"));
+    }
+
+    #[test]
+    fn macos_procargs_parser_matches_exact_environment_entry() {
+        let mut procargs = 2_i32.to_ne_bytes().to_vec();
+        procargs.extend_from_slice(
+            b"/usr/local/bin/worker\0\0worker\0--serve\0MODE=test\0RBNX_BOOT_ID=boot-123\0\0",
+        );
+
+        assert_eq!(
+            macos_procargs_has_environment_entry(&procargs, b"RBNX_BOOT_ID=boot-123"),
+            Some(true)
+        );
+        assert_eq!(
+            macos_procargs_has_environment_entry(&procargs, b"RBNX_BOOT_ID=boot"),
+            Some(false)
+        );
+        assert_eq!(
+            macos_procargs_has_environment_entry(&2_i32.to_ne_bytes(), b"MODE=test"),
+            None
+        );
+
+        let mut truncated = procargs;
+        truncated.pop();
+        truncated.pop();
+        assert_eq!(
+            macos_procargs_has_environment_entry(&truncated, b"RBNX_BOOT_ID=boot-123"),
+            None
+        );
+    }
+
+    #[test]
+    fn macos_ps_state_parser_only_excludes_zombies() {
+        assert_eq!(macos_ps_state_is_not_zombie("Z+  \n"), Some(false));
+        assert_eq!(macos_ps_state_is_not_zombie("S   \n"), Some(true));
+        assert_eq!(macos_ps_state_is_not_zombie(" \n"), None);
+    }
+
+    #[tokio::test]
+    async fn live_process_group_is_not_reported_empty() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id();
+        let detected = process_group_has_members(pgid).await;
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = child.wait();
+
+        assert!(detected);
+    }
+
+    #[tokio::test]
+    async fn checked_shutdown_accepts_matching_boot_group_and_terminates_it() {
+        use std::os::unix::process::CommandExt;
+
+        let boot_id = format!("shutdown-test-{}", std::process::id());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::tests::boot_identity_fixture_process",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("RBNX_BOOT_ID", &boot_id)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id();
+        let record = PackageRuntimeRecord {
+            name: "shutdown-test".into(),
+            pid: pgid,
+            pgid,
+            ..PackageRuntimeRecord::default()
+        };
+
+        let complete = shutdown_package_runtime_checked(
+            None,
+            &record,
+            std::time::Duration::from_secs(2),
+            Some(&boot_id),
+        )
+        .await;
+        let still_running = child.try_wait().unwrap().is_none();
+        if still_running {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pgid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = child.wait();
+
+        assert!(complete);
+        assert!(!still_running);
+    }
+
+    #[tokio::test]
+    async fn mismatched_boot_group_is_rejected_without_signaling() {
+        use std::os::unix::process::CommandExt;
+
+        let boot_id = format!("mismatch-test-{}", std::process::id());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::tests::boot_identity_fixture_process",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("RBNX_BOOT_ID", &boot_id)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id();
+
+        let accepted = terminate_process_group_guarded(
+            pgid,
+            std::time::Duration::from_millis(10),
+            Some("different-boot-id"),
+        )
+        .await;
+        let still_running = child.try_wait().unwrap().is_none();
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = child.wait();
+
+        assert!(!accepted);
+        assert!(still_running);
+    }
+
+    #[tokio::test]
+    async fn zombie_only_process_group_is_reported_empty() {
+        use super::process_is_not_zombie;
+        use std::os::unix::process::CommandExt;
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_is_not_zombie(child.id()).await && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let zombie_detected = !process_is_not_zombie(child.id()).await;
+        let group_has_members = process_group_has_members(child.id()).await;
+        let _ = child.wait();
+
+        assert!(zombie_detected);
+        assert!(!group_has_members);
+    }
+
+    #[test]
+    #[ignore = "spawned by checked_shutdown_accepts_matching_boot_group_and_terminates_it"]
+    fn boot_identity_fixture_process() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
 }

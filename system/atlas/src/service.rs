@@ -113,6 +113,9 @@ fn serialize_provider_kind<S: serde::Serializer>(k: &pb::Kind, ser: S) -> Result
 #[derive(Debug, Clone, Serialize)]
 struct CapabilityProviderState {
     id: String,
+    /// Opaque identity for one successful registration generation. Replaced
+    /// on same-id takeover; never changed by heartbeat/state/declare calls.
+    registration_id: String,
     #[serde(serialize_with = "serialize_provider_kind")]
     kind: pb::Kind,
     namespace: String,
@@ -163,6 +166,7 @@ impl From<&CapabilityProviderState> for pb::CapabilityProvider {
                 .collect(),
             state: provider.state() as i32,
             state_detail: provider.state_detail.clone(),
+            registration_id: provider.registration_id.clone(),
         }
     }
 }
@@ -210,10 +214,8 @@ fn is_legal_transition(prev: pb::LifecycleState, next: pb::LifecycleState) -> bo
 }
 
 fn is_driver_contract(contract_id: &str) -> bool {
-    // Per-area lifecycle drivers: `robonix/primitive/<area>/driver`,
-    // `robonix/service/<area>/driver`. The `{CAP_CLASS}/driver` template in
-    // `capabilities/{primitive,service}/driver.v1.toml` is concretised by
-    // the provider to its area at DeclareCapability time.
+    // Current providers use the shared `robonix/lifecycle/driver`; legacy
+    // per-namespace lifecycle contracts remain valid during migration.
     contract_id.ends_with("/driver")
 }
 
@@ -360,6 +362,7 @@ impl AtlasRegistry {
             // Channels targeting dropped Capabilities are also auto-closed.
             let prev_iface_count = existing.endpoints.len();
             existing.namespace = namespace;
+            existing.registration_id = Uuid::new_v4().to_string();
             existing.capability_md_path = capability_md_path.trim().to_string();
             existing.capability_md = capability_md.to_string();
             existing.last_heartbeat_ms = Self::now_ms();
@@ -377,6 +380,7 @@ impl AtlasRegistry {
             provider_id.clone(),
             CapabilityProviderState {
                 id: provider_id.clone(),
+                registration_id: Uuid::new_v4().to_string(),
                 kind,
                 namespace,
                 capability_md_path: capability_md_path.trim().to_string(),
@@ -503,6 +507,16 @@ impl AtlasRegistry {
                 provider.namespace
             );
         }
+        if is_driver_contract(&contract_id)
+            && let Some(existing) = provider.endpoints.iter().find(|endpoint| {
+                is_driver_contract(&endpoint.contract_id) && endpoint.contract_id != contract_id
+            })
+        {
+            return Err(Status::failed_precondition(format!(
+                "provider '{provider_id}' already declares lifecycle Driver '{}'; cannot also declare '{contract_id}'",
+                existing.contract_id
+            )));
+        }
         if provider
             .endpoints
             .iter()
@@ -609,6 +623,7 @@ impl AtlasRegistry {
                 state: provider.state() as i32,
                 state_detail: provider.state_detail.clone(),
                 capabilities,
+                registration_id: provider.registration_id.clone(),
             });
         }
         out
@@ -890,6 +905,93 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn registration_id_changes_only_on_successful_registration_generation() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("initial registration");
+        let initial = registry
+            .query(
+                "front_camera",
+                pb::Kind::Unspecified,
+                "",
+                Transport::Unspecified,
+            )
+            .await
+            .pop()
+            .expect("initial provider")
+            .registration_id;
+        assert!(!initial.is_empty());
+
+        registry.heartbeat("front_camera").await.expect("heartbeat");
+        let after_heartbeat = registry
+            .query(
+                "front_camera",
+                pb::Kind::Unspecified,
+                "",
+                Transport::Unspecified,
+            )
+            .await
+            .pop()
+            .expect("provider after heartbeat")
+            .registration_id;
+        assert_eq!(after_heartbeat, initial);
+
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("same-kind takeover");
+        let takeover = registry
+            .query(
+                "front_camera",
+                pb::Kind::Unspecified,
+                "",
+                Transport::Unspecified,
+            )
+            .await
+            .pop()
+            .expect("takeover provider")
+            .registration_id;
+        assert_ne!(takeover, initial);
+
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Service,
+                "robonix/service/camera",
+                "",
+                "",
+            )
+            .await
+            .expect_err("cross-kind takeover must fail");
+        let after_rejection = registry
+            .query(
+                "front_camera",
+                pb::Kind::Unspecified,
+                "",
+                Transport::Unspecified,
+            )
+            .await
+            .pop()
+            .expect("provider after rejected takeover")
+            .registration_id;
+        assert_eq!(after_rejection, takeover);
+    }
+
+    #[tokio::test]
     async fn declare_accepts_namespace_mismatch_and_surfaces_diagnostic() {
         let registry = AtlasRegistry::default();
         registry
@@ -964,6 +1066,46 @@ mod endpoint_tests {
             .await;
         assert_eq!(providers.len(), 1);
         assert!(!providers[0].capabilities[0].namespace_mismatch);
+    }
+
+    #[tokio::test]
+    async fn one_provider_cannot_declare_shared_and_legacy_drivers() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "front_camera",
+                "robonix/primitive/camera/driver",
+                Transport::Ros2,
+                "/camera_driver",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("legacy Driver declaration");
+
+        let error = registry
+            .declare(
+                "front_camera",
+                "robonix/lifecycle/driver",
+                Transport::Ros2,
+                "/shared_driver",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect_err("second lifecycle Driver must be rejected");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("cannot also declare"));
     }
 
     #[tokio::test]
@@ -1071,6 +1213,7 @@ cross_namespace = true
             "chassis".to_string(),
             CapabilityProviderState {
                 id: "chassis".to_string(),
+                registration_id: Uuid::new_v4().to_string(),
                 kind: pb::Kind::Primitive,
                 namespace: "robonix/primitive/chassis".to_string(),
                 capability_md_path: String::new(),
