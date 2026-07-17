@@ -51,6 +51,7 @@ from .lifecycle import (
     OLD_ARTIFACT_FALLBACK_ENV,
     bind_user_handler,
     build_lifecycle_servicer,
+    generated_grpc_metadata,
     resolve_servicer,
 )
 from .ros import RosBackend, resolve_msg_type
@@ -757,6 +758,9 @@ class _ProviderBase:
         # 3. atlas-declare every gRPC capability
         endpoint = f"{self._advertise_host()}:{self._driver_port}"
         driver_contract_id, driver_base, driver_method = driver_decl
+        driver_service_name, driver_method_route = generated_grpc_metadata(
+            driver_base, driver_method
+        )
         try:
             self.declare_capability(
                 contract_id=driver_contract_id,
@@ -764,8 +768,8 @@ class _ProviderBase:
                 transport=Transport.GRPC,
                 params=GrpcParams(
                     proto_file="robonix_contracts.proto",
-                    service_name=driver_base,
-                    method=driver_method,
+                    service_name=driver_service_name,
+                    method=driver_method_route,
                 ),
             )
         except Exception as e:  # noqa: BLE001

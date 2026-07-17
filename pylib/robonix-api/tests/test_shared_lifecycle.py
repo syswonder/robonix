@@ -13,6 +13,7 @@ from robonix_api.lifecycle import (
     CMD_SHUTDOWN,
     SHARED_DRIVER_CONTRACT_ID,
     build_lifecycle_servicer,
+    generated_grpc_metadata,
     lifecycle_contract_for_module,
 )
 from robonix_api.capability import _ProviderBase
@@ -105,6 +106,17 @@ def test_omitted_manifest_prefers_current_shared_stub() -> None:
     )
     assert response.ok is True
     assert received == [{"camera": "front"}]
+
+
+def test_generated_driver_metadata_uses_fully_qualified_grpc_route() -> None:
+    assert generated_grpc_metadata("RobonixLifecycleDriver", "Driver") == (
+        "robonix.contracts.RobonixLifecycleDriver",
+        "/robonix.contracts.RobonixLifecycleDriver/Driver",
+    )
+    assert generated_grpc_metadata("RobonixSystemSceneDriver", "Driver") == (
+        "robonix.contracts.RobonixSystemSceneDriver",
+        "/robonix.contracts.RobonixSystemSceneDriver/Driver",
+    )
 
 
 def test_explicit_shared_driver_with_empty_handlers_reaches_active(caplog) -> None:
