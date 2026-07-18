@@ -133,6 +133,10 @@ service:
       # RGB-D remains available for visual SLAM without becoming an occupancy
       # source, which avoids adding depth noise to the authoritative 2D map.
       occupancy_sources: [lidar]
+      # Fuse planar lidar, registered RGB-D, and chassis odometry. The planar
+      # lidar remains the sole occupancy source; RGB-D contributes visual and
+      # geometric constraints without projecting depth noise into the 2D grid.
+      rtabmap_inputs: [lidar, rgbd, odom]
       params_file: config/rtabmap_params.yaml
       sensor_providers:
         lidar2d: tiago_lidar
