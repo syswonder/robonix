@@ -8,7 +8,9 @@ which triggers known scan-matching bugs in slam_toolbox / cartographer
 rotating about the center of the robot").
 This relay subscribes to a Webots scan, flips it to:
     angle_min < angle_max, angle_increment > 0, ranges reversed
-and republishes. SLAM then sees a normal scan and walls stop drifting.
+and republishes it without changing the scan timestamp or timing fields.
+Webots renders the range image at one simulation timestamp, so consumers must
+treat it as an instantaneous scan instead of applying per-ray compensation.
 Usage:
     python3 scan_normalize.py --in /scanner --out /scan_normalized
 """

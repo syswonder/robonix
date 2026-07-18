@@ -17,13 +17,12 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
   exit 1
 fi
 
-# Webots's LaserScan publisher has known quirks (reversed angle_increment,
-# scan_time/time_increment unset, stamp lags one sim step) that wreck
-# downstream SLAM. The lidar primitive owns this fix locally —
-# `scan_normalize.py` republishes the raw /scanner as a standards-compliant
-# scan, and the primitive declares the NORMALISED topic to atlas. Mapping
-# (and any other consumer) only ever sees clean scans; webots-specific
-# compensation never leaks into generic services.
+# Webots publishes scans with a reversed angle definition. The lidar primitive
+# owns that orientation fix locally: `scan_normalize.py` reverses the samples
+# and makes angle_increment positive. A Webots range image represents one
+# simulation timestamp, so the relay passes header.stamp, scan_time, and
+# time_increment through unchanged. Mapping and other consumers use the
+# normalized topic without Webots-specific timing compensation.
 RAW_TOPIC="${TIAGO_SCAN_RAW_TOPIC:-/scanner}"
 OUT_TOPIC="${TIAGO_SCAN_TOPIC:-/scanner_normalized}"
 

@@ -48,3 +48,6 @@ jobs:
       # DeclareInterface / QueryNodes / NegotiateChannel end-to-end.
       - name: cargo test --workspace --all-targets
         run: cargo test --workspace --all-targets
+
+      - name: Webots LaserScan normalization regression
+        run: python3 examples/webots/primitives/tiago_lidar/tests/test_scan_normalize.py

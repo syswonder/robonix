@@ -132,6 +132,10 @@ service:
       # depth rays into the authoritative 2D occupancy grid.
       occupancy_sources: [lidar]
       # Complete simulator tuning is owned by this deployment repository.
+      # Fuse planar lidar, registered RGB-D, and chassis odometry. The planar
+      # lidar remains the sole occupancy source; RGB-D contributes visual and
+      # geometric constraints without projecting depth noise into the 2D grid.
+      rtabmap_inputs: [lidar, rgbd, odom]
       params_file: config/rtabmap_params.yaml
       sensor_providers:
         lidar2d: tiago_lidar
