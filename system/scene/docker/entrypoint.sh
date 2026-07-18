@@ -55,9 +55,10 @@ cd /scene
 
 # Scene's launcher regenerates these stubs with this image's own protobuf
 # toolchain and validates every module before the service container starts.
-# Do not fall back to the ambient host-generated proto_gen: it may target a
-# newer protobuf runtime and must fail closed instead of disabling protobuf's
-# compatibility check.
+# It also bind-masks /scene/rbnx-build/codegen/proto_gen with this same output:
+# robonix-api deliberately discovers and prepends that conventional directory
+# at provider construction time.  Without the mask it would supersede this
+# PYTHONPATH entry with host gencode from a potentially newer runtime.
 SCENE_PROTO_GEN=/scene/rbnx-build/codegen/scene_proto_gen
 if [ ! -f "$SCENE_PROTO_GEN/atlas_pb2.py" ] \
    || [ ! -f "$SCENE_PROTO_GEN/robonix_contracts_pb2_grpc.py" ]; then

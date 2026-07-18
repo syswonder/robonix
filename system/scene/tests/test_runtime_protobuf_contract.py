@@ -100,6 +100,11 @@ exit 0
             self.assertIn("--entrypoint sh", codegen)
             self.assertIn("grpc_tools.protoc", codegen)
             self.assertIn("--entrypoint /scene/docker/entrypoint.sh", service)
+            self.assertIn(
+                f"{scene / 'rbnx-build' / 'codegen' / 'scene_proto_gen'}:"
+                "/scene/rbnx-build/codegen/proto_gen:ro",
+                service,
+            )
             self.assertEqual(ambient.read_text(encoding="utf-8"), "# incompatible host gencode\n")
             self.assertTrue(
                 (scene / "rbnx-build" / "codegen" / "scene_proto_gen" / "atlas_pb2.py").is_file()
