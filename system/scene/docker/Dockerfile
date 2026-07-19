@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # SPDX-License-Identifier: MulanPSL-2.0
 # system/scene container — ROS 2 base + scene's Python deps.
 #
@@ -104,6 +103,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             python3-numpy \
             ros-$ROS_DISTRO-tf2-ros \
             ros-$ROS_DISTRO-tf-transformations \
+            ros-$ROS_DISTRO-rmw-cyclonedds-cpp \
             ros-$ROS_DISTRO-rmw-zenoh-cpp \
             ros-$ROS_DISTRO-zenoh-bridge-dds && \
         rm -rf /var/lib/apt/lists/* \
@@ -225,23 +225,22 @@ RUN mkdir -p /opt/models /opt/models/hf /opt/models/ultralytics /opt/ultralytics
 
 COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
 COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
+COPY _weights/open_clip_pytorch_model.bin /opt/models/open_clip_pytorch_model.bin
 
 # Two CLIP-flavored downloads bake in here:
-#   1. open_clip's ViT-B-32 LAION-2B — goes to HF_HOME.
+#   1. open_clip's ViT-B-32 LAION-2B — copied above from the host model cache.
 #   2. Ultralytics YOLO-World's text encoder — goes to the Ultralytics
 #      weights_dir under /opt/models/ultralytics.
 #
-# Non-pip model downloads. CN-native: open_clip's weights come from the HF
-# mirror (HF_ENDPOINT, set above). Ultralytics uses openai/clip internally from
+# open_clip receives a local checkpoint path, so it never calls the Hugging
+# Face metadata API. Ultralytics uses openai/clip internally from
 # YOLOWorld.set_classes(); run that exact path at build time so start never
 # downloads the 354 MB ViT-B-32.pt into /scene/weights/clip.
 RUN with-build-proxy sh <<'EOF'
 set -eux
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HUB_DOWNLOAD_TIMEOUT=120
 export YOLO_CONFIG_DIR=/opt/ultralytics
 
-python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
+python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='/opt/models/open_clip_pytorch_model.bin')"
 
 python3 - <<'PY'
 from ultralytics.utils import SETTINGS
@@ -297,7 +296,7 @@ ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
     SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
     YOLO_CONFIG_DIR=/opt/ultralytics \
     SCENE_CLIP_MODEL=ViT-B-32 \
-    SCENE_CLIP_PRETRAINED=laion2b_s34b_b79k
+    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin
 
 WORKDIR /scene
 
