@@ -10,6 +10,7 @@ from memory_service.storage.graph_store import GraphStore
 from memory_service.storage.tag_index import TagIndex
 from memory_service.storage.vector_store import VectorStore
 from memory_service.storage.embedding_config import EmbeddingModelConfig
+from memory_service.storage.image_store import ImageStore
 from memory_service.core.remember import RememberPipeline, _rule_based_tag_extraction, _generate_summary
 
 
@@ -74,7 +75,8 @@ class TestRememberPipeline:
         self.tags = TagIndex()
         cfg = EmbeddingModelConfig(dim=8)
         self.vectors = VectorStore(config=cfg, alpha=0.3)
-        self.pipeline = RememberPipeline(self.graph, self.tags, self.vectors)
+        self.images = ImageStore(image_root=os.path.join(self.tmp, "images"))
+        self.pipeline = RememberPipeline(self.graph, self.tags, self.vectors, self.images)
 
     def teardown_method(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -146,6 +148,21 @@ class TestRememberPipeline:
         node = self.graph.get_node(resp.node_id)
         assert node.spatial_data is None
         assert node.tags.objects_present == []
+
+    def test_image_base64_in_kv_saves_image(self):
+        """When kv contains 'image_base64', remember pipeline saves it."""
+        import base64
+        lr = LogRecord(ts=100, level="Info", tag="camera",
+                       msg="camera snapshot in kitchen")
+        img_bytes = b"\x89PNG\r\n\x1a\nfake png frame data"
+        req = RememberRequest(
+            session_id="s4", plan_id="p4", log_record=lr,
+            kv={"image_base64": base64.b64encode(img_bytes).decode("ascii")},
+        )
+        resp = self._run(req)
+        node = self.graph.get_node(resp.node_id)
+        assert len(node.image_refs) >= 1
+        assert "frame_0001.jpg" in node.image_refs[0]
 
 
 # ── Runner ───────────────────────────────────────────────────────────────

@@ -44,6 +44,10 @@ log.info("scribe_mem: starting")
 def _log_environment() -> None:
     log.info("python   : %s (%s)", sys.version.replace("\n", " "), sys.executable)
     log.info("cwd      : %s", os.getcwd())
+    log.info("embedding: enabled=%s (set MEMGRAPH_ENABLE_EMBEDDING=1 to activate)",
+             _ENABLE_EMBEDDING)
+    log.info("clean_start: enabled=%s (set MEMGRAPH_KEEP_DATA=1 to preserve)",
+             not _KEEP_DATA)
     model_path = os.environ.get(
         "EMBEDDING_MODEL_PATH",
         os.path.join(os.path.expanduser("~"),
@@ -63,6 +67,7 @@ from .storage.graph_store import GraphStore  # noqa: E402
 from .storage.tag_index import TagIndex  # noqa: E402
 from .storage.vector_store import VectorStore  # noqa: E402
 from .storage.embedding_config import EmbeddingModelConfig  # noqa: E402
+from .storage.image_store import ImageStore  # noqa: E402
 from .core.remember import RememberPipeline  # noqa: E402
 from .core.retrieve import RetrievePipeline  # noqa: E402
 from .core.compact import CompactPipeline  # noqa: E402
@@ -78,14 +83,57 @@ MEMORY_DIR = str(
     .resolve()
 )
 
+# ── 2a. Clean slate: wipe persisted data on every boot ────────────────
+# The memory graph is ephemeral per session — delete prior graph and
+# all observation images so each rbnx boot starts from a clean state.
+# Set MEMGRAPH_KEEP_DATA=1 to opt out (e.g. debugging persistence bugs).
+_KEEP_DATA = os.environ.get("MEMGRAPH_KEEP_DATA", "0") in ("1", "true", "yes")
+
+def _clean_slate() -> None:
+    """Delete graph_store.json and all image directories from prior runs."""
+    import shutil
+    graph_json = os.path.join(MEMORY_DIR, "graph_store.json")
+    if os.path.exists(graph_json):
+        os.remove(graph_json)
+        log.info("scribe_mem: cleaned %s", graph_json)
+
+    images_dir = str(Path(__file__).resolve().parent.parent / "data" / "images")
+    if os.path.isdir(images_dir):
+        count = 0
+        for entry in os.listdir(images_dir):
+            entry_path = os.path.join(images_dir, entry)
+            try:
+                if os.path.isdir(entry_path):
+                    shutil.rmtree(entry_path, ignore_errors=True)
+                else:
+                    os.remove(entry_path)
+                count += 1
+            except OSError as e:
+                log.debug("scribe_mem: clean_images: %s: %s", entry, e)
+        if count:
+            log.info("scribe_mem: cleaned %d entries from %s", count, images_dir)
+
+if not _KEEP_DATA:
+    _clean_slate()
+
+# ── 2b. Embedding toggle ──────────────────────────────────────────────
+# Embedding (sentence-transformers / all-MiniLM-L6-v2) is OFF by default.
+# Set MEMGRAPH_ENABLE_EMBEDDING=1 to load the model and enable the
+# BM25+Cosine hybrid ranking path (Path B in retrieve.py).
+_ENABLE_EMBEDDING = os.environ.get("MEMGRAPH_ENABLE_EMBEDDING", "0") in ("1", "true", "yes")
+
+graph_type = "GraphStore"
+idx_type = "TagIndex"
+vec_type = "VectorStore(BM25 only)" if not _ENABLE_EMBEDDING else "VectorStore(BM25+Embedding)"
 log.info("scribe_mem: graph_store → %s", os.path.join(MEMORY_DIR, "graph_store.json"))
 log.info("scribe_mem: scribe_log  → %s", os.path.join(_LOG_DIR, "service_memory.log"))
-log.info("scribe_mem: backend     → GraphStore + TagIndex + VectorStore(BM25+Embedding)")
+log.info("scribe_mem: backend     → %s + %s + %s + ImageStore", graph_type, idx_type, vec_type)
 
 _graph = GraphStore(data_dir=MEMORY_DIR)
 _tags = TagIndex()
-_vectors = VectorStore(alpha=0.3)
-_remember_pipe = RememberPipeline(_graph, _tags, _vectors)
+_vectors = VectorStore(alpha=0.3, embedding_enabled=_ENABLE_EMBEDDING)
+_images = ImageStore()
+_remember_pipe = RememberPipeline(_graph, _tags, _vectors, _images)
 _retrieve_pipe = RetrievePipeline(_graph, _tags, _vectors)
 _compact_pipe = CompactPipeline(_graph)
 
@@ -105,14 +153,16 @@ class MemoryService:
             self.graph = GraphStore(data_dir=data_dir)
             self.tags = TagIndex()
             ecfg = embedding_config or EmbeddingModelConfig()
-            self.vectors = VectorStore(config=ecfg, alpha=alpha)
+            self.vectors = VectorStore(config=ecfg, alpha=alpha,
+                                      embedding_enabled=_ENABLE_EMBEDDING)
         else:
             self.graph = _graph
             self.tags = _tags
             self.vectors = _vectors
 
         # Always create own pipelines bound to own stores
-        self._remember_pipe = RememberPipeline(self.graph, self.tags, self.vectors)
+        self._images = ImageStore()
+        self._remember_pipe = RememberPipeline(self.graph, self.tags, self.vectors, self._images)
         self._retrieve_pipe = RetrievePipeline(self.graph, self.tags, self.vectors)
         self._compact_pipe = CompactPipeline(self.graph)
 
@@ -221,10 +271,18 @@ if _MCP_AVAILABLE:
     async def _mcp_remember(msg: String) -> String:
         """Write a structured memory node into the CKG (Causal Knowledge Graph).
 
-        Use this to record a robot action, observation, or decision for
-        later retrieval.  Each node is tagged across four dimensions
-        (spatial / behavioural / cognitive / optimisation) and
-        automatically embedded for hybrid BM25+vector search.
+        Observations are saved AUTOMATICALLY — when scene.list_objects detects
+        objects, the Scene service captures the camera frame and saves
+        everything to memory.  Do NOT call remember after list_objects
+        or camera_snapshot — it is already handled for you.
+
+        Use remember only for EXPLICIT saves: user preferences ("the user
+        likes the red cup"), action results ("grasp succeeded"), navigation
+        events, or any fact the robot should recall later.
+
+        Each node is automatically tagged across four dimensions (spatial /
+        behavioural / cognitive / optimisation) and embedded for hybrid
+        BM25+vector search.
 
         Request JSON schema:
         {
@@ -244,6 +302,7 @@ if _MCP_AVAILABLE:
             ]
           },
           "parent_node_id": 5,           // optional — causal parent
+          "image_base64": "<base64>",    // optional — manual image attach
           "kv": {}                        // optional — extra metadata
         }
 
@@ -256,11 +315,16 @@ if _MCP_AVAILABLE:
 
         session_id = req_dict.get("session_id")
         plan_id = req_dict.get("plan_id")
-        log.info("API remember: sid=%s pid=%s tag=%s msg=%r (%d chars)",
+        b64_len = len(req_dict.get("image_base64", ""))
+        n_objs = len((req_dict.get("spatial") or {}).get("objects", []))
+        log.info("API remember: sid=%s pid=%s tag=%s msg=\"%s\" (%s chars) "
+                 "has_image=%s b64len=%d objects=%d",
                  session_id, plan_id,
                  req_dict.get("log_record", {}).get("tag", "?"),
                  (req_dict.get("log_record", {}).get("msg", "") or "")[:60],
-                 len(req_dict.get("log_record", {}).get("msg", "")))
+                 str(len(req_dict.get("log_record", {}).get("msg", ""))),
+                 "yes" if req_dict.get("image_base64") else "no",
+                 b64_len, n_objs)
 
         if not session_id or not plan_id:
             return _json_error(
@@ -291,19 +355,24 @@ if _MCP_AVAILABLE:
             log_record=lr,
             spatial=spatial,
             parent_node_id=req_dict.get("parent_node_id"),
+            image_base64=req_dict.get("image_base64", ""),
             kv=req_dict.get("kv") if isinstance(req_dict.get("kv"), dict) else {},
         )
         resp = await _remember_pipe.execute(request)
         node = _graph.get_node(resp.node_id)
         summary = node.summary if node else "?"
-        log.info("API remember: sid=%s pid=%s node_id=%d summary=%r",
-                 request.session_id, request.plan_id, resp.node_id, summary)
+        log.info("API remember: sid=%s pid=%s node_id=%s summary=\"%s\"",
+                 request.session_id, request.plan_id, str(resp.node_id), summary)
         return _json_ok({"node_id": resp.node_id, "message": resp.message})
 
     @_memory_svc.mcp("robonix/service/memory/hybrid_search")
     async def _mcp_search(msg: String) -> String:
         """Search the CKG memory using a 3-stage pipeline: tag filter → hybrid
         BM25+embedding ranking → causal/time/weight filter.
+
+        Returns ONLY memories that were previously saved via remember.  If no
+        observations have been persisted (e.g. you looked but forgot to call
+        remember), this will return empty results.
 
         Tags are used for O(1) inverted-index pre-filtering BEFORE vector
         ranking.  Always set as many tag fields as the user's intent
@@ -327,12 +396,17 @@ if _MCP_AVAILABLE:
             "start_ts": 1765432100000000000,
             "end_ts":   1765432200000000000             // 0 = no upper bound
           },
-          "require_executable": false                   // default false (Phase2)
+          "require_executable": false,                  // default false (Phase2)
+          "vlm_qa": false                                // if true, return VLM answer from node images
         }
 
         Response JSON:
         {
           "nodes": [
+            ...
+          ],
+          "vlm_answer": "There was a red cup on the kitchen counter."  // only when vlm_qa=true
+        }
             {
               "node_id": 42,
               "summary": "successfully grasp red cup in kitchen",
@@ -396,13 +470,18 @@ if _MCP_AVAILABLE:
             query=query.strip(), tags=tags, top_k=max(1, min(top_k, 100)),
             alpha=alpha, time_range=time_range,
             require_executable=bool(req_dict.get("require_executable", False)),
+            vlm_qa=bool(req_dict.get("vlm_qa", False)),
         )
         resp = await _retrieve_pipe.execute(request)
-        log.info("API search: query=%r tags=%s top_k=%d alpha=%s → %d results",
+        log.info("API search: query=\"%s\" tags=%s top_k=%s alpha=%s vlm_qa=%s → %s results",
                  request.query[:80],
                  request.tags.to_dict() if request.tags else "{}",
-                 request.top_k, request.alpha, len(resp.nodes))
-        return _json_ok({"nodes": [n.to_dict() for n in resp.nodes]})
+                 str(request.top_k), str(request.alpha), str(request.vlm_qa),
+                 str(len(resp.nodes)))
+        result = {"nodes": [n.to_dict() for n in resp.nodes]}
+        if resp.vlm_answer:
+            result["vlm_answer"] = resp.vlm_answer
+        return _json_ok(result)
 
     @_memory_svc.mcp("robonix/service/memory/promote")
     async def _mcp_compact(msg: Empty) -> String:
@@ -470,11 +549,91 @@ def main() -> int:
 
     _log_environment()
     log.info("memory_dir = %s", MEMORY_DIR)
-    log.info("backend: GraphStore(%d nodes), embedding=%s (semantic=%s)",
-             _graph.count(), _vectors._config.model_name, _vectors.is_semantic)
+    log.info("backend: GraphStore(%d nodes), embedding=%s (enabled=%s)",
+             _graph.count(),
+             _vectors._config.model_name if _ENABLE_EMBEDDING else "disabled",
+             _ENABLE_EMBEDDING)
+    # ── Scene Hook HTTP endpoint (raw, no MCP session needed) ─────
+    _start_scene_hook_server()
+
     log.info("scribe_mem service ready; entering memory_svc.run()")
     _memory_svc.run()
     return 0
+
+
+def _start_scene_hook_server() -> None:
+    """Start a tiny HTTP server on port 37798 for Scene Hook direct POST.
+
+    FastMCP's Streamable HTTP transport requires SSE session negotiation
+    which is too complex for a simple service-to-service Hook.  This
+    endpoint accepts raw JSON POST directly — no MCP protocol overhead.
+    """
+    import json as _json
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    class _HookHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            t0 = time.time()
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else b""
+            try:
+                data = _json.loads(body)
+            except Exception:
+                log.warning("scene_hook.http: bad JSON body (%d bytes)", len(body))
+                self._reply(400, {"error": "invalid json"})
+                return
+
+            has_img = "yes" if data.get("image_base64") else "no"
+            n_objs = len(data.get("spatial", {}).get("objects", []))
+            b64_len = len(data.get("image_base64", ""))
+            log.info("scene_hook.http: received — has_image=%s objects=%d b64len=%d body=%dB",
+                     has_img, n_objs, b64_len, length)
+
+            # Run the remember pipeline synchronously in this thread.
+            import asyncio as _asyncio
+            try:
+                lr = LogRecord.from_dict(data.get("log_record", {}))
+                spatial = None
+                if data.get("spatial"):
+                    spatial = SpatialContext.from_dict(data["spatial"])
+                req = RememberRequest(
+                    session_id=data.get("session_id", "scene-hook"),
+                    plan_id=data.get("plan_id", "scene-hook"),
+                    log_record=lr,
+                    spatial=spatial,
+                    image_base64=data.get("image_base64", ""),
+                    kv=data.get("kv") if isinstance(data.get("kv"), dict) else {},
+                )
+                t_pipe = time.time()
+                resp = _asyncio.run(_remember_pipe.execute(req))
+                pipe_ms = (time.time() - t_pipe) * 1000
+                total_ms = (time.time() - t0) * 1000
+                log.info("scene_hook.http: → node %d (pipe %dms, total %dms)",
+                         resp.node_id, round(pipe_ms), round(total_ms))
+                self._reply(200, {"node_id": resp.node_id})
+            except Exception as e:
+                total_ms = (time.time() - t0) * 1000
+                log.warning("scene_hook.http: ! pipeline error after %dms: %s: %s",
+                           round(total_ms), type(e).__name__, e)
+                self._reply(500, {"error": str(e)})
+
+        def _reply(self, code, obj):
+            body = _json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            log.debug("scene_hook: %s", fmt % args)
+
+    port = int(os.environ.get("SCENE_HOOK_PORT", "37798"))
+    server = HTTPServer(("0.0.0.0", port), _HookHandler)
+    thread = threading.Thread(target=server.serve_forever, name="scene-hook", daemon=True)
+    thread.start()
+    log.info("scene_hook: HTTP endpoint on 0.0.0.0:%d", port)
 
 
 if __name__ == "__main__":

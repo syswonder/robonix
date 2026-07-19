@@ -182,6 +182,10 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         --retries 3 \
     && rm /tmp/requirements/scene-perception-heavy.txt
 
+# Force protobuf upgrade — host rbnx codegen emits >=7.35 protos;
+# the base ROS image ships an older runtime.
+RUN without-proxy pip install --upgrade "protobuf>=7.35"
+
 # pytorch3d (see requirements/scene-pytorch3d.txt to decide whether installing it or not.)
 # COPY requirements/scene-pytorch3d.txt /tmp/requirements/scene-pytorch3d.txt
 # RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \

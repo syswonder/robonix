@@ -12,6 +12,7 @@ into a JSON-schema-typed MCP tool that Pilot discovers via atlas.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -59,6 +60,144 @@ _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
+
+# Scene Hook: when list_objects detects visible objects, automatically
+# capture the latest RGB frame and POST to memgraph's Scene Hook HTTP
+# endpoint so the robot's memory is updated without Pilot involvement.
+_MEMGRAPH_HOOK_URL = "http://localhost:37798"
+_SAVE_COOLDOWN_S = 2.0
+_last_save_ts: float = 0.0
+_last_save_ids: frozenset = frozenset()
+
+
+async def _try_save_observation(visible_objects: list) -> None:
+    """Fire-and-forget: capture RGB frame + save observation to memgraph.
+
+    Never raises — all failures are logged at debug/warning level so
+    the caller (list_objects) is never affected.
+
+    Log trace (every stage emits a structured log line so the full
+    lifecycle is grep-able):
+      scene_hook: triggered — N objects: [...]           (info, entry)
+      scene_hook: rgb WxH encoding (seq=N, age=Ts)       (info)
+      scene_hook: encoded WxH → JPEG N bytes (ratio=X%)  (info)
+      scene_hook: POST N bytes → memgraph ...            (info)
+      scene_hook: ← memgraph 200 node=N (Tms)            (info, success)
+      scene_hook: ← memgraph NNN <reason>                (warning, failure)
+      scene_hook: ! <exception>                           (warning, crash)
+    """
+    global _last_save_ts, _last_save_ids
+    t0 = time.time()
+
+    # ── throttle: skip when the same objects were just saved ──────
+    now = t0
+    obj_ids = frozenset(o.object_id for o in visible_objects)
+    if obj_ids == _last_save_ids and (now - _last_save_ts) < _SAVE_COOLDOWN_S:
+        log.debug("scene_hook: throttled (same %d objects, %.1fs ago)",
+                  len(obj_ids), now - _last_save_ts)
+        return
+
+    labels = [o.cls for o in visible_objects if o.cls]
+    n_objs = len(visible_objects)
+    log.info("scene_hook: triggered — %d objects: %s",
+             n_objs, ", ".join(labels) if labels else "<none>")
+
+    try:
+        # ── grab latest RGB frame from ROS hub ────────────────────
+        if _HUB is None or not _HUB.has("rgb"):
+            log.info("scene_hook: skip — no rgb subscriber on hub")
+            return
+        rgb_msg, stamp_unix, seq = _HUB.latest("rgb")
+        if rgb_msg is None:
+            log.info("scene_hook: skip — no rgb frame yet (hub has slot, seq=0)")
+            return
+
+        h, w, enc = rgb_msg.height, rgb_msg.width, rgb_msg.encoding
+        frame_age_s = (time.time() - stamp_unix) if stamp_unix > 0 else -1
+        log.info("scene_hook: rgb %dx%d %s (seq=%d, age=%.1fs)",
+                 w, h, enc, seq, frame_age_s)
+
+        # ── raw RGB8 → JPEG ───────────────────────────────────────
+        t_encode = time.time()
+        import numpy as np
+
+        try:
+            import cv2
+        except ImportError:
+            log.info("scene_hook: skip — cv2 unavailable")
+            return
+
+        raw = bytes(rgb_msg.data)
+        arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, -1)
+        if enc == "rgb8":
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        ok, jpg = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            log.warning("scene_hook: cv2.imencode returned False")
+            return
+        import base64
+        jpg_bytes = jpg.tobytes()
+        img_b64 = base64.b64encode(jpg_bytes).decode("ascii")
+        raw_kb, jpg_kb = len(raw) / 1024, len(jpg_bytes) / 1024
+        encode_ms = (time.time() - t_encode) * 1000
+        log.info("scene_hook: encoded %dx%d → JPEG %.1f KB (raw %.1f KB, ratio %.0f%%, %dms)",
+                 w, h, jpg_kb, raw_kb, 100 * jpg_kb / max(raw_kb, 1), encode_ms, round(encode_ms))
+
+        # ── build remember request ────────────────────────────────
+        msg = (
+            f"observed {', '.join(labels)} in the scene"
+            if labels
+            else "observed scene"
+        )
+        spatial_objects = [
+            {
+                "obj_id": o.object_id,
+                "label": o.cls,
+                "x": float(o.pose.x),
+                "y": float(o.pose.y),
+                "z": float(o.pose.z),
+            }
+            for o in visible_objects
+        ]
+        payload = {
+            "session_id": "scene-auto",
+            "plan_id": "scene-auto",
+            "log_record": {
+                "ts": time.time_ns(),
+                "level": "Info",
+                "tag": "scene",
+                "msg": msg,
+            },
+            "spatial": {"origin": "world", "objects": spatial_objects},
+            "image_base64": img_b64,
+        }
+        body_bytes = len(img_b64)  # approximate — base64 dominates
+
+        # ── POST to memgraph Scene Hook ───────────────────────────
+        t_post = time.time()
+        import httpx
+
+        log.info("scene_hook: POST → memgraph (%d objects, b64len=%d, body≈%.1f KB)",
+                 n_objs, len(img_b64), body_bytes / 1024)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(_MEMGRAPH_HOOK_URL, json=payload)
+        post_ms = (time.time() - t_post) * 1000
+
+        if r.status_code >= 400:
+            log.warning("scene_hook: ← memgraph %d (%dms): %s",
+                        r.status_code, round(post_ms), r.text[:200])
+            return
+
+        result = r.json()
+        node_id = result.get("node_id", "?")
+        _last_save_ts = now
+        _last_save_ids = obj_ids
+        total_ms = (time.time() - t0) * 1000
+        log.info("scene_hook: ← memgraph 200 node=%s (%dms post, %dms total)",
+                 node_id, round(post_ms), round(total_ms))
+    except Exception:
+        total_ms = (time.time() - t0) * 1000
+        log.warning("scene_hook: ! exception after %dms", round(total_ms), exc_info=True)
 
 
 def attach_state(*, registry: ObjectRegistry, hub=None) -> None:
@@ -208,6 +347,13 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
         objects.extend(_annotation_to_object(a) for a in _ANNO_STORE.list() if a.kind == "room")
+
+    # Scene Hook: auto-save observation when objects are visible.
+    # This is fire-and-forget — list_objects returns immediately
+    # regardless of whether the save succeeds.
+    if visible:
+        asyncio.create_task(_try_save_observation(visible))
+
     return ListObjects_Response(
         objects=objects,
         stamp_unix=time.time(),

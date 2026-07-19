@@ -1,11 +1,17 @@
-"""Retrieve pipeline — 3-stage search: TagFilter → BM25+Embedding → Causal/Time/Weight.
+"""Retrieve pipeline — 3-stage search: TagFilter → Rank → Filters.
+
+Stage 2 ranking has three paths, chosen by availability:
+
+  a) LLM credentials set → LLM ranks the full memory graph (default, best quality)
+  b) LLM unavailable, embedding model installed → BM25 + Cosine hybrid
+  c) Neither → chronological fallback (most recent first)
 
 Pipeline:
   1. Tag filter: tag_index.query(tag_filter) → candidate set O(1)
-  2. Hybrid rank: vector_store.search(query, candidates, top_k, alpha)
+  2. Rank: llm_rank (LLM default) or vector_store.search (embedding) or chronological
   3. Causal filter (Phase1: skip, Phase2: check parent nodes are reproducible)
   4. Time filter: filter by time_range
-  5. Weight sort: weight × hybrid_score → final ranking
+  5. Weight sort: weight × score → final ranking
   6. Fetch full MemoryNode from GraphStore → return
 """
 
@@ -13,13 +19,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List, Optional, Set
+from typing import List, Set
 
 from ..storage.graph_store import GraphStore
 from ..storage.tag_index import TagIndex
 from ..storage.vector_store import VectorStore
+from . import llm_search
 from .types import (
-    MemoryNode, SearchRequest, SearchResponse, TagFilter, TimeRange,
+    MemoryNode, SearchRequest, SearchResponse, TagFilter,
 )
 
 log = logging.getLogger("scribe_mem")
@@ -32,10 +39,10 @@ class RetrievePipeline:
                  vector_store: VectorStore):
         self._graph = graph_store
         self._tags = tag_index
-        self._vectors = vector_store
+        self._vectors = vector_store  # kept for optional embedding path
 
     async def execute(self, request: SearchRequest) -> SearchResponse:
-        """Execute the 3-stage search pipeline.
+        """Execute the search pipeline: TagFilter → LLM rank → filters.
 
         Returns:
             SearchResponse with ranked MemoryNode list.
@@ -49,14 +56,41 @@ class RetrievePipeline:
 
         log.debug("search: tag filter → %d candidates", len(candidate_ids))
 
-        # ── Stage 2: BM25 + Embedding hybrid ranking ──
+        # ── Stage 2: LLM rank (default) → embedding → chronological ──
         top_k = max(1, request.top_k)
-        ranked = self._vectors.search(
-            query=request.query,
-            candidate_ids=candidate_ids,
-            top_k=max(top_k * 3, 10),  # over-fetch for downstream filtering
-            alpha=request.alpha,
-        )
+        overfetch = max(top_k * 3, 10)
+
+        if llm_search.llm_search_available():
+            # Path A: LLM (default — best quality, works without embedding)
+            log.info("search: using LLM ranker")
+            ranked = await llm_search.llm_rank(
+                query=request.query,
+                candidate_ids=candidate_ids,
+                graph_get=self._graph.get_node,
+                top_k=overfetch,
+            )
+        elif self._vectors.is_semantic:
+            # Path B: BM25 + Cosine hybrid (embedding model installed)
+            log.info("search: LLM unavailable — using embedding ranker")
+            ranked = self._vectors.search(
+                query=request.query,
+                candidate_ids=candidate_ids,
+                top_k=overfetch,
+                alpha=request.alpha,
+            )
+        else:
+            # Path C: chronological fallback (best-effort)
+            log.info("search: LLM and embedding unavailable — chronological")
+            nodes = [
+                self._graph.get_node(nid) for nid in candidate_ids
+            ]
+            nodes = [n for n in nodes if n is not None]
+            nodes.sort(key=lambda n: n.timestamp, reverse=True)
+            ranked = [
+                (n.node_id, max(0.05, 1.0 - i * 0.1))
+                for i, n in enumerate(nodes[:overfetch])
+            ]
+
         if not ranked:
             return SearchResponse(nodes=[])
 
@@ -107,4 +141,44 @@ class RetrievePipeline:
                 result_nodes.append(node)
 
         log.info("search: \"%s\" → %d results", request.query[:60], len(result_nodes))
-        return SearchResponse(nodes=result_nodes)
+
+        # ── Stage 6: VLM QA (optional) ──
+        vlm_answer = ""
+        if request.vlm_qa and result_nodes:
+            # Collect image paths and build node contexts
+            all_image_refs: List[str] = []
+            node_ctx: List[str] = []
+            for n in result_nodes[:3]:
+                # Build a compact context string for each node
+                parts = [f"summary: \"{n.summary}\""]
+                if n.tags:
+                    parts.append(f"scene={n.tags.scene_type or '?'}")
+                    parts.append(f"action={n.tags.action_type or '?'}")
+                    if n.tags.objects_present:
+                        parts.append(f"objects={','.join(n.tags.objects_present)}")
+                    parts.append(f"success={n.tags.success}")
+                if n.spatial_data and n.spatial_data.objects:
+                    coords = "; ".join(
+                        f"{o.label}@{o.x:.1f},{o.y:.1f},{o.z:.1f}"
+                        for o in n.spatial_data.objects
+                    )
+                    parts.append(f"spatial={coords}")
+                node_ctx.append(" | ".join(parts))
+                if n.image_refs:
+                    all_image_refs.extend(n.image_refs)
+            if all_image_refs or node_ctx:
+                log.info("search: vlm_qa → %d images, %d contexts for query %r",
+                         len(all_image_refs), len(node_ctx), request.query[:60])
+                from .observe import vlm_answer_question
+                answer = await vlm_answer_question(
+                    query=request.query,
+                    image_paths=all_image_refs,
+                    node_contexts=node_ctx,
+                )
+                if answer:
+                    vlm_answer = answer
+                    log.info("search: vlm_qa answer → %r", answer[:120])
+                else:
+                    log.info("search: vlm_qa — VLM unavailable, skipping")
+
+        return SearchResponse(nodes=result_nodes, vlm_answer=vlm_answer)
