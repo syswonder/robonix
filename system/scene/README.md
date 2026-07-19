@@ -274,6 +274,7 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
+| `SCENE_WEB_HOST` | `0.0.0.0` | Web UI bind host; set `127.0.0.1` on a robot/control workstation to keep the operator surface local-only. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
 | `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
