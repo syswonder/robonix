@@ -632,6 +632,11 @@ jobs:
             [ -d "$d/.git" ] && echo "$(basename "$d") @ $(git -C "$d" rev-parse --short HEAD) $(git -C "$d" log -1 --format=%s)"
           done | tee "$RUNNER_TEMP/remote-provenance.txt"
 
+      - name: Validate Executor control-plane isolation
+        run: |
+          set -euo pipefail
+          bash scripts/test_executor_cancel_isolation.sh
+
       - name: Start isolated Webots simulator
         working-directory: examples/webots/sim
         env:

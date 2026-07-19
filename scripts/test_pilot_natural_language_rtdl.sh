@@ -9,6 +9,9 @@ DEPLOY_DIR="${ROBONIX_TEST_DEPLOY_DIR:-$HOME/robot-agilex-ranger_mini_v3}"
 ATLAS_ADDR="${RBNX_TEST_ATLAS_ADDR:-127.0.0.1:52051}"
 EXECUTOR_ADDR="${RBNX_TEST_EXECUTOR_ADDR:-127.0.0.1:52061}"
 PILOT_ADDR="${RBNX_TEST_PILOT_ADDR:-127.0.0.1:52071}"
+ATLAS_BIN="${ROBONIX_ATLAS_BIN:-$(command -v robonix-atlas || true)}"
+EXECUTOR_BIN="${ROBONIX_EXECUTOR_BIN:-$(command -v robonix-executor || true)}"
+PILOT_BIN="${ROBONIX_PILOT_BIN:-$(command -v robonix-pilot || true)}"
 WORK="$(mktemp -d /tmp/robonix-pilot-language.XXXXXX)"
 TRACE="$WORK/timeline.log"
 ATLAS_LOG="$WORK/atlas.log"
@@ -35,6 +38,10 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+
+: "${ATLAS_BIN:?robonix-atlas is not on PATH; set ROBONIX_ATLAS_BIN}"
+: "${EXECUTOR_BIN:?robonix-executor is not on PATH; set ROBONIX_EXECUTOR_BIN}"
+: "${PILOT_BIN:?robonix-pilot is not on PATH; set ROBONIX_PILOT_BIN}"
 
 if [[ ! -f "$DEPLOY_DIR/.env" ]]; then
   echo "missing $DEPLOY_DIR/.env" >&2
@@ -71,19 +78,19 @@ raise SystemExit(f"{sys.argv[1]} did not listen within 15s")
 PY
 }
 
-"$HOME/.cargo/bin/robonix-atlas" \
+"$ATLAS_BIN" \
   --listen "$ATLAS_ADDR" --capabilities "$ROOT/capabilities" \
   >"$ATLAS_LOG" 2>&1 &
 ATLAS_PID=$!
 wait_port "$ATLAS_ADDR"
 
-"$HOME/.cargo/bin/robonix-executor" \
+"$EXECUTOR_BIN" \
   --atlas "$ATLAS_ADDR" --listen "$EXECUTOR_ADDR" --id executor \
   >"$EXECUTOR_LOG" 2>&1 &
 EXECUTOR_PID=$!
 wait_port "$EXECUTOR_ADDR"
 
-"$HOME/.cargo/bin/robonix-pilot" \
+"$PILOT_BIN" \
   --atlas "$ATLAS_ADDR" --listen "$PILOT_ADDR" --id pilot \
   >"$PILOT_LOG" 2>&1 &
 PILOT_PID=$!

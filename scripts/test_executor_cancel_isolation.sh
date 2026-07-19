@@ -7,6 +7,8 @@ set -euo pipefail
 ROOT="${ROBONIX_SOURCE_PATH:-$(cd "$(dirname "$0")/.." && pwd)}"
 ATLAS_ADDR="${RBNX_TEST_ATLAS_ADDR:-127.0.0.1:51051}"
 EXECUTOR_ADDR="${RBNX_TEST_EXECUTOR_ADDR:-127.0.0.1:51061}"
+ATLAS_BIN="${ROBONIX_ATLAS_BIN:-$(command -v robonix-atlas || true)}"
+EXECUTOR_BIN="${ROBONIX_EXECUTOR_BIN:-$(command -v robonix-executor || true)}"
 WORK="$(mktemp -d /tmp/robonix-rtdl-isolation.XXXXXX)"
 TRACE="$WORK/timeline.log"
 ATLAS_LOG="$WORK/atlas.log"
@@ -29,11 +31,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+: "${ATLAS_BIN:?robonix-atlas is not on PATH; set ROBONIX_ATLAS_BIN}"
+: "${EXECUTOR_BIN:?robonix-executor is not on PATH; set ROBONIX_EXECUTOR_BIN}"
+
 export ROBONIX_SOURCE_PATH="$ROOT"
 export SCRIBE_STDOUT_LEVEL=warn
 export SCRIBE_FILE_LEVEL=debug
 
-"$HOME/.cargo/bin/robonix-atlas" \
+"$ATLAS_BIN" \
   --listen "$ATLAS_ADDR" \
   --capabilities "$ROOT/capabilities" \
   >"$ATLAS_LOG" 2>&1 &
@@ -52,7 +57,7 @@ while time.time() < deadline:
 raise SystemExit("atlas did not listen within 10s")
 PY
 
-"$HOME/.cargo/bin/robonix-executor" \
+"$EXECUTOR_BIN" \
   --atlas "$ATLAS_ADDR" \
   --listen "$EXECUTOR_ADDR" \
   --id executor \
