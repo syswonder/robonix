@@ -22,6 +22,12 @@ OPEN_CLIP_FILE = "open_clip_pytorch_model.bin"
 
 
 class OfflineBuildContractTests(unittest.TestCase):
+    def test_weight_downloads_use_a_stable_resumable_partial_file(self):
+        build = (SCENE_ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
+        self.assertIn('local tmp="$cached.part"', build)
+        self.assertIn("-C -", build)
+        self.assertNotIn('local tmp="$cached.tmp.$$"', build)
+
     def test_dockerfiles_default_to_bundled_frontend_and_local_clip(self):
         for name in ("Dockerfile", "Dockerfile.jetson"):
             text = (SCENE_ROOT / "docker" / name).read_text(encoding="utf-8")
