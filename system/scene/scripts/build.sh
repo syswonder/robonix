@@ -140,12 +140,12 @@ fetch_weight_candidates() {
     fi
 
     local source_url
+    local tmp="$cached.part"
     for source_url in "$@"; do
         [[ -z "$source_url" ]] && continue
-        local tmp="$cached.tmp.$$"
-        rm -f "$tmp"
         echo "[build] downloading $name from $source_url"
         if curl -fL \
+                -C - \
                 --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
                 --max-time "$DOWNLOAD_MAX_TIME" \
                 --retry "$DOWNLOAD_RETRIES" \
@@ -159,12 +159,12 @@ fetch_weight_candidates() {
             copy_cached_weight "$cached" "$dest"
             return 0
         fi
-        rm -f "$tmp"
-        echo "[build] download candidate failed; trying next source" >&2
+        echo "[build] download candidate failed; keeping partial file for resume" >&2
     done
 
     rm -f "$dest"
     echo "[build] error: failed to download $name" >&2
+    echo "[build]        partial download retained at $tmp" >&2
     echo "[build]        set ROBONIX_MODEL_CACHE_DIR to a directory containing $name to build offline" >&2
     exit 1
 }
