@@ -63,6 +63,10 @@ ROS_DISTRO_BUILD="${ROBONIX_SCENE_ROS_DISTRO:-humble}"
 UPSTREAM_ROS_BASE_IMAGE="ros:${ROS_DISTRO_BUILD}-ros-base"
 DEFAULT_ROS_BASE_IMAGE="robonix-ros:${ROS_DISTRO_BUILD}-ros-base"
 ROS_BASE_IMAGE="${ROBONIX_SCENE_ROS_BASE_IMAGE:-$DEFAULT_ROS_BASE_IMAGE}"
+# Empty means use the Docker/BuildKit daemon's bundled Dockerfile frontend.
+# A non-empty image reference is forwarded through BuildKit's special
+# pre-parse BUILDKIT_SYNTAX argument (for a pinned digest or registry mirror).
+SCENE_BUILDKIT_SYNTAX="${ROBONIX_SCENE_BUILDKIT_SYNTAX:-}"
 
 if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
@@ -71,7 +75,13 @@ fi
 mkdir -p "$BUILD/data"
 
 # ── 1. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
-FLAGS=(--mcp)
+# --ros2 also emits rbnx-build/codegen/ros2_idl: the generated ROS 2
+# interface overlay carrying map/msg/MapLifecycle (mapping's latched map
+# identity broadcast, which scene's map binding subscribes to). It is
+# colcon-built inside the scene image after the docker build below and
+# sourced by docker/entrypoint.sh; without it scene falls back to static
+# map binding (SCENE_MAP_ID / config) with a warning.
+FLAGS=(--mcp --ros2)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
 echo "[build] rbnx codegen ${FLAGS[*]}"
@@ -95,6 +105,7 @@ MODEL_CACHE_DIR="${ROBONIX_MODEL_CACHE_DIR:-$WEIGHTS_DIR}"
 mkdir -p "$WEIGHTS_DIR" "$MODEL_CACHE_DIR"
 
 GH_MIRROR="${RBNX_GH_MIRROR-https://ghfast.top/}"
+HF_MIRROR="${RBNX_HF_MIRROR-${HF_ENDPOINT:-https://hf-mirror.com}}"
 DOWNLOAD_CONNECT_TIMEOUT="${RBNX_MODEL_DOWNLOAD_CONNECT_TIMEOUT:-20}"
 DOWNLOAD_MAX_TIME="${RBNX_MODEL_DOWNLOAD_MAX_TIME:-600}"
 DOWNLOAD_RETRIES="${RBNX_MODEL_DOWNLOAD_RETRIES:-3}"
@@ -111,9 +122,9 @@ copy_cached_weight() {
     cp -f "$src" "$dest"
 }
 
-fetch_weight() {
-    local url="$1"
-    local dest="$2"
+fetch_weight_candidates() {
+    local dest="$1"
+    shift
     local name
     name="$(basename "$dest")"
     local cached="$MODEL_CACHE_DIR/$name"
@@ -128,17 +139,13 @@ fetch_weight() {
         return 0
     fi
 
-    local primary="$url"
-    if [[ -n "$GH_MIRROR" ]]; then
-        primary="${GH_MIRROR%/}/$url"
-    fi
-
-    download_one() {
-        local source_url="$1"
-        local tmp="$cached.tmp.$$"
-        rm -f "$tmp"
+    local source_url
+    local tmp="$cached.part"
+    for source_url in "$@"; do
+        [[ -z "$source_url" ]] && continue
         echo "[build] downloading $name from $source_url"
         if curl -fL \
+                -C - \
                 --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
                 --max-time "$DOWNLOAD_MAX_TIME" \
                 --retry "$DOWNLOAD_RETRIES" \
@@ -152,25 +159,45 @@ fetch_weight() {
             copy_cached_weight "$cached" "$dest"
             return 0
         fi
-        rm -f "$tmp"
-        return 1
-    }
-
-    if download_one "$primary"; then
-        return 0
-    fi
-
-    if [[ "$primary" != "$url" ]]; then
-        echo "[build] mirror failed; falling back to direct: $url" >&2
-        if download_one "$url"; then
-            return 0
-        fi
-    fi
+        echo "[build] download candidate failed; keeping partial file for resume" >&2
+    done
 
     rm -f "$dest"
-    echo "[build] error: failed to download $url" >&2
+    echo "[build] error: failed to download $name" >&2
+    echo "[build]        partial download retained at $tmp" >&2
     echo "[build]        set ROBONIX_MODEL_CACHE_DIR to a directory containing $name to build offline" >&2
     exit 1
+}
+
+fetch_weight() {
+    local url="$1"
+    local dest="$2"
+    local primary="$url"
+    local candidates=()
+
+    if [[ -n "$GH_MIRROR" ]]; then
+        primary="${GH_MIRROR%/}/$url"
+    fi
+    candidates+=("$primary")
+    [[ "$primary" != "$url" ]] && candidates+=("$url")
+    fetch_weight_candidates "$dest" "${candidates[@]}"
+}
+
+fetch_hf_weight() {
+    local repo="$1"
+    local filename="$2"
+    local dest="$3"
+    local direct="https://huggingface.co/${repo}/resolve/main/${filename}"
+    local candidates=()
+
+    if [[ -n "$HF_MIRROR" ]]; then
+        local mirrored="${HF_MIRROR%/}/${repo}/resolve/main/${filename}"
+        candidates+=("$mirrored")
+    fi
+    if [[ "${candidates[0]:-}" != "$direct" ]]; then
+        candidates+=("$direct")
+    fi
+    fetch_weight_candidates "$dest" "${candidates[@]}"
 }
 
 fetch_weight \
@@ -180,6 +207,17 @@ fetch_weight \
 fetch_weight \
     "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
     "$WEIGHTS_DIR/mobile_sam.pt"
+
+# open_clip normally resolves this symbolic pretrained name through the
+# Hugging Face metadata API during the Docker build. Fetch the model file on
+# the host instead, using the same retry/cache path as the other scene weights,
+# then COPY it into both Docker variants. RBNX_HF_MIRROR controls the mirror;
+# the canonical huggingface.co URL is always the fallback.
+OPEN_CLIP_WEIGHTS="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
+fetch_hf_weight \
+    "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" \
+    "open_clip_pytorch_model.bin" \
+    "$OPEN_CLIP_WEIGHTS"
 
 # ── 2a. jetson-native: host venv, no docker ────────────────────────────────
 # The heavy CUDA wheels (torch / torchvision / ultralytics / open3d) come from
@@ -222,18 +260,21 @@ if [[ "$TARGET" == "jetson-native" ]]; then
             https://github.com/concept-graphs/concept-graphs.git "$CG"
     fi
     "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
-    # Pre-fetch the CLIP weights into the host HF cache (start_native points
-    # HF_HOME here). Also pre-warm Ultralytics YOLO-World's text encoder path:
+    # Validate the host-staged open_clip checkpoint without contacting the
+    # Hugging Face metadata API. Also pre-warm Ultralytics YOLO-World's text
+    # encoder path:
     # YOLOWorld.set_classes() uses openai/clip via Ultralytics' weights_dir,
     # not open_clip's HF cache. If this is left to start_native, first boot can
     # spend minutes downloading ViT-B-32.pt and miss the scene/object test flow.
-    HFD="$PKG/rbnx-build/data/hf"
     YCD="$PKG/rbnx-build/data/ultralytics"
     UWD="$YCD/weights"
-    mkdir -p "$HFD/clip" "$YCD" "$UWD"
-    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HOME="$HFD" HF_HUB_DOWNLOAD_TIMEOUT=120 \
-        "$PY" -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
-        || echo "[build] warning: open_clip weight prefetch failed (perception will degrade)"
+    mkdir -p "$YCD" "$UWD"
+    SCENE_CLIP_PRETRAINED="$OPEN_CLIP_WEIGHTS" \
+        "$PY" -c "import os, open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained=os.environ['SCENE_CLIP_PRETRAINED'])" \
+        || {
+            echo "[build] error: open_clip could not load $OPEN_CLIP_WEIGHTS" >&2
+            exit 1
+        }
     YOLO_CONFIG_DIR="$YCD" "$PY" <<PY \
         || echo "[build] warning: failed to persist Ultralytics settings"
 from ultralytics.utils import SETTINGS
@@ -274,8 +315,10 @@ classes = [
 model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
 model.set_classes(classes)
 PY
-    if [[ ! -s "$UWD/clip/ViT-B-32.pt" ]]; then
-        echo "[build] warning: missing $UWD/clip/ViT-B-32.pt after ultralytics prefetch; scene start will fail fast" >&2
+    ULTRALYTICS_CLIP="$UWD/clip/ViT-B-32.pt"
+    if [[ ! -s "$ULTRALYTICS_CLIP" ]]; then
+        echo "[build] error: missing $ULTRALYTICS_CLIP after prefetch" >&2
+        exit 1
     fi
     "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
     echo "[build] done (jetson-native)."
@@ -297,6 +340,12 @@ DOCKER_BUILD_FLAGS=(
     --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}"
     --build-arg "ROS_BASE_IMAGE=${ROS_BASE_IMAGE}"
 )
+if [[ -n "$SCENE_BUILDKIT_SYNTAX" ]]; then
+    DOCKER_BUILD_FLAGS+=(--build-arg "BUILDKIT_SYNTAX=${SCENE_BUILDKIT_SYNTAX}")
+    echo "[build] Dockerfile frontend override: ${SCENE_BUILDKIT_SYNTAX}"
+else
+    echo "[build] Dockerfile frontend: builder-bundled (no frontend registry lookup)"
+fi
 [[ "$CLEAN" == "1" ]] && DOCKER_BUILD_FLAGS+=(--no-cache)
 echo "[build] ROS distro: ${ROS_DISTRO_BUILD} (set ROBONIX_SCENE_ROS_DISTRO to change)"
 echo "[build] ROS base image: ${ROS_BASE_IMAGE} (set ROBONIX_SCENE_ROS_BASE_IMAGE to override)"
@@ -369,5 +418,25 @@ esac
 
 echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
 docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
+
+# colcon-build the ros2_idl overlay (map interface package for the
+# lifecycle broadcast) inside the image we just built, so the install
+# tree lands on the host bind mount at the SAME path the runtime
+# container sees (/scene/rbnx-build/...). Skipped when codegen was
+# skipped — scene then runs with static map binding only.
+IDL="$PKG/rbnx-build/codegen/ros2_idl"
+if [[ -d "$IDL/src/map" ]]; then
+    echo "[build] colcon build ros2_idl (map interface pkg) in $IMG"
+    # --user: build/ install/ land on the HOST bind mount — as root they
+    # would survive a later non-root `rm -rf rbnx-build` (RBNX_BUILD_CLEAN).
+    # HOME=/tmp gives colcon a writable home for its metadata as that uid.
+    docker run --rm --entrypoint bash --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -v "$PKG":/scene "$IMG" -lc \
+        "source /opt/ros/\${ROS_DISTRO:-humble}/setup.bash && \
+         cd /scene/rbnx-build/codegen/ros2_idl && \
+         colcon build --packages-up-to map"
+else
+    echo "[build] WARNING: ros2_idl/src/map missing — dynamic map binding disabled"
+fi
 
 echo "[build] done."

@@ -7,9 +7,13 @@ use crate::pb::contracts::{
     robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient,
     robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
     robonix_system_executor_list_active_plans_client::RobonixSystemExecutorListActivePlansClient,
+    robonix_system_pilot_get_health_server::RobonixSystemPilotGetHealth,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
 use crate::pb::executor::ControlPlanRequest;
+use crate::pb::module_health::{
+    GetModuleHealthRequest, GetModuleHealthResponse, ModuleHealth, ModuleHealthReport,
+};
 use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
@@ -45,6 +49,9 @@ pub const EVT_STATUS: u32 = 3;
 pub const EVT_FINAL_TEXT: u32 = 4;
 pub const EVT_NODE_STATE: u32 = 5;
 pub const EVT_TASK_STATE: u32 = 6;
+const MODULE_HEALTH_SCHEMA_VERSION: u32 = 1;
+const MODULE_HEALTH_OK: u32 = 0;
+const MODULE_HEALTH_TTL_MS: u32 = 5000;
 
 #[allow(dead_code)]
 pub enum PilotStreamBody {
@@ -156,6 +163,7 @@ fn subscribe_turn_events(
 
 const SEEN_TASK_IDS_PER_SESSION: usize = 256;
 
+#[derive(Clone)]
 pub struct PilotServiceImpl {
     /// `AtlasClient` is cheap to clone (its inner channel is just a handle);
     /// each Stream RPC clones it to discover executor concurrently without
@@ -503,6 +511,36 @@ impl RobonixSystemPilot for PilotServiceImpl {
     }
 }
 
+#[tonic::async_trait]
+impl RobonixSystemPilotGetHealth for PilotServiceImpl {
+    async fn get_module_health(
+        &self,
+        _request: Request<GetModuleHealthRequest>,
+    ) -> Result<Response<GetModuleHealthResponse>, Status> {
+        Ok(Response::new(GetModuleHealthResponse {
+            report: Some(pilot_health_report(&self.provider_id)),
+        }))
+    }
+}
+
+fn pilot_health_report(provider_id: &str) -> ModuleHealthReport {
+    ModuleHealthReport {
+        schema_version: MODULE_HEALTH_SCHEMA_VERSION,
+        module: Some(ModuleHealth {
+            module_key: String::new(),
+            module_id: "pilot".to_string(),
+            provider_id: provider_id.to_string(),
+            health: MODULE_HEALTH_OK,
+            state: "active".to_string(),
+            reason_code: "OK".to_string(),
+            detail: "pilot serving".to_string(),
+            source: String::new(),
+            received_ts_ns: 0,
+            ttl_ms: MODULE_HEALTH_TTL_MS,
+        }),
+    }
+}
+
 async fn cancel_all_executor_plans(
     mut atlas: AtlasClient,
     consumer_id: &str,
@@ -569,8 +607,9 @@ async fn build_executor_conn(
 #[cfg(test)]
 mod tests {
     use super::{
-        EVT_FINAL_TEXT, EVT_STATUS, expected_turn_id, strict_expected_turn, subscribe_turn_events,
-        task_is_abort_turn, task_is_steer,
+        EVT_FINAL_TEXT, EVT_STATUS, MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION,
+        MODULE_HEALTH_TTL_MS, expected_turn_id, pilot_health_report, strict_expected_turn,
+        subscribe_turn_events, task_is_abort_turn, task_is_steer,
     };
     use crate::pb::pilot::{PilotEvent, Task};
     use tokio_stream::StreamExt;
@@ -585,6 +624,25 @@ mod tests {
             context_json: ctx.into(),
             timestamp_ms: 0,
         }
+    }
+
+    #[test]
+    fn pilot_health_report_uses_minimal_module_health_v1_fields() {
+        let report = pilot_health_report("pilot");
+        assert_eq!(report.schema_version, MODULE_HEALTH_SCHEMA_VERSION);
+
+        let module = report.module.expect("module health");
+        assert_eq!(module.module_id, "pilot");
+        assert_eq!(module.provider_id, "pilot");
+        assert_eq!(module.health, MODULE_HEALTH_OK);
+        assert_eq!(module.state, "active");
+        assert_eq!(module.reason_code, "OK");
+        assert_eq!(module.detail, "pilot serving");
+        assert_eq!(module.ttl_ms, MODULE_HEALTH_TTL_MS);
+
+        assert!(module.module_key.is_empty());
+        assert!(module.source.is_empty());
+        assert_eq!(module.received_ts_ns, 0);
     }
 
     #[test]

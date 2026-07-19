@@ -30,6 +30,20 @@ _LLM_ENV_VARS = (
 )
 
 
+def _ensure_loop() -> asyncio.AbstractEventLoop:
+    """Current event loop, creating (and installing) one when the thread has
+    none. Bare `asyncio.get_event_loop()` is unreliable across the suite:
+    running the milvus-lite tests (test_persistence) first leaves the main
+    thread without a current loop, and the deprecated implicit-creation path
+    then raises "There is no current event loop"."""
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+
 def _pop_llm_env() -> dict:
     """Pop all LLM-related env vars and return them for restoration."""
     return {k: os.environ.pop(k, None) for k in _LLM_ENV_VARS}
@@ -156,7 +170,7 @@ def test_captioner():
     node = SceneGraphNode("obj_1", "cup", (0, 0, 0), (0.1, 0.1, 0.1))
     assert node.caption is None
 
-    result = asyncio.get_event_loop().run_until_complete(cap.caption_node(node))
+    result = _ensure_loop().run_until_complete(cap.caption_node(node))
     assert result.caption == "cup"
     assert result.caption_updated_at is not None
     print("  [PASS] test_captioner")
@@ -257,7 +271,7 @@ def test_llm_client_no_key():
         client = SceneGraphLLMClient(api_key="", base_url="")
         assert not client.available
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _ensure_loop().run_until_complete(
             client.chat_json("system", "user")
         )
         assert result == {}
@@ -281,7 +295,7 @@ def test_relation_inferer_no_llm():
         b = SceneGraphNode("obj_2", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05), caption="table")
         hint = GeometryHint(0.4, 0.6, "a_above_b", "none")
 
-        edge = asyncio.get_event_loop().run_until_complete(
+        edge = _ensure_loop().run_until_complete(
             inferer.infer_relation(a, b, hint)
         )
         assert edge.relation == "unknown"
@@ -318,7 +332,7 @@ def test_builder_rebuild_no_objects():
             config=config,
         )
 
-        snap = asyncio.get_event_loop().run_until_complete(builder.rebuild_once())
+        snap = _ensure_loop().run_until_complete(builder.rebuild_once())
         assert len(snap.nodes) == 0
         assert len(snap.edges) == 0
         assert snap.updated_at > 0
@@ -346,7 +360,7 @@ def _run_builder_rebuild_with_objects_body():
     with tempfile.TemporaryDirectory() as tmpdir:
         registry = ObjectRegistry()
 
-        loop = asyncio.get_event_loop()
+        loop = _ensure_loop()
 
         async def populate():
             async with registry.lock():
@@ -619,7 +633,7 @@ def test_infer_semantic_relation():
     a = SceneGraphNode("a", "handle", (0.0, 0.0, 0.5), (0.1, 0.1, 0.1))
     b = SceneGraphNode("b", "door", (0.0, 0.0, 0.5), (1.0, 0.1, 2.0))
     hint = GeometryHint(0.0, 0.5, "same_level", "a_inside_b")
-    run = asyncio.get_event_loop().run_until_complete
+    run = _ensure_loop().run_until_complete
 
     # A spatial answer is rejected — geometry owns the spatial slot → none.
     inf = RelationInferer(_FakeClient({"relation": "on_top_of", "confidence": 0.9}))
@@ -701,7 +715,7 @@ def test_llm_client_request_body():
         k.setdefault("transport", httpx.MockTransport(handler))
         return orig(*a, **k)
 
-    run = asyncio.get_event_loop().run_until_complete
+    run = _ensure_loop().run_until_complete
     httpx.AsyncClient = patched
     try:
         c = SceneGraphLLMClient(

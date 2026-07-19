@@ -11,13 +11,20 @@ FLAGS=()
 
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-# `websockets` is the one runtime dep this package needs that ships
-# outside the robonix workspace. Install into the host Python; it's a
-# small pure-Python wheel and avoids spinning up another venv just for
-# one library.
-if ! python3 -c "import websockets" >/dev/null 2>&1; then
-    echo "[build] installing websockets (PyPI)"
-    python3 -m pip install --user --quiet websockets >/dev/null
-fi
+# Keep package dependencies independent of whichever Python environment ran
+# `rbnx build`. In particular, user-site installs are invalid when CI invokes
+# the build from a virtualenv and do not guarantee the same interpreter at
+# package start time.
+VENV="$PKG/rbnx-build/venv"
+uv venv --allow-existing --system-site-packages \
+  --python "${AUDIO_CLIENT_BRIDGE_PYTHON:-python3}" "$VENV"
+ROBONIX_API="$(rbnx path robonix-api)"
+uv pip install --python "$VENV/bin/python" --quiet "$ROBONIX_API" 'websockets>=12,<16'
+
+# Import the actual provider, not only its bridge-specific dependency.  This
+# catches missing protobuf/grpc/robonix-api runtime dependencies during build
+# instead of letting Soma discover them when the package starts.
+PYTHONPATH="$ROBONIX_API:$PKG:${PYTHONPATH:-}" \
+  "$VENV/bin/python" -c 'import audio_client_bridge.main'
 
 echo "[build] done."

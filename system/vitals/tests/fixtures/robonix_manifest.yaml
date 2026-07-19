@@ -1,0 +1,21 @@
+# -----------------------------------------------------------------
+# DO NOT RUN SOMA WITH THIS FILE AS-IS.
+# Edit the `primitive:` list below to point at your real primitive
+# package before starting SOMA.  See system/vitals/README.md for
+# step-by-step instructions.
+# -----------------------------------------------------------------
+name: vitals-health-test
+
+system:
+  atlas:
+    listen: 127.0.0.1:50251
+
+# ── Add your health primitive here ──────────────────────────────
+primitive:
+# Example:
+#   - name: health_piper
+#     path: /home/xjy/roboarm/robonix/primitives/health_piper   # absolute path, no ~
+#     config:
+#       can_port: can0
+service: []
+skill: []

@@ -1,0 +1,2 @@
+uint32 schema_version
+ModuleHealth module

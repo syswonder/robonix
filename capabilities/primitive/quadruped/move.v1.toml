@@ -1,0 +1,12 @@
+# Single-shot motion command. The driver executes a bounded translation,
+# rotation, or velocity command and then stops. This is not a continuous
+# command stream; use twist_in for continuous velocity control.
+[contract]
+id      = "robonix/primitive/quadruped/move"
+version = "1"
+kind    = "primitive"
+idl     = "chassis/srv/ExecuteMoveCommand.srv"
+description = "Low-level bounded quadruped motion command without global path planning."
+
+[mode]
+type = "rpc"

@@ -16,6 +16,7 @@ members = [
     "system/pilot",
     "system/scribe",
     "system/soma",
+    "system/vitals",
     "tools/rbnx",
     "tools/codegen",
 ]

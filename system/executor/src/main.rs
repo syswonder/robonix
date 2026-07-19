@@ -26,6 +26,7 @@ use dispatch::builtin::BUILTINS;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
+use pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealthServer;
 use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlansServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -127,6 +128,21 @@ async fn main() -> Result<()> {
         )
         .await?;
 
+    // Module health RPC: Vitals polls this for system-module health.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/get_health",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/get_health.toml",
+                "robonix.contracts.RobonixSystemExecutorGetHealth",
+                "/robonix.contracts.RobonixSystemExecutorGetHealth/GetModuleHealth",
+            ),
+        )
+        .await?;
+
     // Built-in capabilities: declared as MCP-transport capabilities so pilot's
     // catalog discovery sees them like any user MCP provider. The endpoint is a
     // sentinel — dispatch never dials it; calls hitting these contracts hit
@@ -186,7 +202,8 @@ async fn main() -> Result<()> {
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorListActivePlansServer::new(svc))
+        .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorGetHealthServer::new(svc))
         .serve(listen_addr)
         .await
         .context("executor gRPC server failed")?;

@@ -1,0 +1,10 @@
+# nav_msgs/Odometry stream; gRPC `Stream(Empty) returns (stream Odometry)`.
+[contract]
+id      = "robonix/primitive/quadruped/odom"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/nav_msgs/msg/Odometry.msg"
+description = "Raw quadruped odometry in the local odom frame."
+
+[mode]
+type = "topic_out"

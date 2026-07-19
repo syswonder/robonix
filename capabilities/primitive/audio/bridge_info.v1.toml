@@ -1,0 +1,12 @@
+# Optional discovery surface for an audio provider that proxies client I/O.
+# It lets a client learn the robot-side reverse WebSocket endpoint through
+# Atlas rather than hardcoding a port or placing the client address in deploy.
+[contract]
+id = "robonix/primitive/audio/bridge_info"
+version = "1"
+kind = "primitive"
+idl = "audio/srv/GetAudioBridgeInfo.srv"
+description = "Discover the reverse client-audio endpoint exposed by an audio bridge provider."
+
+[mode]
+type = "rpc"
