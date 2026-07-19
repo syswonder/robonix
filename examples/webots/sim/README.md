@@ -88,7 +88,7 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `bridge/entrypoint.sh` | Launch Webots and its browser-stream helpers, then `wait` so the container stays alive. Picks display backend per `WEBOTS_HEADLESS_MODE`. |
 | `bridge/viewer_server.py` | Serve WebotsView locally and proxy/cache remote viewer and world assets. |
 | `bridge/webots_stream_proxy.py` | Forward the live W3D stream while dropping unused robot-window camera payloads. |
-| `bridge/webots_stream_keepalive.py` | Keep externally controlled Webots simulations broadcasting at real-time speed. |
+| `bridge/streaming_healthcheck.py` | Verify that both browser-stream helpers are alive and reachable. |
 | `bridge/webots_assets_seed.tar.gz` | Pre-baked office Webots proto/texture cache (offline-fast default world). |
 | `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
 
@@ -137,7 +137,17 @@ viewer cache; later loads reuse it.
 Override the ports for parallel deployments with
 `ROBONIX_SIM_VIEWER_PORT` and `ROBONIX_SIM_STREAM_PORT`. The latter is the
 optimized public endpoint; browsers should not connect to Webots' raw port
-`1234` directly.
+`1234` directly. These variables configure the actual helper listeners, so
+they work with the default host network as well as bridge port publishing.
+The entrypoint supervises both helpers and exits if either one fails; `start.sh`
+only prints the viewer URL after both endpoints pass their readiness checks.
+
+Run the lightweight custom-port and helper-readiness smoke test with:
+
+```bash
+python3 -m pip install "websockets>=14,<17"
+python3 examples/webots/sim/tests/test_streaming.py
+```
 
 Backend selection (env on the sim container):
 
