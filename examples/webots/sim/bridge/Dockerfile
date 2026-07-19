@@ -70,12 +70,12 @@ RUN set -eux; \
     rm -f /tmp/webots.deb; \
     rm -rf /var/lib/apt/lists/*
 
-# Keep the remote viewer in read-only W3D broadcast mode. The optimized stream
-# proxy listens on 1235 and removes robot-window payloads that WebotsView does
-# not consume. Webots' raw stream remains internal on 1234.
+# Keep the remote viewer in read-only W3D broadcast mode. The public stream
+# port is injected by viewer_server.py at runtime so custom ports work with
+# both host and bridge networking. Webots' raw stream remains on port 1234.
 RUN sed -i \
       -e 's#https://cyberbotics.com/wwi/R2025a/WebotsView.js#/wwi-full/WebotsView.js#' \
-      -e 's#</body>#<script>const wsPort=new URLSearchParams(location.search).get("wsPort")||"1235";document.getElementById("IP-input").value="ws://"+location.hostname+":"+wsPort;document.getElementById("mode").value="w3d";document.getElementById("broadcast").checked=true;</script></body>#' \
+      -e 's#</body>#<script>const wsPort=new URLSearchParams(location.search).get("wsPort")||"__WEBOTS_STREAM_PORT__";document.getElementById("IP-input").value="ws://"+location.hostname+":"+wsPort;document.getElementById("mode").value="w3d";document.getElementById("broadcast").checked=true;</script></body>#' \
     /usr/local/webots/resources/web/streaming_viewer/index.html
 
 # Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
@@ -107,8 +107,8 @@ RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-instal
 COPY bridge/entrypoint.sh /entrypoint.sh
 COPY bridge/viewer_server.py /viewer_server.py
 COPY bridge/webots_stream_proxy.py /webots_stream_proxy.py
-COPY bridge/webots_stream_keepalive.py /webots_stream_keepalive.py
-RUN chmod +x /entrypoint.sh /viewer_server.py /webots_stream_proxy.py /webots_stream_keepalive.py
+COPY bridge/streaming_healthcheck.py /streaming_healthcheck.py
+RUN chmod +x /entrypoint.sh /viewer_server.py /webots_stream_proxy.py /streaming_healthcheck.py
 
 WORKDIR /
 ENTRYPOINT ["/entrypoint.sh"]

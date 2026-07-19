@@ -10,7 +10,15 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
-VIEWER_ROOT = "/usr/local/webots/resources/web/streaming_viewer"
+VIEWER_ROOT = os.environ.get(
+    "WEBOTS_VIEWER_ROOT", "/usr/local/webots/resources/web/streaming_viewer"
+)
+VIEWER_HOST = os.environ.get("WEBOTS_VIEWER_HOST", "0.0.0.0")
+VIEWER_PORT = int(os.environ.get("WEBOTS_VIEWER_PORT", "8080"))
+PUBLIC_STREAM_PORT = int(os.environ.get("WEBOTS_PUBLIC_STREAM_PORT", "1235"))
+RAW_STREAM_HTTP = os.environ.get(
+    "WEBOTS_RAW_STREAM_HTTP", "http://127.0.0.1:1234"
+).rstrip("/")
 WWI_UPSTREAM = "https://cyberbotics.com/wwi/R2025a/"
 GITHUB_RAW = "https://raw.githubusercontent.com/"
 GITHUB_CDN = "https://fastly.jsdelivr.net/gh/"
@@ -32,7 +40,13 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             self.directory = original
 
     def do_GET(self) -> None:
-        if self.path.startswith("/stream/"):
+        """Route local viewer assets and proxied Webots resources."""
+        if self.path.split("?", 1)[0] in ("/", "/index.html"):
+            self.serve_index()
+        elif self.path == "/healthz":
+            self.send_response(204)
+            self.end_headers()
+        elif self.path.startswith("/stream/"):
             self.proxy_stream()
         elif self.path.startswith("/github/"):
             self.proxy_github()
@@ -40,6 +54,18 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             self.proxy_wwi()
         else:
             super().do_GET()
+
+    def serve_index(self) -> None:
+        """Serve the viewer page with its runtime WebSocket port injected."""
+        try:
+            with open(os.path.join(VIEWER_ROOT, "index.html"), "rb") as source:
+                content = source.read().replace(
+                    b"__WEBOTS_STREAM_PORT__", str(PUBLIC_STREAM_PORT).encode()
+                )
+        except OSError as error:
+            self.send_error(500, f"Viewer index unavailable: {error}")
+            return
+        self.send_content(content, "index.html", 0)
 
     @staticmethod
     def safe_relative(path: str, prefix: str) -> str | None:
@@ -176,7 +202,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         path = self.path.removeprefix("/stream")
         try:
             request = urllib.request.Request(
-                "http://127.0.0.1:1234" + path,
+                RAW_STREAM_HTTP + path,
                 headers={"User-Agent": "Robonix-Webots-Viewer/1.0"},
             )
             with urllib.request.urlopen(request, timeout=60) as response:
@@ -198,6 +224,11 @@ class ViewerHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", 8080), ViewerHandler)
+    server = ThreadingHTTPServer((VIEWER_HOST, VIEWER_PORT), ViewerHandler)
     server.daemon_threads = True
+    print(
+        f"viewer listening on http://{VIEWER_HOST}:{VIEWER_PORT} "
+        f"(WebSocket port {PUBLIC_STREAM_PORT})",
+        flush=True,
+    )
     server.serve_forever()

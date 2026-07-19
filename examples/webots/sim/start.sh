@@ -133,8 +133,18 @@ fi
 # rendered (llvmpipe → 0.01x simulation). See compose.stream.yaml and
 # bridge/entrypoint.sh.
 if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
+  export ROBONIX_SIM_STREAM_PORT="${ROBONIX_SIM_STREAM_PORT:-1235}"
+  export ROBONIX_SIM_VIEWER_PORT="${ROBONIX_SIM_VIEWER_PORT:-8080}"
+  if [[ "$ROBONIX_SIM_STREAM_PORT" = "1234" ]]; then
+    echo "[sim/start] error: stream port 1234 is reserved for Webots' raw endpoint" >&2
+    exit 1
+  fi
+  if [[ "$ROBONIX_SIM_STREAM_PORT" = "$ROBONIX_SIM_VIEWER_PORT" ]]; then
+    echo "[sim/start] error: stream and viewer ports must be different" >&2
+    exit 1
+  fi
   CF+=(-f compose.stream.yaml)
-  echo "[sim/start] stream mode — merging compose.stream.yaml (optimized WS :${ROBONIX_SIM_STREAM_PORT:-1235}, viewer :${ROBONIX_SIM_VIEWER_PORT:-8080})"
+  echo "[sim/start] stream mode — merging compose.stream.yaml (optimized WS :${ROBONIX_SIM_STREAM_PORT}, viewer :${ROBONIX_SIM_VIEWER_PORT})"
 fi
 
 allow_x11_for_docker() {
@@ -164,6 +174,11 @@ docker compose "${CF[@]}" up --build -d
 # publishing /scanner /odom /head_front_camera/* etc."
 echo "[sim/start] waiting for sim ros topics..."
 for _ in $(seq 1 60); do
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$SIM_CT" 2>/dev/null || true)" != "true" ]]; then
+        echo "[sim/start] error: simulation container exited during startup" >&2
+        docker logs --tail 120 "$SIM_CT" 2>&1 || true
+        exit 1
+    fi
     n=$(docker exec "$SIM_CT" bash -c \
         'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | wc -l' 2>/dev/null || echo 0)
     if [[ "${n:-0}" -gt 20 ]]; then
@@ -174,19 +189,39 @@ for _ in $(seq 1 60); do
 done
 
 if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
-  viewer_port="${ROBONIX_SIM_VIEWER_PORT:-8080}"
+  echo "[sim/start] waiting for browser-stream helpers..."
+  stream_ready=0
+  for _ in $(seq 1 60); do
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$SIM_CT" 2>/dev/null || true)" != "true" ]]; then
+      break
+    fi
+    if docker exec "$SIM_CT" test -f /tmp/webots-stream-ready 2>/dev/null \
+      && docker exec "$SIM_CT" python3 /streaming_healthcheck.py \
+        --viewer-port "$ROBONIX_SIM_VIEWER_PORT" \
+        --stream-port "$ROBONIX_SIM_STREAM_PORT" 2>/dev/null; then
+      stream_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$stream_ready" != "1" ]]; then
+    echo "[sim/start] error: browser-stream helpers are not ready" >&2
+    docker logs --tail 120 "$SIM_CT" 2>&1 || true
+    exit 1
+  fi
+
   echo
   echo "[sim/start] ========== webots stream ready =========="
   echo "[sim/start] open ONE of these in a browser:"
   # tailscale first (works from anywhere on the tailnet)
   if command -v tailscale &>/dev/null; then
-    tailscale ip -4 2>/dev/null | awk -v port="$viewer_port" '{print "  http://" $1 ":" port "/"}'
+    tailscale ip -4 2>/dev/null | awk -v port="$ROBONIX_SIM_VIEWER_PORT" '{print "  http://" $1 ":" port "/"}'
   fi
   # then LAN / global v4 addresses
   ip -4 -o addr show scope global 2>/dev/null \
     | awk '{print $4}' | cut -d/ -f1 \
-    | awk -v port="$viewer_port" '{print "  http://" $1 ":" port "/"}'
-  echo "[sim/start] the viewer auto-fills ws://<that-host>:${ROBONIX_SIM_STREAM_PORT:-1235} — just hit Connect"
+    | awk -v port="$ROBONIX_SIM_VIEWER_PORT" '{print "  http://" $1 ":" port "/"}'
+  echo "[sim/start] the viewer auto-fills ws://<that-host>:${ROBONIX_SIM_STREAM_PORT} — just hit Connect"
   echo
 fi
 
