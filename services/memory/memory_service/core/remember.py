@@ -4,11 +4,12 @@ Pipeline:
   1. Extract tags from LogRecord + SpatialContext (rule-based for Phase1)
   2. Generate one-line summary (template-based for Phase1)
   3. Build MemoryNode
-  4. tag_index.insert(node_id, tags)        — tags first
-  5. vector_store.insert(node_id, emb, summary) — vector + BM25
-  6. graph_store.add_node(node)            — persist to CKG
-  7. If parent_node_id → add causal edge
-  8. Return RememberResponse
+  4. graph_store.add_node(node)            — assign node_id + persist
+  5. If image_base64 → ImageStore.save → update image_refs + persist
+  6. tag_index.insert(node_id, tags)        — inverted index
+  7. vector_store.insert(node_id, emb, summary) — vector + BM25
+  8. If parent_node_id → add causal edge + persist
+  9. Return RememberResponse
 """
 
 from __future__ import annotations
@@ -160,13 +161,20 @@ def _generate_summary(log_record: LogRecord,
 # ── Pipeline ────────────────────────────────────────────────────────────
 
 class RememberPipeline:
-    """Orchestrate the remember (write) path across all storage layers."""
+    """Orchestrate the remember (write) path across all storage layers.
+
+    If an ``ImageStore`` is provided and the request ``kv`` contains
+    ``image_base64``, the pipeline saves the decoded image to
+    ``data/images/{node_id}/`` and populates ``MemoryNode.image_refs``.
+    """
 
     def __init__(self, graph_store: GraphStore, tag_index: TagIndex,
-                 vector_store: VectorStore):
+                 vector_store: VectorStore,
+                 image_store: "ImageStore | None" = None):
         self._graph = graph_store
         self._tags = tag_index
         self._vectors = vector_store
+        self._images = image_store
 
     async def execute(self, request: RememberRequest) -> RememberResponse:
         """Execute the remember pipeline.
@@ -206,13 +214,36 @@ class RememberPipeline:
         node_id = self._graph.add_node(node)
         node.node_id = node_id
 
-        # 5. Tags first into inverted index
+        # 5. Save image if provided (top-level image_base64 or kv fallback)
+        img_b64 = request.image_base64 or request.kv.get("image_base64", "")
+        if self._images and img_b64:
+            import base64 as _b64
+            t_img = time.time()
+            b64_len = len(img_b64)
+            log.info("remember: decoding base64 image (%d chars) for node %d",
+                     b64_len, node_id)
+            try:
+                img_bytes = _b64.b64decode(img_b64)
+                saved_path = self._images.save(node_id, img_bytes)
+                node.image_refs = self._images.list(node_id)
+                # Persist image_refs to JSON — add_node() already wrote
+                # a snapshot without them.
+                self._graph._persist()
+                img_ms = (time.time() - t_img) * 1000
+                log.info("remember: node %d → saved image %s (%.1f KB, %dms)",
+                         node_id, saved_path, len(img_bytes) / 1024, round(img_ms))
+            except Exception as e:
+                img_ms = (time.time() - t_img) * 1000
+                log.warning("remember: node %d image save FAILED after %dms: %s: %s",
+                           node_id, round(img_ms), type(e).__name__, e)
+
+        # 6. Tags first into inverted index
         self._tags.insert(node_id, tags)
 
-        # 6. Vector + BM25 index
+        # 7. Vector + BM25 index
         self._vectors.insert(node_id, embedding, summary)
 
-        # 7. Causal edge
+        # 8. Causal edge
         if request.parent_node_id is not None:
             try:
                 self._graph.add_edge(request.parent_node_id, node_id)

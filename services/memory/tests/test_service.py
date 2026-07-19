@@ -236,8 +236,9 @@ class TestMemoryService:
             f"Boot 2: expected 3 nodes, got {svc2.graph.count()}"
         assert svc2.tags.count() == 3, \
             f"Boot 2: expected 3 tags indexed, got {svc2.tags.count()}"
-        assert svc2.vectors.count() == 3, \
-            f"Boot 2: expected 3 vectors indexed, got {svc2.vectors.count()}"
+        if svc2.vectors.is_semantic or svc2.vectors._embedding_enabled:
+            assert svc2.vectors.count() == 3, \
+                f"Boot 2: expected 3 vectors indexed, got {svc2.vectors.count()}"
 
         # Verify search works on rebuilt indices
         resp2 = asyncio.run(svc2.search("cup kitchen", top_k=5))

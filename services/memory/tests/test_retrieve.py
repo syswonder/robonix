@@ -1,4 +1,4 @@
-"""Tests for RetrievePipeline — 3-stage search: tag → hybrid → causal/time/weight."""
+"""Tests for RetrievePipeline — tag filter → LLM rank → causal/time/weight."""
 
 import sys, os, tempfile, shutil, asyncio, logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

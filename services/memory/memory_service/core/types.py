@@ -169,6 +169,9 @@ class MemoryNode:
     # Embedding (Phase1: text-only, d=384 from all-MiniLM-L6-v2)
     embedding: List[float] = field(default_factory=list)
 
+    # Images (patrol / inspection demo)
+    image_refs: List[str] = field(default_factory=list)  # paths relative to data/
+
     # Metadata
     node_type: NodeType = NodeType.SHORT_TERM
     created_at: int = 0
@@ -192,6 +195,7 @@ class MemoryNode:
         d["last_access"] = self.last_access
         d["access_count"] = self.access_count
         d["version"] = self.version
+        d["image_refs"] = list(self.image_refs)
         return d
 
     @classmethod
@@ -215,6 +219,7 @@ class MemoryNode:
             last_access=d.get("last_access", 0),
             access_count=d.get("access_count", 0),
             version=d.get("version", 1),
+            image_refs=d.get("image_refs", []),
         )
 
 
@@ -324,6 +329,7 @@ class RememberRequest:
     log_record: LogRecord
     spatial: Optional[SpatialContext] = None
     parent_node_id: Optional[int] = None
+    image_base64: str = ""           # top-level: camera frame as base64
     kv: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -365,6 +371,7 @@ class SearchRequest:
     alpha: Optional[float] = None  # BM25 weight; None → use default 0.3
     time_range: Optional[TimeRange] = None
     require_executable: bool = False
+    vlm_qa: bool = False            # if True, include VLM answer from node images
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"query": self.query, "top_k": self.top_k}
@@ -399,6 +406,7 @@ class SearchRequest:
 class SearchResponse:
     """Output for `robonix/service/memory/hybrid_search`."""
     nodes: List[MemoryNode] = field(default_factory=list)
+    vlm_answer: str = ""            # VLM QA result when vlm_qa=true
 
 
 @dataclass

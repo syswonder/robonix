@@ -57,18 +57,28 @@ class ScribeLogHandler(logging.Handler):
         self._file = open(str(path), "a", encoding="utf-8")
 
     def emit(self, record: logging.LogRecord) -> None:
+        if self._file is None:
+            return  # handler closed, silently drop
         try:
             ts = record.created  # seconds since epoch (float)
             ts_ns = int(ts * 1_000_000_000)
+
+            # Use record.getMessage() directly — avoids double-formatting
+            # when the Formatter wraps %(message)s and the message itself
+            # contains %-style specifiers.
+            try:
+                msg = record.getMessage()
+            except Exception:
+                msg = str(record.msg)
 
             entry: Dict[str, Any] = {
                 "ts": ts_ns,
                 "lvl": _LVL_MAP.get(record.levelno, "I"),
                 "tag": self._tag,
-                "msg": self.format(record),
+                "msg": msg,
             }
 
-            # Optional context from LogRecord extra fields (if passed via `extra=`)
+            # Optional context from LogRecord extra fields
             sid = getattr(record, "sid", None)
             pid = getattr(record, "pid", None)
             cid = getattr(record, "cid", None)
@@ -86,7 +96,13 @@ class ScribeLogHandler(logging.Handler):
             self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
             self._file.flush()
         except Exception:
-            self.handleError(record)
+            # Degrade gracefully — never let logging crash the service.
+            # handleError writes to stderr; if that also fails we
+            # silently drop the record.
+            try:
+                self.handleError(record)
+            except Exception:
+                pass
 
     def close(self) -> None:
         if self._file:

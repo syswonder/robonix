@@ -222,12 +222,22 @@ class VectorStore:
 
     Insert indexes both the embedding vector and the BM25 document.
     Search performs weighted fusion on a candidate set.
+
+    When ``embedding_enabled=False`` (default), the TextEmbedder is
+    never loaded — ``encode()`` returns an empty list, ``insert()``
+    only indexes BM25, and ``is_semantic`` is ``False``.  The
+    retrieve pipeline then falls through to LLM ranking (Path A) or
+    chronological fallback (Path C).
     """
 
-    def __init__(self, config: Optional[EmbeddingModelConfig] = None, alpha: float = 0.3):
+    def __init__(self, config: Optional[EmbeddingModelConfig] = None, alpha: float = 0.3,
+                 *, embedding_enabled: bool = True):
         self._config = config or EmbeddingModelConfig()
         self._alpha = alpha
-        self._embedder = TextEmbedder(self._config)
+        self._embedding_enabled = embedding_enabled
+        self._embedder: Optional[TextEmbedder] = None
+        if embedding_enabled:
+            self._embedder = TextEmbedder(self._config)
         self._bm25 = BM25Index()
 
         # node_id -> embedding vector
@@ -239,20 +249,18 @@ class VectorStore:
 
     @property
     def dim(self) -> int:
-        return self._embedder.dim
+        return self._embedder.dim if self._embedder is not None else 0
 
     @property
     def is_semantic(self) -> bool:
-        return self._embedder.is_semantic
+        return self._embedder is not None and self._embedder.is_semantic
 
     # ── Encoding (modality-reserved interface) ────────────────────────
 
     def encode(self, text: str, modality: str = "text") -> List[float]:
-        """Encode input to vector. modality reserved for multimodal expansion.
-
-        Current supported: "text" only.
-        "visual" / "fused" → NotImplementedError.
-        """
+        """Encode input to vector. Returns empty list when embedding disabled."""
+        if self._embedder is None:
+            return []
         if modality == "text":
             return self._embedder.encode(text)
         if modality == "visual":
@@ -262,6 +270,8 @@ class VectorStore:
         raise ValueError(f"Unknown modality: {modality}")
 
     def encode_batch(self, texts: List[str], modality: str = "text") -> List[List[float]]:
+        if self._embedder is None:
+            return [[] for _ in texts]
         if modality == "text":
             return self._embedder.encode_batch(texts)
         raise NotImplementedError(f"Batch encode not implemented for modality={modality}")
@@ -283,6 +293,8 @@ class VectorStore:
         )
 
     def get_dim(self, modality: str = "text") -> int:
+        if self._embedder is None:
+            return 0
         if modality == "text":
             return self._embedder.dim
         raise ValueError(f"Unknown modality: {modality}")
@@ -290,8 +302,13 @@ class VectorStore:
     # ── Storage ───────────────────────────────────────────────────────
 
     def insert(self, node_id: int, embedding: List[float], summary: str) -> None:
-        """Insert a vector and BM25-index its summary."""
-        self._vectors[node_id] = np.array(embedding, dtype=np.float32)
+        """Insert a vector and BM25-index its summary.
+
+        When embedding is an empty list (embedding disabled), only BM25 is
+        indexed — the dense-vector store is left untouched.
+        """
+        if embedding:
+            self._vectors[node_id] = np.array(embedding, dtype=np.float32)
         if summary:
             self._bm25.insert(node_id, summary)
 
@@ -378,5 +395,6 @@ class VectorStore:
         """Full rebuild from (node_id, embedding, summary) triples."""
         self._vectors.clear()
         for nid, emb, summary in nodes:
-            self._vectors[nid] = np.array(emb, dtype=np.float32)
+            if emb:
+                self._vectors[nid] = np.array(emb, dtype=np.float32)
         self._bm25.rebuild([(nid, summary) for nid, _, summary in nodes])
