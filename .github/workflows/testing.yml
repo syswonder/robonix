@@ -997,6 +997,7 @@ jobs:
           set -o pipefail
           export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
+            --first object_navigation \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out"
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
@@ -1148,6 +1149,7 @@ jobs:
             exit 1
           fi
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
+            --first object_navigation \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \
             | tee "$RUNNER_TEMP/scenarios.restart.out"
 

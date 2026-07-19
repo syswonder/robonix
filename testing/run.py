@@ -580,12 +580,22 @@ def main() -> int:
     ap.add_argument("--scenarios", type=Path, default=Path(__file__).resolve().parent / "scenarios")
     ap.add_argument("--timeout", type=int, default=300, help="per-scenario seconds")
     ap.add_argument("--only", help="run only the scenario with this name")
+    ap.add_argument(
+        "--first",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="run the named scenario before the remaining sorted scenarios; repeatable",
+    )
     ap.add_argument("--summary-json", type=Path, help="write a machine-readable result summary here")
     args = ap.parse_args()
 
     paths = sorted([*args.scenarios.rglob("*.yaml"), *args.scenarios.rglob("*.yml")])
     if args.only:
         paths = [p for p in paths if p.stem == args.only]
+    elif args.first:
+        priority = {name: index for index, name in enumerate(args.first)}
+        paths.sort(key=lambda path: (priority.get(path.stem, len(priority)), str(path)))
     if not paths:
         print("no scenarios found", file=sys.stderr)
         return 2
