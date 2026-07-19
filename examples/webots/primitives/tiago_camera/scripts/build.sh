@@ -9,11 +9,13 @@ FLAGS=(--mcp --ros2)
 echo "[tiago_camera/build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-# Build the ROS 2 overlay inside the sim container (host has no ROS 2).
-if docker ps --format '{{.Names}}' | grep -qx robonix_tiago_sim; then
+# Build the ROS 2 overlay inside this deployment's sim container when it is
+# already running. Respect the per-run name used by CI and parallel deploys.
+SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+if docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
   _IDL="/robonix_pkgs/$(basename "$(dirname "$PKG")")/$(basename "$PKG")/rbnx-build/codegen/ros2_idl"
-  docker exec robonix_tiago_sim bash -lc "source /opt/ros/humble/setup.bash && cd $_IDL && colcon build"
+  docker exec "$SIM_CT" bash -lc "source /opt/ros/humble/setup.bash && cd $_IDL && colcon build"
 else
-  echo "[tiago_camera/build] sim container down — ROS 2 overlay not built; run sim/start.sh then rebuild"
+  echo "[tiago_camera/build] sim container '$SIM_CT' down — ROS 2 overlay not built; run sim/start.sh then rebuild"
 fi
 echo "[tiago_camera/build] done."
