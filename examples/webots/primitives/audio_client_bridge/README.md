@@ -1,11 +1,9 @@
 # audio_client_bridge
 
-Local-only audio primitive that runs on a Linux atlas host but routes
-mic + speaker through a daemon on an client machine across the LAN. The
-manifest-side provider (`com.robonix.primitive.audio`) is identical to the
-default `audio_driver` package, so liaison / scene / pilot don't see a
-difference; the only thing that changes is where the actual ADC/DAC
-lives.
+Audio primitive that runs on the Robonix host but routes mic + speaker through
+the selected `robonix-client` device. It implements the same audio contracts
+as `audio_driver`; both providers can be registered at once, and Liaison uses
+the provider selected by the client for F2, voice-steer, and hands-free turns.
 
 Both halves (the Linux primitive package and the macOS server) live
 in this directory and are committed to the repo. The client machine just
@@ -24,67 +22,50 @@ audio_client_bridge/
 └── scripts/{build,start}.sh       # rbnx codegen + entry
 ```
 
-## Ports
+## Transport
 
-| Port | Side | Protocol | What |
-| --- | --- | --- | --- |
-| `60000` | macOS | WebSocket (`0.0.0.0`) | `/mic`, `/speaker`, `/health`, `/devices`, `/vu`, `/log`, `/set_device` |
-| `60001` | macOS | HTTP (`127.0.0.1`) | `server_web.py` debug UI — open in a browser |
+The default is a reverse WebSocket transport. During driver init the primitive
+binds `0.0.0.0:60002`, publishes its endpoint through Atlas, and waits for
+`robonix-client` to connect. The deployment never stores a client IP.
 
-`60000` listens on all interfaces so the Linux atlas host can dial it
-across LAN/Tailscale. `60001` only binds loopback by default; pass
-`--ui-host 0.0.0.0` if you want to drive the UI from another machine
-(no auth — don't expose to the public internet).
+The client discovers this endpoint through Atlas after the operator selects
+`audio_client_bridge` as an input or output route. Its Audio page owns local
+device selection, audio level display, and the reverse connection lifecycle.
 
 ## Setup (one-shot)
 
-### client side
+### Client side
 
 ```sh
-cd ~/robonix-scripts/client_audio_server          # or wherever you scp'd this dir
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-
-# Option A — headless, you already know the device ids
-python3 server.py --list-devices
-python3 server.py --port 60000 --input-device 1 --output-device 2
-
-# Option B — web UI for picking devices + watching VU + tailing log
-python3 server_web.py --port 60000        # WS 60000 + UI on 60001
-open http://localhost:60001/
+robonix-client --host <robot-host> --port 50051
 ```
 
-Leave it running. The first time, macOS will prompt for mic + network
-permission — accept both. The web UI auto-skips devices whose name
-matches `airpods|bluetooth|iphone|ipad` because BT-HFP can't open a
-16 kHz mono `RawInputStream` on Apple silicon.
+Open **Audio**, select input/output primitives and devices, then apply the
+route. The client starts its local audio endpoint and connects to the selected
+reverse bridge when needed. macOS may request microphone and local-network
+permission on first use.
 
 ### Linux side
 
-In `examples/webots/robonix_manifest.yaml` swap the audio_driver entry
-for the bridge:
+In `examples/webots/robonix_manifest.yaml`, keep both providers registered:
 
 ```yaml
 primitive:
-  # - name: audio_driver
-  #   path: ./primitives/audio_driver
+  - name: audio_driver
+    path: ./primitives/audio_driver
   - name: audio_client_bridge
     path: ./primitives/audio_client_bridge
     config:
-      host: 192.168.1.42      # macOS LAN IP
-      port: 60000
+      transport: reverse
+      listen_port: 60002
 ```
 
-Then `rbnx build && rbnx boot` as usual. Driver(CMD_INIT) probes
-`/health` on the client machine; if unreachable, this primitive defers
-instead of advertising dead mic/speaker streams.
+Then `rbnx build && rbnx boot` as usual. The bridge stays active while no
+client is connected; it is selected only when the operator chooses it.
 
 ## Wire format
 
-Both directions: 16 kHz, mono, s16le PCM. Frames are 100 ms (3200 B
-each). `/mic` is server-stream binary frames; `/speaker` is
-client-stream binary frames. `/health` is a single text JSON message.
+Both directions use 16 kHz, mono, s16le PCM. Frames are 100 ms (3200 B).
 
-No auth, no TLS — assume LAN. Don't expose `client_audio_server` on a public
-interface.
+The current bridge has no authentication or TLS. Use a trusted LAN, Tailscale,
+or an authenticated tunnel; do not expose the bridge port publicly.

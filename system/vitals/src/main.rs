@@ -1,0 +1,294 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+//
+// robonix-vitals — health monitoring: power state, component health, threshold alerts.
+// On startup vitals:
+//   1. Connects to atlas, registers as `vitals`.
+//   2. Declares gRPC capabilities:
+//      - robonix/system/vitals/get    (rpc: GetVitals → VitalsSnapshot)
+//      - robonix/system/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
+//      - robonix/system/vitals/modules/get (rpc: GetModuleHealthSnapshot)
+//   3. Consumes Soma's StreamHealth gRPC stream (real or mock), normalizes
+//      SomaHealthSnapshot → VitalsSnapshot via threshold rules.
+//   4. Serves all gRPC services on `listen`.
+//
+// Vitals requires Soma.  Use --mock-soma to run an embedded mock, or point
+// --soma-endpoint at a real Soma instance.
+
+mod config;
+mod mock_soma;
+pub mod module_health;
+mod module_health_poll;
+mod pb;
+mod service;
+mod soma_ingest;
+mod subprocess;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use config::{Args, VITALS_NAMESPACE, VitalsConfig};
+use log::info;
+use pb::contracts::robonix_system_vitals_get_server::RobonixSystemVitalsGetServer;
+use pb::contracts::robonix_system_vitals_modules_get_server::RobonixSystemVitalsModulesGetServer;
+use pb::contracts::robonix_system_vitals_stream_server::RobonixSystemVitalsStreamServer;
+use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_atlas::pb as atlas_pb;
+use service::VitalsServiceImpl;
+use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let parsed = Args::parse();
+    let log_filter = parsed
+        .log
+        .clone()
+        .or_else(|| std::env::var("RUST_LOG").ok())
+        .unwrap_or_else(|| "robonix_vitals=info".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+
+    let cfg = VitalsConfig::resolve(parsed)?;
+    if cfg.mock_soma {
+        return mock_soma::run_mock_soma(
+            &cfg.atlas_endpoint,
+            &cfg.mock_soma_id,
+            &cfg.mock_soma_listen,
+            &cfg.mock_soma_scenario,
+            cfg.mock_soma_interval_ms,
+            cfg.mock_soma_arm.clone(),
+        )
+        .await;
+    }
+
+    info!("connecting to atlas at {}", cfg.atlas_endpoint);
+    let mut atlas =
+        AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
+            .await
+            .context("connect to atlas")?;
+
+    atlas
+        .register_service(&cfg.id, VITALS_NAMESPACE, "")
+        .await?;
+    info!("registered as '{}' under '{VITALS_NAMESPACE}'", cfg.id);
+
+    let listen_addr: std::net::SocketAddr = cfg
+        .listen
+        .parse()
+        .with_context(|| format!("invalid vitals listen address '{}'", cfg.listen))?;
+    let advertised = match listen_addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            format!("127.0.0.1:{}", listen_addr.port())
+        }
+        _ => listen_addr.to_string(),
+    };
+
+    // Declare GetVitals RPC.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/vitals/get",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/vitals/get.v1.toml",
+                "robonix.contracts.RobonixSystemVitalsGet",
+                "/robonix.contracts.RobonixSystemVitalsGet/GetVitals",
+            ),
+        )
+        .await?;
+    info!("declared GetVitals at {advertised}");
+
+    // Declare StreamVitals server_stream.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/vitals/stream",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/vitals/stream.v1.toml",
+                "robonix.contracts.RobonixSystemVitalsStream",
+                "/robonix.contracts.RobonixSystemVitalsStream/StreamVitals",
+            ),
+        )
+        .await?;
+    info!("declared StreamVitals at {advertised}");
+
+    // Declare module health aggregate snapshot RPC.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/vitals/modules/get",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/vitals/modules/get.toml",
+                "robonix.contracts.RobonixSystemVitalsModulesGet",
+                "/robonix.contracts.RobonixSystemVitalsModulesGet/GetModuleHealthSnapshot",
+            ),
+        )
+        .await?;
+    info!("declared ModuleHealthSnapshot at {advertised}");
+
+    if let Err(e) = atlas
+        .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
+        .await
+    {
+        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
+    }
+
+    // Heartbeat every 20s to prevent Atlas eviction (90s timeout).
+    {
+        let mut hb = atlas.clone();
+        let provider_id = cfg.id.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = hb.heartbeat(&provider_id).await {
+                    log::warn!("heartbeat failed: {e:#}");
+                }
+            }
+        });
+    }
+
+    // Build the shared service state.
+    let svc = VitalsServiceImpl::new();
+    svc.update_self_module_health(&cfg.id)
+        .await
+        .context("initialize Vitals self module health")?;
+    svc.apply_expected_module_config(&cfg.expected_modules)
+        .await;
+
+    module_health_poll::spawn_module_health_poller(
+        atlas.clone(),
+        cfg.id.clone(),
+        svc.clone(),
+        cfg.expected_modules.clone(),
+    );
+
+    let soma_rules: Vec<soma_ingest::SomaThresholdRule> =
+        match std::fs::read_to_string(&cfg.thresholds_path) {
+            Ok(yaml_str) => match soma_ingest::load_soma_thresholds(&yaml_str) {
+                Ok(r) => {
+                    info!(
+                        "loaded {} Soma threshold rules from {}",
+                        r.len(),
+                        cfg.thresholds_path.display()
+                    );
+                    r
+                }
+                Err(e) => {
+                    log::error!(
+                        "failed to parse Soma threshold file '{}': {e:#}; using defaults",
+                        cfg.thresholds_path.display()
+                    );
+                    soma_ingest::default_thresholds()
+                }
+            },
+            Err(_) => soma_ingest::default_thresholds(),
+        };
+
+    // ── SOMA stream consumer (background, retries until SOMA appears) ──
+    // Start the gRPC server immediately so Vitals is ready before SOMA.
+    // The SOMA connection retries in the background.
+    {
+        let svc_for_stream = svc.clone();
+        let rules_for_stream = soma_rules.clone();
+        let mut reconnect_atlas = atlas.clone();
+        let reconnect_consumer_id = cfg.id.clone();
+        let reconnect_soma_endpoint = cfg.soma_endpoint.clone();
+        tokio::spawn(async move {
+            // Initial connect: retry until SOMA appears.
+            let mut stream = loop {
+                match soma_ingest::open_soma_stream(
+                    &mut reconnect_atlas,
+                    &reconnect_consumer_id,
+                    reconnect_soma_endpoint.as_deref(),
+                )
+                .await
+                {
+                    Ok(Some(s)) => break s,
+                    Ok(None) => {
+                        log::warn!("[vitals] waiting for Soma health stream...");
+                    }
+                    Err(e) => {
+                        log::warn!("[vitals] Soma connect failed: {e:#} — retrying in 2s...");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            };
+            log::info!("[vitals] connected to Soma StreamHealth");
+
+            // Outer loop: reconnect on stream end or error.
+            loop {
+                // Inner loop: process stream messages.
+                loop {
+                    match stream.message().await {
+                        Ok(Some(snapshot)) => {
+                            let vitals = soma_ingest::snapshot_to_vitals(
+                                &snapshot,
+                                &rules_for_stream,
+                                monotonic_ns(),
+                            );
+                            svc_for_stream.update_snapshot(vitals).await;
+                        }
+                        Ok(None) => {
+                            log::error!("[vitals] Soma StreamHealth ended — reconnecting...");
+                            break;
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "[vitals] Soma StreamHealth error: {e:#} — reconnecting..."
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                // Reconnect with backoff.
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    match soma_ingest::open_soma_stream(
+                        &mut reconnect_atlas,
+                        &reconnect_consumer_id,
+                        reconnect_soma_endpoint.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(Some(new_stream)) => {
+                            log::info!("[vitals] reconnected to Soma StreamHealth");
+                            stream = new_stream;
+                            break;
+                        }
+                        Ok(None) => {
+                            log::warn!("[vitals] Soma still unavailable — retrying in 2s...");
+                        }
+                        Err(e) => {
+                            log::warn!("[vitals] reconnect failed: {e:#} — retrying in 2s...");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    info!("Vitals gRPC on {listen_addr} (Soma input)");
+    eprintln!("robonix-vitals ready on {listen_addr} (Soma input)");
+
+    tonic::transport::Server::builder()
+        .add_service(RobonixSystemVitalsGetServer::new(svc.clone()))
+        .add_service(RobonixSystemVitalsStreamServer::new(svc.clone()))
+        .add_service(RobonixSystemVitalsModulesGetServer::new(svc))
+        .serve(listen_addr)
+        .await
+        .context("vitals gRPC server failed")?;
+
+    Ok(())
+}
+
+fn monotonic_ns() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}

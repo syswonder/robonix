@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/system/soma/get_health"
+version = "1"
+kind    = "service"
+idl     = "soma/srv/GetHealth.srv"
+
+[mode]
+type = "rpc"

@@ -46,6 +46,17 @@ if __name__ == "__main__":
 
 That's a complete Robonix primitive — registers with Atlas, serves the Driver lifecycle, waits for the upstream topic, declares a ROS 2 capability for downstream consumers, and blocks on SIGTERM.
 
+`namespace` declares the provider's primary contract grouping. Regular
+contracts normally use that prefix. Declaring another contract is allowed;
+robonix-api and Atlas emit a visible warning unless the contract TOML marks it
+as `cross_namespace = true`. The warning is diagnostic and never blocks boot,
+discovery, or calls.
+
+Existing package-local `*/driver` contracts remain supported. A later
+framework migration will provide one built-in lifecycle contract so new
+packages do not need to copy a driver TOML; that migration will retain the
+current form as a compatibility path.
+
 ## What's in the box
 
 - **`ATLAS`** — module-level singleton client (`ATLAS.register`, `ATLAS.find_primitive`, `ATLAS.connect`, ...)
@@ -55,6 +66,23 @@ That's a complete Robonix primitive — registers with Atlas, serves the Driver 
 - **`mcp_contract`** — standalone FastMCP decorator (use when you manage your own FastMCP app, e.g. in `scene_service`)
 
 The Atlas wire protocol (atlas_pb2 / atlas_pb2_grpc) is pre-generated and bundled in the wheel. Per-contract stubs (`robonix_contracts_pb2`, MCP typed dataclasses) are generated **per deployment** by `rbnx codegen` against your contract TOMLs — `robonix-api` automatically picks them up from `<pkg>/rbnx-build/codegen/` at runtime.
+
+## Provider network binding
+
+Provider lifecycle gRPC, user gRPC, and MCP servers keep the compatible
+all-interface default (`0.0.0.0`). A deployment that must make every provider
+local-only sets this before provider construction:
+
+```bash
+export ROBONIX_PROVIDER_BIND_HOST=127.0.0.1
+export ROBONIX_ADVERTISE_HOST=127.0.0.1
+```
+
+`ROBONIX_PROVIDER_BIND_HOST` must be an IPv4 address literal and controls every
+server socket owned by `robonix-api`. When it is a non-wildcard address and no
+advertise override is set, that same address is advertised to Atlas
+automatically. Cross-host deployments should retain `0.0.0.0` and set
+`ROBONIX_ADVERTISE_HOST` to the provider address reachable by consumers.
 
 ## Versioning
 

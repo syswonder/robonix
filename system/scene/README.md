@@ -13,7 +13,7 @@ system/scene/
 ├── docker/
 │   ├── Dockerfile               ROS Humble + torch cu124 + CV stack
 │   ├── requirements.txt         scene + concept-graphs deps
-│   ├── _weights/                pre-fetched YOLO-World + MobileSAM .pt
+│   ├── _weights/                pre-fetched YOLO, MobileSAM + OpenCLIP weights
 │   └── entrypoint.sh            container runtime setup, including Zenoh RMW config
 ├── scripts/
 │   ├── build.sh                 rbnx codegen + docker build (+ weight pre-fetch)
@@ -131,7 +131,8 @@ cd robonix/rust && make install      # rbnx + atlas + pilot + executor + codegen
 
 # Build the scene image once. Pulls torch+cu124 wheels and the
 # concept-graphs source; pre-fetches YOLO-World + MobileSAM .pt to
-# docker/_weights/ so the docker layer stays cache-friendly.
+# docker/_weights/ so the docker layer stays cache-friendly. This includes the
+# OpenCLIP checkpoint, avoiding Hugging Face metadata calls inside BuildKit.
 #
 # Pick the ROS distro BEFORE this first build (default humble) — see
 # "ROS distro" below. e.g.  ROBONIX_SCENE_ROS_DISTRO=jazzy bash scripts/build.sh
@@ -231,6 +232,26 @@ runtime the container sources that distro's `setup.bash`; nothing else in
 scene references a distro. Default builds (variable unset) are unchanged —
 plain `humble`.
 
+### Offline-friendly Docker frontend and model cache
+
+Scene uses the Docker/BuildKit daemon's bundled Dockerfile frontend by
+default, so a cached rebuild does not need to query the `docker/dockerfile`
+registry tag. Builders that require a pinned or mirrored frontend can opt in:
+
+```bash
+ROBONIX_SCENE_BUILDKIT_SYNTAX=registry.example/docker/dockerfile:1.7@sha256:<digest> \
+    bash scripts/build.sh
+```
+
+Model files are downloaded on the host with retries, staged under the ignored
+`docker/_weights/` build context, and reused through
+`ROBONIX_MODEL_CACHE_DIR`. OpenCLIP uses the staged
+`open_clip_pytorch_model.bin` directly instead of resolving a symbolic model
+name through the Hugging Face metadata API. `RBNX_HF_MIRROR` selects the
+Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
+`https://huggingface.co` file URL is always tried as a fallback. Set
+`RBNX_HF_MIRROR=` to skip the mirror.
+
 ## Configuration knobs (env vars)
 
 | Env | Default | Notes |
@@ -240,7 +261,7 @@ plain `humble`.
 | `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera providers before falling back |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
-| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / `laion2b_s34b_b79k` | |
+| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
 | `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
@@ -255,7 +276,9 @@ plain `humble`.
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
-| `SCENE_MAP_ID` | `default` | SLAM map the persisted objects belong to; restore loads only this map's objects (manifest `map_id` overrides) |
+| `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
+| `SCENE_MAP_BINDING_WAIT_S` | `3.0` | how long the startup probe waits for the lifecycle contract to appear on atlas before falling back to static binding; `0` disables the probe |
+| `SCENE_ANNOTATIONS_DIR` | `/data/robonix/scene_annotations` | per-map JSON files holding user annotations (rooms / POIs); host-mounted like the object DB |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
 
 ## Object memory (warm restore)
@@ -273,13 +296,60 @@ DB — and lives under the host-mounted `/data/robonix`, which also makes the
 scene-graph JSON caches survive boots. Writes are driven by the scene-graph
 builder, so disabling `SCENE_GRAPH_ENABLED` stops new writes (restore still runs).
 
-Persistence is partitioned by `SCENE_MAP_ID` (or the manifest `map_id`): an
-object's pose is only meaningful in the `map` frame of the SLAM map it was
-observed on, so restore loads exactly the current map's objects and never mixes
-two maps. The same `object_id` may exist on different maps without colliding.
-`map_id` is a deploy-controlled string today (default `"default"`) and stays
-internal to scene — no atlas/MCP contract changes — until mapping emits a real
-map identity to wire in here.
+Persistence is partitioned by the map binding: an object's pose is only
+meaningful in the `map` frame of the SLAM map it was observed on, so restore
+loads exactly the current map's objects and never mixes two maps. The same
+`object_id` may exist on different maps without colliding.
+
+The binding itself (`scene_service/map_binding.py`) is learned at startup with
+this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
+(`{map_id, mode, generation}` — the authoritative map identity, probed for
+`SCENE_MAP_BINDING_WAIT_S`) → manifest `config.map_id` → `SCENE_MAP_ID` env →
+`"default"`. The broadcast needs the generated `map` interface package
+(`rbnx codegen --ros2` → colcon overlay, built by `scripts/build.sh`, sourced
+by the container entrypoint); without it scene falls back to static binding
+with a warning. At runtime scene only WATCHES the broadcast: if mapping's
+identity or `generation` (bumped when the map origin may have changed: reset /
+mapping-mode session start) drifts from the startup binding, scene logs a
+warning and keeps its binding — reacting (flush + re-anchor) is the planned
+lifecycle linkage (P3).
+
+## User annotations (rooms / POIs)
+
+Scene also stores **user-authored** semantics: annotations the user draws on
+the map canvas — a `room` (named polygon) or a `poi` (named point, optional
+heading; model-ready, no UI yet). They live on the same foundation as
+perceived objects: coordinates are map-frame meters, storage partitions by
+the map binding's `map_id`, and validity follows mapping's `generation`
+epoch. Unlike perceived objects they are user assets: a map rebuild (reset /
+re-mapping) never deletes them — they are flagged `stale` (with a reason)
+for the user to confirm ("still valid" clears the flag) or redraw (new
+geometry is authored against the current frame, so redrawing also clears it).
+
+Storage is one JSON file per map under `SCENE_ANNOTATIONS_DIR`
+(`<map_id>.json`, atomic writes, no vectors — deliberately not in the milvus
+object DB). CRUD goes through the web server's REST API (same trust domain
+as the rest of this LAN debug/UI server — no auth):
+
+| Route | Body | Returns |
+|---|---|---|
+| `GET /api/annotations` | — | `{ok, annotations: [...]}` |
+| `POST /api/annotations` | `{kind, name, points, theta?}` | `{ok, annotation}` (with generated id) |
+| `PUT /api/annotations/{id}` | any of `{name, points, theta, stale: false}` | `{ok, annotation}` |
+| `DELETE /api/annotations/{id}` | — | `{ok}` |
+
+Errors: `400` invalid fields (unknown kind, room polygon < 3 points, poi ≠ 1
+point, non-finite numbers, `theta` on a room — headings are poi-only), `404`
+unknown id, `503` store unavailable — those carry `{ok: false, detail}`; a
+store write failure (e.g. disk full) surfaces as a plain `500` because the
+edit was not saved. On `PUT`, `theta: null` (or absent) means "keep the
+current heading" — a set heading can be changed but not cleared (deliberate
+until the poi UI lands). `points` are `[[x, y], ...]` map-frame
+meters. **This shape is the contract any frontend builds on; treat changes
+as breaking.** The full annotation list also rides along in `GET /api/state`
+(field `annotations`, next to `map_binding`) so map pages get everything in
+one poll. There is deliberately no atlas/MCP surface yet — exposing rooms to
+Pilot (scene-graph `in_room` edges) is a planned follow-up.
 
 ## Capabilities exposed
 
@@ -303,12 +373,14 @@ curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
 ## Web UI quick tour
 
 * `/` — combined 3-column layout (default): 2D map · 3D scene · cam stack
+* `/user` — **end-user map page**: SLAM map + room annotations (draw a polygon, name it, rename / delete / confirm-stale) with a lightweight object overlay; the debug pages above are untouched by it
 * `/2d` — only the 2D top-down map
 * `/3d` — only the 3D point clouds + bboxes
 * `/cam` — only the camera stack: live RGB on top, live depth below
-* `/api/state` — JSON: registry + relations + occupancy PNG + robot pose
+* `/api/state` — JSON: registry + relations + occupancy PNG + robot pose + user annotations + map binding
 * `/api/objects3d` — JSON: per-object pcd + 8 bbox corners + CLIP class
 * `/api/camera` — JSON: latest RGB + depth as base64 PNGs (5 Hz polling)
+* `/api/annotations` — user annotation CRUD (see "User annotations" above)
 
 The 3D viz draws the OccupancyGrid as a translucent floor plane at z = -0.01 (so you can read room geometry under the point clouds), each detected object as a coloured pcd + yaw-rotated wireframe bbox + class label sprite, and the robot as a composite Tiago-shaped proxy (mobile base + torso + shoulder + head + arm), all parented to a `THREE.Group` that updates from `/api/state`'s `robot` field at 4 Hz.
 
@@ -336,7 +408,7 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 ## Scope (what's NOT here)
 
-- **No write API.** No `IngestObservation`, no `UpdateTaskContext`. Per the spec, scene is a sink.
+- **No write contract.** No `IngestObservation`, no `UpdateTaskContext` on atlas/MCP — perception-wise, scene is a sink. (The web server's annotation REST is an internal UI API, not a capability contract.)
 - **No subscribe-stream.** `SubscribeUpdates` doesn't fit MCP semantics. Pilot polls.
 - **No episodic memory.** Long-term memory belongs to memory services, not scene.
 - **No direct motion control.** `goal_near` returns an approach pose; navigation is performed by `robonix/service/navigation/navigate`.

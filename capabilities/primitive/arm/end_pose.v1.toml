@@ -1,0 +1,12 @@
+# Legacy-compatible unstamped end-effector pose. The provider documents the
+# frame in its package capability guide. A future stamped contract can add an
+# explicit frame without changing this deployed v1 wire shape.
+[contract]
+id = "robonix/primitive/arm/end_pose"
+version = "1"
+kind = "primitive"
+idl = "common_interfaces/geometry_msgs/msg/Pose.msg"
+description = "Measured end-effector pose in the arm provider's documented base frame."
+
+[mode]
+type = "topic_out"

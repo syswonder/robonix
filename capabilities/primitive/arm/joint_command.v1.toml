@@ -1,0 +1,11 @@
+# Standard joint command input. Providers may support a subset of JointState
+# fields, but names and positions must use the same units as joint_states.
+[contract]
+id = "robonix/primitive/arm/joint_command"
+version = "1"
+kind = "primitive"
+idl = "common_interfaces/sensor_msgs/msg/JointState.msg"
+description = "Named arm and gripper joint command input using standard JointState units."
+
+[mode]
+type = "topic_in"

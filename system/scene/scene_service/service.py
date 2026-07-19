@@ -36,7 +36,9 @@ scene = Service(id="scene", namespace="robonix/system/scene")
 
 from . import mcp_tools
 from . import web as web_ui
+from .annotations import AnnotationStore
 from .ingest.capabilities import plan_perception
+from .map_binding import MapBinding, choose_map_binding, read_latched_lifecycle
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
@@ -98,12 +100,21 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("rgb",               "robonix/primitive/camera/rgb",        "Image"),
     ("depth",             "robonix/primitive/camera/depth",      "Image"),
     ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
-    ("lidar3d",           "robonix/primitive/lidar/pointcloud",  "PointCloud2"),
+    ("lidar3d",           "robonix/primitive/lidar/lidar3d",     "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
     ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
     ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
-    ("odom",              "robonix/service/map/odom",            "Odometry"),
+    # Mapping may reuse external chassis odometry and then intentionally does
+    # not redeclare map/odom. Consume the primitive's canonical continuous
+    # odometry contract directly; map-corrected pose still comes from TF/pose.
+    ("odom",              "robonix/primitive/chassis/odom",      "Odometry"),
     ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
+    # Latched {map_id, mode, generation} broadcast from mapping. Startup
+    # binding is probed separately (_discover_map_binding, before the hub
+    # exists); this hub subscription feeds the runtime mismatch watcher
+    # (_lifecycle_watch). Needs the generated `map` interface package
+    # (ros2_idl overlay) — the hub skips the row gracefully when missing.
+    ("map_lifecycle",     "robonix/service/map/lifecycle",       "MapLifecycle"),
 ]
 
 # Optional manifest opt-out: kinds listed here are dropped even if atlas
@@ -230,6 +241,46 @@ def _resolve_one_contract(
         msg_type=msg_type,
         qos_profile=qos_profile or "default",
     )
+
+
+def _discover_map_binding(wait_s: float) -> Optional[dict]:
+    """Probe mapping's latched lifecycle broadcast for the startup binding.
+
+    Adaptive cost: polls atlas for the `robonix/service/map/lifecycle`
+    contract for at most `wait_s` (the normal full-boot order starts scene
+    BEFORE mapping, so the contract is usually absent and this returns in
+    ~`wait_s`); once the contract resolves — the scene-restart-while-
+    mapping-runs case — the latched sample arrives immediately, with a 5 s
+    ceiling as safety. Returns {map_id, mode, generation} or None; blocking
+    is fine here, it runs before anything else is wired. `wait_s <= 0`
+    disables the probe (unit tests / ROS-less runs)."""
+    if wait_s <= 0:
+        return None
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            spec = _resolve_one_contract(
+                Transport.ROS2, "map_lifecycle",
+                "robonix/service/map/lifecycle", "MapLifecycle",
+            )
+        except Exception as e:  # noqa: BLE001
+            # Probe runs before bootstrap; if atlas isn't reachable yet a
+            # wire error must degrade to static binding, not kill startup.
+            log.warning("[scene] lifecycle probe: atlas query failed (%s) — "
+                        "falling back to static map binding", e)
+            return None
+        if spec is not None:
+            sample = read_latched_lifecycle(spec.topic, timeout_s=5.0)
+            if sample is None:
+                log.warning(
+                    "[scene] lifecycle contract resolved (%s) but no latched "
+                    "sample within 5s — falling back to static map binding",
+                    spec.topic,
+                )
+            return sample
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.5)
 
 
 def _resolve_explicit(
@@ -842,6 +893,132 @@ async def _ingest_detections(registry: ObjectRegistry, detections):
         )
 
 
+def _log_bg_task_exit(task: "asyncio.Task") -> None:
+    """Done-callback for scene's fire-and-forget background tasks: log any
+    exception at ERROR the moment the task dies, instead of letting asyncio
+    sit on it until interpreter shutdown."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("[scene] background task %r died: %r", task.get_name(), exc)
+
+
+async def _lifecycle_watch(
+    hub: SubscribersHub,
+    binding: MapBinding,
+    anno_store: Optional[AnnotationStore] = None,
+) -> None:
+    """P2 guard: scene binds its map_id ONCE at startup; when mapping's
+    broadcast later disagrees (map loaded/reset/switched at runtime), warn
+    loudly — reacting to it (flush + re-anchor the semantic state) is the
+    P3 lifecycle linkage, not guesswork here. Also confirms a static
+    binding the first time the broadcast appears and agrees.
+
+    One reaction IS taken already: a generation bump on the SAME map flags
+    the user's annotations stale (flag-only — user assets are never
+    deleted automatically). That is a marker write, not a flush, so it is
+    safe ahead of P3; and because it is best-effort, a failing marker
+    write must never kill this watcher — the drift WARNING itself is the
+    load-bearing part.
+
+    A static binding (config/env — the normal full-boot order, scene up
+    before mapping) carries no generation, so the epoch reference is
+    learned from the FIRST confirming broadcast: without that, `gen_ok`
+    would stay vacuously true and runtime bumps would be invisible."""
+    confirmed = False
+    warned_ephemeral = False
+    last_warned: Optional[tuple] = None
+    ref_gen = binding.generation
+    while True:
+        await asyncio.sleep(5.0)
+        msg, stamp_unix, _count = hub.latest("map_lifecycle")
+        if msg is None:
+            continue
+        live_id, live_gen = str(msg.map_id), int(msg.generation)
+        if not live_id:
+            # Ephemeral broadcast: no named identity to compare — but if
+            # scene statically bound a NAMED map, that named partition is
+            # being fed coordinates from a frame that resets every boot.
+            # Say so once instead of guarding silently forever.
+            if not warned_ephemeral and binding.source in ("config", "env"):
+                log.warning(
+                    "[scene] mapping broadcasts an EPHEMERAL session (empty "
+                    "map_id) while scene is bound to %r (source=%s) — set "
+                    "mapping's config.map_id to match", binding.map_id,
+                    binding.source,
+                )
+                warned_ephemeral = True
+            continue
+        id_ok = live_id == binding.map_id
+        gen_ok = ref_gen is None or live_gen == ref_gen
+        if id_ok and gen_ok:
+            if not confirmed:
+                log.info(
+                    "[scene] map binding confirmed by mapping lifecycle: "
+                    "id=%s gen=%d mode=%s", live_id, live_gen, str(msg.mode),
+                )
+                confirmed = True
+                # Static bindings learn their epoch here; from now on a
+                # bump IS detectable. The annotation store gets to compare
+                # the confirmed epoch against the one its file recorded
+                # (it too may have loaded under an unknown generation).
+                ref_gen = live_gen
+                if anno_store is not None:
+                    try:
+                        anno_store.reconcile_generation(live_gen)
+                    except Exception as e:  # noqa: BLE001
+                        # Best-effort marker write (disk full / read-only
+                        # dir); the watcher itself must survive it.
+                        log.error(
+                            "[scene-anno] generation reconcile failed "
+                            "(annotation staleness may be outdated): %s", e,
+                        )
+            last_warned = None
+            continue
+        key = (live_id, live_gen)
+        if key != last_warned:
+            log.warning(
+                "[scene] mapping's live map identity (id=%s gen=%d mode=%s) "
+                "no longer matches scene's startup binding (id=%s gen=%s "
+                "source=%s) — semantic state may be mis-anchored. Scene keeps "
+                "its startup binding until lifecycle linkage (P3) lands; "
+                "restart scene to rebind.",
+                live_id, live_gen, str(msg.mode),
+                binding.map_id, ref_gen, binding.source,
+            )
+            if anno_store is not None and id_ok and not gen_ok:
+                # Same map, new frame epoch: user-drawn geometry may no
+                # longer line up with the rebuilt map. Flag it for user
+                # confirmation (marker-only; deletion is never automatic).
+                try:
+                    n = anno_store.mark_all_stale(
+                        f"map generation {ref_gen}→{live_gen}",
+                        new_generation=live_gen,
+                    )
+                    if n:
+                        log.warning(
+                            "[scene-anno] %d annotation(s) marked stale — "
+                            "confirm or redraw them in the map UI", n,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    # Losing the stale marker is recoverable (next boot's
+                    # load-time epoch check re-judges); losing this watcher
+                    # would silence ALL drift warnings for the session.
+                    log.error(
+                        "[scene-anno] stale marking failed (annotations "
+                        "may show as fresh until restart): %s", e,
+                    )
+            if id_ok:
+                # Acknowledge the new epoch so a THIRD epoch is reported
+                # against this one (accurate from→to in reason/log), and
+                # each bump warns exactly once. The registry's semantic
+                # state stays anchored to the startup binding until the
+                # lifecycle linkage (P3) actually re-anchors it.
+                ref_gen = live_gen
+            last_warned = key
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 async def _run() -> None:
     config = _load_config()
@@ -865,14 +1042,44 @@ async def _run() -> None:
     # arrive; the embedder is wired in later (only needed for writes). The
     # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
     # prior boot wrote rows — but writes are driven by the scene-graph builder.
-    # Which SLAM map this scene session belongs to. Deploy-controlled until
-    # mapping emits a real map identity — manifest `map_id` wins, else the
-    # SCENE_MAP_ID env, else "default". This is the join key against mapping
-    # and the scope key for ALL of scene's persistent state: object poses are
-    # only valid in their own map's frame, and so are the scene-graph caption/
-    # relation caches. Computed once here so the object store (below) and the
-    # scene-graph cache (further down) partition on the same value.
-    map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
+    # Which SLAM map this scene session belongs to. This is the join key
+    # against mapping and the scope key for ALL of scene's persistent state:
+    # object poses are only valid in their own map's frame, and so are the
+    # scene-graph caption/relation caches. Computed once here so the object
+    # store (below) and the scene-graph cache (further down) partition on
+    # the same value.
+    #
+    # Binding precedence (choose_map_binding): mapping's latched lifecycle
+    # broadcast — the authoritative map identity, probed briefly here —
+    # then manifest `map_id`, then SCENE_MAP_ID env, then "default". The
+    # static levers stay as fallback because the normal full-boot order
+    # starts scene BEFORE mapping (probe cost then ≈ the wait window);
+    # a scene restart while mapping runs binds from the broadcast alone.
+    broadcast = _discover_map_binding(
+        float(os.environ.get("SCENE_MAP_BINDING_WAIT_S", "3.0"))
+    )
+    binding = choose_map_binding(
+        broadcast, config.get("map_id"), os.environ.get("SCENE_MAP_ID")
+    )
+    map_id = binding.map_id
+    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in ("true", "1", "yes")
+    scene_state_map_id = map_id if restore_on_start else f".live-{os.getpid()}-{int(time.time())}"
+    log.info(
+        "[scene] map binding: id=%s gen=%s source=%s mode=%s restore_on_start=%s state_partition=%s",
+        binding.map_id, binding.generation, binding.source, binding.mode,
+        restore_on_start, scene_state_map_id,
+    )
+    if broadcast is not None and not str(broadcast.get("map_id") or ""):
+        # mapping is provably UP but running ephemeral (no map_id) — its
+        # frame resets every boot, so the named partition scene just bound
+        # statically will never re-anchor. Likely a manifest misconfig
+        # (SCENE_MAP_ID set, mapping's config.map_id forgotten).
+        log.warning(
+            "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
+            "while scene binds %r from %s — objects stored under this id "
+            "won't re-anchor across boots; set mapping's config.map_id to "
+            "match", binding.map_id, binding.source,
+        )
 
     obj_store = None
     if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
@@ -882,14 +1089,15 @@ async def _run() -> None:
             "SCENE_OBJECT_MEMORY_DB", "/data/robonix/scene_memory/objects.db"
         )
         try:
-            obj_store = ObjectStore(db_path, map_id=map_id)
-            restored = obj_store.load_all()
-            async with registry.lock():
-                for o in restored:
-                    registry.restore_object(o)
+            obj_store = ObjectStore(db_path, map_id=scene_state_map_id)
+            restored = obj_store.load_all() if restore_on_start else []
+            if restored:
+                async with registry.lock():
+                    for o in restored:
+                        registry.restore_object(o)
             log.info(
-                "[scene-persist] restored %d objects (map_id=%s) from %s",
-                len(restored), obj_store.map_id, db_path,
+                "[scene-persist] object store ready: restored %d object(s) (partition=%s, restore_on_start=%s) from %s",
+                len(restored), obj_store.map_id, restore_on_start, db_path,
             )
         except Exception as e:  # noqa: BLE001
             # Object memory is opted in (default on), so a failure here is not
@@ -901,10 +1109,39 @@ async def _run() -> None:
                 "writes): %s", e,
             )
             obj_store = None
+
+    # User annotations (rooms / POIs) — user-authored semantics on the same
+    # map_id partition rule as the object store; validity is additionally
+    # tracked against mapping's generation epoch (annotations only — the
+    # object store has no epoch concept). A failure here disables the
+    # annotation API for the session (web answers 503) but never blocks
+    # scene itself.
+    anno_store: Optional[AnnotationStore] = None
+    try:
+        anno_store = AnnotationStore(
+            os.environ.get(
+                "SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"
+            ),
+            map_id=scene_state_map_id,
+            generation=binding.generation if restore_on_start else None,
+        )
+        anns = anno_store.list()
+        log.info(
+            "[scene-anno] annotation store ready: %d annotation(s), %d stale "
+            "(map_id=%s) at %s",
+            len(anns), sum(a.stale for a in anns), anno_store.map_id,
+            anno_store.path,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error(
+            "[scene-anno] annotation store init failed — annotation API "
+            "disabled for this session: %s", e,
+        )
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
     # supplied later in _start_ros_ingest). The geometric relation loop +
     # scene-graph store are wired further down, once the registry is live.
     mcp_tools.attach_state(registry=registry)
+    mcp_tools.attach_annotation_store(anno_store)
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
     # keeps running its own asyncio event loop after this returns.
@@ -916,6 +1153,7 @@ async def _run() -> None:
     for fn in (
         mcp_tools.list_objects,
         mcp_tools.goal_near,
+        mcp_tools.goal_room,
         mcp_tools.get_scene_graph,
         mcp_tools.get_object_context,
         mcp_tools.list_relations,
@@ -934,7 +1172,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 5 MCP tools at %s", scene.mcp_endpoint)
+    log.info("scene declared 6 MCP tools at %s", scene.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -960,6 +1198,12 @@ async def _run() -> None:
         obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
+        # P2 guard: warn when mapping's live map identity drifts from the
+        # binding scene started with (P3 will act on it instead).
+        asyncio.create_task(
+            _lifecycle_watch(hub, binding, anno_store),
+            name="scene-lifecycle-watch",
+        ),
         # Background reconciler: keeps scene's hub adding subscriptions
         # for new ROS2 topic_outs that appear on atlas after start
         # (mapping comes up after scene; same pattern for any future
@@ -975,6 +1219,11 @@ async def _run() -> None:
         ),
         *ingest_bg,
     ]
+    # These tasks are fire-and-forget: nothing awaits them, so an uncaught
+    # exception would otherwise vanish until shutdown (the failure mode of
+    # the failure-detectors themselves). Surface any death immediately.
+    for _t in bg_tasks:
+        _t.add_done_callback(_log_bg_task_exit)
 
     # ── Relation layer ───────────────────────────────────────────────
     # Fast geometric relations (contact/containment + reachable_by) are
@@ -987,9 +1236,10 @@ async def _run() -> None:
     sg_cache_dir = os.environ.get(
         "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
     )
-    # Partition the scene-graph caches by the same map_id as the object store,
-    # so caption/relation answers from one map never bleed into another.
-    sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=map_id)
+    # Partition the scene-graph caches by the same runtime state partition as
+    # the object store. Startup defaults to a live session; explicit Load rebinds
+    # persistent room/object state through the web map facade.
+    sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=scene_state_map_id)
     log.info(
         "[scene-graph] cache base=%s partitioned by map_id=%s",
         sg_cache_dir, map_id,
@@ -1050,6 +1300,14 @@ async def _run() -> None:
             hub=hub,
             detector=perception,
             sg_store=sg_store,
+            anno_store=anno_store,
+            object_store=obj_store,
+            map_binding={
+                "map_id": binding.map_id,
+                "mode": binding.mode if restore_on_start else "",
+                "generation": binding.generation if restore_on_start else None,
+                "source": binding.source if restore_on_start else "default",
+            },
         )
         web_uv = uvicorn.Config(
             app=web_app,

@@ -44,6 +44,14 @@ def _import_ros():
     # transform is non-identity, and the web UI shows the robot offset
     # from where rviz (which goes through tf) shows it.
     from tf2_ros import Buffer, TransformListener  # type: ignore
+    # map/msg/MapLifecycle comes from the generated ros2_idl overlay
+    # (rbnx codegen --ros2 + colcon build), NOT the ROS distro. Import it
+    # defensively: a deploy without the overlay must lose only the
+    # lifecycle subscription, not every scene subscription.
+    try:
+        from map.msg import MapLifecycle  # type: ignore
+    except ImportError:
+        MapLifecycle = None
     return {
         "rclpy": rclpy,
         "Node": Node,
@@ -65,6 +73,9 @@ def _import_ros():
         "TransformStamped": TransformStamped,
         "Odometry": Odometry,
         "OccupancyGrid": OccupancyGrid,
+        # None when the ros2_idl overlay is missing — _subscribe skips the
+        # spec with a warning instead of crashing the hub.
+        "MapLifecycle": MapLifecycle,
         "Buffer": Buffer,
         "TransformListener": TransformListener,
     }
@@ -75,13 +86,55 @@ class TopicSpec:
     """One observation kind's wiring. `kind` is the abstract name
     (rgb / depth / lidar2d / pose / odom); `topic` is the concrete
     ROS topic; `msg_type` selects which sensor_msgs / nav_msgs class
-    to import. Optional `qos_profile` lets a config override the
-    default reliable-latched profile when needed (e.g. /amcl_pose
-    needs RELIABLE + KEEP_LAST(1))."""
+    to import. Optional `qos_profile` carries the Atlas declaration; when it
+    is absent, sensor streams use best-effort/volatile and map lifecycle data
+    uses reliable/transient-local semantics."""
     kind: str
     topic: str
     msg_type: str            # "Image" | "LaserScan" | "PoseWithCovarianceStamped" | "Odometry"
     qos_profile: str = "default"
+
+
+def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
+    """Return reliability, durability and depth for one Atlas topic.
+
+    Atlas carries the publisher's declared QoS. A RELIABLE request cannot
+    connect to a BEST_EFFORT publisher, while a BEST_EFFORT subscription can
+    consume either reliability. Honour the declaration instead of replacing
+    every sensor stream with a hard-coded RELIABLE request.
+    """
+    sensor_kinds = {"rgb", "depth", "lidar2d", "lidar3d", "intrinsics"}
+    if spec.kind in {
+        "rgb",
+        "depth",
+        "intrinsics",
+        "occupancy_grid",
+        "map_lifecycle",
+        "camera_extrinsics",
+    }:
+        depth = 1
+    elif spec.kind in {"lidar2d", "lidar3d"}:
+        depth = 2
+    else:
+        depth = 10
+    declared = str(spec.qos_profile or "default").strip().lower().replace("-", "_")
+    if declared in {"best_effort", "sensor_data"}:
+        return "best_effort", "volatile", depth
+    if declared == "reliable":
+        return "reliable", "volatile", depth
+    if declared in {"latched", "transient_local"}:
+        return "reliable", "transient_local", depth
+    if declared not in {"", "default"}:
+        log.warning(
+            "[scene-ros] unsupported Atlas QoS %r for %s; using safe kind default",
+            spec.qos_profile,
+            spec.kind,
+        )
+    if spec.kind in sensor_kinds:
+        return "best_effort", "volatile", depth
+    if spec.kind in {"occupancy_grid", "map_lifecycle", "camera_extrinsics"}:
+        return "reliable", "transient_local", depth
+    return "reliable", "volatile", depth
 
 
 class _LatestSlot:
@@ -166,14 +219,19 @@ class SubscribersHub:
         """Add a new (kind, topic) subscription to a hub already up.
         Used by the background reconciler to absorb topics that come
         online after start(). Returns True if added, False if the
-        kind was already known."""
+        kind was already known — or if the subscription could not be
+        created (missing msg class): committing the slot anyway would
+        make has_kinds() claim a subscription that doesn't exist and
+        pair a success log with the skip warning."""
         if self._ros is None:
             return False
         if spec.kind in self._slots:
             return False
         self._slots[spec.kind] = _LatestSlot()
+        if not self._subscribe(spec):
+            del self._slots[spec.kind]
+            return False
         self.specs.append(spec)
-        self._subscribe(spec)
         log.info("[scene-ros] dynamic add: %s on %s", spec.kind, spec.topic)
         return True
 
@@ -208,82 +266,44 @@ class SubscribersHub:
                 log.debug("[scene-ros] spin tick: %s", e)
 
     # ── subscription wiring ────────────────────────────────────────────────
-    def _subscribe(self, spec: TopicSpec) -> None:
+    def _subscribe(self, spec: TopicSpec) -> bool:
+        """Create the rclpy subscription for one spec. Returns False (with
+        a warning) when the msg class is unavailable — the hub and every
+        other subscription keep running."""
         assert self._ros is not None
-        msg_cls = self._ros[spec.msg_type]
+        msg_cls = self._ros.get(spec.msg_type)
+        if msg_cls is None:
+            # Unknown or unavailable msg class (e.g. MapLifecycle without
+            # the ros2_idl overlay). One subscription degrades, the hub —
+            # and every other subscription — keeps running.
+            log.warning(
+                "[scene-ros] msg type %r unavailable — skipping %s on %s "
+                "(generated interface overlay missing?)",
+                spec.msg_type, spec.kind, spec.topic,
+            )
+            return False
         QoSProfile = self._ros["QoSProfile"]
         ReliabilityPolicy = self._ros["ReliabilityPolicy"]
         DurabilityPolicy = self._ros["DurabilityPolicy"]
         HistoryPolicy = self._ros["HistoryPolicy"]
 
-        # Per-topic QoS. ROS2's compatibility rule: a subscriber's
-        # reliability must be ≤ the publisher's, so RELIABLE-pub +
-        # BEST_EFFORT-sub silently drops every message — caught by
-        # `ros2 topic info -v` showing zero data on a `topic echo`.
-        # Webots's camera plugin publishes RELIABLE, Nav2 publishes
-        # /amcl_pose RELIABLE, etc. So we default to RELIABLE here
-        # and trust ROS to coerce when a publisher is BEST_EFFORT.
-        # If a deployment needs to opt back into BEST_EFFORT for a
-        # specific topic (e.g. a real lidar at 100 Hz), the spec
-        # could grow a `qos_profile` field; not needed for v1.
-        if spec.kind in ("rgb", "depth"):
-            # KEEP_LAST(1): cameras spam at >10 Hz; only the freshest
-            # frame is useful for the periodic VLM tick.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        elif spec.kind == "lidar2d":
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=2,
-            )
-        elif spec.kind == "occupancy_grid":
-            # slam_toolbox publishes /map RELIABLE + TRANSIENT_LOCAL
-            # (the standard "latched" map). A late subscriber needs
-            # TRANSIENT_LOCAL to receive the cached snapshot.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        elif spec.kind == "intrinsics":
-            # Pinhole K (primitive/camera/intrinsics). Real cameras
-            # (e.g. realsense2_camera) publish camera_info CONTINUOUSLY
-            # alongside every frame with DURABILITY=VOLATILE — a
-            # TRANSIENT_LOCAL subscriber is then QoS-incompatible and
-            # receives NOTHING ("waiting for camera intrinsics" forever).
-            # VOLATILE is compatible with both a volatile continuous
-            # publisher and a transient-local latched one, so use it.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=5,
-            )
-        elif spec.kind == "camera_extrinsics":
-            # Static camera mount transform (primitive/camera/extrinsics):
-            # genuinely latched (published once), so TRANSIENT_LOCAL is
-            # needed to pick up the cached value on a late start.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        else:
-            # Pose / odom are typically reliable + small.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=10,
-            )
+        reliability_name, durability_name, depth = topic_qos_policy(spec)
+        reliability = (
+            ReliabilityPolicy.BEST_EFFORT
+            if reliability_name == "best_effort"
+            else ReliabilityPolicy.RELIABLE
+        )
+        durability = (
+            DurabilityPolicy.TRANSIENT_LOCAL
+            if durability_name == "transient_local"
+            else DurabilityPolicy.VOLATILE
+        )
+        qos = QoSProfile(
+            reliability=reliability,
+            durability=durability,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=depth,
+        )
 
         slot = self._slots[spec.kind]
         _kind = spec.kind  # closure capture
@@ -298,8 +318,16 @@ class SubscribersHub:
                 log.info("[scene-ros] FIRST msg on %s (kind=%s)", spec.topic, _k)
 
         self._node.create_subscription(msg_cls, spec.topic, _cb, qos)
-        log.info("[scene-ros] subscribed: %s on %s (%s, qos=%s)",
-                 spec.kind, spec.topic, spec.msg_type, spec.kind)
+        log.info(
+            "[scene-ros] subscribed: %s on %s (%s, qos=%s/%s depth=%d)",
+            spec.kind,
+            spec.topic,
+            spec.msg_type,
+            reliability_name,
+            durability_name,
+            depth,
+        )
+        return True
 
     # ── consumer-side accessors ────────────────────────────────────────────
     def latest(self, kind: str) -> tuple[Any, float, int]:

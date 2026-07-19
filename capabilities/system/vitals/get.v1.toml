@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/system/vitals/get"
+version = "1"
+kind    = "service"
+idl     = "vitals/srv/GetVitals.srv"
+
+[mode]
+type = "rpc"

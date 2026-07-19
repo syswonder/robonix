@@ -1,0 +1,10 @@
+# Read the current robot-local wake-word interaction state.
+---
+bool enabled
+string state
+string keyword
+string mic_provider_id
+string speaker_provider_id
+uint64 last_wake_ms
+string last_transcript
+string last_error
