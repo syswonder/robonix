@@ -954,9 +954,12 @@ async def _lifecycle_watch(
             if not warned_ephemeral and binding.source in ("config", "env"):
                 log.warning(
                     "[scene] mapping broadcasts an EPHEMERAL session (empty "
-                    "map_id) while scene is bound to %r (source=%s) — set "
-                    "mapping's config.map_id to match", binding.map_id,
-                    binding.source,
+                    "map_id) while scene is bound to %r (source=%s) — mapping "
+                    "mode is using an unsaved live session; Save the current "
+                    "mapping session as %r first, then Load that saved map or "
+                    "restart in localization mode for a stable cross-boot "
+                    "binding",
+                    binding.map_id, binding.source, binding.map_id,
                 )
                 warned_ephemeral = True
             continue
@@ -1082,13 +1085,15 @@ async def _run() -> None:
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # mapping is provably UP but running ephemeral (no map_id) — its
         # frame resets every boot, so the named partition scene just bound
-        # statically will never re-anchor. Likely a manifest misconfig
-        # (SCENE_MAP_ID set, mapping's config.map_id forgotten).
+        # statically will not re-anchor across boots until the operator saves
+        # this live session and later loads it in localization mode.
         log.warning(
             "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
             "while scene binds %r from %s — objects stored under this id "
-            "won't re-anchor across boots; set mapping's config.map_id to "
-            "match", binding.map_id, binding.source,
+            "won't re-anchor across boots; Save the current mapping session "
+            "as %r first, then Load that saved map or restart in localization "
+            "mode",
+            binding.map_id, binding.source, binding.map_id,
         )
 
     obj_store = None
