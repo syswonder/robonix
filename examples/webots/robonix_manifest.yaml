@@ -127,14 +127,10 @@ service:
     branch: main
     config:
       use_sim_time: true
-      # The simulator's planar lidar is deterministic and aligned to odom.
-      # Keep RGB-D available to RTAB-Map without mixing approximately synced
-      # depth rays into the authoritative 2D occupancy grid.
-      occupancy_sources: [lidar]
+      # Fuse planar lidar and registered depth into the 2-D occupancy grid.
+      occupancy_sources: [lidar, depth]
       # Complete simulator tuning is owned by this deployment repository.
-      # Fuse planar lidar, registered RGB-D, and chassis odometry. The planar
-      # lidar remains the sole occupancy source; RGB-D contributes visual and
-      # geometric constraints without projecting depth noise into the 2D grid.
+      # RTAB-Map also consumes RGB-D and the chassis odometry for SLAM.
       rtabmap_inputs: [lidar, rgbd, odom]
       params_file: config/rtabmap_params.yaml
       sensor_providers:

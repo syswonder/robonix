@@ -32,8 +32,12 @@ class WebotsDeployConfigTest(unittest.TestCase):
         self.assertNotIn("rtabmap_profile", mapping)
         self.assertNotIn("rtabmap_params", mapping)
         params = yaml.safe_load((ROOT / mapping["params_file"]).read_text())
-        self.assertEqual(params["Reg/Strategy"], 0)
+        self.assertEqual(params["Reg/Strategy"], 1)
         self.assertEqual(params["Rtabmap/DetectionRate"], 5.0)
+        self.assertEqual(params["RGBD/LinearUpdate"], 0.05)
+        self.assertEqual(params["RGBD/AngularUpdate"], 0.05)
+        self.assertTrue(params["RGBD/NeighborLinkRefining"])
+        self.assertTrue(params["RGBD/ProximityBySpace"])
 
     def test_navigation_uses_deploy_owned_file(self):
         navigation = entries(self.document, "service")["nav2"]["config"]
