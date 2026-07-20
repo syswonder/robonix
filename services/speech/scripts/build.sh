@@ -102,11 +102,15 @@ fi
 VIRTUAL_ENV="$PKG/$VENV" uv sync "${SYNC_ARGS[@]}"
 
 # Wake-word detection is a core Speech capability, independent of whether ASR
-# and TTS use local models or Tencent. The runtime libraries are published on
-# sherpa-onnx's wheel index rather than PyPI.
-uv pip install --python "$VENV/bin/python" --no-index \
-    --find-links "${SHERPA_ONNX_WHEEL_INDEX:-https://k2-fsa.github.io/sherpa/onnx/cpu-cn.html}" \
-    sherpa-onnx-bin==1.13.4 sherpa-onnx-core==1.13.4
+# and TTS use local models or Tencent. Install the complete, version-matched
+# sherpa-onnx wheel set from the configured Python package index. PyPI and the
+# default TUNA mirror publish Linux x86_64/aarch64 wheels for all three
+# packages, so the build does not need to scrape k2-fsa.github.io (which is not
+# reliably reachable from mainland China).
+SHERPA_ONNX_INDEX_URL="${SHERPA_ONNX_INDEX_URL:-$UV_INDEX_URL}"
+uv pip install --python "$VENV/bin/python" \
+    --index-url "$SHERPA_ONNX_INDEX_URL" \
+    sherpa-onnx==1.13.4 sherpa-onnx-bin==1.13.4 sherpa-onnx-core==1.13.4
 
 # ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
 # On Jetson (aarch64), PyPI ships a torch built against a CUDA version that
