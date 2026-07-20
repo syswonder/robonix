@@ -137,6 +137,13 @@ _remember_pipe = RememberPipeline(_graph, _tags, _vectors, _images)
 _retrieve_pipe = RetrievePipeline(_graph, _tags, _vectors)
 _compact_pipe = CompactPipeline(_graph)
 
+# ── 2c. Scene Hook HTTP server ───────────────────────────────────────
+# Must start at module level — rbnx boot calls robonix_api.Service.run()
+# directly, bypassing main().  The server listens for raw JSON POSTs
+# from Scene's ObjectWatchdog and Scene Hook (mcp_tools.py).
+# Called AFTER _start_scene_hook_server is defined below.
+# See line ~640 for the actual call.
+
 # ── 3. Standalone API (MemoryService) — works without rbnx ─────────────
 
 
@@ -561,13 +568,22 @@ def main() -> int:
     return 0
 
 
+_scene_hook_started = False
+
 def _start_scene_hook_server() -> None:
     """Start a tiny HTTP server on port 37798 for Scene Hook direct POST.
 
     FastMCP's Streamable HTTP transport requires SSE session negotiation
     which is too complex for a simple service-to-service Hook.  This
     endpoint accepts raw JSON POST directly — no MCP protocol overhead.
+
+    Idempotent: safe to call multiple times (e.g. module-level + main()).
     """
+    global _scene_hook_started
+    if _scene_hook_started:
+        return
+    _scene_hook_started = True
+
     import json as _json
     import threading
     from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -635,6 +651,10 @@ def _start_scene_hook_server() -> None:
     thread.start()
     log.info("scene_hook: HTTP endpoint on 0.0.0.0:%d", port)
 
+
+# Start at module level so it works regardless of whether the process
+# enters through main() or robonix_api.Service.run().
+_start_scene_hook_server()
 
 if __name__ == "__main__":
     sys.exit(main())
