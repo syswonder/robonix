@@ -141,13 +141,14 @@ pub async fn execute_build(
     path: Option<PathBuf>,
     global: Option<String>,
     clean: bool,
+    no_update_check: bool,
 ) -> Result<()> {
     if let Some(file) = file {
         let manifest_path = resolve_local_path_for_filesystem(&file)?;
         if !manifest_path.is_file() {
             anyhow::bail!("deployment manifest not found: {}", manifest_path.display());
         }
-        return build_deploy_manifest(&manifest_path, &config, clean);
+        return build_deploy_manifest(&manifest_path, &config, clean, no_update_check);
     }
 
     // Deploy-manifest mode: if `path` (or cwd, when -p is omitted)
@@ -165,7 +166,7 @@ pub async fn execute_build(
     if let Some(dir) = candidate_dir {
         let deploy_manifest = dir.join("robonix_manifest.yaml");
         if deploy_manifest.is_file() {
-            return build_deploy_manifest(&deploy_manifest, &config, clean);
+            return build_deploy_manifest(&deploy_manifest, &config, clean, no_update_check);
         }
     }
     let package_root = resolve_package_path(&config, path, global)?;
@@ -184,7 +185,12 @@ pub async fn execute_build(
 /// "fetch → build" be a controlled offline step the user can run
 /// when they have network / time, then `rbnx boot` is a fast,
 /// online-optional bring-up.
-fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> Result<()> {
+fn build_deploy_manifest(
+    manifest_path: &Path,
+    config: &Config,
+    clean: bool,
+    no_update_check: bool,
+) -> Result<()> {
     use serde_yaml::Value;
     let manifest_dir = manifest_path
         .parent()
@@ -203,7 +209,9 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         &format!("packages declared in {}", manifest_path.display()),
     );
     // Notice (non-fatal) if any cloned remote provider is behind upstream.
-    super::check_remotes::report_outdated(manifest_path);
+    if !no_update_check {
+        super::check_remotes::report_outdated(manifest_path);
+    }
 
     // Collect (section, name, pkg_dir, url_to_clone) for every entry.
     struct Resolved {

@@ -166,6 +166,25 @@ mod tests {
     }
 
     #[test]
+    fn build_accepts_no_update_check() {
+        let cli = Cli::try_parse_from([
+            "rbnx",
+            "build",
+            "-f",
+            "robot/robonix_manifest.yaml",
+            "--no-update-check",
+        ])
+        .expect("build --no-update-check should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Build {
+                no_update_check: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn boot_accepts_verbose_mode() {
         let cli = Cli::try_parse_from(["rbnx", "boot", "-v"]).expect("boot -v should parse");
         assert!(matches!(
