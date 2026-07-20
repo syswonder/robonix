@@ -379,6 +379,12 @@ environment. See the
 and the [robot integration guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html)
 for topology and deployment details.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository's license headers,
+code style, validation commands, commit format, human-authorship policy, and AI
+assistance disclosure rules.
+
 ## Contributors
 
 [![All Contributors](https://img.shields.io/github/all-contributors/syswonder/robonix?color=ee8449&style=flat-square)](#contributors)

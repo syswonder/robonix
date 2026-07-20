@@ -21,30 +21,15 @@ fn robot_catalog_name(name: &str) -> String {
     format!("robonix.robot.{}", suffix.replace('-', "."))
 }
 
-pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
-    validate_name(name)?;
-
-    let base = match path {
-        Some(p) => p.to_path_buf(),
-        None => std::env::current_dir()?,
-    };
-    let project_dir = base.join(name);
-
-    if project_dir.exists() {
-        anyhow::bail!("directory '{}' already exists", project_dir.display());
-    }
-
-    output::action("Init", &format!("creating robot deployment '{name}'"));
-
-    std::fs::create_dir_all(&project_dir).context("failed to create deployment directory")?;
-
-    // robonix_manifest.yaml (deployment manifest).
+fn deployment_manifest(name: &str) -> String {
     let catalog_name = robot_catalog_name(name);
-    let manifest = format!(
-        r#"catalog:
+    format!(
+        r#"manifestVersion: 1
+catalog:
   name: {catalog_name}
   version: 0.1.0
-  description: TODO: describe this robot deployment.
+  description: "TODO: describe this robot deployment."
+  license: Apache-2.0
   tags:
     - robot
     - deploy
@@ -75,7 +60,6 @@ system:
   liaison:
     listen: 0.0.0.0:50081
     log: info
-  memory: []
 
 primitive: []
 
@@ -83,7 +67,28 @@ service: []
 
 skill: []
 "#
-    );
+    )
+}
+
+pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
+    validate_name(name)?;
+
+    let base = match path {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let project_dir = base.join(name);
+
+    if project_dir.exists() {
+        anyhow::bail!("directory '{}' already exists", project_dir.display());
+    }
+
+    output::action("Init", &format!("creating robot deployment '{name}'"));
+
+    std::fs::create_dir_all(&project_dir).context("failed to create deployment directory")?;
+
+    // robonix_manifest.yaml (deployment manifest).
+    let manifest = deployment_manifest(name);
     std::fs::write(project_dir.join("robonix_manifest.yaml"), manifest)
         .context("failed to write robonix_manifest.yaml")?;
 
@@ -106,4 +111,37 @@ __pycache__/
     output::sub_step(".gitignore");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_manifest_has_complete_robot_catalog_metadata() {
+        let root: serde_yaml::Value =
+            serde_yaml::from_str(&deployment_manifest("robot-example-mobile")).unwrap();
+        let catalog = root
+            .get("catalog")
+            .and_then(|value| value.as_mapping())
+            .unwrap();
+
+        assert_eq!(
+            root.get("manifestVersion").and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        for key in [
+            "name",
+            "version",
+            "description",
+            "license",
+            "tags",
+            "maintainers",
+        ] {
+            assert!(
+                catalog.contains_key(serde_yaml::Value::String(key.into())),
+                "missing catalog.{key}"
+            );
+        }
+    }
 }
