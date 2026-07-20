@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import time
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
@@ -64,7 +65,14 @@ _ANNO_STORE: "AnnotationStore | None" = None
 # Scene Hook: when list_objects detects visible objects, automatically
 # capture the latest RGB frame and POST to memgraph's Scene Hook HTTP
 # endpoint so the robot's memory is updated without Pilot involvement.
-_MEMGRAPH_HOOK_URL = "http://localhost:37798"
+# Set MEMGRAPH_HOOK_URL to override the memgraph Scene Hook address.
+# Default 127.0.0.1 works when Scene runs with --network host or on
+# the same machine as memgraph.  For Docker without host networking
+# use "http://172.17.0.1:37798" (default bridge gateway).
+_MEMGRAPH_HOOK_URL = os.environ.get(
+    "MEMGRAPH_HOOK_URL",
+    "http://127.0.0.1:37798",
+)
 _SAVE_COOLDOWN_S = 2.0
 _last_save_ts: float = 0.0
 _last_save_ids: frozenset = frozenset()
