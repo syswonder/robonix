@@ -1,0 +1,16 @@
+# Axis-level position command (precise / full-spectrum fallback): address
+# individual control axes by JointInfo.name. For hardware-independent control
+# prefer move_finger. Values normalized [0,1]; endpoint meaning comes from each
+# axis's `type` in info (bend/sway/oppose/other). Only listed axes move; unlisted hold
+# their current target. An empty request, unknown/duplicate names, and values
+# outside [0,1] (or non-finite) are rejected, never clamped. ok=true means
+# the command was accepted and dispatched, NOT that the hand reached the target
+# -- observe state_joint; ok=false with a reason in message on rejection.
+[contract]
+id      = "robonix/primitive/hand/move_joint"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/MoveJoint.srv"
+
+[mode]
+type = "rpc"

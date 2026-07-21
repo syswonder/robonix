@@ -1,0 +1,7 @@
+# Set per-finger speed limit by (finger, type) (normalized [0,1]). Motor
+# parameter, typically configured by skill/service in task context. The driver
+# maps each (finger, type) to its underlying axes. Only listed pairs updated.
+FingerValue[] limits   # value = speed limit [0,1]
+---
+bool ok                # true = limits accepted & applied; false = rejected, reason in message
+string message
