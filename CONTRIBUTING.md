@@ -116,8 +116,14 @@ change. Avoid vague subjects such as `update`, `changes`, or `fix stuff`.
 
 This policy applies to commits submitted on or after July 20, 2026.
 
-- A commit's Git author and committer must be human contributors. An AI coding
-  agent must not be named in either field.
+- A commit's Git author must be a human contributor. Its committer must also be
+  human, except for GitHub's verified `GitHub <noreply@github.com>` web-flow
+  identity when GitHub applies a human-reviewed merge.
+- Repository automation accounts such as `github-actions[bot]`,
+  `allcontributors[bot]`, Dependabot, and Renovate must not be the author or
+  committer of a Robonix commit. Automation that publishes generated artifacts
+  must write to its designated artifact or Pages repository instead.
+- An AI coding agent must not be named as the author or committer.
 - Do not attribute authorship or responsibility to an AI agent through
   `Co-authored-by`, `Co-developed-by`, `Signed-off-by`, `Reviewed-by`,
   `Tested-by`, `Acked-by`, or `Suggested-by` trailers.
@@ -152,10 +158,12 @@ the governance policy of this project:
 - <https://docs.kernel.org/process/submitting-patches.html#using-assisted-by>
 
 CI checks every commit introduced by a pull request or protected-branch push.
-It rejects known AI identities in Git authorship fields and responsibility or
-authorship trailers, while allowing a correctly formatted `Assisted-by`
-trailer. The check cannot determine whether undisclosed AI assistance occurred;
-accurate disclosure remains the human contributor's responsibility.
+After a force-push makes the event's previous SHA unavailable, it audits the
+complete history reachable from the new head. It rejects known automation and
+AI identities in Git authorship fields and responsibility or authorship
+trailers, while allowing a correctly formatted `Assisted-by` trailer. The check
+cannot determine whether undisclosed AI assistance occurred; accurate
+disclosure remains the human contributor's responsibility.
 
 Run the same check locally against a proposed range:
 

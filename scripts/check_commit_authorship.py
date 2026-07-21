@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Reject commits that attribute authorship or responsibility to an AI agent."""
+"""Require human commit responsibility and reject bot or AI attribution."""
 
 from __future__ import annotations
 
@@ -16,8 +16,10 @@ ZERO_SHA_RE = re.compile(r"^0+$")
 TRAILER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*):\s*(.*?)\s*$")
 IDENTITY_RE = re.compile(r"^(.*?)\s*<([^<>]+)>\s*$")
 
-# These patterns identify coding agents, not ordinary repository automation.
-# GitHub's merge and Actions bots remain valid committers.
+# Coding-agent identities are distinct from repository automation identities.
+# Both are prohibited as authors or committers. GitHub's web-flow merge
+# identity remains allowed because it records the hosting service that applied
+# a human-reviewed merge; it is not a bot author or contributor identity.
 AI_NAME_RE = re.compile(
     r"(?:^|[\s._+-])(?:"
     r"chatgpt|openai[\s._+-]*codex|codex|github[\s._+-]*copilot|copilot|"
@@ -35,6 +37,20 @@ AI_EMAIL_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+AUTOMATION_NAME_RE = re.compile(
+    r"(?:\[bot\]$|(?:^|[\s._+-])(?:"
+    r"github[\s._+-]*actions|allcontributors|dependabot|renovate"
+    r")(?:$|[\s._+-]))",
+    re.IGNORECASE,
+)
+AUTOMATION_EMAIL_RE = re.compile(
+    r"(?:"
+    r"(?:github-actions|allcontributors|dependabot|renovate)(?:[^@]*)@|"
+    r"bot@"
+    r")",
+    re.IGNORECASE,
+)
+MAX_FULL_HISTORY_COMMITS = 10_000
 
 AUTHORSHIP_TRAILERS = {
     "co-authored-by",
@@ -63,6 +79,21 @@ def is_ai_identity(name: str, email: str) -> bool:
     return bool(AI_NAME_RE.search(name.strip()) or AI_EMAIL_RE.search(email.strip()))
 
 
+def is_automation_identity(name: str, email: str) -> bool:
+    """Return whether a Git identity is a repository automation account."""
+
+    return bool(
+        AUTOMATION_NAME_RE.search(name.strip())
+        or AUTOMATION_EMAIL_RE.search(email.strip())
+    )
+
+
+def is_prohibited_identity(name: str, email: str) -> bool:
+    """Return whether an identity cannot own Robonix commit responsibility."""
+
+    return is_ai_identity(name, email) or is_automation_identity(name, email)
+
+
 def validate_assisted_by(value: str) -> str | None:
     """Validate Robonix ``Assisted-by: AGENT:MODEL [TOOLS...]`` syntax."""
 
@@ -89,6 +120,16 @@ def inspect_record(record: CommitRecord) -> list[str]:
             "Git committer is an AI identity: "
             f"{record.committer_name} <{record.committer_email}>"
         )
+    if is_automation_identity(record.author_name, record.author_email):
+        violations.append(
+            "Git author is an automation identity: "
+            f"{record.author_name} <{record.author_email}>"
+        )
+    if is_automation_identity(record.committer_name, record.committer_email):
+        violations.append(
+            "Git committer is an automation identity: "
+            f"{record.committer_name} <{record.committer_email}>"
+        )
 
     for line_number, line in enumerate(record.message.splitlines(), 1):
         match = TRAILER_RE.match(line)
@@ -106,10 +147,11 @@ def inspect_record(record: CommitRecord) -> list[str]:
         if key not in AUTHORSHIP_TRAILERS:
             continue
         identity = IDENTITY_RE.match(value)
-        if identity and is_ai_identity(identity.group(1), identity.group(2)):
+        if identity and is_prohibited_identity(identity.group(1), identity.group(2)):
             violations.append(
-                f"AI identity used in {match.group(1)} trailer on message line "
-                f"{line_number}; use Assisted-by instead"
+                f"AI or automation identity used in {match.group(1)} trailer on "
+                f"message line {line_number}; use Assisted-by instead for AI tools "
+                "and keep responsibility with a human"
             )
 
     return violations
@@ -129,13 +171,46 @@ def git(*args: str) -> str:
     return result.stdout
 
 
+def commit_exists(ref: str) -> bool:
+    """Return whether ``ref`` resolves to a commit in the checkout."""
+
+    try:
+        git("cat-file", "-e", f"{ref}^{{commit}}")
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def full_history_commits(head: str, reason: str) -> list[str]:
+    """Audit reachable history when an event base is unavailable after a rewrite."""
+
+    commits = git("rev-list", "--reverse", head).splitlines()
+    if len(commits) > MAX_FULL_HISTORY_COMMITS:
+        raise ValueError(
+            f"full-history fallback contains {len(commits)} commits, exceeding "
+            f"the safety limit of {MAX_FULL_HISTORY_COMMITS}"
+        )
+    print(
+        "::warning title=Commit authorship full-history fallback::"
+        f"{reason}; auditing all {len(commits)} commits reachable from {head}"
+    )
+    return commits
+
+
 def introduced_commits(base: str, head: str) -> list[str]:
     """List commits introduced between event base and head."""
 
     if not head:
         raise ValueError("head commit is empty")
+    if not commit_exists(head):
+        raise ValueError(f"head commit is unavailable: {head}")
     if not base or ZERO_SHA_RE.fullmatch(base):
-        return [head]
+        return full_history_commits(head, "event base is empty")
+    if not commit_exists(base):
+        return full_history_commits(
+            head,
+            f"event base {base} is unavailable (for example after a force-push)",
+        )
     return git("rev-list", "--reverse", f"{base}..{head}").splitlines()
 
 
