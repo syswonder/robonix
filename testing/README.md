@@ -154,8 +154,11 @@ replan-on-failure path with no test hooks in production code.
 For debugging map save/load regressions, use `testing/verify_scene_map_persistence.py`
 against an already booted Webots deploy. It calls the Scene public map API, then
 uses the mapping and sim containers only as verifiers: SQLite `quick_check`,
-RTAB-Map table counts, preview PNG size, metadata, and the `/map` published
-after load must all agree.
+RTAB-Map table counts, preview PNG size, metadata, Scene's fresh-occupancy
+confirmation for the requested load, and a non-empty `/map` must all be valid.
+The report records any width or height difference between the saved preview and
+the live occupancy grid as a diagnostic warning because RTAB-Map may
+re-quantize the grid boundary on load.
 
 ```bash
 # Verify an existing saved map without writing a new artifact.
