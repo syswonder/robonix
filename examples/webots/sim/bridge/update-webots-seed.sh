@@ -6,7 +6,7 @@
 # Default: robonix_tiago_sim
 set -euo pipefail
 CONTAINER="${1:-robonix_tiago_sim}"
-OUT="${2:-${TMPDIR:-/tmp}/webots-office-seed-v1.tar.gz}"
+OUT="${2:-${TMPDIR:-/tmp}/webots-office-seed-v3.tar.gz}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
     echo "container not running: $CONTAINER" >&2

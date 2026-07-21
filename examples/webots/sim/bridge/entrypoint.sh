@@ -228,8 +228,8 @@ start_xvfb() {
 prepare_office_webots_seed() {
   local seed_id expected_sha url mirror fetch_url cache_root marker
   local archive stage count actual_sha entry
-  seed_id="webots-office-seed-v1"
-  expected_sha="06383278c6e3c2cc9ed647c0e3bbfbb8e2c3fddcceb2d8a5ca7b8925943c0d65"
+  seed_id="webots-office-seed-v3"
+  expected_sha="f98f3e27a58ca432b5faced2f4d2e5d7fd12dd1992202a59ee55332a510d5110"
   url="${ROBONIX_WEBOTS_SEED_URL:-https://github.com/syswonder/robonix-assets/releases/download/${seed_id}/${seed_id}.tar.gz}"
   mirror="${ROBONIX_WEBOTS_SEED_MIRROR-https://ghfast.top/}"
   cache_root="${ROBONIX_WEBOTS_CACHE_ROOT:-/root/.cache/Cyberbotics/Webots}"
@@ -274,8 +274,8 @@ prepare_office_webots_seed() {
         return 1
         ;;
     esac
-    case "/$entry/" in
-      */../*|*//*)
+    case "$entry" in
+      ""|/*|*//*|../*|*/../*|*/..)
         rm -rf "$archive" "$stage"
         echo "[entrypoint] unsafe Webots office seed path: ${entry}" >&2
         return 1
@@ -285,9 +285,9 @@ prepare_office_webots_seed() {
 
   tar -xzf "$archive" -C "$stage"
   count=$(find "$stage/assets" -maxdepth 1 -type f | wc -l)
-  if [ "$count" -ne 97 ]; then
+  if [ "$count" -ne 192 ]; then
     rm -rf "$archive" "$stage"
-    echo "[entrypoint] Webots office seed file count mismatch: expected=97 actual=${count}" >&2
+    echo "[entrypoint] Webots office seed file count mismatch: expected=192 actual=${count}" >&2
     return 1
   fi
 

@@ -39,7 +39,7 @@ bash examples/webots/sim/start.sh
 
 `office.wbt` is the default. On its first start, the simulator downloads the
 small, versioned office seed from the
-[Robonix Assets](https://github.com/syswonder/robonix-assets/releases/tag/webots-office-seed-v1)
+[Robonix Assets](https://github.com/syswonder/robonix-assets/releases/tag/webots-office-seed-v3)
 Release through `https://ghfast.top/`, verifies its SHA-256 checksum, and stores
 it in the persistent `webots_cache` Docker volume. Later starts reuse that
 cache. Set `ROBONIX_WEBOTS_SEED_MIRROR` to another prefix, or to an empty value

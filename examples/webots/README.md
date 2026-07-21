@@ -52,7 +52,7 @@ You can also pre-export `ROBONIX_WEBOTS_WORLD=<world>.wbt`.
 
 `office.wbt` is the default. Its small, checksum-pinned cache downloads once
 from the
-[`syswonder/robonix-assets`](https://github.com/syswonder/robonix-assets/releases/tag/webots-office-seed-v1)
+[`syswonder/robonix-assets`](https://github.com/syswonder/robonix-assets/releases/tag/webots-office-seed-v3)
 Release through `https://ghfast.top/` and is then reused from the persistent
 Docker volume. For `apartment.wbt`, `complete_apartment.wbt`, `break_room.wbt`,
 and `kitchen.wbt`, enable the official Webots offline asset bundle once:
