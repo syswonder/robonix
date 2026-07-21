@@ -69,7 +69,7 @@ class TencentRealtimeASRBackend:
 
     def __init__(self):
         self.creds = TencentCredentials.from_env()
-        self.engine = os.environ.get("TENCENT_ASR_ENGINE", "16k_zh_en")
+        self.engine = os.environ.get("TENCENT_ASR_ENGINE", "16k_zh")
         self.host = os.environ.get("TENCENT_ASR_HOST", "asr.cloud.tencent.com")
         self.needvad = int(os.environ.get("TENCENT_ASR_NEEDVAD", "1"))
         self.voice_format = int(os.environ.get("TENCENT_ASR_VOICE_FORMAT", "1"))
@@ -161,7 +161,7 @@ class TencentRealtimeASRBackend:
         # snapshot here so a long-lived backend never signs with stale AppID
         # or credentials captured by an earlier initialization attempt.
         self.creds = TencentCredentials.from_env()
-        self.engine = os.environ.get("TENCENT_ASR_ENGINE", "16k_zh_en")
+        self.engine = os.environ.get("TENCENT_ASR_ENGINE", "16k_zh")
         now = int(time.time())
         params = {
             "engine_model_type": self.engine,
