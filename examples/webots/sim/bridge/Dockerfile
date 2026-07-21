@@ -70,11 +70,12 @@ RUN set -eux; \
     rm -f /tmp/webots.deb; \
     rm -rf /var/lib/apt/lists/*
 
-# The streaming-viewer's default WS URL is `ws://localhost:1234`, which
-# is wrong for any remote browser (they'd hit their own localhost).
-# Inject a one-line script that rewrites the input from the page's
-# location.hostname before the user clicks Connect.
-RUN sed -i 's|</body>|<script>document.getElementById("IP-input").value="ws://"+location.hostname+":1234";</script></body>|' \
+# Keep the remote viewer in read-only W3D broadcast mode. The public stream
+# port is injected by viewer_server.py at runtime so custom ports work with
+# both host and bridge networking. Webots' raw stream remains on port 1234.
+RUN sed -i \
+      -e 's#https://cyberbotics.com/wwi/R2025a/WebotsView.js#/wwi-full/WebotsView.js#' \
+      -e 's#</body>#<script>const wsPort=new URLSearchParams(location.search).get("wsPort")||"__WEBOTS_STREAM_PORT__";document.getElementById("IP-input").value="ws://"+location.hostname+":"+wsPort;document.getElementById("mode").value="w3d";document.getElementById("broadcast").checked=true;</script></body>#' \
     /usr/local/webots/resources/web/streaming_viewer/index.html
 
 # Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
@@ -92,7 +93,8 @@ RUN mkdir -p /root/.cache/Cyberbotics/Webots \
 # bind-mounted package dirs under /robonix_pkgs.)
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python3 -m pip install --no-cache-dir \
-    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx
+    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx \
+    "websockets>=14,<17"
 
 ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
@@ -103,7 +105,10 @@ COPY ros_ws/src/eaios_webots src/eaios_webots
 RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-select eaios_webots"
 
 COPY bridge/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY bridge/viewer_server.py /viewer_server.py
+COPY bridge/webots_stream_proxy.py /webots_stream_proxy.py
+COPY bridge/streaming_healthcheck.py /streaming_healthcheck.py
+RUN chmod +x /entrypoint.sh /viewer_server.py /webots_stream_proxy.py /streaming_healthcheck.py
 
 WORKDIR /
 ENTRYPOINT ["/entrypoint.sh"]

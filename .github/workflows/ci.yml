@@ -11,6 +11,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  webots-streaming-smoke:
+    name: Webots streaming smoke test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install streaming test dependency
+        run: python3 -m pip install "websockets>=14,<17"
+      - name: Test custom ports and helper readiness
+        run: python3 examples/webots/sim/tests/test_streaming.py
+
   check:
     name: Rust (fmt + clippy + build + tests)
     runs-on: ubuntu-22.04
