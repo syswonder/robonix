@@ -1,0 +1,35 @@
+system/scene/README.md
+  s_6c6ca8fc87d296::t_64c63767cdd1e5 370,373,375-387
+system/scene/scene_service/map_meta.py
+  s_6c6ca8fc87d296::t_8ba370c93f3c66 28,77-82,92-119
+system/scene/scene_service/service.py
+  s_6c6ca8fc87d296::t_aa93e6632c80b3 913,953-956,958,964,968,970,1035-1041,1084-1096,1174-1178,1359-1360,1468
+system/scene/scene_service/web.py
+  s_6c6ca8fc87d296::t_c9271091e56f5f 577-578,637-647,859-863,963-987,1051-1057,1085-1088,1102-1106,1113-1127,1130-1158,1191
+system/scene/tests/test_annotations.py
+  s_6c6ca8fc87d296::t_b2e53230507d73 281-284,288-301
+system/scene/tests/test_lifecycle_flush.py
+  s_6c6ca8fc87d296::t_ce94aac291c0be 244-321,327
+system/scene/tests/test_map_epoch.py
+  s_6c6ca8fc87d296::t_4c674f5a0d81ae 342,344-346,366,368-369,372,390,392-400,521-525,538,540,542,569-572,590,593-733,774,780,782-786
+system/scene/tests/test_map_meta.py
+  s_6c6ca8fc87d296::t_20347967e6f232 81-137,154-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "018413a42a572d8a684e246ab777e9d4514d634a",
+  "prompts": {},
+  "sessions": {
+    "s_6c6ca8fc87d296": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1afae001-f567-4147-b141-01ef3c11a802",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
