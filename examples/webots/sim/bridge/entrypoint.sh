@@ -225,6 +225,79 @@ start_xvfb() {
   echo "[entrypoint] Xvfb ${NVIDIA_DISPLAY} (CPU render)"
 }
 
+prepare_office_webots_seed() {
+  local seed_id expected_sha url mirror fetch_url cache_root marker
+  local archive stage count actual_sha entry
+  seed_id="webots-office-seed-v1"
+  expected_sha="06383278c6e3c2cc9ed647c0e3bbfbb8e2c3fddcceb2d8a5ca7b8925943c0d65"
+  url="${ROBONIX_WEBOTS_SEED_URL:-https://github.com/syswonder/robonix-assets/releases/download/${seed_id}/${seed_id}.tar.gz}"
+  mirror="${ROBONIX_WEBOTS_SEED_MIRROR-https://ghfast.top/}"
+  cache_root="${ROBONIX_WEBOTS_CACHE_ROOT:-/root/.cache/Cyberbotics/Webots}"
+  marker="${cache_root}/.${seed_id}-${expected_sha}.ok"
+
+  if [ -f "$marker" ]; then
+    echo "[entrypoint] Webots office seed already present (${seed_id})"
+    return 0
+  fi
+
+  fetch_url="$url"
+  if [ -n "$mirror" ]; then
+    case "$url" in
+      https://github.com/*)
+        fetch_url="${mirror%/}/${url}"
+        ;;
+    esac
+  fi
+
+  archive=$(mktemp "/tmp/${seed_id}.XXXXXX.tar.gz")
+  stage=$(mktemp -d "/tmp/${seed_id}.XXXXXX")
+  echo "[entrypoint] downloading Webots office seed: ${fetch_url}"
+  if ! wget --tries=3 --timeout=30 --progress=dot:giga -O "$archive" "$fetch_url"; then
+    rm -rf "$archive" "$stage"
+    echo "[entrypoint] failed to download Webots office seed" >&2
+    return 1
+  fi
+
+  actual_sha=$(sha256sum "$archive" | awk '{print $1}')
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    rm -rf "$archive" "$stage"
+    echo "[entrypoint] Webots office seed checksum mismatch: expected=${expected_sha} actual=${actual_sha}" >&2
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    case "$entry" in
+      assets|assets/|assets/*) ;;
+      *)
+        rm -rf "$archive" "$stage"
+        echo "[entrypoint] unsafe Webots office seed path: ${entry}" >&2
+        return 1
+        ;;
+    esac
+    case "/$entry/" in
+      */../*|*//*)
+        rm -rf "$archive" "$stage"
+        echo "[entrypoint] unsafe Webots office seed path: ${entry}" >&2
+        return 1
+        ;;
+    esac
+  done < <(tar -tzf "$archive")
+
+  tar -xzf "$archive" -C "$stage"
+  count=$(find "$stage/assets" -maxdepth 1 -type f | wc -l)
+  if [ "$count" -ne 97 ]; then
+    rm -rf "$archive" "$stage"
+    echo "[entrypoint] Webots office seed file count mismatch: expected=97 actual=${count}" >&2
+    return 1
+  fi
+
+  mkdir -p "$cache_root/assets"
+  cp -a "$stage/assets/." "$cache_root/assets/"
+  touch "$marker"
+  rm -rf "$archive" "$stage"
+  echo "[entrypoint] Webots office seed ready: ${count} verified files"
+}
+
 prepare_full_webots_assets() {
   if [ "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS:-0}" != "1" ]; then
     return 0
@@ -277,6 +350,7 @@ case "${WEBOTS_HEADLESS_MODE:-host}" in
 esac
 
 start_zenoh_router
+prepare_office_webots_seed
 prepare_full_webots_assets
 
 if [ "${WEBOTS_STREAM:-0}" = "1" ]; then

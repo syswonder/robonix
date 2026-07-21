@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Re-export the Webots asset cache tarball used by Dockerfile.
+# Re-export the Webots office cache for a robonix-assets Release.
 # Run this on a machine where the container has successfully downloaded the
 # full asset set (i.e. Webots has opened the world at least once).
-# Usage:   ./update-webots-seed.sh [container_name]
-# Default: robonix_tiago_sim_stack-ros2-bridge-1
+# Usage:   ./update-webots-seed.sh [container_name] [output_path]
+# Default: robonix_tiago_sim
 set -euo pipefail
-CONTAINER="${1:-robonix_tiago_sim_stack-ros2-bridge-1}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="${HERE}/webots_assets_seed.tar.gz"
+CONTAINER="${1:-robonix_tiago_sim}"
+OUT="${2:-${TMPDIR:-/tmp}/webots-office-seed-v1.tar.gz}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
     echo "container not running: $CONTAINER" >&2
@@ -23,3 +22,4 @@ docker exec "$CONTAINER" bash -c '
 
 echo "[update-seed] wrote $(ls -lh "$OUT" | awk "{print \$5}") → $OUT"
 echo "[update-seed] file count: $(tar -tzf "$OUT" | grep -v "/$" | wc -l)"
+echo "[update-seed] sha256: $(sha256sum "$OUT" | awk '{print $1}')"

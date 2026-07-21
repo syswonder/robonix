@@ -37,9 +37,17 @@ export ROBONIX_WEBOTS_WORLD=kitchen.wbt
 bash examples/webots/sim/start.sh
 ```
 
-`office.wbt` is the seeded default and does not require the full upstream Webots
-asset library. For the other built-in worlds, download Cyberbotics' official
-offline asset bundle once before launching:
+`office.wbt` is the default. On its first start, the simulator downloads the
+small, versioned office seed from the
+[Robonix Assets](https://github.com/syswonder/robonix-assets/releases/tag/webots-office-seed-v1)
+Release through `https://ghfast.top/`, verifies its SHA-256 checksum, and stores
+it in the persistent `webots_cache` Docker volume. Later starts reuse that
+cache. Set `ROBONIX_WEBOTS_SEED_MIRROR` to another prefix, or to an empty value
+for direct GitHub access; `ROBONIX_WEBOTS_SEED_URL` overrides the complete
+source URL.
+
+For the other built-in worlds, download Cyberbotics' official offline asset
+bundle once before launching:
 
 ```bash
 ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1 \
@@ -89,7 +97,7 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `bridge/viewer_server.py` | Serve WebotsView locally and proxy/cache remote viewer and world assets. |
 | `bridge/webots_stream_proxy.py` | Forward the live W3D stream while dropping unused robot-window camera payloads. |
 | `bridge/streaming_healthcheck.py` | Verify that both browser-stream helpers are alive and reachable. |
-| `bridge/webots_assets_seed.tar.gz` | Pre-baked office Webots proto/texture cache (offline-fast default world). |
+| `bridge/update-webots-seed.sh` | Maintainer tool that exports an updated office cache for publication in `syswonder/robonix-assets`. |
 | `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
 
 ## Headless / browser-streaming mode

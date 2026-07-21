@@ -78,15 +78,6 @@ RUN sed -i \
       -e 's#</body>#<script>const wsPort=new URLSearchParams(location.search).get("wsPort")||"__WEBOTS_STREAM_PORT__";document.getElementById("IP-input").value="ws://"+location.hostname+":"+wsPort;document.getElementById("mode").value="w3d";document.getElementById("broadcast").checked=true;</script></body>#' \
     /usr/local/webots/resources/web/streaming_viewer/index.html
 
-# Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
-# raw.githubusercontent.com at first run, which is slow and less reproducible.
-# The seed tarball is exported from a successful run; see scripts/update-webots-seed.sh.
-COPY bridge/webots_assets_seed.tar.gz /tmp/webots_seed.tar.gz
-RUN mkdir -p /root/.cache/Cyberbotics/Webots \
-    && tar -xzf /tmp/webots_seed.tar.gz -C /root/.cache/Cyberbotics/Webots \
-    && rm -f /tmp/webots_seed.tar.gz \
-    && echo "[dockerfile] webots asset cache: $(ls /root/.cache/Cyberbotics/Webots/assets | wc -l) files pre-populated"
-
 # Python deps used by the robonix driver processes that will be `docker
 # exec`'d into this container. (Drivers themselves live on host; their
 # Python imports resolve against this image's site-packages + the
