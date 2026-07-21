@@ -367,15 +367,24 @@ map without a sidecar (saved before this mechanism, or a foreign DB) restores
 unknown epoch may anchor to a map frame that no longer exists (the off-map
 "ghost object" bug). Re-save the map to create its snapshot.
 
-Save refuses (409) two epoch hazards rather than corrupting state silently:
+Save refuses (409) three epoch hazards rather than corrupting state silently:
 updating an existing map's semantics **from a still-running mapping session**
 (the artifact froze at the original Save while the live frame kept drifting —
-load it in localization mode instead, or delete and re-save), and saving onto
+load it in localization mode instead, or delete and re-save), saving onto
 a map **whose annotations this session never loaded** (the carry would
-overwrite previously saved rooms; load first). Load is transactional on the
-occupancy grid: scene rebinds rooms/objects only after observing a fresh grid
-from the loaded map, and Delete removes the artifact, the annotation file,
-the sidecar, and every object partition of the map.
+overwrite previously saved rooms; load first), and saving **while scene's
+semantic state may not match the map mapping runs** — after a Load that did
+not complete, or after mapping switched maps outside the facade — until a
+Load reports success (the 409 detail starts with `save blocked:`). A Save
+whose object snapshot fails to commit returns 502 with
+`partial: "spatial_saved_object_snapshot_failed"`: the sidecar still points
+at the previous snapshot, and the detail names the recovery (retry, or for a
+fresh mapping-session save: delete and save anew). Load is transactional on
+the occupancy grid AND the snapshot: scene rebinds rooms/objects only after
+observing a fresh grid from the loaded map, a registry-flush or
+snapshot-restore failure aborts the load (502) with the previous binding and
+annotation partition kept, and Delete removes the artifact, the annotation
+file, the sidecar, and every object partition of the map.
 
 ## Capabilities exposed
 

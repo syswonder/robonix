@@ -574,7 +574,8 @@ def make_app(*, registry: ObjectRegistry,
              sg_store: Any = None, anno_store: Any = None,
              object_store: Any = None, map_meta: Any = None,
              map_binding: Optional[dict] = None,
-             ops_lock: Optional[asyncio.Lock] = None) -> Starlette:
+             ops_lock: Optional[asyncio.Lock] = None,
+             semantic_hold: Optional[dict] = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
@@ -633,6 +634,17 @@ def make_app(*, registry: ObjectRegistry,
         map_binding = {}
     if ops_lock is None:
         ops_lock = asyncio.Lock()
+    # `semantic_hold["reason"]` is non-None while scene's semantic state
+    # may not match the map mapping is running: a Load is in flight, its
+    # last attempt did not complete, or (set by the lifecycle watcher,
+    # which is why the dict can be passed in and shared) mapping switched
+    # maps outside the facade. Save reads it under `ops_lock`:
+    # snapshotting in that divergent window would commit the wrong
+    # (possibly just-flushed, empty) registry as the map's snapshot and
+    # move the sidecar off the last valid one. In-memory only — a scene
+    # restart re-binds from scratch, which is its own convergence.
+    if semantic_hold is None:
+        semantic_hold = {"reason": None}
 
     async def _persist_scene_objects(partition: str) -> tuple[int, int]:
         """Snapshot the registry into `partition` — EVERY object, including
@@ -844,6 +856,11 @@ def make_app(*, registry: ObjectRegistry,
 
     async def _maps_save_locked(map_id: str, body: dict) -> JSONResponse:
         """Save body — runs under `ops_lock` (see maps_save)."""
+        if semantic_hold["reason"]:
+            return _anno_error(409, (
+                f"save blocked: {semantic_hold['reason']} — Load a map "
+                "(any map) until it reports success, then Save"
+            ))
         note = str(body.get("note") or "")
         before_payload = await asyncio.to_thread(_maps_payload)
         spatial_exists, existing_map = _map_exists_in_payload(before_payload, map_id)
@@ -943,6 +960,31 @@ def make_app(*, registry: ObjectRegistry,
                 out["object_persist_error"] = object_persist_error
             mode_after_save = current_mode if spatial_exists and current_bound_id == map_id and current_mode else "mapping"
             _set_map_binding(map_id, mode_after_save, "ui_save", generation=gen)
+            if object_persist_error is not None:
+                # The public Save contract is geometry + rooms + objects as
+                # ONE unit. With the object snapshot uncommitted the artifact
+                # is incomplete, and a 200/ok here would let the operator
+                # move on without the recovery step — the sidecar still
+                # points at the previous snapshot (spatial geometry, when it
+                # was written above, does remain on disk). The recovery text
+                # must match what the guards above will actually allow: after
+                # a FRESH mapping-session save the artifact is already
+                # immutable, so "retry Save" would only bounce off the
+                # mapping-mode 409 — deleting and re-saving is the real path.
+                recovery = (
+                    "retry Save" if mode_after_save != "mapping" else (
+                        "delete the map and Save anew (this mapping "
+                        "session's artifact is immutable, so a plain retry "
+                        "would be refused)"
+                    )
+                )
+                out["ok"] = False
+                out["partial"] = "spatial_saved_object_snapshot_failed"
+                out["detail"] = (
+                    f"{out.get('detail') or 'saved'}; OBJECT SNAPSHOT FAILED: "
+                    f"{object_persist_error} — the map's semantic snapshot "
+                    f"was NOT updated; {recovery}"
+                )
 
         annotations = anno_store.list_json() if anno_store is not None else []
         out.setdefault("annotations", len(annotations))
@@ -1006,6 +1048,13 @@ def make_app(*, registry: ObjectRegistry,
             "theta": float(body.get("theta") or 0.0),
         }, load_timeout_s)
         if out.get("ok"):
+            # Mapping now runs the target DB while scene's semantic state
+            # still belongs to the previous map — from here until every
+            # rebind below commits, a Save must not snapshot. The hold is
+            # cleared only on full success; every early return leaves it
+            # set, so an operator's next Save gets a 409 pointing back at
+            # the Load retry.
+            semantic_hold["reason"] = f"the last load of {map_id} did not complete"
             # Mapping's LoadMap response means RTAB-Map accepted the database
             # and PublishMap request. Do not restore semantic state until Scene
             # has actually observed the resulting occupancy grid; otherwise the
@@ -1033,6 +1082,10 @@ def make_app(*, registry: ObjectRegistry,
                         break
                 await asyncio.sleep(0.1)
             if not occupancy_ready:
+                semantic_hold["reason"] = (
+                    f"the last load of {map_id} failed before scene "
+                    "observed its occupancy grid"
+                )
                 out = {
                     **out,
                     "ok": False,
@@ -1046,16 +1099,63 @@ def make_app(*, registry: ObjectRegistry,
             # before this load is anchored to the dead pre-load frame — and
             # the watcher will not catch it (a facade load is deliberately
             # not drift). Flush first, so the registry ends up holding the
-            # restored snapshot plus post-load observations only.
+            # restored snapshot plus post-load observations only. A flush
+            # failure aborts the load HERE — rebinding annotations/objects
+            # over a registry that may still hold pre-load objects would
+            # recreate the mixed-epoch state this ordering exists to
+            # prevent.
             try:
                 async with registry.lock():
                     flushed = registry.clear_objects()
                 if flushed:
                     out["objects_flushed"] = flushed
             except Exception as e:  # noqa: BLE001
-                out["object_flush_error"] = str(e)
+                semantic_hold["reason"] = (
+                    f"the last load of {map_id} failed flushing "
+                    "pre-load objects"
+                )
+                out = {
+                    **out,
+                    "ok": False,
+                    "object_flush_error": str(e),
+                    "detail": (
+                        f"{out.get('detail') or 'loaded'}; REGISTRY FLUSH "
+                        f"FAILED: {e} — aborted before rooms/objects were "
+                        "rebound; retry the load"
+                    ),
+                }
+                return JSONResponse(out, status_code=502)
             gen, _broadcast_mode = _latched_lifecycle(map_id)
             meta = map_meta.read(map_id) if map_meta is not None else None
+            if meta is not None:
+                # Restore BEFORE rebinding annotations or committing the
+                # scene binding: on failure the previous binding (and the
+                # previous map's annotation file) stay in place, and the
+                # semantic hold above keeps Save from publishing the
+                # flushed (possibly empty) registry as a fresh snapshot
+                # over the last valid one.
+                try:
+                    out["objects_restored"] = await _restore_scene_objects(
+                        meta.object_partition
+                    )
+                    out["snapshot_partition"] = meta.object_partition
+                except Exception as e:  # noqa: BLE001
+                    semantic_hold["reason"] = (
+                        f"the last load of {map_id} failed restoring its "
+                        "object snapshot"
+                    )
+                    out = {
+                        **out,
+                        "ok": False,
+                        "object_restore_error": str(e),
+                        "detail": (
+                            f"{out.get('detail') or 'loaded'}; RESTORE "
+                            f"FAILED: {e} — saved objects were NOT loaded "
+                            "and the previous scene binding was kept; retry "
+                            "the load before saving"
+                        ),
+                    }
+                    return JSONResponse(out, status_code=502)
             if anno_store is not None:
                 # Localization load keeps the saved map's frame epoch, so the
                 # live broadcast (when present) carries the generation the
@@ -1087,24 +1187,8 @@ def make_app(*, registry: ObjectRegistry,
                     "no objects (rooms still load; re-save the map to "
                     "snapshot current objects)", map_id,
                 )
-            else:
-                try:
-                    out["objects_restored"] = await _restore_scene_objects(
-                        meta.object_partition
-                    )
-                    out["snapshot_partition"] = meta.object_partition
-                except Exception as e:  # noqa: BLE001
-                    # Distinguish "could not read the snapshot" from a
-                    # genuinely empty one, in the operator-visible detail —
-                    # saving on top of an unnoticed failed restore would
-                    # commit an empty snapshot.
-                    out["object_restore_error"] = str(e)
-                    out["detail"] = (
-                        f"{out.get('detail') or 'loaded'}; RESTORE FAILED: "
-                        f"{e} — saved objects were NOT loaded; retry the "
-                        "load before saving this map"
-                    )
             _set_map_binding(map_id, "localization", "ui_load", generation=gen)
+            semantic_hold["reason"] = None
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
     async def maps_delete(request) -> JSONResponse:

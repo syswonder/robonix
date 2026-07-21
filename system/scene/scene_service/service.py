@@ -910,6 +910,7 @@ async def _lifecycle_watch(
     registry: Optional[ObjectRegistry] = None,
     live_binding: Optional[dict] = None,
     ops_lock: Optional[asyncio.Lock] = None,
+    semantic_hold: Optional[dict] = None,
     interval_s: float = 5.0,
 ) -> None:
     """Lifecycle linkage: track mapping's latched identity broadcast against
@@ -949,20 +950,24 @@ async def _lifecycle_watch(
     warned_ephemeral = False
     last_warned: Optional[tuple] = None
 
-    async def _flush_registry(why: str) -> None:
-        """Best-effort registry flush; a failure is loud but non-fatal."""
+    async def _flush_registry(why: str) -> bool:
+        """Flush the registry; a failure is loud and non-fatal, but the
+        result is returned so callers can withhold whatever acknowledgement
+        (epoch advance, warn-once latch) would otherwise stop the retry."""
         if registry is None:
-            return
+            return True
         try:
             async with registry.lock():
                 dropped = registry.clear_objects()
             log.warning("[scene] flushed %d mis-anchored object(s) %s",
                         dropped, why)
+            return True
         except Exception as e:  # noqa: BLE001
             log.error(
                 "[scene] object flush failed — mis-anchored objects remain "
-                "until re-observation or restart: %s", e,
+                "until the flush is retried: %s", e,
             )
+            return False
 
     async def _tick() -> None:
         nonlocal confirmed_key, warned_ephemeral, last_warned
@@ -1027,7 +1032,13 @@ async def _lifecycle_watch(
                     "annotations are flagged stale for confirmation",
                     live_id, ref_gen, live_gen, str(msg.mode),
                 )
-                await _flush_registry("after epoch bump")
+                if not await _flush_registry("after epoch bump"):
+                    # Do NOT acknowledge the new generation: with the
+                    # mis-anchored objects still in the registry, advancing
+                    # would make the next tick see no mismatch and never
+                    # retry. Leaving state untouched re-triggers this whole
+                    # reaction (flush included) on the next tick.
+                    return
                 if anno_store is not None:
                     try:
                         n = anno_store.mark_all_stale(
@@ -1070,7 +1081,19 @@ async def _lifecycle_watch(
                     live_id, live_gen, str(msg.mode),
                     bound_id, ref_gen, live_binding.get("source"),
                 )
-                await _flush_registry("after external map switch")
+                if semantic_hold is not None:
+                    # Scene stays bound to the previous map while mapping
+                    # runs another one: a Save would commit the flushed
+                    # (or newly foreign-frame) registry as the OLD map's
+                    # snapshot and purge its last valid one. Held until a
+                    # facade Load completes and re-converges the binding.
+                    semantic_hold["reason"] = (
+                        f"mapping switched to map {live_id} outside scene"
+                    )
+                if not await _flush_registry("after external map switch"):
+                    # Don't latch this key into `last_warned` — the next
+                    # tick warns again and retries the flush.
+                    return
             last_warned = key
 
     while True:
@@ -1148,6 +1171,11 @@ async def _run() -> None:
     # serializes the facade's Save/Load/Delete with the watcher's epoch
     # response — both suspend at awaits mid-critical-section.
     map_ops_lock = asyncio.Lock()
+    # Shared between the web facade (Save honors it, Load sets/clears it)
+    # and the lifecycle watcher (an external map switch raises it): while
+    # `reason` is non-None, scene's semantic state may not match the map
+    # mapping runs, and Save is refused until a Load completes.
+    semantic_hold: dict = {"reason": None}
     live_binding: dict = {
         "map_id": binding.map_id,
         "mode": binding.mode if restore_on_start else "",
@@ -1328,7 +1356,8 @@ async def _run() -> None:
         asyncio.create_task(
             _lifecycle_watch(hub, binding, anno_store,
                              registry=registry, live_binding=live_binding,
-                             ops_lock=map_ops_lock),
+                             ops_lock=map_ops_lock,
+                             semantic_hold=semantic_hold),
             name="scene-lifecycle-watch",
         ),
         # Background reconciler: keeps scene's hub adding subscriptions
@@ -1436,6 +1465,7 @@ async def _run() -> None:
             map_meta=map_meta,
             map_binding=live_binding,
             ops_lock=map_ops_lock,
+            semantic_hold=semantic_hold,
         )
         web_uv = uvicorn.Config(
             app=web_app,

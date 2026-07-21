@@ -78,6 +78,63 @@ def test_delete_and_sanitization():
     print("  [PASS] test_delete_and_sanitization")
 
 
+def test_foreign_identity_sidecar_treated_as_corrupt():
+    """A parseable sidecar whose identity belongs to ANOTHER map (wrong
+    map_id, foreign partition token, or a seq that disagrees) must degrade
+    to 'no snapshot' — trusting it would let Load restore another map's
+    objects, exactly the mis-anchoring the sidecar exists to prevent."""
+    with tempfile.TemporaryDirectory() as d:
+        store = MapMetaStore(d)
+        path = os.path.join(d, "map_a.json")
+        # Identity names map_b (a copied / hand-renamed sidecar file).
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(make_meta("map_b", "map_b__s1", 1).to_json(), f)
+        assert store.read("map_a") is None
+        # Right map id, but the partition is another map's token.
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(make_meta("map_a", "map_b__s1", 1).to_json(), f)
+        assert store.read("map_a") is None
+        # Partition token disagrees with the recorded save_seq.
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(make_meta("map_a", "map_a__s2", 1).to_json(), f)
+        assert store.read("map_a") is None
+        # save_seq below the token floor (tokens start at __s1).
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(make_meta("map_a", "map_a__s0", 0).to_json(), f)
+        assert store.read("map_a") is None
+        # A consistent record still reads (validation is not over-eager).
+        store.write(make_meta("map_a", "map_a__s1", 1))
+        assert store.read("map_a").object_partition == "map_a__s1"
+    print("  [PASS] test_foreign_identity_sidecar_treated_as_corrupt")
+
+
+def test_numeric_fields_normalized_on_read():
+    """A foreign/hand-edited sidecar may carry save_seq or
+    mapping_generation as strings or floats. read() must hand back ints —
+    the raw values would poison next_partition's arithmetic ("2" + 1) or
+    mint a float token ("__s3.0") that no later read accepts — and a
+    value that cannot be an int makes the record corrupt, not half-used."""
+    with tempfile.TemporaryDirectory() as d:
+        store = MapMetaStore(d)
+        path = os.path.join(d, "map_a.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"map_id": "map_a", "object_partition": "map_a__s2",
+                       "save_seq": "2", "saved_at_unix": 1.0,
+                       "mapping_generation": "5"}, f)
+        meta = store.read("map_a")
+        assert meta is not None
+        assert meta.save_seq == 2 and type(meta.save_seq) is int
+        assert (meta.mapping_generation == 5
+                and type(meta.mapping_generation) is int)
+        assert store.next_partition("map_a") == ("map_a__s3", 3)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"map_id": "map_a", "object_partition": "map_a__s2",
+                       "save_seq": 2.0, "saved_at_unix": 1.0,
+                       "mapping_generation": "yes"}, f)
+        assert store.read("map_a") is None
+    print("  [PASS] test_numeric_fields_normalized_on_read")
+
+
 def test_unknown_keys_dropped():
     """A sidecar written by a NEWER scene still loads (forward-tolerant)."""
     m = MapSemanticMeta.from_json({
@@ -94,5 +151,7 @@ if __name__ == "__main__":
     test_roundtrip_and_seq_progression()
     test_corrupt_sidecar_treated_as_absent()
     test_delete_and_sanitization()
+    test_foreign_identity_sidecar_treated_as_corrupt()
+    test_numeric_fields_normalized_on_read()
     test_unknown_keys_dropped()
     print("\nAll tests passed!")

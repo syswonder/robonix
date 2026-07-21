@@ -339,9 +339,11 @@ def test_save_excludes_self_robot_object():
     print("  [PASS] test_save_excludes_self_robot_object")
 
 
-def test_failed_snapshot_keeps_previous_sidecar():
+def test_failed_snapshot_keeps_previous_sidecar_and_fails_the_save():
     """An incomplete object write must leave the sidecar at the previous,
-    still-consistent snapshot (and not purge it)."""
+    still-consistent snapshot (and not purge it) — and the Save must report
+    an explicit failure, not 200/ok: geometry + rooms + objects commit as
+    one unit, so an operator must retry rather than trust the artifact."""
     if _unavailable():
         return
     with tempfile.TemporaryDirectory() as tmp:
@@ -361,11 +363,13 @@ def test_failed_snapshot_keeps_previous_sidecar():
         env.store.persist = broken_persist
         with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
             status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
-        assert status == 200 and body["ok"], body        # annotations still saved
+        assert status == 502 and not body["ok"], body
         assert "object_persist_error" in body, body
+        assert body.get("partial") == "spatial_saved_object_snapshot_failed", body
+        assert "OBJECT SNAPSHOT FAILED" in body.get("detail", ""), body
         assert env.meta.read("labx").object_partition == "labx__s1"
         assert "old" in env.store.rows.get("labx__s1", {})
-    print("  [PASS] test_failed_snapshot_keeps_previous_sidecar")
+    print("  [PASS] test_failed_snapshot_keeps_previous_sidecar_and_fails_the_save")
 
 
 # ── Load ────────────────────────────────────────────────────────────────────
@@ -383,12 +387,17 @@ def test_load_without_sidecar_restores_nothing():
         if app is None:
             return
         env.store.rows["labx"] = {"ghost": _obj("ghost")}   # mixed-epoch legacy
-        with _patched(web_mod, rpc=_rpc_ok):
+        with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
             status, body = _call(app, "POST", "/api/maps/load", {"map_id": "labx"})
-        assert status == 200 and body["ok"], body
-        assert body["objects_restored"] == 0
-        assert "semantic_snapshot" in body
-        assert env.registry._objects == {}               # nothing snuck in
+            assert status == 200 and body["ok"], body
+            assert body["objects_restored"] == 0
+            assert "semantic_snapshot" in body
+            assert env.registry._objects == {}           # nothing snuck in
+            # The no-sidecar path still COMPLETES the load — the save hold
+            # is lifted, and this Save creates the map's first sidecar.
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
+            assert status == 200 and body["ok"], body
+            assert env.meta.read("labx") is not None
     print("  [PASS] test_load_without_sidecar_restores_nothing")
 
 
@@ -509,9 +518,11 @@ def test_generation_threading_from_latched_broadcast():
     print("  [PASS] test_generation_threading_from_latched_broadcast")
 
 
-def test_save_without_sidecar_store_degrades_loudly():
-    """map_meta init failure (None): Save still succeeds for annotations but
-    reports the objects were NOT snapshotted, and writes no orphan rows."""
+def test_save_without_sidecar_store_fails_the_save():
+    """map_meta init failure (None) while an object store exists: the
+    objects cannot be snapshotted, so the Save reports failure (annotations
+    were still written; retrying after the sidecar store heals completes
+    the unit) and writes no orphan rows."""
     if _unavailable():
         return
     with tempfile.TemporaryDirectory() as tmp:
@@ -524,10 +535,11 @@ def test_save_without_sidecar_store_degrades_loudly():
             return
         with _patched(web_mod, rpc=_rpc_ok, maps=_spatial()):
             status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
-        assert status == 200 and body["ok"], body
+        assert status == 502 and not body["ok"], body
         assert "object_persist_error" in body, body
+        assert body.get("partial") == "spatial_saved_object_snapshot_failed", body
         assert env.store.rows == {}                      # no orphan write
-    print("  [PASS] test_save_without_sidecar_store_degrades_loudly")
+    print("  [PASS] test_save_without_sidecar_store_fails_the_save")
 
 
 def test_load_flushes_preload_live_objects():
@@ -554,9 +566,10 @@ def test_load_flushes_preload_live_objects():
     print("  [PASS] test_load_flushes_preload_live_objects")
 
 
-def test_load_restore_failure_is_visible():
-    """A DB read error during restore must be distinguishable from an empty
-    snapshot — in the response error key AND the operator-visible detail."""
+def test_load_restore_failure_fails_load_and_keeps_previous_binding():
+    """A DB read error during restore fails the Load outright: the previous
+    scene binding (and annotation partition) stay in place, so the flushed
+    registry cannot be committed against the half-loaded map."""
     if _unavailable():
         return
     with tempfile.TemporaryDirectory() as tmp:
@@ -574,10 +587,150 @@ def test_load_restore_failure_is_visible():
         env.store.load_all = broken_load_all
         with _patched(web_mod, rpc=_rpc_ok):
             status, body = _call(app, "POST", "/api/maps/load", {"map_id": "labx"})
-        assert status == 200 and body["ok"], body
+        assert status == 502 and not body["ok"], body
         assert "milvus went away" in body.get("object_restore_error", ""), body
         assert "RESTORE FAILED" in body.get("detail", ""), body
-    print("  [PASS] test_load_restore_failure_is_visible")
+        assert env.binding["map_id"] == "default", env.binding  # binding kept
+        assert env.anno.map_id == ".live", env.anno.map_id      # anno not rebound
+    print("  [PASS] test_load_restore_failure_fails_load_and_keeps_previous_binding")
+
+
+def test_load_flush_failure_aborts_before_any_rebind():
+    """A registry flush failure aborts the Load before annotations or
+    objects are rebound: continuing would restore the new map's snapshot
+    into a registry that may still hold objects anchored to the previous
+    frame — the mixed-epoch state this ordering exists to prevent."""
+    if _unavailable():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        web_mod, app, env = _make_env(
+            tmp, binding={"map_id": "default", "mode": "", "generation": None,
+                          "source": "default"},
+            objs=[_obj("preload")],
+        )
+        if app is None:
+            return
+        env.meta.write(make_meta("labx", "labx__s1", 1))
+        env.store.rows["labx__s1"] = {"saved": _obj("saved")}
+
+        def broken_clear():
+            raise RuntimeError("registry wedged")
+
+        env.registry.clear_objects = broken_clear
+        with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
+            status, body = _call(app, "POST", "/api/maps/load", {"map_id": "labx"})
+            assert status == 502 and not body["ok"], body
+            assert "registry wedged" in body.get("object_flush_error", ""), body
+            assert set(env.registry._objects) == {"preload"}  # nothing restored
+            assert env.binding["map_id"] == "default", env.binding
+            assert env.anno.map_id == ".live", env.anno.map_id
+            # The hold from this failure blocks Save too.
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
+            assert status == 409 and "save blocked" in body.get("detail", ""), body
+    print("  [PASS] test_load_flush_failure_aborts_before_any_rebind")
+
+
+def test_occupancy_timeout_fails_load_and_blocks_save():
+    """When the loaded map's grid never reaches scene, the Load fails and
+    the divergent window (mapping runs the new DB, scene still bound to
+    the old map) blocks Save until a Load completes."""
+    if _unavailable():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        web_mod, app, env = _make_env(
+            tmp, binding={"map_id": "default", "mode": "", "generation": None,
+                          "source": "default"},
+        )
+        if app is None:
+            return
+
+        def frozen_latest(_key):  # grid count/stamp never advance
+            grid = SimpleNamespace(info=SimpleNamespace(width=10, height=8))
+            return grid, 5.0, 1
+
+        env.hub.latest = frozen_latest
+        os.environ["SCENE_MAP_READY_TIMEOUT_S"] = "0.2"
+        try:
+            with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
+                status, body = _call(app, "POST", "/api/maps/load",
+                                     {"map_id": "labx"})
+                assert status == 502 and not body["ok"], body
+                assert "did not observe" in body.get("detail", ""), body
+                status, body = _call(app, "POST", "/api/maps/save",
+                                     {"map_id": "labx"})
+                assert status == 409 and "save blocked" in body.get("detail", ""), body
+        finally:
+            del os.environ["SCENE_MAP_READY_TIMEOUT_S"]
+    print("  [PASS] test_occupancy_timeout_fails_load_and_blocks_save")
+
+
+def test_fresh_save_snapshot_failure_names_workable_recovery():
+    """A FIRST save from a mapping session latches the immutable-artifact
+    state, so after a failed object snapshot a plain 'retry Save' would
+    only bounce off the mapping-mode 409 — the failure detail must point
+    at the recovery that actually works (delete and save anew)."""
+    if _unavailable():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        web_mod, app, env = _make_env(
+            tmp, binding={"map_id": "default", "mode": "", "generation": None,
+                          "source": "default"},
+            objs=[_obj("o1")],
+        )
+        if app is None:
+            return
+
+        def broken_persist(pairs, *, partition=None):
+            raise RuntimeError("milvus down")
+
+        env.store.persist = broken_persist
+        with _patched(web_mod, rpc=_rpc_ok, maps=_spatial()):
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
+        assert status == 502 and not body["ok"], body
+        assert body.get("partial") == "spatial_saved_object_snapshot_failed", body
+        assert "delete the map and Save anew" in body.get("detail", ""), body
+        assert env.meta.read("labx") is None            # sidecar not committed
+    print("  [PASS] test_fresh_save_snapshot_failure_names_workable_recovery")
+
+
+def test_failed_load_blocks_save_until_successful_retry():
+    """The load-failure-then-save sequence: after a failed Load the
+    registry/binding may not match the map mapping runs, so Save is refused
+    (409) until a Load completes; a successful retry lifts the hold."""
+    if _unavailable():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        web_mod, app, env = _make_env(
+            tmp, binding={"map_id": "default", "mode": "", "generation": None,
+                          "source": "default"},
+        )
+        if app is None:
+            return
+        env.meta.write(make_meta("labx", "labx__s1", 1))
+        env.store.rows["labx__s1"] = {"saved": _obj("saved")}
+        real_load_all = env.store.load_all
+
+        def broken_load_all(*, partition=None, limit=16384, strict=False):
+            raise RuntimeError("milvus went away")
+
+        env.store.load_all = broken_load_all
+        with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
+            status, body = _call(app, "POST", "/api/maps/load", {"map_id": "labx"})
+            assert status == 502 and not body["ok"], body
+            # Save is now held — even one that would otherwise pass.
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
+            assert status == 409 and not body["ok"], body
+            assert "save blocked" in body.get("detail", ""), body
+            # A successful Load retry lifts the hold …
+            env.store.load_all = real_load_all
+            status, body = _call(app, "POST", "/api/maps/load", {"map_id": "labx"})
+            assert status == 200 and body["ok"], body
+            assert body["objects_restored"] == 1, body
+            # … and the same Save now proceeds (semantic-only re-save).
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
+            assert status == 200 and body["ok"], body
+            assert env.meta.read("labx").object_partition == "labx__s2"
+    print("  [PASS] test_failed_load_blocks_save_until_successful_retry")
 
 
 def test_delete_keeps_sidecar_when_snapshot_delete_fails():
@@ -618,14 +771,18 @@ if __name__ == "__main__":
     test_mapping_mode_resave_refused()
     test_save_refuses_overwriting_unloaded_annotations()
     test_save_excludes_self_robot_object()
-    test_failed_snapshot_keeps_previous_sidecar()
+    test_failed_snapshot_keeps_previous_sidecar_and_fails_the_save()
     test_load_without_sidecar_restores_nothing()
     test_load_restores_exactly_the_sidecar_partition()
     test_delete_removes_sidecar_and_both_partitions()
     test_reserved_map_ids_rejected()
     test_generation_threading_from_latched_broadcast()
-    test_save_without_sidecar_store_degrades_loudly()
+    test_save_without_sidecar_store_fails_the_save()
     test_load_flushes_preload_live_objects()
-    test_load_restore_failure_is_visible()
+    test_load_restore_failure_fails_load_and_keeps_previous_binding()
+    test_load_flush_failure_aborts_before_any_rebind()
+    test_occupancy_timeout_fails_load_and_blocks_save()
+    test_fresh_save_snapshot_failure_names_workable_recovery()
+    test_failed_load_blocks_save_until_successful_retry()
     test_delete_keeps_sidecar_when_snapshot_delete_fails()
     print("\nAll tests passed!")

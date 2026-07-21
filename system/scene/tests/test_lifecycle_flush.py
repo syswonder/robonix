@@ -241,9 +241,88 @@ def test_watcher_survives_none_stores_and_malformed_samples():
     print("  [PASS] test_watcher_survives_none_stores_and_malformed_samples")
 
 
+def test_flush_failure_defers_epoch_advance():
+    """A failed flush must NOT acknowledge the new generation: advancing
+    would make the next tick see no mismatch and never retry, leaving the
+    mis-anchored objects in the registry indefinitely. The whole reaction
+    (flush, stale-marking, epoch advance) re-fires until the flush lands."""
+    service_mod = _service_mod()
+    if service_mod is None:
+        return
+
+    async def scenario(tmp):
+        registry = ObjectRegistry()
+        async with registry.lock():
+            registry._objects.update({"o1": _obj("o1")})
+        anno = AnnotationStore(os.path.join(tmp, "anno"), map_id="m1")
+        anno.create(kind="room", name="kitchen", points=ROOM_PTS)
+        hub = FakeHub()
+        binding = MapBinding(map_id="m1", source="env")
+        live = {"map_id": "m1", "mode": "", "generation": None, "source": "env"}
+        hold = {"reason": None}
+        task = asyncio.create_task(service_mod._lifecycle_watch(
+            hub, binding, anno,
+            registry=registry, live_binding=live, interval_s=0.01,
+            semantic_hold=hold,
+        ))
+        try:
+            hub.set("m1", 1)
+            await _settle()
+            assert live["generation"] == 1, live
+
+            def broken_clear():
+                raise RuntimeError("registry wedged")
+
+            registry.clear_objects = broken_clear
+            hub.set("m1", 2)
+            await _settle()
+            # Bump seen but the flush failed: epoch NOT advanced, objects
+            # kept, room not yet stale — nothing acknowledged the bump.
+            assert live["generation"] == 1, live
+            assert set(registry._objects) == {"o1"}
+            assert not anno.list()[0].stale
+            assert hold["reason"] is None      # same-map bump: no hold
+
+            del registry.clear_objects          # the flush heals
+            await _settle()
+            assert live["generation"] == 2, live
+            assert registry._objects == {}, registry._objects
+            assert anno.list()[0].stale
+
+            # Cross-map switch with the flush wedged again: the save hold
+            # is raised immediately (scene and mapping now diverge), and
+            # the warn-once latch is NOT set, so the flush retries.
+            async with registry.lock():
+                registry._objects["o4"] = _obj("o4")
+            registry.clear_objects = broken_clear
+            hub.set("m9", 1)
+            await _settle()
+            assert hold["reason"] and "m9" in hold["reason"], hold
+            assert set(registry._objects) == {"o4"}   # flush still failing
+            del registry.clear_objects
+            await _settle()
+            assert registry._objects == {}, registry._objects  # retried
+            assert hold["reason"], hold  # only a facade Load clears it
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(scenario(tmp))
+        finally:
+            loop.close()
+    print("  [PASS] test_flush_failure_defers_epoch_advance")
+
+
 if __name__ == "__main__":
     print("Running lifecycle flush tests...\n")
     test_confirm_bump_and_cross_map_drift()
     test_facade_load_is_not_drift()
     test_watcher_survives_none_stores_and_malformed_samples()
+    test_flush_failure_defers_epoch_advance()
     print("\nAll tests passed!")

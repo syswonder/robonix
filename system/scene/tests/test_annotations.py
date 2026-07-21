@@ -278,9 +278,26 @@ def _make_web_app(anno_store, **overrides):
         print(f"  [SKIP] web tests unavailable: {e}")
         return None
 
-    class _StubRegistry:  # annotation routes never touch the registry
+    class _StubRegistry:
+        """Annotation routes never touch the registry, but the map-load
+        route flushes it (and aborts the load when the flush fails), so
+        the stub must honestly support lock() + clear_objects()."""
         _objects: dict = {}
         _surfaces: dict = {}
+
+        def lock(self):
+            import contextlib
+
+            @contextlib.asynccontextmanager
+            async def _noop():
+                yield
+
+            return _noop()
+
+        def clear_objects(self) -> int:
+            n = len(self._objects)
+            self._objects.clear()
+            return n
 
     options = {
         "registry": _StubRegistry(),

@@ -25,7 +25,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -74,7 +74,12 @@ class MapMetaStore:
     def read(self, map_id: str) -> Optional[MapSemanticMeta]:
         """The sidecar for `map_id`, or None when absent/unreadable. A
         malformed record must never crash a Load — it degrades to
-        "no snapshot", which restores nothing."""
+        "no snapshot", which restores nothing. "Malformed" includes an
+        identity mismatch: a parseable record naming ANOTHER map (or a
+        partition token outside this map's `<id>__s<seq>` namespace) would
+        let Load restore a different map's objects into this one, so it is
+        treated as corrupt rather than trusted."""
+        clean = sanitize_map_id(map_id)
         path = self._path(map_id)
         with self._lock:
             if not path.exists():
@@ -84,7 +89,34 @@ class MapMetaStore:
                 meta = MapSemanticMeta.from_json(data)
                 if not meta.object_partition:
                     raise ValueError("empty object_partition")
-                return meta
+                if sanitize_map_id(meta.map_id) != clean:
+                    raise ValueError(
+                        f"sidecar identity is {meta.map_id!r}, not {map_id!r}"
+                    )
+                seq = int(meta.save_seq)
+                if seq < 1:
+                    raise ValueError(f"invalid save_seq {meta.save_seq!r}")
+                expected_partition = f"{clean}__s{seq}"
+                if meta.object_partition != expected_partition:
+                    raise ValueError(
+                        f"partition {meta.object_partition!r} is not this "
+                        f"map's save token {expected_partition!r}"
+                    )
+                # Return NORMALIZED numeric fields: a foreign sidecar with
+                # save_seq "2"/2.0 passes the checks above, but the raw
+                # value would then poison downstream arithmetic —
+                # `next_partition`'s `save_seq + 1` (TypeError escaping as
+                # a 500 mid-Save) or a minted "…__s3.0" token no later
+                # read would accept. Same for mapping_generation, which
+                # feeds integer comparisons in annotation staleness.
+                return replace(
+                    meta,
+                    save_seq=seq,
+                    mapping_generation=(
+                        None if meta.mapping_generation is None
+                        else int(meta.mapping_generation)
+                    ),
+                )
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "[scene-mapmeta] unreadable sidecar %s (%s) — treating as "
