@@ -302,6 +302,9 @@ jobs:
   gpu_testing:
     name: Webots integration suite
     needs: security-gate
+    concurrency:
+      group: robonix-webots-gpu-${{ inputs.gpu_id || vars.ROBONIX_CI_GPU_ID || '0' }}
+      cancel-in-progress: false
     outputs:
       result: ${{ steps.scenarios.outputs.result }}
     # Optional per-run manual approval: configure the `gpu-testing` Environment
@@ -330,16 +333,21 @@ jobs:
       GRPCIO_PIN: "1.80.0"
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
+      RUN_ATTEMPT: "${{ github.run_attempt }}"
+      RUN_KEY: "${{ github.run_id }}-${{ github.run_attempt }}"
       # GPU selection is runner-specific. Priority:
       # workflow_call input -> repo/org variable -> runner env -> default GPU 0.
       ROBONIX_CI_GPU_ID_INPUT: ${{ inputs.gpu_id || '' }}
       ROBONIX_CI_GPU_ID_VAR: ${{ vars.ROBONIX_CI_GPU_ID || '' }}
+      ROBONIX_CI_MIN_GPU_FREE_MIB: ${{ vars.ROBONIX_CI_MIN_GPU_FREE_MIB || '4096' }}
       RMW_IMPLEMENTATION: "rmw_zenoh_cpp"
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
       # CI should not depend on external Tencent/FunASR credentials or quota.
       SPEECH_BACKEND: "mock"
+      # Keep build-time ECAPA verification off the GPU reserved for Webots and Scene.
+      VOICEPRINT_DEVICE: "cpu"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
       ROBONIX_SIM_NETWORK: "bridge"
@@ -368,9 +376,6 @@ jobs:
             registry-1.docker.io:443
             auth.docker.io:443
             production.cloudflare.docker.com:443
-
-      - name: Configure runner-local Robonix home
-        run: echo "ROBONIX_HOME=$RUNNER_TEMP/robonix-home" >> "$GITHUB_ENV"
 
       - name: Select runner GPU
         run: |
@@ -402,6 +407,29 @@ jobs:
           nvidia-smi -q >/dev/null || { echo "::error::nvidia-smi unhealthy"; exit 1; }
           if dmesg 2>/dev/null | grep -qi 'NVRM: Xid'; then
             echo "::warning::Xid in dmesg — GPU may be degraded"; fi
+
+      - name: Wait for runner GPU capacity
+        run: |
+          set -euo pipefail
+          case "${ROBONIX_CI_MIN_GPU_FREE_MIB}" in
+            ''|*[!0-9]*) echo "::error::ROBONIX_CI_MIN_GPU_FREE_MIB must be an integer"; exit 1 ;;
+          esac
+          free_mib=0
+          for attempt in $(seq 1 30); do
+            free_mib="$(nvidia-smi --id="${ROBONIX_CI_GPU_ID}" --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -d ' ')"
+            case "$free_mib" in ''|*[!0-9]*) free_mib=0 ;; esac
+            if [ "$free_mib" -ge "$ROBONIX_CI_MIN_GPU_FREE_MIB" ]; then
+              echo "runner GPU ${ROBONIX_CI_GPU_ID} ready: ${free_mib} MiB free"
+              break
+            fi
+            echo "runner GPU ${ROBONIX_CI_GPU_ID} busy: ${free_mib} MiB free; waiting (${attempt}/30)"
+            sleep 10
+          done
+          if [ "$free_mib" -lt "$ROBONIX_CI_MIN_GPU_FREE_MIB" ]; then
+            echo "::error title=Runner GPU unavailable::GPU ${ROBONIX_CI_GPU_ID} has ${free_mib} MiB free; ${ROBONIX_CI_MIN_GPU_FREE_MIB} MiB is required"
+            nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || true
+            exit 1
+          fi
 
       - name: Reset runner workspace
         run: |
@@ -544,7 +572,7 @@ jobs:
           scene_web_port=$((27000 + suffix))
           soma_port=$((28000 + suffix))
           ros_domain_id=$((90 + (suffix % 100)))
-          runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_ID}"
+          runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_KEY}"
           rm -rf "$runtime_dir"
           mkdir -p "$runtime_dir"
 
@@ -564,14 +592,14 @@ jobs:
             echo "ROBONIX_ATLAS=127.0.0.1:$atlas_port"
             echo "ROBONIX_SIM_STREAM_PORT=$stream_port"
             echo "ROBONIX_SIM_VIEWER_PORT=$viewer_port"
-            echo "ROBONIX_SIM_CONTAINER=ci-${RUN_ID}-sim"
-            echo "ROBONIX_SIM_PROJECT=ci-${RUN_ID}"
+            echo "ROBONIX_SIM_CONTAINER=ci-${RUN_KEY}-sim"
+            echo "ROBONIX_SIM_PROJECT=ci-${RUN_KEY}"
             echo "ROBONIX_SIM_XDISPLAY=:$xdisplay"
             echo "ROBONIX_WEBOTS_CACHE_VOLUME=robonix_ci_webots_cache"
-            echo "ROBONIX_MAPPING_CONTAINER=ci-${RUN_ID}-mapping"
-            echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_ID}-nav2"
-            echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_ID}-explore"
-            echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_ID}-scene"
+            echo "ROBONIX_MAPPING_CONTAINER=ci-${RUN_KEY}-mapping"
+            echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_KEY}-nav2"
+            echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_KEY}-explore"
+            echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_KEY}-scene"
             echo "ROBONIX_CI_RUNTIME_DIR=$runtime_dir"
             echo "AGENT_MEMORY_DIR=$runtime_dir/agent_memory"
             echo "AGENT_MILVUS_URI=$runtime_dir/agent_milvus.db"
@@ -1000,7 +1028,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
-          map_id="ci_scene_map_${RUN_ID}"
+          map_id="ci_scene_map_${RUN_KEY}"
           python3 "$GITHUB_WORKSPACE/testing/verify_scene_map_persistence.py" \
             --scene-url "http://127.0.0.1:${SCENE_WEB_PORT}" \
             --map-id "$map_id" \
@@ -1112,10 +1140,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sim-logs"
           docker logs "$ROBONIX_SIM_CONTAINER" >"$RUNNER_TEMP/sim-logs/webots.stdout.log" 2>&1 || true
           for name in \
-            "${ROBONIX_MAPPING_CONTAINER:-ci-${RUN_ID}-mapping}" \
-            "${ROBONIX_NAV2_CONTAINER:-ci-${RUN_ID}-nav2}" \
-            "${ROBONIX_EXPLORE_CONTAINER:-ci-${RUN_ID}-explore}" \
-            "${ROBONIX_SCENE_CONTAINER:-ci-${RUN_ID}-scene}"; do
+            "${ROBONIX_MAPPING_CONTAINER:-ci-${RUN_KEY}-mapping}" \
+            "${ROBONIX_NAV2_CONTAINER:-ci-${RUN_KEY}-nav2}" \
+            "${ROBONIX_EXPLORE_CONTAINER:-ci-${RUN_KEY}-explore}" \
+            "${ROBONIX_SCENE_CONTAINER:-ci-${RUN_KEY}-scene}"; do
             [ -n "$name" ] || continue
             docker logs "$name" >"$RUNNER_TEMP/sim-logs/${name}.stdout.log" 2>&1 || true
             docker inspect "$name" >"$RUNNER_TEMP/sim-logs/${name}.inspect.json" 2>&1 || true
@@ -1158,14 +1186,14 @@ jobs:
             [ -S "$socket" ] || return 0
             sudo -n rm -f "$socket" 2>/dev/null || true
             [ -S "$socket" ] || return 0
-            docker exec "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" rm -f "$socket" >/dev/null 2>&1 || true
+            docker exec "${ROBONIX_SIM_CONTAINER:-ci-${RUN_KEY}-sim}" rm -f "$socket" >/dev/null 2>&1 || true
             [ -S "$socket" ] || return 0
             if docker image inspect busybox:latest >/dev/null 2>&1; then
               timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "$socket" >/dev/null 2>&1 || true
             fi
           }
 
-          docker ps -aq --filter "name=ci-${RUN_ID}-" | while read -r cid; do
+          docker ps -aq --filter "name=ci-${RUN_KEY}-" | while read -r cid; do
             [ -n "$cid" ] || continue
             docker rm -f "$cid" >/dev/null 2>&1 || true
           done
@@ -1176,8 +1204,8 @@ jobs:
               remove_x_socket "$xnum"
             fi
           fi
-          rm -rf "/tmp/robonix-ci-${RUN_ID}"
-          (cd examples/webots/sim && docker compose -p "ci-${RUN_ID}" down --remove-orphans -v) 2>/dev/null || true
+          rm -rf "/tmp/robonix-ci-${RUN_KEY}"
+          (cd examples/webots/sim && docker compose -p "ci-${RUN_KEY}" down --remove-orphans -v) 2>/dev/null || true
           if [ -n "${ROBONIX_SIM_XDISPLAY:-}" ]; then
             xnum="${ROBONIX_SIM_XDISPLAY#:}"
             for _ in $(seq 1 30); do
@@ -1193,7 +1221,7 @@ jobs:
               ls -l "/tmp/.X11-unix/X${xnum}" || true
             fi
           fi
-          docker volume ls -q --filter "name=ci-${RUN_ID}_" | while read -r vid; do
+          docker volume ls -q --filter "name=ci-${RUN_KEY}_" | while read -r vid; do
             [ -n "$vid" ] || continue
             docker volume rm -f "$vid" >/dev/null 2>&1 || true
           done
@@ -1397,7 +1425,7 @@ jobs:
             --metadata "env_webots_version=$webots_version" \
             --metadata "env_ros_distro=$ros_distro" \
             --metadata "env_ros_domain_id=${ROS_DOMAIN_ID:-}" \
-            --metadata "env_sim_container=ci-${RUN_ID}-sim" \
+            --metadata "env_sim_container=ci-${RUN_KEY}-sim" \
             --metadata "env_sim_image=$sim_image" \
             --metadata "env_webots_stream_port=${ROBONIX_SIM_STREAM_PORT:-}" \
             --metadata "env_webots_viewer_port=${ROBONIX_SIM_VIEWER_PORT:-}" \
@@ -1432,6 +1460,30 @@ jobs:
             examples/webots/rbnx-boot/logs/lifecycle-*.log
             examples/webots/rbnx-boot/processes.json
           if-no-files-found: ignore
+
+      - name: Clean runner-local run directory
+        if: always()
+        run: |
+          set -euo pipefail
+          target="${ROBONIX_CI_RUNTIME_DIR:-}"
+          if [ -z "$target" ]; then
+            echo "runner-local runtime directory was not initialized; nothing to clean"
+            exit 0
+          fi
+          case "$target" in
+            "$RUNNER_TEMP/robonix-ci-$RUN_KEY") ;;
+            *) echo "::error::refusing to clean unexpected runtime directory: ${target:-<unset>}"; exit 1 ;;
+          esac
+          rm -rf -- "$target" 2>/dev/null || true
+          if [ -e "$target" ]; then
+            timeout 60s docker run --rm --network none \
+              -v "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
+              busybox:latest sh -c 'rm -rf -- "$1"' sh "$target"
+          fi
+          if [ -e "$target" ]; then
+            echo "::error::runner-local runtime directory remains after cleanup: $target"
+            exit 1
+          fi
 
   report:
     name: Webots report generation
