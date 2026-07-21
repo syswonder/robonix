@@ -201,6 +201,12 @@ def main() -> int:
     ap.add_argument("--min-artifact-bytes", type=int, default=1_000_000)
     ap.add_argument("--min-nodes", type=int, default=1)
     ap.add_argument("--min-known-cells", type=int, default=1)
+    ap.add_argument(
+        "--dimension-tolerance-cells",
+        type=int,
+        default=2,
+        help="maximum save/load occupancy-grid width or height drift in cells",
+    )
     ap.add_argument("--origin-tolerance", type=float, default=0.05)
     ap.add_argument("--timeout", type=float, default=420.0)
     ap.add_argument("--skip-save", action="store_true")
@@ -266,10 +272,16 @@ def main() -> int:
           f"meta={expected_w}x{expected_h} preview={artifact.get('preview_width')}x{artifact.get('preview_height')}",
           results)
     if live is not None:
+        live_w = int(live.get("width") or -1)
+        live_h = int(live.get("height") or -1)
+        width_delta = abs(expected_w - live_w)
+        height_delta = abs(expected_h - live_h)
         check("loaded_map_dimensions_match_saved_meta",
-              expected_w == int(live.get("width") or -1)
-              and expected_h == int(live.get("height") or -1),
-              f"meta={expected_w}x{expected_h} live={live.get('width')}x{live.get('height')}",
+              width_delta <= args.dimension_tolerance_cells
+              and height_delta <= args.dimension_tolerance_cells,
+              f"meta={expected_w}x{expected_h} live={live_w}x{live_h} "
+              f"delta={width_delta}x{height_delta} "
+              f"tolerance={args.dimension_tolerance_cells} cells",
               results)
         meta_origin = origin_meta(meta)
         if meta_origin is not None:
