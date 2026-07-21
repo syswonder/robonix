@@ -1048,8 +1048,6 @@ jobs:
         # the second boot running so the next step can exercise scenarios
         # against the restarted stack; the final cleanup step shuts it down.
         working-directory: examples/webots
-        env:
-          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
         run: |
           set -euo pipefail
           milvus_lock="$(dirname "$AGENT_MILVUS_URI")/.$(basename "$AGENT_MILVUS_URI").lock"
@@ -1132,8 +1130,6 @@ jobs:
 
       - name: Capture runtime logs
         if: always()
-        env:
-          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
         run: |
           # Capture the sim/webots container stdout and the in-container ROS
           # logs so a failure leaves a full trace alongside the scribe logs.
