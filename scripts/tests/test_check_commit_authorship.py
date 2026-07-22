@@ -51,6 +51,34 @@ class CommitAuthorshipTests(unittest.TestCase):
         )
         self.assertTrue(any("Git committer is an AI identity" in item for item in violations))
 
+    def test_explicit_coding_agent_identities_are_rejected(self):
+        agent_identities = (
+            "OpenCode",
+            "Trae AI",
+            "Windsurf Cascade",
+            "Cline",
+            "Roo Code",
+            "Kilo Code",
+            "Qwen Code",
+            "Amazon Q Developer",
+            "Augment Code",
+            "Qodo Merge",
+            "Replit Agent",
+            "GitLab Duo",
+            "Sourcegraph Cody",
+            "JetBrains Junie",
+            "Google Jules",
+            "Factory Droid",
+            "Warp Agent",
+            "AI Coding Agent",
+        )
+        for identity in agent_identities:
+            with self.subTest(identity=identity):
+                violations = MODULE.inspect_record(record(author_name=identity))
+                self.assertTrue(
+                    any("Git author is an AI identity" in item for item in violations)
+                )
+
     def test_github_actions_author_is_rejected(self):
         violations = MODULE.inspect_record(
             record(

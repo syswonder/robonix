@@ -25,6 +25,17 @@ AI_NAME_RE = re.compile(
     r"chatgpt|openai[\s._+-]*codex|codex|github[\s._+-]*copilot|copilot|"
     r"claude(?:[\s._+-]+code)?|anthropic[\s._+-]*claude|"
     r"gemini(?:[\s._+-]+cli)?|cursor(?:[\s._+-]+agent)?|"
+    r"opencode|trae(?:[\s._+-]+(?:ai|agent))?|"
+    r"windsurf(?:[\s._+-]+cascade)?|cline|"
+    r"roo[\s._+-]*code|kilo[\s._+-]*code|qwen[\s._+-]*code|"
+    r"amazon[\s._+-]*q[\s._+-]*developer|augment[\s._+-]*code|"
+    r"qodo(?:[\s._+-]*merge)?|replit[\s._+-]*agent|"
+    r"gitlab[\s._+-]*duo|sourcegraph[\s._+-]*cody|"
+    r"jetbrains[\s._+-]*junie|google[\s._+-]*jules|"
+    r"factory[\s._+-]*droid|warp[\s._+-]*agent|"
+    r"codeium|codewhisperer|tabnine|"
+    r"ai[\s._+-]*coding[\s._+-]*(?:agent|assistant)|"
+    r"coding[\s._+-]*(?:agent|assistant)|"
     r"aider|devin|openhands|swe[\s._+-]*agent"
     r")(?:$|[\s._+-])",
     re.IGNORECASE,
@@ -32,8 +43,10 @@ AI_NAME_RE = re.compile(
 AI_EMAIL_RE = re.compile(
     r"(?:"
     r"noreply@anthropic\.com|"
-    r"(?:copilot|codex|chatgpt|claude|gemini|cursor|aider|devin|"
-    r"openhands|swe-agent)(?:[^@]*)@"
+    r"(?:copilot|codex|chatgpt|claude|gemini|cursor|opencode|trae|"
+    r"windsurf|cline|roo-code|kilo-code|qwen-code|augment-code|qodo|"
+    r"replit-agent|gitlab-duo|aider|devin|openhands|swe-agent)"
+    r"(?:[^@]*)@"
     r")",
     re.IGNORECASE,
 )
