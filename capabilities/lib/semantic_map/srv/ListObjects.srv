@@ -1,8 +1,6 @@
 # robonix/system/scene/list_objects — return every object the scene
-# registry currently believes exists. No filters, no scoping; the LLM
-# calls this every round to ground its world model and filters
-# client-side by label / distance / etc. (cheaper than baking those
-# knobs into the schema).
+# registry currently believes exists. Room entries remain for v1
+# compatibility; new callers should use ListRegions for full room geometry.
 ---
 Object[] objects
 float64 stamp_unix
