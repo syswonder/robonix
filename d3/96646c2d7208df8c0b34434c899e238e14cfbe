@@ -1,0 +1,21 @@
+system/scene/scene_service/web.py
+  s_6c6ca8fc87d296::t_ddf52b177d5fcc 2785-2794,2798,2916,2918-2919,2921-2927,3024,3440-3441,3445-3446,3448-3455,3457-3458,3638,4013-4026
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d396646c2d7208df8c0b34434c899e238e14cfbe",
+  "prompts": {},
+  "sessions": {
+    "s_6c6ca8fc87d296": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1afae001-f567-4147-b141-01ef3c11a802",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
