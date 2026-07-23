@@ -10,7 +10,6 @@ use crate::pb::contracts::{
     robonix_system_pilot_get_health_server::RobonixSystemPilotGetHealth,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
-use crate::pb::executor::ControlPlanRequest;
 use crate::pb::module_health::{
     GetModuleHealthRequest, GetModuleHealthResponse, ModuleHealth, ModuleHealthReport,
 };
@@ -331,28 +330,19 @@ impl RobonixSystemPilot for PilotServiceImpl {
             } else {
                 false
             };
-            let executor_cancelled =
-                cancel_all_executor_plans(self.atlas.clone(), &self.provider_id).await;
-            debug!(
-                "[pilot] deterministic stop session {id} (turn_signaled={turn_signaled}, executor={executor_cancelled:?})"
-            );
+            debug!("[pilot] session-scoped stop session {id} (turn_signaled={turn_signaled})");
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
-            let message = match executor_cancelled {
-                Ok(true) => "stop completed",
-                Ok(false) => "stop reached Executor but cancellation was not accepted",
-                Err(ref error) => error.as_str(),
-            };
-            let state = if executor_cancelled == Ok(true) {
-                SessionState::Completed
+            let message = if turn_signaled {
+                "stop requested for this session; its active RTDL plans are being cancelled"
             } else {
-                SessionState::Failed
+                "no active turn exists for this session"
             };
             let _ = tx
                 .send(Ok(pack(
                     &id,
                     PilotStreamBody::Status(SessionStatusEvent {
                         session_id: id.clone(),
-                        state: state as u32,
+                        state: SessionState::Completed as u32,
                         message: message.to_string(),
                     }),
                 )))
@@ -539,29 +529,6 @@ fn pilot_health_report(provider_id: &str) -> ModuleHealthReport {
             ttl_ms: MODULE_HEALTH_TTL_MS,
         }),
     }
-}
-
-async fn cancel_all_executor_plans(
-    mut atlas: AtlasClient,
-    consumer_id: &str,
-) -> Result<bool, String> {
-    let (_, _, channel) = atlas_client::connect_to_capability(
-        &mut atlas,
-        consumer_id,
-        "robonix/system/executor/control_plan",
-    )
-    .await
-    .map_err(|error| format!("stop could not reach Executor: {error:#}"))?;
-    let mut client = RobonixSystemExecutorControlPlanClient::new(channel);
-    client
-        .control_plan(ControlPlanRequest {
-            action: "cancel_all".into(),
-            wait_ms: 5_000,
-            ..Default::default()
-        })
-        .await
-        .map(|response| response.into_inner().success)
-        .map_err(|error| format!("Executor cancellation failed: {error}"))
 }
 
 /// Connect to Executor's business-plan and out-of-band control RPCs.
