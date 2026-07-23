@@ -800,7 +800,11 @@ fn feed_results_into_history(
     )));
     let mut deferred_followups: Vec<Message> = Vec::new();
     for r in results {
-        let mapped = rtdl_result_to_messages(r);
+        let mut bounded = r.clone();
+        if !history::is_image_output(&bounded.output) {
+            bounded.output = compact_tool_result(&bounded.contract_id, &bounded.output, 4096);
+        }
+        let mapped = rtdl_result_to_messages(&bounded);
         history.extend(mapped.tool_messages);
         deferred_followups.extend(mapped.followup_messages);
     }
@@ -1828,7 +1832,7 @@ Compose multi-step trees; don't drip one node per round. No new capability call 
 Executor results are scoped to the plan_id/tree named immediately before them. A failed tree \
 blocks only its dependent steps; do not cancel an unrelated in-flight tree because another \
 tree failed. Cancel only for an explicit user steer covering that tree or a safety hazard.\n\
-For a named room or region, current Scene data is authoritative: call Scene list_objects, then \
+For a named room or region, current Scene data is authoritative: call Scene list_regions, then \
 goal_room with its stable ID, then navigation with the returned pose. Never substitute a Memory \
 coordinate or an object/grasp pose. A navigation SUCCEEDED result proves completion only for the \
 resolved requested destination; a zero-distance result does not prove that the robot moved.\n\
@@ -2395,6 +2399,95 @@ fn compact_preview(value: &str, max_chars: usize) -> String {
     preview
 }
 
+/// Bound a tool result without turning structured JSON into an invalid prefix.
+/// Scene list contracts keep the identifiers needed for a targeted follow-up
+/// while explicitly reporting whether any records were omitted.
+fn compact_tool_result(contract_id: &str, value: &str, max_chars: usize) -> String {
+    let original_chars = value.chars().count();
+    if original_chars <= max_chars {
+        return value.to_string();
+    }
+
+    let projection = match contract_id {
+        "robonix/system/scene/list_objects" => Some(("objects", &["id", "label"][..])),
+        "robonix/system/scene/list_regions" => Some((
+            "regions",
+            &["id", "kind", "name", "stale", "stale_reason"][..],
+        )),
+        _ => None,
+    };
+    if let (Some((array_key, fields)), Ok(parsed)) =
+        (projection, serde_json::from_str::<serde_json::Value>(value))
+        && let Some(items) = parsed.get(array_key).and_then(|entry| entry.as_array())
+    {
+        let mut projected: Vec<serde_json::Value> = items
+            .iter()
+            .map(|item| {
+                let mut record = serde_json::Map::new();
+                if let Some(source) = item.as_object() {
+                    for field in fields {
+                        if let Some(field_value) = source.get(*field) {
+                            record.insert((*field).to_string(), field_value.clone());
+                        }
+                    }
+                }
+                serde_json::Value::Object(record)
+            })
+            .collect();
+        loop {
+            let returned = projected.len();
+            let mut root = serde_json::Map::new();
+            root.insert(
+                array_key.to_string(),
+                serde_json::Value::Array(projected.clone()),
+            );
+            for key in ["map_id", "stamp_unix"] {
+                if let Some(field_value) = parsed.get(key) {
+                    root.insert(key.to_string(), field_value.clone());
+                }
+            }
+            root.insert(
+                "_robonix_truncation".to_string(),
+                serde_json::json!({
+                    "truncated": true,
+                    "complete_record_index": returned == items.len(),
+                    "original_chars": original_chars,
+                    "total_records": items.len(),
+                    "returned_records": returned,
+                    "omitted_fields": true,
+                    "instruction": "Use a narrower capability for full record details; never infer absence when complete_record_index is false."
+                }),
+            );
+            let encoded = serde_json::Value::Object(root).to_string();
+            if encoded.chars().count() <= max_chars {
+                return encoded;
+            }
+            if projected.is_empty() {
+                break;
+            }
+            projected.pop();
+        }
+    }
+
+    let mut preview_chars = max_chars / 3;
+    loop {
+        let encoded = serde_json::json!({
+            "_robonix_truncation": {
+                "truncated": true,
+                "original_chars": original_chars,
+                "complete": false,
+                "instruction": "The preview is incomplete; do not infer that an omitted value is absent."
+            },
+            "preview": compact_preview(value, preview_chars),
+        })
+        .to_string();
+        if encoded.chars().count() <= max_chars || preview_chars == 0 {
+            return encoded;
+        }
+        preview_chars /= 2;
+    }
+}
+
 /// Recover the LLM-facing capability name from an expanded capability call.
 fn call_display_name(call: &CapabilityCall) -> String {
     format!("{}.{}", call.provider_id, llm_name(&call.contract_id))
@@ -2643,10 +2736,10 @@ by planning capability calls available to you.
   Bind X itself; never substitute X's predecessor or successor.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - For semantic navigation, resolve names through Scene before calling navigation:
-  - call Scene `list_objects` first to discover the stable ID for a named room or
-    physical object; pass that exact full ID to the goal tool, never its label,
-    room number, or a guessed ID; use `get_scene_graph` only when object
-    relationships are needed;
+  - call Scene `list_regions` first to discover the stable ID for a named room
+    or region, and call `list_objects` for a physical object; pass that exact
+    full ID to the goal tool, never its label, room number, or a guessed ID;
+    use `get_scene_graph` only when object relationships are needed;
   - named rooms or regions MUST use Scene `goal_room`; never use `goal_near`,
     Memory coordinates, or guessed coordinates for a room destination;
   - physical objects MUST use Scene `goal_near` to obtain an approach pose;
@@ -2714,11 +2807,11 @@ mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
         RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer, apply_task_update,
-        build_executor_active_block, build_forest_block, configured_vlm_idle_timeout,
-        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
-        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
-        is_legacy_plan_control_contract, mixes_control_inspection_with_action, parse_meta_plan_op,
-        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        build_executor_active_block, build_forest_block, compact_tool_result,
+        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
+        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
+        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
+        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end,
@@ -2743,6 +2836,76 @@ mod tests {
             configured_vlm_idle_timeout(Some("bad")),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn large_region_results_remain_valid_json_and_keep_stable_ids() {
+        let regions: Vec<_> = (0..24)
+            .map(|index| {
+                json!({
+                    "id": format!("scene.room.anno.{index}"),
+                    "kind": "room",
+                    "name": format!("room {index}"),
+                    "points_xy": vec![index as f64; 300],
+                    "stale": false,
+                    "stale_reason": "",
+                })
+            })
+            .collect();
+        let original = json!({
+            "regions": regions,
+            "map_id": "3f_demo",
+            "stamp_unix": 123.0,
+        })
+        .to_string();
+        assert!(original.chars().count() > 4096);
+
+        let compact = compact_tool_result("robonix/system/scene/list_regions", &original, 4096);
+        let parsed: serde_json::Value = serde_json::from_str(&compact).unwrap();
+        let compact_regions = parsed["regions"].as_array().unwrap();
+        assert_eq!(compact_regions.len(), 24);
+        assert_eq!(compact_regions[23]["id"], "scene.room.anno.23");
+        assert_eq!(parsed["_robonix_truncation"]["complete_record_index"], true);
+        assert!(compact.chars().count() <= 4096);
+    }
+
+    #[test]
+    fn arbitrary_large_text_is_marked_incomplete_in_valid_json() {
+        let compact = compact_tool_result("example/large", &"x".repeat(9000), 4096);
+        let parsed: serde_json::Value = serde_json::from_str(&compact).unwrap();
+        assert_eq!(parsed["_robonix_truncation"]["truncated"], true);
+        assert_eq!(parsed["_robonix_truncation"]["complete"], false);
+        assert!(compact.chars().count() <= 4096);
+    }
+
+    #[test]
+    fn malformed_image_shape_is_bounded_as_text() {
+        let original = json!({
+            "width": 640,
+            "height": 480,
+            "encoding": "error",
+            "data": "x".repeat(9000),
+        })
+        .to_string();
+        assert!(!crate::history::is_image_output(&original));
+        let compact = compact_tool_result("camera/snapshot", &original, 4096);
+        assert!(compact.chars().count() <= 4096);
+    }
+
+    #[test]
+    fn oversized_projected_scalar_and_escaped_preview_stay_bounded() {
+        let original = json!({
+            "regions": [{
+                "id": format!("scene.room.{}", "\\\"\n".repeat(3000)),
+                "kind": "room",
+                "name": "large",
+            }],
+            "map_id": "demo",
+        })
+        .to_string();
+        let compact = compact_tool_result("robonix/system/scene/list_regions", &original, 4096);
+        serde_json::from_str::<serde_json::Value>(&compact).unwrap();
+        assert!(compact.chars().count() <= 4096);
     }
 
     #[test]
