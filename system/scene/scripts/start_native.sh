@@ -43,12 +43,14 @@ W="$PKG/docker/_weights"
 export SCENE_YOLO_WORLD_WEIGHTS="${SCENE_YOLO_WORLD_WEIGHTS:-$W/yolov8l-world.pt}"
 export SCENE_MOBILE_SAM_WEIGHTS="${SCENE_MOBILE_SAM_WEIGHTS:-$W/mobile_sam.pt}"
 export SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}"
-export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-laion2b_s34b_b79k}"
-export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-export HF_HOME="${HF_HOME:-$PKG/rbnx-build/data/hf}"
+export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-$W/open_clip_pytorch_model.bin}"
 export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
 ULTRALYTICS_CLIP_WEIGHTS="$YOLO_CONFIG_DIR/weights/clip/ViT-B-32.pt"
-for model_path in "$SCENE_YOLO_WORLD_WEIGHTS" "$SCENE_MOBILE_SAM_WEIGHTS" "$ULTRALYTICS_CLIP_WEIGHTS"; do
+for model_path in \
+    "$SCENE_YOLO_WORLD_WEIGHTS" \
+    "$SCENE_MOBILE_SAM_WEIGHTS" \
+    "$SCENE_CLIP_PRETRAINED" \
+    "$ULTRALYTICS_CLIP_WEIGHTS"; do
     if [[ ! -s "$model_path" ]]; then
         echo "[scene/native] error: missing model weight $model_path" >&2
         echo "               run system/scene/scripts/build.sh before starting scene." >&2
@@ -64,7 +66,8 @@ mkdir -p "$SCENE_ANNOTATIONS_DIR"
 
 # Service knobs (same defaults the docker run wires via -e).
 export SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}"
+export SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}"
 export SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}"
 
-echo "[scene/native] python=$PY ros=$ROS_DISTRO rmw=${RMW_IMPLEMENTATION:-<default>} web=$SCENE_WEB_PORT"
+echo "[scene/native] python=$PY ros=$ROS_DISTRO rmw=${RMW_IMPLEMENTATION:-<default>} web=$SCENE_WEB_HOST:$SCENE_WEB_PORT"
 exec "$PY" -m scene_service.service

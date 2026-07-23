@@ -87,13 +87,55 @@ class TopicSpec:
     """One observation kind's wiring. `kind` is the abstract name
     (rgb / depth / lidar2d / pose / odom); `topic` is the concrete
     ROS topic; `msg_type` selects which sensor_msgs / nav_msgs class
-    to import. Optional `qos_profile` lets a config override the
-    default reliable-latched profile when needed (e.g. /amcl_pose
-    needs RELIABLE + KEEP_LAST(1))."""
+    to import. Optional `qos_profile` carries the Atlas declaration; when it
+    is absent, sensor streams use best-effort/volatile and map lifecycle data
+    uses reliable/transient-local semantics."""
     kind: str
     topic: str
     msg_type: str            # "Image" | "LaserScan" | "PoseWithCovarianceStamped" | "Odometry"
     qos_profile: str = "default"
+
+
+def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
+    """Return reliability, durability and depth for one Atlas topic.
+
+    Atlas carries the publisher's declared QoS. A RELIABLE request cannot
+    connect to a BEST_EFFORT publisher, while a BEST_EFFORT subscription can
+    consume either reliability. Honour the declaration instead of replacing
+    every sensor stream with a hard-coded RELIABLE request.
+    """
+    sensor_kinds = {"rgb", "depth", "lidar2d", "lidar3d", "intrinsics"}
+    if spec.kind in {
+        "rgb",
+        "depth",
+        "intrinsics",
+        "occupancy_grid",
+        "map_lifecycle",
+        "camera_extrinsics",
+    }:
+        depth = 1
+    elif spec.kind in {"lidar2d", "lidar3d"}:
+        depth = 2
+    else:
+        depth = 10
+    declared = str(spec.qos_profile or "default").strip().lower().replace("-", "_")
+    if declared in {"best_effort", "sensor_data"}:
+        return "best_effort", "volatile", depth
+    if declared == "reliable":
+        return "reliable", "volatile", depth
+    if declared in {"latched", "transient_local"}:
+        return "reliable", "transient_local", depth
+    if declared not in {"", "default"}:
+        log.warning(
+            "[scene-ros] unsupported Atlas QoS %r for %s; using safe kind default",
+            spec.qos_profile,
+            spec.kind,
+        )
+    if spec.kind in sensor_kinds:
+        return "best_effort", "volatile", depth
+    if spec.kind in {"occupancy_grid", "map_lifecycle", "camera_extrinsics"}:
+        return "reliable", "transient_local", depth
+    return "reliable", "volatile", depth
 
 
 class _LatestSlot:

@@ -11,13 +11,16 @@ layer can reuse the same table; when no embedder is wired (e.g. the VLM-fallback
 perception path that has no CLIP), a fixed placeholder vector is stored so the
 collection stays well-formed.
 
-Rows are partitioned by `map_id`: an object's pose is only meaningful in the
-`map` frame of the SLAM map it was observed on, so warm-restore loads exactly
-the current map's objects and never mixes two maps. The primary key is the
-composite `"{map_id}::{object_id}"` so the same `object_id` may exist on
-different maps without colliding on upsert. Until mapping emits a real map
-identity, `map_id` is a deploy-controlled string (`SCENE_MAP_ID`, default
-`"default"`) — this stays internal to scene and touches no atlas/MCP contract.
+Rows are partitioned by the scalar `map_id` field: an object's pose is only
+meaningful in the `map` frame it was observed in, so a restore must load rows
+written in that exact frame and nothing else. The web facade's Save writes
+each snapshot under a fresh partition token (`"<map_id>__s<seq>"`, allocated
+by `map_meta`) rather than the bare map id — two saves of the same-named map
+belong to two different frames, and the token keeps them apart where a shared
+`map_id` partition would silently mix epochs. The primary key is the
+composite `"{partition}::{object_id}"` so the same `object_id` may exist in
+several partitions without colliding on upsert. All of this stays internal
+to scene and touches no atlas/MCP contract.
 """
 from __future__ import annotations
 
@@ -99,8 +102,10 @@ class ObjectStore:
         left by an earlier draft (legacy `object_id` primary key, before
         per-map partitioning) is dropped and recreated: that schema keys upsert
         on `object_id` alone, so two maps' identical ids would silently
-        overwrite each other. The store is a best-effort warm-restore cache, so
-        recreating it just forces a one-time cold start — never a boot failure."""
+        overwrite each other. Note the DB now durably holds saved maps' object
+        snapshots — the drop only ever hits those pre-partitioning legacy
+        collections (which cannot contain valid snapshots); it must stay a
+        warning-loud one-time event, never a boot failure."""
         if self._client.has_collection(_COLLECTION):
             if self._schema_current():
                 self._client.load_collection(_COLLECTION)
@@ -161,9 +166,9 @@ class ObjectStore:
     def _schema_current(self) -> bool:
         """True iff the existing collection matches what we'd create now: the
         composite `pk` primary key AND the `bbox_yaw` field (added after the
-        first persistence draft). A collection failing either check is dropped
-        and recreated — cheap, since the store is a best-effort warm-restore
-        cache and a recreate just forces a one-time cold start."""
+        first persistence draft). A collection failing either check predates
+        snapshot partitioning — it cannot hold valid snapshots — and is
+        dropped and recreated as a one-time, warning-loud cold start."""
         return self._has_composite_pk() and self._has_field("bbox_yaw")
 
     def _has_composite_pk(self) -> bool:
@@ -211,23 +216,26 @@ class ObjectStore:
         return vecs
 
     # ── write ────────────────────────────────────────────────────────────
-    def persist(self, pairs: list[tuple[SceneObject, Optional[str]]]) -> int:
-        """Upsert `(SceneObject, caption)` pairs under this store's `map_id`
-        (composite pk `"{map_id}::{object_id}"`). Caption falls back to the
-        class name when None. Returns the number of rows written;
-        a milvus error is swallowed (logged) so a bad write never kills the
-        builder tick."""
+    def persist(self, pairs: list[tuple[SceneObject, Optional[str]]],
+                *, partition: Optional[str] = None) -> int:
+        """Upsert `(SceneObject, caption)` pairs under `partition` (default:
+        this store's `map_id`; composite pk `"{partition}::{object_id}"`).
+        Caption falls back to the class name when None. Returns the number of
+        rows written; a milvus error is swallowed (logged) so a bad write
+        never kills the builder tick — callers that need write integrity
+        (the Save snapshot) compare the return value against `len(pairs)`."""
         if not pairs:
             return 0
+        target = self._partition(partition)
         captions = [(cap or obj.cls) for obj, cap in pairs]
         vecs = self._embed_captions(captions)
         rows = []
         for (obj, _cap), caption, vec in zip(pairs, captions, vecs):
             rows.append(
                 {
-                    "pk": f"{self._map_id}::{obj.object_id}",
+                    "pk": f"{target}::{obj.object_id}",
                     "object_id": obj.object_id,
-                    "map_id": self._map_id,
+                    "map_id": target,
                     "embedding": vec,
                     "cls": obj.cls,
                     "caption": caption,
@@ -256,22 +264,27 @@ class ObjectStore:
         return len(rows)
 
     # ── read ─────────────────────────────────────────────────────────────
-    def load_all(self, *, limit: int = 16384) -> list[SceneObject]:
-        """Return this map's persisted objects as `SceneObject`s for warm
-        restore (rows of other maps are filtered out by `map_id`).
+    def load_all(self, *, partition: Optional[str] = None,
+                 limit: int = 16384, strict: bool = False) -> list[SceneObject]:
+        """Return one partition's persisted objects as `SceneObject`s for warm
+        restore (default: this store's `map_id`; rows of other partitions are
+        filtered out).
 
         Restored objects come back `missing=True` (known but not currently
         observed) with their persisted `last_seen`; re-observation flips them
         back via data association. The embedding column is intentionally not
         read back — restore needs only scalar state. A query *error* is logged
-        at error level and yields an empty list rather than failing boot — this
-        is distinct from a genuinely empty DB, which returns `[]` silently."""
+        at error level and yields an empty list rather than failing boot —
+        UNLESS `strict` is set (the facade's Load path), where the caller must
+        be able to tell "snapshot unreadable" from "snapshot empty": a Save on
+        top of an unnoticed failed restore would commit an empty snapshot."""
+        target = self._partition(partition)
         try:
-            # map_id is sanitized to a quote-free identifier in __init__, so
-            # interpolating it into the predicate is injection-safe.
+            # Partitions are sanitized to quote-free identifiers, so
+            # interpolating into the predicate is injection-safe.
             rows = self._client.query(
                 collection_name=_COLLECTION,
-                filter=f'map_id == "{self._map_id}"',
+                filter=f'map_id == "{target}"',
                 output_fields=[
                     "object_id", "cls", "caption", "x", "y", "z", "yaw",
                     "frame_id", "size_x", "size_y", "size_z", "bbox_yaw",
@@ -281,6 +294,8 @@ class ObjectStore:
                 limit=limit,
             )
         except Exception as e:  # noqa: BLE001
+            if strict:
+                raise RuntimeError(f"load_all({target}) failed: {e}") from e
             # Not a cold start: the DB may hold rows we failed to read (bad
             # path, missing volume, schema mismatch). Surface it as an error so
             # a silently-empty graph isn't mistaken for "nothing persisted yet".

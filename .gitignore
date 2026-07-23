@@ -54,12 +54,8 @@ target
 
 .cursor/
 
-# Claude Code local config: ignore session state but track shared
-# repo-level skills / agents / settings so collaborators see them.
-.claude/*
-!.claude/skills/
-!.claude/agents/
-!.claude/settings.json
+# Claude Code local configuration.
+.claude/
 
 rbnx-boot
 

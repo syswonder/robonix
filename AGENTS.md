@@ -121,6 +121,11 @@ available to them.
 
 - Don't commit unless the user explicitly says to. Multiple smaller reviewable
   commits beat one mega-commit.
+- A commit's Git author must be a human contributor. Never use an AI agent in
+  the author or committer fields, or in authorship, sign-off, review, or test
+  trailers. When AI materially assists a change, the human author may disclose
+  it only as `Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL ...]` and remains
+  fully responsible for the contribution. See `CONTRIBUTING.md`.
 - Don't force-push to `main` ever. Force-push to `dev` / `dev-wheatfox` only
   when the user explicitly authorizes it.
 - Always create new commits rather than amending pushed commits, unless the

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -58,20 +58,41 @@ _INDEX_HTML = """<!doctype html>
     canvas { display: block; width: 100%; height: 100%; background: #14171f; }
     .legend { position: absolute; bottom: 8px; left: 12px; font-size: 11px;
       color: var(--muted); background: rgba(20,23,31,.85); padding: 4px 8px; border-radius: 4px; }
+    .scene-status { position: absolute; top: 10px; left: 12px; z-index: 2;
+      color: var(--muted); background: rgba(20,23,31,.92); border: 1px solid #33405a;
+      padding: 5px 9px; border-radius: 5px; font-size: 12px; }
+    .scene-status.error { color: #ff8b82; border-color: #6b3640; }
   </style>
 </head>
-<body>
+<body data-ready="loading">
 <div id="wrap">
   <div id="canvas-wrap">
     <canvas id="c"></canvas>
+    <div class="scene-status" id="scene-status" role="status">loading Scene state…</div>
     <div class="legend">scene · 1 m grid · north = +x · 5 Hz</div>
   </div>
 </div>
 <script>
 const c = document.getElementById('c');
 const ctx = c.getContext('2d');
+const sceneStatus = document.getElementById('scene-status');
+let currentState = null;
 function fit() { c.width = c.clientWidth; c.height = c.clientHeight; }
-window.addEventListener('resize', fit); fit();
+window.addEventListener('resize', () => {
+    fit();
+    if (currentState) draw(currentState);
+});
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && currentState) draw(currentState);
+});
+fit();
+
+function setSceneStatus(text, kind = '') {
+    sceneStatus.textContent = text || '';
+    sceneStatus.className = 'scene-status' + (kind ? ' ' + kind : '');
+    sceneStatus.style.display = text ? 'block' : 'none';
+}
+function setSceneReady(value) { document.body.dataset.ready = value; }
 
 // World-to-pixel: center on robot if known, else (0,0). 1m = 40 px.
 let center = [0, 0];
@@ -95,6 +116,12 @@ function classColor(cls) { return CLS_COLORS[cls] || '#9aa0a6'; }
 let occImg = null;
 let occMeta = null;
 let occStamp = 0;
+let occLoading = 0;
+let occLoadToken = 0;
+
+function isCurrentOccupancyLoad(token, stamp) {
+    return token === occLoadToken && stamp === occLoading;
+}
 
 function draw(state) {
     fit();
@@ -105,12 +132,28 @@ function draw(state) {
     if (robot) center = [robot.pose.x, robot.pose.y];
 
     // ── Occupancy map underlay ──────────────────────────────────────
-    if (state.occupancy && state.occupancy.stamp_ms !== occStamp) {
-        occStamp = state.occupancy.stamp_ms;
-        occMeta = state.occupancy;
+    if (state.occupancy && state.occupancy.stamp_ms !== occStamp
+        && state.occupancy.stamp_ms !== occLoading) {
+        occLoading = state.occupancy.stamp_ms;
+        const loadToken = ++occLoadToken;
+        const meta = state.occupancy;
         const im = new Image();
-        im.onload = () => { occImg = im; };
-        im.src = 'data:image/png;base64,' + state.occupancy.png_b64;
+        im.onload = () => {
+            if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;
+            occImg = im;
+            occMeta = meta;
+            occStamp = meta.stamp_ms;
+            occLoading = 0;
+            if (currentState) draw(currentState);
+        };
+        im.onerror = () => {
+            if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;
+            occLoading = 0;
+            setSceneReady('error');
+            setSceneStatus('Scene map image could not be decoded; retrying…', 'error');
+            console.error('occupancy PNG decode failed');
+        };
+        im.src = 'data:image/png;base64,' + meta.png_b64;
     }
     if (occImg && occMeta) {
         // Map cell [0,0] is at world (origin_x, origin_y). Width/height
@@ -195,6 +238,16 @@ function draw(state) {
         ctx.stroke();
         ctx.lineWidth = 1;
     }
+
+    const canvasVisible = c.clientWidth > 0 && c.clientHeight > 0;
+    if (canvasVisible
+        && (!state.occupancy || (occImg && occStamp === state.occupancy.stamp_ms))) {
+        setSceneReady('true');
+        setSceneStatus('');
+    } else {
+        setSceneReady('loading');
+        setSceneStatus(canvasVisible ? 'loading occupancy map…' : 'waiting for visible canvas…');
+    }
 }
 
 function fmt(n) { return Number(n).toFixed(2); }
@@ -202,12 +255,19 @@ function fmt(n) { return Number(n).toFixed(2); }
 async function tick() {
     try {
         const r = await fetch('/api/state', { cache: 'no-store' });
-        if (!r.ok) return;
-        const state = await r.json();
-        draw(state);
+        if (!r.ok) {
+            setSceneReady('error');
+            setSceneStatus(`Scene state unavailable (HTTP ${r.status}); retrying…`, 'error');
+            return;
+        }
+        currentState = await r.json();
+        draw(currentState);
         // Info panel was moved to a top-level floating overlay in
         // _COMBINED_HTML; this iframe no longer has any DOM for it.
-    } catch (_) { /* swallow; next tick will retry */ }
+    } catch (error) {
+        setSceneReady('error');
+        setSceneStatus(`Scene state unavailable; retrying… (${error})`, 'error');
+    }
 }
 // 2Hz tick. The map updates at 1 Hz from slam_toolbox; the robot
 // pose is interpolated visually so 500ms is smooth enough without
@@ -231,6 +291,17 @@ def _shorten_id(object_id: str) -> str:
 # pure waste. With this cache, re-encode is gated to "once per new
 # message", so steady-state /api/state cost drops to a dict lookup.
 _OCCUPANCY_CACHE: dict[str, Any] = {"count": -1, "payload": None}
+
+# Camera previews are much larger than the occupancy thumbnail (a Go2 RGB
+# frame is commonly 1920x1080), and `/cam` polls several times per second.
+# Keep independent caches because RGB and depth advance at different rates.
+# Cache ``None`` as well: an unsupported frame must not be re-encoded on every
+# GET while its hub message count is unchanged.
+_CAMERA_CACHE: dict[str, dict[str, Any]] = {
+    "rgb": {"hub": None, "count": -1, "payload": None},
+    "depth": {"hub": None, "count": -1, "payload": None},
+}
+_CAMERA_PREVIEW_MIN_INTERVAL_S = 0.4
 
 
 def _occupancy_payload(hub: Any) -> Optional[dict]:
@@ -352,29 +423,53 @@ def _image_to_png_b64(msg: Any, *, kind: str) -> Optional[dict]:
     }
 
 
+def _camera_channel_payload(hub: Any, kind: str) -> Optional[dict]:
+    """Return one cached camera preview for the hub's latest channel message.
+
+    The completed cache entry is replaced atomically so a worker-thread reader
+    can observe either the old or new entry, never a partially updated key and
+    payload. Per-app request single-flight is enforced by ``make_app``.
+    """
+    if not hub.has(kind):
+        return None
+    msg, stamp_unix, count = hub.latest(kind)
+    if msg is None or count == 0:
+        return None
+
+    cache = _CAMERA_CACHE[kind]
+    if cache["hub"] is hub and cache["count"] == count:
+        return cache["payload"]
+
+    payload = _image_to_png_b64(msg, kind=kind)
+    if payload is not None and payload["stamp_ms"] == 0:
+        # Prefer the ROS header stamp; fall back to ingest-time when unset.
+        payload["stamp_ms"] = int(stamp_unix * 1000)
+    _CAMERA_CACHE[kind] = {
+        "hub": hub,
+        "count": count,
+        "payload": payload,
+    }
+    return payload
+
+
 def _camera_payload(hub: Any) -> dict:
-    """JSON for the /cam panel: latest RGB + depth as base64 PNGs."""
+    """JSON for the /cam panel: latest RGB + depth as cached PNGs."""
     out: dict[str, Any] = {"rgb": None, "depth": None}
     if hub is None:
         return out
-    if hub.has("rgb"):
-        msg, stamp_unix, count = hub.latest("rgb")
-        if msg is not None and count > 0:
-            enc = _image_to_png_b64(msg, kind="rgb")
-            if enc is not None:
-                # Prefer rclpy stamp; fall back to ingest-time if header is unset.
-                if enc["stamp_ms"] == 0:
-                    enc["stamp_ms"] = int(stamp_unix * 1000)
-                out["rgb"] = enc
-    if hub.has("depth"):
-        msg, stamp_unix, count = hub.latest("depth")
-        if msg is not None and count > 0:
-            enc = _image_to_png_b64(msg, kind="depth")
-            if enc is not None:
-                if enc["stamp_ms"] == 0:
-                    enc["stamp_ms"] = int(stamp_unix * 1000)
-                out["depth"] = enc
+    out["rgb"] = _camera_channel_payload(hub, "rgb")
+    out["depth"] = _camera_channel_payload(hub, "depth")
     return out
+
+
+def _camera_json_bytes(hub: Any) -> bytes:
+    """Encode one camera response completely inside the preview worker."""
+    return json.dumps(
+        _camera_payload(hub),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _state_payload(registry: ObjectRegistry,
@@ -987,7 +1082,34 @@ def make_app(*, registry: ObjectRegistry,
         return HTMLResponse(_USER_HTML)
 
     async def camera_state(_request) -> JSONResponse:
-        return JSONResponse(_camera_payload(hub))
+        """Return a rate-limited, single-flight preview off the event loop."""
+        nonlocal camera_preview_hub
+        nonlocal camera_preview_bytes
+        nonlocal camera_preview_completed_s
+
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if (
+            camera_preview_hub is hub
+            and camera_preview_bytes is not None
+            and now - camera_preview_completed_s < _CAMERA_PREVIEW_MIN_INTERVAL_S
+        ):
+            return Response(camera_preview_bytes, media_type="application/json")
+
+        async with camera_preview_lock:
+            now = loop.time()
+            if (
+                camera_preview_hub is hub
+                and camera_preview_bytes is not None
+                and now - camera_preview_completed_s
+                < _CAMERA_PREVIEW_MIN_INTERVAL_S
+            ):
+                return Response(camera_preview_bytes, media_type="application/json")
+            payload = await asyncio.to_thread(_camera_json_bytes, hub)
+            camera_preview_hub = hub
+            camera_preview_bytes = payload
+            camera_preview_completed_s = loop.time()
+            return Response(payload, media_type="application/json")
 
     # Static asset directory ships with scene_service; holds the
     # tiago URDF mesh assets (STL/DAE files lifted from PAL Robotics's
@@ -1424,7 +1546,7 @@ _INDEX_CAM_HTML = r"""<!doctype html>
     <div class="tile" id="depth">
       <span class="label"><b>depth</b> <span class="meta">—</span> <i style="color:#666">(near=bright)</i></span>
       <img id="depth_img" alt="" />
-      <div class="empty" id="depth_empty">no depth stream connected</div>
+      <div class="empty" id="depth_empty">no depth frame available</div>
     </div>
   </div>
   <script>

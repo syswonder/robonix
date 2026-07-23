@@ -55,6 +55,7 @@ from .state import (
     Pose3D,
 )
 from .state.object_registry import now_unix
+from .web_binding import resolve_web_host
 
 logging.basicConfig(
     level=os.environ.get("SCENE_LOG_LEVEL", "INFO").upper(),
@@ -1355,7 +1356,10 @@ async def _run_active(config: dict) -> None:
             relation_inferer=sg_inferer,
             store=sg_store,
             config=sg_cfg,
-            object_store=obj_store,
+            # Live sessions are not persisted (objects reach the DB only via
+            # an explicit Save snapshot); the builder's continuous writes are
+            # the LEGACY warm-restore mode's mechanism and follow its switch.
+            object_store=obj_store if restore_on_start else None,
             perception=perception,
         )
         sg_stop = asyncio.Event()
@@ -1374,8 +1378,9 @@ async def _run_active(config: dict) -> None:
     # Web debug UI on a separate port — top-down 2D canvas + objects
     # table + robot pose. Lives in the same asyncio loop as the rest
     # of scene so registry reads are local. Set `web_port: 0` in the
-    # deploy-manifest scene block to disable. SCENE_WEB_PORT env is
-    # the override of last resort.
+    # deploy-manifest scene block to disable. SCENE_WEB_PORT and
+    # SCENE_WEB_HOST are environment fallbacks; an explicit Scene config file
+    # can set web_host: 127.0.0.1 to keep this operator surface local-only.
     web_port = int(
         int(config.get("web_port") or "0")
         if config.get("web_port") is not None and config.get("web_port") != ""
@@ -1384,6 +1389,7 @@ async def _run_active(config: dict) -> None:
     web_task = None
     web_server: uvicorn.Server | None = None
     if web_port > 0:
+        web_host = resolve_web_host(config)
         web_app = web_ui.make_app(
             registry=registry,
             hub=hub,
@@ -1400,13 +1406,13 @@ async def _run_active(config: dict) -> None:
         )
         web_uv = uvicorn.Config(
             app=web_app,
-            host="0.0.0.0",
+            host=web_host,
             port=web_port,
             log_level="warning",
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
-        log.info("web UI on http://0.0.0.0:%d", web_port)
+        log.info("web UI on http://%s:%d", web_host, web_port)
 
     log.info(
         "scene up; cap=%s mcp=%s observations=%d",

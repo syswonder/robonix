@@ -1,0 +1,14 @@
+# Set per-finger speed limit by (finger, type) (normalized [0,1]). One
+# (finger, type) may map to several underlying axes; the limit applies to every
+# one of them. Only listed pairs are updated. ok=true means the limits were
+# accepted and applied; ok=false on rejection (empty request,
+# unknown/duplicate/absent pair, out-of-range value, hardware rejection) with a
+# reason in message.
+[contract]
+id      = "robonix/primitive/hand/set_finger_speed_limits"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/SetFingerSpeedLimits.srv"
+
+[mode]
+type = "rpc"

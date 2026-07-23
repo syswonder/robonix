@@ -175,6 +175,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn boot_prerequisites_build_non_builtin_system_packages() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "rbnx-system-prerequisite-{}-{nonce}",
+            std::process::id()
+        ));
+        let scene = temp.join("system/scene");
+        std::fs::create_dir_all(&scene).expect("scene package directory");
+        std::fs::write(
+            scene.join("package_manifest.yaml"),
+            r#"manifestVersion: 1
+package:
+  name: com.robonix.system.scene.test
+  version: 0.1.0
+  description: test system package
+  license: MulanPSL-2.0
+build: mkdir -p rbnx-build && touch rbnx-build/proof
+start: "true"
+stop: "true"
+"#,
+        )
+        .expect("test package manifest");
+
+        let deploy = DeployManifest {
+            system: HashMap::from([("scene".to_string(), serde_yaml::Value::Null)]),
+            ..Default::default()
+        };
+        let manifest_dir = temp.join("deployment");
+        let cache_root = manifest_dir.join("rbnx-boot/cache");
+        std::fs::create_dir_all(&cache_root).expect("cache directory");
+
+        check_prerequisites(&deploy, &cache_root, &manifest_dir, Some(&temp))
+            .expect("system-package prerequisite build");
+
+        assert!(scene.join("rbnx-build/proof").is_file());
+        assert!(scene.join("rbnx-build/.rbnx-built").is_file());
+        std::fs::remove_dir_all(temp).expect("remove test directory");
+    }
+
+    #[test]
     fn soma_always_receives_the_selected_boot_manifest() {
         use serde_yaml::{Mapping, Value};
 
@@ -311,6 +354,7 @@ fn check_prerequisites(
     deploy: &DeployManifest,
     cache_root: &Path,
     manifest_dir: &Path,
+    robonix_source_path: Option<&Path>,
 ) -> Result<()> {
     use std::collections::BTreeMap;
     // value: (url, branch, manifest_override)
@@ -349,6 +393,30 @@ fn check_prerequisites(
         let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {
             needs_build.insert(name, (pkg_path, entry.manifest.clone()));
+        }
+    }
+
+    // Non-builtin `system:` entries are packages too.  They are resolved
+    // from the configured Robonix source tree rather than from an explicit
+    // deployment `path:`, so the package loop above cannot see them.  Build
+    // them during prerequisites just like primitive/service/skill packages;
+    // otherwise `rbnx start` performs the build after spawn and the provider
+    // registration timeout can kill a legitimate first build (Scene model
+    // downloads are a common example).
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+    if let Some(source_root) = robonix_source_path {
+        for name in deploy.system.keys() {
+            if SYSTEM_BUILTINS.contains(&name.as_str()) {
+                continue;
+            }
+            let pkg_path = source_root.join("system").join(name);
+            if !pkg_path.exists() {
+                continue; // the later system-package loop reports optional packages
+            }
+            let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
+            if !stamp.exists() {
+                needs_build.insert(name.clone(), (pkg_path, None));
+            }
         }
     }
     if needs_clone.is_empty() && needs_build.is_empty() {
@@ -397,7 +465,9 @@ pub(super) fn prepare_manifest(
     root: serde_yaml::Value,
     robonix_source_path: Option<&Path>,
 ) -> Result<serde_yaml::Value> {
-    robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)
+    let prepared = robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)?;
+    robonix_cli::manifest::validate_deployment_instance_names(&prepared)?;
+    Ok(prepared)
 }
 
 /// Make sure `system.soma` exists in the manifest map as a mapping,
@@ -1124,7 +1194,12 @@ pub async fn execute(
     // `rbnx build`'s job. We just verify both have happened; if
     // not, warn loudly and remediate inline so the user isn't
     // stuck on a fresh clone.
-    check_prerequisites(&deploy, &cache_root, &manifest_dir)?;
+    check_prerequisites(
+        &deploy,
+        &cache_root,
+        &manifest_dir,
+        config.robonix_source_path.as_deref(),
+    )?;
 
     // Install the SIGINT/SIGTERM handlers BEFORE bringup begins, not after.
     // Bringup takes many seconds (git, spawns, waiting for ACTIVE); a Ctrl-C

@@ -33,6 +33,7 @@ fi
 
 CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
+RUNTIME_PROTO_TMP=""
 
 cleanup() {
     timeout 15s docker stop "$CT" >/dev/null 2>&1 || true
@@ -41,6 +42,65 @@ trap cleanup EXIT INT TERM
 
 # Drop a stopped container from a previous run.
 docker rm -f "$CT" >/dev/null 2>&1 || true
+
+# Python protobuf generated code is only forward-compatible within protobuf's
+# documented runtime window.  `rbnx codegen` intentionally uses the host's
+# active python3, which can be newer than this image (for example gencode
+# 7.35.0 with a 6.33.6 runtime).  Never suppress protobuf's version check and
+# never guess a package pin here.  Instead, regenerate Scene's Python stubs
+# with the exact grpc_tools/protobuf stack that will import them, without
+# network access, then validate every generated module before Scene starts.
+# Keep these stubs separate from the host build output: other packages may
+# legitimately use a different Python runtime.
+prepare_runtime_proto_gen() {
+    local proto_staging="$PKG/rbnx-build/proto-staging"
+    local runtime_proto
+    local runtime_proto_gen="$PKG/rbnx-build/codegen/scene_proto_gen"
+
+    runtime_proto="$(rbnx path runtime-proto)" || {
+        echo "[scene/start] cannot resolve Robonix runtime proto directory" >&2
+        return 1
+    }
+    [[ -d "$runtime_proto" && -f "$runtime_proto/atlas.proto" ]] || {
+        echo "[scene/start] missing runtime atlas.proto: $runtime_proto" >&2
+        return 1
+    }
+    [[ -d "$proto_staging" ]] \
+        && find "$proto_staging" -maxdepth 1 -type f -name '*.proto' -print -quit \
+            | grep -q . || {
+        echo "[scene/start] missing staged package protos; run rbnx build first" >&2
+        return 1
+    }
+
+    mkdir -p "$PKG/rbnx-build/codegen"
+    RUNTIME_PROTO_TMP="$(mktemp -d "${runtime_proto_gen}.tmp.XXXXXX")"
+
+    docker run --rm \
+        --network none \
+        --entrypoint sh \
+        --user "$(id -u):$(id -g)" \
+        -e HOME=/tmp \
+        -v "$runtime_proto:/runtime-proto:ro" \
+        -v "$proto_staging:/proto-staging:ro" \
+        -v "$RUNTIME_PROTO_TMP:/proto-gen" \
+        "$IMG" -ec '
+            python3 -m grpc_tools.protoc \
+                -I/runtime-proto \
+                -I/proto-staging \
+                --python_out=/proto-gen \
+                --grpc_python_out=/proto-gen \
+                /runtime-proto/*.proto \
+                /proto-staging/*.proto
+            PYTHONPATH=/proto-gen python3 -c '\''import importlib, pathlib; p = pathlib.Path("/proto-gen"); modules = sorted({f.stem for f in p.glob("*_pb2.py")} | {f.stem for f in p.glob("*_pb2_grpc.py")}); assert modules; [importlib.import_module(name) for name in modules]'\''
+        '
+
+    rm -rf -- "$runtime_proto_gen"
+    mv -- "$RUNTIME_PROTO_TMP" "$runtime_proto_gen"
+    RUNTIME_PROTO_TMP=""
+    echo "[scene/start] runtime-compatible protobuf stubs ready"
+}
+
+prepare_runtime_proto_gen
 
 mkdir -p rbnx-build/data
 # Host-persisted scene state. Mounted at /data/robonix in the container so the
@@ -104,6 +164,7 @@ fi
 
 exec docker run --rm \
     --name "$CT" \
+    --entrypoint /scene/docker/entrypoint.sh \
     --network host \
     --ipc=host \
     "${GPU_ARGS[@]}" \
@@ -148,8 +209,10 @@ exec docker run --rm \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
+    -e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}" \
     "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
+    -v "$PKG/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/proto_gen:ro" \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
