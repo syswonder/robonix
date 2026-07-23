@@ -20,7 +20,7 @@
 use anyhow::{Context, Result};
 use robonix_scribe::warn;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Preferred per-package manifest filename. Legacy `robonix_manifest.yaml`
@@ -73,6 +73,50 @@ pub fn prepare_deployment_manifest(
     }
     expand_deployment_yaml(&mut root);
     Ok(root)
+}
+
+/// Validate package instance identities in one deployment.
+///
+/// Every primitive, service, and skill entry ``name`` becomes an Atlas provider
+/// id. The ids must therefore be non-empty, whitespace-normalized, and unique
+/// across package sections. Built-in system processes resolve their provider
+/// ids through component-specific configuration and are checked against the
+/// live Atlas registry when package startup begins.
+pub fn validate_deployment_instance_names(root: &serde_yaml::Value) -> Result<()> {
+    let mut seen = HashSet::new();
+    let mut record = |name: &str, location: &str| -> Result<()> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("{location} must declare a non-empty `name`");
+        }
+        if name != trimmed {
+            anyhow::bail!("{location} `name` must not contain leading or trailing whitespace");
+        }
+        if !seen.insert(name.to_string()) {
+            anyhow::bail!(
+                "duplicate deployment instance name '{name}' at {location}; \
+                 every primitive, service, and skill instance must be unique"
+            );
+        }
+        Ok(())
+    };
+
+    for section in ["primitive", "service", "skill"] {
+        let Some(entries) = root.get(section) else {
+            continue;
+        };
+        let entries = entries
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("deployment `{section}` must be a list"))?;
+        for (index, entry) in entries.iter().enumerate() {
+            let name = entry
+                .get("name")
+                .and_then(serde_yaml::Value::as_str)
+                .unwrap_or("");
+            record(name, &format!("{section}[{index}]"))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn expand_deployment_env(s: &str) -> String {
@@ -628,6 +672,75 @@ config:
         let value: serde_yaml::Value = serde_yaml::from_str("manifest: 42\n").unwrap();
         let error = split_system_package_config(&value).unwrap_err();
         assert!(error.to_string().contains("must be a non-empty string"));
+    }
+
+    #[test]
+    fn deployment_instance_names_are_unique_across_sections() {
+        let valid: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+system:
+  scene: {}
+primitive:
+  - name: front_camera
+    path: camera
+  - name: wrist_camera
+    path: camera
+service:
+  - name: navigation
+    path: navigation
+"#,
+        )
+        .unwrap();
+        validate_deployment_instance_names(&valid).unwrap();
+
+        let duplicate: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+system:
+  scene: {}
+primitive:
+  - name: scene
+    path: camera
+service:
+  - name: scene
+    path: scene
+"#,
+        )
+        .unwrap();
+        let error = validate_deployment_instance_names(&duplicate)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate deployment instance name 'scene'"));
+    }
+
+    #[test]
+    fn deployment_instance_names_reject_outer_whitespace() {
+        let manifest: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+primitive:
+  - name: " front_camera "
+    path: camera
+"#,
+        )
+        .unwrap();
+        let error = validate_deployment_instance_names(&manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must not contain leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn deployment_package_instance_name_is_required() {
+        let manifest: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+primitive:
+  - path: camera
+"#,
+        )
+        .unwrap();
+        let error = validate_deployment_instance_names(&manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("primitive[0] must declare a non-empty `name`"));
     }
 
     #[test]

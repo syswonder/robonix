@@ -124,6 +124,8 @@ impl Deployment {
             .with_context(|| format!("parse '{}'", manifest_path.display()))?;
         let prepared = prepare_deployment_manifest(raw, None)
             .with_context(|| format!("prepare '{}'", manifest_path.display()))?;
+        robonix_cli::manifest::validate_deployment_instance_names(&prepared)
+            .with_context(|| format!("validate identities in '{}'", manifest_path.display()))?;
         let manifest: DeployManifest = serde_yaml::from_value(prepared)
             .with_context(|| format!("decode '{}'", manifest_path.display()))?;
         let cache_root = deployment_path.join("rbnx-boot").join("cache");

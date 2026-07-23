@@ -809,6 +809,7 @@ pub async fn execute_start(
         let lifecycle = drive_standalone_lifecycle(
             &mut atlas,
             &before,
+            &instance_name,
             &expected_contract,
             allow_shared_upgrade,
             json,
@@ -907,11 +908,13 @@ fn normalize_atlas_endpoint(endpoint: &str) -> String {
 async fn drive_standalone_lifecycle(
     atlas: &mut AtlasClient,
     before: &ProviderRegistrationSnapshot,
+    expected_provider_id: &str,
     expected_driver_contract: &str,
     allow_shared_driver_upgrade: bool,
     config_json: String,
 ) -> Result<()> {
-    let outcome = wait_for_registration_core(atlas, before, "rbnx start").await?;
+    let outcome =
+        wait_for_registration_core(atlas, before, expected_provider_id, "rbnx start").await?;
     let driver_contract = resolve_runtime_driver_contract(
         &outcome.provider_id,
         &outcome.provider_namespace,

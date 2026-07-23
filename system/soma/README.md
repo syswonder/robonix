@@ -55,6 +55,14 @@ serves gRPC on `listen`. Skill packages are held until `rbnx boot` writes
 `stage2\n` into the pipe on `$ROBONIX_SOMA_STAGE_FD` (stage 2). Soma stops
 every package it launched on SIGINT/SIGTERM.
 
+For every launched package, Soma treats the deployment entry's `name` as the
+provider instance id and passes it through `RBNX_INSTANCE_NAME`. It accepts
+startup only after that exact id has a fresh Atlas registration; registrations
+from other concurrently starting providers are ignored. Deployment instance
+names must be non-empty, whitespace-normalized, and unique across primitive,
+service, and skill sections. If the expected id is already live in Atlas,
+startup fails rather than taking over the existing provider.
+
 Driver omission canonically selects `robonix/lifecycle/driver`. Soma verifies
 the provider's runtime declaration, delivers entry `config` through
 Driver(CMD_INIT), and activates primitives (skills remain inactive until first

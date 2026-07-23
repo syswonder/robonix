@@ -34,8 +34,7 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
     PackageRuntimeRecord, ProviderRegistrationSnapshot, RegistrationOutcome,
-    is_new_provider_registration, resolve_runtime_driver_contract, snapshot_provider_ids,
-    terminate_process_group,
+    resolve_runtime_driver_contract, snapshot_provider_ids, terminate_process_group,
 };
 use robonix_cli::output;
 use serde::Deserialize;
@@ -982,6 +981,12 @@ pub async fn execute(
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
     let root = prepare_manifest(root, config.robonix_source_path.as_deref())
         .with_context(|| format!("failed to prepare {}", manifest_path.display()))?;
+    robonix_cli::manifest::validate_deployment_instance_names(&root).with_context(|| {
+        format!(
+            "invalid deployment identities in {}",
+            manifest_path.display()
+        )
+    })?;
     let mut deploy: DeployManifest = serde_yaml::from_value(root)
         .with_context(|| format!("failed to decode {}", manifest_path.display()))?;
     // Banner + boot header FIRST, so the logo/version and what we're booting
@@ -1988,6 +1993,7 @@ async fn spawn_and_init(
     let registration = match wait_for_registration(
         atlas,
         &before,
+        &entry.name,
         &pkg_label,
         component,
         spawn_env.log_dir,
@@ -2002,18 +2008,16 @@ async fn spawn_and_init(
         }
     };
     let provider_id = registration.provider_id.clone();
-    // Spec: the provider_id this process registers (Python's
-    // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
-    // for this entry. Mismatch is a deploy bug — surfacing it here
-    // beats letting downstream consumers fail with cryptic
-    // "no provider for X" errors.
+    // The exact-id waiter makes this an internal invariant. Keep the check as
+    // defense in depth so a future launcher refactor cannot deliver config to
+    // a provider other than the manifest instance.
     if provider_id != entry.name {
         let log_file = log_path(spawn_env.log_dir, &pkg_label);
         output::boot_fail(
             short_label(&pkg_label, component),
             &format!(
-                "provider_id mismatch: manifest says name='{}' but Capability(id='{}') registered. \
-                 Fix python source to match manifest. Log: {}",
+                "deployment instance propagation failed: expected manifest name='{}', \
+                 observed Capability(id='{}'). Log: {}",
                 entry.name,
                 provider_id,
                 log_file.display()
@@ -2021,7 +2025,7 @@ async fn spawn_and_init(
         );
         terminate_process_group(pgid, Duration::from_secs(8)).await;
         anyhow::bail!(
-            "[{component}/{pkg_label}] provider_id mismatch: manifest name='{}' vs Capability(id='{}')",
+            "[{component}/{pkg_label}] deployment identity invariant failed: manifest name='{}' vs Capability(id='{}')",
             entry.name,
             provider_id,
         );
@@ -2057,7 +2061,12 @@ async fn spawn_and_init(
         ));
     }
 
-    let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
+    let config_json = serde_json::to_string(&entry.config).with_context(|| {
+        format!(
+            "[{component}/{pkg_label}] serialize config for deployment instance '{}'",
+            entry.name
+        )
+    })?;
     sp.driver_contract = Some(driver_contract.clone());
     sp.config_json = Some(config_json.clone());
 
@@ -2643,14 +2652,22 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
     before: &ProviderRegistrationSnapshot,
+    expected_provider_id: &str,
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
     child: &mut Child,
 ) -> Result<RegistrationOutcome> {
-    // One package = one provider. Find a new id or changed registration_id.
-    // Multiple changed providers = deploy bug, fail loud. Heartbeat timestamps
-    // are deliberately excluded because every healthy provider updates them.
+    if before.contains_key(expected_provider_id) {
+        anyhow::bail!(
+            "[{component}/{pkg_label}] deployment instance '{expected_provider_id}' \
+             was already registered before spawn"
+        );
+    }
+
+    // Wait for this manifest instance's exact id with a fresh registration
+    // generation. Unrelated providers can register concurrently and must not
+    // receive this instance's lifecycle config.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
@@ -2704,30 +2721,14 @@ async fn wait_for_registration(
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            let matches: Vec<&atlas_pb::CapabilityProvider> = providers
-                .iter()
-                .filter(|provider| is_new_provider_registration(provider, before))
-                .collect();
-            if matches.len() > 1 {
-                let log_file = log_path(log_dir, pkg_label);
-                let cap_ids: Vec<&str> = matches.iter().map(|r| r.id.as_str()).collect();
-                output::boot_fail(
-                    display_label,
-                    &format!(
-                        "multiple new providers appeared from one spawn ({}) — \
-                         package start must register exactly one Capability. Log: {}",
-                        cap_ids.join(", "),
-                        log_file.display()
-                    ),
-                );
-                anyhow::bail!(
-                    "[{component}/{pkg_label}] multiple new providers from one spawn: {} \
-                     — spec is one package start = one Capability(id=...). Log: {}",
-                    cap_ids.join(", "),
-                    log_file.display()
-                );
-            }
-            if let Some(first) = matches.first() {
+            let matched = providers.iter().find(|provider| {
+                robonix_cli::launch::is_expected_provider_registration(
+                    provider,
+                    before,
+                    expected_provider_id,
+                )
+            });
+            if let Some(first) = matched {
                 let provider_id = first.id.clone();
                 let registration_id = first.registration_id.clone();
                 // RegisterPrimitive/Service/Skill and DeclareCapability are
@@ -2816,14 +2817,16 @@ async fn wait_for_registration(
             output::boot_fail(
                 display_label,
                 &format!(
-                    "registration timeout after {:?} — see {}",
+                    "registration timeout after {:?}; expected instance '{}' — see {}",
                     DRIVER_REGISTER_TIMEOUT,
+                    expected_provider_id,
                     log_file.display()
                 ),
             );
             anyhow::bail!(
-                "[{component}/{pkg_label}] timed out after {:?} — package never registered a provider with atlas. Log: {}",
+                "[{component}/{pkg_label}] timed out after {:?} — package never registered expected deployment instance '{}' with atlas. Log: {}",
                 DRIVER_REGISTER_TIMEOUT,
+                expected_provider_id,
                 log_file.display()
             );
         }
