@@ -37,6 +37,9 @@ RUNTIME_PROTO_TMP=""
 
 cleanup() {
     timeout 15s docker stop "$CT" >/dev/null 2>&1 || true
+    if [[ -n "$RUNTIME_PROTO_TMP" ]]; then
+        rm -rf -- "$RUNTIME_PROTO_TMP"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -167,13 +170,16 @@ exec docker run --rm \
     --entrypoint /scene/docker/entrypoint.sh \
     --network host \
     --ipc=host \
-    "${GPU_ARGS[@]}" \
+    ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+    -e ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-0.0.0.0}" \
+    -e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}" \
     -e ROBONIX_DRIVER_CONTRACT_ID="${ROBONIX_DRIVER_CONTRACT_ID-robonix/lifecycle/driver}" \
     -e ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK="${ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK:-}" \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
+    -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
     -e SCENE_CAMERA_FRAME="${SCENE_CAMERA_FRAME:-}" \
     -e SCENE_BASE_FRAME="${SCENE_BASE_FRAME:-}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
@@ -199,21 +205,22 @@ exec docker run --rm \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
     -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \
+    -e SCENE_ANNOTATIONS_DIR="${SCENE_ANNOTATIONS_DIR:-/data/robonix/scene_annotations}" \
     -e SCENE_MAP_LOAD_TIMEOUT_S="${SCENE_MAP_LOAD_TIMEOUT_S:-240}" \
     -e SCENE_GRAPH_MIN_OBSERVATIONS="${SCENE_GRAPH_MIN_OBSERVATIONS:-2}" \
     -e SCENE_GRAPH_MAX_OBJECTS="${SCENE_GRAPH_MAX_OBJECTS:-80}" \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
-    "${MAP_ID_ARGS[@]}" \
+    ${MAP_ID_ARGS[@]+"${MAP_ID_ARGS[@]}"} \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     -e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}" \
-    "${ZENOH_ARGS[@]}" \
+    ${ZENOH_ARGS[@]+"${ZENOH_ARGS[@]}"} \
     -v "$(pwd)":/scene \
     -v "$PKG/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/proto_gen:ro" \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
-    "${EXTRA_MOUNTS[@]}" \
+    ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
     "$IMG"

@@ -18,6 +18,7 @@ import logging
 import os
 import signal
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
@@ -45,6 +46,7 @@ from .ingest.ros_subscribers import (
     SubscribersHub,
     TopicSpec,
 )
+from .map_meta import MapMetaStore
 from .lifecycle_runtime import (
     SceneLifecycleRuntime,
     close_scene_runtime_resources,
@@ -118,7 +120,7 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
     ("intrinsics", "robonix/primitive/camera/intrinsics", "CameraInfo"),
     ("pose", "robonix/service/map/pose", "PoseWithCovarianceStamped"),
-    ("odom", "robonix/service/map/odom", "Odometry"),
+    ("odom", "robonix/primitive/chassis/odom", "Odometry"),
     ("occupancy_grid", "robonix/service/map/occupancy_grid", "OccupancyGrid"),
     # Latched {map_id, mode, generation} broadcast from mapping. Startup
     # binding is probed separately (_discover_map_binding, before the hub
@@ -1002,53 +1004,70 @@ async def _lifecycle_watch(
     hub: SubscribersHub,
     binding: MapBinding,
     anno_store: Optional[AnnotationStore] = None,
+    *,
+    registry: Optional[ObjectRegistry] = None,
+    live_binding: Optional[dict] = None,
+    ops_lock: Optional[asyncio.Lock] = None,
+    semantic_hold: Optional[dict] = None,
+    interval_s: float = 5.0,
 ) -> None:
-    """P2 guard: scene binds its map_id ONCE at startup; when mapping's
-    broadcast later disagrees (map loaded/reset/switched at runtime), warn
-    loudly — reacting to it (flush + re-anchor the semantic state) is the
-    P3 lifecycle linkage, not guesswork here. Also confirms a static
-    binding the first time the broadcast appears and agrees.
-
-    One reaction IS taken already: a generation bump on the SAME map flags
-    the user's annotations stale (flag-only — user assets are never
-    deleted automatically). That is a marker write, not a flush, so it is
-    safe ahead of P3; and because it is best-effort, a failing marker
-    write must never kill this watcher — the drift WARNING itself is the
-    load-bearing part.
-
-    A static binding (config/env — the normal full-boot order, scene up
-    before mapping) carries no generation, so the epoch reference is
-    learned from the FIRST confirming broadcast: without that, `gen_ok`
-    would stay vacuously true and runtime bumps would be invisible."""
-    confirmed = False
+    """React to map-frame epoch changes and external map switches."""
+    if live_binding is None:
+        live_binding = {
+            "map_id": binding.map_id,
+            "mode": binding.mode,
+            "generation": binding.generation,
+            "source": binding.source,
+        }
+    if ops_lock is None:
+        ops_lock = asyncio.Lock()
+    confirmed_key: Optional[tuple] = None
     warned_ephemeral = False
     last_warned: Optional[tuple] = None
-    ref_gen = binding.generation
-    while True:
-        await asyncio.sleep(5.0)
-        msg, stamp_unix, _count = hub.latest("map_lifecycle")
+
+    async def _flush_registry(why: str) -> bool:
+        if registry is None:
+            return True
+        try:
+            async with registry.lock():
+                dropped = registry.clear_objects()
+            log.warning(
+                "[scene] flushed %d mis-anchored object(s) %s", dropped, why
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "[scene] object flush failed — mis-anchored objects remain "
+                "until the flush is retried: %s",
+                e,
+            )
+            return False
+
+    async def _tick() -> None:
+        nonlocal confirmed_key, warned_ephemeral, last_warned
+        msg, _stamp, _count = hub.latest("map_lifecycle")
         if msg is None:
-            continue
+            return
         live_id, live_gen = str(msg.map_id), int(msg.generation)
+        bound_id = str(live_binding.get("map_id") or "")
+        ref_gen = live_binding.get("generation")
         if not live_id:
-            # Ephemeral broadcast: no named identity to compare — but if
-            # scene statically bound a NAMED map, that named partition is
-            # being fed coordinates from a frame that resets every boot.
-            # Say so once instead of guarding silently forever.
             if not warned_ephemeral and binding.source in ("config", "env"):
                 log.warning(
                     "[scene] mapping broadcasts an EPHEMERAL session (empty "
-                    "map_id) while scene is bound to %r (source=%s) — set "
-                    "mapping's config.map_id to match",
+                    "map_id) while scene is bound to %r (source=%s) — mapping "
+                    "mode is using an unsaved live session; Save the current "
+                    "mapping session as %r first, then Load that saved map or "
+                    "restart in localization mode for a stable cross-boot "
+                    "binding",
                     binding.map_id,
                     binding.source,
+                    binding.map_id,
                 )
                 warned_ephemeral = True
-            continue
-        id_ok = live_id == binding.map_id
-        gen_ok = ref_gen is None or live_gen == ref_gen
-        if id_ok and gen_ok:
-            if not confirmed:
+            return
+        if live_id == bound_id and (ref_gen is None or live_gen == ref_gen):
+            if confirmed_key != (live_id, live_gen):
                 log.info(
                     "[scene] map binding confirmed by mapping lifecycle: "
                     "id=%s gen=%d mode=%s",
@@ -1056,12 +1075,8 @@ async def _lifecycle_watch(
                     live_gen,
                     str(msg.mode),
                 )
-                confirmed = True
-                # Static bindings learn their epoch here; from now on a
-                # bump IS detectable. The annotation store gets to compare
-                # the confirmed epoch against the one its file recorded
-                # (it too may have loaded under an unknown generation).
-                ref_gen = live_gen
+                confirmed_key = (live_id, live_gen)
+                live_binding["generation"] = live_gen
                 if anno_store is not None:
                     try:
                         anno_store.reconcile_generation(live_gen)
@@ -1074,54 +1089,86 @@ async def _lifecycle_watch(
                             e,
                         )
             last_warned = None
-            continue
+            return
+        if live_id == bound_id:
+            async with ops_lock:
+                ref_gen = live_binding.get("generation")
+                if (
+                    str(live_binding.get("map_id") or "") != live_id
+                    or live_gen == ref_gen
+                ):
+                    return
+                log.warning(
+                    "[scene] map %s frame epoch changed under scene (gen "
+                    "%s→%d, mode=%s) — flushing derived objects "
+                    "(re-observation rebuilds them in the new frame); room "
+                    "annotations are flagged stale for confirmation",
+                    live_id,
+                    ref_gen,
+                    live_gen,
+                    str(msg.mode),
+                )
+                if not await _flush_registry("after epoch bump"):
+                    return
+                if anno_store is not None:
+                    try:
+                        n = anno_store.mark_all_stale(
+                            f"map generation {ref_gen}→{live_gen}",
+                            new_generation=live_gen,
+                        )
+                        if n:
+                            log.warning(
+                                "[scene-anno] %d annotation(s) marked stale "
+                                "— confirm or redraw them in the map UI",
+                                n,
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        log.error(
+                            "[scene-anno] stale marking failed (annotations "
+                            "may show as fresh until restart): %s",
+                            e,
+                        )
+                live_binding["generation"] = live_gen
+                if str(msg.mode):
+                    live_binding["mode"] = str(msg.mode)
+                confirmed_key = (live_id, live_gen)
+            return
         key = (live_id, live_gen)
         if key != last_warned:
-            log.warning(
-                "[scene] mapping's live map identity (id=%s gen=%d mode=%s) "
-                "no longer matches scene's startup binding (id=%s gen=%s "
-                "source=%s) — semantic state may be mis-anchored. Scene keeps "
-                "its startup binding until lifecycle linkage (P3) lands; "
-                "restart scene to rebind.",
-                live_id,
-                live_gen,
-                str(msg.mode),
-                binding.map_id,
-                ref_gen,
-                binding.source,
-            )
-            if anno_store is not None and id_ok and not gen_ok:
-                # Same map, new frame epoch: user-drawn geometry may no
-                # longer line up with the rebuilt map. Flag it for user
-                # confirmation (marker-only; deletion is never automatic).
-                try:
-                    n = anno_store.mark_all_stale(
-                        f"map generation {ref_gen}→{live_gen}",
-                        new_generation=live_gen,
+            async with ops_lock:
+                if str(live_binding.get("map_id") or "") == live_id:
+                    return
+                log.warning(
+                    "[scene] mapping's live map identity (id=%s gen=%d "
+                    "mode=%s) no longer matches scene's binding (id=%s "
+                    "gen=%s source=%s) — flushing stale objects; Load the "
+                    "map in the map UI (or restart scene) to bind its "
+                    "semantic state.",
+                    live_id,
+                    live_gen,
+                    str(msg.mode),
+                    bound_id,
+                    ref_gen,
+                    live_binding.get("source"),
+                )
+                if semantic_hold is not None:
+                    semantic_hold["reason"] = (
+                        f"mapping switched to map {live_id} outside scene"
                     )
-                    if n:
-                        log.warning(
-                            "[scene-anno] %d annotation(s) marked stale — "
-                            "confirm or redraw them in the map UI",
-                            n,
-                        )
-                except Exception as e:  # noqa: BLE001
-                    # Losing the stale marker is recoverable (next boot's
-                    # load-time epoch check re-judges); losing this watcher
-                    # would silence ALL drift warnings for the session.
-                    log.error(
-                        "[scene-anno] stale marking failed (annotations "
-                        "may show as fresh until restart): %s",
-                        e,
-                    )
-            if id_ok:
-                # Acknowledge the new epoch so a THIRD epoch is reported
-                # against this one (accurate from→to in reason/log), and
-                # each bump warns exactly once. The registry's semantic
-                # state stays anchored to the startup binding until the
-                # lifecycle linkage (P3) actually re-anchors it.
-                ref_gen = live_gen
+                if not await _flush_registry("after external map switch"):
+                    return
             last_warned = key
+
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await _tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "[scene] lifecycle watch tick failed (watch continues): %s", e
+            )
 
 
 # ── active runtime ─────────────────────────────────────────────────────────
@@ -1161,9 +1208,7 @@ async def _run_active(config: dict) -> None:
         "1",
         "yes",
     )
-    scene_state_map_id = (
-        map_id if restore_on_start else f".live-{os.getpid()}-{int(time.time())}"
-    )
+    scene_state_map_id = map_id if restore_on_start else ".live"
     log.info(
         "[scene] map binding: id=%s gen=%s source=%s mode=%s restore_on_start=%s state_partition=%s",
         binding.map_id,
@@ -1173,6 +1218,14 @@ async def _run_active(config: dict) -> None:
         restore_on_start,
         scene_state_map_id,
     )
+    map_ops_lock = asyncio.Lock()
+    semantic_hold: dict = {"reason": None}
+    live_binding: dict = {
+        "map_id": binding.map_id,
+        "mode": binding.mode if restore_on_start else "",
+        "generation": binding.generation if restore_on_start else None,
+        "source": binding.source if restore_on_start else "default",
+    }
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # mapping is provably UP but running ephemeral (no map_id) — its
         # frame resets every boot, so the named partition scene just bound
@@ -1200,6 +1253,13 @@ async def _run_active(config: dict) -> None:
         )
         try:
             obj_store = ObjectStore(db_path, map_id=scene_state_map_id)
+            purged = obj_store.purge_live_partitions()
+            if purged:
+                log.info(
+                    "[scene-persist] purged %d leftover live-session row(s) "
+                    "from earlier boots",
+                    purged,
+                )
             restored = obj_store.load_all() if restore_on_start else []
             if restored:
                 async with registry.lock():
@@ -1230,10 +1290,23 @@ async def _run_active(config: dict) -> None:
     # object store has no epoch concept). A failure here disables the
     # annotation API for the session (web answers 503) but never blocks
     # scene itself.
+    anno_dir = os.environ.get(
+        "SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"
+    )
+    if not restore_on_start:
+        try:
+            for leftover in Path(anno_dir).expanduser().glob(".live*.json"):
+                leftover.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "[scene-anno] live-session file cleanup failed (leftovers "
+                "may resurface next boot): %s",
+                e,
+            )
     anno_store: Optional[AnnotationStore] = None
     try:
         anno_store = AnnotationStore(
-            os.environ.get("SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"),
+            anno_dir,
             map_id=scene_state_map_id,
             generation=binding.generation if restore_on_start else None,
         )
@@ -1250,6 +1323,18 @@ async def _run_active(config: dict) -> None:
         log.error(
             "[scene-anno] annotation store init failed — annotation API "
             "disabled for this session: %s",
+            e,
+        )
+    map_meta: Optional[MapMetaStore] = None
+    try:
+        meta_dir = os.environ.get("SCENE_MAP_META_DIR") or os.path.join(
+            os.path.dirname(anno_dir.rstrip("/")) or ".", "scene_maps"
+        )
+        map_meta = MapMetaStore(meta_dir)
+    except Exception as e:  # noqa: BLE001
+        log.error(
+            "[scene-mapmeta] sidecar store init failed — Save/Load will not "
+            "snapshot/restore objects this session: %s",
             e,
         )
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
@@ -1282,10 +1367,16 @@ async def _run_active(config: dict) -> None:
         obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
-        # P2 guard: warn when mapping's live map identity drifts from the
-        # binding scene started with (P3 will act on it instead).
         asyncio.create_task(
-            _lifecycle_watch(hub, binding, anno_store),
+            _lifecycle_watch(
+                hub,
+                binding,
+                anno_store,
+                registry=registry,
+                live_binding=live_binding,
+                ops_lock=map_ops_lock,
+                semantic_hold=semantic_hold,
+            ),
             name="scene-lifecycle-watch",
         ),
         # Background reconciler: keeps scene's hub adding subscriptions
@@ -1397,12 +1488,10 @@ async def _run_active(config: dict) -> None:
             sg_store=sg_store,
             anno_store=anno_store,
             object_store=obj_store,
-            map_binding={
-                "map_id": binding.map_id,
-                "mode": binding.mode if restore_on_start else "",
-                "generation": binding.generation if restore_on_start else None,
-                "source": binding.source if restore_on_start else "default",
-            },
+            map_meta=map_meta,
+            map_binding=live_binding,
+            ops_lock=map_ops_lock,
+            semantic_hold=semantic_hold,
         )
         web_uv = uvicorn.Config(
             app=web_app,

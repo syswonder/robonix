@@ -163,6 +163,15 @@ class AnnotationStore:
     def path(self) -> Path:
         return self._path
 
+    def has_saved(self, map_id: str) -> bool:
+        """True when a persisted annotation file already exists for `map_id`.
+
+        Guards the Save path: `rebind(carry_current=True)` onto a partition
+        this store never loaded would OVERWRITE that file with the live
+        session's annotations — silently destroying previously saved rooms
+        (user assets). Callers refuse the save instead (load first)."""
+        return (self._base / f"{sanitize_map_id(map_id)}.json").exists()
+
     def rebind(self, map_id: str, *, generation: Optional[int] = None,
                carry_current: bool = False) -> None:
         """Switch this store to another map partition.

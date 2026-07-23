@@ -73,6 +73,27 @@ _MODE_TRANSPORT_OK = {
 }
 
 
+def _provider_bind_host(value: str | None = None) -> str:
+    """Return the validated IPv4 address used by provider gRPC servers."""
+    raw = (
+        os.environ.get("ROBONIX_PROVIDER_BIND_HOST", "0.0.0.0")
+        if value is None
+        else value
+    )
+    host = str(raw).strip()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError(
+            "ROBONIX_PROVIDER_BIND_HOST must be an IPv4 address literal"
+        ) from exc
+    if not isinstance(address, ipaddress.IPv4Address):
+        raise ValueError(
+            "ROBONIX_PROVIDER_BIND_HOST must be an IPv4 address literal"
+        )
+    return str(address)
+
+
 def _resolve_provider_id(default_id: str) -> str:
     """Return the deployment instance id, or the package's standalone default.
 

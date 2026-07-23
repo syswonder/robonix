@@ -80,14 +80,12 @@ class ObjectStore:
         """The sanitized map id this store is scoped to."""
         return self._map_id
 
-    def rebind(self, map_id: str) -> None:
-        """Switch subsequent reads/writes to another map partition.
-
-        The Milvus collection is shared across maps; rows are filtered by the
-        scalar ``map_id`` field and keyed by ``{map_id}::{object_id}``, so a
-        rebind only changes the partition used by ``persist`` / ``load_all``.
-        """
-        self._map_id = _sanitize_map_id(map_id)
+    def _partition(self, partition: Optional[str]) -> str:
+        """Resolve the partition an operation targets: the explicit argument
+        when given, else this store's bound `map_id`. Explicit partitions keep
+        one-shot operations (the web facade's Save/Load snapshots) from
+        mutating the store-wide binding that the builder shares."""
+        return self._map_id if partition is None else _sanitize_map_id(partition)
 
     # ── schema ───────────────────────────────────────────────────────────
     def _ensure_collection(self) -> None:
@@ -335,7 +333,10 @@ class ObjectStore:
         """Delete persisted scene objects belonging to one map partition.
 
         The collection is shared, so the filter is mandatory: deleting a map
-        must never affect objects captured for another spatial map.
+        must never affect objects captured for another spatial map. The
+        return value counts rows found by a query capped at 16384 — a "how
+        much was there" signal, possibly lower than what the (uncapped)
+        delete removed.
         """
         target = _sanitize_map_id(map_id)
         predicate = f'map_id == "{target}"'
@@ -351,6 +352,28 @@ class ObjectStore:
             return len(rows)
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"delete_map({target}) failed: {e}") from e
+
+    def purge_live_partitions(self) -> int:
+        """Best-effort deletion of leftover `.live*` partitions.
+
+        Earlier builds persisted the live session under a unique
+        `.live-<pid>-<ts>` partition every boot and never cleaned it, so a
+        long-lived DB accumulates dead rows without bound. Live sessions are
+        no longer persisted at all; this reclaims what old boots left behind.
+        Returns the number of rows deleted (0 on any error — cleanup must
+        never block a boot)."""
+        predicate = 'map_id like ".live%"'
+        try:
+            rows = self._client.query(
+                collection_name=_COLLECTION, filter=predicate,
+                output_fields=["pk"], limit=16384,
+            )
+            if rows:
+                self._client.delete(collection_name=_COLLECTION, filter=predicate)
+            return len(rows)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[scene-persist] live-partition cleanup failed: %s", e)
+            return 0
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def close(self) -> None:

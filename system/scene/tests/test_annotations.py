@@ -262,9 +262,13 @@ def _make_web_app(anno_store, **overrides):
         print(f"  [SKIP] web tests unavailable: {e}")
         return None
 
-    class _StubRegistry:  # annotation routes never touch the registry
+    class _StubRegistry:
         _objects: dict = {}
         _surfaces: dict = {}
+
+        @staticmethod
+        def clear_objects():
+            return 0
 
     options = {
         "registry": _StubRegistry(),
