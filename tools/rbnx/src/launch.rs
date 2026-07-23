@@ -302,6 +302,15 @@ pub async fn snapshot_provider_ids(atlas: &mut AtlasClient) -> Result<HashSet<St
         .collect())
 }
 
+/// Match only a newly appearing registration for the requested manifest id.
+pub fn is_expected_provider_registration(
+    provider: &atlas_pb::CapabilityProvider,
+    before: &HashSet<String>,
+    expected_provider_id: &str,
+) -> bool {
+    provider.id == expected_provider_id && !before.contains(expected_provider_id)
+}
+
 /// Outcome of `wait_for_registration_core`:
 ///   * `provider_id` — the new provider that appeared after `before`.
 ///   * `driver_contract` — if the new provider also declared a
@@ -332,8 +341,15 @@ pub struct RegistrationOutcome {
 pub async fn wait_for_registration_core(
     atlas: &mut AtlasClient,
     before: &HashSet<String>,
+    expected_provider_id: &str,
     who: &str,
 ) -> Result<RegistrationOutcome> {
+    if before.contains(expected_provider_id) {
+        anyhow::bail!(
+            "[{who}] deployment instance '{expected_provider_id}' was already registered before spawn"
+        );
+    }
+
     // Poll cadence is decoupled from any spinner refresh: we just sleep
     // 200ms between Atlas queries. That's the same cadence the CLI used
     // (one query per 2 spinner ticks at 100ms/tick).
@@ -345,19 +361,10 @@ pub async fn wait_for_registration_core(
             .query_capabilities("", "", atlas_pb::Transport::Unspecified)
             .await
             .with_context(|| format!("[{who}] poll atlas"))?;
-        let matches: Vec<&atlas_pb::CapabilityProvider> = providers
-            .iter()
-            .filter(|provider| !before.contains(&provider.id))
-            .collect();
-        if matches.len() > 1 {
-            let cap_ids: Vec<&str> = matches.iter().map(|r| r.id.as_str()).collect();
-            anyhow::bail!(
-                "[{who}] multiple new providers appeared from one spawn: {} \
-                 — spec is one package start = one Capability(id=...)",
-                cap_ids.join(", ")
-            );
-        }
-        if let Some(first) = matches.first() {
+        let matched = providers.iter().find(|provider| {
+            is_expected_provider_registration(provider, before, expected_provider_id)
+        });
+        if let Some(first) = matched {
             let provider_id = first.id.clone();
             // RegisterPrimitive/Service/Skill and DeclareCapability are
             // two separate RPCs from the package side — Register lands
@@ -501,4 +508,42 @@ pub async fn call_driver_cmd(
         );
     }
     Ok(r.state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{atlas_pb, is_expected_provider_registration};
+    use std::collections::HashSet;
+
+    #[test]
+    fn expected_registration_ignores_unrelated_provider() {
+        let before = HashSet::from(["existing_camera".to_string()]);
+        let provider = |id: &str| atlas_pb::CapabilityProvider {
+            id: id.to_string(),
+            ..Default::default()
+        };
+
+        assert!(!is_expected_provider_registration(
+            &provider("unrelated_lidar"),
+            &before,
+            "camera",
+        ));
+        assert!(is_expected_provider_registration(
+            &provider("camera"),
+            &before,
+            "camera",
+        ));
+    }
+
+    #[test]
+    fn expected_registration_rejects_an_already_live_id() {
+        let before = HashSet::from(["camera".to_string()]);
+        let provider = atlas_pb::CapabilityProvider {
+            id: "camera".to_string(),
+            ..Default::default()
+        };
+        assert!(!is_expected_provider_registration(
+            &provider, &before, "camera",
+        ));
+    }
 }

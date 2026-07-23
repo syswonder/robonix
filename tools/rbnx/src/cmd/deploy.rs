@@ -362,7 +362,9 @@ pub(super) fn prepare_manifest(
     root: serde_yaml::Value,
     robonix_source_path: Option<&Path>,
 ) -> Result<serde_yaml::Value> {
-    robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)
+    let prepared = robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)?;
+    robonix_cli::manifest::validate_deployment_instance_names(&prepared)?;
+    Ok(prepared)
 }
 
 /// Make sure `system.soma` exists in the manifest map as a mapping,
@@ -1823,15 +1825,22 @@ async fn spawn_and_init(
         );
     };
 
-    let (provider_id, driver_contract) =
-        match wait_for_registration(atlas, &before, &pkg_label, component, spawn_env.log_dir).await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                reap();
-                return Err(e);
-            }
-        };
+    let (provider_id, driver_contract) = match wait_for_registration(
+        atlas,
+        &before,
+        &entry.name,
+        &pkg_label,
+        component,
+        spawn_env.log_dir,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reap();
+            return Err(e);
+        }
+    };
 
     // Spec: the provider_id this process registers (Python's
     // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
@@ -1843,8 +1852,8 @@ async fn spawn_and_init(
         output::boot_fail(
             short_label(&pkg_label, component),
             &format!(
-                "provider_id mismatch: manifest says name='{}' but Capability(id='{}') registered. \
-                 Fix python source to match manifest. Log: {}",
+                "deployment instance propagation failed: expected manifest name='{}', \
+                 observed Capability(id='{}'). Log: {}",
                 entry.name,
                 provider_id,
                 log_file.display()
@@ -1867,7 +1876,18 @@ async fn spawn_and_init(
         return Ok(sp);
     };
 
-    let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
+    let config_json = match serde_json::to_string(&entry.config).with_context(|| {
+        format!(
+            "[{component}/{pkg_label}] serialize config for deployment instance '{}'",
+            entry.name
+        )
+    }) {
+        Ok(value) => value,
+        Err(error) => {
+            reap();
+            return Err(error);
+        }
+    };
     sp.provider_id = Some(provider_id.clone());
     sp.driver_contract = Some(driver_contract.clone());
     sp.config_json = Some(config_json.clone());
@@ -2270,14 +2290,20 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
     before: &HashSet<String>,
+    expected_provider_id: &str,
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
 ) -> Result<(String, Option<String>)> {
-    // One package = one provider. Find the provider that wasn't in `before`.
-    // Multiple new providers = deploy bug, fail loud. No heartbeat-based
-    // freshness fallback — every existing ACTIVE provider heartbeats
-    // periodically and would falsely match.
+    if before.contains(expected_provider_id) {
+        anyhow::bail!(
+            "[{component}/{pkg_label}] deployment instance '{expected_provider_id}' \
+             was already registered before spawn"
+        );
+    }
+
+    // Wait only for this manifest entry's exact provider id. Other packages
+    // may register concurrently and must not receive this instance's config.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
@@ -2302,30 +2328,14 @@ async fn wait_for_registration(
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            let matches: Vec<&atlas_pb::CapabilityProvider> = providers
-                .iter()
-                .filter(|provider| !before.contains(&provider.id))
-                .collect();
-            if matches.len() > 1 {
-                let log_file = log_path(log_dir, pkg_label);
-                let cap_ids: Vec<&str> = matches.iter().map(|r| r.id.as_str()).collect();
-                output::boot_fail(
-                    display_label,
-                    &format!(
-                        "multiple new providers appeared from one spawn ({}) — \
-                         package start must register exactly one Capability. Log: {}",
-                        cap_ids.join(", "),
-                        log_file.display()
-                    ),
-                );
-                anyhow::bail!(
-                    "[{component}/{pkg_label}] multiple new providers from one spawn: {} \
-                     — spec is one package start = one Capability(id=...). Log: {}",
-                    cap_ids.join(", "),
-                    log_file.display()
-                );
-            }
-            if let Some(first) = matches.first() {
+            let matched = providers.iter().find(|provider| {
+                robonix_cli::launch::is_expected_provider_registration(
+                    provider,
+                    before,
+                    expected_provider_id,
+                )
+            });
+            if let Some(first) = matched {
                 let provider_id = first.id.clone();
                 // RegisterPrimitive/Service/Skill and DeclareCapability are
                 // two separate RPCs from the package side — Register lands

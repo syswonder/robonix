@@ -55,6 +55,11 @@ serves gRPC on `listen`. Skill packages are held until `rbnx boot` writes
 `stage2\n` into the pipe on `$ROBONIX_SOMA_STAGE_FD` (stage 2). Soma stops
 every package it launched on SIGINT/SIGTERM.
 
+For every package, Soma passes the deployment entry's `name` through
+`RBNX_INSTANCE_NAME` and waits only for that exact Atlas provider id. Package
+instance names must be non-empty, whitespace-normalized, unique, and not
+already live before spawn.
+
 `--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`);
 package stdout/stderr is written through scribe under `$SCRIBE_LOG_DIR` or
 `./logs`.
