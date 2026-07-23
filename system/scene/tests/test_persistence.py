@@ -344,6 +344,45 @@ def test_map_id_sanitized():
     print("  [PASS] test_map_id_sanitized")
 
 
+def test_partition_scoped_operations():
+    """persist/load_all take an explicit partition without touching the
+    store's own binding (the Save/Load snapshot path), and
+    purge_live_partitions clears only leftover `.live*` rows."""
+    try:
+        import milvus_lite  # noqa: F401
+        import pymilvus  # noqa: F401
+    except Exception:
+        print("  [SKIP] test_partition_scoped_operations (pymilvus/milvus-lite not installed)")
+        return
+
+    from scene_service.persistence import ObjectStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = ObjectStore(os.path.join(d, "objects.db"), map_id="bound")
+        store.persist([(_make_obj("scene.object.a_001", "a"), None)], partition="labx__s1")
+        store.persist([(_make_obj("scene.object.b_001", "b"), None)], partition="labx__s2")
+        store.persist([(_make_obj("scene.object.c_001", "c"), None)])  # bound partition
+        store.persist([(_make_obj("scene.object.d_001", "d"), None)], partition=".live-1-2")
+        assert store.map_id == "bound"  # explicit partitions never rebind
+        assert {o.object_id for o in store.load_all(partition="labx__s1")} \
+            == {"scene.object.a_001"}
+        assert {o.object_id for o in store.load_all(partition="labx__s2")} \
+            == {"scene.object.b_001"}
+        assert {o.object_id for o in store.load_all()} == {"scene.object.c_001"}
+
+        assert store.purge_live_partitions() == 1
+        assert store.load_all(partition=".live-1-2") == []
+        assert {o.object_id for o in store.load_all(partition="labx__s1")} \
+            == {"scene.object.a_001"}  # named snapshots untouched
+
+        assert store.delete_map("labx__s1") == 1
+        assert store.load_all(partition="labx__s1") == []
+        assert {o.object_id for o in store.load_all(partition="labx__s2")} \
+            == {"scene.object.b_001"}  # sibling snapshot untouched
+        store.close()
+    print("  [PASS] test_partition_scoped_operations")
+
+
 if __name__ == "__main__":
     print("Running persistence unit tests...\n")
     test_restore_object_counter_collision()
@@ -356,4 +395,5 @@ if __name__ == "__main__":
     test_object_store_upsert_latest_wins()
     test_object_store_map_id_isolation()
     test_legacy_schema_recreated()
+    test_partition_scoped_operations()
     print("\nAll tests passed!")
