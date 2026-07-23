@@ -51,6 +51,7 @@ from .state import (
     Pose3D,
 )
 from .state.object_registry import now_unix
+from .web_binding import resolve_web_host
 
 
 logging.basicConfig(
@@ -62,6 +63,11 @@ log = logging.getLogger("scene-service")
 
 def _load_config() -> dict:
     """Read RBNX_CONFIG_FILE if set; otherwise return an empty config.
+
+    An explicitly requested config is safety-relevant input. Unreadable,
+    malformed, empty, or non-mapping content must stop startup instead of
+    silently widening bind addresses and other settings to legacy defaults.
+
     Empty `observations` triggers auto-discovery against atlas — scene
     asks for every cap with a ROS2 topic_out interface and subscribes
     by contract leaf. The manifest only needs to populate
@@ -72,17 +78,21 @@ def _load_config() -> dict:
         return {}
     try:
         text = Path(path).read_text()
-        try:
-            cfg = json.loads(text)
-        except json.JSONDecodeError:
-            import yaml  # PyYAML is in deps
+    except OSError as exc:
+        raise RuntimeError(f"failed to read explicit Scene config {path}") from exc
+    try:
+        cfg = json.loads(text)
+    except json.JSONDecodeError:
+        import yaml  # PyYAML is in deps
 
-            cfg = yaml.safe_load(text) or {}
-    except Exception as e:  # noqa: BLE001
-        log.warning("failed to read %s: %s; using empty config", path, e)
-        return {}
+        try:
+            cfg = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise RuntimeError(
+                f"failed to parse explicit Scene config {path}"
+            ) from exc
     if not isinstance(cfg, dict):
-        cfg = {}
+        raise ValueError(f"explicit Scene config root must be a mapping: {path}")
     return cfg
 
 
@@ -944,9 +954,12 @@ async def _lifecycle_watch(
             if not warned_ephemeral and binding.source in ("config", "env"):
                 log.warning(
                     "[scene] mapping broadcasts an EPHEMERAL session (empty "
-                    "map_id) while scene is bound to %r (source=%s) — set "
-                    "mapping's config.map_id to match", binding.map_id,
-                    binding.source,
+                    "map_id) while scene is bound to %r (source=%s) — mapping "
+                    "mode is using an unsaved live session; Save the current "
+                    "mapping session as %r first, then Load that saved map or "
+                    "restart in localization mode for a stable cross-boot "
+                    "binding",
+                    binding.map_id, binding.source, binding.map_id,
                 )
                 warned_ephemeral = True
             continue
@@ -1072,13 +1085,15 @@ async def _run() -> None:
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # mapping is provably UP but running ephemeral (no map_id) — its
         # frame resets every boot, so the named partition scene just bound
-        # statically will never re-anchor. Likely a manifest misconfig
-        # (SCENE_MAP_ID set, mapping's config.map_id forgotten).
+        # statically will not re-anchor across boots until the operator saves
+        # this live session and later loads it in localization mode.
         log.warning(
             "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
             "while scene binds %r from %s — objects stored under this id "
-            "won't re-anchor across boots; set mapping's config.map_id to "
-            "match", binding.map_id, binding.source,
+            "won't re-anchor across boots; Save the current mapping session "
+            "as %r first, then Load that saved map or restart in localization "
+            "mode",
+            binding.map_id, binding.source, binding.map_id,
         )
 
     obj_store = None
@@ -1285,8 +1300,9 @@ async def _run() -> None:
     # Web debug UI on a separate port — top-down 2D canvas + objects
     # table + robot pose. Lives in the same asyncio loop as the rest
     # of scene so registry reads are local. Set `web_port: 0` in the
-    # deploy-manifest scene block to disable. SCENE_WEB_PORT env is
-    # the override of last resort.
+    # deploy-manifest scene block to disable. SCENE_WEB_PORT and
+    # SCENE_WEB_HOST are environment fallbacks; an explicit Scene config file
+    # can set web_host: 127.0.0.1 to keep this operator surface local-only.
     web_port = int(
         int(config.get("web_port") or "0")
         if config.get("web_port") is not None and config.get("web_port") != ""
@@ -1295,6 +1311,7 @@ async def _run() -> None:
     web_task = None
     web_server: uvicorn.Server | None = None
     if web_port > 0:
+        web_host = resolve_web_host(config)
         web_app = web_ui.make_app(
             registry=registry,
             hub=hub,
@@ -1311,13 +1328,13 @@ async def _run() -> None:
         )
         web_uv = uvicorn.Config(
             app=web_app,
-            host="0.0.0.0",
+            host=web_host,
             port=web_port,
             log_level="warning",
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
-        log.info("web UI on http://0.0.0.0:%d", web_port)
+        log.info("web UI on http://%s:%d", web_host, web_port)
 
     log.info(
         "scene up; cap=%s mcp=%s observations=%d",

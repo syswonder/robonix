@@ -66,7 +66,8 @@ mkdir -p "$SCENE_ANNOTATIONS_DIR"
 
 # Service knobs (same defaults the docker run wires via -e).
 export SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}"
+export SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}"
 export SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}"
 
-echo "[scene/native] python=$PY ros=$ROS_DISTRO rmw=${RMW_IMPLEMENTATION:-<default>} web=$SCENE_WEB_PORT"
+echo "[scene/native] python=$PY ros=$ROS_DISTRO rmw=${RMW_IMPLEMENTATION:-<default>} web=$SCENE_WEB_HOST:$SCENE_WEB_PORT"
 exec "$PY" -m scene_service.service
