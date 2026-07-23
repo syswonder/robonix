@@ -1,0 +1,21 @@
+system/scene/tests/test_room_suggest_api.py
+  s_6c6ca8fc87d296::t_fecc24ab222c89 1-200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ece14a2937463fb6808495999eb0836034e35df9",
+  "prompts": {},
+  "sessions": {
+    "s_6c6ca8fc87d296": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1afae001-f567-4147-b141-01ef3c11a802",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
