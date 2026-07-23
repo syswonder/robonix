@@ -13,7 +13,7 @@ system/scene/
 ├── docker/
 │   ├── Dockerfile               ROS Humble + torch cu124 + CV stack
 │   ├── requirements.txt         scene + concept-graphs deps
-│   ├── _weights/                pre-fetched YOLO-World + MobileSAM .pt
+│   ├── _weights/                pre-fetched YOLO, MobileSAM + OpenCLIP weights
 │   └── entrypoint.sh            container runtime setup, including Zenoh RMW config
 ├── scripts/
 │   ├── build.sh                 rbnx codegen + docker build (+ weight pre-fetch)
@@ -131,7 +131,8 @@ cd robonix/rust && make install      # rbnx + atlas + pilot + executor + codegen
 
 # Build the scene image once. Pulls torch+cu124 wheels and the
 # concept-graphs source; pre-fetches YOLO-World + MobileSAM .pt to
-# docker/_weights/ so the docker layer stays cache-friendly.
+# docker/_weights/ so the docker layer stays cache-friendly. This includes the
+# OpenCLIP checkpoint, avoiding Hugging Face metadata calls inside BuildKit.
 #
 # Pick the ROS distro BEFORE this first build (default humble) — see
 # "ROS distro" below. e.g.  ROBONIX_SCENE_ROS_DISTRO=jazzy bash scripts/build.sh
@@ -288,6 +289,26 @@ runtime the container sources that distro's `setup.bash`; nothing else in
 scene references a distro. Default builds (variable unset) are unchanged —
 plain `humble`.
 
+### Offline-friendly Docker frontend and model cache
+
+Scene uses the Docker/BuildKit daemon's bundled Dockerfile frontend by
+default, so a cached rebuild does not need to query the `docker/dockerfile`
+registry tag. Builders that require a pinned or mirrored frontend can opt in:
+
+```bash
+ROBONIX_SCENE_BUILDKIT_SYNTAX=registry.example/docker/dockerfile:1.7@sha256:<digest> \
+    bash scripts/build.sh
+```
+
+Model files are downloaded on the host with retries, staged under the ignored
+`docker/_weights/` build context, and reused through
+`ROBONIX_MODEL_CACHE_DIR`. OpenCLIP uses the staged
+`open_clip_pytorch_model.bin` directly instead of resolving a symbolic model
+name through the Hugging Face metadata API. `RBNX_HF_MIRROR` selects the
+Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
+`https://huggingface.co` file URL is always tried as a fallback. Set
+`RBNX_HF_MIRROR=` to skip the mirror.
+
 ## Configuration knobs (env vars)
 
 | Env | Default | Notes |
@@ -297,7 +318,7 @@ plain `humble`.
 | `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera providers before falling back |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
-| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / `laion2b_s34b_b79k` | |
+| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
 | `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
@@ -310,27 +331,28 @@ plain `humble`.
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
-| `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
+| `SCENE_WEB_HOST` | `0.0.0.0` | Web UI bind host; set `127.0.0.1` on a robot/control workstation to keep the operator surface local-only. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
+| `SCENE_OBJECT_MEMORY_ENABLED` | `true` | enable the object snapshot DB backing the map UI's Save/Load (boot warm-restore only under `SCENE_RESTORE_ON_START`) |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
 | `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
 | `SCENE_MAP_BINDING_WAIT_S` | `3.0` | how long the startup probe waits for the lifecycle contract to appear on atlas before falling back to static binding; `0` disables the probe |
 | `SCENE_ANNOTATIONS_DIR` | `/data/robonix/scene_annotations` | per-map JSON files holding user annotations (rooms / POIs); host-mounted like the object DB |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
 
-## Object memory (warm restore)
+## Object memory (Save/Load snapshots)
 
-When `SCENE_OBJECT_MEMORY_ENABLED` is on, scene persists its stable objects to a
-small embedded milvus-lite DB (`SCENE_OBJECT_MEMORY_DB`) at the scene-graph
-builder cadence, and reloads them into the registry at boot. After a restart the
-graph is populated immediately instead of re-accumulating every object through
-the `min_observations` filter; re-observation re-confirms restored objects in
-place (no duplicate ids). Each row carries a caption vector embedded with the
-open_clip text encoder already loaded for perception (512-d, shared with the
-per-object image features), so a future object-search layer can reuse the table.
-The DB is scene-owned — a separate file/process from `system/memory`'s memsearch
-DB — and lives under the host-mounted `/data/robonix`, which also makes the
-scene-graph JSON caches survive boots. Writes are driven by the scene-graph
-builder, so disabling `SCENE_GRAPH_ENABLED` stops new writes (restore still runs).
+When `SCENE_OBJECT_MEMORY_ENABLED` is on, scene keeps an embedded milvus-lite
+DB (`SCENE_OBJECT_MEMORY_DB`) for its stable objects. By default a boot starts
+a **fresh live session** that is never persisted; objects reach the DB only
+when the operator **saves a map** in the map UI, which snapshots the live
+registry together with the spatial artifact, and come back only when that map
+is **loaded** (see "Map library" below for the epoch rules). Each row carries
+a caption vector embedded with the open_clip text encoder already loaded for
+perception (512-d, shared with the per-object image features), so a future
+object-search layer can reuse the table. The DB is scene-owned — a separate
+file/process from `system/memory`'s memsearch DB — and lives under the
+host-mounted `/data/robonix`, which also makes the scene-graph JSON caches
+survive boots.
 
 Persistence is partitioned by the map binding: an object's pose is only
 meaningful in the `map` frame of the SLAM map it was observed on, so restore

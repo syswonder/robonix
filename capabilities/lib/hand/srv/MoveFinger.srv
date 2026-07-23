@@ -1,0 +1,8 @@
+# Finger-level position command: address a finger's motion by (finger, type),
+# e.g. index bend or thumb oppose. Hardware-independent -- the driver maps
+# each (finger, type) to the hand's underlying axes. Only listed pairs move;
+# unlisted hold. See contract for accept semantics.
+FingerValue[] targets  # value = target normalized position [0,1]
+---
+bool ok                # true = accepted & dispatched (not necessarily reached)
+string message         # non-empty on rejection: human-readable reason

@@ -55,6 +55,17 @@ Package instance settings belong in the deployment manifest's nested
 provider through `Driver(CMD_INIT)`; it does not create a second package
 configuration file.
 
+Each primitive, service, or skill entry's `name` is its Atlas provider id and
+must be non-empty, whitespace-normalized, and unique across those package
+sections. `rbnx boot` passes that
+identity to the package as `RBNX_INSTANCE_NAME`; the Python SDK uses it for
+registration, capability declaration, heartbeat, and lifecycle state while
+preserving the package's source-level id for standalone `rbnx start`. Startup
+waits only for a fresh registration of that exact id, so unrelated providers
+that register concurrently cannot receive the instance's lifecycle config. If
+that id is already live in Atlas before spawn, startup fails rather than taking
+over the existing provider.
+
 Package authors normally omit Driver from `capabilities`; rbnx and current
 codegen automatically select and register `robonix/lifecycle/driver`. Explicit
 shared selection is accepted, and one explicitly selected namespace Driver
@@ -73,6 +84,13 @@ SDK uses a complete legacy service pair when present, or a complete shared pair
 when the legacy pair is wholly absent. Partial stubs, zero or multiple runtime
 Drivers, unrelated IDs, and shared-to-legacy fallback all fail startup, so
 config is never silently lost and no provider is promoted without a Driver.
+
+Each primitive, service, and skill entry's `name` is its deploy-time Atlas
+provider id. `rbnx boot` passes it as `RBNX_INSTANCE_NAME`; the SDK uses that
+identity for registration, capability declaration, heartbeat, and lifecycle
+state. Package source keeps its own default id for standalone `rbnx start`.
+Startup waits only for the exact expected id, so an unrelated concurrent
+registration cannot receive another instance's lifecycle config.
 
 ## How it finds the source tree
 

@@ -132,7 +132,7 @@ def _value_for_predicate(path: str, op: str, expected: Any) -> Any:
     if op == "contains":
         return f"simulated-{expected}-value"
     if op == "regex":
-        return "simulated"
+        return synthetic_text_for_regex(str(expected))
     if op == "ne":
         if expected == "robot":
             return "table"
@@ -189,6 +189,11 @@ def _satisfy_check(root: dict, check: dict) -> None:
         current = scenario_run.select_json_values(root, select)
         if not current or not hasattr(current[0], "__len__") or len(current[0]) < int(assertion.get("value", 1)):
             _set_path(root, select, [{}])
+    elif isinstance(assertion, dict) and assertion.get("op") == "regex":
+        values = scenario_run.select_json_values(root, select)
+        current = values[0] if values and isinstance(values[0], str) else ""
+        fragment = synthetic_text_for_regex(str(assertion.get("value", "")))
+        _set_path(root, select, f"{current} {fragment}".strip())
     elif isinstance(assertion, dict) and assertion.get("op") not in {None, "exists"}:
         _set_path(root, select, _value_for_predicate(select, str(assertion.get("op")), assertion.get("value")))
     else:
@@ -241,7 +246,17 @@ def synthetic_text_for_regex(pattern: str) -> str:
         return json.dumps({"objects": [{"id": "scene.object.simulated_001", "label": "table"}]})
     if "approach pose" in pattern:
         return json.dumps({"reachable": True, "x": 0.5, "y": 0.0, "yaw": 0.25, "reason": "approach pose for simulated object"})
-    return pattern.replace("^", "").replace("$", "").replace("\\n?", "")
+    sample = pattern.replace("^", "").replace("$", "").replace("\\n?", "")
+    sample = re.sub(r"\\s(?:[+*?]|\{\d+(?:,\d*)?\})?", " ", sample)
+    sample = re.sub(r"\\d(?:[+*?]|\{\d+(?:,\d*)?\})?", "1", sample)
+    sample = re.sub(r"\.\*\??", "sample", sample)
+    sample = re.sub(r"\\([\\\"'/:.,_ -])", r"\1", sample)
+    try:
+        if re.search(pattern, sample):
+            return sample
+    except re.error:
+        pass
+    return pattern.replace("^", "").replace("$", "")
 
 
 def output_for_expect(expect: dict) -> tuple[str, str]:

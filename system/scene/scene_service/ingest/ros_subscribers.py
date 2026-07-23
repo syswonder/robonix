@@ -10,10 +10,9 @@ on their own schedule. Keeps GIL contention predictable and means
 the relation engine / MCP server don't stall behind a fat pointcloud
 callback.
 
-Topic names come from atlas channel declarations or from
-`system.scene.config.observations[]`, delivered through Driver(CMD_INIT), so a
-new robot does not need a code edit—only a declaration of which topic publishes
-each observation kind.
+Topic names come from atlas channel declarations or
+`RBNX_CONFIG_FILE.observations[]` so a new robot does not need a code edit —
+just declare which topic publishes which observation kind.
 """
 from __future__ import annotations
 
@@ -87,13 +86,55 @@ class TopicSpec:
     """One observation kind's wiring. `kind` is the abstract name
     (rgb / depth / lidar2d / pose / odom); `topic` is the concrete
     ROS topic; `msg_type` selects which sensor_msgs / nav_msgs class
-    to import. Optional `qos_profile` lets a config override the
-    default reliable-latched profile when needed (e.g. /amcl_pose
-    needs RELIABLE + KEEP_LAST(1))."""
+    to import. Optional `qos_profile` carries the Atlas declaration; when it
+    is absent, sensor streams use best-effort/volatile and map lifecycle data
+    uses reliable/transient-local semantics."""
     kind: str
     topic: str
     msg_type: str            # "Image" | "LaserScan" | "PoseWithCovarianceStamped" | "Odometry"
     qos_profile: str = "default"
+
+
+def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
+    """Return reliability, durability and depth for one Atlas topic.
+
+    Atlas carries the publisher's declared QoS. A RELIABLE request cannot
+    connect to a BEST_EFFORT publisher, while a BEST_EFFORT subscription can
+    consume either reliability. Honour the declaration instead of replacing
+    every sensor stream with a hard-coded RELIABLE request.
+    """
+    sensor_kinds = {"rgb", "depth", "lidar2d", "lidar3d", "intrinsics"}
+    if spec.kind in {
+        "rgb",
+        "depth",
+        "intrinsics",
+        "occupancy_grid",
+        "map_lifecycle",
+        "camera_extrinsics",
+    }:
+        depth = 1
+    elif spec.kind in {"lidar2d", "lidar3d"}:
+        depth = 2
+    else:
+        depth = 10
+    declared = str(spec.qos_profile or "default").strip().lower().replace("-", "_")
+    if declared in {"best_effort", "sensor_data"}:
+        return "best_effort", "volatile", depth
+    if declared == "reliable":
+        return "reliable", "volatile", depth
+    if declared in {"latched", "transient_local"}:
+        return "reliable", "transient_local", depth
+    if declared not in {"", "default"}:
+        log.warning(
+            "[scene-ros] unsupported Atlas QoS %r for %s; using safe kind default",
+            spec.qos_profile,
+            spec.kind,
+        )
+    if spec.kind in sensor_kinds:
+        return "best_effort", "volatile", depth
+    if spec.kind in {"occupancy_grid", "map_lifecycle", "camera_extrinsics"}:
+        return "reliable", "transient_local", depth
+    return "reliable", "volatile", depth
 
 
 class _LatestSlot:
@@ -246,84 +287,23 @@ class SubscribersHub:
         DurabilityPolicy = self._ros["DurabilityPolicy"]
         HistoryPolicy = self._ros["HistoryPolicy"]
 
-        # Per-topic QoS. ROS2's compatibility rule: a subscriber's
-        # reliability must be ≤ the publisher's, so RELIABLE-pub +
-        # BEST_EFFORT-sub silently drops every message — caught by
-        # `ros2 topic info -v` showing zero data on a `topic echo`.
-        # Webots's camera plugin publishes RELIABLE, Nav2 publishes
-        # /amcl_pose RELIABLE, etc. So we default to RELIABLE here
-        # and trust ROS to coerce when a publisher is BEST_EFFORT.
-        # If a deployment needs to opt back into BEST_EFFORT for a
-        # specific topic (e.g. a real lidar at 100 Hz), the spec
-        # could grow a `qos_profile` field; not needed for v1.
-        if spec.kind in ("rgb", "depth"):
-            # KEEP_LAST(1): cameras spam at >10 Hz; only the freshest
-            # frame is useful for the periodic VLM tick.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        elif spec.kind == "lidar2d":
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=2,
-            )
-        elif spec.kind == "occupancy_grid":
-            # slam_toolbox publishes /map RELIABLE + TRANSIENT_LOCAL
-            # (the standard "latched" map). A late subscriber needs
-            # TRANSIENT_LOCAL to receive the cached snapshot.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        elif spec.kind == "intrinsics":
-            # Pinhole K (primitive/camera/intrinsics). Real cameras
-            # (e.g. realsense2_camera) publish camera_info CONTINUOUSLY
-            # alongside every frame with DURABILITY=VOLATILE — a
-            # TRANSIENT_LOCAL subscriber is then QoS-incompatible and
-            # receives NOTHING ("waiting for camera intrinsics" forever).
-            # VOLATILE is compatible with both a volatile continuous
-            # publisher and a transient-local latched one, so use it.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=5,
-            )
-        elif spec.kind == "map_lifecycle":
-            # mapping's identity broadcast is latched (published once per
-            # lifecycle transition); TRANSIENT_LOCAL picks up the cached
-            # sample on a late start.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        elif spec.kind == "camera_extrinsics":
-            # Static camera mount transform (primitive/camera/extrinsics):
-            # genuinely latched (published once), so TRANSIENT_LOCAL is
-            # needed to pick up the cached value on a late start.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-            )
-        else:
-            # Pose / odom are typically reliable + small.
-            qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=10,
-            )
+        reliability_name, durability_name, depth = topic_qos_policy(spec)
+        reliability = (
+            ReliabilityPolicy.BEST_EFFORT
+            if reliability_name == "best_effort"
+            else ReliabilityPolicy.RELIABLE
+        )
+        durability = (
+            DurabilityPolicy.TRANSIENT_LOCAL
+            if durability_name == "transient_local"
+            else DurabilityPolicy.VOLATILE
+        )
+        qos = QoSProfile(
+            reliability=reliability,
+            durability=durability,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=depth,
+        )
 
         slot = self._slots[spec.kind]
         _kind = spec.kind  # closure capture
@@ -338,8 +318,15 @@ class SubscribersHub:
                 log.info("[scene-ros] FIRST msg on %s (kind=%s)", spec.topic, _k)
 
         self._node.create_subscription(msg_cls, spec.topic, _cb, qos)
-        log.info("[scene-ros] subscribed: %s on %s (%s, qos=%s)",
-                 spec.kind, spec.topic, spec.msg_type, spec.kind)
+        log.info(
+            "[scene-ros] subscribed: %s on %s (%s, qos=%s/%s depth=%d)",
+            spec.kind,
+            spec.topic,
+            spec.msg_type,
+            reliability_name,
+            durability_name,
+            depth,
+        )
         return True
 
     # ── consumer-side accessors ────────────────────────────────────────────

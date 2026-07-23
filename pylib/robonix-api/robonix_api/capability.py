@@ -24,6 +24,7 @@ Layered API:
 from __future__ import annotations
 
 import inspect
+import ipaddress
 import json
 import logging
 import os
@@ -60,6 +61,8 @@ from .tool import mcp_contract
 
 log = logging.getLogger("robonix_api.capability")
 
+_INSTANCE_NAME_ENV = "RBNX_INSTANCE_NAME"
+
 
 # Transport-ENUM <-> contract.mode compatibility matrix (best-effort
 # check at declare_capability time).
@@ -68,6 +71,52 @@ _MODE_TRANSPORT_OK = {
     "topic_in": {"ros2", "grpc"},
     "topic_out": {"ros2", "grpc"},
 }
+
+
+def _provider_bind_host(value: str | None = None) -> str:
+    """Return the validated IPv4 address used by provider gRPC servers."""
+    raw = (
+        os.environ.get("ROBONIX_PROVIDER_BIND_HOST", "0.0.0.0")
+        if value is None
+        else value
+    )
+    host = str(raw).strip()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError(
+            "ROBONIX_PROVIDER_BIND_HOST must be an IPv4 address literal"
+        ) from exc
+    if not isinstance(address, ipaddress.IPv4Address):
+        raise ValueError(
+            "ROBONIX_PROVIDER_BIND_HOST must be an IPv4 address literal"
+        )
+    return str(address)
+
+
+def _resolve_provider_id(default_id: str) -> str:
+    """Return the deployment instance id, or the package's standalone default.
+
+    ``rbnx boot`` assigns every package instance a unique manifest ``name`` and
+    exports it as ``RBNX_INSTANCE_NAME``. Package source code may keep a stable
+    default id so the same repository still works with bare ``rbnx start``;
+    deployed instances must register, declare capabilities, heartbeat, and
+    report lifecycle state under the manifest-owned identity.
+    """
+    instance_id = os.environ.get(_INSTANCE_NAME_ENV, "").strip()
+    if not instance_id:
+        if os.environ.get("RBNX_DEPLOY_MANAGED", "").strip():
+            raise RuntimeError(
+                "RBNX_INSTANCE_NAME must be non-empty for a deploy-managed package"
+            )
+        return default_id
+    if instance_id != default_id:
+        log.info(
+            "deployment instance id overrides package default: %r -> %r",
+            default_id,
+            instance_id,
+        )
+    return instance_id
 
 
 # ── _ProviderBase ───────────────────────────────────────────────────────────
@@ -100,10 +149,12 @@ class _ProviderBase:
         pkg_root: Path | None = None,
         md_path: str | None = None,
     ) -> None:
-        self.id = id
+        self.default_id = id
+        self.id = _resolve_provider_id(id)
         self.namespace = namespace.strip("/")
         if not self.namespace:
             raise ValueError("namespace must be non-empty")
+        self._bind_host = _provider_bind_host()
 
         # Locate pkg_root from the caller's frame if not given.
         if pkg_root is None:
@@ -416,14 +467,16 @@ class _ProviderBase:
         would hand the consumer "127.0.0.1:<port>" and it would dial its
         own loopback instead of this host.
 
-        Resolution order: ROBONIX_ADVERTISE_HOST (explicit override) ->
-        the local source IP that routes toward the atlas host (this is the
-        interface a remote consumer reaches us on, since the atlas is the
-        rendezvous both sides already share) -> 127.0.0.1 (same-host only,
-        when route resolution fails)."""
-        explicit = os.environ.get("ROBONIX_ADVERTISE_HOST")
+        Resolution order: ROBONIX_ADVERTISE_HOST (explicit override) -> an
+        explicit non-wildcard provider bind host -> the local source IP that
+        routes toward the atlas host -> 127.0.0.1 when route resolution fails.
+        A loopback bind therefore advertises loopback automatically instead of
+        publishing an endpoint that the server does not accept."""
+        explicit = os.environ.get("ROBONIX_ADVERTISE_HOST", "").strip()
         if explicit:
             return explicit
+        if not ipaddress.ip_address(self._bind_host).is_unspecified:
+            return self._bind_host
         atlas = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
         atlas_host = atlas.rsplit(":", 1)[0] if ":" in atlas else atlas
         return self.resolve_host_ip(atlas_host) or "127.0.0.1"
@@ -545,23 +598,15 @@ class _ProviderBase:
         from mcp.server.fastmcp import FastMCP
         from mcp.server.transport_security import TransportSecuritySettings
 
-        # Cross-host reachability. The MCP SDK auto-enables DNS-rebinding
-        # protection whenever the bound host is a loopback name
-        # (127.0.0.1 / localhost / ::1), pinning allowed_hosts to localhost.
-        # A consumer on another machine dialing this provider by LAN IP is
-        # then rejected with HTTP 421 "Misdirected Request" (Invalid Host
-        # header). Binding host="0.0.0.0" happens to sidestep that on the
-        # current SDK, but that is incidental — a newer SDK could enable the
-        # check for 0.0.0.0 too, and any provider that legitimately binds a
-        # loopback host would still 421. So disable the Host-header check
-        # explicitly: providers are reached through atlas-issued endpoints,
-        # not untrusted browser origins, so DNS-rebinding protection buys
-        # nothing here and only breaks cross-host dialing.
+        # Preserve cross-host compatibility for wildcard/LAN binds. A
+        # loopback-only deployment is also reachable from a local browser, so
+        # keep the MCP SDK's Host-header/DNS-rebinding guard enabled there.
+        protect_loopback = ipaddress.ip_address(self._bind_host).is_loopback
         self._mcp_app = FastMCP(
             self.id,
-            host="0.0.0.0",
+            host=self._bind_host,
             transport_security=TransportSecuritySettings(
-                enable_dns_rebinding_protection=False
+                enable_dns_rebinding_protection=protect_loopback
             ),
         )
 
@@ -750,10 +795,16 @@ class _ProviderBase:
             )
 
         # 2c. bind on port 0 -- OS picks free port.
-        self._driver_port = server.add_insecure_port("[::]:0")
+        self._driver_port = server.add_insecure_port(f"{self._bind_host}:0")
+        if self._driver_port == 0:
+            raise RuntimeError(
+                f"cannot bind lifecycle gRPC server on {self._bind_host}"
+            )
         server.start()
         self._driver_server = server
-        log.info("Lifecycle gRPC serving on 0.0.0.0:%d", self._driver_port)
+        log.info(
+            "Lifecycle gRPC serving on %s:%d", self._bind_host, self._driver_port
+        )
 
         # 3. atlas-declare every gRPC capability
         endpoint = f"{self._advertise_host()}:{self._driver_port}"
@@ -810,12 +861,12 @@ class _ProviderBase:
         import uvicorn
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("0.0.0.0", 0))
+        s.bind((self._bind_host, 0))
         self._mcp_port = s.getsockname()[1]
         s.close()
         cfg = uvicorn.Config(
             self._mcp_app.streamable_http_app(),  # pyright: ignore[reportOptionalMemberAccess]
-            host="0.0.0.0",
+            host=self._bind_host,
             port=self._mcp_port,
             log_level="warning",
         )
@@ -823,7 +874,7 @@ class _ProviderBase:
         thread = threading.Thread(target=server.run, name="robonix-mcp", daemon=True)
         thread.start()
         self._mcp_server_thread = thread
-        log.info("MCP HTTP serving on 0.0.0.0:%d", self._mcp_port)
+        log.info("MCP HTTP serving on %s:%d", self._bind_host, self._mcp_port)
 
     def _declare_mcp_handlers(self) -> None:
         endpoint = f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"

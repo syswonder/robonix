@@ -623,6 +623,20 @@ pub fn is_new_provider_registration(
         .is_none_or(|registration_id| registration_id != &provider.registration_id)
 }
 
+/// True when this is a fresh registration for the exact deployment instance.
+///
+/// Other providers may register concurrently while a package is starting.
+/// They are unrelated and must never receive this instance's lifecycle config.
+pub fn is_expected_provider_registration(
+    provider: &atlas_pb::CapabilityProvider,
+    before: &ProviderRegistrationSnapshot,
+    expected_provider_id: &str,
+) -> bool {
+    provider.id == expected_provider_id
+        && !before.contains_key(expected_provider_id)
+        && is_new_provider_registration(provider, before)
+}
+
 /// Outcome of `wait_for_registration_core`:
 ///   * `provider_id` — the new provider that appeared after `before`.
 ///   * `provider_kind` — Atlas provider kind, used to keep skills INACTIVE.
@@ -728,8 +742,9 @@ fn runtime_driver_contracts(provider: &atlas_pb::CapabilityProvider) -> Vec<Stri
     contracts
 }
 
-/// Poll atlas until a provider NOT in `before` appears, then briefly
-/// settle to see if it also declares a `*/driver` gRPC capability.
+/// Poll atlas until the exact deployment instance has a new registration,
+/// then briefly settle to see if it also declares a `*/driver` gRPC
+/// capability.
 ///
 /// No terminal UI — pure RPC + sleep loop. Callers that want spinner /
 /// boot_progress output (rbnx CLI) wrap this with their own decorator.
@@ -737,9 +752,7 @@ fn runtime_driver_contracts(provider: &atlas_pb::CapabilityProvider) -> Vec<Stri
 ///
 /// Errors:
 ///   * timeout (no new provider before `DRIVER_REGISTER_TIMEOUT`),
-///   * multiple new providers from a single spawn (a deploy bug — the
-///     spec is one package start = one Capability(id=...)),
-///   * the new provider vanished between matching and settling (crashed
+///   * the expected provider vanished between matching and settling (crashed
 ///     or was evicted by heartbeat lapse).
 ///
 /// `who` is a free-form label included in error messages so the caller
@@ -747,8 +760,15 @@ fn runtime_driver_contracts(provider: &atlas_pb::CapabilityProvider) -> Vec<Stri
 pub async fn wait_for_registration_core(
     atlas: &mut AtlasClient,
     before: &ProviderRegistrationSnapshot,
+    expected_provider_id: &str,
     who: &str,
 ) -> Result<RegistrationOutcome> {
+    if before.contains_key(expected_provider_id) {
+        anyhow::bail!(
+            "[{who}] deployment instance '{expected_provider_id}' was already registered before spawn"
+        );
+    }
+
     // Poll cadence is decoupled from any spinner refresh: we just sleep
     // 200ms between Atlas queries. That's the same cadence the CLI used
     // (one query per 2 spinner ticks at 100ms/tick).
@@ -760,19 +780,10 @@ pub async fn wait_for_registration_core(
             .query_capabilities("", "", atlas_pb::Transport::Unspecified)
             .await
             .with_context(|| format!("[{who}] poll atlas"))?;
-        let matches: Vec<&atlas_pb::CapabilityProvider> = providers
-            .iter()
-            .filter(|provider| is_new_provider_registration(provider, before))
-            .collect();
-        if matches.len() > 1 {
-            let cap_ids: Vec<&str> = matches.iter().map(|r| r.id.as_str()).collect();
-            anyhow::bail!(
-                "[{who}] multiple new providers appeared from one spawn: {} \
-                 — spec is one package start = one Capability(id=...)",
-                cap_ids.join(", ")
-            );
-        }
-        if let Some(first) = matches.first() {
+        let matched = providers.iter().find(|provider| {
+            is_expected_provider_registration(provider, before, expected_provider_id)
+        });
+        if let Some(first) = matched {
             let provider_id = first.id.clone();
             let registration_id = first.registration_id.clone();
             // RegisterPrimitive/Service/Skill and DeclareCapability are
@@ -831,7 +842,7 @@ pub async fn wait_for_registration_core(
         if Instant::now() >= deadline {
             anyhow::bail!(
                 "[{who}] timed out after {DRIVER_REGISTER_TIMEOUT:?} — package never \
-                 registered a provider with atlas",
+                 registered expected deployment instance '{expected_provider_id}' with atlas",
             );
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -928,11 +939,12 @@ pub async fn call_driver_cmd(
 #[cfg(test)]
 mod tests {
     use super::{
-        PackageRuntimeRecord, atlas_pb, is_new_provider_registration,
-        linux_proc_status_is_not_zombie, macos_procargs_has_environment_entry,
-        macos_ps_state_is_not_zombie, proc_start_time_ticks, process_group_has_members,
-        resolve_runtime_driver_contract, shutdown_package_runtime_checked,
-        terminate_process_group_guarded, validate_runtime_driver_contracts,
+        PackageRuntimeRecord, atlas_pb, is_expected_provider_registration,
+        is_new_provider_registration, linux_proc_status_is_not_zombie,
+        macos_procargs_has_environment_entry, macos_ps_state_is_not_zombie, proc_start_time_ticks,
+        process_group_has_members, resolve_runtime_driver_contract,
+        shutdown_package_runtime_checked, terminate_process_group_guarded,
+        validate_runtime_driver_contracts,
     };
 
     const SHARED: &str = "robonix/lifecycle/driver";
@@ -1099,6 +1111,42 @@ mod tests {
         assert!(is_new_provider_registration(
             &provider("lidar", "registration-a"),
             &before,
+        ));
+    }
+
+    #[test]
+    fn expected_registration_ignores_unrelated_concurrent_provider() {
+        let before =
+            std::collections::HashMap::from([("existing_camera".to_string(), "old".to_string())]);
+        let provider = |id: &str, registration_id: &str| atlas_pb::CapabilityProvider {
+            id: id.to_string(),
+            registration_id: registration_id.to_string(),
+            ..Default::default()
+        };
+
+        assert!(!is_expected_provider_registration(
+            &provider("unrelated_lidar", "new"),
+            &before,
+            "camera",
+        ));
+        assert!(is_expected_provider_registration(
+            &provider("camera", "new"),
+            &before,
+            "camera",
+        ));
+    }
+
+    #[test]
+    fn expected_registration_does_not_accept_takeover_of_existing_id() {
+        let before = std::collections::HashMap::from([("camera".to_string(), "old".to_string())]);
+        let provider = atlas_pb::CapabilityProvider {
+            id: "camera".to_string(),
+            registration_id: "new".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!is_expected_provider_registration(
+            &provider, &before, "camera",
         ));
     }
 

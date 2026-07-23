@@ -53,9 +53,19 @@ configure_zenoh_session
 
 cd /scene
 
-# Codegen output lives under rbnx-build/codegen/. Build phase produces
-# it on the host before this container runs; we just inject onto path.
-export PYTHONPATH="/scene/rbnx-build/codegen/proto_gen:/scene/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+# Scene's launcher regenerates these stubs with this image's own protobuf
+# toolchain and validates every module before the service container starts.
+# It also bind-masks /scene/rbnx-build/codegen/proto_gen with this same output:
+# robonix-api deliberately discovers and prepends that conventional directory
+# at provider construction time.  Without the mask it would supersede this
+# PYTHONPATH entry with host gencode from a potentially newer runtime.
+SCENE_PROTO_GEN=/scene/rbnx-build/codegen/scene_proto_gen
+if [ ! -f "$SCENE_PROTO_GEN/atlas_pb2.py" ] \
+   || [ ! -f "$SCENE_PROTO_GEN/robonix_contracts_pb2_grpc.py" ]; then
+    echo "[entrypoint] missing runtime-compatible Scene protobuf stubs" >&2
+    exit 1
+fi
+export PYTHONPATH="$SCENE_PROTO_GEN:/scene/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
 
 # robonix-api lives in the workspace pylib dir, also bind-mounted.
 if [ -d /robonix-api ]; then

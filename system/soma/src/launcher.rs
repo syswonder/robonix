@@ -198,9 +198,9 @@ impl PackageLauncher {
                 }
             };
 
-        // Snapshot before spawn so wait_for_registration_core can
-        // tell us which new provider is OUR child (not some
-        // pre-existing one whose driver replied to a polling tick).
+        // Snapshot the expected instance's registration generation before
+        // spawn. Other providers may register concurrently; the shared waiter
+        // ignores them and only accepts target.name with a new generation.
         let before = match snapshot_provider_ids(atlas).await {
             Ok(s) => s,
             Err(e) => {
@@ -235,7 +235,7 @@ impl PackageLauncher {
         // early-exit detection rbnx uses for soma itself (deploy.rs).
         let who = format!("{}/{}", target.kind, target.name);
         let outcome = tokio::select! {
-            result = wait_for_registration_core(atlas, &before, &who) => match result {
+            result = wait_for_registration_core(atlas, &before, &target.name, &who) => match result {
                 Ok(o) => o,
                 Err(e) => {
                     self.reap(pid).await;
@@ -287,7 +287,19 @@ impl PackageLauncher {
             );
         }
 
-        let config_json = serde_json::to_string(&target.config).unwrap_or_else(|_| "{}".into());
+        let config_json = match serde_json::to_string(&target.config) {
+            Ok(config_json) => config_json,
+            Err(error) => {
+                self.reap(pid).await;
+                return PackageStartupStatus::SpawnFailed {
+                    command,
+                    error: format!(
+                        "serialize config for deployment instance '{}': {error}",
+                        target.name
+                    ),
+                };
+            }
+        };
         self.note_lifecycle(
             pid,
             outcome.provider_id.clone(),

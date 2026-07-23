@@ -117,8 +117,10 @@ class SceneGraphBuilder:
         self.store = store
         self.cfg = config or SceneGraphConfig()
         # Optional persistence layer (scene_service.persistence.ObjectStore).
-        # When set, each rebuild upserts the current stable objects so the
-        # registry can warm-restore after a restart. None disables persistence.
+        # Only wired in the legacy SCENE_RESTORE_ON_START mode: each rebuild
+        # then upserts the current stable objects so the registry can
+        # warm-restore at boot. The default Save/Load snapshot path never
+        # goes through the builder — service.py passes None.
         self.object_store = object_store
         # Optional perception detector exposing latest_frame_bundle() (the
         # concept-graphs metric-tier detector). When present + enabled, the
@@ -250,7 +252,8 @@ class SceneGraphBuilder:
             updated_at=time.time(),
         )
 
-        # 8. Persist current stable objects for warm restore. `nodes` is
+        # 8. Persist current stable objects for the legacy boot warm
+        # restore (object_store is None outside that mode). `nodes` is
         # built from `stable` in order, so zip pairs each object with the
         # caption just computed for it. Offloaded to a thread because the
         # caption embedding + milvus write are synchronous and must not

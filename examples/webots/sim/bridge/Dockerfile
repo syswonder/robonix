@@ -78,15 +78,6 @@ RUN set -eux; \
 RUN sed -i 's|</body>|<script>document.getElementById("IP-input").value="ws://"+location.hostname+":__ROBONIX_STREAM_PORT__";</script></body>|' \
     /usr/local/webots/resources/web/streaming_viewer/index.html
 
-# Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
-# raw.githubusercontent.com at first run, which is slow and less reproducible.
-# The seed tarball is exported from a successful run; see scripts/update-webots-seed.sh.
-COPY bridge/webots_assets_seed.tar.gz /tmp/webots_seed.tar.gz
-RUN mkdir -p /root/.cache/Cyberbotics/Webots \
-    && tar -xzf /tmp/webots_seed.tar.gz -C /root/.cache/Cyberbotics/Webots \
-    && rm -f /tmp/webots_seed.tar.gz \
-    && echo "[dockerfile] webots asset cache: $(ls /root/.cache/Cyberbotics/Webots/assets | wc -l) files pre-populated"
-
 # Python deps used by the robonix driver processes that will be `docker
 # exec`'d into this container. (Drivers themselves live on host; their
 # Python imports resolve against this image's site-packages + the
@@ -104,7 +95,10 @@ COPY ros_ws/src/eaios_webots src/eaios_webots
 RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-select eaios_webots"
 
 COPY bridge/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY bridge/viewer_server.py /viewer_server.py
+COPY bridge/webots_stream_proxy.py /webots_stream_proxy.py
+COPY bridge/streaming_healthcheck.py /streaming_healthcheck.py
+RUN chmod +x /entrypoint.sh /viewer_server.py /webots_stream_proxy.py /streaming_healthcheck.py
 
 WORKDIR /
 ENTRYPOINT ["/entrypoint.sh"]
