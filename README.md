@@ -379,6 +379,12 @@ environment. See the
 and the [robot integration guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html)
 for topology and deployment details.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository's license headers,
+code style, validation commands, commit format, human-authorship policy, and AI
+assistance disclosure rules.
+
 ## Contributors
 
 [![All Contributors](https://img.shields.io/github/all-contributors/syswonder/robonix?color=ee8449&style=flat-square)](#contributors)
@@ -407,6 +413,8 @@ Thanks goes to these wonderful people:
     <tr>
       <td align="center" valign="top" width="20%"><a href="https://github.com/QingFeng34048"><img src="https://avatars.githubusercontent.com/u/202889188?v=4?s=80" width="80px;" alt="qingfeng123"/><br /><sub><b>qingfeng123</b></sub></a><br /><a href="#tool-QingFeng34048" title="Tools">🔧</a> <a href="#data-QingFeng34048" title="Data">🔣</a></td>
       <td align="center" valign="top" width="20%"><a href="https://github.com/ohhhHwH"><img src="https://avatars.githubusercontent.com/u/76088492?v=4?s=80" width="80px;" alt="longyunhou"/><br /><sub><b>longyunhou</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=ohhhHwH" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/Origamii520"><img src="https://avatars.githubusercontent.com/u/214653863?v=4?s=80" width="80px;" alt="Origamii520"/><br /><sub><b>Origamii520</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=Origamii520" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/Bunnycxk"><img src="https://avatars.githubusercontent.com/u/41613268?v=4?s=80" width="80px;" alt="Xiankun Chen"/><br /><sub><b>Xiankun Chen</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=Bunnycxk" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

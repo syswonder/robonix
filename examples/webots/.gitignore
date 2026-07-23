@@ -10,3 +10,7 @@ robonix_mcp_types/
 
 *.egg-info/
 rbnx-*
+
+# Webots cache archives belong in syswonder/robonix-assets Releases.
+sim/bridge/webots_assets_seed.tar.gz
+sim/bridge/webots-office-seed-*.tar.gz
