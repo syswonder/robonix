@@ -18,9 +18,9 @@ config:
   # FunASR and TTS can remain available.
   disable_whisper: false
 
-  # list of non-empty strings, default: ["罗伯特"].
+  # list of non-empty strings; defaults to the Mandarin wake phrase below.
   # Wake phrases compiled into the runtime keyword file.
-  wake_words: ["罗伯特"]
+  wake_words: ["罗伯特"]  # i18n-ok: Mandarin runtime default
 
   # string path or null, default: bundled build artifact.
   # Directory containing the sherpa-onnx keyword-spotting model.
@@ -42,9 +42,9 @@ config:
   # CPU threads used by the wake-word backend.
   wake_word_num_threads: 2
 
-  # list of non-empty strings, default: ["我在"].
+  # list of non-empty strings; defaults to the Mandarin warm-up phrase below.
   # Short phrases synthesized during initialization to warm the TTS backend.
-  tts_warm_phrases: ["我在"]
+  tts_warm_phrases: ["我在"]  # i18n-ok: Mandarin runtime default
 
   # Local backend ----------------------------------------------------------
 

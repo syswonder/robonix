@@ -4,9 +4,9 @@ name: Docs Check
 
 on:
   push:
-    branches: [main, dev, dev/**]
+    branches: [main, dev, dev-next, dev/**]
   pull_request:
-    branches: [main, dev, dev/**]
+    branches: [main, dev, dev-next, dev/**]
 
 jobs:
   docs:
