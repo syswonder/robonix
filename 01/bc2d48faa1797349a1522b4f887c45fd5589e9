@@ -1,0 +1,23 @@
+system/scene/scene_service/room_suggest.py
+  s_6c6ca8fc87d296::t_34e2ea23eedffc 15-16,27-29,54-55,70-73,82-83,87,96,129-130,138-143,149-151,155-157,207-209,211-212,248-250,315-321,325-326,333-334,345-346,348-351,388-390,408-411,416-419,427,434-439,442-446,450,452,454-455,461-462,464,466-467,485-490,507-508
+system/scene/tests/test_room_suggest.py
+  s_6c6ca8fc87d296::t_21bc3bf761d29e 13,15-19,21-24,32,63,113,115-121,198,202-207,211,258-290,296-298,314-318,322-342,365-418,423-425,469-471,479,485-487
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "01bc2d48faa1797349a1522b4f887c45fd5589e9",
+  "prompts": {},
+  "sessions": {
+    "s_6c6ca8fc87d296": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1afae001-f567-4147-b141-01ef3c11a802",
+        "model": "unknown"
+      },
+      "human_author": "lifeiyang <lifeiyang@zju.edu.cn>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
