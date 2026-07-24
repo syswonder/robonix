@@ -1,0 +1,10 @@
+当前记忆系统存在以下核心问题：
+1. **两套独立的图系统**：`MemoryGraph`（networkx, 整数ID）和 `SemanticKnowledgeGraph`（dict, 字符串ID "eN"）运行时零耦合
+2. **`append_to_skg` 写 skg.json，但 `retrieval_Request` 读 retrieval_memory.json**——静态 SKG 从未被检索管线使用
+3. **`update_Scene` 每次调用销毁重建整个 MemoryGraph**——主循环中每个动作步骤都会触发
+4. **`skill2FIXED_mem` 直接操作 scene_info 字典**而非通过记忆API
+5. **逻辑调用层**（run-llm-mem.py）散布着5个独立的记忆操作函数，无统一接口
+
+**目标**：三层架构——MemoryGraph（底层存储）→ SKG（中间层接口）→ 逻辑调用层（仅调用 SKG 接口）
+
+

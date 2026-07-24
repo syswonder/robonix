@@ -1,0 +1,3 @@
+export VLM_API_KEY=sk-7e1b3ab8af5049ae87e0c3455e550e13
+export VLM_BASE_URL=https://api.deepseek.com
+export VLM_MODEL=deepseek-v4-pro

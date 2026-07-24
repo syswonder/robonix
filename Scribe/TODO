@@ -1,0 +1,15 @@
+# 0. 前置：安装 Docker（如已装跳过）
+  sudo apt-get install -y docker.io docker-compose-v2
+  sudo systemctl enable --now docker
+  sudo usermod -aG docker $USER   # 需重新登录生效
+  
+  # 1. Sim 容器（自动拉取 osrf/ros:humble-desktop-full ~3GB + 构建 bridge 镜像）
+  export DISPLAY=:0
+  bash /home/hyl/robonix/examples/webots/sim/start.sh
+
+  # 2. 启动全栈（自动 clone 远端 git 包: mapping/nav2/explore，约 500MB）
+  export VLM_BASE_URL=https://api.openai.com/v1
+  export VLM_API_KEY=sk-...
+  export VLM_MODEL=gpt-5.5
+  cd /home/hyl/robonix/examples/webots
+  rbnx boot
