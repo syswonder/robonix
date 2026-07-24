@@ -196,8 +196,7 @@ class ObjectWatchdog:
 
     async def _save_object(self, obj, img_b64: str) -> bool:
         """POST a single-object remember request to the memgraph Scene Hook."""
-        import json as _json
-        import httpx  # noqa: F811 (module-level, but kept lazy for non-watchdog paths)
+        import httpx
 
         now_ns = time.time_ns()
         payload: Dict[str, Any] = {

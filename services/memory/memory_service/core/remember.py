@@ -227,8 +227,10 @@ class RememberPipeline:
                 saved_path = self._images.save(node_id, img_bytes)
                 node.image_refs = self._images.list(node_id)
                 # Persist image_refs to JSON — add_node() already wrote
-                # a snapshot without them.
-                self._graph._persist()
+                # a snapshot without them.  update_node() bumps the
+                # version and flushes; the node object is the same
+                # reference so the in-memory state is already correct.
+                self._graph.update_node(node_id, node)
                 img_ms = (time.time() - t_img) * 1000
                 log.info("remember: node %d → saved image %s (%.1f KB, %dms)",
                          node_id, saved_path, len(img_bytes) / 1024, round(img_ms))

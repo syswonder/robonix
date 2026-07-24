@@ -1,8 +1,9 @@
 """Image Store — local image persistence under data/images/{node_id}/.
 
-Each MemoryNode's observation frames are stored as PNG files in a
-per-node subdirectory.  Paths returned are relative to the service
-package root (services/memory/).
+Each MemoryNode's observation frames are stored as JPEG files in a
+per-node subdirectory (named ``frame_0001.jpg``).  ``list()`` accepts
+both ``.jpg`` and ``.png`` for backward compatibility.  Paths returned
+are relative to the service package root (``services/memory/``).
 """
 
 from __future__ import annotations

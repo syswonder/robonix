@@ -149,7 +149,7 @@ async def _try_save_observation(visible_objects: list) -> None:
         raw_kb, jpg_kb = len(raw) / 1024, len(jpg_bytes) / 1024
         encode_ms = (time.time() - t_encode) * 1000
         log.info("scene_hook: encoded %dx%d → JPEG %.1f KB (raw %.1f KB, ratio %.0f%%, %dms)",
-                 w, h, jpg_kb, raw_kb, 100 * jpg_kb / max(raw_kb, 1), encode_ms, round(encode_ms))
+                 w, h, jpg_kb, raw_kb, 100 * jpg_kb / max(raw_kb, 1), round(encode_ms))
 
         # ── build remember request ────────────────────────────────
         msg = (

@@ -79,17 +79,26 @@ class RetrievePipeline:
                 alpha=request.alpha,
             )
         else:
-            # Path C: chronological fallback (best-effort)
-            log.info("search: LLM and embedding unavailable — chronological")
-            nodes = [
-                self._graph.get_node(nid) for nid in candidate_ids
-            ]
-            nodes = [n for n in nodes if n is not None]
-            nodes.sort(key=lambda n: n.timestamp, reverse=True)
-            ranked = [
-                (n.node_id, max(0.05, 1.0 - i * 0.1))
-                for i, n in enumerate(nodes[:overfetch])
-            ]
+            # Path C: BM25 keyword match, fall back to chronological
+            log.info("search: LLM and embedding unavailable — BM25 keyword")
+            ranked = self._vectors.search(
+                query=request.query,
+                candidate_ids=candidate_ids,
+                top_k=overfetch,
+                alpha=1.0,  # pure BM25 — no embedding scores available
+            )
+            if not ranked:
+                # Ultimate fallback: most-recent-first
+                log.info("search: BM25 returned empty — chronological")
+                nodes = [
+                    self._graph.get_node(nid) for nid in candidate_ids
+                ]
+                nodes = [n for n in nodes if n is not None]
+                nodes.sort(key=lambda n: n.timestamp, reverse=True)
+                ranked = [
+                    (n.node_id, max(0.05, 1.0 - i * 0.1))
+                    for i, n in enumerate(nodes[:overfetch])
+                ]
 
         if not ranked:
             return SearchResponse(nodes=[])

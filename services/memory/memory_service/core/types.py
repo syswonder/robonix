@@ -339,6 +339,7 @@ class RememberRequest:
             "log_record": self.log_record.to_dict(),
             "spatial": self.spatial.to_dict() if self.spatial else None,
             "parent_node_id": self.parent_node_id,
+            "image_base64": self.image_base64,
             "kv": self.kv,
         }
 
@@ -383,6 +384,8 @@ class SearchRequest:
             d["time_range"] = {"start_ts": self.time_range.start_ts,
                                "end_ts": self.time_range.end_ts}
         d["require_executable"] = self.require_executable
+        if self.vlm_qa:
+            d["vlm_qa"] = self.vlm_qa
         return d
 
     @classmethod
@@ -399,6 +402,7 @@ class SearchRequest:
             alpha=d.get("alpha"),
             time_range=tr,
             require_executable=d.get("require_executable", False),
+            vlm_qa=d.get("vlm_qa", False),
         )
 
 
