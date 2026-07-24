@@ -21,11 +21,8 @@
 # range (:0–:12 physical + :1001–:1099 xrdp) so the X socket that leaks
 # into the bind-mounted /tmp/.X11-unix won't collide with any host user.
 #
-# When WEBOTS_STREAM=1, the webots stream WebSocket is exposed on :1234
-# and a tiny HTTP server on :8080 serves the streaming-viewer assets
-# (Webots ships the viewer HTML at
-# /usr/local/webots/resources/web/streaming_viewer). Browse to
-# http://<server>:8080/ from any machine that can reach the host.
+# When WEBOTS_STREAM=1, Webots keeps its raw stream on :1234 while a
+# configurable proxy and viewer expose the browser-facing endpoints.
 set -eo pipefail
 source /opt/ros/humble/setup.bash
 source /colcon_ws/install/setup.bash
@@ -43,8 +40,17 @@ NVIDIA_DISPLAY="${ROBONIX_SIM_XDISPLAY:-:48}"
 XNUM="${NVIDIA_DISPLAY#:}"
 ZENOH_ROUTER_PID=""
 _webots_launch_pid=""
+_viewer_pid=""
+_stream_proxy_pid=""
+STREAM_READY_FILE="/tmp/webots-stream-ready"
 
 cleanup() {
+  rm -f "$STREAM_READY_FILE"
+  for pid in "${_stream_proxy_pid:-}" "${_viewer_pid:-}"; do
+    if [ -n "$pid" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
   if [ -n "${_webots_launch_pid:-}" ]; then
     kill -TERM "${_webots_launch_pid}" 2>/dev/null || true
   fi
@@ -53,6 +59,60 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+# Start both browser-stream helpers and fail unless their configured endpoints
+# become reachable while the exact child processes remain alive.
+start_stream_helpers() {
+  local viewer_port="${WEBOTS_VIEWER_PORT:-8080}"
+  local stream_port="${WEBOTS_FILTER_PORT:-1235}"
+
+  rm -f "$STREAM_READY_FILE"
+  python3 /viewer_server.py >/tmp/viewer-http.log 2>&1 &
+  _viewer_pid=$!
+  python3 /webots_stream_proxy.py >/tmp/webots-stream-proxy.log 2>&1 &
+  _stream_proxy_pid=$!
+
+  if ! python3 /streaming_healthcheck.py \
+      --viewer-port "$viewer_port" \
+      --stream-port "$stream_port" \
+      --viewer-pid "$_viewer_pid" \
+      --proxy-pid "$_stream_proxy_pid" \
+      --timeout "${WEBOTS_HELPER_READY_TIMEOUT:-10}"; then
+    echo "[entrypoint] browser-stream helpers failed to become ready" >&2
+    tail -80 /tmp/viewer-http.log /tmp/webots-stream-proxy.log 2>&1 || true
+    return 1
+  fi
+  echo "[entrypoint] viewer HTTP on :${viewer_port}, optimized WebSocket on :${stream_port}, raw Webots stream on :1234"
+}
+
+# Wait for Webots and both required helpers. A helper exit is always fatal;
+# Webots' own exit status is preserved when the launch process finishes first.
+supervise_required_processes() {
+  local status=0
+  local required=("$_webots_launch_pid")
+  if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
+    required+=("$_viewer_pid" "$_stream_proxy_pid")
+  fi
+
+  wait -n "${required[@]}" || status=$?
+  if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
+    if ! kill -0 "$_viewer_pid" 2>/dev/null; then
+      echo "[entrypoint] viewer helper exited unexpectedly; last 80 log lines:" >&2
+      tail -80 /tmp/viewer-http.log 2>&1 || true
+      return 1
+    fi
+    if ! kill -0 "$_stream_proxy_pid" 2>/dev/null; then
+      echo "[entrypoint] stream proxy exited unexpectedly; last 80 log lines:" >&2
+      tail -80 /tmp/webots-stream-proxy.log 2>&1 || true
+      return 1
+    fi
+  fi
+  if ! kill -0 "$_webots_launch_pid" 2>/dev/null; then
+    return "$status"
+  fi
+  echo "[entrypoint] a required process exited unexpectedly" >&2
+  return 1
+}
 
 start_zenoh_router() {
   if [ "${RMW_IMPLEMENTATION:-}" != "rmw_zenoh_cpp" ]; then
@@ -165,6 +225,79 @@ start_xvfb() {
   echo "[entrypoint] Xvfb ${NVIDIA_DISPLAY} (CPU render)"
 }
 
+prepare_office_webots_seed() {
+  local seed_id expected_sha url mirror fetch_url cache_root marker
+  local archive stage count actual_sha entry
+  seed_id="webots-office-seed-v3"
+  expected_sha="f98f3e27a58ca432b5faced2f4d2e5d7fd12dd1992202a59ee55332a510d5110"
+  url="${ROBONIX_WEBOTS_SEED_URL:-https://github.com/syswonder/robonix-assets/releases/download/${seed_id}/${seed_id}.tar.gz}"
+  mirror="${ROBONIX_WEBOTS_SEED_MIRROR-https://ghfast.top/}"
+  cache_root="${ROBONIX_WEBOTS_CACHE_ROOT:-/root/.cache/Cyberbotics/Webots}"
+  marker="${cache_root}/.${seed_id}-${expected_sha}.ok"
+
+  if [ -f "$marker" ]; then
+    echo "[entrypoint] Webots office seed already present (${seed_id})"
+    return 0
+  fi
+
+  fetch_url="$url"
+  if [ -n "$mirror" ]; then
+    case "$url" in
+      https://github.com/*)
+        fetch_url="${mirror%/}/${url}"
+        ;;
+    esac
+  fi
+
+  archive=$(mktemp "/tmp/${seed_id}.XXXXXX.tar.gz")
+  stage=$(mktemp -d "/tmp/${seed_id}.XXXXXX")
+  echo "[entrypoint] downloading Webots office seed: ${fetch_url}"
+  if ! wget --tries=3 --timeout=30 --progress=dot:giga -O "$archive" "$fetch_url"; then
+    rm -rf "$archive" "$stage"
+    echo "[entrypoint] failed to download Webots office seed" >&2
+    return 1
+  fi
+
+  actual_sha=$(sha256sum "$archive" | awk '{print $1}')
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    rm -rf "$archive" "$stage"
+    echo "[entrypoint] Webots office seed checksum mismatch: expected=${expected_sha} actual=${actual_sha}" >&2
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    case "$entry" in
+      assets|assets/|assets/*) ;;
+      *)
+        rm -rf "$archive" "$stage"
+        echo "[entrypoint] unsafe Webots office seed path: ${entry}" >&2
+        return 1
+        ;;
+    esac
+    case "$entry" in
+      ""|/*|*//*|../*|*/../*|*/..)
+        rm -rf "$archive" "$stage"
+        echo "[entrypoint] unsafe Webots office seed path: ${entry}" >&2
+        return 1
+        ;;
+    esac
+  done < <(tar -tzf "$archive")
+
+  tar -xzf "$archive" -C "$stage"
+  count=$(find "$stage/assets" -maxdepth 1 -type f | wc -l)
+  if [ "$count" -ne 192 ]; then
+    rm -rf "$archive" "$stage"
+    echo "[entrypoint] Webots office seed file count mismatch: expected=192 actual=${count}" >&2
+    return 1
+  fi
+
+  mkdir -p "$cache_root/assets"
+  cp -a "$stage/assets/." "$cache_root/assets/"
+  touch "$marker"
+  rm -rf "$archive" "$stage"
+  echo "[entrypoint] Webots office seed ready: ${count} verified files"
+}
+
 prepare_full_webots_assets() {
   if [ "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS:-0}" != "1" ]; then
     return 0
@@ -216,18 +349,13 @@ case "${WEBOTS_HEADLESS_MODE:-host}" in
   *) echo "[entrypoint] unknown WEBOTS_HEADLESS_MODE=$WEBOTS_HEADLESS_MODE"; exit 2 ;;
 esac
 
-if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
-  # Serve the streaming-viewer assets from a separate port; the viewer
-  # HTML connects back to the WS server on :1234 (port hard-coded by
-  # webots).
-  (cd /usr/local/webots/resources/web/streaming_viewer \
-     && python3 -m http.server 8080 --bind 0.0.0.0) \
-       >/tmp/viewer-http.log 2>&1 &
-  echo "[entrypoint] viewer HTTP on :8080  ws on :1234"
-fi
-
 start_zenoh_router
+prepare_office_webots_seed
 prepare_full_webots_assets
+
+if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
+  start_stream_helpers
+fi
 
 WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
 
@@ -246,7 +374,23 @@ _webots_launch_pid=$!
 echo "[entrypoint] eaios_webots pid=${_webots_launch_pid}"
 sleep "${WEBOTS_WARMUP_SEC}"
 
-# Stay alive so `docker exec` from rbnx-driven driver packages can land
-# inside this container. Ctrl-C (compose down) propagates SIGTERM here
-# which `wait` will then forward to the launch process.
-wait ${_webots_launch_pid}
+if ! kill -0 "$_webots_launch_pid" 2>/dev/null; then
+  echo "[entrypoint] Webots exited during warmup" >&2
+  exit 1
+fi
+
+if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
+  if ! python3 /streaming_healthcheck.py \
+      --viewer-port "${WEBOTS_VIEWER_PORT:-8080}" \
+      --stream-port "${WEBOTS_FILTER_PORT:-1235}" \
+      --viewer-pid "$_viewer_pid" \
+      --proxy-pid "$_stream_proxy_pid"; then
+    echo "[entrypoint] browser-stream helper failed during Webots warmup" >&2
+    exit 1
+  fi
+  touch "$STREAM_READY_FILE"
+fi
+
+# Stay alive so `docker exec` from rbnx-driven driver packages can land inside
+# this container, while treating every browser-stream helper as required.
+supervise_required_processes

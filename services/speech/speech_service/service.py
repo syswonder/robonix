@@ -1187,6 +1187,14 @@ from speech_mcp import (  # noqa: E402
 _SPEAKER_CONTRACT = "robonix/primitive/audio/speaker"
 _speak_tts = None
 _default_speaker_provider_id = ""
+_speaker_locks_guard = threading.Lock()
+_speaker_locks: dict[str, threading.Lock] = {}
+
+
+def _speaker_lock(provider_id: str) -> threading.Lock:
+    """Return the process-wide serialization lock for one speaker provider."""
+    with _speaker_locks_guard:
+        return _speaker_locks.setdefault(provider_id, threading.Lock())
 
 
 @speech.mcp("robonix/service/speech/list_speakers")
@@ -1197,6 +1205,7 @@ def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
     caps = ATLAS.find_capability(
         contract_id=_SPEAKER_CONTRACT,
         namespace_prefix=(req.namespace_prefix or ""),
+        transport=Transport.GRPC,
     )
     seen: dict[str, dict] = {}
     for c in caps:
@@ -1229,40 +1238,48 @@ def speak(req: Speak_Request) -> Speak_Response:
         raise RuntimeError(f"no speaker provider (target={target!r})")
     cap = caps[0]
 
-    tts_backend = _tts_servicer.tts_backend
-    if tts_backend is None:
-        log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
-    if tts_backend is None and _speak_tts is None:
-        _speak_tts = EdgeTTSBackend()
-    if tts_backend is None:
-        tts_backend = _speak_tts
-    # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
-    # would error ("loop already running"). Synthesize on a worker thread
-    # that owns its own loop.
-    import asyncio
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
-    if not pcm:
-        raise RuntimeError("TTS backend returned no PCM audio")
-    log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
+    # Calls targeting the same physical speaker must synthesize and play in
+    # order. Without this lock concurrent RTDL trees race at the primitive;
+    # one stream wins and the other receives RESOURCE_EXHAUSTED. Different
+    # speaker providers retain independent queues.
+    speaker_lock = _speaker_lock(cap.provider_id)
+    if speaker_lock.locked():
+        log.info("speech/speak queued for busy speaker %s", cap.provider_id)
+    with speaker_lock:
+        tts_backend = _tts_servicer.tts_backend
+        if tts_backend is None:
+            log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
+        if tts_backend is None and _speak_tts is None:
+            _speak_tts = EdgeTTSBackend()
+        if tts_backend is None:
+            tts_backend = _speak_tts
+        # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
+        # would error ("loop already running"). Synthesize on a worker thread
+        # that owns its own loop.
+        import asyncio
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
+        if not pcm:
+            raise RuntimeError("TTS backend returned no PCM audio")
+        log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
 
-    with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
-        stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
-            grpc.insecure_channel(ch.endpoint)
-        )
+        with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
+            stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
+                grpc.insecure_channel(ch.endpoint)
+            )
 
-        def frames():
-            frame_bytes = 9600 * 2  # 600 ms s16le frames
-            seq = 0
-            for i in range(0, len(pcm), frame_bytes):
-                seq += 1
-                yield audio_pb2.AudioChunk(
-                    data=pcm[i:i + frame_bytes], timestamp_ns=0,
-                    sequence=seq, duration_s=0.0,
-                )
+            def frames():
+                frame_bytes = 9600 * 2  # 600 ms s16le frames
+                seq = 0
+                for i in range(0, len(pcm), frame_bytes):
+                    seq += 1
+                    yield audio_pb2.AudioChunk(
+                        data=pcm[i:i + frame_bytes], timestamp_ns=0,
+                        sequence=seq, duration_s=0.0,
+                    )
 
-        stub.Speaker(frames())
+            stub.Speaker(frames())
 
     return Speak_Response(ok=True, detail=f"spoke {len(text)} chars on {cap.provider_id}")
 

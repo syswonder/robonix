@@ -1,0 +1,11 @@
+# Query hand metadata: the full control-axis layout of THIS hand. Consumers
+# call info first to discover the axes, then drive them by finger (move_finger)
+# or by axis name (move_joint / set_joint_*).
+[contract]
+id      = "robonix/primitive/hand/info"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/GetHandInfo.srv"
+
+[mode]
+type = "rpc"

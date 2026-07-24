@@ -20,7 +20,7 @@
 use anyhow::{Context, Result};
 use robonix_scribe::warn;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Preferred per-package manifest filename. Legacy `robonix_manifest.yaml`
@@ -72,6 +72,44 @@ pub fn prepare_deployment_manifest(
     }
     expand_deployment_yaml(&mut root);
     Ok(root)
+}
+
+/// Validate Atlas provider identities owned by deployment package entries.
+pub fn validate_deployment_instance_names(root: &serde_yaml::Value) -> Result<()> {
+    let mut seen = HashSet::new();
+    let mut record = |name: &str, location: &str| -> Result<()> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("{location} must declare a non-empty `name`");
+        }
+        if name != trimmed {
+            anyhow::bail!("{location} `name` must not contain leading or trailing whitespace");
+        }
+        if !seen.insert(name.to_string()) {
+            anyhow::bail!(
+                "duplicate deployment instance name '{name}' at {location}; \
+                 every primitive, service, and skill instance must be unique"
+            );
+        }
+        Ok(())
+    };
+
+    for section in ["primitive", "service", "skill"] {
+        let Some(entries) = root.get(section) else {
+            continue;
+        };
+        let entries = entries
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("deployment `{section}` must be a list"))?;
+        for (index, entry) in entries.iter().enumerate() {
+            let name = entry
+                .get("name")
+                .and_then(serde_yaml::Value::as_str)
+                .unwrap_or("");
+            record(name, &format!("{section}[{index}]"))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn expand_deployment_env(s: &str) -> String {
@@ -453,5 +491,44 @@ capabilities: []
         manifest
             .validate_and_summarize()
             .expect("package.vendor must not invalidate an otherwise valid manifest");
+    }
+
+    #[test]
+    fn deployment_instance_names_are_unique_across_sections() {
+        let valid: serde_yaml::Value =
+            serde_yaml::from_str("primitive:\n  - name: camera\nservice:\n  - name: navigation\n")
+                .unwrap();
+        validate_deployment_instance_names(&valid).unwrap();
+
+        let duplicate: serde_yaml::Value =
+            serde_yaml::from_str("primitive:\n  - name: camera\nskill:\n  - name: camera\n")
+                .unwrap();
+        assert!(
+            validate_deployment_instance_names(&duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate deployment instance name 'camera'")
+        );
+    }
+
+    #[test]
+    fn deployment_instance_name_is_required_and_normalized() {
+        let missing: serde_yaml::Value =
+            serde_yaml::from_str("primitive:\n  - path: camera\n").unwrap();
+        assert!(
+            validate_deployment_instance_names(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("must declare a non-empty `name`")
+        );
+
+        let padded: serde_yaml::Value =
+            serde_yaml::from_str("primitive:\n  - name: ' camera '\n").unwrap();
+        assert!(
+            validate_deployment_instance_names(&padded)
+                .unwrap_err()
+                .to_string()
+                .contains("must not contain leading or trailing whitespace")
+        );
     }
 }

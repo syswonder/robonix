@@ -59,6 +59,8 @@ from .tool import mcp_contract
 
 log = logging.getLogger("robonix_api.capability")
 
+_INSTANCE_NAME_ENV = "RBNX_INSTANCE_NAME"
+
 
 # Transport-ENUM <-> contract.mode compatibility matrix (best-effort
 # check at declare_capability time).
@@ -94,6 +96,24 @@ def _provider_bind_host(value: str | None = None) -> str:
     return str(address)
 
 
+def _resolve_provider_id(default_id: str) -> str:
+    """Resolve a package default id to its deploy-time instance identity."""
+    instance_id = os.environ.get(_INSTANCE_NAME_ENV, "").strip()
+    if not instance_id:
+        if os.environ.get("RBNX_DEPLOY_MANAGED", "").strip():
+            raise RuntimeError(
+                "RBNX_INSTANCE_NAME must be non-empty for a deploy-managed package"
+            )
+        return default_id
+    if instance_id != default_id:
+        log.info(
+            "deployment instance id overrides package default: %r -> %r",
+            default_id,
+            instance_id,
+        )
+    return instance_id
+
+
 # ── _ProviderBase ───────────────────────────────────────────────────────────
 
 
@@ -124,7 +144,8 @@ class _ProviderBase:
         pkg_root: Path | None = None,
         md_path: str | None = None,
     ) -> None:
-        self.id = id
+        self.default_id = id
+        self.id = _resolve_provider_id(id)
         self.namespace = namespace.strip("/")
         if not self.namespace:
             raise ValueError("namespace must be non-empty")

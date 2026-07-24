@@ -1,0 +1,7 @@
+# Query hand metadata: the full control-axis layout. Call before driving axes:
+# move_finger works off (finger, type); the joint-level interface (move_joint,
+# set_joint_*_limits) addresses axes by the `name` returned here.
+---
+bool ok               # false = metadata unavailable (driver/hardware not ready)
+string message        # non-empty on failure: human-readable reason
+JointInfo[] joints    # every control axis; empty when ok=false -- do not read unless ok=true

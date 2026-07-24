@@ -208,7 +208,7 @@ impl PackageLauncher {
         // early-exit detection rbnx uses for soma itself (deploy.rs).
         let who = format!("{}/{}", target.kind, target.name);
         let outcome = tokio::select! {
-            result = wait_for_registration_core(atlas, &before, &who) => match result {
+            result = wait_for_registration_core(atlas, &before, &target.name, &who) => match result {
                 Ok(o) => o,
                 Err(e) => {
                     self.reap(pid).await;
@@ -250,7 +250,19 @@ impl PackageLauncher {
             return PackageStartupStatus::Spawned { command };
         };
 
-        let config_json = serde_json::to_string(&target.config).unwrap_or_else(|_| "{}".into());
+        let config_json = match serde_json::to_string(&target.config) {
+            Ok(value) => value,
+            Err(error) => {
+                self.reap(pid).await;
+                return PackageStartupStatus::SpawnFailed {
+                    command,
+                    error: format!(
+                        "{who}: serialize config for deployment instance '{}': {error}",
+                        target.name
+                    ),
+                };
+            }
+        };
         self.note_lifecycle(
             pid,
             outcome.provider_id.clone(),

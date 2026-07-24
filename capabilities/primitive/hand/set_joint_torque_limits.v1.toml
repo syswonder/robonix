@@ -1,0 +1,13 @@
+# Set per-axis torque limit by JointInfo.name (normalized [0,1]). Torque limits
+# are motor parameters typically configured by skill/service in task context.
+# Only listed axes are updated. ok=true means the limits were accepted and
+# applied; ok=false on rejection (empty request, unknown/duplicate name,
+# out-of-range value, hardware rejection) with a reason in message.
+[contract]
+id      = "robonix/primitive/hand/set_joint_torque_limits"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/SetJointTorqueLimits.srv"
+
+[mode]
+type = "rpc"

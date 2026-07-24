@@ -52,6 +52,13 @@ Run `rbnx <cmd> --help` for full flags.
 - `RBNX_CONFIG_FILE` — explicit path to a config file (overrides
   `~/.robonix/config.yaml`).
 
+Each primitive, service, and skill entry's `name` is its deploy-time Atlas
+provider id. `rbnx boot` passes it as `RBNX_INSTANCE_NAME`; the SDK uses that
+identity for registration, capability declaration, heartbeat, and lifecycle
+state. Package source keeps its own default id for standalone `rbnx start`.
+Startup waits only for the exact expected id, so an unrelated concurrent
+registration cannot receive another instance's lifecycle config.
+
 ## How it finds the source tree
 
 Many subcommands (codegen, build, boot) need to resolve paths inside
