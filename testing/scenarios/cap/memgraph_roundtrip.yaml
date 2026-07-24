@@ -1,0 +1,113 @@
+# Exercise memgraph remember → hybrid_search → promote round-trip.
+# Memgraph uses JSON-over-String (std_msgs/String.data = JSON string).
+name: memgraph_roundtrip
+task: "ci-test: write a structured memory node, search with tag filter, then promote"
+steps:
+  # ═══ Step 1: remember + hybrid_search in one ordered RTDL tree ═══
+  - content: Writing a spatial memory node, then searching for it with tag filter.
+    rtdl_description: memgraph remember + hybrid_search (tag-filtered)
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: memgraph_remember_search
+      children:
+        # 1a — write a kitchen observation
+        - op: do
+          id: remember_kitchen
+          cap: memgraph.memory_remember
+          args:
+            data: |
+              {"session_id":"ci-sess-1","plan_id":"ci-plan-1",
+               "log_record":{"ts":0,"level":"Info","tag":"ci-test",
+               "msg":"robot grasped the red cup from the kitchen counter"},
+               "spatial":{"origin":"world",
+               "objects":[{"obj_id":"scene.obj.cup_001","label":"red cup",
+               "x":1.0,"y":2.0,"z":0.8}]}}
+          description: persist a kitchen fetch memory
+          expect:
+            contract: robonix/service/memory/remember
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: '"node_id":\s*\d+'}
+        # 1b — hybrid_search with scene_type=kitchen tag
+        - op: do
+          id: hybrid_search_kitchen
+          cap: memgraph.memory_hybrid_search
+          args:
+            data: |
+              {"query":"red cup","tags":{"scene_type":"kitchen"},"top_k":3}
+          description: search for kitchen cup memory
+          expect:
+            contract: robonix/service/memory/hybrid_search
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: 'red.cup'}
+                - select: $.data
+                  assert: {op: regex, value: kitchen}
+  # ═══ Step 2: write another node + search with different filter ═══
+  - content: Writing a workshop craft memory, then searching without tags.
+    rtdl_description: memgraph remember + hybrid_search (no tags)
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: memgraph_remember_search2
+      children:
+        - op: do
+          id: remember_workshop
+          cap: memgraph.memory_remember
+          args:
+            data: |
+              {"session_id":"ci-sess-1","plan_id":"ci-plan-2",
+               "log_record":{"ts":0,"level":"Info","tag":"ci-test",
+               "msg":"crafted a wooden plank at the crafting table in the workshop"},
+               "spatial":{"origin":"world",
+               "objects":[{"obj_id":"scene.obj.plank_001","label":"wooden plank",
+               "x":7.0,"y":8.0,"z":1.0}]}}
+          description: persist a workshop craft memory
+          expect:
+            contract: robonix/service/memory/remember
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: '"node_id":\s*\d+'}
+        - op: do
+          id: hybrid_search_plank
+          cap: memgraph.memory_hybrid_search
+          args:
+            data: |
+              {"query":"crafting wooden items","top_k":5}
+          description: pure semantic search for craft memory
+          expect:
+            contract: robonix/service/memory/hybrid_search
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: 'wooden'}
+  # ═══ Step 3: promote (compact) ═══
+  - content: Promoting short-term nodes to long-term.
+    rtdl_description: memgraph promote
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: memgraph_promote
+      children:
+        - op: do
+          id: promote_nodes
+          cap: memgraph.memory_promote
+          args: {}
+          description: compact short-term memory
+          expect:
+            contract: robonix/service/memory/promote
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: nodes_compacted}
+  - content: Round-trip complete.
+    status: done

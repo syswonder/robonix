@@ -39,6 +39,7 @@ from . import web as web_ui
 from .annotations import AnnotationStore
 from .ingest.capabilities import plan_perception
 from .map_binding import MapBinding, choose_map_binding, read_latched_lifecycle
+from .object_watchdog import ObjectWatchdog
 from .map_meta import MapMetaStore
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
@@ -1368,9 +1369,17 @@ async def _run() -> None:
         obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
-        # Lifecycle linkage: on a runtime epoch bump (mapping reset / re-init
-        # under scene's feet) flush derived objects and stale-mark rooms —
-        # tracking the live binding the web facade also updates.
+        # Object-level watchdog: polls the registry for NEW objects and
+        # saves one image per object to memgraph.  Default on; set
+        # SCENE_OBJECT_WATCHDOG=0 to disable.
+        *([asyncio.create_task(
+            ObjectWatchdog(
+                registry=registry, hub=hub,
+            ).run(),
+            name="object-watchdog",
+        )] if os.environ.get("SCENE_OBJECT_WATCHDOG", "1") in ("1", "true", "yes") else []),
+        # P2 guard: warn when mapping's live map identity drifts from the
+        # binding scene started with (P3 will act on it instead).
         asyncio.create_task(
             _lifecycle_watch(hub, binding, anno_store,
                              registry=registry, live_binding=live_binding,

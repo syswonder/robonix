@@ -1,0 +1,14 @@
+# robonix/service/memory/promote — promote ShortTerm → LongTerm memory (unary RPC).
+# Phase1 JSON encoding over std_msgs/String; Phase2: structured IDL.
+#
+# Request: Empty trigger (std_msgs/Empty)
+#   No parameters needed — compact scans all ShortTerm nodes and promotes overflow
+#   (oldest first) to LongTerm when count exceeds the internal threshold (default 50).
+#
+# Response JSON: {
+#   "summary":          "Compacted 7 short-term nodes → long-term (50 remaining, 65 total).",
+#   "nodes_compacted":  7
+# }
+std_msgs/Empty trigger
+---
+std_msgs/String response_json

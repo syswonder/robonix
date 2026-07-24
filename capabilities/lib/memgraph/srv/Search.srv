@@ -1,0 +1,28 @@
+# robonix/service/memory/hybrid_search — 3-stage hybrid search over CKG memory (unary RPC).
+# Phase1 JSON encoding over std_msgs/String; Phase2: structured IDL.
+#
+# Request JSON: {
+#   "query":             "<semantic query text>",
+#   "tags":              {                            // optional — TagFilter (AND semantics)
+#     "scene_type":      "kitchen",                   // optional
+#     "objects":         ["cup"],                     // optional
+#     "action_type":     "grasp",                     // optional
+#     "success":         true,                        // optional
+#     "task_type":       "fetch",                     // optional
+#     "difficulty_max":  "medium"                     // optional
+#   },
+#   "top_k":             5,                           // default 5
+#   "alpha":             0.3,                         // optional — BM25 weight
+#   "time_range":        {"start_ts": 0, "end_ts": 0},// optional — ns timestamps
+#   "require_executable": false                       // default false (Phase2)
+# }
+#
+# Response JSON: {
+#   "nodes": [
+#     {"node_id": 42, "summary": "...", "tags": {...}, "spatial_data": {...},
+#      "weight": 0.5, "timestamp": ..., "raw_log": {...}, "causal_chain": [...], "embedding": [...]}
+#   ]
+# }
+std_msgs/String request_json
+---
+std_msgs/String response_json

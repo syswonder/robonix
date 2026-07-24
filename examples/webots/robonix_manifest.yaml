@@ -91,6 +91,15 @@ primitive:
 
 # after booted all the primitives, start the services
 service:
+  # ── Memory services (two parallel backends) ──────────────────────────
+  # Memgraph (Scribe Mem) — structured CKG memory (BM25 + Embedding).
+  # Contracts: robonix/service/memory/{remember,hybrid_search,promote}
+  # Embedding: all-MiniLM-L6-v2 (d=384), BM25 + Cosine hybrid retrieval.
+  - name: memgraph
+    path: ../../services/memory
+    config:
+      backend: memgraph
+
   # memsearch — default reference long-term-memory service for the
   # agent. Lives at services/memsearch in the robonix tree; pilot
   # queries it for relevant past context when planning.
