@@ -13,7 +13,7 @@ steps:
         # 1a — successful kitchen fetch
         - op: do
           id: remember_success
-          cap: memgraph.memgraph_remember
+          cap: memgraph.memory_remember
           args:
             data: |
               {"session_id":"ci-sess-fail","plan_id":"ci-plan-s",
@@ -30,7 +30,7 @@ steps:
         # 1b — failed kitchen fetch (lesson)
         - op: do
           id: remember_failure
-          cap: memgraph.memgraph_remember
+          cap: memgraph.memory_remember
           args:
             data: |
               {"session_id":"ci-sess-fail","plan_id":"ci-plan-f",
@@ -47,7 +47,7 @@ steps:
         # 1c — hybrid_search filtered to failures only
         - op: do
           id: hybrid_search_failures
-          cap: memgraph.memgraph_hybrid_search
+          cap: memgraph.memory_hybrid_search
           args:
             data: |
               {"query":"kitchen grasp","tags":{"success":false},"top_k":5}
