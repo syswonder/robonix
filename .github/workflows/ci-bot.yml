@@ -63,7 +63,7 @@ jobs:
               const r = await github.rest.repos.getCollaboratorPermissionLevel({
                 owner: context.repo.owner, repo: context.repo.repo, username,
               });
-              permission = r.data.permission || 'none';
+              permission = r.data.role_name || r.data.permission || 'none';
             } catch (e) {
               core.notice(`could not resolve repo permission for @${username}: ${e.message}`);
             }
@@ -129,6 +129,7 @@ jobs:
             core.setOutput('triggered_by', context.payload.comment.user.login || '');
       - name: Create running status comment
         id: say
+        if: steps.auth.outputs.authorized == 'true'
         uses: actions/github-script@v7
         with:
           script: |
