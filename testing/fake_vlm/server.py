@@ -237,15 +237,23 @@ def _leaf_results_from_messages(messages: list[dict]) -> list[dict]:
         elif isinstance(content, list):
             parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
     leaves: list[dict] = []
+    seen: set[int] = set()
     for value in _json_values_from_text("\n".join(parts)):
         for node in _walk_json(value):
             if not isinstance(node, dict):
                 continue
             leaf = node.get("leaf_result")
             if isinstance(leaf, dict):
-                leaves.append(leaf)
+                candidate = leaf
             elif {"contract_id", "success", "output"}.issubset(node.keys()):
-                leaves.append(node)
+                candidate = node
+            else:
+                continue
+            marker = id(candidate)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            leaves.append(candidate)
     return leaves
 
 
