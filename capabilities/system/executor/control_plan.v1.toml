@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/system/executor/control_plan"
+version = "1"
+kind    = "service"
+idl     = "executor/srv/ControlPlan.srv"
+description = "Apply an out-of-band RTDL meta operation without creating another plan."
+
+[mode]
+type = "rpc"

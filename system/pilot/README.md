@@ -42,6 +42,8 @@ Common configuration:
 
 The VLM-facing RTDL envelope rules (grammar, example, constraints) live in `rtdl_protocol.md` at the crate root and are embedded at compile time via `include_str!` into the per-turn capability list prompt. Edit that file to change RTDL instructions without touching `planner.rs`.
 
+Pilot's standing system prompt is built in `src/planner.rs`; it includes the runtime operating principles, including the rule that failed required capability calls stop autonomous physical task progress until the user confirms the next step.
+
 ## RTDL Planning Flow
 
 Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object:

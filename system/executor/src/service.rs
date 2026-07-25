@@ -5,9 +5,13 @@
 
 use crate::dispatch::{async_poll, async_registry};
 use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
+use crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlan;
 use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
 use crate::pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealth;
-use crate::pb::executor::{CancelAllResponse, RtdlEvent};
+use crate::pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlans;
+use crate::pb::executor::{
+    CancelAllResponse, ControlPlanResponse, ListActivePlansResponse, RtdlEvent,
+};
 use crate::pb::module_health::{
     GetModuleHealthRequest, GetModuleHealthResponse, ModuleHealth, ModuleHealthReport,
 };
@@ -283,6 +287,19 @@ fn is_operator_node(node_kind: u32) -> bool {
     matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
 }
 
+/// Map a completed leaf call to its RTDL state. Cancellation wins over the
+/// provider result: a command terminated by cancel_plan normally returns
+/// success=false, but that is an expected CANCELED outcome, not a FAILED tool.
+fn leaf_terminal_state(success: bool, cancelled: bool) -> u32 {
+    if cancelled {
+        RtdlNodeStateEnum::Canceled as u32
+    } else if success {
+        RtdlNodeStateEnum::Succeeded as u32
+    } else {
+        RtdlNodeStateEnum::Failed as u32
+    }
+}
+
 /// Emit the terminal event for an `on_enter` stop point on any RTDL node.
 async fn send_stop_on_enter(
     tx: &Sender<Result<RtdlEvent, Status>>,
@@ -418,12 +435,11 @@ async fn execute_call(
             .await
         }
         Ok(None) => {
-            let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
-            let state = if r.success {
-                RtdlNodeStateEnum::Succeeded as u32
-            } else {
-                RtdlNodeStateEnum::Failed as u32
-            };
+            let r =
+                crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime, &node.plan_id)
+                    .await;
+            let cancelled = runtime.is_cancelled(&node.plan_id).await;
+            let state = leaf_terminal_state(r.success, cancelled);
             runtime
                 .record_op_state(&node.plan_id, &node.op_id, state)
                 .await;
@@ -465,6 +481,94 @@ impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
             .cancel_all_plans(&self.provider_id, &mut atlas)
             .await;
         Ok(Response::new(CancelAllResponse { success }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemExecutorListActivePlans for ExecutorServiceImpl {
+    async fn list_active_plans(
+        &self,
+        _request: Request<crate::pb::executor::ListActivePlansRequest>,
+    ) -> Result<Response<ListActivePlansResponse>, Status> {
+        Ok(Response::new(ListActivePlansResponse {
+            success: true,
+            plans_json: self.runtime.active_plans_json().await,
+            error: String::new(),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
+    async fn control_plan(
+        &self,
+        request: Request<crate::pb::executor::ControlPlanRequest>,
+    ) -> Result<Response<ControlPlanResponse>, Status> {
+        let request = request.into_inner();
+        let mut atlas = self.atlas.clone();
+        let response = match request.action.as_str() {
+            "cancel" => {
+                let wait_ms = if request.wait_ms == 0 {
+                    5_000
+                } else {
+                    request.wait_ms
+                };
+                let (completed, message) = self
+                    .runtime
+                    .cancel_plan_control(&request.plan_id, wait_ms, &self.provider_id, &mut atlas)
+                    .await;
+                ControlPlanResponse {
+                    success: true,
+                    completed,
+                    message,
+                    error: String::new(),
+                }
+            }
+            "cancel_all" => {
+                let wait_ms = if request.wait_ms == 0 {
+                    5_000
+                } else {
+                    request.wait_ms
+                };
+                let (target_count, completed) = self
+                    .runtime
+                    .cancel_all_plans_except(&self.provider_id, &mut atlas, None, wait_ms)
+                    .await;
+                ControlPlanResponse {
+                    success: true,
+                    completed,
+                    message: format!(
+                        "Cancellation requested for all RTDL plans; target_count={target_count}, completed={completed}."
+                    ),
+                    error: String::new(),
+                }
+            }
+            "stop_at" => match self
+                .runtime
+                .stop_plan_at_control(&request.plan_id, &request.op_id, &request.when)
+                .await
+            {
+                Ok(message) => ControlPlanResponse {
+                    success: true,
+                    completed: true,
+                    message,
+                    error: String::new(),
+                },
+                Err(error) => ControlPlanResponse {
+                    success: false,
+                    completed: true,
+                    message: String::new(),
+                    error,
+                },
+            },
+            action => ControlPlanResponse {
+                success: false,
+                completed: true,
+                message: String::new(),
+                error: format!("unknown plan-control action '{action}'"),
+            },
+        };
+        Ok(Response::new(response))
     }
 }
 
@@ -600,7 +704,7 @@ mod tests {
     use super::{
         MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION, MODULE_HEALTH_TTL_MS, PlanRuntime, RTDL_DO,
         RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum, executor_health_report,
-        send_operator_terminal, send_stop_on_enter, validate_plan,
+        leaf_terminal_state, send_operator_terminal, send_stop_on_enter, validate_plan,
     };
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
@@ -613,6 +717,41 @@ mod tests {
             contract_id: "robonix/test/cap".to_string(),
             args_json: "{}".to_string(),
         }
+    }
+
+    #[test]
+    fn executor_health_report_uses_minimal_module_health_v1_fields() {
+        let report = executor_health_report("executor");
+        assert_eq!(report.schema_version, MODULE_HEALTH_SCHEMA_VERSION);
+
+        let module = report.module.expect("module health");
+        assert_eq!(module.module_id, "executor");
+        assert_eq!(module.provider_id, "executor");
+        assert_eq!(module.health, MODULE_HEALTH_OK);
+        assert_eq!(module.state, "active");
+        assert_eq!(module.reason_code, "OK");
+        assert_eq!(module.detail, "executor serving");
+        assert_eq!(module.ttl_ms, MODULE_HEALTH_TTL_MS);
+
+        assert!(module.module_key.is_empty());
+        assert!(module.source.is_empty());
+        assert_eq!(module.received_ts_ns, 0);
+    }
+
+    #[test]
+    fn canceled_leaf_is_not_reported_as_failed_provider_work() {
+        assert_eq!(
+            leaf_terminal_state(false, true),
+            RtdlNodeStateEnum::Canceled as u32
+        );
+        assert_eq!(
+            leaf_terminal_state(false, false),
+            RtdlNodeStateEnum::Failed as u32
+        );
+        assert_eq!(
+            leaf_terminal_state(true, false),
+            RtdlNodeStateEnum::Succeeded as u32
+        );
     }
 
     fn node(kind: u32, children: Vec<u32>, call: Option<CapabilityCall>) -> RtdlNode {
@@ -643,25 +782,6 @@ mod tests {
             nodes,
             root_index,
         }
-    }
-
-    #[test]
-    fn executor_health_report_uses_minimal_module_health_v1_fields() {
-        let report = executor_health_report("executor");
-        assert_eq!(report.schema_version, MODULE_HEALTH_SCHEMA_VERSION);
-
-        let module = report.module.expect("module health");
-        assert_eq!(module.module_id, "executor");
-        assert_eq!(module.provider_id, "executor");
-        assert_eq!(module.health, MODULE_HEALTH_OK);
-        assert_eq!(module.state, "active");
-        assert_eq!(module.reason_code, "OK");
-        assert_eq!(module.detail, "executor serving");
-        assert_eq!(module.ttl_ms, MODULE_HEALTH_TTL_MS);
-
-        assert!(module.module_key.is_empty());
-        assert!(module.source.is_empty());
-        assert_eq!(module.received_ts_ns, 0);
     }
 
     #[test]

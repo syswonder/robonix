@@ -20,6 +20,27 @@ pub struct ToolResultHistory {
     pub followup_messages: Vec<Message>,
 }
 
+fn is_image_value(v: &serde_json::Value) -> bool {
+    v.get("image_base64")
+        .and_then(|x| x.as_str())
+        .is_some_and(|data| !data.is_empty())
+        || (v.get("width").is_some()
+            && v.get("height").is_some()
+            && v.get("encoding")
+                .and_then(|encoding| encoding.as_str())
+                .is_some_and(|encoding| encoding != "error")
+            && v.get("data")
+                .and_then(|data| data.as_str())
+                .is_some_and(|data| !data.is_empty()))
+}
+
+/// Return true only for payloads that [`tool_result_to_messages`] will map to
+/// an actual image follow-up. Callers use this to avoid retaining malformed
+/// image-shaped JSON without normal result-size bounds.
+pub fn is_image_output(output: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(output).is_ok_and(|value| is_image_value(&value))
+}
+
 /// Build history messages from one executor tool result.
 ///
 /// Normal path: a single `Message` with `role: "tool"` and `tool_call_id = call_id`,
@@ -38,7 +59,9 @@ pub fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory
         };
     };
 
-    if let Some(b64) = v.get("image_base64").and_then(|x| x.as_str()) {
+    if is_image_value(&v)
+        && let Some(b64) = v.get("image_base64").and_then(|x| x.as_str())
+    {
         let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("jpeg");
         return ToolResultHistory {
             tool_messages: vec![Message::tool_result(
@@ -55,14 +78,7 @@ pub fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory
     // sensor_msgs/msg/Image — matches camera_snapshot / camera_depth_snapshot.
     // Skip encoding="error" (placeholder) and any payload missing real data.
     let img_encoding = v.get("encoding").and_then(|e| e.as_str());
-    if v.get("width").is_some()
-        && v.get("height").is_some()
-        && img_encoding.is_some()
-        && img_encoding != Some("error")
-        && v.get("data")
-            .and_then(|d| d.as_str())
-            .is_some_and(|s| !s.is_empty())
-    {
+    if is_image_value(&v) && img_encoding.is_some() {
         let enc = img_encoding.unwrap_or("jpeg");
         let b64 = v.get("data").and_then(|d| d.as_str()).unwrap_or("");
         return ToolResultHistory {

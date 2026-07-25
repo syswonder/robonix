@@ -6,6 +6,8 @@
 // Used here:
 //   pb::contracts::robonix_system_executor_execute_server — Execute stream RPC handler
 //   pb::contracts::robonix_system_executor_cancel_all_plans_server — cancel-all RPC handler
+//   pb::contracts::robonix_system_executor_control_plan_server — out-of-band plan meta ops
+//   pb::contracts::robonix_system_executor_list_active_plans_server — active-plan snapshot RPC
 //   pb::executor                                   — RtdlEvent
 //   pb::pilot                                      — Plan / CapabilityCall / CapabilityCallResult / ToolRouting
 #![allow(

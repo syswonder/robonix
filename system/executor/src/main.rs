@@ -24,8 +24,10 @@ use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
+use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
 use pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealthServer;
+use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlansServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
@@ -75,6 +77,38 @@ async fn main() -> Result<()> {
                 "capabilities/system/executor/execute.v1.toml",
                 "robonix.contracts.RobonixSystemExecutorExecute",
                 "/robonix.contracts.RobonixSystemExecutorExecute/Execute",
+            ),
+        )
+        .await?;
+
+    // Out-of-band RTDL meta operations. These never enter PlanRuntime as a
+    // new plan, so canceling work cannot create a self-referential cancel tree.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/control_plan",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/control_plan.v1.toml",
+                "robonix.contracts.RobonixSystemExecutorControlPlan",
+                "/robonix.contracts.RobonixSystemExecutorControlPlan/ControlPlan",
+            ),
+        )
+        .await?;
+
+    // Read-only control path for clients and observability. Polling it must not
+    // create an RTDL query plan of its own.
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/list_active_plans",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/list_active_plans.v1.toml",
+                "robonix.contracts.RobonixSystemExecutorListActivePlans",
+                "/robonix.contracts.RobonixSystemExecutorListActivePlans/ListActivePlans",
             ),
         )
         .await?;
@@ -167,6 +201,8 @@ async fn main() -> Result<()> {
     tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorGetHealthServer::new(svc))
         .serve(listen_addr)
         .await

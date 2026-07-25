@@ -660,6 +660,11 @@ jobs:
             [ -d "$d/.git" ] && echo "$(basename "$d") @ $(git -C "$d" rev-parse --short HEAD) $(git -C "$d" log -1 --format=%s)"
           done | tee "$RUNNER_TEMP/remote-provenance.txt"
 
+      - name: Validate Executor control-plane isolation
+        run: |
+          set -euo pipefail
+          bash scripts/test_executor_cancel_isolation.sh
+
       - name: Start isolated Webots simulator
         working-directory: examples/webots/sim
         env:
@@ -1020,6 +1025,7 @@ jobs:
           set -o pipefail
           export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
+            --first object_navigation \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out"
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
@@ -1129,7 +1135,52 @@ jobs:
             fi
             sleep 0.5
           done
+          # Atlas readiness only proves that Scene registered its contracts.
+          # A restarted Scene still needs fresh camera frames before its object
+          # registry contains a real object, so apply the same readiness gate
+          # used before the first scenario pass.
+          scene_url="http://127.0.0.1:${SCENE_WEB_PORT}/api/state"
+          state_file="$RUNNER_TEMP/sim-logs/scene-state-post-restart.json"
+          scene_ready=0
+          echo "waiting for a real non-robot scene object after lifecycle restart: ${scene_url}"
+          for _ in $(seq 1 180); do
+            if curl -fsS --max-time 2 "$scene_url" -o "$state_file"; then
+              if python3 - "$state_file" <<'SCENE_READY_PY'
+          import json, sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              state = json.load(f)
+          objects = state.get("objects") or []
+          for obj in objects:
+              cls = str(obj.get("cls") or obj.get("label") or "").strip().lower()
+              oid = str(obj.get("id") or "")
+              if cls and cls != "robot" and oid.startswith("scene.object."):
+                  print(json.dumps({
+                      "id": obj.get("id"),
+                      "cls": obj.get("cls") or obj.get("label"),
+                      "confidence": obj.get("confidence"),
+                      "observation_count": obj.get("observation_count"),
+                      "pose": obj.get("pose"),
+                  }, ensure_ascii=False))
+                  sys.exit(0)
+          sys.exit(1)
+          SCENE_READY_PY
+              then
+                echo "post-restart scene object readiness confirmed"
+                scene_ready=1
+                break
+              fi
+            fi
+            sleep 2
+          done
+          if [ "$scene_ready" -ne 1 ]; then
+            echo "::error::scene did not expose a non-robot object after lifecycle restart"
+            cat "$state_file" || true
+            tail -260 "examples/webots/rbnx-boot/logs/scene.log" || true
+            exit 1
+          fi
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
+            --first object_navigation \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \
             | tee "$RUNNER_TEMP/scenarios.restart.out"
 

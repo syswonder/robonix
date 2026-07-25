@@ -8,16 +8,114 @@
 // without the user first calling a bridge tool.
 
 use crate::pb::contracts::{
+    robonix_system_soma_get_health_client::RobonixSystemSomaGetHealthClient,
     robonix_system_soma_get_urdf_client::RobonixSystemSomaGetUrdfClient,
     robonix_system_soma_get_yaml_client::RobonixSystemSomaGetYamlClient,
 };
-use crate::pb::soma::{GetUrdfRequest, GetYamlRequest};
+use crate::pb::soma::{GetHealthRequest, GetUrdfRequest, GetYamlRequest};
 use anyhow::{Context, Result};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_scribe::warn;
 
 const GET_YAML_CONTRACT: &str = "robonix/system/soma/get_yaml";
 const GET_URDF_CONTRACT: &str = "robonix/system/soma/get_urdf";
+const GET_HEALTH_CONTRACT: &str = "robonix/system/soma/get_health";
+
+pub async fn fetch_runtime_prompt_block(atlas: &mut AtlasClient, consumer_id: &str) -> String {
+    match fetch_health(atlas, consumer_id).await {
+        Ok(value) => format!(
+            "\n\n## Current embodiment state (from Soma)\n\
+             This snapshot was refreshed immediately before planning. Fresh fields are \
+             authoritative. Stale or missing fields mean unknown; never reconstruct them \
+             from conversation history. `likely_holding` means the calibrated gripper is \
+             not fully open; it does not identify the object.\n\n{}\n",
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+        ),
+        Err(error) => format!(
+            "\n\n## Current embodiment state (from Soma)\n\
+             {{\"available\":false,\"error\":{}}}\n",
+            serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"unknown\"".into())
+        ),
+    }
+}
+
+async fn fetch_health(atlas: &mut AtlasClient, consumer_id: &str) -> Result<serde_json::Value> {
+    let (channel_id, _provider_id, channel) =
+        atlas_client::connect_to_capability(atlas, consumer_id, GET_HEALTH_CONTRACT)
+            .await
+            .context("connect to Soma get_health")?;
+    let result = async {
+        let response = RobonixSystemSomaGetHealthClient::new(channel)
+            .get_health(GetHealthRequest {})
+            .await
+            .context("call Soma get_health")?
+            .into_inner();
+        let snapshot = response
+            .snapshot
+            .context("Soma has not published a health snapshot yet")?;
+        let components: Vec<_> = snapshot
+            .components
+            .into_iter()
+            .map(|component| {
+                serde_json::json!({
+                    "id": component.id,
+                    "parent_id": component.parent_id,
+                    "kind": component.kind,
+                    "health": component.health,
+                    "operational_state": component.operational_state,
+                    "online": component.online,
+                    "detail": component.detail,
+                })
+            })
+            .collect();
+        let actuators: Vec<_> = snapshot
+            .actuators
+            .into_iter()
+            .map(|actuator| {
+                serde_json::json!({
+                    "component_id": actuator.component_id,
+                    "joint_name": actuator.joint_name,
+                    "position": actuator.position.map(|value| serde_json::json!({
+                        "value": value.value, "unit": value.unit, "quality": value.quality,
+                    })),
+                    "communication_ok": actuator.communication_ok,
+                })
+            })
+            .collect();
+        let metrics: Vec<_> = snapshot
+            .metrics
+            .into_iter()
+            .map(|metric| {
+                serde_json::json!({
+                    "component_id": metric.component_id,
+                    "name": metric.name,
+                    "value": metric.value.map(|value| serde_json::json!({
+                        "value": value.value, "unit": value.unit, "quality": value.quality,
+                    })),
+                })
+            })
+            .collect();
+        Ok::<_, anyhow::Error>(serde_json::json!({
+            "available": true,
+            "body_id": snapshot.body_id,
+            "seq": snapshot.seq,
+            "source_ts_ns": snapshot.source_ts_ns,
+            "ttl_ms": snapshot.ttl_ms,
+            "components": components,
+            "actuators": actuators,
+            "metrics": metrics,
+            "safety": snapshot.safety.map(|safety| serde_json::json!({
+                "motion_allowed": safety.motion_allowed,
+                "motor_power_allowed": safety.motor_power_allowed,
+                "aggregate_state": safety.aggregate_state,
+                "detail": safety.detail,
+            })),
+        }))
+    }
+    .await;
+    let _ = atlas.disconnect_capability(&channel_id).await;
+    result
+}
 
 pub async fn fetch_system_prompt_block(
     atlas: &mut AtlasClient,

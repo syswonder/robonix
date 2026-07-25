@@ -20,6 +20,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::time::Duration;
+
+const MAX_OPEN_RETRIES: usize = 3;
+
+fn open_retry_delay(
+    status: reqwest::StatusCode,
+    retry_after: Option<&str>,
+    retry_index: usize,
+) -> Option<Duration> {
+    if retry_index >= MAX_OPEN_RETRIES
+        || !(status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+    {
+        return None;
+    }
+    let server_seconds = retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds.clamp(1, 10));
+    let seconds = server_seconds.unwrap_or_else(|| 1_u64 << retry_index.min(3));
+    Some(Duration::from_secs(seconds))
+}
 
 /// One message in an OpenAI Chat Completions conversation.
 /// Spec: https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages
@@ -221,21 +241,41 @@ impl VlmClient {
             .context("build chat completion request")?;
 
         let url = format!("{}/chat/completions", self.api_base);
-        let response = self
-            .inner
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("open VLM chat stream")?;
-        let status = response.status();
-        if !status.is_success() {
+        let mut retry_index = 0;
+        let response = loop {
+            let response = self
+                .inner
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(&request)
+                .send()
+                .await
+                .context("open VLM chat stream")?;
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
+            if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
+                robonix_scribe::warn!(
+                    "[pilot/vlm] open stream HTTP {status}; retry {}/{} in {:.1}s",
+                    retry_index + 1,
+                    MAX_OPEN_RETRIES,
+                    delay.as_secs_f64()
+                );
+                tokio::time::sleep(delay).await;
+                retry_index += 1;
+                continue;
+            }
             bail!("open VLM chat stream: HTTP {status}: {text}");
-        }
+        };
         let mut upstream = response.bytes_stream();
 
         // Walk the upstream chunk-by-chunk, accumulating tool-call deltas by
@@ -314,6 +354,36 @@ impl VlmClient {
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_OPEN_RETRIES, open_retry_delay};
+    use std::time::Duration;
+
+    #[test]
+    fn transient_open_errors_use_bounded_backoff() {
+        assert_eq!(
+            open_retry_delay(reqwest::StatusCode::TOO_MANY_REQUESTS, None, 0),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            open_retry_delay(reqwest::StatusCode::SERVICE_UNAVAILABLE, Some("7"), 1),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            open_retry_delay(reqwest::StatusCode::BAD_REQUEST, None, 0),
+            None
+        );
+        assert_eq!(
+            open_retry_delay(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                None,
+                MAX_OPEN_RETRIES
+            ),
+            None
+        );
     }
 }
 
