@@ -8,7 +8,7 @@ if command -v rbnx >/dev/null 2>&1; then
     # (canonical ROS 2 messages) so nav's rclpy types are Robonix's.
     FLAGS=(--mcp --ros2)
     [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
-    rbnx codegen -p "$PKG" "${FLAGS[@]}"
+    bash "$PKG/../../scripts/run_python_codegen.sh" "$PKG" "${FLAGS[@]}"
 
     # Build the ROS 2 overlay inside the sim container (host has no ROS 2).
     if docker ps --format '{{.Names}}' | grep -qx robonix_tiago_sim; then

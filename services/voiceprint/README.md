@@ -28,7 +28,8 @@ bash scripts/build.sh
 The build phase:
 
 1. Creates `rbnx-build/venv/` via `uv venv` + `uv sync`.
-2. Generates gRPC stubs from `proto/voiceprint.proto` into `rbnx-build/codegen/proto_gen/`.
+2. Runs `rbnx codegen --mcp` with the venv interpreter and import-tests the
+   generated contract modules under `rbnx-build/codegen/`.
 3. Pre-downloads ECAPA-TDNN (`speechbrain/spkrec-ecapa-voxceleb`) into
    `rbnx-build/models/`. Set `SKIP_MODEL_DOWNLOAD=1` to skip; set
    `HF_ENDPOINT=https://hf-mirror.com` (default) for runner environments where direct model downloads are unreliable.

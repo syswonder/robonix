@@ -132,7 +132,19 @@ FLAGS=(--mcp)
 # The complete build directory was already removed above. A second clean here
 # would delete the freshly synchronized venv.
 echo "[build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+RBNX_CODEGEN_PYTHON="$PKG/$VENV/bin/python" \
+    PATH="$PKG/$VENV/bin:$PATH" \
+    rbnx codegen -p "$PKG" "${FLAGS[@]}"
+
+CODEGEN_PYTHONPATH="$PKG/$BUILD/codegen/proto_gen:$PKG/$BUILD/codegen/robonix_mcp_types"
+PYTHONPATH="$CODEGEN_PYTHONPATH:${PYTHONPATH:-}" "$VENV/bin/python" - <<'PY'
+import robonix_contracts_pb2
+import robonix_contracts_pb2_grpc
+import voiceprint_mcp
+import voiceprint_pb2
+
+print("[build] generated Voiceprint gRPC and MCP imports OK")
+PY
 
 # ── 4. Pre-warm ECAPA-TDNN weights from ModelScope (skip with SKIP_MODEL_DOWNLOAD=1) ─
 # Fetch from ModelScope, not HuggingFace: hf_hub's metadata HEAD only follows

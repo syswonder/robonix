@@ -14,4 +14,10 @@ cd "$PKG_ROOT"
 # robonix_mcp_types}` itself — packages don't manage codegen paths.
 export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${PYTHONPATH:-}"
 
-exec python3 -m audio_driver.main
+PYTHON="$PKG_ROOT/rbnx-build/venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  echo "audio_driver is not built; run 'rbnx build' first" >&2
+  exit 1
+fi
+
+exec "$PYTHON" -m audio_driver.main

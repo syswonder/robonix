@@ -85,6 +85,9 @@ FLAGS=(--mcp --ros2)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
 echo "[build] rbnx codegen ${FLAGS[*]}"
+# RBNX_CODEGEN_POLICY_EXEMPT: Scene's host codegen stages IDL/ROS artifacts.
+# Docker runtime Python stubs are regenerated and import-validated offline by
+# scripts/start.sh with the exact interpreter and libraries baked into $IMG.
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────

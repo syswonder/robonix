@@ -33,11 +33,10 @@ Audio driver -- Robonix primitive layer, automatically scans ALSA devices, provi
 
 ```
 audio_driver/
-├── proto/
-│   └── audio_driver.proto      # Self-contained gRPC definitions
-├── proto_gen/                  # Generated *_pb2.py at build time (git-ignored)
+├── rbnx-build/                 # Managed venv + generated contract modules
 ├── scripts/
-│   └── build.sh                # Proto code generation
+│   ├── build.sh                # Venv sync + codegen + import smoke test
+│   └── start.sh                # Managed-venv runtime entry
 ├── audio_driver/
 │   ├── __init__.py             # Package entry point
 │   ├── node.py                 # Main entry: Atlas registration + daemon threads + main()
@@ -51,35 +50,23 @@ audio_driver/
 
 ## Quick Start
 
-### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-# Core dependencies: grpcio, grpcio-tools, protobuf
-# System dependencies: arecord, aplay (alsa-utils package)
-```
-
-### 2. Generate Proto Stubs
+### 1. Build
 
 ```bash
 bash scripts/build.sh
 ```
 
-### 3. Start the Driver
+This creates `rbnx-build/venv`, installs dependencies, runs `rbnx codegen`
+with that interpreter, and verifies the generated imports. The host still
+needs `arecord` and `aplay` from `alsa-utils`.
+
+### 2. Start the Driver
 
 ```bash
-# Normal mode (auto-scan devices + Atlas registration)
-export PYTHONPATH=$(pwd)/proto_gen:${PYTHONPATH:-}
-python -m audio_driver.main
-
-# Standalone mode (skip Atlas registration)
-AUDIO_DRIVER_STANDALONE=1 python -m audio_driver.main
-
-# Specify devices (override auto-detection)
-AUDIO_MIC_DEVICE=hw:1,0 AUDIO_SPEAKER_DEVICE=hw:0,0 python -m audio_driver.main
+bash scripts/start.sh
 ```
 
-### 4. Launch via Robonix
+### 3. Launch via Robonix
 
 ```bash
 rbnx run com.robonix.example.audio_driver
@@ -190,12 +177,9 @@ When creating a new primitive driver, copy this package and modify:
 | Environment variable prefix | AUDIO_ | Your device prefix |
 | Manifest node ID | com.robonix.primitive.audio | com.robonix.primitive.your_device |
 
-Keep unchanged:
-- `_ensure_proto_gen()` -- Proto stub lookup logic
-- `_register_with_atlas()` -- Atlas registration + heartbeat
-- Daemon thread pattern -- One gRPC server thread per interface
-- `robonix_manifest.yaml` structure
-- `scripts/build.sh` proto generation
+Keep the managed build contract unchanged: prepare the package venv before
+`rbnx codegen`, select its interpreter through both `PATH` and
+`RBNX_CODEGEN_PYTHON`, and import-test generated modules before runtime.
 
 ## Atlas Integration
 

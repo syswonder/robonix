@@ -144,7 +144,9 @@ fi
 
 # ── 3. Codegen (.proto + grpc stubs → rbnx-build/codegen/) ──────────────────
 echo "[build] rbnx codegen"
-PATH="$PKG/$VENV/bin:$PATH" rbnx codegen --mcp -p "$PKG"
+RBNX_CODEGEN_PYTHON="$PKG/$VENV/bin/python" \
+    PATH="$PKG/$VENV/bin:$PATH" \
+    rbnx codegen --mcp -p "$PKG"
 
 # The service imports both gRPC stubs (`speech_pb2*`) and MCP dataclasses
 # (`speech_mcp`) at startup. Verify both generated Python roots now so a
@@ -152,9 +154,14 @@ PATH="$PKG/$VENV/bin:$PATH" rbnx codegen --mcp -p "$PKG"
 # registration timeout during `rbnx boot`.
 CODEGEN_PYTHONPATH="$PKG/$BUILD/codegen/proto_gen:$PKG/$BUILD/codegen/robonix_mcp_types"
 PYTHONPATH="$CODEGEN_PYTHONPATH:${PYTHONPATH:-}" "$VENV/bin/python" - <<'PY'
+import asr_pb2
+import audio_pb2
+import robonix_contracts_pb2
+import robonix_contracts_pb2_grpc
 import speech_mcp
 import speech_pb2
 import speech_pb2_grpc
+import tts_pb2
 
 print("[build] generated Speech gRPC and MCP imports OK")
 PY
