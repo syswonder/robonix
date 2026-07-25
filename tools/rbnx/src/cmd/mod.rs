@@ -204,10 +204,10 @@ pub enum Commands {
     },
     /// Run codegen for a package (proto + gRPC stubs + MCP types)
     ///
-    /// Wraps robonix-codegen + grpc_tools.protoc: stages system protos under
-    /// `<pkg>/rbnx-build/proto-staging/`, then emits `<pkg>/proto_gen/` (and
-    /// optional `<pkg>/robonix_mcp_types/`). If `-p` is omitted, rbnx walks up
-    /// from the current directory to find a package manifest.
+    /// Wraps robonix-codegen + Python grpcio-tools: stages system protos under
+    /// `<pkg>/rbnx-build/proto-staging/`, then emits generated artifacts under
+    /// `<pkg>/rbnx-build/codegen/`. If `-p` is omitted, rbnx walks up from the
+    /// current directory to find a package manifest.
     Codegen {
         /// Package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
@@ -220,14 +220,17 @@ pub enum Commands {
         /// source install/setup.bash so rclpy types are Robonix's.
         #[arg(long)]
         ros2: bool,
-        /// Remove previous proto_gen/, robonix_mcp_types/, rbnx-build/ before regenerating
+        /// Remove previous generated outputs before regenerating (never removes rbnx-build/ws/)
         #[arg(long)]
         clean: bool,
-        /// Directory (relative to package root, or absolute) where proto_gen/ and robonix_mcp_types/
-        /// should be placed. Defaults to package root; use e.g. `--out-dir tiago_bridge` to put
-        /// stubs inside a package subdirectory.
+        /// Directory (relative to package root, or absolute) containing generated artifact directories.
+        /// Defaults to `<package>/rbnx-build/codegen`.
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        /// Python interpreter used for grpcio-tools generation and import validation.
+        /// Precedence: this flag, RBNX_CODEGEN_PYTHON, then `python3`.
+        #[arg(long, value_name = "PATH")]
+        python: Option<PathBuf>,
     },
     /// Regenerate the mdBook contract + ROS IDL reference
     ///
@@ -448,7 +451,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             ros2,
             clean,
             out_dir,
-        } => codegen::execute(config, package, mcp, ros2, clean, out_dir).await,
+            python,
+        } => codegen::execute(config, package, mcp, ros2, clean, out_dir, python).await,
         Commands::Docs { out_dir } => docs::execute(config, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
