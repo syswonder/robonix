@@ -57,7 +57,16 @@ FLAGS=(--mcp)
 # The complete build directory was already removed above. A second clean here
 # would delete the freshly synchronized venv before model warm-up.
 echo "[build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+RBNX_CODEGEN_PYTHON="$PKG/$VENV/bin/python" \
+    PATH="$PKG/$VENV/bin:$PATH" \
+    rbnx codegen -p "$PKG" "${FLAGS[@]}"
+
+CODEGEN_PYTHONPATH="$PKG/$BUILD/codegen/proto_gen:$PKG/$BUILD/codegen/robonix_mcp_types"
+PYTHONPATH="$CODEGEN_PYTHONPATH:${PYTHONPATH:-}" "$VENV/bin/python" - <<'PY'
+import std_msgs_mcp
+
+print("[build] generated MemSearch MCP imports OK")
+PY
 
 # ── 4. Warm the ONNX embedding model at BUILD time ──────────────────────────
 # The service constructs MemSearch(embedding_provider="onnx") at start, which

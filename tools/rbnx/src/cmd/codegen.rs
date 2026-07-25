@@ -26,8 +26,10 @@ use anyhow::{Context, Result};
 use colored::*;
 use robonix_cli::{Config, SourcePathKey};
 use robonix_scribe::debug;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn run_cmd(label: &str, cmd: &mut Command) -> Result<()> {
     debug!("[codegen] {}: {:?}", label, cmd);
@@ -72,6 +74,7 @@ pub async fn execute(
     ros2: bool,
     clean: bool,
     out_dir: Option<PathBuf>,
+    python: Option<PathBuf>,
 ) -> Result<()> {
     let pkg_root = match package {
         Some(p) => resolve_pkg_root(&p)?,
@@ -199,40 +202,66 @@ pub async fn execute(
     // Probe for both python3 and the module up front — the historical
     // silent-ignore on failure left packages with "0 generated Servicers"
     // at runtime and a debug session per missing dep.
-    probe_python_grpc_tools()?;
+    let python_selection = select_codegen_python(python)?;
+    let python = &python_selection.path;
+    let python_info = probe_python_grpc_tools(python)?;
+    println!(
+        "{} Python: {} ({})",
+        "[codegen]".bold(),
+        python_info.executable,
+        python_info.version
+    );
 
     println!(
         "{} grpc_tools.protoc → {}",
         "[codegen]".bold(),
         proto_gen.display()
     );
-    std::fs::create_dir_all(&proto_gen)?;
-    let proto_files: Vec<PathBuf> = std::fs::read_dir(&runtime_proto)?
-        .chain(std::fs::read_dir(&proto_staging)?)
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("proto"))
-        .collect();
+    let proto_gen_pending = temporary_sibling(&proto_gen, "pending");
+    if proto_gen_pending.exists() {
+        std::fs::remove_dir_all(&proto_gen_pending)?;
+    }
+    std::fs::create_dir_all(&proto_gen_pending)?;
+    let mut proto_inputs = collect_proto_inputs(&runtime_proto, "runtime")?;
+    proto_inputs.extend(collect_proto_inputs(&proto_staging, "staged")?);
+    proto_inputs.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
 
-    let mut protoc = Command::new("python3");
+    let input_fingerprint = fingerprint_proto_inputs(&proto_inputs)?;
+    let mut protoc = Command::new(python);
     protoc
         .args(["-m", "grpc_tools.protoc", "-I"])
         .arg(&runtime_proto)
         .arg("-I")
         .arg(&proto_staging)
-        .arg(format!("--python_out={}", proto_gen.display()))
-        .arg(format!("--grpc_python_out={}", proto_gen.display()));
-    for f in &proto_files {
-        protoc.arg(f);
+        .arg(format!("--python_out={}", proto_gen_pending.display()))
+        .arg(format!("--grpc_python_out={}", proto_gen_pending.display()));
+    for input in &proto_inputs {
+        protoc.arg(&input.physical_path);
     }
     let status = protoc
         .status()
-        .with_context(|| "failed to spawn python3 -m grpc_tools.protoc")?;
+        .with_context(|| format!("failed to spawn {} -m grpc_tools.protoc", python.display()))?;
     if !status.success() {
+        std::fs::remove_dir_all(&proto_gen_pending).ok();
         anyhow::bail!(
-            "python3 -m grpc_tools.protoc failed with {status}. \
-             Re-run with -v / RUST_LOG=debug to see protoc output."
+            "{} -m grpc_tools.protoc failed with {status}. \
+             Re-run with -v / RUST_LOG=debug to see protoc output.",
+            python.display()
         );
     }
+    if let Err(error) = validate_generated_imports(python, &proto_gen_pending) {
+        std::fs::remove_dir_all(&proto_gen_pending).ok();
+        return Err(error);
+    }
+    write_toolchain_metadata(
+        &proto_gen_pending.join("codegen-toolchain.json"),
+        &python_info,
+        &python_selection.source,
+        direct_codegen.as_deref(),
+        &rust_root,
+        &input_fingerprint,
+    )?;
+    publish_directory(&proto_gen_pending, &proto_gen)?;
 
     // 3b. Optional: ROS 2 canonical message overlay (source). Emitted next
     //     to proto_gen / robonix_mcp_types so it follows the same rbnx-build
@@ -271,8 +300,12 @@ pub async fn execute(
 fn clean_codegen_outputs<'a>(paths: impl IntoIterator<Item = &'a PathBuf>) -> Result<()> {
     for path in paths {
         if path.exists() {
-            std::fs::remove_dir_all(path)
-                .with_context(|| format!("remove codegen output {}", path.display()))?;
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            }
+            .with_context(|| format!("remove codegen output {}", path.display()))?;
         }
     }
     Ok(())
@@ -333,35 +366,314 @@ pub(crate) fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
 /// copy-pasteable install instruction if either is missing — this is the
 /// only Python dep `rbnx codegen` reaches for, so making it explicit up
 /// front is the entire UX cost of not vendoring protoc + grpc_python_plugin.
-fn probe_python_grpc_tools() -> Result<()> {
-    let py = Command::new("python3").arg("--version").output();
-    if py.is_err() || !py.as_ref().unwrap().status.success() {
+#[derive(Debug)]
+struct PythonInfo {
+    executable: String,
+    version: String,
+    grpcio_tools: String,
+    protobuf: String,
+    grpcio: String,
+    protoc_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProtoInput {
+    logical_path: String,
+    physical_path: PathBuf,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PythonSelection {
+    path: PathBuf,
+    source: String,
+}
+
+fn resolve_python_selection(
+    cli: Option<PathBuf>,
+    environment: Option<std::ffi::OsString>,
+) -> PythonSelection {
+    if let Some(path) = cli {
+        return PythonSelection {
+            path,
+            source: "cli".to_string(),
+        };
+    }
+    if let Some(path) = environment
+        && !path.is_empty()
+    {
+        return PythonSelection {
+            path: PathBuf::from(path),
+            source: "environment".to_string(),
+        };
+    }
+    PythonSelection {
+        path: PathBuf::from("python3"),
+        source: "default".to_string(),
+    }
+}
+
+fn select_codegen_python(cli: Option<PathBuf>) -> Result<PythonSelection> {
+    let selection = resolve_python_selection(cli, std::env::var_os("RBNX_CODEGEN_PYTHON"));
+    let candidate = &selection.path;
+    let output = Command::new(candidate)
+        .arg("--version")
+        .output()
+        .with_context(|| {
+            format!(
+                "cannot execute codegen Python selected by {}: {}",
+                selection.source,
+                candidate.display()
+            )
+        })?;
+    if !output.status.success() {
         anyhow::bail!(
-            "python3 not found on PATH. `rbnx codegen` shells out to \
-             `python3 -m grpc_tools.protoc` to emit Python gRPC stubs. \
-             Install python3 (>=3.10) and re-run."
+            "codegen Python selected by {} failed `--version`: {} ({})",
+            selection.source,
+            candidate.display(),
+            output.status
         );
     }
-    let mod_probe = Command::new("python3")
-        .args(["-c", "import grpc_tools.protoc"])
+    Ok(selection)
+}
+
+fn probe_python_grpc_tools(python: &Path) -> Result<PythonInfo> {
+    const PROBE: &str = r#"
+import importlib.metadata as m, json, sys
+import grpc_tools.protoc
+def v(name):
+    try: return m.version(name)
+    except m.PackageNotFoundError: return "unknown"
+print(json.dumps({"executable": sys.executable, "version": sys.version.split()[0],
+                  "grpcio_tools": v("grpcio-tools"), "protobuf": v("protobuf"),
+                  "grpcio": v("grpcio")}, sort_keys=True))
+"#;
+    let mod_probe = Command::new(python)
+        .args(["-c", PROBE])
         .output()
-        .with_context(|| "failed to spawn python3 for grpc_tools probe")?;
+        .with_context(|| format!("failed to spawn {} for grpc_tools probe", python.display()))?;
     if !mod_probe.status.success() {
-        let py_path = Command::new("python3")
-            .args(["-c", "import sys; print(sys.executable)"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "python3".to_string());
         anyhow::bail!(
-            "Python module 'grpc_tools' not importable from {py_path}.\n\
+            "Python module 'grpc_tools' not importable from {}.\n\
              `rbnx codegen` needs grpcio-tools to emit Python `_pb2.py` + `_pb2_grpc.py`.\n\
              Install into the python3 above:\n\
-             \n    python3 -m pip install --user grpcio-tools\n"
+             \n    {} -m pip install grpcio-tools\n\
+             Probe stderr: {}",
+            python.display(),
+            python.display(),
+            String::from_utf8_lossy(&mod_probe.stderr).trim()
         );
     }
+    let value: serde_json::Value = serde_json::from_slice(&mod_probe.stdout)
+        .with_context(|| "codegen Python returned invalid toolchain probe metadata")?;
+    let get = |key: &str| {
+        value[key]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| format!("codegen Python probe omitted `{key}`"))
+    };
+    let protoc_version = Command::new(python)
+        .args(["-m", "grpc_tools.protoc", "--version"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to query grpc_tools.protoc version via {}",
+                python.display()
+            )
+        })?;
+    if !protoc_version.status.success() {
+        anyhow::bail!(
+            "failed to query bundled grpc_tools.protoc version via {}: {}",
+            python.display(),
+            String::from_utf8_lossy(&protoc_version.stderr).trim()
+        );
+    }
+    Ok(PythonInfo {
+        executable: get("executable")?,
+        version: get("version")?,
+        grpcio_tools: get("grpcio_tools")?,
+        protobuf: get("protobuf")?,
+        grpcio: get("grpcio")?,
+        protoc_version: String::from_utf8_lossy(&protoc_version.stdout)
+            .trim()
+            .to_owned(),
+    })
+}
+
+fn collect_proto_inputs(root: &Path, namespace: &str) -> Result<Vec<ProtoInput>> {
+    let mut inputs = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("read proto input directory {}", root.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("proto") {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("derive logical proto path for {}", path.display()))?;
+        inputs.push(ProtoInput {
+            logical_path: format!(
+                "{namespace}/{}",
+                relative.to_string_lossy().replace('\\', "/")
+            ),
+            physical_path: path,
+        });
+    }
+    Ok(inputs)
+}
+
+fn fingerprint_proto_inputs(proto_inputs: &[ProtoInput]) -> Result<String> {
+    let mut sorted = proto_inputs.to_vec();
+    sorted.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+    let mut digest = Sha256::new();
+    for input in sorted {
+        let contents = std::fs::read(&input.physical_path).with_context(|| {
+            format!(
+                "read proto input for fingerprint: {}",
+                input.physical_path.display()
+            )
+        })?;
+        digest.update((input.logical_path.len() as u64).to_be_bytes());
+        digest.update(input.logical_path.as_bytes());
+        digest.update((contents.len() as u64).to_be_bytes());
+        digest.update(contents);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn temporary_sibling(path: &Path, label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(
+        ".{}.{}-{}-{nonce}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        label,
+        std::process::id()
+    ))
+}
+
+fn validate_generated_imports(python: &Path, generated: &Path) -> Result<()> {
+    const VALIDATE: &str = r#"
+import importlib, pathlib, sys, traceback
+root = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+files = sorted(set(root.rglob("*_pb2.py")) | set(root.rglob("*_pb2_grpc.py")))
+if not files:
+    raise SystemExit("no generated *_pb2.py or *_pb2_grpc.py files found")
+failed = []
+for path in files:
+    name = ".".join(path.relative_to(root).with_suffix("").parts)
+    try:
+        importlib.import_module(name)
+    except Exception:
+        failed.append((str(path.relative_to(root)), traceback.format_exc()))
+if failed:
+    for path, error in failed:
+        print("IMPORT FAILED: " + path, file=sys.stderr)
+        print(error, file=sys.stderr)
+    raise SystemExit(f"{len(failed)} of {len(files)} generated modules failed import validation")
+print(f"validated {len(files)} generated Python modules")
+"#;
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(VALIDATE)
+        .arg(generated)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run generated-stub validation with {}",
+                python.display()
+            )
+        })?;
+    ensure_success("generated Python import validation", output)
+}
+
+fn ensure_success(label: &str, output: Output) -> Result<()> {
+    if output.status.success() {
+        println!(
+            "{} {}",
+            "[codegen]".bold(),
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{label} failed with {}:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn publish_directory(pending: &Path, destination: &Path) -> Result<()> {
+    let backup = temporary_sibling(destination, "previous");
+    if destination.exists() {
+        std::fs::rename(destination, &backup).with_context(|| {
+            format!(
+                "preserve previous generated stubs {}",
+                destination.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(pending, destination) {
+        if backup.exists() {
+            std::fs::rename(&backup, destination).ok();
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "publish generated stubs atomically to {}",
+                destination.display()
+            )
+        });
+    }
+    if backup.exists() {
+        std::fs::remove_dir_all(backup)?;
+    }
     Ok(())
+}
+
+fn write_toolchain_metadata(
+    path: &Path,
+    python: &PythonInfo,
+    selection_source: &str,
+    codegen_bin: Option<&Path>,
+    rust_root: &Path,
+    input_fingerprint: &str,
+) -> Result<()> {
+    let generator_version = codegen_bin.and_then(|bin| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|version| !version.is_empty())
+    });
+    let metadata = serde_json::json!({
+        "schema_version": 1,
+        "inputs": {
+            "algorithm": "sha256",
+            "proto_paths_and_contents": input_fingerprint
+        },
+        "generator": {
+            "kind": if codegen_bin.is_some() { "binary" } else { "cargo-run" },
+            "path": codegen_bin.map(|p| p.display().to_string()),
+            "version": generator_version,
+            "rust_root": rust_root.display().to_string()
+        },
+        "python": {
+            "executable": python.executable,
+            "selection_source": selection_source,
+            "version": python.version,
+            "grpcio_tools": python.grpcio_tools,
+            "bundled_protoc": python.protoc_version,
+            "protobuf": python.protobuf,
+            "grpcio": python.grpcio
+        }
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&metadata)?)
+        .with_context(|| format!("write codegen metadata {}", path.display()))
 }
 
 /// Build a fresh `Command` invoking `robonix-codegen` either directly
@@ -422,6 +734,163 @@ mod tests {
         assert!(!codegen.exists());
         assert!(!staging.exists());
         assert_eq!(fs::read(&setup).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publish_directory_replaces_previous_tree() {
+        let root = temp_root("atomic-publish");
+        let destination = root.join("proto_gen");
+        let pending = root.join(".proto_gen.pending");
+        fs::create_dir_all(&destination).unwrap();
+        fs::create_dir_all(&pending).unwrap();
+        fs::write(destination.join("old_pb2.py"), "old").unwrap();
+        fs::write(pending.join("new_pb2.py"), "new").unwrap();
+
+        publish_directory(&pending, &destination).unwrap();
+
+        assert!(!pending.exists());
+        assert!(!destination.join("old_pb2.py").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("new_pb2.py")).unwrap(),
+            "new"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validates_every_generated_python_module() {
+        let root = temp_root("validate-imports");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("hello_pb2.py"), "VALUE = 1\n").unwrap();
+        fs::write(
+            root.join("hello_pb2_grpc.py"),
+            "import hello_pb2\nVALUE = hello_pb2.VALUE\n",
+        )
+        .unwrap();
+
+        validate_generated_imports(Path::new("python3"), &root).unwrap();
+
+        fs::write(root.join("broken_pb2.py"), "raise RuntimeError('broken')\n").unwrap();
+        let error = validate_generated_imports(Path::new("python3"), &root).unwrap_err();
+        assert!(error.to_string().contains("broken_pb2.py"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn python_selection_precedence_is_cli_then_environment_then_default() {
+        let env = Some(std::ffi::OsString::from("/env/python"));
+        assert_eq!(
+            resolve_python_selection(Some(PathBuf::from("/cli/python")), env.clone()),
+            PythonSelection {
+                path: PathBuf::from("/cli/python"),
+                source: "cli".to_string(),
+            }
+        );
+        assert_eq!(
+            resolve_python_selection(None, env),
+            PythonSelection {
+                path: PathBuf::from("/env/python"),
+                source: "environment".to_string(),
+            }
+        );
+        assert_eq!(
+            resolve_python_selection(None, None),
+            PythonSelection {
+                path: PathBuf::from("python3"),
+                source: "default".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn proto_fingerprint_is_order_independent_and_content_sensitive() {
+        let root = temp_root("fingerprint");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("a.proto");
+        let second = root.join("b.proto");
+        fs::write(&first, "syntax = \"proto3\";\n").unwrap();
+        fs::write(&second, "message B {}\n").unwrap();
+
+        let first_input = ProtoInput {
+            logical_path: "runtime/a.proto".to_string(),
+            physical_path: first.clone(),
+        };
+        let second_input = ProtoInput {
+            logical_path: "staged/b.proto".to_string(),
+            physical_path: second.clone(),
+        };
+        let forward =
+            fingerprint_proto_inputs(&[first_input.clone(), second_input.clone()]).unwrap();
+        let reverse =
+            fingerprint_proto_inputs(&[second_input.clone(), first_input.clone()]).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 64);
+
+        fs::write(&second, "message B { string value = 1; }\n").unwrap();
+        let changed = fingerprint_proto_inputs(&[first_input, second_input]).unwrap();
+        assert_ne!(forward, changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn proto_fingerprint_does_not_depend_on_clone_root() {
+        let left = temp_root("fingerprint-left");
+        let right = temp_root("fingerprint-right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        let left_path = left.join("same.proto");
+        let right_path = right.join("same.proto");
+        fs::write(&left_path, "message Same {}\n").unwrap();
+        fs::write(&right_path, "message Same {}\n").unwrap();
+
+        let left_hash = fingerprint_proto_inputs(&[ProtoInput {
+            logical_path: "runtime/same.proto".to_string(),
+            physical_path: left_path,
+        }])
+        .unwrap();
+        let right_hash = fingerprint_proto_inputs(&[ProtoInput {
+            logical_path: "runtime/same.proto".to_string(),
+            physical_path: right_path,
+        }])
+        .unwrap();
+
+        assert_eq!(left_hash, right_hash);
+        fs::remove_dir_all(left).unwrap();
+        fs::remove_dir_all(right).unwrap();
+    }
+
+    #[test]
+    fn metadata_records_selection_protoc_and_fingerprint() {
+        let root = temp_root("metadata");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("codegen-toolchain.json");
+        let python = PythonInfo {
+            executable: "/venv/bin/python".to_string(),
+            version: "3.12.1".to_string(),
+            grpcio_tools: "1.70.0".to_string(),
+            protobuf: "5.29.0".to_string(),
+            grpcio: "1.70.0".to_string(),
+            protoc_version: "libprotoc 29.3".to_string(),
+        };
+
+        write_toolchain_metadata(
+            &path,
+            &python,
+            "environment",
+            None,
+            &root,
+            "0123456789abcdef",
+        )
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["python"]["selection_source"], "environment");
+        assert_eq!(value["python"]["bundled_protoc"], "libprotoc 29.3");
+        assert_eq!(
+            value["inputs"]["proto_paths_and_contents"],
+            "0123456789abcdef"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

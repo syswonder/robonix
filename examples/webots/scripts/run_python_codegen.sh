@@ -57,7 +57,9 @@ if [[ "$compatible" != "1" ]]; then
 fi
 
 echo "[webots/codegen] rbnx codegen -p $PKG $*"
-PATH="$VENV/bin:$PATH" rbnx codegen -p "$PKG" "$@"
+RBNX_CODEGEN_PYTHON="$VENV/bin/python" \
+    PATH="$VENV/bin:$PATH" \
+    rbnx codegen -p "$PKG" "$@"
 
 CODEGEN_ROOT="$PKG/rbnx-build/codegen"
 PYTHONPATH="$CODEGEN_ROOT/proto_gen:$CODEGEN_ROOT/robonix_mcp_types:${PYTHONPATH:-}" \

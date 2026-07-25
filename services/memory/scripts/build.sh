@@ -60,8 +60,18 @@ VIRTUAL_ENV="$PKG/$VENV" "$_UV" sync --active --no-managed-python
 
 # ── 4. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
 FLAGS=(--mcp)
-[[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
+# The complete build directory was already removed above. Passing --clean here
+# would delete the freshly synchronized runtime venv.
 echo "[build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+RBNX_CODEGEN_PYTHON="$PKG/$VENV/bin/python" \
+    PATH="$PKG/$VENV/bin:$PATH" \
+    rbnx codegen -p "$PKG" "${FLAGS[@]}"
+
+CODEGEN_PYTHONPATH="$PKG/$BUILD/codegen/proto_gen:$PKG/$BUILD/codegen/robonix_mcp_types"
+PYTHONPATH="$CODEGEN_PYTHONPATH:${PYTHONPATH:-}" "$VENV/bin/python" - <<'PY'
+import std_msgs_mcp
+
+print("[build] generated Memory MCP imports OK")
+PY
 
 echo "[build] done."
