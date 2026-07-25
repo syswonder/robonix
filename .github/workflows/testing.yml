@@ -1043,15 +1043,20 @@ jobs:
         # state under <manifest-dir>/rbnx-boot/ (not ~/.robonix/), that
         # Soma package children are stopped cleanly, and that the stack
         # can come back up after a clean teardown (the issue #128
-        # regression). The second boot reuses the per-run sim container;
-        # the validator does NOT start a new webots instance. CI leaves
-        # the second boot running so the next step can exercise scenarios
-        # against the restarted stack; the final cleanup step shuts it down.
+        # regression). The second boot reuses both the per-run sim container
+        # and the persistent mapping/scene state: a process restart must not
+        # silently turn into a new-map session while the physical robot stays
+        # at its post-scenario pose. CI leaves the second boot running so the
+        # next step can exercise scenarios against the restarted stack; the
+        # final cleanup step shuts it down.
         working-directory: examples/webots
         run: |
           set -euo pipefail
           milvus_lock="$(dirname "$AGENT_MILVUS_URI")/.$(basename "$AGENT_MILVUS_URI").lock"
-          export ROBONIX_LIFECYCLE_RESET_PATHS="${MAPPING_MAPS_DIR}:${SCENE_DATA_DIR}:${AGENT_MEMORY_DIR}:${AGENT_MILVUS_URI}:${milvus_lock}"
+          # Scenario memory uses fixed fixture keys and must be isolated between
+          # passes. Mapping and scene data are deliberately preserved because
+          # they are runtime state whose reboot recovery this test exercises.
+          export ROBONIX_LIFECYCLE_RESET_PATHS="${AGENT_MEMORY_DIR}:${AGENT_MILVUS_URI}:${milvus_lock}"
           python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
             --rbnx rbnx \
             --manifest robonix_manifest.ci.generated.yaml \
