@@ -15,7 +15,7 @@ dependencies = [
     "fastmcp",
     "grpcio>=1.81.1",
     "grpcio-tools>=1.81.1",
-    "protobuf",
+    "protobuf>=7.35",
     "uvicorn",
     "robonix-api",
     "pyyaml>=6.0",

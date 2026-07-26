@@ -77,17 +77,17 @@ primitive:
       frame_id: lidar
   # ── audio mic/speaker source ─────────────────────────────────────────────
   # Local ALSA provider. It remains available for robot-local audio.
-  - name: audio_driver
-    path: ./primitives/audio_driver
-    config: {}
+  #- name: audio_driver
+  #  path: ./primitives/audio_driver
+  #  config: {}
   # Reverse bridge for a robonix-client audio route. It advertises its
   # endpoint through Atlas and waits for the client to connect, so neither
   # this manifest nor Liaison stores a client IP.
-  - name: audio_client_bridge
-    path: ./primitives/audio_client_bridge
-    config:
-      transport: reverse
-      listen_port: 60002
+  #- name: audio_client_bridge
+  #  path: ./primitives/audio_client_bridge
+  #  config:
+  #    transport: reverse
+  #    listen_port: 60002
 
 # after booted all the primitives, start the services
 service:
@@ -103,33 +103,33 @@ service:
   # memsearch — default reference long-term-memory service for the
   # agent. Lives at services/memsearch in the robonix tree; pilot
   # queries it for relevant past context when planning.
-  - name: memory
-    path: ${ROBONIX_SOURCE_PATH}/services/memsearch
-    config:
-      backend: sqlite
+  #- name: memory
+  #  path: ${ROBONIX_SOURCE_PATH}/services/memsearch
+  #  config:
+  #    backend: sqlite
 
   # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
   # liaison's voice loop connects to. The selected audio provider is supplied
   # by the client for F2, voice steer, and hands-free turns.
   # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
-  - name: speech
-    path: ${ROBONIX_SOURCE_PATH}/services/speech
-    config:
-      disable_whisper: true
-      funasr_device: cuda
-      tts_voice: zh-CN-XiaoxiaoNeural
-      # CI and headless Webots have no connected reverse-audio client. Keep
-      # the bridge available, but send default speech to the local provider.
-      default_speaker_provider_id: audio_driver
+  #- name: speech
+  #  path: ${ROBONIX_SOURCE_PATH}/services/speech
+  #  config:
+  #    disable_whisper: true
+  #    funasr_device: cuda
+  #    tts_voice: zh-CN-XiaoxiaoNeural
+  #    # CI and headless Webots have no connected reverse-audio client. Keep
+  #    # the bridge available, but send default speech to the local provider.
+  #    default_speaker_provider_id: audio_driver
 
   # voiceprint — ECAPA-TDNN speaker identification. Provides
   # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
   # stamps each Task with the identified user_id, and `rbnx chat`'s user
   # modal enrolls/lists speakers. Config is env-driven (port 50092,
   # threshold 0.25, device auto) so the manifest block stays empty.
-  - name: voiceprint
-    path: ${ROBONIX_SOURCE_PATH}/services/voiceprint
-    config: {}
+  #- name: voiceprint
+  #  path: ${ROBONIX_SOURCE_PATH}/services/voiceprint
+  #  config: {}
 
   # Mapping publishes the occupancy, point cloud, pose, and map-management
   # contracts consumed by Navigation and Scene.

@@ -84,7 +84,7 @@ RUN sed -i \
 # bind-mounted package dirs under /robonix_pkgs.)
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python3 -m pip install --no-cache-dir \
-    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx \
+    "grpcio>=1.78.0" "protobuf>=7.35" mcp "fastmcp>=3" numpy Pillow uvicorn httpx \
     "websockets>=14,<17"
 
 ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
