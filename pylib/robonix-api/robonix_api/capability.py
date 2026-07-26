@@ -114,6 +114,17 @@ def _resolve_provider_id(default_id: str) -> str:
     return instance_id
 
 
+def _mcp_loopback_allowed_hosts(bind_host: str) -> list[str]:
+    """Return exact/wildcard Host values accepted by a loopback MCP server."""
+
+    if not ipaddress.ip_address(bind_host).is_loopback:
+        return []
+    hosts = [bind_host, f"{bind_host}:*"]
+    if bind_host == "127.0.0.1":
+        hosts.extend(["localhost", "localhost:*"])
+    return hosts
+
+
 # ── _ProviderBase ───────────────────────────────────────────────────────────
 
 
@@ -581,12 +592,17 @@ class _ProviderBase:
         # Preserve cross-host compatibility for wildcard/LAN binds. A
         # loopback-only deployment is also reachable from a local browser, so
         # keep the MCP SDK's Host-header/DNS-rebinding guard enabled there.
+        # The SDK defaults allowed_hosts to an empty list when callers provide
+        # explicit transport settings, which otherwise rejects every Atlas MCP
+        # request with HTTP 421. Allow only this loopback endpoint (with its
+        # dynamically allocated port) and the equivalent localhost spelling.
         protect_loopback = ipaddress.ip_address(self._bind_host).is_loopback
         self._mcp_app = FastMCP(
             self.id,
             host=self._bind_host,
             transport_security=TransportSecuritySettings(
-                enable_dns_rebinding_protection=protect_loopback
+                enable_dns_rebinding_protection=protect_loopback,
+                allowed_hosts=_mcp_loopback_allowed_hosts(self._bind_host),
             ),
         )
 
