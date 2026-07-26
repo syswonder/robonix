@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/get_profile"
+version = "1"
+kind = "service"
+idl = "keystone/srv/GetProfile.srv"
+description = "Resolve the current session to its canonical user profile."
+
+[mode]
+type = "rpc"

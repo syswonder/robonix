@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/get_system_config"
+version = "1"
+kind = "service"
+idl = "keystone/srv/GetSystemConfig.srv"
+description = "Read Keystone account-system configuration."
+
+[mode]
+type = "rpc"

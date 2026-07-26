@@ -1,0 +1,6 @@
+string session_token
+uint8[] audio_data
+uint32 sample_rate_hz
+string voiceprint_provider_id
+---
+keystone/User user

@@ -1,10 +1,13 @@
 [workspace]
 # The 12 Robonix system components live one-per-directory under `system/`.
-# Four currently have a Rust implementation:
+# Rust implementations currently included in the workspace:
 #   - atlas    (capability discovery)
 #   - executor (capability orchestration; embeds sentinel for v0.1)
+#   - keystone (user identity and access-control core)
 #   - liaison  (human-machine interaction)
 #   - pilot    (planning + decision + memory + world model)
+#   - scribe   (logging facade)
+#   - soma     (body model and package bring-up)
 # Repo-side dev tooling lives under `tools/` (rbnx CLI + codegen).
 # Python-only system components (scene) and reference service implementations
 # (services/{memsearch,voiceprint,speech}) are managed by uv and not part of
@@ -12,6 +15,7 @@
 members = [
     "system/atlas",
     "system/executor",
+    "system/keystone",
     "system/liaison",
     "system/pilot",
     "system/scribe",
@@ -59,6 +63,12 @@ protoc-bin-vendored = "3.2"
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
+
+# Identity persistence and authentication
+argon2 = "0.5"
+base64 = "0.22"
+rand = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # OpenAI-compatible VLM client
 async-openai = "0.34.0"

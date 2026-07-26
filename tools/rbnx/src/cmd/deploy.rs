@@ -300,7 +300,9 @@ fn check_prerequisites(
     // otherwise `rbnx start` performs the build after spawn and the provider
     // registration timeout can kill a legitimate first build (Scene model
     // downloads are a common example).
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+    const SYSTEM_BUILTINS: &[&str] = &[
+        "atlas", "executor", "keystone", "pilot", "liaison", "soma", "vitals",
+    ];
     if let Some(source_root) = robonix_source_path {
         for name in deploy.system.keys() {
             if SYSTEM_BUILTINS.contains(&name.as_str()) {
@@ -1108,6 +1110,7 @@ pub async fn execute(
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
+                ("keystone", "robonix-keystone"),
                 ("soma", "robonix-soma"),
                 ("pilot", "robonix-pilot"),
                 ("liaison", "robonix-liaison"),
@@ -1277,7 +1280,8 @@ pub async fn execute(
         let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
 
         if !skip_system {
-            let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+            let builtin_names: &[&str] =
+                &["atlas", "keystone", "executor", "pilot", "liaison", "soma"];
             for (key, value) in &deploy.system {
                 if builtin_names.contains(&key.as_str()) {
                     continue;
@@ -1639,7 +1643,12 @@ fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> 
         .get(serde_yaml::Value::String("listen".into()))?
         .as_str()?;
     let trimmed = s.trim();
-    if trimmed.is_empty() || !matches!(name, "atlas" | "executor" | "pilot" | "liaison" | "soma") {
+    if trimmed.is_empty()
+        || !matches!(
+            name,
+            "atlas" | "keystone" | "executor" | "pilot" | "liaison" | "soma"
+        )
+    {
         return None;
     }
     Some(trimmed.to_string())

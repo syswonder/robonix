@@ -43,6 +43,7 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Status};
 use uuid::Uuid;
 
+use crate::keystone_gateway::KeystoneGateway;
 use crate::pb::audio::AudioChunk;
 use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
@@ -205,6 +206,7 @@ pub async fn start_voice_session(
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
+    keystone: Option<Arc<KeystoneGateway>>,
 ) -> Result<impl Stream<Item = Result<VoiceEvent, Status>>, Status> {
     let session_id = if req.session_id.is_empty() {
         Uuid::new_v4().to_string()
@@ -250,6 +252,7 @@ pub async fn start_voice_session(
             atlas,
             pilot_endpoint_default,
             access,
+            keystone,
             tx.clone(),
         )
         .await;
@@ -287,9 +290,18 @@ async fn run_session(
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
+    keystone: Option<Arc<KeystoneGateway>>,
     tx: mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<()> {
     let mock = is_mock_mode();
+    // Reject an absent, expired, or disabled account before taking microphone
+    // ownership or invoking ASR. The resolved identity is reused after
+    // transcription so caller-supplied user fields never reach Pilot.
+    let keystone_account = if let Some(keystone) = keystone.as_ref() {
+        Some(keystone.resolve_session(&req.session_token).await?)
+    } else {
+        None
+    };
     // `record_seconds` is now a hard-stop ceiling on streaming capture
     // (FunASR's VAD ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
@@ -360,57 +372,120 @@ async fn run_session(
         anyhow::bail!("empty transcript — nothing to send to Pilot");
     }
 
-    // 3. Voiceprint + access gate. ASR may already have produced a transcript,
-    // but no Pilot task, TTS, or action is allowed until the voice identity passes
-    // the Liaison access policy. Client hints cannot bypass voiceprint when the
-    // gate is enabled.
-    let identity = identify_user(
-        &atlas,
-        &req.voiceprint_node_id,
-        &audio_pcm,
-        &req.client_user_id,
-        &session_id,
-        &tx,
-    )
-    .await;
-    let decision = access.authorize_voice(&req.client_user_id, identity.response.as_ref());
-    let (user_id, access_context) = match decision {
-        access::AccessDecision::Allow {
-            user_id,
-            method,
-            confidence,
-            reason,
-        } => {
-            info!(
-                "[liaison/access] voice allow user={user_id} via {method:?} confidence={confidence:.2}: {reason}"
-            );
+    // 3. Resolve the login session and apply its per-user voice guard. When the
+    // guard is off, Voiceprint is deliberately not called. When it is on, a
+    // Voiceprint outage, unknown speaker, low-confidence result, or another
+    // enrolled user all reject before Pilot receives a task.
+    let principal = if let (Some(keystone), Some(account)) = (keystone.as_ref(), keystone_account) {
+        if account.voice_guard_enabled {
+            let identity = identify_user(
+                &atlas,
+                &req.voiceprint_node_id,
+                &audio_pcm,
+                "",
+                &session_id,
+                &tx,
+            )
+            .await;
+            let identified = identity.response.ok_or_else(|| {
+                anyhow::anyhow!("voice guard requires an available Voiceprint result")
+            })?;
+            let verified = keystone
+                .client_verify_voice(
+                    &req.session_token,
+                    &identified.user_id,
+                    identified.confidence,
+                    access.voice_threshold,
+                )
+                .await?;
+            let account = verified
+                .user
+                .ok_or_else(|| anyhow::anyhow!("Keystone returned no verified user"))?;
             let _ = tx
                 .send(Ok(event_user(
                     KIND_USER_IDENTIFIED,
                     &session_id,
-                    &user_id,
-                    confidence,
-                    &format!("access allowed: {reason}"),
+                    &account.user_id,
+                    identified.confidence,
+                    "voiceprint matched logged-in account",
                 )))
                 .await;
-            (
-                user_id,
-                AccessContext {
-                    method: method.as_str().to_string(),
-                    confidence,
-                    reason,
+            VoicePrincipal {
+                user_id: account.user_id,
+                username: account.username,
+                display_name: account.display_name,
+                roles: account.roles,
+                access: AccessContext {
+                    method: "voiceprint".to_string(),
+                    confidence: identified.confidence,
+                    reason: "voiceprint matched logged-in account".to_string(),
                 },
-            )
+            }
+        } else {
+            VoicePrincipal {
+                user_id: account.user_id,
+                username: account.username,
+                display_name: account.display_name,
+                roles: account.roles,
+                access: AccessContext {
+                    method: "session".to_string(),
+                    confidence: 1.0,
+                    reason: "voice guard disabled for logged-in account".to_string(),
+                },
+            }
         }
-        access::AccessDecision::Deny {
-            user_id,
-            confidence,
-            reason,
-        } => {
-            warn!(
-                "[liaison/access] voice deny user={user_id} confidence={confidence:.2}: {reason}"
-            );
-            anyhow::bail!("access denied for voice user '{user_id}': {reason}");
+    } else {
+        let identity = identify_user(
+            &atlas,
+            &req.voiceprint_node_id,
+            &audio_pcm,
+            &req.client_user_id,
+            &session_id,
+            &tx,
+        )
+        .await;
+        let decision = access.authorize_voice(&req.client_user_id, identity.response.as_ref());
+        match decision {
+            access::AccessDecision::Allow {
+                user_id,
+                method,
+                confidence,
+                reason,
+            } => {
+                info!(
+                    "[liaison/access] voice allow user={user_id} via {method:?} confidence={confidence:.2}: {reason}"
+                );
+                let _ = tx
+                    .send(Ok(event_user(
+                        KIND_USER_IDENTIFIED,
+                        &session_id,
+                        &user_id,
+                        confidence,
+                        &format!("access allowed: {reason}"),
+                    )))
+                    .await;
+                VoicePrincipal {
+                    user_id,
+                    username: String::new(),
+                    display_name: String::new(),
+                    roles: Vec::new(),
+                    access: AccessContext {
+                        method: method.as_str().to_string(),
+                        confidence,
+                        reason,
+                    },
+                }
+            }
+            access::AccessDecision::Deny {
+                user_id,
+                confidence,
+                reason,
+            } => {
+                warn!(
+                    "[liaison/access] voice deny user={user_id} confidence={confidence:.2}: {reason}"
+                );
+                anyhow::bail!("access denied for voice user '{user_id}': {reason}");
+            }
         }
     };
 
@@ -422,8 +497,7 @@ async fn run_session(
     let task = build_task(
         &session_id,
         &transcript,
-        &user_id,
-        &access_context,
+        &principal,
         &audio_pcm,
         &req.context_json,
     );
@@ -491,7 +565,7 @@ async fn run_session(
                                 event_kind: KIND_PILOT,
                                 session_id: session_id.clone(),
                                 text: String::new(),
-                                user_id: user_id.clone(),
+                                user_id: principal.user_id.clone(),
                                 confidence: 0.0,
                                 pilot: Some(ev),
                                 error: String::new(),
@@ -867,6 +941,14 @@ struct AccessContext {
     reason: String,
 }
 
+struct VoicePrincipal {
+    user_id: String,
+    username: String,
+    display_name: String,
+    roles: Vec<String>,
+    access: AccessContext,
+}
+
 async fn identify_user(
     atlas: &Arc<Mutex<AtlasClient>>,
     pin_provider_id: &str,
@@ -1073,8 +1155,7 @@ pub(crate) async fn play_prompt(
 fn build_task(
     session_id: &str,
     transcript: &str,
-    user_id: &str,
-    access: &AccessContext,
+    principal: &VoicePrincipal,
     audio_pcm: &[u8],
     extra_context_json: &str,
 ) -> Task {
@@ -1089,14 +1170,29 @@ fn build_task(
         // updating pilot in lockstep.
         obj.insert("modality".to_string(), serde_json::json!("voice"));
         obj.insert("voice_session".to_string(), serde_json::json!(true));
-        obj.insert("user_id".to_string(), serde_json::json!(user_id));
+        obj.insert("user_id".to_string(), serde_json::json!(principal.user_id));
+        if !principal.username.is_empty() {
+            obj.insert(
+                "username".to_string(),
+                serde_json::json!(principal.username),
+            );
+        }
+        if !principal.display_name.is_empty() {
+            obj.insert(
+                "display_name".to_string(),
+                serde_json::json!(principal.display_name),
+            );
+        }
+        if !principal.roles.is_empty() {
+            obj.insert("roles".to_string(), serde_json::json!(principal.roles));
+        }
         obj.insert(
             "access".to_string(),
             serde_json::json!({
                 "allowed": true,
-                "method": access.method,
-                "confidence": access.confidence,
-                "reason": access.reason,
+                "method": principal.access.method,
+                "confidence": principal.access.confidence,
+                "reason": principal.access.reason,
             }),
         );
     }
@@ -1318,17 +1414,25 @@ mod tests {
         let task = build_task(
             "sess-1",
             "hello",
-            "voice:alice",
-            &AccessContext {
-                method: "voiceprint".to_string(),
-                confidence: 0.9,
-                reason: "matched".to_string(),
+            &VoicePrincipal {
+                user_id: "user-alice".to_string(),
+                username: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                roles: vec!["user".to_string()],
+                access: AccessContext {
+                    method: "voiceprint".to_string(),
+                    confidence: 0.9,
+                    reason: "matched".to_string(),
+                },
             },
             &[],
             r#"{"foo":"bar"}"#,
         );
         let v: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
-        assert_eq!(v["user_id"], "voice:alice");
+        assert_eq!(v["user_id"], "user-alice");
+        assert_eq!(v["username"], "alice");
+        assert_eq!(v["display_name"], "Alice");
+        assert_eq!(v["roles"], serde_json::json!(["user"]));
         assert_eq!(v["voice_session"], true);
         assert_eq!(v["access"]["allowed"], true);
         assert_eq!(v["access"]["method"], "voiceprint");

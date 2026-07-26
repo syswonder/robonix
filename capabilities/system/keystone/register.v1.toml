@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/register"
+version = "1"
+kind = "service"
+idl = "keystone/srv/Register.srv"
+description = "Create a Robonix account when public signup is enabled."
+
+[mode]
+type = "rpc"

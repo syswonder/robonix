@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/verify_voice"
+version = "1"
+kind = "service"
+idl = "keystone/srv/VerifyVoice.srv"
+description = "Verify that a voiceprint match belongs to the current session."
+
+[mode]
+type = "rpc"

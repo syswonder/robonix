@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/admin_update_user"
+version = "1"
+kind = "service"
+idl = "keystone/srv/AdminUpdateUser.srv"
+description = "Update a user's enabled state, roles, and voice policy."
+
+[mode]
+type = "rpc"

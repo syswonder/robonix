@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/update_profile"
+version = "1"
+kind = "service"
+idl = "keystone/srv/UpdateProfile.srv"
+description = "Update the current user's editable profile fields."
+
+[mode]
+type = "rpc"
