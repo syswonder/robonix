@@ -5,9 +5,8 @@
 #
 # Why this is a contract and not a hardcoded default:
 #   Depth back-projection scales every 3D point by fx/fy and offsets it
-#   by cx/cy. A consumer that assumes one camera's intrinsics (e.g. the
-#   Webots head camera) and is fed another camera's depth (a RealSense
-#   at a different resolution / FOV) places objects at systematically
+#   by cx/cy. A consumer that assumes one camera's intrinsics and is fed
+#   another camera's depth at a different resolution or FOV places objects at systematically
 #   wrong map positions — silently, with no crash. Routing K through
 #   atlas means the consumer asks for `primitive/camera/intrinsics` and
 #   gets the geometry of whichever camera is actually wired in.

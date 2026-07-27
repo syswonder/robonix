@@ -357,43 +357,37 @@ class ConceptGraphsDetector:
         rgb_fetcher_msg: Callable[[], Optional[Any]],
         depth_fetcher_msg: Callable[[], Optional[Any]],
         camera_info_fetcher: Callable[[], Optional[_CamIntrinsics]],
-        chassis_pose_fn: Callable[[], Optional[tuple[float, float, float, float]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         registry: ObjectRegistry,
-        # Returns the current world frame id (whatever the localizer
-        # is publishing in `header.frame_id`). Defaults to "map" when
-        # the SelfTracker hasn't seen a pose yet.
+        # Returns the current world frame id from the active localizer.
+        # An empty result means spatial projection is not ready.
         world_frame_fn: Optional[Callable[[], str]] = None,
+        robot_base_frame_fn: Optional[Callable[[], str]] = None,
         period_s: float = 0.6,
+        pose_max_age_s: float = 2.0,
         confidence_threshold: float = 0.30,
-        camera_height_m: float = 1.1,
         max_detections: int = 30,
         yolo_weights_path: Optional[str] = None,
         sam_weights_path: Optional[str] = None,
         clip_model_name: Optional[str] = None,
         clip_pretrained: Optional[str] = None,
         cfg_overrides: Optional[dict] = None,
-        # `hub` exposes tf2 lookups (lookup_transform_4x4). When
-        # provided, the camera→map transform is taken from /tf
-        # directly instead of composing chassis_pose with a
-        # hardcoded camera mount — this matters once SLAM corrects
-        # map→odom and the chassis_pose drifts out of map frame.
+        # `hub` exposes the Atlas-selected ROS2 contract slots used to
+        # compose the camera-to-world transform.
         hub: Any = None,
-        camera_frame: str = "camera_optical_frame",
+        camera_frame: str = "",
         # Body frame asserted for the compatibility pose + extrinsics chain.
         # It must match odometry.child_frame_id when odometry is selected.
-        # Without it, pose means base_link while odometry uses its own child.
+        # Soma's live footprint base frame is preferred when available.
         base_frame: Optional[str] = None,
     ) -> None:
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
         self._cam_info = camera_info_fetcher
-        self._chassis = chassis_pose_fn
         self._on_dets = on_detections
         self._registry = registry
         self._period_s = period_s
         self._conf_thresh = confidence_threshold
-        self._cam_z = camera_height_m
         self._max_dets = max_detections
         self._yolo_weights = yolo_weights_path
         self._sam_weights = sam_weights_path
@@ -402,7 +396,9 @@ class ConceptGraphsDetector:
         self._hub = hub
         self._camera_frame = camera_frame
         self._base_frame = (base_frame or "").strip().lstrip("/")
-        self._world_frame_fn = world_frame_fn or (lambda: "map")
+        self._world_frame_fn = world_frame_fn or (lambda: "")
+        self._robot_base_frame_fn = robot_base_frame_fn or (lambda: "")
+        self._pose_max_age_s = max(0.0, float(pose_max_age_s))
 
         self._yolo: Any = None
         self._sam: Any = None
@@ -822,7 +818,7 @@ class ConceptGraphsDetector:
 
         # Resize masks to depth resolution if needed (MobileSAM masks
         # come back at the input resolution, which matches RGB; depth
-        # may differ. Webots both 640x480 so this is a no-op there).
+        # may differ; equal-sized streams make this a no-op).
         h_d, w_d = depth.shape[:2]
         h_m, w_m = masks.shape[1], masks.shape[2]
         if (h_m, w_m) != (h_d, w_d):
@@ -879,7 +875,19 @@ class ConceptGraphsDetector:
             [0,    K.fy, K.cy],
             [0,    0,    1.0],
         ], dtype=np.float32)
-        trans_pose = self._build_camera_to_map_transform()
+        world_frame = str(self._world_frame_fn() or "").strip()
+        trans_pose = self._build_camera_to_map_transform(
+            expected_world_frame=world_frame,
+        )
+        if trans_pose is None or not world_frame:
+            if not getattr(self, "_spatial_not_ready_logged", False):
+                log.warning(
+                    "camera pose/extrinsics unavailable; withholding spatial "
+                    "detections until contracts or header-derived TF are ready"
+                )
+                self._spatial_not_ready_logged = True
+            return
+        self._spatial_not_ready_logged = False
         try:
             obj_pcds_and_bboxes = self._cg["detections_to_obj_pcd_and_bbox"](
                 depth_array=depth.astype(np.float32),
@@ -1561,154 +1569,166 @@ class ConceptGraphsDetector:
         return out
 
     # ── Camera-to-world transform ───────────────────────────────────
-    def _build_camera_to_map_transform(self):
-        """4x4 homogeneous transform mapping camera-optical points
-        into the world frame published by the active localizer.
+    def _selected_camera_frame(self) -> str:
+        """Return the configured or live RGB optical frame without guessing."""
+        configured = str(getattr(self, "_camera_frame", "") or "").strip().lstrip("/")
+        if configured:
+            return configured
+        rgb_msg = self._rgb_msg()
+        return str(
+            getattr(getattr(rgb_msg, "header", None), "frame_id", "") or ""
+        ).strip().lstrip("/")
 
-        Three paths, in order of preference:
+    def _selected_base_frame(self) -> str:
+        """Return Soma's live base frame, checked against explicit config."""
+        live_fn = getattr(self, "_robot_base_frame_fn", None)
+        live = str(live_fn() if live_fn is not None else "").strip().lstrip("/")
+        configured = str(getattr(self, "_base_frame", "") or "").strip().lstrip("/")
+        if live and configured and live != configured:
+            signature = (live, configured)
+            if getattr(self, "_invalid_configured_base_signature", None) != signature:
+                log.warning(
+                    "configured base_frame %r does not match Soma footprint frame %r",
+                    configured,
+                    live,
+                )
+                self._invalid_configured_base_signature = signature
+            return ""
+        return live or configured
 
-          1. **tf2 (authoritative).** Look up the selected camera frame
-             directly against the world frame advertised by the localizer.
-             This preserves the complete URDF/static-transform chain and
-             avoids choosing between duplicate transform sources.
+    def _build_camera_to_map_transform(self, *, expected_world_frame: str = ""):
+        """Return a validated camera-to-world transform.
 
-          2. **Atlas-resolved compatibility contracts.** Only when tf2 is
-             unavailable, compose
-             `T(world ← base) ⊕ T(base ← camera_optical)` from the
-             two slots:
-               - `service/map/pose` (or `service/map/odom`) — robot
-                 pose in world frame, supplied by mapping/AMCL/mocap.
-               - `primitive/camera/extrinsics` — static camera mount
-                 transform supplied by the camera primitive itself.
-             The extrinsics message is accepted only when its parent is the
-             body frame returned by that selected pose source and its child
-             is the selected camera frame.
-
-          3. **Naive fallback.** No pose stream and no tf either —
-             compose chassis_pose with a yaw-only rotation and a
-             configured camera height. Useful only for bring-up before
-             SLAM is wired; emits a debug-level warning.
+        dev-next keeps its TF-first experiment, but both TF endpoints must come
+        from the active camera and localizer. If TF is unavailable, the
+        Atlas-routed pose and camera-extrinsics contracts are composed only
+        when their world/body/camera frame chain is complete and current.
         """
         import numpy as np
 
-        # Path 1: the TF tree is authoritative. Prefer the world frame the
-        # localizer is publishing; use "map" only when no pose sample has
-        # identified it yet.
+        world_frame = str(
+            expected_world_frame or self._world_frame_fn() or ""
+        ).strip().lstrip("/")
+        camera_frame = self._selected_camera_frame()
+        if not world_frame or not camera_frame:
+            return None
+
         if self._hub is not None:
-            world_frame = self._world_frame_fn() or "map"
-            T = self._hub.lookup_transform_4x4(self._camera_frame, world_frame)
-            if T is not None:
-                return T.astype(np.float32)
+            transform = self._hub.lookup_transform_4x4(
+                camera_frame,
+                world_frame,
+            )
+            if transform is not None:
+                return transform.astype(np.float32)
 
-        # Path 2: compatibility contracts, used only when TF lookup is not
-        # available. Carry the selected pose source's body frame into the
-        # extrinsics validator; an unselected odometry sample must never change
-        # the coordinate chain chosen for a preferred pose sample.
-        pose_transform = self._slot_pose_transform()
-        if pose_transform is not None:
-            T_pose, pose_body_frame = pose_transform
-            T_ext = self._slot_extrinsics_4x4(pose_body_frame)
-        else:
-            T_pose, T_ext = None, None
-        if T_pose is not None and T_ext is not None:
-            return (T_pose @ T_ext).astype(np.float32)
+        pose_transform = self._slot_pose_transform(
+            expected_world_frame=world_frame,
+        )
+        if pose_transform is None:
+            return None
+        pose_matrix, body_frame = pose_transform
+        extrinsics_matrix = self._slot_extrinsics_4x4(body_frame)
+        if extrinsics_matrix is None:
+            return None
+        return (pose_matrix @ extrinsics_matrix).astype(np.float32)
 
-        # Path 3: naive composition (bring-up only).
-        chassis = self._chassis()
-        rx, ry, _, ryaw = chassis if chassis is not None else (0.0, 0.0, 0.0, 0.0)
-        R_cb = np.array([
-            [0,  0,  1],
-            [-1, 0,  0],
-            [0, -1,  0],
-        ], dtype=np.float32)
-        t_cb = np.array([0.0, 0.0, self._cam_z], dtype=np.float32)
-        T_cb = np.eye(4, dtype=np.float32)
-        T_cb[:3, :3] = R_cb
-        T_cb[:3, 3] = t_cb
-        c, s = math.cos(ryaw), math.sin(ryaw)
-        T_bm = np.array([
-            [c, -s, 0, rx],
-            [s,  c, 0, ry],
-            [0,  0, 1, 0.0],
-            [0,  0, 0, 1.0],
-        ], dtype=np.float32)
-        return T_bm @ T_cb
-
-    def _slot_pose_transform(self):
-        """Return ``(T(world ← body), body_frame)`` for the chosen sample.
-
-        ``pose`` is preferred and represents configured ``base_frame`` or
-        ``base_link`` because PoseWithCovarianceStamped has no child-frame
-        field. ``odom`` instead derives the body from its own child_frame_id;
-        an explicit base_frame is an assertion and rejects a conflicting
-        odometry sample. The returned frame must be passed to extrinsics
-        validation so both matrices describe one coordinate chain.
-        """
+    def _slot_pose_transform(self, *, expected_world_frame: str = ""):
+        """Return the body pose matrix and its validated frame endpoint."""
         if self._hub is None:
             return None
+        expected_world = str(
+            expected_world_frame or self._world_frame_fn() or ""
+        ).strip().lstrip("/")
+        if not expected_world:
+            return None
+        expected_base = self._selected_base_frame()
         for kind in ("pose", "odom"):
             if not self._hub.has(kind):
                 continue
             msg, stamp_unix, _count = self._hub.latest(kind)
             if msg is None or stamp_unix <= 0:
                 continue
-            body_frame = self._body_frame_for_pose_source(kind, msg)
+            max_age_s = float(getattr(self, "_pose_max_age_s", 0.0) or 0.0)
+            if max_age_s > 0.0 and time.time() - stamp_unix > max_age_s:
+                continue
+            world_frame = str(
+                getattr(getattr(msg, "header", None), "frame_id", "") or ""
+            ).strip().lstrip("/")
+            if world_frame != expected_world:
+                continue
+            body_frame = self._body_frame_for_pose_source(
+                kind,
+                msg,
+                expected_base=expected_base,
+            )
             if body_frame is None:
                 continue
-            p = msg.pose.pose if hasattr(msg, "pose") and hasattr(msg.pose, "pose") else msg.pose
-            q = p.orientation
+            pose = (
+                msg.pose.pose
+                if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
+                else msg.pose
+            )
+            quaternion = pose.orientation
             return (
                 _quat_xyz_to_matrix(
-                    float(q.x), float(q.y), float(q.z), float(q.w),
-                    float(p.position.x), float(p.position.y), float(p.position.z),
+                    float(quaternion.x),
+                    float(quaternion.y),
+                    float(quaternion.z),
+                    float(quaternion.w),
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(pose.position.z),
                 ),
                 body_frame,
             )
         return None
 
-    def _body_frame_for_pose_source(self, kind: str, msg):
-        """Resolve and validate the body frame for one selected pose source."""
-        configured = getattr(self, "_base_frame", "").strip().lstrip("/")
+    def _body_frame_for_pose_source(
+        self,
+        kind: str,
+        msg,
+        *,
+        expected_base: str = "",
+    ) -> str | None:
+        """Resolve a body endpoint without a robot-model default."""
+        expected_base = str(expected_base or "").strip().lstrip("/")
         if kind != "odom":
-            return configured or "base_link"
-        odom_child = str(getattr(msg, "child_frame_id", "")).strip().lstrip("/")
-        if configured and odom_child and odom_child != configured:
-            signature = (odom_child, configured)
+            return expected_base or None
+        odom_child = str(getattr(msg, "child_frame_id", "") or "").strip().lstrip("/")
+        if not odom_child:
+            return None
+        if expected_base and odom_child != expected_base:
+            signature = (odom_child, expected_base)
             if getattr(self, "_invalid_odom_body_signature", None) != signature:
                 log.warning(
-                    "ignoring odometry with child frame %r; configured "
-                    "base_frame asserts %r",
+                    "ignoring odometry with child frame %r; active base frame is %r",
                     odom_child,
-                    configured,
+                    expected_base,
                 )
                 self._invalid_odom_body_signature = signature
             return None
-        return configured or odom_child or "base_link"
+        return expected_base or odom_child
 
     def _slot_extrinsics_4x4(self, expected_parent: str | None = None):
-        """Read the static camera-mount transform (TransformStamped
-        from `primitive/camera/extrinsics`) and return a 4×4
-        `T(body ← selected_camera_frame)` matrix. Reject missing or mismatched
-        parent/child frame ids rather than composing transforms from
-        incompatible coordinate frames. Production callers pass the body
-        frame returned by `_slot_pose_transform`; the optional default exists
-        only for direct compatibility probes and never inspects odometry."""
-        import numpy as np
-        if self._hub is None or not self._hub.has("camera_extrinsics"):
+        """Return the camera mount only for the selected frame endpoints."""
+        expected_parent = str(
+            expected_parent or self._selected_base_frame() or ""
+        ).strip().lstrip("/")
+        expected_child = self._selected_camera_frame()
+        if (
+            self._hub is None
+            or not self._hub.has("camera_extrinsics")
+            or not expected_parent
+            or not expected_child
+        ):
             return None
         msg, stamp_unix, _count = self._hub.latest("camera_extrinsics")
         if msg is None or stamp_unix <= 0:
             return None
-        parent_frame = str(getattr(getattr(msg, "header", None), "frame_id", ""))
-        child_frame = str(getattr(msg, "child_frame_id", ""))
-        parent_frame = parent_frame.strip().lstrip("/")
-        child_frame = child_frame.strip().lstrip("/")
-        expected_parent = str(
-            expected_parent
-            or getattr(self, "_base_frame", "")
-            or "base_link"
+        parent_frame = str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
         ).strip().lstrip("/")
-        expected_child = self._camera_frame.strip().lstrip("/")
+        child_frame = str(getattr(msg, "child_frame_id", "") or "").strip().lstrip("/")
         if parent_frame != expected_parent or child_frame != expected_child:
             signature = (parent_frame, child_frame, expected_parent, expected_child)
             if getattr(self, "_invalid_extrinsics_signature", None) != signature:
@@ -1722,11 +1742,16 @@ class ConceptGraphsDetector:
                 )
                 self._invalid_extrinsics_signature = signature
             return None
-        t = msg.transform.translation
-        q = msg.transform.rotation
+        translation = msg.transform.translation
+        quaternion = msg.transform.rotation
         return _quat_xyz_to_matrix(
-            float(q.x), float(q.y), float(q.z), float(q.w),
-            float(t.x), float(t.y), float(t.z),
+            float(quaternion.x),
+            float(quaternion.y),
+            float(quaternion.z),
+            float(quaternion.w),
+            float(translation.x),
+            float(translation.y),
+            float(translation.z),
         )
 
     # ── Project MapObjectList → ObjectRegistry ──────────────────────
@@ -1873,6 +1898,12 @@ class ConceptGraphsDetector:
         live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
             wf = self._world_frame_fn()
+            if not wf:
+                log.warning(
+                    "withholding ConceptGraphs snapshot because the world frame "
+                    "is unknown"
+                )
+                return
             # oids touched this tick (bound / adopted / inserted). Used to (a)
             # stop two detections claiming the same orphan and (b) spare a
             # touched record from the eviction sweep below.
@@ -2141,7 +2172,7 @@ def _yaw_from_pca_xy(xy) -> float:
 def _image_msg_to_bgr(msg: Any) -> Optional[Any]:
     """sensor_msgs/Image (rgb8 / bgr8 / rgba8 / bgra8 / mono8 / jpeg) → numpy BGR.
 
-    Webots emits bgra8 (4-channel); leaving that out of the supported
+    Some cameras emit bgra8 (4-channel); leaving that out of the supported
     set silently dropped every frame. Both rgba8 and bgra8 paths here.
     """
     try:

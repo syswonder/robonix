@@ -68,7 +68,7 @@ class Pose3D:
     y: float
     z: float
     yaw: float = 0.0  # radians; yaw-only orientation suffices for v1
-    frame_id: str = "map"
+    frame_id: str = ""
 
 
 @dataclass
@@ -78,7 +78,7 @@ class BBox3D:
     size_y: float = 0.1
     size_z: float = 0.1
     yaw: float = 0.0
-    frame_id: str = "map"
+    frame_id: str = ""
 
     @property
     def half_x(self) -> float:
@@ -97,8 +97,8 @@ class BBox3D:
 class SceneObject:
     """Stable object record. id format: `scene.object.<cls>_<NNN>`.
 
-    Pose is in `map` frame after ingest does the TF transform; never
-    raw sensor frame. Confidence is an EMA over per-observation
+    Pose is in the explicit world frame supplied by ingest after its
+    coordinate transform; never a guessed or raw sensor frame. Confidence is an EMA over per-observation
     confidences; pose is updated by the data_assoc layer with EMA
     `alpha=0.3` toward each new pose. `last_seen` is wall-clock unix
     seconds (Chronos TODO)."""
