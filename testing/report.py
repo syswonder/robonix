@@ -887,6 +887,13 @@ def write_html(
         score = 0
     verdict = "NO DATA" if total == 0 else ("PASS" if failed == 0 else "FAIL")
     result_class = "pass" if verdict == "PASS" else "fail"
+    infrastructure_note = str(summary.get("infrastructure_note", "") or "").strip()
+    infrastructure_section = (
+        '<div class="infrastructure-note"><strong>Infrastructure:</strong> '
+        f"{html.escape(infrastructure_note)}</div>"
+        if infrastructure_note
+        else ""
+    )
     generated_on = html.escape(_format_beijing_time(metadata.get("generated_on", "")))
     embedded_styles = _inline_styles(inline_styles or [])
     embedded_scripts = _inline_scripts(inline_scripts or [])
@@ -1368,6 +1375,13 @@ def write_html(
       color: var(--muted);
       margin: 6px 0 10px;
     }}
+    .infrastructure-note {{
+      background: #fffbeb;
+      border: 1px solid #fcd34d;
+      color: #92400e;
+      margin: 0 0 16px;
+      padding: 10px 12px;
+    }}
     .coverage-table td:first-child {{
       color: #374151;
       font-family: var(--mono);
@@ -1387,6 +1401,7 @@ def write_html(
     <div class=\"card\"><strong>Failures</strong><span class=\"metric\">{failed}</span></div>
     <div class=\"card\"><strong>Score</strong><span class=\"metric score-metric\">{score}/100</span></div>
   </div>
+  {infrastructure_section}
   {_llm_analysis_section(analysis)}
   <h2>Run Metadata</h2>
   {_metadata_table(metadata)}
@@ -1639,16 +1654,25 @@ def write_markdown(summary: dict, analysis: dict | None, out: Path) -> None:
     passed = int(summary.get("passed", 0) or 0)
     failed = int(summary.get("failed", 0) or 0)
     verdict = "NO DATA" if total == 0 else ("PASS" if failed == 0 else "FAIL")
+    infrastructure_note = " ".join(
+        str(summary.get("infrastructure_note", "") or "").split()
+    ).replace("|", "\\|")
     lines = [
         "## Robonix Webots CI",
         "",
         f"**Result:** `{verdict}`",
         f"**Scenarios:** `{passed}/{total}`",
         f"**Failures:** `{failed}`",
-        "",
-        "| Status | Suite | Scenario | Rounds | Failures |",
-        "| --- | --- | --- | ---: | --- |",
     ]
+    if infrastructure_note:
+        lines.extend([f"**Infrastructure:** {infrastructure_note}"])
+    lines.extend(
+        [
+            "",
+            "| Status | Suite | Scenario | Rounds | Failures |",
+            "| --- | --- | --- | ---: | --- |",
+        ]
+    )
     for sc in summary.get("scenarios", []):
         failures = "<br>".join(str(f).replace("|", "\\|") for f in sc.get("failures", [])) or "-"
         lines.append(
