@@ -46,6 +46,7 @@ capabilities. The long-term goal is simple: **train once, deploy on any robot**.
 | WHEELTEC R550 mini_tank | R550 tracked chassis and IMU; LSLIDAR N10P; Orbbec Astra S RGB-D camera | [sherry-part](https://github.com/sherry-part) | [link](https://github.com/syswonder/robot-wheeltec-r550) | [link](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.wheeltec.r550/) |
 | Unitree Go2 | Go2 quadruped chassis; onboard lidar, camera, and IMU; audio bridge | [Origamii520](https://github.com/Origamii520) | [link](https://github.com/syswonder/robot-unitree-go2) | [link](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.unitree.go2/) |
 | WowRobo Roboarm | Five-axis LeRobot Koch arm; Orbbec Gemini 215 RGB-D camera; audio | [gaoyz1235](https://github.com/gaoyz1235) | [link](https://github.com/syswonder/robot-wowrobo-roboarm) | [link](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.wowrobo.roboarm/) |
+| Webots TIAGo Lite (simulation) | Simulated differential-drive chassis; head RGB-D camera; Hokuyo planar lidar; audio | syswonder | [link](examples/webots/) | — |
 | Minecraft Bot (simulation) | Minecraft player body; camera, chassis, world-state, inventory, navigation, and exploration providers | [ZZJJWarth](https://github.com/ZZJJWarth) | [link](https://github.com/syswonder/robot-syswonder-minecraft_bot) | [link](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.syswonder.minecraft_bot/) |
 
 Each deployment links the complete robot manifest and its primitive, service,
