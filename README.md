@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=lightgray&style=flat-square" alt="Repo size" />
   <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange&style=flat-square" alt="Top language" />
   <a href="https://syswonder.github.io/robonix-package-catalog/packages/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsyswonder.github.io%2Frobonix-package-catalog%2Fapi%2Fv1%2Fpackages&query=%24.packages.length&label=Robonix%20packages&color=0f766e&style=flat-square" alt="Robonix packages" /></a>
-  <a href="#supported-robots"><img src="https://img.shields.io/badge/Supported%20robots-2-2563eb?style=flat-square" alt="Supported robots: 2" /></a>
+  <a href="#supported-robots"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsyswonder.github.io%2Frobonix-package-catalog%2Fapi%2Fv1%2Frobots&query=%24.robots.length&label=Robot%20deployments&color=2563eb&style=flat-square" alt="Published robot deployments" /></a>
 </p>
 
 <br />
@@ -43,9 +43,15 @@ capabilities. The long-term goal is simple: **train once, deploy on any robot**.
 | --- | --- | --- | --- | --- |
 | AgileX Ranger Mini v3 | Ranger Mini v3 chassis; Livox MID-360 lidar and IMU; Intel RealSense D435i RGB-D camera; optional AgileX Piper arm; audio | syswonder | [`robot-agilex-ranger_mini_v3`](https://github.com/syswonder/robot-agilex-ranger_mini_v3) | [`robonix.robot.agilex.ranger_mini_v3`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.agilex.ranger_mini_v3/) |
 | DEEP Robotics Lite3 | Lite3 quadruped chassis; Livox MID-360 lidar and IMU; Orbbec Gemini 330-series RGB-D camera | [Bunnycxk](https://github.com/Bunnycxk) | [`robot-deep_robotics-lite3`](https://github.com/syswonder/robot-deep_robotics-lite3) | [`robonix.robot.deep_robotics.lite3`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.deep_robotics.lite3/) |
+| WHEELTEC R550 mini_tank | R550 tracked chassis and IMU; LSLIDAR N10P; Orbbec Astra S RGB-D camera | [sherry-part](https://github.com/sherry-part) | [`robot-wheeltec-r550`](https://github.com/syswonder/robot-wheeltec-r550) | [`robonix.robot.wheeltec.r550`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.wheeltec.r550/) |
+| Unitree Go2 | Go2 quadruped chassis; onboard lidar, camera, and IMU; audio bridge | [Origamii520](https://github.com/Origamii520) | [`robot-unitree-go2`](https://github.com/syswonder/robot-unitree-go2) | [`robonix.robot.unitree.go2`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.unitree.go2/) |
+| WowRobo Roboarm | Five-axis LeRobot Koch arm; Orbbec Gemini 215 RGB-D camera; audio | [gaoyz1235](https://github.com/gaoyz1235) | [`robot-wowrobo-roboarm`](https://github.com/syswonder/robot-wowrobo-roboarm) | [`robonix.robot.wowrobo.roboarm`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.wowrobo.roboarm/) |
+| Minecraft Bot (simulation) | Minecraft player body; camera, chassis, world-state, inventory, navigation, and exploration providers | [ZZJJWarth](https://github.com/ZZJJWarth) | [`robot-syswonder-minecraft_bot`](https://github.com/syswonder/robot-syswonder-minecraft_bot) | [`robonix.robot.syswonder.minecraft_bot`](https://syswonder.github.io/robonix-package-catalog/robots/robonix.robot.syswonder.minecraft_bot/) |
 
 Each deployment links the complete robot manifest and its primitive, service,
-and skill dependencies. See the
+and skill dependencies. Published deployment metadata does not replace the
+hardware-specific safety, commissioning, and acceptance gates documented by
+each repository. See the
 [robot catalog](https://syswonder.github.io/robonix-package-catalog/robots/)
 for published integrations.
 
