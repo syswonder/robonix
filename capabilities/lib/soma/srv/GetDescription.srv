@@ -4,6 +4,6 @@
 # don't hammer this — it doesn't change at runtime.
 ---
 string urdf_xml          # full URDF contents (utf-8)
-string model_name        # e.g. "ranger_mini_v2", "tiago"
+string model_name        # deployment-defined robot model identifier
 float64 mass_kg          # sum of all link masses; -1 if unknown
-string base_frame        # convention frame for kinematic root, e.g. "base_link"
+string base_frame        # deployment-defined kinematic root frame

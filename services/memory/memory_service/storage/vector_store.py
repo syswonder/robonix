@@ -43,17 +43,26 @@ class TextEmbedder:
         model_path = self._config.model_path
         try:
             from sentence_transformers import SentenceTransformer
-            if os.path.isdir(model_path):
+            if model_path and os.path.isdir(model_path):
                 self._model = SentenceTransformer(model_path, device=self._config.device)
-                log.info("TextEmbedder: loaded all-MiniLM-L6-v2 from %s", model_path)
+                log.info("TextEmbedder: loaded embedding model from %s", model_path)
                 self._initialized = True
             else:
-                log.warning(
-                    "TextEmbedder: model path not found (%s), "
-                    "trying sentence-transformers package default", model_path
+                if model_path:
+                    log.warning(
+                        "TextEmbedder: configured model path not found (%s); "
+                        "trying model name %s through the standard cache",
+                        model_path,
+                        self._config.model_name,
+                    )
+                self._model = SentenceTransformer(
+                    self._config.model_name,
+                    device=self._config.device,
                 )
-                self._model = SentenceTransformer("all-MiniLM-L6-v2", device=self._config.device)
-                log.info("TextEmbedder: loaded all-MiniLM-L6-v2 from package cache")
+                log.info(
+                    "TextEmbedder: loaded %s through the standard cache",
+                    self._config.model_name,
+                )
                 self._initialized = True
         except ImportError:
             log.warning(

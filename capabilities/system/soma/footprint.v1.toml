@@ -1,9 +1,9 @@
-# 2D collision footprint polygon in `base_link`. nav2_wrapper queries
+# 2D collision footprint polygon in the response's declared `base_frame`.
+# Navigation and spatial-planning consumers query
 # this at startup to configure its costmap (inscribed_radius +
 # inflation_radius), simple_nav for its A* inflation tail, anti-bump
-# checks for chassis primitives. URDF-derived; override-able via
-# soma's deploy config when the URDF hull is too generous (e.g.
-# Tiago's torso overhang vs the chassis base).
+# checks for chassis primitives. The deployment declares the polygon in
+# `soma.yaml`; Soma validates it and derives both radii from those points.
 [contract]
 id      = "robonix/system/soma/footprint"
 version = "1"

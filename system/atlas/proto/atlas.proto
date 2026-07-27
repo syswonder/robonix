@@ -35,8 +35,8 @@ package robonix.atlas;
 //
 // Why three kinds? They differ in lifetime semantics, so consumers
 // can pick the right reasoning shape:
-//   Primitive -- hardware / data source driver (e.g. tiago_camera,
-//                mid360_lidar, ranger CAN chassis). Long-lived; one
+//   Primitive -- hardware / data source driver (e.g. a camera,
+//                lidar, or chassis driver). Long-lived; one
 //                process per device.
 //   Service   -- composed user-facing function (e.g. mapping,
 //                navigation, scene). Long-lived; includes the
@@ -119,7 +119,7 @@ enum Kind {
 // The caller is expected to redeclare its Capabilities after takeover.
 
 message RegisterRequest {
-  // Stable id, e.g. "webots_tiago_camera_front". Empty => Atlas
+  // Stable id, e.g. "front_camera". Empty => Atlas
   // assigns "ephemeral-<uuid>". Convention: id matches `name:` in
   // package_manifest.yaml.
   string id = 1;
@@ -250,7 +250,7 @@ message DeclareCapabilityRequest {
   // Example: contract `robonix/primitive/camera/rgb` already explains
   // "returns current RGB image as sensor_msgs/Image"; this field adds
   // "front-facing, 640x480 @ 30 Hz, no exposure compensation" for the
-  // tiago_camera_front instance specifically. Surfaced to Pilot / LLM.
+  // front_camera instance specifically. Surfaced to Pilot / LLM.
   //
   // Filled by the CapabilityProvider -- either explicitly, or auto-
   // filled by the framework from the handler's docstring (e.g.

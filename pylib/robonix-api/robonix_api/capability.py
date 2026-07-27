@@ -121,7 +121,7 @@ class _ProviderBase:
     """Internal base for Primitive / Service / Skill. NOT exported.
 
     Args:
-        id:        stable provider id (e.g. "webots_tiago_camera_front").
+        id:        stable provider id (e.g. "front_camera").
                    Convention: matches `name:` in package_manifest.yaml.
         namespace: primary contract grouping for this provider, e.g.
                    "robonix/primitive/camera". Domain contracts normally
@@ -426,8 +426,10 @@ class _ProviderBase:
         return RosBackend.get().wait_for_topic(topic, cls, timeout_s)
 
     def resolve_host_ip(self, target_ip: str) -> str | None:
-        """`ip route get <target>` -> src field. Used by drivers (e.g.
-        mid360) that need to bake the host's IP into a vendor config."""
+        """Return the source address selected by `ip route get <target>`.
+
+        Some vendor drivers require that address in their generated config.
+        """
         import subprocess
 
         try:
@@ -901,10 +903,9 @@ class _ProviderBase:
 
 class Primitive(_ProviderBase):
     """A hardware / data-source driver CapabilityProvider.
-    e.g. tiago_camera, mid360_lidar, ranger CAN chassis.
 
         primitive_cam = Primitive(
-            id="webots_tiago_camera_front",
+            id="front_camera",
             namespace="robonix/primitive/camera",
         )
     """

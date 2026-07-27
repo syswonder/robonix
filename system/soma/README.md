@@ -84,6 +84,11 @@ string robot_id
 string urdf_xml
 ```
 
+`robonix/system/soma/footprint` returns the active robot's 2D collision
+polygon, base frame, inscribed radius, and circumscribed radius. Generic
+services such as Scene and Navigation consume this contract instead of
+carrying robot-model dimensions of their own.
+
 An empty request `robot_id` selects `default_robot`. If no `default_robot` is
 configured and exactly one robot is loaded, Soma selects that only robot.
 

@@ -23,7 +23,9 @@ from typing import TYPE_CHECKING
 from .state import ObjectRegistry, SceneObject
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
-from .geometry import disc_inside_polygon, point_in_polygon, polygon_centroid
+from .geometry import point_in_polygon
+from .goal_planner import object_goal, room_goal
+from .robot_geometry import RobotGeometryState
 
 if TYPE_CHECKING:
     from .annotations import Annotation, AnnotationStore
@@ -63,6 +65,7 @@ _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
+_ROBOT_GEOMETRY: RobotGeometryState | None = None
 
 # Scene Hook: when list_objects detects visible objects, automatically
 # capture the latest RGB frame and POST to memgraph's Scene Hook HTTP
@@ -159,6 +162,17 @@ async def _try_save_observation(visible_objects: list) -> None:
             if labels
             else "observed scene"
         )
+        frames = {
+            str(o.pose.frame_id or "").strip()
+            for o in visible_objects
+        }
+        if len(frames) != 1 or not next(iter(frames), ""):
+            log.warning(
+                "scene_hook: skip — spatial snapshot has unknown or mixed frames: %s",
+                sorted(frames),
+            )
+            return
+        spatial_frame = next(iter(frames))
         spatial_objects = [
             {
                 "obj_id": o.object_id,
@@ -178,7 +192,7 @@ async def _try_save_observation(visible_objects: list) -> None:
                 "tag": "scene",
                 "msg": msg,
             },
-            "spatial": {"origin": "world", "objects": spatial_objects},
+            "spatial": {"origin": spatial_frame, "objects": spatial_objects},
             "image_base64": img_b64,
         }
         body_bytes = len(img_b64)  # approximate — base64 dominates
@@ -210,10 +224,17 @@ async def _try_save_observation(visible_objects: list) -> None:
         log.warning("scene_hook: ! exception after %dms", round(total_ms), exc_info=True)
 
 
-def attach_state(*, registry: ObjectRegistry, hub=None) -> None:
-    global _REGISTRY, _HUB
+def attach_state(
+    *,
+    registry: ObjectRegistry,
+    hub=None,
+    robot_geometry: RobotGeometryState | None = None,
+) -> None:
+    """Attach live Scene dependencies used by read-only MCP handlers."""
+    global _REGISTRY, _HUB, _ROBOT_GEOMETRY
     _REGISTRY = registry
     _HUB = hub
+    _ROBOT_GEOMETRY = robot_geometry
 
 
 def attach_scene_graph_store(store: SceneGraphStore) -> None:
@@ -446,61 +467,6 @@ async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Re
 
 
 # Constants for goal_near — service-side defaults, no longer schema knobs.
-_GOAL_NEAR_CLEARANCE_M = 0.4   # robot inscribed_radius + safety margin
-_GOAL_NEAR_SEARCH_M = 6.0      # max distance to look for a free cell
-_GOAL_NEAR_ROBOT_RADIUS_M = 0.3  # Tiago-sized default for inflation
-_GOAL_NEAR_RING_STEP_M = 0.1
-_GOAL_NEAR_ANGLE_STEPS = [0.0, 0.2, -0.2, 0.4, -0.4, 0.6, -0.6,
-                          0.8, -0.8, 1.0, -1.0, 1.2, -1.2,
-                          1.4, -1.4, 1.6, -1.6]
-
-
-def _occupancy_bfs(
-    grid_msg, target_x: float, target_y: float, approach_ang: float
-) -> tuple[float, float, float] | None:
-    """Sweep rings of free cells around (target_x, target_y) on the
-    occupancy grid; pick the first one with enough clearance and face
-    back at the target. Returns (x, y, yaw) or None if nothing free.
-    """
-    import numpy as np
-
-    info = grid_msg.info
-    w, h = int(info.width), int(info.height)
-    res = float(info.resolution)
-    ogx = float(info.origin.position.x)
-    ogy = float(info.origin.position.y)
-    grid = np.frombuffer(bytes(grid_msg.data), dtype=np.int8).reshape(h, w)
-    # Occupied cells are hard blockers. Unknown cells are allowed here because
-    # scene objects often sit at the edge of the explored map; rejecting all
-    # unknown cells makes object-relative navigation unusable before SLAM has
-    # fully painted the area.
-    blocked = grid > 50
-    infl = max(1, int(math.ceil(
-        (_GOAL_NEAR_ROBOT_RADIUS_M + _GOAL_NEAR_CLEARANCE_M) / res)))
-
-    def is_safe(gx: int, gy: int) -> bool:
-        if gx - infl < 0 or gy - infl < 0 or gx + infl >= w or gy + infl >= h:
-            return False
-        return not bool(
-            blocked[gy - infl: gy + infl + 1, gx - infl: gx + infl + 1].any()
-        )
-
-    standoff = 0.5  # min approach distance from object centre
-    n_rings = int(_GOAL_NEAR_SEARCH_M / _GOAL_NEAR_RING_STEP_M) + 1
-    for i in range(n_rings):
-        r = standoff + i * _GOAL_NEAR_RING_STEP_M
-        for dth in _GOAL_NEAR_ANGLE_STEPS:
-            ang = approach_ang + dth
-            wx = target_x - math.cos(ang) * r
-            wy = target_y - math.sin(ang) * r
-            gx = int((wx - ogx) / res)
-            gy = int((wy - ogy) / res)
-            if 0 <= gx < w and 0 <= gy < h and is_safe(gx, gy):
-                yaw = math.atan2(target_y - wy, target_x - wx)
-                return wx, wy, yaw
-    return None
-
-
 @mcp_contract(mcp, contract_id="robonix/system/scene/goal_near")
 async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     """Find a navigation-safe approach pose near a physical scene object.
@@ -516,6 +482,15 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     Contract: robonix/system/scene/goal_near."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
+    footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
+    if footprint is None:
+        return GoalNear_Response(
+            reachable=False,
+            x=0.0,
+            y=0.0,
+            yaw=0.0,
+            reason="Soma footprint unavailable — robot geometry is not ready",
+        )
     objs, _surfs = await _REGISTRY.snapshot()
     target = objs.get(req.object_id)
     if target is None:
@@ -542,8 +517,10 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
             float(target.pose.x) - float(robot.pose.x),
         )
     else:
-        # Fallback if self-tracking has not populated yet.
-        approach_ang = math.pi
+        # Without a live robot pose there is no evidence for a preferred
+        # approach side. The planner remains unbiased and still faces the
+        # returned pose toward the target.
+        approach_ang = None
 
     if _HUB is None or not _HUB.has("occupancy_grid"):
         return GoalNear_Response(
@@ -564,72 +541,53 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason="occupancy_grid empty — wait for mapping to publish",
         )
+    grid_frame = str(
+        getattr(getattr(msg, "header", None), "frame_id", "") or ""
+    ).strip()
+    target_frame = str(target.pose.frame_id or "").strip()
+    bbox_frame = str(target.bbox.frame_id or "").strip()
+    if (
+        not grid_frame
+        or not target_frame
+        or bbox_frame != target_frame
+        or grid_frame != target_frame
+    ):
+        return GoalNear_Response(
+            reachable=False,
+            x=0.0,
+            y=0.0,
+            yaw=0.0,
+            reason=(
+                "object pose, bbox, and occupancy grid do not share one "
+                "explicit frame "
+                f"(pose={target_frame or 'unknown'}, "
+                f"bbox={bbox_frame or 'unknown'}, "
+                f"grid={grid_frame or 'unknown'})"
+            ),
+        )
 
-    found = _occupancy_bfs(
+    target_radius_m = math.hypot(
+        max(0.0, float(target.bbox.size_x)) * 0.5,
+        max(0.0, float(target.bbox.size_y)) * 0.5,
+    )
+    found = object_goal(
         msg,
-        float(target.pose.x),
-        float(target.pose.y),
-        approach_ang,
+        target_x=float(target.pose.x),
+        target_y=float(target.pose.y),
+        preferred_approach_yaw=approach_ang,
+        minimum_standoff_m=footprint.circumscribed_radius_m + target_radius_m,
+        footprint=footprint,
     )
     if found is None:
         return GoalNear_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason=f"no free cell within {_GOAL_NEAR_SEARCH_M:.1f}m of '{req.object_id}'",
+            reason=f"no footprint-safe approach cell for '{req.object_id}'",
         )
     gx, gy, yaw = found
     return GoalNear_Response(
         reachable=True, x=float(gx), y=float(gy), yaw=float(yaw),
         reason=f"approach pose for '{target.cls}' ({req.object_id})",
     )
-
-
-def _occupancy_room_goal(grid_msg, points) -> tuple[float, float] | None:
-    """Choose the safest free grid cell nearest a room's polygon centroid."""
-    import numpy as np
-
-    polygon = [(float(x), float(y)) for x, y in points]
-    if len(polygon) < 3:
-        return None
-    info = grid_msg.info
-    width, height = int(info.width), int(info.height)
-    resolution = float(info.resolution)
-    origin_x = float(info.origin.position.x)
-    origin_y = float(info.origin.position.y)
-    grid = np.frombuffer(bytes(grid_msg.data), dtype=np.int8).reshape(height, width)
-    # A room destination must be known free space. Unknown cells are not goals.
-    blocked = (grid < 0) | (grid > 50)
-    footprint_radius = _GOAL_NEAR_ROBOT_RADIUS_M + _GOAL_NEAR_CLEARANCE_M
-    inflation_cells = max(1, int(math.ceil(footprint_radius / resolution)))
-    centroid_x, centroid_y = polygon_centroid(polygon)
-
-    min_x = max(0, int((min(x for x, _ in polygon) - origin_x) / resolution))
-    max_x = min(width - 1, int((max(x for x, _ in polygon) - origin_x) / resolution))
-    min_y = max(0, int((min(y for _, y in polygon) - origin_y) / resolution))
-    max_y = min(height - 1, int((max(y for _, y in polygon) - origin_y) / resolution))
-    candidates = []
-    for gy in range(min_y, max_y + 1):
-        wy = origin_y + (gy + 0.5) * resolution
-        for gx in range(min_x, max_x + 1):
-            wx = origin_x + (gx + 0.5) * resolution
-            if not disc_inside_polygon(wx, wy, footprint_radius, polygon):
-                continue
-            if (
-                gx - inflation_cells < 0
-                or gy - inflation_cells < 0
-                or gx + inflation_cells >= width
-                or gy + inflation_cells >= height
-            ):
-                continue
-            local = blocked[
-                gy - inflation_cells: gy + inflation_cells + 1,
-                gx - inflation_cells: gx + inflation_cells + 1,
-            ]
-            if not bool(local.any()):
-                candidates.append(((wx - centroid_x) ** 2 + (wy - centroid_y) ** 2, wx, wy))
-    if not candidates:
-        return None
-    _, x, y = min(candidates)
-    return x, y
 
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/goal_room")
@@ -640,6 +598,15 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
     The result never falls outside the room polygon.
     Contract: robonix/system/scene/goal_room.
     """
+    footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
+    if footprint is None:
+        return GoalRoom_Response(
+            reachable=False,
+            x=0.0,
+            y=0.0,
+            yaw=0.0,
+            reason="Soma footprint unavailable — robot geometry is not ready",
+        )
     room, ambiguous = _resolve_room_target(req.room_id)
     if ambiguous:
         candidates = ", ".join(
@@ -679,7 +646,19 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason="occupancy_grid empty - wait for mapping to publish",
         )
-    found = _occupancy_room_goal(msg, room.points)
+    grid_frame = str(
+        getattr(getattr(msg, "header", None), "frame_id", "") or ""
+    ).strip()
+    if not grid_frame:
+        return GoalRoom_Response(
+            reachable=False,
+            x=0.0,
+            y=0.0,
+            yaw=0.0,
+            reason="occupancy_grid frame is unknown",
+        )
+    room_yaw = float(room.theta or 0.0)
+    found = room_goal(msg, room.points, footprint, yaw=room_yaw)
     if found is None:
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
@@ -695,7 +674,7 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
         reachable=True,
         x=float(x),
         y=float(y),
-        yaw=float(room.theta or 0.0),
+        yaw=room_yaw,
         reason=f"safe pose inside room '{room.name}' ({stable_room_id})",
     )
 

@@ -22,24 +22,26 @@ Typical usage:
 
     from robonix_api import ATLAS, Primitive, Ok, Err, Deferred
 
-    primitive_mid360 = Primitive(
-        id="mid360_lidar",
-        namespace="robonix/primitive/lidar",
+    camera = Primitive(
+        id="camera",
+        namespace="robonix/primitive/camera",
     )
 
-    @primitive_mid360.on_init
+    @camera.on_init
     def init(cfg: dict):
-        topic = cfg.get("lidar_topic", "/scanner/cloud")
-        if not primitive_mid360.wait_for_topic(topic, "PointCloud2", 30.0):
-            return Deferred(f"no PointCloud2 on {topic} yet")
-        primitive_mid360.create_publisher(
-            contract_id="robonix/primitive/lidar/lidar3d",
-            topic=topic, msg_type="PointCloud2",
+        topic = cfg.get("rgb_topic")
+        if not topic:
+            return Err("rgb_topic is required")
+        if not camera.wait_for_topic(topic, "Image", 30.0):
+            return Deferred(f"no Image on configured topic {topic} yet")
+        camera.create_publisher(
+            contract_id="robonix/primitive/camera/rgb",
+            topic=topic, msg_type="Image",
         )
         return Ok()
 
     if __name__ == "__main__":
-        primitive_mid360.run()
+        camera.run()
 """
 from __future__ import annotations
 

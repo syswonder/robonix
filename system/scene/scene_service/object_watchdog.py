@@ -198,6 +198,13 @@ class ObjectWatchdog:
         """POST a single-object remember request to the memgraph Scene Hook."""
         import httpx
 
+        frame_id = str(obj.pose.frame_id or "").strip()
+        if not frame_id:
+            log.warning(
+                "object_watchdog: skip %s — spatial frame is unknown",
+                obj.object_id,
+            )
+            return False
         now_ns = time.time_ns()
         payload: Dict[str, Any] = {
             "session_id": "scene-watchdog",
@@ -209,7 +216,7 @@ class ObjectWatchdog:
                 "msg": f"observed new object: {obj.cls}",
             },
             "spatial": {
-                "origin": "world",
+                "origin": frame_id,
                 "objects": [
                     {
                         "obj_id": obj.object_id,

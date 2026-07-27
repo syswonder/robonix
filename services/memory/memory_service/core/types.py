@@ -73,7 +73,13 @@ class ObjectCoord:
 class SpatialContext:
     """Spatial context from Scene.list_objects. (§2.3)"""
     objects: List[ObjectCoord] = field(default_factory=list)
-    origin: str = "world"           # "world" / "robot_base" / "camera"
+    origin: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject coordinates whose reference frame was not supplied."""
+        self.origin = str(self.origin or "").strip()
+        if self.objects and not self.origin:
+            raise ValueError("spatial origin frame is required when objects are present")
 
     def to_dict(self) -> Dict[str, Any]:
         return {"objects": [o.to_dict() for o in self.objects], "origin": self.origin}
@@ -81,7 +87,7 @@ class SpatialContext:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SpatialContext":
         objects = [ObjectCoord.from_dict(o) for o in d.get("objects", [])]
-        return cls(objects=objects, origin=d.get("origin", "world"))
+        return cls(objects=objects, origin=d.get("origin", ""))
 
 
 @dataclass

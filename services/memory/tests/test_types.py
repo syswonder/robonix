@@ -37,7 +37,7 @@ class TestSpatialContext:
     def test_empty(self):
         s = SpatialContext()
         assert s.objects == []
-        assert s.origin == "world"
+        assert s.origin == ""
 
     def test_roundtrip(self):
         s = SpatialContext(
@@ -126,7 +126,10 @@ class TestMemoryNode:
 
     def test_full_node_roundtrip(self):
         lr = LogRecord(ts=100, level="Warn", tag="exec", msg="failed")
-        sp = SpatialContext(objects=[ObjectCoord(obj_id="o1", label="chair", x=1, y=2, z=0)])
+        sp = SpatialContext(
+            objects=[ObjectCoord(obj_id="o1", label="chair", x=1, y=2, z=0)],
+            origin="fixture_frame",
+        )
         tags = TagSet(scene_type="living_room", action_type="navigate", task_type="explore")
         n = MemoryNode(
             node_id=42,
@@ -214,7 +217,10 @@ class TestRememberRequest:
 
     def test_with_spatial(self):
         lr = LogRecord(ts=200, level="Info", tag="t", msg="m")
-        sp = SpatialContext(objects=[ObjectCoord(obj_id="o1", label="cup")])
+        sp = SpatialContext(
+            objects=[ObjectCoord(obj_id="o1", label="cup")],
+            origin="fixture_frame",
+        )
         req = RememberRequest(session_id="s2", plan_id="p2", log_record=lr,
                               spatial=sp, parent_node_id=10)
         req2 = RememberRequest.from_dict(req.to_dict())

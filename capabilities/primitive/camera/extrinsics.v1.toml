@@ -5,19 +5,17 @@
 #
 # Why this is a contract and not a tf2 lookup:
 #   tf2 is a global ROS side-channel — atlas can't see it, `rbnx caps`
-#   can't list it, `rbnx channels` can't audit it. Two robots that ship
-#   with different camera mount geometries (Tiago vs Ranger Mini) need
-#   different extrinsics, and routing the value through atlas means
+#   can't list it, `rbnx channels` can't audit it. Deployments with
+#   different camera mount geometries need different extrinsics, and
+#   routing the value through atlas means
 #   the consumer asks for `primitive/camera/extrinsics` and gets the
 #   right transform regardless of which robot is wired in. tf2 stays
 #   available for raw ROS tooling (rviz, ros2 echo) but is not on the
 #   critical path of any robonix capability resolution.
 #
 # Payload: geometry_msgs/TransformStamped — `header.frame_id` is the
-# parent (typically the chassis base link, e.g. `base_link`),
-# `child_frame_id` is the camera's optical frame (e.g.
-# `head_front_camera_rgb_optical_frame` on Tiago,
-# `camera_color_optical_frame` on a typical RealSense). The transform
+# parent robot body frame, and `child_frame_id` is the active camera's
+# optical frame. The transform
 # is `parent ← child` in the standard ROS sense (i.e. it expresses the
 # child's pose in the parent's frame, equivalently the matrix that
 # maps points in the child frame into the parent frame).
