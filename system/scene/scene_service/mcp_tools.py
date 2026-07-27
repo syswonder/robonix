@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from .state import ObjectRegistry, SceneObject
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
-from .geometry import point_in_polygon
+from .geometry import point_in_polygon, polygon_centroid
 from .goal_planner import object_goal, room_goal
 from .robot_geometry import RobotGeometryState
 

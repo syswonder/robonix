@@ -413,6 +413,7 @@ file, the sidecar, and every object partition of the map.
 | Contract                                       | Tool name        | What it does                                                        |
 |------------------------------------------------|------------------|---------------------------------------------------------------------|
 | `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object (id, label, x,y,z, last_seen). LLM filters client-side. |
+| `robonix/system/scene/get_robot_context`       | `get_robot_context` | One coherent robot pose, room/area containment, and nearby-object snapshot. |
 | `robonix/system/scene/goal_near`               | `goal_near`      | Footprint-safe approach pose near a registered object. Pass to `navigation/navigate`. |
 | `robonix/system/scene/goal_room`               | `goal_room`      | Footprint-safe pose inside a room annotation. |
 | `robonix/system/scene/get_scene_graph`         | `get_scene_graph` | Current semantic graph nodes and relation edges. |
