@@ -322,14 +322,49 @@ environment variables.
 | `visibility_depth_margin_m` | float, m | `0.20` | measured depth must be at least this far behind the stored object center to count as clear-space negative evidence |
 | `object_ttl_s` | float, s | `30.0` | time after the last positive observation before a `missing` object is hard-deleted |
 
+`perception.geometry` controls metric RGB-D admission. All distances use SI
+metres; percentages are expressed on a 0–100 scale and fractions on a 0–1
+scale.
+
+| Key | Type / unit | Default | Meaning |
+|---|---|---|---|
+| `mask_erosion_px` | integer, image pixels | `1` | conservative SAM-mask boundary erosion; automatically falls back when erosion would erase a small valid object |
+| `min_depth_m` | float, m | `0.15` | nearest accepted depth sample |
+| `max_depth_m` | float, m | `6.0` | farthest accepted depth sample |
+| `depth_mad_scale` | float, dimensionless | `3.5` | robust median-absolute-deviation multiplier used to reject depth spikes inside each mask |
+| `depth_min_band_m` | float, m | `0.12` | minimum half-width of the accepted per-mask depth band |
+| `frame_dbscan` | boolean | `true` | run ConceptGraphs DBSCAN noise removal on each newly back-projected object cloud |
+| `require_occupancy_bounds` | boolean | `true` | withhold authoritative objects until a same-frame-id occupancy grid exists, then reject off-map clouds |
+| `map_bounds_margin_m` | float, m | `0.25` | tolerance outside the current occupancy-grid rectangle |
+| `map_max_outside_fraction` | float, fraction | `0.20` | maximum fraction of object-cloud points allowed outside that tolerant map rectangle |
+| `bbox_low_percentile` | float, % | `5.0` | lower robust point-cloud quantile used for the yaw-aligned 3D box |
+| `bbox_high_percentile` | float, % | `95.0` | upper robust point-cloud quantile used for the yaw-aligned 3D box |
+| `max_bbox_extent_m` | float, m | `3.0` | reject a per-frame object hypothesis when any robust 3D box dimension exceeds this deployment limit |
+
 ```yaml
 system:
   scene:
-    perception:
-      period_s: 0.6
-      visible_miss_frames: 3
-      visibility_depth_margin_m: 0.20
-      object_ttl_s: 30.0
+    config:
+      # Scene receives only this nested Driver configuration mapping.
+      # Package/runtime selectors remain siblings of `config`.
+      perception:
+        period_s: 0.6
+        visible_miss_frames: 3
+        visibility_depth_margin_m: 0.20
+        object_ttl_s: 30.0
+        geometry:
+          mask_erosion_px: 1
+          min_depth_m: 0.15
+          max_depth_m: 6.0
+          depth_mad_scale: 3.5
+          depth_min_band_m: 0.12
+          frame_dbscan: true
+          require_occupancy_bounds: true
+          map_bounds_margin_m: 0.25
+          map_max_outside_fraction: 0.20
+          bbox_low_percentile: 5.0
+          bbox_high_percentile: 95.0
+          max_bbox_extent_m: 3.0
 ```
 
 ## Legacy environment and model knobs

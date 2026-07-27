@@ -166,6 +166,205 @@ def _visible_missing_uuids(
     return visible_missing
 
 
+def _erode_binary_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
+    """Square-kernel binary erosion without an OpenCV/SciPy dependency."""
+    radius = max(0, int(radius_px))
+    source = np.asarray(mask, dtype=bool)
+    if radius == 0 or source.ndim != 2:
+        return source.copy()
+    height, width = source.shape
+    padded = np.pad(source, radius, mode="constant", constant_values=False)
+    eroded = np.ones_like(source)
+    window = 2 * radius + 1
+    for dy in range(window):
+        for dx in range(window):
+            eroded &= padded[dy:dy + height, dx:dx + width]
+    return eroded
+
+
+def _refine_masks_with_depth(
+    masks: Any,
+    depth_m: Any,
+    *,
+    erosion_px: int,
+    min_depth_m: float,
+    max_depth_m: float,
+    mad_scale: float,
+    min_band_m: float,
+    min_points: int,
+    min_retained_ratio: float = 0.25,
+) -> np.ndarray:
+    """Suppress mask-edge background and depth spikes before backprojection.
+
+    Each SAM mask is conservatively eroded, range-gated, then clipped around
+    its median depth using a robust MAD band. If either refinement would erase
+    a small valid object, the previous valid stage is retained. This improves
+    geometry without converting a quality filter into a small-object recall
+    regression.
+    """
+    mask_array = np.asarray(masks, dtype=bool)
+    depth = np.asarray(depth_m, dtype=np.float32)
+    if mask_array.ndim != 3 or depth.ndim != 2:
+        return mask_array.copy()
+    if mask_array.shape[1:] != depth.shape:
+        return mask_array.copy()
+
+    minimum = max(1, int(min_points))
+    near = max(0.0, float(min_depth_m))
+    far = max(near, float(max_depth_m))
+    finite_range = np.isfinite(depth) & (depth >= near) & (depth <= far)
+    out = np.zeros_like(mask_array)
+    for index, original in enumerate(mask_array):
+        ranged = original & finite_range
+        if int(ranged.sum()) < minimum:
+            continue
+
+        eroded = _erode_binary_mask(ranged, erosion_px)
+        required_after_erode = max(
+            minimum,
+            int(round(float(ranged.sum()) * max(0.0, min(1.0, min_retained_ratio)))),
+        )
+        working = eroded if int(eroded.sum()) >= required_after_erode else ranged
+
+        values = depth[working]
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        robust_sigma = 1.4826 * mad
+        band = max(float(min_band_m), float(mad_scale) * robust_sigma)
+        clipped = working & (np.abs(depth - median) <= band)
+        required_after_clip = max(
+            minimum,
+            int(round(float(working.sum()) * max(0.0, min(1.0, min_retained_ratio)))),
+        )
+        out[index] = clipped if int(clipped.sum()) >= required_after_clip else working
+    return out
+
+
+def _occupancy_contains_points(
+    points_world: Any,
+    occupancy_grid: Any,
+    *,
+    expected_frame: str,
+    margin_m: float = 0.25,
+    max_outside_fraction: float = 0.20,
+) -> bool:
+    """Check a world-frame point cloud against a possibly rotated map grid."""
+    try:
+        points = np.asarray(points_world, dtype=np.float64)
+        points = points[np.all(np.isfinite(points), axis=1)]
+        info = occupancy_grid.info
+        resolution = float(info.resolution)
+        width = int(info.width)
+        height = int(info.height)
+        frame = str(
+            getattr(getattr(occupancy_grid, "header", None), "frame_id", "") or ""
+        ).strip().lstrip("/")
+        if (
+            points.ndim != 2
+            or points.shape[0] == 0
+            or points.shape[1] < 2
+            or resolution <= 0.0
+            or width <= 0
+            or height <= 0
+            or not frame
+            or frame != str(expected_frame or "").strip().lstrip("/")
+        ):
+            return False
+        origin = info.origin
+        q = origin.orientation
+        yaw = math.atan2(
+            2.0 * (float(q.w) * float(q.z) + float(q.x) * float(q.y)),
+            1.0 - 2.0 * (float(q.y) ** 2 + float(q.z) ** 2),
+        )
+        dx = points[:, 0] - float(origin.position.x)
+        dy = points[:, 1] - float(origin.position.y)
+        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+        local_x = cos_yaw * dx + sin_yaw * dy
+        local_y = -sin_yaw * dx + cos_yaw * dy
+        map_width_m = width * resolution
+        map_height_m = height * resolution
+        margin = max(0.0, float(margin_m))
+        inside = (
+            (local_x >= -margin)
+            & (local_x <= map_width_m + margin)
+            & (local_y >= -margin)
+            & (local_y <= map_height_m + margin)
+        )
+        outside_fraction = 1.0 - float(np.mean(inside))
+        center_x = float(np.median(local_x))
+        center_y = float(np.median(local_y))
+        center_inside = (
+            -margin <= center_x <= map_width_m + margin
+            and -margin <= center_y <= map_height_m + margin
+        )
+        return center_inside and outside_fraction <= max(
+            0.0,
+            min(1.0, float(max_outside_fraction)),
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _robust_yaw_bbox(
+    points_world: Any,
+    *,
+    low_percentile: float = 5.0,
+    high_percentile: float = 95.0,
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Return a robust yaw-only 3D box as ``(center, extent, yaw)``."""
+    points = np.asarray(points_world, dtype=np.float64)
+    points = points[np.all(np.isfinite(points), axis=1)]
+    if points.ndim != 2 or points.shape[0] < 4 or points.shape[1] < 3:
+        return None
+    low = max(0.0, min(100.0, float(low_percentile)))
+    high = max(low, min(100.0, float(high_percentile)))
+    if high <= low:
+        return None
+    # Estimate orientation from a lightly trimmed cloud. A single far depth
+    # spike otherwise dominates the covariance eigenvectors even though the
+    # later extent quantiles would have rejected that point.
+    trim_low = max(0.0, min(low, 2.0))
+    trim_high = min(100.0, max(high, 98.0))
+    xy_low = np.percentile(points[:, :2], trim_low, axis=0)
+    xy_high = np.percentile(points[:, :2], trim_high, axis=0)
+    yaw_points = points[
+        np.all(
+            (points[:, :2] >= xy_low) & (points[:, :2] <= xy_high),
+            axis=1,
+        )
+    ]
+    if yaw_points.shape[0] < 4:
+        yaw_points = points
+    yaw = _yaw_from_pca_xy(yaw_points[:, :2])
+    if not math.isfinite(yaw):
+        return None
+    anchor_xy = np.median(points[:, :2], axis=0)
+    cos_yaw, sin_yaw = float(np.cos(yaw)), float(np.sin(yaw))
+    world_to_local = np.array(
+        [[cos_yaw, sin_yaw], [-sin_yaw, cos_yaw]],
+        dtype=np.float64,
+    )
+    local_xy = (points[:, :2] - anchor_xy) @ world_to_local.T
+    lo_xy = np.percentile(local_xy, low, axis=0)
+    hi_xy = np.percentile(local_xy, high, axis=0)
+    lo_z, hi_z = np.percentile(points[:, 2], [low, high])
+    local_center_xy = (lo_xy + hi_xy) * 0.5
+    center_xy = anchor_xy + local_center_xy @ world_to_local
+    center = np.asarray(
+        [float(center_xy[0]), float(center_xy[1]), float((lo_z + hi_z) * 0.5)]
+    )
+    extent = np.asarray(
+        [
+            float(hi_xy[0] - lo_xy[0]),
+            float(hi_xy[1] - lo_xy[1]),
+            float(hi_z - lo_z),
+        ]
+    )
+    if not np.all(np.isfinite(center)) or not np.all(np.isfinite(extent)):
+        return None
+    return center, np.maximum(extent, 0.0), yaw
+
+
 _DEFAULT_YOLO_WORLD_WEIGHTS = "/opt/models/yolov8l-world.pt"
 _DEFAULT_MOBILE_SAM_WEIGHTS = "/opt/models/mobile_sam.pt"
 _DEFAULT_CLIP_MODEL = "ViT-B-32"
@@ -457,6 +656,18 @@ class ConceptGraphsDetector:
         visible_miss_threshold: int = 3,
         visibility_depth_margin_m: float = 0.20,
         object_ttl_s: float = 30.0,
+        mask_erosion_px: int = 1,
+        min_depth_m: float = 0.15,
+        max_depth_m: float = 6.0,
+        depth_mad_scale: float = 3.5,
+        depth_min_band_m: float = 0.12,
+        frame_dbscan: bool = True,
+        require_occupancy_bounds: bool = True,
+        map_bounds_margin_m: float = 0.25,
+        map_max_outside_fraction: float = 0.20,
+        bbox_low_percentile: float = 5.0,
+        bbox_high_percentile: float = 95.0,
+        max_bbox_extent_m: float = 3.0,
         confidence_threshold: float = 0.30,
         max_detections: int = 30,
         yolo_weights_path: Optional[str] = None,
@@ -497,6 +708,27 @@ class ConceptGraphsDetector:
             float(visibility_depth_margin_m),
         )
         self._object_ttl_s = max(0.0, float(object_ttl_s))
+        self._mask_erosion_px = max(0, int(mask_erosion_px))
+        self._min_depth_m = max(0.0, float(min_depth_m))
+        self._max_depth_m = max(self._min_depth_m, float(max_depth_m))
+        self._depth_mad_scale = max(0.0, float(depth_mad_scale))
+        self._depth_min_band_m = max(0.0, float(depth_min_band_m))
+        self._frame_dbscan = bool(frame_dbscan)
+        self._require_occupancy_bounds = bool(require_occupancy_bounds)
+        self._map_bounds_margin_m = max(0.0, float(map_bounds_margin_m))
+        self._map_max_outside_fraction = max(
+            0.0,
+            min(1.0, float(map_max_outside_fraction)),
+        )
+        self._bbox_low_percentile = max(
+            0.0,
+            min(100.0, float(bbox_low_percentile)),
+        )
+        self._bbox_high_percentile = max(
+            self._bbox_low_percentile,
+            min(100.0, float(bbox_high_percentile)),
+        )
+        self._max_bbox_extent_m = max(0.05, float(max_bbox_extent_m))
 
         self._yolo: Any = None
         self._sam: Any = None
@@ -553,6 +785,15 @@ class ConceptGraphsDetector:
         # Keep the binding for stable re-identification, but suppress these
         # objects from the 3D live view until they are observed again.
         self._missing_uuids: set[str] = set()
+        self._quality_counters: dict[str, int] = {
+            "healthy_frames": 0,
+            "masks_input": 0,
+            "masks_retained": 0,
+            "depth_rejected_masks": 0,
+            "map_bounds_rejected_detections": 0,
+            "oversized_bbox_rejected_detections": 0,
+            "accepted_frame_detections": 0,
+        }
         # How long a soft-evicted (missing) registry record is kept so a
         # re-detection can re-bind it before it is hard-pruned. Decouples
         # observation_count from concept-graphs uuid churn across ticks.
@@ -627,6 +868,8 @@ class ConceptGraphsDetector:
             self._uuid_to_oid.clear()
             self._expired_uuids.clear()
             self._missing_uuids.clear()
+            for key in getattr(self, "_quality_counters", {}):
+                self._quality_counters[key] = 0
             self._tick_idx = 0
             self._last_logged_total = -1
             self._spatial_not_ready_logged = False
@@ -653,6 +896,26 @@ class ConceptGraphsDetector:
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-cg] embed_text failed: %s", e)
             return None
+
+    def quality_metrics(self) -> dict[str, Any]:
+        """Return cumulative admission counters for operator/CI reporting."""
+        return {
+            **dict(getattr(self, "_quality_counters", {})),
+            "require_occupancy_bounds": bool(
+                getattr(self, "_require_occupancy_bounds", False)
+            ),
+            "frame_dbscan": bool(getattr(self, "_frame_dbscan", False)),
+            "depth_range_m": [
+                float(getattr(self, "_min_depth_m", 0.0)),
+                float(getattr(self, "_max_depth_m", 0.0)),
+            ],
+            "max_bbox_extent_m": float(
+                getattr(self, "_max_bbox_extent_m", 0.0)
+            ),
+            "map_bounds_margin_m": float(
+                getattr(self, "_map_bounds_margin_m", 0.0)
+            ),
+        }
 
     # ── External viz access ──────────────────────────────────────────
     # Web UI's `/3d` page calls into here every frame. Held under the
@@ -718,40 +981,29 @@ class ConceptGraphsDetector:
                     pts = pts[idx]
                     if cols is not None and cols.size:
                         cols = cols[idx]
-                # Yaw-only OBB via 2D PCA on the XY footprint. Same
-                # rationale as in `_project_to_registry`: Open3D's
-                # `get_oriented_bounding_box(robust=True)` segfaults
-                # in qhull on certain pcds, so we never call it.
-                yaw = _yaw_from_pca_xy(pts[:, :2])
-                # Rotate the pts into yaw-aligned frame, take axis-
-                # aligned extent there, build 8 corners, rotate back.
-                cos_y = float(np.cos(yaw)); sin_y = float(np.sin(yaw))
+                bbox_result = _robust_yaw_bbox(
+                    pts,
+                    low_percentile=getattr(self, "_bbox_low_percentile", 5.0),
+                    high_percentile=getattr(self, "_bbox_high_percentile", 95.0),
+                )
+                if bbox_result is None:
+                    continue
+                center, extent, yaw = bbox_result
+                cos_y = float(np.cos(yaw))
+                sin_y = float(np.sin(yaw))
                 rot_xy = np.array([[cos_y, sin_y], [-sin_y, cos_y]])
-                pts_xy = pts[:, :2] - pts[:, :2].mean(axis=0)
-                pts_local = pts_xy @ rot_xy.T  # rotate into yaw frame
-                # 5–95 percentile instead of full min/max — robust
-                # against the depth-spike outliers that were inflating
-                # bbox dimensions to 3 m+ on a single chair.
-                lo_x, hi_x = np.percentile(pts_local[:, 0], [5, 95])
-                lo_y, hi_y = np.percentile(pts_local[:, 1], [5, 95])
-                lo_z, hi_z = np.percentile(pts[:, 2], [5, 95])
-                lo_x, hi_x = float(lo_x), float(hi_x)
-                lo_y, hi_y = float(lo_y), float(hi_y)
-                lo_z, hi_z = float(lo_z), float(hi_z)
-                cx, cy = pts[:, :2].mean(axis=0)
-                # 8 corners in robot-frame XY (yaw-rotated) + raw Z.
+                hx, hy, hz = (float(v) * 0.5 for v in extent)
                 local_corners = np.array([
-                    [lo_x, lo_y, lo_z], [hi_x, lo_y, lo_z],
-                    [lo_x, hi_y, lo_z], [lo_x, lo_y, hi_z],
-                    [hi_x, hi_y, hi_z], [lo_x, hi_y, hi_z],
-                    [hi_x, lo_y, hi_z], [hi_x, hi_y, lo_z],
+                    [-hx, -hy, -hz], [hx, -hy, -hz],
+                    [-hx, hy, -hz], [-hx, -hy, hz],
+                    [hx, hy, hz], [-hx, hy, hz],
+                    [hx, -hy, hz], [hx, hy, -hz],
                 ])
                 corners = np.zeros_like(local_corners)
-                # Rotate xy back into world, then translate.
                 world_xy = local_corners[:, :2] @ rot_xy
-                corners[:, 0] = world_xy[:, 0] + cx
-                corners[:, 1] = world_xy[:, 1] + cy
-                corners[:, 2] = local_corners[:, 2]
+                corners[:, 0] = world_xy[:, 0] + center[0]
+                corners[:, 1] = world_xy[:, 1] + center[1]
+                corners[:, 2] = local_corners[:, 2] + center[2]
                 bbox_corners_arr = corners
                 if not np.all(np.isfinite(bbox_corners_arr)):
                     continue
@@ -768,7 +1020,7 @@ class ConceptGraphsDetector:
                     "n_points": int(obj.get("n_points", pts.shape[0])),
                     "conf_mean": (float(np.mean(obj["conf"])) if obj.get("conf") else 0.0),
                     # Center + size for HUD; clients can also derive from corners.
-                    "center": pts.mean(axis=0).tolist(),
+                    "center": center.tolist(),
                     "bbox_corners": bbox_corners,
                     "inst_color": inst_color,
                     "points": pts.tolist(),
@@ -866,6 +1118,16 @@ class ConceptGraphsDetector:
                 self._spatial_not_ready_logged = True
             return
         self._spatial_not_ready_logged = False
+        occupancy_grid = self._current_occupancy_grid(world_frame)
+        if self._require_occupancy_bounds and occupancy_grid is None:
+            if not getattr(self, "_occupancy_not_ready_logged", False):
+                log.warning(
+                    "occupancy grid unavailable or frame-mismatched; "
+                    "withholding navigation-grade object detections"
+                )
+                self._occupancy_not_ready_logged = True
+            return
+        self._occupancy_not_ready_logged = False
         cam_K_mat = np.array(
             [
                 [K.fx, 0, K.cx],
@@ -976,6 +1238,7 @@ class ConceptGraphsDetector:
             cls_idx = cls_idx[:n]
         if masks.shape[0] == 0:
             return
+        self._quality_counters["masks_input"] += int(masks.shape[0])
 
         # Resize masks to depth resolution if needed (MobileSAM masks
         # come back at the input resolution, which matches RGB; depth
@@ -995,6 +1258,28 @@ class ConceptGraphsDetector:
             except Exception as e:  # noqa: BLE001
                 log.warning("mask resize failed: %s — skipping tick", e)
                 return
+        masks = _refine_masks_with_depth(
+            masks,
+            depth,
+            erosion_px=self._mask_erosion_px,
+            min_depth_m=self._min_depth_m,
+            max_depth_m=self._max_depth_m,
+            mad_scale=self._depth_mad_scale,
+            min_band_m=self._depth_min_band_m,
+            min_points=int(self.cfg["min_points_threshold"]),
+        )
+        retained_masks = int(np.count_nonzero(np.any(masks, axis=(1, 2))))
+        self._quality_counters["masks_retained"] += retained_masks
+        self._quality_counters["depth_rejected_masks"] += (
+            int(masks.shape[0]) - retained_masks
+        )
+        if not masks.any():
+            self._finish_healthy_frame(
+                depth=depth,
+                intrinsics=K,
+                camera_to_world=trans_pose,
+            )
+            return
 
         # ── CLIP per-detection feature ──────────────────────────────
         try:
@@ -1045,7 +1330,7 @@ class ConceptGraphsDetector:
                 dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
                 dbscan_eps=self.cfg["dbscan_eps"],
                 dbscan_min_points=self.cfg["dbscan_min_points"],
-                run_dbscan=False,
+                run_dbscan=self._frame_dbscan,
                 device=self._device,
             )
         except Exception as e:  # noqa: BLE001
@@ -1078,6 +1363,41 @@ class ConceptGraphsDetector:
             # Drop them before they reach the merge pipeline.
             try:
                 pts_chk = np.asarray(entry["pcd"].points)
+                if (
+                    occupancy_grid is not None
+                    and not _occupancy_contains_points(
+                        pts_chk,
+                        occupancy_grid,
+                        expected_frame=world_frame,
+                        margin_m=self._map_bounds_margin_m,
+                        max_outside_fraction=self._map_max_outside_fraction,
+                    )
+                ):
+                    log.debug(
+                        "[scene-cg] drop %s detection outside occupancy bounds",
+                        cls_name,
+                    )
+                    self._quality_counters[
+                        "map_bounds_rejected_detections"
+                    ] += 1
+                    continue
+                frame_bbox = _robust_yaw_bbox(
+                    pts_chk,
+                    low_percentile=self._bbox_low_percentile,
+                    high_percentile=self._bbox_high_percentile,
+                )
+                if (
+                    frame_bbox is None
+                    or float(np.max(frame_bbox[1])) > self._max_bbox_extent_m
+                ):
+                    log.debug(
+                        "[scene-cg] drop %s detection with invalid/oversized bbox",
+                        cls_name,
+                    )
+                    self._quality_counters[
+                        "oversized_bbox_rejected_detections"
+                    ] += 1
+                    continue
                 if pts_chk.shape[0] >= 4:
                     z_max = float(pts_chk[:, 2].max())
                     z_p90 = float(np.percentile(pts_chk[:, 2], 90))
@@ -1126,6 +1446,7 @@ class ConceptGraphsDetector:
                 "new_counter": 0,
             }
             det_list.append(d)
+        self._quality_counters["accepted_frame_detections"] += len(det_list)
 
         if len(det_list) == 0:
             self._finish_healthy_frame(
@@ -1292,6 +1613,7 @@ class ConceptGraphsDetector:
         camera_to_world: Any,
     ) -> None:
         """Commit one healthy frame's positive and negative evidence."""
+        self._quality_counters["healthy_frames"] += 1
         frame_seq = self._tick_idx
         self._tick_idx += 1
         self._maybe_periodic_cleanup()
@@ -1789,6 +2111,32 @@ class ConceptGraphsDetector:
             return ""
         return live or configured
 
+    def _current_occupancy_grid(self, expected_world_frame: str):
+        """Return the current map grid only when its frame matches projection."""
+        if self._hub is None or not self._hub.has("occupancy_grid"):
+            return None
+        try:
+            msg, stamp_unix, count = self._hub.latest("occupancy_grid")
+        except Exception:  # noqa: BLE001
+            return None
+        if msg is None or stamp_unix <= 0.0 or count <= 0:
+            return None
+        frame = str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).strip().lstrip("/")
+        expected = str(expected_world_frame or "").strip().lstrip("/")
+        if not frame or frame != expected:
+            return None
+        info = getattr(msg, "info", None)
+        if (
+            info is None
+            or int(getattr(info, "width", 0) or 0) <= 0
+            or int(getattr(info, "height", 0) or 0) <= 0
+            or float(getattr(info, "resolution", 0.0) or 0.0) <= 0.0
+        ):
+            return None
+        return msg
+
     def _build_camera_to_map_transform(self, *, expected_world_frame: str = ""):
         """Return a validated camera-to-world transform.
 
@@ -2006,32 +2354,14 @@ class ConceptGraphsDetector:
                 if finite_pts.shape[0] < 4:
                     continue
                 pts = finite_pts
-                obb_yaw = _yaw_from_pca_xy(pts[:, :2])
-                cy_, sy_ = float(np.cos(obb_yaw)), float(np.sin(obb_yaw))
-                pts_local_xy = (pts[:, :2] - pts[:, :2].mean(axis=0)) @ np.array([[cy_, sy_], [-sy_, cy_]]).T
-                obb_center = np.array([
-                    float(pts[:, 0].mean()), float(pts[:, 1].mean()), float(pts[:, 2].mean()),
-                ])
-                # Use 5–95 percentile range instead of full min/max:
-                # a single outlier point (depth backprojection
-                # spike, mask leak) along the principal axis was
-                # blowing chair / table extents to 3 m+. Percentile
-                # is robust to a few stragglers and matches what
-                # the user actually expects to see.
-                lo, hi = np.percentile(pts_local_xy[:, 0], [5, 95])
-                ex_x = float(hi - lo)
-                lo, hi = np.percentile(pts_local_xy[:, 1], [5, 95])
-                ex_y = float(hi - lo)
-                lo, hi = np.percentile(pts[:, 2], [5, 95])
-                ex_z = float(hi - lo)
-                obb_extent = np.array([ex_x, ex_y, ex_z])
-                # Final NaN/Inf guard. If any value made it through
-                # (e.g. zero-variance pcd → PCA returns NaN yaw), skip
-                # this object rather than letting JSON reject the
-                # whole snapshot.
-                if not (np.all(np.isfinite(obb_center)) and np.all(np.isfinite(obb_extent))
-                        and math.isfinite(obb_yaw)):
+                bbox_result = _robust_yaw_bbox(
+                    pts,
+                    low_percentile=self._bbox_low_percentile,
+                    high_percentile=self._bbox_high_percentile,
+                )
+                if bbox_result is None:
                     continue
+                obb_center, obb_extent, obb_yaw = bbox_result
 
                 cls = _canon_class(obj.get("class_name", "object"))
                 conf_list = obj.get("conf", [])
@@ -2050,6 +2380,8 @@ class ConceptGraphsDetector:
                     "size_y": float(max(0.05, obb_extent[1])),
                     "size_z": float(max(0.05, obb_extent[2])),
                     "confidence": max(0.0, min(1.0, conf)),
+                    "geometry_point_count": int(pts.shape[0]),
+                    "geometry_view_count": int(obj.get("num_detections", 1) or 1),
                 })
             except Exception:  # noqa: BLE001
                 continue
@@ -2214,6 +2546,17 @@ class ConceptGraphsDetector:
                     existing.bbox = bbox
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
                     existing.attributes["observation_lifecycle"] = "visibility"
+                    existing.attributes["geometry_source"] = "rgbd_multi_view"
+                    existing.attributes["bbox_method"] = "yaw_pca_quantile"
+                    existing.attributes["geometry_point_count"] = int(
+                        s.get("geometry_point_count", 0)
+                    )
+                    existing.attributes["geometry_view_count"] = int(
+                        s.get("geometry_view_count", 1)
+                    )
+                    existing.attributes["navigation_grade"] = bool(
+                        getattr(self, "_require_occupancy_bounds", False)
+                    )
                     if is_observed:
                         existing.last_seen = now
                         existing.missing = False
@@ -2238,6 +2581,17 @@ class ConceptGraphsDetector:
                         obj.attributes["cg_uuid"] = u
                         self._uuid_to_oid[u] = obj.object_id
                     obj.attributes["observation_lifecycle"] = "visibility"
+                    obj.attributes["geometry_source"] = "rgbd_multi_view"
+                    obj.attributes["bbox_method"] = "yaw_pca_quantile"
+                    obj.attributes["geometry_point_count"] = int(
+                        s.get("geometry_point_count", 0)
+                    )
+                    obj.attributes["geometry_view_count"] = int(
+                        s.get("geometry_view_count", 1)
+                    )
+                    obj.attributes["navigation_grade"] = bool(
+                        getattr(self, "_require_occupancy_bounds", False)
+                    )
                     obj.attributes["last_observed_frame"] = frame_seq
                     obj.attributes["last_observed_unix"] = now
                     obj.attributes["consecutive_visible_misses"] = 0

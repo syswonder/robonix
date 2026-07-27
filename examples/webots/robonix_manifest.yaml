@@ -39,6 +39,22 @@ system:
         visible_miss_frames: 3
         visibility_depth_margin_m: 0.20
         object_ttl_s: 30.0
+        geometry:
+          # Reject RGB-D points outside the physical sensor range, remove
+          # one-pixel SAM boundary leakage, denoise each frame, and admit only
+          # point clouds that fit the current map grid.
+          mask_erosion_px: 1
+          min_depth_m: 0.15
+          max_depth_m: 6.0
+          depth_mad_scale: 3.5
+          depth_min_band_m: 0.12
+          frame_dbscan: true
+          require_occupancy_bounds: true
+          map_bounds_margin_m: 0.25
+          map_max_outside_fraction: 0.20
+          bbox_low_percentile: 5.0
+          bbox_high_percentile: 95.0
+          max_bbox_extent_m: 3.0
   # execution layer
   executor:
     # robonix-client polls Executor for authoritative active RTDL plans.

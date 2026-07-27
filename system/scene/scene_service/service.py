@@ -574,6 +574,19 @@ async def _start_ros_ingest(
     perception_cfg = config.get("perception") or {}
     if not isinstance(perception_cfg, dict):
         raise ValueError("perception must be a mapping")
+    geometry_cfg = perception_cfg.get("geometry") or {}
+    if not isinstance(geometry_cfg, dict):
+        raise ValueError("perception.geometry must be a mapping")
+
+    def _geometry_bool(key: str, default: bool) -> bool:
+        value = geometry_cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {
+            "true", "false", "1", "0", "yes", "no",
+        }:
+            return value.strip().lower() in {"true", "1", "yes"}
+        raise ValueError(f"perception.geometry.{key} must be a boolean")
     detection_period_s = float(
         perception_cfg["period_s"]
         if perception_cfg.get("period_s") is not None
@@ -594,6 +607,20 @@ async def _start_ros_ingest(
         if perception_cfg.get("object_ttl_s") is not None
         else 30.0
     )
+    mask_erosion_px = int(geometry_cfg.get("mask_erosion_px", 1))
+    min_depth_m = float(geometry_cfg.get("min_depth_m", 0.15))
+    max_depth_m = float(geometry_cfg.get("max_depth_m", 6.0))
+    depth_mad_scale = float(geometry_cfg.get("depth_mad_scale", 3.5))
+    depth_min_band_m = float(geometry_cfg.get("depth_min_band_m", 0.12))
+    frame_dbscan = _geometry_bool("frame_dbscan", True)
+    require_occupancy_bounds = _geometry_bool("require_occupancy_bounds", True)
+    map_bounds_margin_m = float(geometry_cfg.get("map_bounds_margin_m", 0.25))
+    map_max_outside_fraction = float(
+        geometry_cfg.get("map_max_outside_fraction", 0.20)
+    )
+    bbox_low_percentile = float(geometry_cfg.get("bbox_low_percentile", 5.0))
+    bbox_high_percentile = float(geometry_cfg.get("bbox_high_percentile", 95.0))
+    max_bbox_extent_m = float(geometry_cfg.get("max_bbox_extent_m", 3.0))
     if detection_period_s <= 0.0:
         raise ValueError("perception.period_s must be greater than zero")
     if visible_miss_frames < 1:
@@ -604,6 +631,34 @@ async def _start_ros_ingest(
         )
     if object_ttl_s < 0.0:
         raise ValueError("perception.object_ttl_s must not be negative")
+    if mask_erosion_px < 0:
+        raise ValueError("perception.geometry.mask_erosion_px must not be negative")
+    if min_depth_m < 0.0 or max_depth_m <= min_depth_m:
+        raise ValueError(
+            "perception.geometry depth range must satisfy "
+            "0 <= min_depth_m < max_depth_m"
+        )
+    if depth_mad_scale < 0.0 or depth_min_band_m < 0.0:
+        raise ValueError(
+            "perception.geometry depth filters must not be negative"
+        )
+    if map_bounds_margin_m < 0.0:
+        raise ValueError(
+            "perception.geometry.map_bounds_margin_m must not be negative"
+        )
+    if not 0.0 <= map_max_outside_fraction <= 1.0:
+        raise ValueError(
+            "perception.geometry.map_max_outside_fraction must be in [0, 1]"
+        )
+    if not 0.0 <= bbox_low_percentile < bbox_high_percentile <= 100.0:
+        raise ValueError(
+            "perception.geometry bbox percentiles must satisfy "
+            "0 <= low < high <= 100"
+        )
+    if max_bbox_extent_m <= 0.0:
+        raise ValueError(
+            "perception.geometry.max_bbox_extent_m must be greater than zero"
+        )
 
     # ── self-pose bridge ───────────────────────────────────────────────────
     # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
@@ -794,6 +849,18 @@ async def _start_ros_ingest(
             visible_miss_threshold=visible_miss_frames,
             visibility_depth_margin_m=visibility_depth_margin_m,
             object_ttl_s=object_ttl_s,
+            mask_erosion_px=mask_erosion_px,
+            min_depth_m=min_depth_m,
+            max_depth_m=max_depth_m,
+            depth_mad_scale=depth_mad_scale,
+            depth_min_band_m=depth_min_band_m,
+            frame_dbscan=frame_dbscan,
+            require_occupancy_bounds=require_occupancy_bounds,
+            map_bounds_margin_m=map_bounds_margin_m,
+            map_max_outside_fraction=map_max_outside_fraction,
+            bbox_low_percentile=bbox_low_percentile,
+            bbox_high_percentile=bbox_high_percentile,
+            max_bbox_extent_m=max_bbox_extent_m,
             camera_frame=camera_frame,
             base_frame=configured_base_frame or None,
         )

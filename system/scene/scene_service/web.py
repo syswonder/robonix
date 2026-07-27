@@ -339,11 +339,24 @@ def _occupancy_payload(hub: Any) -> Optional[dict]:
     buf = io.BytesIO()
     PILImage.fromarray(out, mode="L").save(buf, format="PNG", optimize=False)
     payload = {
+        "frame_id": str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).strip(),
         "width": w,
         "height": h,
         "resolution": float(info.resolution),
         "origin_x": float(info.origin.position.x),
         "origin_y": float(info.origin.position.y),
+        "origin_yaw": math.atan2(
+            2.0 * (
+                float(info.origin.orientation.w) * float(info.origin.orientation.z)
+                + float(info.origin.orientation.x) * float(info.origin.orientation.y)
+            ),
+            1.0 - 2.0 * (
+                float(info.origin.orientation.y) ** 2
+                + float(info.origin.orientation.z) ** 2
+            ),
+        ),
         "stamp_ms": int(stamp_unix * 1000),
         "png_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
     }
@@ -477,7 +490,8 @@ def _state_payload(registry: ObjectRegistry,
                    hub: Any, sg_store: Any = None,
                    anno_store: Any = None,
                    map_binding: Optional[dict] = None,
-                   robot_geometry: Any = None) -> dict:
+                   robot_geometry: Any = None,
+                   detector: Any = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
     sees a half-updated registry. The "relations" field shows the fast
@@ -538,6 +552,11 @@ def _state_payload(registry: ObjectRegistry,
         "robot_footprint": (
             robot_geometry.current().to_json()
             if robot_geometry is not None and robot_geometry.current() is not None
+            else None
+        ),
+        "perception_quality": (
+            detector.quality_metrics()
+            if detector is not None and hasattr(detector, "quality_metrics")
             else None
         ),
         "occupancy": _occupancy_payload(hub),
@@ -866,6 +885,7 @@ def make_app(*, registry: ObjectRegistry,
                 anno_store,
                 map_binding,
                 robot_geometry,
+                detector,
             )
         )
 
