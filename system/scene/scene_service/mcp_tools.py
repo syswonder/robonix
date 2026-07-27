@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""FastMCP tool definitions — two read-only handlers, that's it.
+"""FastMCP tool definitions for Scene queries and object corrections.
 
   list_objects()           → flat list of every object in the registry
   goal_near(object_id)     → reachable approach pose for a physical object
   goal_room(room_id)       → reachable pose inside a room polygon
+  update/delete/flush      → epoch-checked derived-object corrections
 
-Writes happen on the ingest path (perception → registry); these
-handlers only read. Inputs are codegen-derived ROS dataclasses
+Inputs are codegen-derived ROS dataclasses
 (`semantic_map_mcp.*`); the @mcp_contract decorator turns each one
 into a JSON-schema-typed MCP tool that Pilot discovers via atlas.
 """
@@ -27,6 +27,7 @@ from .robot_geometry import RobotGeometryState
 
 if TYPE_CHECKING:
     from .annotations import Annotation, AnnotationStore
+    from .object_mutations import ObjectMutationCoordinator
 
 # Resolved at import time. PYTHONPATH is set by package_manifest.yaml's
 # `start:` block to include rbnx-build/codegen/{proto_gen,robonix_mcp_types}.
@@ -42,6 +43,10 @@ from semantic_map_mcp import (  # type: ignore
     GetRobotContext_Response,
     GetSceneGraph_Request,
     GetSceneGraph_Response,
+    DeleteObject_Request,
+    DeleteObject_Response,
+    FlushObjects_Request,
+    FlushObjects_Response,
     ListObjects_Request,
     ListObjects_Response,
     ListRelations_Request,
@@ -50,6 +55,10 @@ from semantic_map_mcp import (  # type: ignore
     SceneAnnotation as SceneAnnotationIDL,
     SceneGraphEdge as SceneGraphEdgeIDL,
     SceneGraphNode as SceneGraphNodeIDL,
+    UpdateObjectLabel_Request,
+    UpdateObjectLabel_Response,
+    UpdateObjectGeometry_Request,
+    UpdateObjectGeometry_Response,
 )
 
 from mcp.server.fastmcp import FastMCP
@@ -64,6 +73,7 @@ _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near B
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
 _ROBOT_GEOMETRY: RobotGeometryState | None = None
+_OBJECT_MUTATIONS: "ObjectMutationCoordinator | None" = None
 
 
 
@@ -73,7 +83,7 @@ def attach_state(
     hub=None,
     robot_geometry: RobotGeometryState | None = None,
 ) -> None:
-    """Attach live Scene dependencies used by read-only MCP handlers."""
+    """Attach live Scene dependencies used by MCP handlers."""
     global _REGISTRY, _HUB, _ROBOT_GEOMETRY
     _REGISTRY = registry
     _HUB = hub
@@ -88,6 +98,13 @@ def attach_scene_graph_store(store: SceneGraphStore) -> None:
 def attach_annotation_store(store: "AnnotationStore | None") -> None:
     global _ANNO_STORE
     _ANNO_STORE = store
+
+
+def attach_object_mutations(
+    coordinator: "ObjectMutationCoordinator | None",
+) -> None:
+    global _OBJECT_MUTATIONS
+    _OBJECT_MUTATIONS = coordinator
 
 
 # ── conversions: SceneObject → IDL Object ──────────────────────────────────
@@ -216,7 +233,13 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     Contract: robonix/system/scene/list_objects."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
-    objs, _surfs = await _REGISTRY.snapshot()
+    if _OBJECT_MUTATIONS is not None:
+        objs, map_id, generation = (
+            await _OBJECT_MUTATIONS.snapshot_objects()
+        )
+    else:
+        objs, _surfs = await _REGISTRY.snapshot()
+        map_id, generation = "", -1
     visible = [o for o in objs.values() if not o.missing]
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
@@ -224,6 +247,103 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     return ListObjects_Response(
         objects=objects,
         stamp_unix=time.time(),
+        map_id=map_id,
+        generation=generation,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/update_object_label")
+async def update_object_label(
+    req: UpdateObjectLabel_Request,
+) -> UpdateObjectLabel_Response:
+    """Apply a sticky operator label correction to one derived object."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_label(
+        object_id=req.object_id,
+        label=req.label,
+        clear_override=req.clear_override,
+        expected_map_id=req.expected_map_id,
+        expected_generation=req.expected_generation,
+        persist_to_snapshot=req.persist_to_snapshot,
+    )
+    return UpdateObjectLabel_Response(
+        object=_to_idl(obj),
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/update_object_geometry")
+async def update_object_geometry(
+    req: UpdateObjectGeometry_Request,
+) -> UpdateObjectGeometry_Response:
+    """Replace one derived object's pose/bbox with a non-nav operator value."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    obj, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.update_geometry(
+            object_id=req.object_id,
+            x=req.x,
+            y=req.y,
+            z=req.z,
+            yaw=req.yaw,
+            size_x=req.size_x,
+            size_y=req.size_y,
+            size_z=req.size_z,
+            frame_id=req.frame_id,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+        )
+    )
+    return UpdateObjectGeometry_Response(
+        object=_to_idl(obj),
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/delete_object")
+async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
+    """Delete one incorrect derived object from the asserted map epoch."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    deleted_id, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.delete_object(
+            object_id=req.object_id,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+        )
+    )
+    return DeleteObject_Response(
+        deleted_id=deleted_id,
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/flush_objects")
+async def flush_objects(req: FlushObjects_Request) -> FlushObjects_Response:
+    """Clear all derived objects while preserving robot and annotations."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    deleted_count, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.flush_objects(
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+        )
+    )
+    return FlushObjects_Response(
+        deleted_count=deleted_count,
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
     )
 
 
@@ -666,6 +786,7 @@ __all__ = [
     "attach_state",
     "attach_scene_graph_store",
     "attach_annotation_store",
+    "attach_object_mutations",
     "get_robot_context",
     "list_objects",
     "goal_near",
@@ -673,4 +794,8 @@ __all__ = [
     "get_scene_graph",
     "get_object_context",
     "list_relations",
+    "update_object_label",
+    "update_object_geometry",
+    "delete_object",
+    "flush_objects",
 ]

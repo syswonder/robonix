@@ -1,0 +1,10 @@
+# Replace one derived object's geometry with an explicit operator correction.
+[contract]
+id      = "robonix/system/scene/update_object_geometry"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/UpdateObjectGeometry.srv"
+description = "Replace one derived Scene object's metric pose and bounding box in the caller-asserted map epoch; values use metres and radians and remain non-navigation-grade."
+
+[mode]
+type = "rpc"

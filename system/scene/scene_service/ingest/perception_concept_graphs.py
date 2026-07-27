@@ -931,6 +931,8 @@ class ConceptGraphsDetector:
         # here (not lazily) so _apply_snapshot is safe to call before the first
         # _project_to_registry tick — including from unit tests.
         self._uuid_to_oid: dict[str, str] = {}
+        self._operator_labels: dict[str, str] = {}
+        self._operator_geometry_oids: set[str] = set()
         self._expired_uuids: set[str] = set()
         # UUIDs backed by historical ConceptGraphs geometry but currently
         # confirmed absent by repeated, unobstructed RGB-D observations.
@@ -1041,6 +1043,8 @@ class ConceptGraphsDetector:
                 except TypeError:
                     self._map_objects = []
             self._uuid_to_oid.clear()
+            getattr(self, "_operator_labels", {}).clear()
+            getattr(self, "_operator_geometry_oids", set()).clear()
             self._expired_uuids.clear()
             self._missing_uuids.clear()
             for key in getattr(self, "_quality_counters", {}):
@@ -1048,6 +1052,131 @@ class ConceptGraphsDetector:
             self._tick_idx = 0
             self._last_logged_total = -1
             self._spatial_not_ready_logged = False
+
+    async def update_object_label(self, object_id: str, label: str) -> bool:
+        """Install a sticky operator label in the detector-owned track."""
+        loop = asyncio.get_running_loop()
+        return bool(
+            await loop.run_in_executor(
+                None,
+                self._update_object_label_locked,
+                object_id,
+                label,
+            )
+        )
+
+    def _update_object_label_locked(self, object_id: str, label: str) -> bool:
+        with self._inference_lock:
+            self._operator_labels[object_id] = label
+            updated = False
+            for obj in self._map_objects or ():
+                uuid_value = str(obj.get("id", "") or "")
+                if self._uuid_to_oid.get(uuid_value) != object_id:
+                    continue
+                if not obj.get("operator_label"):
+                    obj["operator_label_previous"] = str(
+                        obj.get("class_name", "object") or "object"
+                    )
+                obj["operator_label"] = label
+                obj["class_name"] = label
+                updated = True
+            return updated
+
+    async def clear_object_label_override(self, object_id: str) -> bool:
+        """Remove a runtime operator override, used to roll back failed writes."""
+        loop = asyncio.get_running_loop()
+        return bool(
+            await loop.run_in_executor(
+                None,
+                self._clear_object_label_override_locked,
+                object_id,
+            )
+        )
+
+    def _clear_object_label_override_locked(self, object_id: str) -> bool:
+        with self._inference_lock:
+            existed = self._operator_labels.pop(object_id, None) is not None
+            for obj in self._map_objects or ():
+                uuid_value = str(obj.get("id", "") or "")
+                if self._uuid_to_oid.get(uuid_value) != object_id:
+                    continue
+                obj.pop("operator_label", None)
+                previous = str(
+                    obj.pop("operator_label_previous", "") or ""
+                ).strip()
+                if previous:
+                    obj["class_name"] = previous
+                existed = True
+            self._stabilize_map_labels()
+            return existed
+
+    async def update_object_geometry_override(self, object_id: str) -> bool:
+        """Keep detector projection from overwriting an operator-owned bbox."""
+        loop = asyncio.get_running_loop()
+        return bool(
+            await loop.run_in_executor(
+                None,
+                self._update_object_geometry_override_locked,
+                object_id,
+            )
+        )
+
+    def _update_object_geometry_override_locked(self, object_id: str) -> bool:
+        with self._inference_lock:
+            self._operator_geometry_oids.add(object_id)
+            return True
+
+    async def clear_object_geometry_override(self, object_id: str) -> bool:
+        loop = asyncio.get_running_loop()
+        return bool(
+            await loop.run_in_executor(
+                None,
+                self._clear_object_geometry_override_locked,
+                object_id,
+            )
+        )
+
+    def _clear_object_geometry_override_locked(self, object_id: str) -> bool:
+        with self._inference_lock:
+            existed = object_id in self._operator_geometry_oids
+            self._operator_geometry_oids.discard(object_id)
+            return existed
+
+    async def delete_object(self, object_id: str) -> bool:
+        """Remove one registry-bound object from all detector-owned state."""
+        loop = asyncio.get_running_loop()
+        return bool(
+            await loop.run_in_executor(
+                None,
+                self._delete_object_locked,
+                object_id,
+            )
+        )
+
+    def _delete_object_locked(self, object_id: str) -> bool:
+        with self._inference_lock:
+            self._operator_labels.pop(object_id, None)
+            self._operator_geometry_oids.discard(object_id)
+            uuids = {
+                uuid_value
+                for uuid_value, oid in self._uuid_to_oid.items()
+                if oid == object_id
+            }
+            if not uuids or self._map_objects is None:
+                return False
+            if self._cg is not None:
+                retained = self._cg["MapObjectList"]()
+            else:
+                retained = []
+            for obj in self._map_objects:
+                if str(obj.get("id", "") or "") not in uuids:
+                    retained.append(obj)
+            self._map_objects = retained
+            for uuid_value in uuids:
+                self._uuid_to_oid.pop(uuid_value, None)
+                self._missing_uuids.discard(uuid_value)
+                self._expired_uuids.discard(uuid_value)
+            return True
 
     # ── Text embedding (shared CLIP) ─────────────────────────────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
@@ -1136,12 +1265,22 @@ class ConceptGraphsDetector:
         # which never matches the 2D view's count.
         live_uuids = getattr(self, "_uuid_to_oid", None)
         missing_uuids = getattr(self, "_missing_uuids", set())
+        operator_geometry_oids = getattr(
+            self,
+            "_operator_geometry_oids",
+            set(),
+        )
         for obj_idx, obj in enumerate(map_objs):
             if live_uuids is not None and live_uuids:
                 u = str(obj.get("id", ""))
                 if u and u not in live_uuids:
                     continue
                 if u and u in missing_uuids:
+                    continue
+                if live_uuids.get(u) in operator_geometry_oids:
+                    # The web layer emits the operator bbox from the registry.
+                    # Keeping the old RGB-D cloud here would visually contradict
+                    # the explicit correction and falsely imply measured support.
                     continue
             try:
                 pcd = obj.get("pcd")
@@ -1215,6 +1354,9 @@ class ConceptGraphsDetector:
                     ),
                     "label_candidates": list(
                         obj.get("label_candidates", ()) or ()
+                    ),
+                    "label_source": str(
+                        obj.get("label_source", "model") or "model"
                     ),
                     "num_detections": int(obj.get("num_detections", 1)),
                     "n_points": int(obj.get("n_points", pts.shape[0])),
@@ -1291,6 +1433,30 @@ class ConceptGraphsDetector:
     def _stabilize_map_labels(self) -> None:
         """Resolve each persistent object's label from recent observations."""
         for obj in self._map_objects or ():
+            uuid_value = str(obj.get("id", "") or "")
+            object_id = self._uuid_to_oid.get(uuid_value, "")
+            override = (
+                self._operator_labels.get(object_id)
+                or str(obj.get("operator_label", "") or "").strip().lower()
+            )
+            if override:
+                obj["operator_label"] = override
+                obj["class_name"] = override
+                obj["label_confidence"] = 1.0
+                obj["label_provisional"] = False
+                obj["label_source"] = "operator"
+                obj["label_evidence_count"] = len(
+                    list(obj.get("class_id", ()) or ())
+                )
+                obj["label_candidates"] = [
+                    {
+                        "label": override,
+                        "score": 1.0,
+                        "share": 1.0,
+                        "observations": obj["label_evidence_count"],
+                    }
+                ]
+                continue
             evidence = _label_evidence(
                 obj,
                 self._classes,
@@ -1305,6 +1471,7 @@ class ConceptGraphsDetector:
             obj["label_provisional"] = evidence["provisional"]
             obj["label_evidence_count"] = evidence["evidence_count"]
             obj["label_candidates"] = evidence["candidates"]
+            obj["label_source"] = "model"
 
     def _tick_locked(self) -> None:
         self._purge_expired_map_objects_locked()
@@ -2628,6 +2795,12 @@ class ConceptGraphsDetector:
                     "label_candidates": list(
                         obj.get("label_candidates", ()) or ()
                     ),
+                    "label_source": str(
+                        obj.get("label_source", "model") or "model"
+                    ),
+                    "operator_label": str(
+                        obj.get("operator_label", "") or ""
+                    ),
                     "geometry_point_count": int(pts.shape[0]),
                     "geometry_view_count": int(obj.get("num_detections", 1) or 1),
                 })
@@ -2710,6 +2883,10 @@ class ConceptGraphsDetector:
             self._expired_uuids = set()
         if not hasattr(self, "_missing_uuids"):
             self._missing_uuids = set()
+        if not hasattr(self, "_operator_labels"):
+            self._operator_labels = {}
+        if not hasattr(self, "_operator_geometry_oids"):
+            self._operator_geometry_oids = set()
         live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
             wf = self._world_frame_fn()
@@ -2786,23 +2963,44 @@ class ConceptGraphsDetector:
                             existing.attributes["cg_uuid"] = u
                             self._uuid_to_oid[u] = existing.object_id
                 if existing is not None:
+                    operator_label = str(
+                        existing.attributes.get("operator_label", "") or ""
+                    ).strip()
+                    if operator_label:
+                        s["cls"] = operator_label
+                        s["label_confidence"] = 1.0
+                        s["label_provisional"] = False
+                        s["label_source"] = "operator"
+                        s["operator_label"] = operator_label
+                        self._operator_labels[existing.object_id] = operator_label
                     # Geometry is the persistent fused MapObject snapshot and
                     # may be projected every tick. Positive-observation state
                     # changes only when this UUID received current-frame
                     # evidence.
-                    existing.pose = pose
-                    existing.bbox = bbox
+                    operator_geometry = bool(
+                        existing.attributes.get("operator_geometry")
+                        or existing.object_id in self._operator_geometry_oids
+                    )
+                    if operator_geometry:
+                        self._operator_geometry_oids.add(existing.object_id)
+                    else:
+                        existing.pose = pose
+                        existing.bbox = bbox
                     existing.cls = s["cls"]
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
                     existing.attributes["observation_lifecycle"] = "visibility"
-                    existing.attributes["geometry_source"] = "rgbd_multi_view"
-                    existing.attributes["bbox_method"] = "yaw_pca_quantile"
-                    existing.attributes["geometry_point_count"] = int(
-                        s.get("geometry_point_count", 0)
-                    )
-                    existing.attributes["geometry_view_count"] = int(
-                        s.get("geometry_view_count", 1)
-                    )
+                    if not operator_geometry:
+                        existing.attributes["geometry_source"] = "rgbd_multi_view"
+                        existing.attributes["bbox_method"] = "yaw_pca_quantile"
+                        existing.attributes["geometry_point_count"] = int(
+                            s.get("geometry_point_count", 0)
+                        )
+                        existing.attributes["geometry_view_count"] = int(
+                            s.get("geometry_view_count", 1)
+                        )
+                        existing.attributes["geometry_navigation_grade"] = bool(
+                            getattr(self, "_require_occupancy_bounds", False)
+                        )
                     existing.attributes["label_confidence"] = float(
                         s.get("label_confidence", 0.0)
                     )
@@ -2815,8 +3013,15 @@ class ConceptGraphsDetector:
                     existing.attributes["label_candidates"] = list(
                         s.get("label_candidates", ()) or ()
                     )
+                    existing.attributes["label_source"] = str(
+                        s.get("label_source", "model") or "model"
+                    )
+                    if s.get("operator_label"):
+                        existing.attributes["operator_label"] = str(
+                            s["operator_label"]
+                        )
                     existing.attributes["navigation_grade"] = bool(
-                        getattr(self, "_require_occupancy_bounds", False)
+                        existing.attributes.get("geometry_navigation_grade", False)
                         and not s.get("label_provisional", True)
                     )
                     if is_observed:
@@ -2851,6 +3056,9 @@ class ConceptGraphsDetector:
                     obj.attributes["geometry_view_count"] = int(
                         s.get("geometry_view_count", 1)
                     )
+                    obj.attributes["geometry_navigation_grade"] = bool(
+                        getattr(self, "_require_occupancy_bounds", False)
+                    )
                     obj.attributes["label_confidence"] = float(
                         s.get("label_confidence", 0.0)
                     )
@@ -2863,8 +3071,18 @@ class ConceptGraphsDetector:
                     obj.attributes["label_candidates"] = list(
                         s.get("label_candidates", ()) or ()
                     )
+                    obj.attributes["label_source"] = str(
+                        s.get("label_source", "model") or "model"
+                    )
+                    if s.get("operator_label"):
+                        obj.attributes["operator_label"] = str(
+                            s["operator_label"]
+                        )
+                        self._operator_labels[obj.object_id] = str(
+                            s["operator_label"]
+                        )
                     obj.attributes["navigation_grade"] = bool(
-                        getattr(self, "_require_occupancy_bounds", False)
+                        obj.attributes.get("geometry_navigation_grade", False)
                         and not s.get("label_provisional", True)
                     )
                     obj.attributes["last_observed_frame"] = frame_seq

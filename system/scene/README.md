@@ -1,6 +1,6 @@
 # `system/scene` — live semantic + geometric map
 
-Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes read-only MCP tools that Pilot calls during RTDL planning/execution, and a self-contained 2D + 3D web viewer.
+Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes query tools for Pilot plus epoch-checked derived-object correction tools, and a self-contained 2D + 3D web viewer.
 
 This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
 
@@ -20,7 +20,8 @@ system/scene/
 │   └── start.sh                 docker run wrapper used by `rbnx boot`
 ├── scene_service/
 │   ├── service.py               entrypoint: atlas register + asyncio + FastMCP
-│   ├── mcp_tools.py             5 @mcp_contract handlers (thin wrappers)
+│   ├── mcp_tools.py             @mcp_contract handlers (thin wrappers)
+│   ├── object_mutations.py      epoch-checked label/delete/flush coordinator
 │   ├── web.py                   2D + 3D web viewer (Starlette + three.js)
 │   ├── state/                   ObjectRegistry, data assoc, snapshot
 │   ├── scene_graph/             relations: fast geometric loop (reachable_by) + image-grounded VLM (image_relations.py) + store
@@ -41,16 +42,18 @@ system/scene/
 
 The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 
-1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the live RGB frame. Class list is a 55-entry indoor-office vocabulary; override at runtime via `SCENE_OPEN_VOCAB_CLASSES=cup,chair,...`.
+1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the live RGB frame. The class list comes from `perception.vocabulary`; `SCENE_OPEN_VOCAB_CLASSES` remains a compatibility fallback when Driver configuration is absent.
 2. **Segment.** MobileSAM, prompted with each YOLO bbox, produces a per-detection mask.
 3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract — the real per-deployment camera. There is no hardcoded-default fallback: guessing `K` scales every point by `fx/fy` and silently misplaces objects, so when no usable intrinsics are wired the detector *waits* (logs `waiting for camera intrinsics`) instead. The world transform comes from the robot's TF tree first: Scene asks for `T(world ← selected_camera_optical)` so the full URDF/static chain and SLAM's `map → odom` correction stay intact. Only when that TF lookup is unavailable does the compatibility path compose `T(world ← body)` from `service/map/pose` (or odom) with `T(body ← camera_optical)` from `primitive/camera/extrinsics`. The selected pose source determines `body`; the extrinsics parent must match that same frame. The world frame name is whatever `header.frame_id` the localizer publishes — never a hardcoded `"map"` once a sample exists.
-4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + 3D-AABB IoU drives the concept-graphs merge pipeline: `compute_spatial_similarities` + `compute_visual_similarities` + `aggregate_similarities` + `merge_detections_to_objects`. Three hard gates filter the agg_sim matrix:
+4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + voxel point-cloud overlap drives the ConceptGraphs merge pipeline. Three hard gates filter the aggregate similarity matrix:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
-   * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
-   * **Threshold** — agg_sim < 0.55 → spawn new object instead.
+   * **Class gate** — exact labels or deployment-reviewed `confusable_class_groups` only; unrestricted cross-class merging is disabled by default.
+   * **Threshold** — aggregate similarity below 0.85 → spawn a new object instead.
 5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks, but only UUIDs carrying the current `image_idx` refresh `last_seen` and `observation_count`. An unmatched object becomes `missing` only after repeated healthy frames whose current depth image shows clear space behind its old location; out-of-FOV, occluded, disconnected-sensor, failed-model, and stale-transform cases remain unknown. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
-Periodic cleanup (every 30 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
+Track labels use recent confidence-weighted evidence. A label remains
+provisional until it passes the configured support/share gates, and a stable
+label changes only after the challenger also clears the switch margin.
 
 ## Deployment targets (x86 / Jetson)
 
@@ -514,13 +517,17 @@ Pilot (scene-graph `in_room` edges) is a planned follow-up.
 
 | Contract                                       | Tool name        | What it does                                                        |
 |------------------------------------------------|------------------|---------------------------------------------------------------------|
-| `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object (id, label, x,y,z, last_seen). LLM filters client-side. |
+| `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object plus the atomic `map_id` and `generation` required by mutation calls. |
 | `robonix/system/scene/get_robot_context`       | `get_robot_context` | One coherent robot pose, room/area containment, and nearby-object snapshot. |
 | `robonix/system/scene/goal_near`               | `goal_near`      | Footprint-safe approach pose near a registered object. Pass to `navigation/navigate`. |
 | `robonix/system/scene/goal_room`               | `goal_room`      | Footprint-safe pose inside a room annotation. |
 | `robonix/system/scene/get_scene_graph`         | `get_scene_graph` | Current semantic graph nodes and relation edges. |
 | `robonix/system/scene/get_object_context`      | `get_object_context` | One object's graph context plus nearby objects and directly related edges. |
 | `robonix/system/scene/list_relations`          | `list_relations` | Relation edges, optionally filtered by relation type. |
+| `robonix/system/scene/update_object_label`     | `update_object_label` | Apply a sticky operator label correction in an asserted map epoch. |
+| `robonix/system/scene/update_object_geometry`  | `update_object_geometry` | Replace one pose/yaw-only bbox in metres/radians; provenance-marked and non-navigation-grade. |
+| `robonix/system/scene/delete_object`           | `delete_object` | Delete one incorrect derived object in an asserted map epoch. |
+| `robonix/system/scene/flush_objects`            | `flush_objects` | Clear all derived objects while preserving the robot and user annotations. |
 
 These are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
 
@@ -535,6 +542,44 @@ curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
          "name":"list_objects","arguments":{}}}'
 ```
+
+### Derived-object correction
+
+Every write is optimistic-concurrency checked against Scene's map-frame epoch:
+
+1. Call `list_objects` and keep its `map_id` and `generation` (`-1` means the
+   mapping provider does not expose a generation).
+2. Call `update_object_label`, `update_object_geometry`, `delete_object`, or
+   `flush_objects` with those exact values.
+3. If mapping changed in between, the tool raises an error. Refresh
+   `list_objects` and decide again; Scene never applies a stale correction to
+   a new coordinate frame.
+
+`update_object_label` changes semantics only; it installs an operator override
+that is not replaced by later model votes. Set `clear_override=true` to restore
+the model label state captured immediately before the first operator edit
+(`label` is then ignored). `update_object_geometry` accepts
+`x`, `y`, `z`, `size_x`, `size_y`, and `size_z` in metres plus `yaw` in
+radians. Its `frame_id` must exactly match the object's current world frame.
+Because a hand-authored bbox has no supporting RGB-D cloud, Scene records it as
+`geometry_source=operator_bbox`, exposes zero supporting points/views, and
+forces `navigation_grade=false`; delete and re-observe the object to regain
+measured navigation geometry. `flush_objects` clears detector tracks,
+non-robot registry objects, derived surfaces, and relation/caption caches
+together. It does not delete the robot self-object, room/POI annotations, the
+occupancy map, or mapping state.
+
+`persist_to_snapshot=false` changes only the current runtime. With
+`persist_to_snapshot=true`, Scene also updates the currently committed semantic
+snapshot; the call fails before mutation when the map has not been saved yet.
+This explicit flag prevents a temporary debugging correction from silently
+rewriting saved semantics while still allowing an operator to prevent a bad
+object from returning after reload.
+
+The `/user` page exposes the same four operations for each derived object. Its
+“persist to saved snapshot” checkbox maps directly to
+`persist_to_snapshot`; stale epochs return HTTP 409, unknown object IDs return
+404, and invalid labels/geometry return 400.
 
 ## Web UI quick tour
 

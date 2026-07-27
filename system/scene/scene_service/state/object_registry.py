@@ -38,6 +38,15 @@ OBJECT_ATTRIBUTE_KEYS = (
     "label_evidence_count",   # int — recent observations used for the label
     "label_candidates",       # list — ranked label evidence for diagnostics
     "navigation_grade",       # bool — geometry and label passed nav admission
+    "geometry_navigation_grade",  # bool — geometry alone passed nav admission
+    "geometry_source",        # str — measured or explicit operator bbox
+    "bbox_method",            # str — method/provenance for the current bbox
+    "geometry_point_count",   # int — measured points supporting geometry
+    "geometry_view_count",    # int — fused views supporting geometry
+    "operator_geometry",      # bool — pose/bbox was explicitly corrected
+    "label_source",           # str — "model" or explicit "operator"
+    "operator_label",         # str — sticky human/supervisor label override
+    "operator_label_previous",  # dict — model label state for explicit undo
 )
 
 # Per-class defaults. Hardcoded for v1; intent is to drive these from a
@@ -185,6 +194,129 @@ class ObjectRegistry:
         return n
 
     # ── object CRUD (caller MUST hold the lock) ────────────────────────────
+    def clear_derived_objects(self) -> int:
+        """Delete non-robot objects and all derived surfaces."""
+        doomed = [
+            oid
+            for oid, obj in self._objects.items()
+            if not obj.attributes.get("is_robot")
+        ]
+        for oid in doomed:
+            del self._objects[oid]
+        self._surfaces.clear()
+        return len(doomed)
+
+    def delete_derived_object(self, object_id: str) -> SceneObject:
+        """Delete one non-robot object or raise a precise lookup error."""
+        obj = self._objects.get(object_id)
+        if obj is None:
+            raise KeyError(f"unknown Scene object {object_id!r}")
+        if obj.attributes.get("is_robot"):
+            raise ValueError("the robot self-object cannot be deleted")
+        del self._objects[object_id]
+        return obj
+
+    def update_object_label(self, object_id: str, label: str) -> SceneObject:
+        """Apply a sticky operator-owned semantic label correction."""
+        obj = self._objects.get(object_id)
+        if obj is None:
+            raise KeyError(f"unknown Scene object {object_id!r}")
+        if obj.attributes.get("is_robot"):
+            raise ValueError("the robot self-object label cannot be edited")
+        if not obj.attributes.get("operator_label"):
+            obj.attributes["operator_label_previous"] = {
+                "label": obj.cls,
+                "label_source": obj.attributes.get("label_source", "model"),
+                "label_confidence": obj.attributes.get("label_confidence", 0.0),
+                "label_provisional": obj.attributes.get(
+                    "label_provisional",
+                    True,
+                ),
+                "label_evidence_count": obj.attributes.get(
+                    "label_evidence_count",
+                    0,
+                ),
+                "label_candidates": obj.attributes.get("label_candidates", []),
+                "graspable": obj.attributes.get("graspable", False),
+                "movable": obj.attributes.get("movable", True),
+                "fragile": obj.attributes.get("fragile", False),
+            }
+        obj.cls = label
+        for key in ("graspable", "movable", "fragile"):
+            obj.attributes[key] = DEFAULT_ATTRIBUTES[key]
+        obj.attributes.update(_CLASS_ATTRIBUTE_DEFAULTS.get(label, {}))
+        obj.attributes["operator_label"] = label
+        obj.attributes["label_source"] = "operator"
+        obj.attributes["label_confidence"] = 1.0
+        obj.attributes["label_provisional"] = False
+        obj.attributes["navigation_grade"] = bool(
+            obj.attributes.get("geometry_navigation_grade")
+        )
+        return obj
+
+    def clear_object_label_override(self, object_id: str) -> SceneObject:
+        """Restore the model-owned label state captured before operator edit."""
+        obj = self._objects.get(object_id)
+        if obj is None:
+            raise KeyError(f"unknown Scene object {object_id!r}")
+        if obj.attributes.get("is_robot"):
+            raise ValueError("the robot self-object label cannot be edited")
+        previous = obj.attributes.get("operator_label_previous")
+        if not isinstance(previous, dict) or not obj.attributes.get(
+            "operator_label"
+        ):
+            raise ValueError(
+                f"Scene object {object_id!r} has no operator label override"
+            )
+        obj.cls = str(previous.get("label") or obj.cls)
+        for key in (
+            "label_source",
+            "label_confidence",
+            "label_provisional",
+            "label_evidence_count",
+            "label_candidates",
+            "graspable",
+            "movable",
+            "fragile",
+        ):
+            if key in previous:
+                value = previous[key]
+                obj.attributes[key] = value
+                # label_candidates is mutable; do not retain the undo payload's
+                # list object after the payload is removed below.
+                if key == "label_candidates":
+                    obj.attributes[key] = list(value or ())
+        obj.attributes.pop("operator_label", None)
+        obj.attributes.pop("operator_label_previous", None)
+        obj.attributes["navigation_grade"] = bool(
+            obj.attributes.get("geometry_navigation_grade")
+            and not obj.attributes.get("label_provisional", True)
+        )
+        return obj
+
+    def update_object_geometry(
+        self,
+        object_id: str,
+        pose: Pose3D,
+        bbox: BBox3D,
+    ) -> SceneObject:
+        """Install a provenance-marked, deliberately non-nav operator bbox."""
+        obj = self._objects.get(object_id)
+        if obj is None:
+            raise KeyError(f"unknown Scene object {object_id!r}")
+        if obj.attributes.get("is_robot"):
+            raise ValueError("the robot self-object geometry cannot be edited")
+        obj.pose = pose
+        obj.bbox = bbox
+        obj.attributes["operator_geometry"] = True
+        obj.attributes["geometry_source"] = "operator_bbox"
+        obj.attributes["bbox_method"] = "operator_yaw_bbox"
+        obj.attributes["geometry_point_count"] = 0
+        obj.attributes["geometry_view_count"] = 0
+        obj.attributes["geometry_navigation_grade"] = False
+        obj.attributes["navigation_grade"] = False
+        return obj
+
     def insert_object(
         self,
         cls: str,

@@ -1849,6 +1849,19 @@ async def _run_active(config: dict) -> None:
         map_id,
     )
     mcp_tools.attach_scene_graph_store(sg_store)
+    from .object_mutations import ObjectMutationCoordinator
+
+    object_mutations = ObjectMutationCoordinator(
+        registry=registry,
+        detector=perception,
+        scene_graph_store=sg_store,
+        live_binding=live_binding,
+        ops_lock=map_ops_lock,
+        semantic_hold=semantic_hold,
+        object_store=obj_store,
+        map_meta=map_meta,
+    )
+    mcp_tools.attach_object_mutations(object_mutations)
     geo_loop = GeometricRelationLoop(registry, sg_store)
     await geo_loop.start()
 
@@ -1948,6 +1961,7 @@ async def _run_active(config: dict) -> None:
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
             derived_state_reset=_reset_derived_state,
+            object_mutations=object_mutations,
         )
         web_uv = uvicorn.Config(
             app=web_app,
@@ -1984,6 +1998,7 @@ async def _run_active(config: dict) -> None:
         web_task=web_task,
         object_store=obj_store,
     )
+    mcp_tools.attach_object_mutations(None)
 
 
 async def _run() -> None:
@@ -2008,6 +2023,10 @@ async def _run() -> None:
         mcp_tools.get_object_context,
         mcp_tools.get_robot_context,
         mcp_tools.list_relations,
+        mcp_tools.update_object_label,
+        mcp_tools.update_object_geometry,
+        mcp_tools.delete_object,
+        mcp_tools.flush_objects,
     )
     for fn in scene_tools:
         cid = getattr(fn, "_robonix_contract_id", None)

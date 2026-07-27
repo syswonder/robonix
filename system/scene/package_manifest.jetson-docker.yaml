@@ -28,3 +28,7 @@ capabilities:
   - name: robonix/system/scene/get_scene_graph
   - name: robonix/system/scene/get_object_context
   - name: robonix/system/scene/list_relations
+  - name: robonix/system/scene/update_object_label
+  - name: robonix/system/scene/update_object_geometry
+  - name: robonix/system/scene/delete_object
+  - name: robonix/system/scene/flush_objects

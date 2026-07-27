@@ -6,7 +6,7 @@ id      = "robonix/system/scene/list_objects"
 version = "1"
 kind    = "service"
 idl     = "semantic_map/srv/ListObjects.srv"
-description = "List all objects currently known to the scene registry."
+description = "List all objects currently known to Scene with the map epoch required by correction calls."
 
 [mode]
 type = "rpc"

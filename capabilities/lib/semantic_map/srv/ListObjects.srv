@@ -6,3 +6,6 @@
 ---
 Object[] objects
 float64 stamp_unix
+string map_id
+# -1 means the active mapping provider does not expose a generation.
+int64 generation

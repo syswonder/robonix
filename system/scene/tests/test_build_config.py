@@ -97,6 +97,10 @@ class SceneBuildConfigTest(unittest.TestCase):
                 "get_object_context",
                 "get_robot_context",
                 "list_relations",
+                "update_object_label",
+                "update_object_geometry",
+                "delete_object",
+                "flush_objects",
             ],
         )
 

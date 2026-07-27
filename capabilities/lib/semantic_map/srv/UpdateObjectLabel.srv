@@ -1,0 +1,16 @@
+# Update the operator-owned semantic label of one derived Scene object.
+# expected_generation uses -1 when Scene has no authoritative map generation.
+
+string object_id
+# Ignored when clear_override=true.
+string label
+# Restore the model-owned label state saved before the first operator edit.
+bool clear_override
+string expected_map_id
+int64 expected_generation
+bool persist_to_snapshot
+---
+Object object
+string map_id
+int64 generation
+bool persisted
