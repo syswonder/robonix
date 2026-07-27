@@ -13,7 +13,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 
 # ── Attribute schema ────────────────────────────────────────────────────────
@@ -112,6 +112,9 @@ class SceneObject:
     observation_count: int = 1
     missing: bool = False
     attributes: dict[str, object] = field(default_factory=dict)
+    # Latest 2D bounding-box in image pixels [x0, y0, x1, y1] from the
+    # VLM detector.  None when unavailable (e.g. ConceptGraphs path).
+    last_bbox_2d: Optional[tuple[float, float, float, float]] = None
 
 
 @dataclass

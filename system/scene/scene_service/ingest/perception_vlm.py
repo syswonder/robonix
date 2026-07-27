@@ -286,6 +286,7 @@ class VLMObjectDetector:
                     bbox=BBox3D(size_x=size_x, size_y=size_y, size_z=size_z, yaw=0.0, frame_id="map"),
                     confidence=max(0.0, min(1.0, conf)),
                     source="vlm",
+                    bbox_2d=(x0, y0, x1, y1),
                 ))
             except Exception:  # noqa: BLE001
                 continue

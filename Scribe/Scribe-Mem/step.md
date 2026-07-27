@@ -2668,3 +2668,64 @@ start: |
 ```
 117 tests passed, 0 failed（全部 7 项修复后无回归）
 ```
+
+---
+
+## Phase 27: ObjectWatchdog 物体遮罩 — 仅保留目标物体区域（2026-07-26）
+
+### 动机
+
+VLM QA 看图回答时，全帧画面包含多个物体（cabinet、chair、table...），
+VLM 被"干扰"无法聚焦到目标物体上。需要为每个保存的物体图片添加遮罩：
+只保留该物体周围区域可见，其余画面变暗。
+
+### 实现
+
+`object_watchdog.py:_capture_frame(obj)` 新增可选 `obj` 参数，当传入
+物体时执行三步：
+
+```
+1. 3D→2D 投影 (_project_to_pixel)
+   TF lookup: camera optical frame → map
+   计算物体在相机坐标系下的位置
+   Pinhole 投影: u = fx * X/Z + cx, v = fy * Y/Z + cy
+   回退: 当 TF 或 intrinsics 不可用时用图像中心
+
+2. 遮罩生成 (_apply_object_mask)
+   以投影点 (u, v) 为中心
+   半径 = max(30, f * bbox_size / depth) 像素
+   径向渐变: 中心 1.0 → 0.6*radius 处 1.0 → radius 处 0.0
+
+3. 混合
+   masked = original * mask + dark * (1 - mask)
+   dark = original * 0.15 (85% 变暗)
+```
+
+### 关键参数
+
+| 参数 | 来源 | 回退值 |
+|------|------|--------|
+| `fx, fy, cx, cy` | `_HUB.latest("intrinsics")` | 554, 554, w/2, h/2 |
+| 相机位姿 | `_HUB.lookup_xy_yaw(frame, "map")` | 原点 lookat +X |
+| 物体 3D 位置 | `obj.pose.x, obj.pose.y, obj.pose.z` | — |
+| 遮罩半径 | `fx * bbox_size / depth` | `img_w * 0.15` 像素 |
+
+### 效果
+
+```
+原始图片                        遮罩后图片
+┌────────────────────┐          ┌────────────────────┐
+│ 🪴  🪑  🗄️  🖥️     │          │                    │
+│                    │    →     │     🪴             │
+│ 🛋️                  │          │                    │
+│              🚪    │          │                    │
+└────────────────────┘          └────────────────────┘
+  全场景可见                       仅目标盆栽可见
+```
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `system/scene/scene_service/object_watchdog.py` | `_capture_frame(obj)` 新增遮罩参数 + `_project_to_pixel()` + `_apply_object_mask()` |
+| `system/scene/scene_service/object_watchdog.py` | `_tick()` 每物体单独调用 `_capture_frame(obj)` 代替批量共用一帧 |

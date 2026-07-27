@@ -613,6 +613,14 @@ def _start_scene_hook_server() -> None:
                 spatial = None
                 if data.get("spatial"):
                     spatial = SpatialContext.from_dict(data["spatial"])
+
+                # ── dedup: reuse existing node for same object+position ──
+                existing_nid = _find_existing_node(spatial, data.get("image_base64", ""))
+                if existing_nid is not None:
+                    log.info("scene_hook.http: dedup → appending to node %d", existing_nid)
+                    self._reply(200, {"node_id": existing_nid})
+                    return
+
                 req = RememberRequest(
                     session_id=data.get("session_id", "scene-hook"),
                     plan_id=data.get("plan_id", "scene-hook"),
@@ -644,6 +652,47 @@ def _start_scene_hook_server() -> None:
 
         def log_message(self, fmt, *args):
             log.debug("scene_hook: %s", fmt % args)
+
+    def _find_existing_node(spatial, img_b64: str):
+        """Check whether a node for the same object+position already exists.
+
+        Returns the existing node_id, or None.  Dedup key: first object's
+        (label, x_grid, y_grid) at 1.0 m resolution.  When a match is
+        found AND *img_b64* is non-empty, the new image is appended to the
+        existing node's ``image_refs``.
+        """
+        if spatial is None or not spatial.objects:
+            return None
+        obj = spatial.objects[0]
+        gx = round(float(obj.x))
+        gy = round(float(obj.y))
+        key = f"{obj.label}@{gx},{gy}"
+        # Search existing nodes for the same grid key.
+        for nid in _graph.all_ids():
+            node = _graph.get_node(nid)
+            if node is None or node.spatial_data is None:
+                continue
+            if not node.spatial_data.objects:
+                continue
+            no = node.spatial_data.objects[0]
+            ngx = round(float(no.x))
+            ngy = round(float(no.y))
+            nkey = f"{no.label}@{ngx},{ngy}"
+            if nkey == key:
+                # Append image if provided.
+                if img_b64 and _images is not None:
+                    import base64 as _b64
+                    try:
+                        img_bytes = _b64.b64decode(img_b64)
+                        _images.save(nid, img_bytes)
+                        node.image_refs = _images.list(nid)
+                        _graph.update_node(nid, node)
+                        log.info("scene_hook.dedup: appended image to node %d (%d total)",
+                                 nid, len(node.image_refs))
+                    except Exception as e:
+                        log.warning("scene_hook.dedup: image append failed: %s", e)
+                return nid
+        return None
 
     port = int(os.environ.get("SCENE_HOOK_PORT", "37798"))
     server = HTTPServer(("0.0.0.0", port), _HookHandler)

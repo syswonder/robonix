@@ -169,9 +169,18 @@ rbnx build -p ../../system/scene
 
 ----
 
-删除重复的物体， 重复物体不应该保存
+1. 删除重复的物体， 重复物体不应该保存
 
-LLM 检索，在合适的时候调用 VLM
+根据识别的物体在图像上加上一层mask，除了这个物体其他物体都给盖住，修改并补充到 @Scribe/Scribe-Mem/step.md 中
+
+
+根据当前 @/home/hyl/robonix/services/memory/data/images 下的图片 和 @/home/hyl/robonix/services/memory/memory/graph_store.json
+和相关的日志 @/home/hyl/robonix/examples/webots/rbnx-boot/logs ；解释为什么会有重复的物体保存，给出一个删除重复物体的方案，重复的物体不应该保存；
+搜索当前 robonix 中关于物体点云的展示部分，说明其中的物体是如何识别成一个然后聚类的；给出当前保存图片使不同角度下的图片保存成一个的方案
+
+聚类只保存一个物体的操作在在记忆存储侧实现聚合操作
+
+2. LLM 检索，在合适的时候调用 VLM
 
 ------
 
