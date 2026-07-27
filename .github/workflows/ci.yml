@@ -23,6 +23,8 @@ jobs:
         run: python3 -m pip install "websockets>=14,<17"
       - name: Test custom ports and helper readiness
         run: python3 examples/webots/sim/tests/test_streaming.py
+      - name: Test Webots report infrastructure failures
+        run: python3 -m unittest discover -s testing -p 'test_*.py' -v
 
   check:
     name: Rust (fmt + clippy + build + tests)
