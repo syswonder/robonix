@@ -25,10 +25,12 @@ job). You can also run it by hand against any booted deploy.
 | Scene perception | Real scene service over Webots RGB-D, camera intrinsics, and ConceptGraphs | Scenarios require non-robot objects from the live scene registry and use one as the navigation target. |
 | Speech/audio hardware | Real speech service plus audio driver using ALSA `null` devices | The runner has no physical speaker/mic. CI checks TTS-to-speaker and mic/speaker driver wiring through normal ALSA devices, not acoustic output. |
 
-This workflow is therefore not a perception-quality or physical-audio quality
-test. It is a build/boot/dispatch/runtime integration test for the
-Webots-backed robot stack, with deterministic substitution only at the VLM
-planning boundary.
+This workflow is primarily a build/boot/dispatch/runtime integration test for
+the Webots-backed robot stack, with deterministic substitution only at the VLM
+planning boundary. It also contains one bounded Scene perception-quality gate
+against checked-in Webots ground truth. That gate does not replace physical
+robot evaluation. Audio remains a wiring check rather than an acoustic-quality
+test.
 
 ## Pieces
 
@@ -56,6 +58,32 @@ Execution order after boot:
    `scenarios/flow/`.
 3. The workflow uploads per-scenario JSONL event streams, boot logs, provider
    logs, sim stdout, ROS logs, final `rbnx caps`, and a summary JSON.
+
+## Scene object ground-truth gate
+
+`scene_object_quality` checks more than API success. Its fixture description is
+stored in `testing/fixtures/webots_office_scene_quality.json`; positions are
+resolved from the named nodes in the checked-in `office.wbt` at test time, so
+the verifier does not duplicate simulator coordinates or add runtime
+robot/environment constants.
+
+The target is the named `PottedTree` nearest TIAGo's initial view. Its
+0.3 × 0.3 × 1.3 m dimensions come from the pinned Cyberbotics R2025a proto and
+are recorded with their source URL. Across eight live samples the verifier
+reports and gates:
+
+- target recall and label accuracy;
+- stable Scene ID count;
+- median center XY/Z error and maximum XY drift;
+- yaw-oriented 3D bbox IoU;
+- exported point-cloud inlier fraction and point count;
+- navigation-grade status;
+- the existing occupancy-bound, bbox-sanity, and background-label checks.
+
+Thresholds are SI-valued and live beside the fixture metadata. They form a
+regression floor for this specific simulator scene, not a claim about physical
+robot accuracy. Physical RGB-D and per-environment metrics required by issue
+#177 remain a separate release gate.
 
 ## Reports and sharing
 

@@ -1,10 +1,10 @@
-# Gate live Scene objects on map bounds, finite robust boxes, and background labels.
+# Gate live Scene objects on map bounds and checked-in Webots ground truth.
 name: scene_object_quality
 task: "ci-test: verify live scene object spatial quality"
 steps:
   - time_s: 0.0
     content: Checking Scene object quality.
-    rtdl_description: validate map bounds, 3D boxes, and admission metrics
+    rtdl_description: validate label, center, 3D box, cloud, stability, and admission
     status: in_progress
     rtdl:
       op: sequence
@@ -27,5 +27,9 @@ steps:
                 off_map_count: 0
                 invalid_bbox_count: 0
                 background_label_count: 0
+                ground_truth_metrics:
+                  ok: true
+                  label_accuracy: 1.0
+                  stable_id_count: 1
   - content: Scene spatial object quality verified.
     status: done
