@@ -1,0 +1,30 @@
+# Gate confidence-weighted label convergence on a live static Webots scene.
+name: scene_label_stability
+task: "ci-test: verify live scene label stability"
+steps:
+  - time_s: 0.0
+    content: Checking Scene label evidence and association safety.
+    rtdl_description: validate converged object labels across repeated frames
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: scene_label_stability_step
+      children:
+        - op: do
+          id: verify_scene_label_stability
+          cap: executor.builtin_run_command
+          args:
+            command: 'python3 "$(rbnx path root)/testing/verify_scene_label_stability.py"'
+          description: sample stable live object IDs and detect label changes
+          expect:
+            contract: robonix/system/executor/builtin/run_command
+            success: true
+            args:
+              command: 'python3 "$(rbnx path root)/testing/verify_scene_label_stability.py"'
+            output:
+              json:
+                ok: true
+                label_switch_count: 0
+                allow_cross_class_merge: false
+  - content: Scene label stability verified.
+    status: done

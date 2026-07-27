@@ -70,11 +70,116 @@ _BG_CLASSES = frozenset({"floor", "wall", "ceiling", "carpet"})
 _IGNORED_CLASSES = frozenset({"person"})
 
 
-def _resolved_classes() -> list[str]:
-    raw = os.environ.get("SCENE_OPEN_VOCAB_CLASSES", "").strip()
-    if not raw:
-        return list(_DEFAULT_OPEN_VOCAB)
-    return [s.strip() for s in raw.split(",") if s.strip()]
+def _resolved_classes(
+    configured: Optional[list[str]] = None,
+    additional: Optional[list[str]] = None,
+) -> list[str]:
+    """Resolve the open-vocabulary prompt list with stable de-duplication.
+
+    Normal deployments use Driver config. ``SCENE_OPEN_VOCAB_CLASSES`` remains
+    a legacy full override only when no configured base list is supplied.
+    """
+    raw = (
+        os.environ.get("SCENE_OPEN_VOCAB_CLASSES", "").strip()
+        if configured is None and additional is None
+        else ""
+    )
+    if raw:
+        candidates = [s.strip() for s in raw.split(",") if s.strip()]
+    else:
+        candidates = list(configured or _DEFAULT_OPEN_VOCAB)
+        candidates.extend(additional or ())
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        label = str(candidate or "").strip().lower()
+        if label and label not in seen:
+            seen.add(label)
+            out.append(label)
+    return out
+
+
+def _label_evidence(
+    obj: Any,
+    classes: list[str],
+    *,
+    current_label: str,
+    history_size: int,
+    min_switch_observations: int,
+    min_winner_share: float,
+    switch_margin: float,
+) -> dict[str, Any]:
+    """Aggregate recent confidence-weighted class evidence for one map object."""
+    class_ids = list(obj.get("class_id", ()) or ())
+    confidences = list(obj.get("conf", ()) or ())
+    limit = max(1, int(history_size))
+    class_ids = class_ids[-limit:]
+    confidences = confidences[-limit:]
+    scores: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for index, raw_class_id in enumerate(class_ids):
+        try:
+            class_id = int(raw_class_id)
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= class_id < len(classes):
+            continue
+        label = str(classes[class_id]).strip().lower()
+        if not label:
+            continue
+        try:
+            confidence = float(confidences[index])
+        except (IndexError, TypeError, ValueError):
+            confidence = 1.0
+        weight = max(0.01, min(1.0, confidence))
+        scores[label] = scores.get(label, 0.0) + weight
+        counts[label] = counts.get(label, 0) + 1
+
+    fallback = str(current_label or obj.get("class_name") or "object").strip().lower()
+    if not scores:
+        return {
+            "label": fallback or "object",
+            "confidence": 0.0,
+            "provisional": True,
+            "evidence_count": 0,
+            "candidates": [],
+        }
+    ranked = sorted(scores, key=lambda label: (-scores[label], label))
+    winner = ranked[0]
+    total = max(1e-9, sum(scores.values()))
+    winner_share = scores[winner] / total
+    current = fallback if fallback in scores else ""
+    selected = current or winner
+    if winner != selected:
+        selected_score = scores.get(selected, 0.0)
+        enough_support = counts[winner] >= max(1, int(min_switch_observations))
+        enough_share = winner_share >= max(0.0, min(1.0, float(min_winner_share)))
+        enough_margin = (
+            scores[winner] - selected_score
+            >= max(0.0, float(switch_margin)) * total
+        )
+        if enough_support and enough_share and enough_margin:
+            selected = winner
+    candidates = [
+        {
+            "label": label,
+            "score": round(scores[label], 6),
+            "share": round(scores[label] / total, 6),
+            "observations": counts[label],
+        }
+        for label in ranked[:5]
+    ]
+    return {
+        "label": selected,
+        "confidence": scores.get(selected, 0.0) / total,
+        "provisional": (
+            counts.get(selected, 0) < max(1, int(min_switch_observations))
+            or scores.get(selected, 0.0) / total
+            < max(0.0, min(1.0, float(min_winner_share)))
+        ),
+        "evidence_count": sum(counts.values()),
+        "candidates": candidates,
+    }
 
 
 def _observed_map_object_uuids(
@@ -522,8 +627,33 @@ def _parse_merge_class_groups(raw: str) -> dict[str, str]:
     return out
 
 
+def _merge_class_groups_from_lists(groups: list[list[str]]) -> dict[str, str]:
+    """Build the same bucket map from validated Driver configuration."""
+    out: dict[str, str] = {}
+    for group in groups:
+        members = sorted(
+            {
+                str(member or "").strip().lower()
+                for member in group
+                if str(member or "").strip()
+            }
+        )
+        if len(members) < 2:
+            continue
+        key = "|".join(members)
+        for member in members:
+            out[member] = key
+    return out
+
+
 # ── Model loading ────────────────────────────────────────────────────────
-def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained):
+def _try_load_models(
+    yolo_path,
+    sam_path,
+    clip_model_name,
+    clip_pretrained,
+    classes,
+):
     """Load YOLO-World, MobileSAM, and open_clip in one shot. Returns
     `(yolo, sam, clip_model, clip_preprocess, clip_tokenizer, device)`
     or `(None, ...)` if any piece is unavailable."""
@@ -566,7 +696,6 @@ def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained):
 
     try:
         yolo = YOLO(yw)
-        classes = _resolved_classes()
         yolo.set_classes(classes)
         log.info("[scene-cg] YOLO-World loaded: %d open-vocab classes", len(classes))
     except Exception as e:  # noqa: BLE001
@@ -668,6 +797,14 @@ class ConceptGraphsDetector:
         bbox_low_percentile: float = 5.0,
         bbox_high_percentile: float = 95.0,
         max_bbox_extent_m: float = 3.0,
+        classes: Optional[list[str]] = None,
+        additional_classes: Optional[list[str]] = None,
+        label_history_size: int = 20,
+        label_min_switch_observations: int = 3,
+        label_min_winner_share: float = 0.65,
+        label_switch_margin: float = 0.20,
+        allow_cross_class_merge: Optional[bool] = None,
+        confusable_class_groups: Optional[list[list[str]]] = None,
         confidence_threshold: float = 0.30,
         max_detections: int = 30,
         yolo_weights_path: Optional[str] = None,
@@ -729,6 +866,19 @@ class ConceptGraphsDetector:
             min(100.0, float(bbox_high_percentile)),
         )
         self._max_bbox_extent_m = max(0.05, float(max_bbox_extent_m))
+        self._label_history_size = max(1, int(label_history_size))
+        self._label_min_switch_observations = max(
+            1,
+            int(label_min_switch_observations),
+        )
+        self._label_min_winner_share = max(
+            0.0,
+            min(1.0, float(label_min_winner_share)),
+        )
+        self._label_switch_margin = max(
+            0.0,
+            min(1.0, float(label_switch_margin)),
+        )
 
         self._yolo: Any = None
         self._sam: Any = None
@@ -741,7 +891,9 @@ class ConceptGraphsDetector:
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
         self._inference_lock = threading.Lock()
-        self._classes = _resolved_classes()
+        self._classes = _resolved_classes(classes, additional_classes)
+        if not self._classes:
+            raise ValueError("open-vocabulary class list must not be empty")
         self._tick_idx = 0
         # Set in start() so worker-thread `_project_to_registry` can
         # schedule the actual mutation on the asyncio loop (the registry
@@ -808,9 +960,31 @@ class ConceptGraphsDetector:
         # label flicker across the group merges instead of splitting into
         # separate records. Applied only inside the same-class merge gate and
         # the same-class proximity collapse — both still distance-gated.
-        self._merge_class_group = _parse_merge_class_groups(
-            os.environ.get("SCENE_CG_MERGE_CLASS_GROUPS", "")
-        )
+        if confusable_class_groups is None:
+            self._merge_class_group = _parse_merge_class_groups(
+                os.environ.get("SCENE_CG_MERGE_CLASS_GROUPS", "")
+            )
+        else:
+            self._merge_class_group = _merge_class_groups_from_lists(
+                confusable_class_groups
+            )
+            unknown_group_labels = (
+                set(self._merge_class_group) - set(self._classes)
+            )
+            if unknown_group_labels:
+                raise ValueError(
+                    "confusable class groups reference labels outside the "
+                    "resolved vocabulary: "
+                    + ", ".join(sorted(unknown_group_labels))
+                )
+        if allow_cross_class_merge is None:
+            allow_cross_class_merge = (
+                os.environ.get("SCENE_CG_ALLOW_CROSS_CLASS_MERGE", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes"}
+            )
+        self._allow_cross_class_merge = bool(allow_cross_class_merge)
 
     async def start(self) -> None:
         if self._task is not None:
@@ -825,6 +999,7 @@ class ConceptGraphsDetector:
             None, _try_load_models,
             self._yolo_weights, self._sam_weights,
             self._clip_model_name, self._clip_pretrained,
+            self._classes,
         )
         if self._yolo is None:
             log.warning("ConceptGraphsDetector skipped — models unavailable")
@@ -899,6 +1074,12 @@ class ConceptGraphsDetector:
 
     def quality_metrics(self) -> dict[str, Any]:
         """Return cumulative admission counters for operator/CI reporting."""
+        provisional_count = 0
+        if self._map_objects is not None:
+            provisional_count = sum(
+                bool(obj.get("label_provisional", True))
+                for obj in self._map_objects
+            )
         return {
             **dict(getattr(self, "_quality_counters", {})),
             "require_occupancy_bounds": bool(
@@ -914,6 +1095,13 @@ class ConceptGraphsDetector:
             ),
             "map_bounds_margin_m": float(
                 getattr(self, "_map_bounds_margin_m", 0.0)
+            ),
+            "label_provisional_objects": provisional_count,
+            "label_history_size": int(
+                getattr(self, "_label_history_size", 0)
+            ),
+            "allow_cross_class_merge": bool(
+                getattr(self, "_allow_cross_class_merge", False)
             ),
         }
 
@@ -1016,6 +1204,18 @@ class ConceptGraphsDetector:
                 out.append({
                     "id": str(obj.get("id", f"obj_{obj_idx}")),
                     "cls": obj.get("class_name", "object"),
+                    "label_confidence": float(
+                        obj.get("label_confidence", 0.0) or 0.0
+                    ),
+                    "label_provisional": bool(
+                        obj.get("label_provisional", True)
+                    ),
+                    "label_evidence_count": int(
+                        obj.get("label_evidence_count", 0) or 0
+                    ),
+                    "label_candidates": list(
+                        obj.get("label_candidates", ()) or ()
+                    ),
                     "num_detections": int(obj.get("num_detections", 1)),
                     "n_points": int(obj.get("n_points", pts.shape[0])),
                     "conf_mean": (float(np.mean(obj["conf"])) if obj.get("conf") else 0.0),
@@ -1075,6 +1275,36 @@ class ConceptGraphsDetector:
     def _tick_once(self) -> None:
         with self._inference_lock:
             self._tick_locked()
+
+    def _association_group(self, label: str) -> str:
+        normalized = str(label or "").strip().lower()
+        return self._merge_class_group.get(normalized, normalized)
+
+    def _association_compatible(self, left: str, right: str) -> bool:
+        """Return whether two labels may share one physical-object track."""
+        if self._allow_cross_class_merge:
+            return True
+        left_group = self._association_group(left)
+        right_group = self._association_group(right)
+        return bool(left_group and left_group == right_group)
+
+    def _stabilize_map_labels(self) -> None:
+        """Resolve each persistent object's label from recent observations."""
+        for obj in self._map_objects or ():
+            evidence = _label_evidence(
+                obj,
+                self._classes,
+                current_label=str(obj.get("class_name", "") or ""),
+                history_size=self._label_history_size,
+                min_switch_observations=self._label_min_switch_observations,
+                min_winner_share=self._label_min_winner_share,
+                switch_margin=self._label_switch_margin,
+            )
+            obj["class_name"] = evidence["label"]
+            obj["label_confidence"] = evidence["confidence"]
+            obj["label_provisional"] = evidence["provisional"]
+            obj["label_evidence_count"] = evidence["evidence_count"]
+            obj["label_candidates"] = evidence["candidates"]
 
     def _tick_locked(self) -> None:
         self._purge_expired_map_objects_locked()
@@ -1524,29 +1754,16 @@ class ConceptGraphsDetector:
                         dist_mask = torch.from_numpy(dist > max_d).to(agg_sim.device)
                         agg_sim[dist_mask] = float("-inf")
 
-                        # Same-class gate. Only enforced when both
-                        # sides have a real class label — empty
-                        # strings (rare) get a free pass.
-                        # **Centroid-proximity bypass**: when the two
-                        # are physically co-located (< cross_class_
-                        # centroid_max_m) we drop the class gate, so
-                        # YOLO label flicker (picture_frame /
-                        # shelf / cabinet on the same wall fixture)
-                        # collapses into one record instead of three
-                        # overlapping bboxes.
-                        prox_m = float(self.cfg["cross_class_centroid_max_m"])
-                        proximate = dist <= prox_m                  # (M, N) bool
-                        # Confusable-class buckets (SCENE_CG_MERGE_CLASS_GROUPS)
-                        # collapse e.g. chair/table/desk to one key so a desk's
-                        # YOLO label flicker is NOT treated as a class mismatch.
-                        # Empty map → identity, i.e. plain class comparison.
-                        grp = self._merge_class_group
+                        # Cross-class association is unsafe by default:
+                        # co-location is common for distinct objects (cup on
+                        # table, plant on cabinet). Only exact classes or a
+                        # deployment-reviewed confusable group may share a
+                        # track. The legacy class-agnostic behaviour requires
+                        # the explicit allow_cross_class_merge escape hatch.
                         cls_mismatch = np.zeros((len(det_classes), len(obj_classes)), dtype=bool)
                         for i, dc in enumerate(det_classes):
-                            dcg = grp.get(dc, dc)
                             for j, oc in enumerate(obj_classes):
-                                ocg = grp.get(oc, oc)
-                                if dcg and ocg and dcg != ocg and not proximate[i, j]:
+                                if not self._association_compatible(dc, oc):
                                     cls_mismatch[i, j] = True
                         cls_mask = torch.from_numpy(cls_mismatch).to(agg_sim.device)
                         agg_sim[cls_mask] = float("-inf")
@@ -1616,7 +1833,9 @@ class ConceptGraphsDetector:
         self._quality_counters["healthy_frames"] += 1
         frame_seq = self._tick_idx
         self._tick_idx += 1
+        self._stabilize_map_labels()
         self._maybe_periodic_cleanup()
+        self._stabilize_map_labels()
         observed_uuids = _observed_map_object_uuids(
             self._map_objects,
             frame_seq=frame_seq,
@@ -1766,6 +1985,19 @@ class ConceptGraphsDetector:
                     objects_b=None,
                     voxel_size=self.cfg["downsample_voxel_size"],
                 )
+                # ConceptGraphs's canonical pass is class-agnostic. Mask
+                # incompatible labels before handing it the overlap matrix so
+                # a nearby tabletop object cannot be absorbed into furniture.
+                if not self._allow_cross_class_merge:
+                    for i, left in enumerate(self._map_objects):
+                        for j in range(i + 1, len(self._map_objects)):
+                            right = self._map_objects[j]
+                            if not self._association_compatible(
+                                left.get("class_name", ""),
+                                right.get("class_name", ""),
+                            ):
+                                overlap_mat[i, j] = 0.0
+                                overlap_mat[j, i] = 0.0
                 # concept-graphs `merge_overlap_objects` returns
                 # `(MapObjectList, index_updates)` — assigning the
                 # tuple directly into self._map_objects silently broke
@@ -1792,7 +2024,10 @@ class ConceptGraphsDetector:
                 ran_any = True
             except Exception as e:  # noqa: BLE001
                 log.warning("merge_overlap_objects failed: %s", e)
-        if self._tick_idx % self.cfg["cross_class_merge_interval_ticks"] == 0:
+        if (
+            self._allow_cross_class_merge
+            and self._tick_idx % self.cfg["cross_class_merge_interval_ticks"] == 0
+        ):
             try:
                 pre = len(self._map_objects)
                 self._map_objects = self._cross_class_geometric_collapse(self._map_objects)
@@ -2380,6 +2615,19 @@ class ConceptGraphsDetector:
                     "size_y": float(max(0.05, obb_extent[1])),
                     "size_z": float(max(0.05, obb_extent[2])),
                     "confidence": max(0.0, min(1.0, conf)),
+                    "label_confidence": max(
+                        0.0,
+                        min(1.0, float(obj.get("label_confidence", 0.0) or 0.0)),
+                    ),
+                    "label_provisional": bool(
+                        obj.get("label_provisional", True)
+                    ),
+                    "label_evidence_count": int(
+                        obj.get("label_evidence_count", 0) or 0
+                    ),
+                    "label_candidates": list(
+                        obj.get("label_candidates", ()) or ()
+                    ),
                     "geometry_point_count": int(pts.shape[0]),
                     "geometry_view_count": int(obj.get("num_detections", 1) or 1),
                 })
@@ -2544,6 +2792,7 @@ class ConceptGraphsDetector:
                     # evidence.
                     existing.pose = pose
                     existing.bbox = bbox
+                    existing.cls = s["cls"]
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
                     existing.attributes["observation_lifecycle"] = "visibility"
                     existing.attributes["geometry_source"] = "rgbd_multi_view"
@@ -2554,8 +2803,21 @@ class ConceptGraphsDetector:
                     existing.attributes["geometry_view_count"] = int(
                         s.get("geometry_view_count", 1)
                     )
+                    existing.attributes["label_confidence"] = float(
+                        s.get("label_confidence", 0.0)
+                    )
+                    existing.attributes["label_provisional"] = bool(
+                        s.get("label_provisional", True)
+                    )
+                    existing.attributes["label_evidence_count"] = int(
+                        s.get("label_evidence_count", 0)
+                    )
+                    existing.attributes["label_candidates"] = list(
+                        s.get("label_candidates", ()) or ()
+                    )
                     existing.attributes["navigation_grade"] = bool(
                         getattr(self, "_require_occupancy_bounds", False)
+                        and not s.get("label_provisional", True)
                     )
                     if is_observed:
                         existing.last_seen = now
@@ -2589,8 +2851,21 @@ class ConceptGraphsDetector:
                     obj.attributes["geometry_view_count"] = int(
                         s.get("geometry_view_count", 1)
                     )
+                    obj.attributes["label_confidence"] = float(
+                        s.get("label_confidence", 0.0)
+                    )
+                    obj.attributes["label_provisional"] = bool(
+                        s.get("label_provisional", True)
+                    )
+                    obj.attributes["label_evidence_count"] = int(
+                        s.get("label_evidence_count", 0)
+                    )
+                    obj.attributes["label_candidates"] = list(
+                        s.get("label_candidates", ()) or ()
+                    )
                     obj.attributes["navigation_grade"] = bool(
                         getattr(self, "_require_occupancy_bounds", False)
+                        and not s.get("label_provisional", True)
                     )
                     obj.attributes["last_observed_frame"] = frame_seq
                     obj.attributes["last_observed_unix"] = now

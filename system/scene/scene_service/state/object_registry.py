@@ -33,6 +33,11 @@ OBJECT_ATTRIBUTE_KEYS = (
     "restored",      # bool — restored from persistence (map Load / legacy
                      #        boot restore) and not yet re-observed;
                      #        perception re-binds it by class+pose, then clears
+    "label_confidence",       # float — confidence-weighted winning label share
+    "label_provisional",      # bool — label has not met the stability gate
+    "label_evidence_count",   # int — recent observations used for the label
+    "label_candidates",       # list — ranked label evidence for diagnostics
+    "navigation_grade",       # bool — geometry and label passed nav admission
 )
 
 # Per-class defaults. Hardcoded for v1; intent is to drive these from a

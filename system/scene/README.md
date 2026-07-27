@@ -341,6 +341,35 @@ scale.
 | `bbox_high_percentile` | float, % | `95.0` | upper robust point-cloud quantile used for the yaw-aligned 3D box |
 | `max_bbox_extent_m` | float, m | `3.0` | reject a per-frame object hypothesis when any robust 3D box dimension exceeds this deployment limit |
 
+`perception.vocabulary` owns the YOLO-World prompt vocabulary. Labels are
+case-normalized and de-duplicated while preserving order.
+
+| Key | Type / unit | Default | Meaning |
+|---|---|---|---|
+| `classes` | list of strings | built-in indoor vocabulary | optional full replacement of the detector vocabulary; an explicitly empty list is invalid |
+| `additional_classes` | list of strings | `[]` | deployment-specific labels appended to `classes` or the built-in vocabulary |
+
+`perception.label` converts per-frame classifications into track-level label
+evidence. Observation confidence is the weight; a track's public label changes
+only after the challenger clears every configured gate.
+
+| Key | Type / unit | Default | Meaning |
+|---|---|---|---|
+| `history_size` | integer, observations | `20` | maximum recent class observations retained in the label vote |
+| `min_switch_observations` | integer, observations | `3` | minimum observations supporting a label before it is non-provisional or may replace the current label |
+| `min_winner_share` | float, fraction | `0.65` | minimum share of total confidence-weighted evidence required by the winner |
+| `switch_margin` | float, fraction | `0.20` | winner must exceed the current label by at least this fraction of total weighted evidence |
+
+`perception.association` controls when differently labelled detections may
+share one physical-object track. The safe default is exact-label association.
+Nearby geometry alone is insufficient because distinct objects are often
+co-located (for example, a cup on a table).
+
+| Key | Type / unit | Default | Meaning |
+|---|---|---|---|
+| `confusable_class_groups` | list of string lists | `[]` | reviewed synonym/equivalence groups whose members may associate, such as `["sofa", "couch"]`; every member must exist in the resolved vocabulary |
+| `allow_cross_class_merge` | boolean | `false` | legacy emergency escape hatch that permits unrestricted cross-class association and geometric collapse; not recommended for normal deployments |
+
 ```yaml
 system:
   scene:
@@ -352,6 +381,18 @@ system:
         visible_miss_frames: 3
         visibility_depth_margin_m: 0.20
         object_ttl_s: 30.0
+        vocabulary:
+          # Omit `classes` to retain the built-in indoor vocabulary.
+          additional_classes: []
+        label:
+          history_size: 20
+          min_switch_observations: 3
+          min_winner_share: 0.65
+          switch_margin: 0.20
+        association:
+          confusable_class_groups:
+            - [sofa, couch]
+          allow_cross_class_merge: false
         geometry:
           mask_erosion_px: 1
           min_depth_m: 0.15
@@ -378,11 +419,12 @@ system:
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
 | `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
-| `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
+| `SCENE_CG_MERGE_THRESHOLD` | `0.85` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
-| `SCENE_CG_CROSS_CLASS_CENTROID_MAX_M` | `0.5` | per-tick class-gate bypass radius: a detection within this of an existing object may merge despite a different class label (handles YOLO label flicker on one fixture) |
-| `SCENE_CG_CROSS_CLASS_IOU_THRESH` / `SCENE_CG_CROSS_CLASS_OVERLAP_THRESH` | `0.30` / `0.50` | periodic class-agnostic collapse: fold two records when AABB IoU ≥ first **or** one-inside-other overlap ≥ second, regardless of class/visual sim. Lower to be more aggressive on a flickering desk (`chair` vs `table` split) |
+| `SCENE_CG_ALLOW_CROSS_CLASS_MERGE` | `false` | compatibility switch for unrestricted cross-class association/collapse; Driver `perception.association.allow_cross_class_merge` takes precedence |
+| `SCENE_CG_CROSS_CLASS_CENTROID_MAX_M` | `0.5` | legacy proximity threshold, effective only when unrestricted cross-class merging is explicitly enabled |
+| `SCENE_CG_CROSS_CLASS_IOU_THRESH` / `SCENE_CG_CROSS_CLASS_OVERLAP_THRESH` | `0.30` / `0.50` | legacy class-agnostic collapse thresholds, effective only when unrestricted cross-class merging is explicitly enabled |
 | `SCENE_CG_MERGE_OVERLAP_THRESH` / `SCENE_CG_MERGE_VISUAL_SIM_THRESH` | `0.50` / `0.65` | periodic `merge_overlap` pass: fold pairs with pcd-overlap ≥ first **and** CLIP cosine ≥ second |
 | `SCENE_CG_SAME_CLASS_MERGE_DIST_M` | `0.4` | lenient dedup: fold two SAME-class (or same `SCENE_CG_MERGE_CLASS_GROUPS` bucket) records whose centroids are within this distance, regardless of visual sim (kills "one keyboard → three"). `0` disables |
 | `SCENE_CG_MERGE_CLASS_GROUPS` | `` | opt-in confusable-class reconciliation, e.g. `chair,table,desk;sofa,couch` — listed classes share one merge bucket so label flicker across the group collapses while distinct, distant objects stay separate. Empty = off (never relabels) |

@@ -39,6 +39,19 @@ system:
         visible_miss_frames: 3
         visibility_depth_margin_m: 0.20
         object_ttl_s: 30.0
+        label:
+          # Require repeated, confidence-weighted evidence before a label is
+          # navigation-grade or allowed to replace a stable track label.
+          history_size: 20
+          min_switch_observations: 3
+          min_winner_share: 0.65
+          switch_margin: 0.20
+        association:
+          # Co-location is not proof of identity (for example, a cup on a
+          # table). Webots uses exact-label tracks and disables the legacy
+          # class-agnostic geometric collapse.
+          confusable_class_groups: []
+          allow_cross_class_merge: false
         geometry:
           # Reject RGB-D points outside the physical sensor range, remove
           # one-pixel SAM boundary leakage, denoise each frame, and admit only

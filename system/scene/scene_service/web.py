@@ -516,6 +516,21 @@ def _state_payload(registry: ObjectRegistry,
                 "yaw": o.bbox.yaw,
             },
             "confidence": o.confidence,
+            "label_confidence": float(
+                o.attributes.get("label_confidence", 0.0) or 0.0
+            ),
+            "label_provisional": bool(
+                o.attributes.get("label_provisional", False)
+            ),
+            "label_evidence_count": int(
+                o.attributes.get("label_evidence_count", 0) or 0
+            ),
+            "label_candidates": list(
+                o.attributes.get("label_candidates", ()) or ()
+            ),
+            "navigation_grade": bool(
+                o.attributes.get("navigation_grade", False)
+            ),
             "observation_count": o.observation_count,
             "missing": o.missing,
         })

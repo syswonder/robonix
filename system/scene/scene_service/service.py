@@ -577,16 +577,112 @@ async def _start_ros_ingest(
     geometry_cfg = perception_cfg.get("geometry") or {}
     if not isinstance(geometry_cfg, dict):
         raise ValueError("perception.geometry must be a mapping")
+    vocabulary_cfg = perception_cfg.get("vocabulary") or {}
+    if not isinstance(vocabulary_cfg, dict):
+        raise ValueError("perception.vocabulary must be a mapping")
+    label_cfg = perception_cfg.get("label") or {}
+    if not isinstance(label_cfg, dict):
+        raise ValueError("perception.label must be a mapping")
+    association_cfg = perception_cfg.get("association") or {}
+    if not isinstance(association_cfg, dict):
+        raise ValueError("perception.association must be a mapping")
 
-    def _geometry_bool(key: str, default: bool) -> bool:
-        value = geometry_cfg.get(key, default)
+    def _config_bool(
+        mapping: dict,
+        prefix: str,
+        key: str,
+        default: Optional[bool],
+    ) -> Optional[bool]:
+        value = mapping.get(key, default)
+        if value is None:
+            return None
         if isinstance(value, bool):
             return value
         if isinstance(value, str) and value.strip().lower() in {
             "true", "false", "1", "0", "yes", "no",
         }:
             return value.strip().lower() in {"true", "1", "yes"}
-        raise ValueError(f"perception.geometry.{key} must be a boolean")
+        raise ValueError(f"{prefix}.{key} must be a boolean")
+
+    def _string_list(
+        mapping: dict,
+        prefix: str,
+        key: str,
+        *,
+        allow_empty: bool,
+    ) -> Optional[list[str]]:
+        if key not in mapping:
+            return None
+        value = mapping[key]
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value
+        ):
+            raise ValueError(f"{prefix}.{key} must be a list of strings")
+        normalized = [
+            item.strip().lower()
+            for item in value
+            if item.strip()
+        ]
+        if not normalized and not allow_empty:
+            raise ValueError(f"{prefix}.{key} must not be empty")
+        return normalized
+
+    classes = _string_list(
+        vocabulary_cfg,
+        "perception.vocabulary",
+        "classes",
+        allow_empty=False,
+    )
+    additional_classes = _string_list(
+        vocabulary_cfg,
+        "perception.vocabulary",
+        "additional_classes",
+        allow_empty=True,
+    )
+    label_history_size = int(label_cfg.get("history_size", 20))
+    label_min_switch_observations = int(
+        label_cfg.get("min_switch_observations", 3)
+    )
+    label_min_winner_share = float(label_cfg.get("min_winner_share", 0.65))
+    label_switch_margin = float(label_cfg.get("switch_margin", 0.20))
+    allow_cross_class_merge = _config_bool(
+        association_cfg,
+        "perception.association",
+        "allow_cross_class_merge",
+        None,
+    )
+    confusable_class_groups: Optional[list[list[str]]] = None
+    if "confusable_class_groups" in association_cfg:
+        raw_groups = association_cfg["confusable_class_groups"]
+        if not isinstance(raw_groups, list) or any(
+            not isinstance(group, list)
+            or len(group) < 2
+            or any(not isinstance(item, str) for item in group)
+            for group in raw_groups
+        ):
+            raise ValueError(
+                "perception.association.confusable_class_groups must be "
+                "a list of string lists with at least two members"
+            )
+        confusable_class_groups = [
+            [item.strip().lower() for item in group if item.strip()]
+            for group in raw_groups
+        ]
+        if any(len(set(group)) < 2 for group in confusable_class_groups):
+            raise ValueError(
+                "each perception.association.confusable_class_groups entry "
+                "must contain at least two distinct non-empty labels"
+            )
+
+    def _geometry_bool(key: str, default: bool) -> bool:
+        return bool(
+            _config_bool(
+                geometry_cfg,
+                "perception.geometry",
+                key,
+                default,
+            )
+        )
     detection_period_s = float(
         perception_cfg["period_s"]
         if perception_cfg.get("period_s") is not None
@@ -659,6 +755,18 @@ async def _start_ros_ingest(
         raise ValueError(
             "perception.geometry.max_bbox_extent_m must be greater than zero"
         )
+    if label_history_size < 1:
+        raise ValueError("perception.label.history_size must be at least one")
+    if label_min_switch_observations < 1:
+        raise ValueError(
+            "perception.label.min_switch_observations must be at least one"
+        )
+    if not 0.0 <= label_min_winner_share <= 1.0:
+        raise ValueError(
+            "perception.label.min_winner_share must be in [0, 1]"
+        )
+    if not 0.0 <= label_switch_margin <= 1.0:
+        raise ValueError("perception.label.switch_margin must be in [0, 1]")
 
     # ── self-pose bridge ───────────────────────────────────────────────────
     # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
@@ -861,6 +969,14 @@ async def _start_ros_ingest(
             bbox_low_percentile=bbox_low_percentile,
             bbox_high_percentile=bbox_high_percentile,
             max_bbox_extent_m=max_bbox_extent_m,
+            classes=classes,
+            additional_classes=additional_classes,
+            label_history_size=label_history_size,
+            label_min_switch_observations=label_min_switch_observations,
+            label_min_winner_share=label_min_winner_share,
+            label_switch_margin=label_switch_margin,
+            allow_cross_class_merge=allow_cross_class_merge,
+            confusable_class_groups=confusable_class_groups,
             camera_frame=camera_frame,
             base_frame=configured_base_frame or None,
         )
