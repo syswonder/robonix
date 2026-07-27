@@ -4,8 +4,6 @@
 bool available
 # Deployment hard ceiling for planar linear speed, in metres per second (m/s).
 float64 max_linear_speed_mps
-# Deployment hard ceiling for yaw rate, in radians per second (rad/s).
-float64 max_angular_speed_radps
 # All percentage fields use percent in the range (0, 100].
 float64 default_percentage
 float64 min_percentage
@@ -14,8 +12,6 @@ float64 step_percentage
 float64 effective_percentage
 # Current planar linear-speed ceiling in metres per second (m/s).
 float64 effective_linear_speed_mps
-# Current yaw-rate ceiling in radians per second (rad/s).
-float64 effective_angular_speed_radps
 # "goal" or "session".
 string scope
 string run_id
