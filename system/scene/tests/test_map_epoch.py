@@ -123,7 +123,7 @@ _KEEP = object()  # sentinel: "build the real MapMetaStore"
 
 
 def _make_env(tmp, *, binding, objs=(), anno_map_id=".live",
-              lifecycle=None, map_meta=_KEEP):
+              lifecycle=None, map_meta=_KEEP, derived_state_reset=None):
     """(web_mod, app, pieces) or (None, None, None) when deps can't import."""
     err = _IMPORT_ERR
     web_mod = None
@@ -148,6 +148,7 @@ def _make_env(tmp, *, binding, objs=(), anno_map_id=".live",
     app = web_mod.make_app(
         registry=registry, hub=hub, anno_store=anno,
         object_store=store, map_meta=meta, map_binding=bind,
+        derived_state_reset=derived_state_reset,
     )
     return web_mod, app, SimpleNamespace(
         registry=registry, anno=anno, meta=meta, store=store, hub=hub,
@@ -548,10 +549,16 @@ def test_load_flushes_preload_live_objects():
     if _unavailable():
         return
     with tempfile.TemporaryDirectory() as tmp:
+        resets = []
+
+        async def reset_derived_state():
+            resets.append("reset")
+
         web_mod, app, env = _make_env(
             tmp, binding={"map_id": "default", "mode": "", "generation": None,
                           "source": "default"},
             objs=[_obj("preload1"), _obj("preload2")],
+            derived_state_reset=reset_derived_state,
         )
         if app is None:
             return
@@ -563,6 +570,7 @@ def test_load_flushes_preload_live_objects():
         assert body["objects_flushed"] == 2
         assert body["objects_restored"] == 1
         assert set(env.registry._objects) == {"saved"}
+        assert resets == ["reset"]
     print("  [PASS] test_load_flushes_preload_live_objects")
 
 

@@ -97,9 +97,15 @@ def test_confirm_bump_and_cross_map_drift():
         hub = FakeHub()
         binding = MapBinding(map_id="m1", source="env")
         live = {"map_id": "m1", "mode": "", "generation": None, "source": "env"}
+        derived_resets = []
+
+        async def reset_derived():
+            derived_resets.append(time.time())
+
         task = asyncio.create_task(service_mod._lifecycle_watch(
             hub, binding, anno,
-            registry=registry, live_binding=live, interval_s=0.01,
+            registry=registry, live_binding=live,
+            derived_state_reset=reset_derived, interval_s=0.01,
         ))
         try:
             # 1) Confirm: matching broadcast → epoch learned, nothing flushed.
@@ -108,6 +114,7 @@ def test_confirm_bump_and_cross_map_drift():
             assert live["generation"] == 1, live
             assert set(registry._objects) == {"o1", "o2"}
             assert not anno.list()[0].stale
+            assert derived_resets == []
 
             # 2) Generation bump (reset under scene): objects flushed,
             #    room flagged stale (kept), epoch advanced — exactly once.
@@ -115,6 +122,7 @@ def test_confirm_bump_and_cross_map_drift():
             await _settle()
             assert live["generation"] == 2, live
             assert registry._objects == {}, registry._objects
+            assert len(derived_resets) == 1
             room = anno.list()[0]
             assert room.stale and "1" in room.stale_reason and "2" in room.stale_reason
 
@@ -131,6 +139,7 @@ def test_confirm_bump_and_cross_map_drift():
             await _settle()
             assert registry._objects == {}, registry._objects
             assert live["map_id"] == "m1", live
+            assert len(derived_resets) == 2
         finally:
             task.cancel()
             try:

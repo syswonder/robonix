@@ -285,6 +285,12 @@ class ObjectRegistry:
         for obj in self._objects.values():
             if obj.missing or obj.attributes.get("is_robot"):
                 continue
+            # RGB-D tracks own staleness through healthy, visibility-checked
+            # negative observations. Wall-clock silence can mean an occlusion,
+            # out-of-FOV object, disconnected sensor, or failed model and must
+            # not be converted into evidence that the object disappeared.
+            if obj.attributes.get("observation_lifecycle") == "visibility":
+                continue
             if (now - obj.last_seen) > self.grace_period_s:
                 obj.missing = True
                 flipped += 1

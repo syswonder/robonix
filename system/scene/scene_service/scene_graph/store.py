@@ -122,6 +122,17 @@ class SceneGraphStore:
             updated_at=max(self._geometric_updated_at, self._semantic_updated_at),
         )
 
+    def clear_derived_state(self) -> None:
+        """Clear every object-derived live slice and persistent cache."""
+        self._nodes.clear()
+        self._geometric_edges.clear()
+        self._semantic_edges.clear()
+        self._geometric_updated_at = 0.0
+        self._semantic_updated_at = 0.0
+        self._caption_cache.clear()
+        self._relation_cache.clear()
+        self.flush_caches()
+
     # ── caption cache ────────────────────────────────────────────────────
 
     @staticmethod

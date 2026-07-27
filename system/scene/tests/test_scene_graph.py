@@ -228,6 +228,17 @@ def test_store_cache():
         cached2 = store2.get_cached_relation(node, node2, hint)
         assert cached2 is not None
         assert cached2.relation == "on_top_of"
+
+        # A map-epoch reset clears both live slices and persisted derived
+        # caches, so old object ids and edges cannot reappear.
+        store2.set_geometric([node], [edge])
+        store2.clear_derived_state()
+        assert store2.get_snapshot() is None
+        assert store2.get_cached_caption(node) is None
+        assert store2.get_cached_relation(node, node2, hint) is None
+        store3 = SceneGraphStore(cache_dir=tmpdir)
+        assert store3.get_cached_caption(node) is None
+        assert store3.get_cached_relation(node, node2, hint) is None
     print("  [PASS] test_store_cache")
 
 

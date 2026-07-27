@@ -48,7 +48,7 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
    * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
    * **Threshold** — agg_sim < 0.55 → spawn new object instead.
-5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
+5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks, but only UUIDs carrying the current `image_idx` refresh `last_seen` and `observation_count`. An unmatched object becomes `missing` only after repeated healthy frames whose current depth image shows clear space behind its old location; out-of-FOV, occluded, disconnected-sensor, failed-model, and stale-transform cases remain unknown. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
 Periodic cleanup (every 30 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
 
@@ -308,7 +308,31 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 `https://huggingface.co` file URL is always tried as a fallback. Set
 `RBNX_HF_MIRROR=` to skip the mirror.
 
-## Configuration knobs (env vars)
+## Driver configuration
+
+These values belong under `system.scene.config.perception` in the deployment
+manifest. Durations are seconds, distances are metres, and frame counts are
+dimensionless. Explicit Driver configuration takes precedence over legacy
+environment variables.
+
+| Key | Type / unit | Default | Meaning |
+|---|---|---|---|
+| `period_s` | float, s | `0.6` | minimum interval between metric perception frames |
+| `visible_miss_frames` | integer, frames | `3` | consecutive healthy, depth-verified absences required before marking an object `missing` |
+| `visibility_depth_margin_m` | float, m | `0.20` | measured depth must be at least this far behind the stored object center to count as clear-space negative evidence |
+| `object_ttl_s` | float, s | `30.0` | time after the last positive observation before a `missing` object is hard-deleted |
+
+```yaml
+system:
+  scene:
+    perception:
+      period_s: 0.6
+      visible_miss_frames: 3
+      visibility_depth_margin_m: 0.20
+      object_ttl_s: 30.0
+```
+
+## Legacy environment and model knobs
 
 | Env | Default | Notes |
 |---|---|---|
@@ -327,7 +351,7 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_CG_MERGE_OVERLAP_THRESH` / `SCENE_CG_MERGE_VISUAL_SIM_THRESH` | `0.50` / `0.65` | periodic `merge_overlap` pass: fold pairs with pcd-overlap ≥ first **and** CLIP cosine ≥ second |
 | `SCENE_CG_SAME_CLASS_MERGE_DIST_M` | `0.4` | lenient dedup: fold two SAME-class (or same `SCENE_CG_MERGE_CLASS_GROUPS` bucket) records whose centroids are within this distance, regardless of visual sim (kills "one keyboard → three"). `0` disables |
 | `SCENE_CG_MERGE_CLASS_GROUPS` | `` | opt-in confusable-class reconciliation, e.g. `chair,table,desk;sofa,couch` — listed classes share one merge bucket so label flicker across the group collapses while distinct, distant objects stay separate. Empty = off (never relabels) |
-| `SCENE_OBJECT_TTL_SEC` | `30` | how long a soft-evicted (`missing`) object is kept so a re-detection can re-bind its id + observation_count before it is hard-pruned; decouples object identity from per-tick uuid churn |
+| `SCENE_OBJECT_TTL_SEC` | unset | compatibility override for `perception.object_ttl_s`; new deployments should use Driver configuration |
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |

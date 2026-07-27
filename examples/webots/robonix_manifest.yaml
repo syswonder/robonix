@@ -29,7 +29,16 @@ system:
   vitals:
     listen: 0.0.0.0:50093
   # soma+scene layer
-  scene: {}
+  scene:
+    config:
+      perception:
+        # Metric SI units. A removed object must be absent in three healthy,
+        # depth-verified frames before it becomes missing. Sensor/model
+        # outages and occlusion do not count as negative observations.
+        period_s: 0.6
+        visible_miss_frames: 3
+        visibility_depth_margin_m: 0.20
+        object_ttl_s: 30.0
   # execution layer
   executor:
     # robonix-client polls Executor for authoritative active RTDL plans.

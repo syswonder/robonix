@@ -675,7 +675,8 @@ def make_app(*, registry: ObjectRegistry,
              map_binding: Optional[dict] = None,
              ops_lock: Optional[asyncio.Lock] = None,
              semantic_hold: Optional[dict] = None,
-             robot_geometry: Any = None) -> Starlette:
+             robot_geometry: Any = None,
+             derived_state_reset: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
@@ -711,6 +712,8 @@ def make_app(*, registry: ObjectRegistry,
     watcher's epoch response (service.py shares the same lock): the handlers
     suspend at RPC awaits mid-critical-section, and an interleaved flush or
     second Save would mix sessions/epochs in one snapshot.
+    `derived_state_reset` clears detector maps, UUID bindings, and scene-graph
+    state before a successful map Load restores the new epoch.
 
     Annotation API contract (STABLE once shipped — any frontend builds on
     it; see system/scene/README.md):
@@ -1221,6 +1224,8 @@ def make_app(*, registry: ObjectRegistry,
             # recreate the mixed-epoch state this ordering exists to
             # prevent.
             try:
+                if derived_state_reset is not None:
+                    await derived_state_reset()
                 registry_lock = getattr(registry, "lock", None)
                 if callable(registry_lock):
                     async with registry_lock():

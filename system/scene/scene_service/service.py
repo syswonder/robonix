@@ -19,7 +19,7 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
 
@@ -571,6 +571,39 @@ async def _start_ros_ingest(
     )
     if pose_max_age_s <= 0.0:
         raise ValueError("pose_max_age_s must be greater than zero")
+    perception_cfg = config.get("perception") or {}
+    if not isinstance(perception_cfg, dict):
+        raise ValueError("perception must be a mapping")
+    detection_period_s = float(
+        perception_cfg["period_s"]
+        if perception_cfg.get("period_s") is not None
+        else (os.environ.get("SCENE_DETECT_PERIOD_S") or 0.6)
+    )
+    visible_miss_frames = int(
+        perception_cfg.get("visible_miss_frames")
+        if perception_cfg.get("visible_miss_frames") is not None
+        else 3
+    )
+    visibility_depth_margin_m = float(
+        perception_cfg.get("visibility_depth_margin_m")
+        if perception_cfg.get("visibility_depth_margin_m") is not None
+        else 0.20
+    )
+    object_ttl_s = float(
+        perception_cfg.get("object_ttl_s")
+        if perception_cfg.get("object_ttl_s") is not None
+        else 30.0
+    )
+    if detection_period_s <= 0.0:
+        raise ValueError("perception.period_s must be greater than zero")
+    if visible_miss_frames < 1:
+        raise ValueError("perception.visible_miss_frames must be at least one")
+    if visibility_depth_margin_m < 0.0:
+        raise ValueError(
+            "perception.visibility_depth_margin_m must not be negative"
+        )
+    if object_ttl_s < 0.0:
+        raise ValueError("perception.object_ttl_s must not be negative")
 
     # ── self-pose bridge ───────────────────────────────────────────────────
     # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
@@ -756,8 +789,11 @@ async def _start_ros_ingest(
             # starves co-located GPU work (e.g. FunASR ASR), making voice slow.
             # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
             # speech + perception together.
-            period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            period_s=detection_period_s,
             pose_max_age_s=pose_max_age_s,
+            visible_miss_threshold=visible_miss_frames,
+            visibility_depth_margin_m=visibility_depth_margin_m,
+            object_ttl_s=object_ttl_s,
             camera_frame=camera_frame,
             base_frame=configured_base_frame or None,
         )
@@ -1216,6 +1252,7 @@ async def _lifecycle_watch(
     live_binding: Optional[dict] = None,
     ops_lock: Optional[asyncio.Lock] = None,
     semantic_hold: Optional[dict] = None,
+    derived_state_reset: Optional[Callable[[], Awaitable[None]]] = None,
     interval_s: float = 5.0,
 ) -> None:
     """React to map-frame epoch changes and external map switches."""
@@ -1233,11 +1270,13 @@ async def _lifecycle_watch(
     last_warned: Optional[tuple] = None
 
     async def _flush_registry(why: str) -> bool:
-        if registry is None:
-            return True
         try:
-            async with registry.lock():
-                dropped = registry.clear_objects()
+            if derived_state_reset is not None:
+                await derived_state_reset()
+            dropped = 0
+            if registry is not None:
+                async with registry.lock():
+                    dropped = registry.clear_objects()
             log.warning(
                 "[scene] flushed %d mis-anchored object(s) %s", dropped, why
             )
@@ -1589,18 +1628,6 @@ async def _run_active(config: dict) -> None:
     bg_tasks = [
         geometry_task,
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
-        asyncio.create_task(
-            _lifecycle_watch(
-                hub,
-                binding,
-                anno_store,
-                registry=registry,
-                live_binding=live_binding,
-                ops_lock=map_ops_lock,
-                semantic_hold=semantic_hold,
-            ),
-            name="scene-lifecycle-watch",
-        ),
         # Background reconciler: keeps scene's hub adding subscriptions
         # for new ROS2 topic_outs that appear on atlas after start
         # (mapping comes up after scene; same pattern for any future
@@ -1617,11 +1644,6 @@ async def _run_active(config: dict) -> None:
         ),
         *ingest_bg,
     ]
-    # These tasks are fire-and-forget: nothing awaits them, so an uncaught
-    # exception would otherwise vanish until shutdown (the failure mode of
-    # the failure-detectors themselves). Surface any death immediately.
-    for _t in bg_tasks:
-        _t.add_done_callback(_log_bg_task_exit)
 
     # ── Relation layer ───────────────────────────────────────────────
     # Fast geometric relations (contact/containment + reachable_by) are
@@ -1646,6 +1668,33 @@ async def _run_active(config: dict) -> None:
     mcp_tools.attach_scene_graph_store(sg_store)
     geo_loop = GeometricRelationLoop(registry, sg_store)
     await geo_loop.start()
+
+    async def _reset_derived_state() -> None:
+        reset = getattr(perception, "reset_derived_state", None)
+        if reset is not None:
+            await reset()
+        sg_store.clear_derived_state()
+
+    bg_tasks.append(
+        asyncio.create_task(
+            _lifecycle_watch(
+                hub,
+                binding,
+                anno_store,
+                registry=registry,
+                live_binding=live_binding,
+                ops_lock=map_ops_lock,
+                semantic_hold=semantic_hold,
+                derived_state_reset=_reset_derived_state,
+            ),
+            name="scene-lifecycle-watch",
+        )
+    )
+    # These tasks are fire-and-forget: nothing awaits them, so an uncaught
+    # exception would otherwise vanish until shutdown (the failure mode of
+    # the failure-detectors themselves). Surface any death immediately.
+    for _t in bg_tasks:
+        _t.add_done_callback(_log_bg_task_exit)
 
     # ── Scene Graph (optional LLM enrichment of the residual) ────────
     sg_stop: asyncio.Event | None = None
@@ -1715,6 +1764,7 @@ async def _run_active(config: dict) -> None:
             ops_lock=map_ops_lock,
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
+            derived_state_reset=_reset_derived_state,
         )
         web_uv = uvicorn.Config(
             app=web_app,

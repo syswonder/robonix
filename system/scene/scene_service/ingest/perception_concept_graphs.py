@@ -77,6 +77,95 @@ def _resolved_classes() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _observed_map_object_uuids(
+    map_objects: Any,
+    *,
+    frame_seq: int,
+) -> set[str]:
+    """Return map-object UUIDs that contain evidence from ``frame_seq``.
+
+    ConceptGraphs keeps every contributing frame in ``image_idx`` when it
+    merges a detection into a historical object. This is the positive
+    observation boundary: membership in the persistent ``MapObjectList`` is
+    not evidence that an object was seen in the current frame.
+    """
+    observed: set[str] = set()
+    for obj in map_objects or ():
+        try:
+            indices = obj.get("image_idx", ())
+            if frame_seq not in indices:
+                continue
+            uuid_value = str(obj.get("id", "") or "")
+            if uuid_value:
+                observed.add(uuid_value)
+        except (TypeError, ValueError):
+            continue
+    return observed
+
+
+def _visible_missing_uuids(
+    map_objects: Any,
+    *,
+    observed_uuids: set[str],
+    depth_m: Any,
+    intrinsics: Any,
+    camera_to_world: Any,
+    depth_margin_m: float,
+) -> set[str]:
+    """Return unmatched objects whose old location is visibly empty.
+
+    The historical object center is projected into the current depth image.
+    A miss counts only when the measured surface is materially *behind* the
+    stored object. A closer surface means occlusion; a similar depth means the
+    object may still be present but the detector missed it; invalid/out-of-FOV
+    depth is unknown. Those cases must not delete state.
+    """
+    try:
+        depth = np.asarray(depth_m, dtype=np.float32)
+        transform = np.asarray(camera_to_world, dtype=np.float64)
+        if depth.ndim != 2 or transform.shape != (4, 4):
+            return set()
+        world_to_camera = np.linalg.inv(transform)
+    except (TypeError, ValueError, np.linalg.LinAlgError):
+        return set()
+
+    height, width = depth.shape
+    margin = max(0.0, float(depth_margin_m))
+    visible_missing: set[str] = set()
+    for obj in map_objects or ():
+        try:
+            uuid_value = str(obj.get("id", "") or "")
+            if not uuid_value or uuid_value in observed_uuids:
+                continue
+            points = np.asarray(obj["pcd"].points, dtype=np.float64)
+            points = points[np.all(np.isfinite(points), axis=1)]
+            if points.shape[0] < 1:
+                continue
+            center_world = np.append(np.median(points, axis=0), 1.0)
+            center_camera = world_to_camera @ center_world
+            expected_depth = float(center_camera[2])
+            if not math.isfinite(expected_depth) or expected_depth <= 0.0:
+                continue
+            u = int(round(float(intrinsics.fx) * center_camera[0] / expected_depth
+                          + float(intrinsics.cx)))
+            v = int(round(float(intrinsics.fy) * center_camera[1] / expected_depth
+                          + float(intrinsics.cy)))
+            if not (0 <= u < width and 0 <= v < height):
+                continue
+            u0, u1 = max(0, u - 1), min(width, u + 2)
+            v0, v1 = max(0, v - 1), min(height, v + 2)
+            patch = depth[v0:v1, u0:u1]
+            valid = patch[np.isfinite(patch) & (patch > 0.0)]
+            if valid.size == 0:
+                continue
+            measured_depth = float(np.median(valid))
+            if measured_depth > expected_depth + margin:
+                visible_missing.add(uuid_value)
+        except (KeyError, TypeError, ValueError, np.linalg.LinAlgError):
+            continue
+    return visible_missing
+
+
 _DEFAULT_YOLO_WORLD_WEIGHTS = "/opt/models/yolov8l-world.pt"
 _DEFAULT_MOBILE_SAM_WEIGHTS = "/opt/models/mobile_sam.pt"
 _DEFAULT_CLIP_MODEL = "ViT-B-32"
@@ -365,6 +454,9 @@ class ConceptGraphsDetector:
         robot_base_frame_fn: Optional[Callable[[], str]] = None,
         period_s: float = 0.6,
         pose_max_age_s: float = 2.0,
+        visible_miss_threshold: int = 3,
+        visibility_depth_margin_m: float = 0.20,
+        object_ttl_s: float = 30.0,
         confidence_threshold: float = 0.30,
         max_detections: int = 30,
         yolo_weights_path: Optional[str] = None,
@@ -399,6 +491,12 @@ class ConceptGraphsDetector:
         self._world_frame_fn = world_frame_fn or (lambda: "")
         self._robot_base_frame_fn = robot_base_frame_fn or (lambda: "")
         self._pose_max_age_s = max(0.0, float(pose_max_age_s))
+        self._visible_miss_threshold = max(1, int(visible_miss_threshold))
+        self._visibility_depth_margin_m = max(
+            0.0,
+            float(visibility_depth_margin_m),
+        )
+        self._object_ttl_s = max(0.0, float(object_ttl_s))
 
         self._yolo: Any = None
         self._sam: Any = None
@@ -449,15 +547,21 @@ class ConceptGraphsDetector:
         # here (not lazily) so _apply_snapshot is safe to call before the first
         # _project_to_registry tick — including from unit tests.
         self._uuid_to_oid: dict[str, str] = {}
+        self._expired_uuids: set[str] = set()
+        # UUIDs backed by historical ConceptGraphs geometry but currently
+        # confirmed absent by repeated, unobstructed RGB-D observations.
+        # Keep the binding for stable re-identification, but suppress these
+        # objects from the 3D live view until they are observed again.
+        self._missing_uuids: set[str] = set()
         # How long a soft-evicted (missing) registry record is kept so a
         # re-detection can re-bind it before it is hard-pruned. Decouples
         # observation_count from concept-graphs uuid churn across ticks.
-        try:
-            self._object_ttl_s = float(
-                os.environ.get("SCENE_OBJECT_TTL_SEC", "30.0").strip() or "30.0"
-            )
-        except ValueError:
-            self._object_ttl_s = 30.0
+        legacy_ttl = os.environ.get("SCENE_OBJECT_TTL_SEC", "").strip()
+        if legacy_ttl:
+            try:
+                self._object_ttl_s = max(0.0, float(legacy_ttl))
+            except ValueError:
+                pass
         # Optional confusable-class reconciliation (off by default): maps a
         # group of classes (e.g. chair/table/desk) to one bucket so YOLO-World
         # label flicker across the group merges instead of splitting into
@@ -505,6 +609,27 @@ class ConceptGraphsDetector:
         if self._task is not None:
             await self._task
             self._task = None
+
+    async def reset_derived_state(self) -> None:
+        """Atomically drop detector-owned state after a map epoch change."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._reset_derived_state_locked)
+
+    def _reset_derived_state_locked(self) -> None:
+        with self._inference_lock:
+            if self._cg is not None:
+                self._map_objects = self._cg["MapObjectList"]()
+            elif self._map_objects is not None:
+                try:
+                    self._map_objects = type(self._map_objects)()
+                except TypeError:
+                    self._map_objects = []
+            self._uuid_to_oid.clear()
+            self._expired_uuids.clear()
+            self._missing_uuids.clear()
+            self._tick_idx = 0
+            self._last_logged_total = -1
+            self._spatial_not_ready_logged = False
 
     # ── Text embedding (shared CLIP) ─────────────────────────────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
@@ -559,10 +684,13 @@ class ConceptGraphsDetector:
         # projected, or ones that periodic cleanup is about to evict),
         # which never matches the 2D view's count.
         live_uuids = getattr(self, "_uuid_to_oid", None)
+        missing_uuids = getattr(self, "_missing_uuids", set())
         for obj_idx, obj in enumerate(map_objs):
             if live_uuids is not None and live_uuids:
                 u = str(obj.get("id", ""))
                 if u and u not in live_uuids:
+                    continue
+                if u and u in missing_uuids:
                     continue
             try:
                 pcd = obj.get("pcd")
@@ -697,6 +825,7 @@ class ConceptGraphsDetector:
             self._tick_locked()
 
     def _tick_locked(self) -> None:
+        self._purge_expired_map_objects_locked()
         rgb_msg = self._rgb_msg()
         depth_msg = self._depth_msg()
         if rgb_msg is None or depth_msg is None:
@@ -724,6 +853,27 @@ class ConceptGraphsDetector:
         depth = _depth_msg_to_metres(depth_msg)
         if rgb is None or depth is None:
             return
+        world_frame = str(self._world_frame_fn() or "").strip()
+        trans_pose = self._build_camera_to_map_transform(
+            expected_world_frame=world_frame,
+        )
+        if trans_pose is None or not world_frame:
+            if not getattr(self, "_spatial_not_ready_logged", False):
+                log.warning(
+                    "camera pose/extrinsics unavailable; withholding spatial "
+                    "detections until contracts or header-derived TF are ready"
+                )
+                self._spatial_not_ready_logged = True
+            return
+        self._spatial_not_ready_logged = False
+        cam_K_mat = np.array(
+            [
+                [K.fx, 0, K.cx],
+                [0, K.fy, K.cy],
+                [0, 0, 1.0],
+            ],
+            dtype=np.float32,
+        )
         # YOLO-World predict expects RGB in standard channel order.
         # Internal Ultralytics handles BGR-as-input fine but CLIP later
         # needs RGB. Convert once here.
@@ -747,8 +897,11 @@ class ConceptGraphsDetector:
         r0 = yolo_results[0]
         boxes = getattr(r0, "boxes", None)
         if boxes is None or len(boxes) == 0:
-            self._tick_idx += 1
-            self._maybe_periodic_cleanup()
+            self._finish_healthy_frame(
+                depth=depth,
+                intrinsics=K,
+                camera_to_world=trans_pose,
+            )
             return
 
         try:
@@ -758,6 +911,11 @@ class ConceptGraphsDetector:
         except Exception:  # noqa: BLE001
             return
         if xyxy.shape[0] == 0:
+            self._finish_healthy_frame(
+                depth=depth,
+                intrinsics=K,
+                camera_to_world=trans_pose,
+            )
             return
 
         # Cap the count so SAM doesn't get a 200-bbox dump.
@@ -786,8 +944,11 @@ class ConceptGraphsDetector:
             for cidx in cls_idx
         ], dtype=bool)
         if not keep.any():
-            self._tick_idx += 1
-            self._maybe_periodic_cleanup()
+            self._finish_healthy_frame(
+                depth=depth,
+                intrinsics=K,
+                camera_to_world=trans_pose,
+            )
             return
         xyxy = xyxy[keep]
         confs = confs[keep]
@@ -870,24 +1031,6 @@ class ConceptGraphsDetector:
             return
 
         # ── Per-detection PCD + bbox in map frame ────────────────────
-        cam_K_mat = np.array([
-            [K.fx, 0,    K.cx],
-            [0,    K.fy, K.cy],
-            [0,    0,    1.0],
-        ], dtype=np.float32)
-        world_frame = str(self._world_frame_fn() or "").strip()
-        trans_pose = self._build_camera_to_map_transform(
-            expected_world_frame=world_frame,
-        )
-        if trans_pose is None or not world_frame:
-            if not getattr(self, "_spatial_not_ready_logged", False):
-                log.warning(
-                    "camera pose/extrinsics unavailable; withholding spatial "
-                    "detections until contracts or header-derived TF are ready"
-                )
-                self._spatial_not_ready_logged = True
-            return
-        self._spatial_not_ready_logged = False
         try:
             obj_pcds_and_bboxes = self._cg["detections_to_obj_pcd_and_bbox"](
                 depth_array=depth.astype(np.float32),
@@ -985,8 +1128,11 @@ class ConceptGraphsDetector:
             det_list.append(d)
 
         if len(det_list) == 0:
-            self._tick_idx += 1
-            self._maybe_periodic_cleanup()
+            self._finish_healthy_frame(
+                depth=depth,
+                intrinsics=K,
+                camera_to_world=trans_pose,
+            )
             return
 
         # ── Concept-graphs merge ─────────────────────────────────────
@@ -1132,9 +1278,56 @@ class ConceptGraphsDetector:
                     log.warning("concept-graphs merge pipeline failed: %s", e)
                 return
 
+        self._finish_healthy_frame(
+            depth=depth,
+            intrinsics=K,
+            camera_to_world=trans_pose,
+        )
+
+    def _finish_healthy_frame(
+        self,
+        *,
+        depth: Any,
+        intrinsics: Any,
+        camera_to_world: Any,
+    ) -> None:
+        """Commit one healthy frame's positive and negative evidence."""
+        frame_seq = self._tick_idx
         self._tick_idx += 1
         self._maybe_periodic_cleanup()
-        self._project_to_registry()
+        observed_uuids = _observed_map_object_uuids(
+            self._map_objects,
+            frame_seq=frame_seq,
+        )
+        visible_miss_uuids = _visible_missing_uuids(
+            self._map_objects,
+            observed_uuids=observed_uuids,
+            depth_m=depth,
+            intrinsics=intrinsics,
+            camera_to_world=camera_to_world,
+            depth_margin_m=self._visibility_depth_margin_m,
+        )
+        self._project_to_registry(
+            observed_uuids=observed_uuids,
+            visible_miss_uuids=visible_miss_uuids,
+            frame_seq=frame_seq,
+            observed_at=time.time(),
+        )
+
+    def _purge_expired_map_objects_locked(self) -> None:
+        """Remove TTL-expired UUIDs from the persistent ConceptGraphs map."""
+        expired = set(getattr(self, "_expired_uuids", set()))
+        if not expired or self._map_objects is None:
+            return
+        self._expired_uuids.difference_update(expired)
+        if self._cg is not None:
+            retained = self._cg["MapObjectList"]()
+        else:
+            retained = []
+        for obj in self._map_objects:
+            if str(obj.get("id", "") or "") not in expired:
+                retained.append(obj)
+        self._map_objects = retained
 
     # ── Voxel pcd-overlap (replaces concept-graphs `overlap` mode) ──
     @staticmethod
@@ -1755,9 +1948,21 @@ class ConceptGraphsDetector:
         )
 
     # ── Project MapObjectList → ObjectRegistry ──────────────────────
-    def _project_to_registry(self) -> None:
-        """Replace registry's perception-source objects with a snapshot
-        of the current MapObjectList. Robot self-record is preserved.
+    def _project_to_registry(
+        self,
+        *,
+        observed_uuids: Optional[set[str]] = None,
+        visible_miss_uuids: Optional[set[str]] = None,
+        frame_seq: int = 0,
+        observed_at: Optional[float] = None,
+    ) -> None:
+        """Project persistent geometry without replaying positive sightings.
+
+        ``observed_uuids`` contains only objects matched or created by the
+        current healthy frame. ``visible_miss_uuids`` contains unmatched
+        objects whose old location had clear depth evidence of absence.
+        Historical map membership alone updates neither ``last_seen`` nor the
+        observation count.
 
         Runs from the worker thread; the registry uses an asyncio.Lock,
         so we schedule the actual mutation back onto the asyncio loop
@@ -1853,12 +2058,27 @@ class ConceptGraphsDetector:
         # serializes with the snapshot reader (same asyncio.Lock).
         try:
             asyncio.run_coroutine_threadsafe(
-                self._apply_snapshot(snapshots), self._asyncio_loop,
+                self._apply_snapshot(
+                    snapshots,
+                    observed_uuids=observed_uuids,
+                    visible_miss_uuids=visible_miss_uuids,
+                    frame_seq=frame_seq,
+                    observed_at=observed_at,
+                ),
+                self._asyncio_loop,
             )
         except Exception as e:  # noqa: BLE001
             log.debug("schedule registry update failed: %s", e)
 
-    async def _apply_snapshot(self, snapshots: list[dict]) -> None:
+    async def _apply_snapshot(
+        self,
+        snapshots: list[dict],
+        *,
+        observed_uuids: Optional[set[str]] = None,
+        visible_miss_uuids: Optional[set[str]] = None,
+        frame_seq: int = 0,
+        observed_at: Optional[float] = None,
+    ) -> None:
         """Reconcile concept-graphs MapObjectList state into the
         registry **incrementally**. Robot self-record and non-
         perception objects are preserved; for our own objects we:
@@ -1894,7 +2114,22 @@ class ConceptGraphsDetector:
         suffix climbed into the thousands), reset observation_count,
         and broke any consumer that held an oid across ticks.
         """
-        now = time.time()
+        now = time.time() if observed_at is None else float(observed_at)
+        # Compatibility for direct callers predating FrameObservation: an
+        # omitted set means every supplied snapshot is a positive observation.
+        # Production always passes an explicit set, including an empty set.
+        if observed_uuids is None:
+            observed_uuids = {
+                str(s.get("uuid", "") or "")
+                for s in snapshots
+                if str(s.get("uuid", "") or "")
+            }
+        if visible_miss_uuids is None:
+            visible_miss_uuids = set()
+        if not hasattr(self, "_expired_uuids"):
+            self._expired_uuids = set()
+        if not hasattr(self, "_missing_uuids"):
+            self._missing_uuids = set()
         live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
             wf = self._world_frame_fn()
@@ -1914,6 +2149,7 @@ class ConceptGraphsDetector:
             # exist while this loop runs.
             for s in snapshots:
                 u = s.get("uuid", "")
+                is_observed = bool(u and u in observed_uuids)
                 pose = Pose3D(
                     x=s["x"], y=s["y"], z=s["z"],
                     yaw=s.get("yaw", 0.0), frame_id=wf,
@@ -1924,7 +2160,7 @@ class ConceptGraphsDetector:
                 )
                 oid = self._uuid_to_oid.get(u) if u else None
                 existing = self._registry._objects.get(oid) if oid else None
-                if existing is None:
+                if existing is None and is_observed:
                     # No uuid binding yet (first sighting of this uuid). Before
                     # minting a new id, try to re-adopt a stable record so the
                     # object keeps its id (and accumulated count) across a uuid
@@ -1970,17 +2206,24 @@ class ConceptGraphsDetector:
                             existing.attributes["cg_uuid"] = u
                             self._uuid_to_oid[u] = existing.object_id
                 if existing is not None:
-                    # Update in place. Preserve oid + first_seen. The count is
-                    # registry-owned (one per tick seen) so it survives a uuid
-                    # swap instead of resetting to the CG object's num_detections.
+                    # Geometry is the persistent fused MapObject snapshot and
+                    # may be projected every tick. Positive-observation state
+                    # changes only when this UUID received current-frame
+                    # evidence.
                     existing.pose = pose
                     existing.bbox = bbox
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
-                    existing.last_seen = now
-                    existing.missing = False
-                    existing.observation_count += 1
+                    existing.attributes["observation_lifecycle"] = "visibility"
+                    if is_observed:
+                        existing.last_seen = now
+                        existing.missing = False
+                        self._missing_uuids.discard(u)
+                        existing.observation_count += 1
+                        existing.attributes["last_observed_frame"] = frame_seq
+                        existing.attributes["last_observed_unix"] = now
+                        existing.attributes["consecutive_visible_misses"] = 0
                     adopted_oids.add(existing.object_id)
-                else:
+                elif is_observed:
                     obj = self._registry.insert_object(
                         cls=s["cls"],
                         pose=pose,
@@ -1994,7 +2237,27 @@ class ConceptGraphsDetector:
                     if u:
                         obj.attributes["cg_uuid"] = u
                         self._uuid_to_oid[u] = obj.object_id
+                    obj.attributes["observation_lifecycle"] = "visibility"
+                    obj.attributes["last_observed_frame"] = frame_seq
+                    obj.attributes["last_observed_unix"] = now
+                    obj.attributes["consecutive_visible_misses"] = 0
+                    self._missing_uuids.discard(u)
                     adopted_oids.add(obj.object_id)
+
+            # Negative evidence is also frame-scoped. A missing vote is
+            # accepted only when the current RGB-D/model pass was healthy and
+            # depth showed clear space behind the object's old location.
+            for u in visible_miss_uuids:
+                oid = self._uuid_to_oid.get(u)
+                obj = self._registry._objects.get(oid) if oid else None
+                if obj is None or obj.attributes.get("is_robot"):
+                    continue
+                misses = int(obj.attributes.get("consecutive_visible_misses", 0)) + 1
+                obj.attributes["consecutive_visible_misses"] = misses
+                obj.attributes["last_visible_miss_frame"] = frame_seq
+                if misses >= self._visible_miss_threshold:
+                    obj.missing = True
+                    self._missing_uuids.add(u)
 
             # Evict registry records whose source uuid is gone. Runs AFTER
             # bind/adopt so a record adopted above (cg_uuid rebound to a live
@@ -2030,7 +2293,20 @@ class ConceptGraphsDetector:
             # stale one, so soft eviction does not resurrect duplicates.
             for obj in doomed:
                 self._registry.soft_evict(obj)
-            self._registry.prune_expired(now, self._object_ttl_s)
+            uuid_by_oid = {
+                oid: uuid_value
+                for uuid_value, oid in self._uuid_to_oid.items()
+            }
+            pruned_oids = self._registry.prune_expired(
+                now,
+                self._object_ttl_s,
+            )
+            for oid in pruned_oids:
+                uuid_value = uuid_by_oid.get(oid)
+                if uuid_value:
+                    self._uuid_to_oid.pop(uuid_value, None)
+                    self._expired_uuids.add(uuid_value)
+                    self._missing_uuids.discard(uuid_value)
 
     def _rebind_restored(self, cls: str, pose: Pose3D) -> Optional[SceneObject]:
         """Nearest warm-restored, not-yet-rebound object of class `cls` whose
