@@ -233,6 +233,25 @@ stop: "true"
 
         assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
     }
+
+    #[test]
+    fn liaison_receives_the_keystone_endpoint_from_the_manifest() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 0.0.0.0:50081
+keystone_endpoint: 127.0.0.1:50095
+"#,
+        )
+        .expect("liaison config");
+
+        let args = system_cli_args("liaison", Some(&cfg), Some("0.0.0.0:50051"));
+        let endpoint = args
+            .windows(2)
+            .find(|pair| pair[0] == "--keystone-endpoint")
+            .map(|pair| pair[1].as_str());
+
+        assert_eq!(endpoint, Some("127.0.0.1:50095"));
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -1761,6 +1780,7 @@ fn system_cli_args(
                 s("atlas").or_else(|| atlas_listen.map(str::to_string)),
             );
             push_pair(&mut out, "--pilot-endpoint", s("pilot_endpoint"));
+            push_pair(&mut out, "--keystone-endpoint", s("keystone_endpoint"));
             push_pair(&mut out, "--log", s("log"));
         }
         "soma" => {

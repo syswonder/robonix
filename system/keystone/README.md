@@ -14,7 +14,11 @@ Keystone stores:
 
 The SQLite database uses foreign keys and WAL mode. Its default path is
 `$ROBONIX_DATA_DIR/keystone.db`; `rbnx boot` sets `ROBONIX_DATA_DIR` to the
-deployment's `rbnx-boot/data` directory.
+deployment's `rbnx-boot/data` directory. A robot deployment that can move
+between source checkouts should set `system.keystone.database` and
+`bootstrap_credentials_file` to stable, robot-owned paths such as
+`${HOME}/.robonix/data/keystone.db` and
+`${HOME}/.robonix/data/keystone-bootstrap-admin.txt`.
 
 ## First administrator
 
@@ -39,6 +43,8 @@ system:
   keystone:
     listen: 127.0.0.1:50095
     log: info
+    database: ${HOME}/.robonix/data/keystone.db
+    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
   liaison:
     listen: 0.0.0.0:50081
     keystone_endpoint: 127.0.0.1:50095

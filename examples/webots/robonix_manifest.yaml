@@ -17,6 +17,12 @@ system:
     # robonix-client discovers Keystone through Atlas and connects directly.
     listen: 0.0.0.0:50095
     log: info
+    # Accounts belong to this robot, not to a disposable source checkout.
+    # Keep both the identity database and first-boot credential file outside
+    # rbnx-boot so rebuilding or testing from another worktree does not create
+    # a second, apparently empty user directory.
+    database: ${HOME}/.robonix/data/keystone.db
+    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
   # soma+scene layer
   scene:
     log: info
