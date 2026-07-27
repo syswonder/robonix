@@ -16,12 +16,10 @@ bool persist
 ---
 bool accepted
 bool changed
-# Percentage of the deployment-configured linear and angular speed ceilings.
+# Percentage of the deployment-configured linear-speed ceiling.
 float64 effective_percentage
 # Planar linear-speed ceiling in metres per second (m/s).
 float64 effective_linear_speed_mps
-# Yaw-rate ceiling in radians per second (rad/s).
-float64 effective_angular_speed_radps
 # "goal" for an automatically restored override, or "session" if persistent.
 string scope
 string run_id
