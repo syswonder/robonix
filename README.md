@@ -83,7 +83,7 @@ rbnx boot
 
 Then run `rbnx chat` in a third terminal. Try `go to room 101`, `what can you
 see?`, or `explore the office`. See the
-[Getting Started guide](https://robonix.syswonder.org/getting-started/quickstart.html)
+[Getting Started guide](https://robonix-book.syswonder.org/getting-started/quickstart.html)
 for the complete walkthrough.
 
 https://github.com/user-attachments/assets/604b2c7f-3b6d-46be-858b-c52acaf686e3
@@ -266,7 +266,7 @@ Run `rbnx caps` to inspect the live providers, then try `rbnx chat` and ask the
 robot to say hello. Each example package keeps its manifest, `config.spec`,
 build/start scripts, implementation, and optional capability definitions in
 one directory. Start there, then follow the
-[package integration guide](https://robonix.syswonder.org/integration-guide/package-catalog.html)
+[package integration guide](https://robonix-book.syswonder.org/integration-guide/package-catalog.html)
 to publish a reusable package.
 
 ## Repository Layout
@@ -376,7 +376,7 @@ for its multi-container ROS graph. Primitive, service, and skill code continues
 to use normal ROS 2 APIs; the deployment selects the RMW through its process
 environment. See the
 [`rmw_zenoh` design](https://github.com/ros2/rmw_zenoh/blob/rolling/docs/design.md)
-and the [robot integration guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html)
+and the [robot integration guide](https://robonix-book.syswonder.org/integration-guide/vendor-onboarding.html)
 for topology and deployment details.
 
 ## Contributing
