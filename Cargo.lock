@@ -3233,11 +3233,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "nix 0.31.3",
  "prost",
  "protoc-bin-vendored",
  "robonix-atlas",
- "robonix-cli",
  "robonix-codegen",
  "robonix-scribe",
  "serde",

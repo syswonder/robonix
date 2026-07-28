@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
 pub mod config;
-pub mod deployment;
-pub mod launcher;
 pub mod pb;
-pub mod report;
 pub mod runtime_monitor;
 pub mod runtime_state;
 pub mod service;

@@ -1,10 +1,10 @@
 # Soma - raw body YAML and URDF service
 
 Soma loads a single robot's `soma.yaml` and referenced URDF, then exposes them
-to other Robonix components over gRPC. `rbnx boot` reads the same
-`robonix_manifest.yaml` to decide which primitive and skill packages to run;
-Soma spawns them through `rbnx start` in two stages (see
-`docs/soma_two_stage_bringup.md`).
+to other Robonix components over gRPC. `rbnx boot` is the sole deployment
+orchestrator: it starts and owns primitive, service, and skill packages and
+drives their lifecycle directly. Soma does not read deployment manifests or
+spawn child processes.
 
 Soma v2 does not render or interpret a self-description. Pilot calls
 `robonix/system/soma/get_yaml` to receive the original YAML string, and other
@@ -27,9 +27,7 @@ Fields can also be supplied on the CLI (`--atlas`, `--listen`, `--provider-id`,
 `--robot-yaml`); CLI flags win over config-file values. `rbnx boot` uses this
 CLI mode — it does not write a soma config file on disk.
 
-The robot's `soma.yaml` and any files it references (URDF, package
-`robonix_manifest.yaml` for stage 1/2 bring-up) must live somewhere Soma can
-read at startup.
+The robot's `soma.yaml` and referenced URDF must be readable at startup.
 
 ## Run
 
@@ -49,20 +47,11 @@ robonix-soma \
   --robot-yaml /path/to/robot/soma.yaml
 ```
 
-At startup Soma parses the robot YAML, loads the referenced URDF, spawns
-primitive packages via `rbnx start` (stage 1), registers itself in Atlas, and
-serves gRPC on `listen`. Skill packages are held until `rbnx boot` writes
-`stage2\n` into the pipe on `$ROBONIX_SOMA_STAGE_FD` (stage 2). Soma stops
-every package it launched on SIGINT/SIGTERM.
+At startup Soma parses the robot YAML, loads the referenced URDF, starts its
+gRPC body API, and only then registers ACTIVE in Atlas. `rbnx boot` waits for
+that readiness before it starts deployment primitives.
 
-For every package, Soma passes the deployment entry's `name` through
-`RBNX_INSTANCE_NAME` and waits only for that exact Atlas provider id. Package
-instance names must be non-empty, whitespace-normalized, unique, and not
-already live before spawn.
-
-`--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`);
-package stdout/stderr is written through scribe under `$SCRIBE_LOG_DIR` or
-`./logs`.
+`--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`).
 
 ## gRPC API
 

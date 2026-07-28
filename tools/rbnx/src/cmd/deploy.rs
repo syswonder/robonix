@@ -33,7 +33,6 @@ use robonix_cli::launch::PackageRuntimeRecord;
 use robonix_cli::output;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -210,28 +209,34 @@ stop: "true"
     }
 
     #[test]
-    fn soma_always_receives_the_selected_boot_manifest() {
+    fn soma_paths_are_resolved_without_package_lifecycle_config() {
         use serde_yaml::{Mapping, Value};
 
         let manifest_dir = PathBuf::from("/tmp/ranger-deploy");
-        let selected = manifest_dir.join("robonix_manifest.arm.yaml");
         let mut soma = Mapping::new();
-        // A stale local value must not make Soma boot the default profile
-        // after `rbnx boot -f <arm-profile>`.
         soma.insert(
-            Value::String("deployment_manifest".into()),
-            Value::String("robonix_manifest.yaml".into()),
+            Value::String("robot_yaml".into()),
+            Value::String("robot/soma.yaml".into()),
         );
         let mut system = HashMap::from([("soma".to_string(), Value::Mapping(soma))]);
 
-        ensure_soma_defaults(&mut system, &manifest_dir, &selected);
+        ensure_soma_defaults(&mut system, &manifest_dir);
         let args = system_cli_args("soma", system.get("soma"), None);
-        let manifest_arg = args
+        let robot_yaml_arg = args
             .windows(2)
-            .find(|pair| pair[0] == "--deployment-manifest")
+            .find(|pair| pair[0] == "--robot-yaml")
             .map(|pair| pair[1].as_str());
 
-        assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
+        assert_eq!(
+            robot_yaml_arg,
+            Some(
+                manifest_dir
+                    .join("robot/soma.yaml")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(!args.iter().any(|arg| arg == "--deployment-manifest"));
     }
 }
 
@@ -370,18 +375,17 @@ pub(super) fn prepare_manifest(
 /// Make sure `system.soma` exists in the manifest map as a mapping,
 /// and resolve any relative file paths inside it against `manifest_dir`.
 ///
-/// v2 soma has four flat config keys — `atlas_endpoint`, `listen`,
+/// Soma has four flat config keys — `atlas_endpoint`, `listen`,
 /// `provider_id`, `robot_yaml` — and rbnx forwards them via CLI.
 ///
 /// This helper handles the two "soma implied but not spelled out"
 /// manifest patterns:
 ///   * `system.soma:` with no body — a bare tag or null.
-///   * no `system.soma:` at all, but `primitive:` / `skill:` present.
+///   * no `system.soma:` entry, but a sidecar `soma.yaml` exists.
 ///
 /// In both cases we promote / insert an empty mapping so the rest of
-/// deploy.rs (system_cli_args, the builtin loop, the stage 2 pipe)
-/// sees a populated entry. Existing operator-supplied values are
-/// NEVER overwritten.
+/// deploy.rs sees a populated entry. Existing operator-supplied values
+/// are never overwritten.
 ///
 /// It also normalises the two path-valued fields inside `system.soma`
 /// — `robot_yaml` and `config` — from possibly relative to always
@@ -400,24 +404,10 @@ pub(super) fn prepare_manifest(
 /// manifests will surface the type mismatch at soma CLI parse time
 /// rather than being silently rewritten here.
 ///
-/// `robot_yaml` auto-injection: soma refuses to boot without a
-/// `--robot-yaml` — it needs the robot description before it can
-/// spawn any primitive in stage 1. Previously we left this to the
-/// operator, but the failure mode ("missing robot_yaml" → soma exits
-/// → rbnx sits in `wait_for_soma_stage1` for the full 180s timeout
-/// before reporting failure) is disproportionately painful for a
-/// missing default. So: if the operator hasn't set `robot_yaml` and
-/// a file literally named `soma.yaml` sits next to the manifest, we
-/// inject that path. If neither is present, we leave the slot empty
-/// — soma will bail on config parse with a clear error, and the
-/// stage-1 waiter (see `wait_for_soma_stage1`) will surface soma's
-/// early exit instead of waiting for the timeout. Operators who
-/// want a different name still just set `robot_yaml:` explicitly.
-fn ensure_soma_defaults(
-    system: &mut HashMap<String, serde_yaml::Value>,
-    manifest_dir: &Path,
-    manifest_path: &Path,
-) {
+/// `robot_yaml` auto-injection: if the operator has not set the path and a
+/// sidecar `soma.yaml` exists, use it. Soma serves body description/state
+/// only; rbnx owns every package process and lifecycle transition.
+fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifest_dir: &Path) {
     use serde_yaml::{Mapping, Value};
     let entry = system
         .entry("soma".to_string())
@@ -432,23 +422,12 @@ fn ensure_soma_defaults(
         .as_mapping_mut()
         .expect("promoted to mapping just above");
 
-    // Soma launches primitive and skill packages itself. It therefore must
-    // read the exact deployment file selected by `rbnx boot -f`, not infer a
-    // sibling default manifest from robot_yaml. This is intentionally owned
-    // by the boot command: a stale manifest-local value must not make rbnx
-    // build one profile while Soma starts another.
-    map.insert(
-        Value::String("deployment_manifest".to_string()),
-        Value::String(manifest_path.to_string_lossy().into_owned()),
-    );
-
     // Auto-inject `robot_yaml: <manifest_dir>/soma.yaml` when the
     // operator didn't set it AND the file exists. We check for the
     // key's presence-and-non-emptiness rather than presence alone so
     // an unset `${ROBOT_YAML}` (which manifest preparation turns into
     // "") still triggers the sidecar lookup. Missing sidecar → leave
-    // absent (soma's own config-resolve error is the right signal;
-    // stage-1 waiter surfaces the early exit fast).
+    // absent (soma's own config-resolve error is the right signal).
     let robot_yaml_key = Value::String("robot_yaml".to_string());
     let robot_yaml_missing = match map.get(&robot_yaml_key) {
         None => true,
@@ -466,7 +445,7 @@ fn ensure_soma_defaults(
         }
     }
 
-    for key in ["robot_yaml", "deployment_manifest", "config"] {
+    for key in ["robot_yaml", "config"] {
         let k = Value::String(key.to_string());
         let Some(v) = map.get_mut(&k) else { continue };
         let Some(s) = v.as_str() else { continue };
@@ -580,172 +559,6 @@ async fn spawn_system_binary(
         package_dir: None,
         stop: None,
     })
-}
-
-/// Fixed fd number rbnx exports as `ROBONIX_SOMA_STAGE_FD` in soma's
-/// environment. Any fd ≥ 3 works — we pick 3 because it's the first
-/// non-stdio slot, which keeps `ls /proc/<soma>/fd` readable at a
-/// glance. Soma reads the trigger line, then closes it.
-const SOMA_STAGE_FD: RawFd = 3;
-
-/// Spawn soma with an inherited pipe on `SOMA_STAGE_FD`. The parent
-/// keeps the write end and later writes `stage2\n` to it (see
-/// `write_stage2_trigger` below). Layered on `spawn_system_binary`'s
-/// stdio+scribe pattern but adds:
-///   * pipe() to create the trigger channel
-///   * pre_exec dup2 to move the child's end onto SOMA_STAGE_FD
-///     (the natural fd from pipe() is unpredictable — some later
-///     lib open() call could grab it — so we pin it to a known
-///     number)
-///   * ROBONIX_SOMA_STAGE_FD env so soma finds it
-///   * close-on-exec cleared on the child fd (dup2 clears it by
-///     default, which is what we want)
-///
-/// Returns the Spawned handle and the parent's write-end File. Drop
-/// the File to close the pipe (soma sees EOF and continues without
-/// stage 2 — matches the `no fd` env-absent path).
-async fn spawn_soma_binary(
-    log_dir: &Path,
-    name: &str,
-    bin: &str,
-    args: &[String],
-) -> Result<(Spawned, std::fs::File)> {
-    use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
-
-    // Create the trigger pipe. Parent owns the write end for the
-    // lifetime of the boot; child inherits the read end. We keep
-    // the OwnedFd wrappers so an early error path drops the fds
-    // rather than leaking them.
-    let (read_fd, write_fd): (OwnedFd, OwnedFd) =
-        nix::unistd::pipe().context("pipe() for soma stage-2 trigger")?;
-    let child_raw = read_fd.as_raw_fd();
-
-    // tokio::process::Command is a thin wrapper over std::process,
-    // but pre_exec lives on the std side. We prime the std Command
-    // via .as_std_mut() below.
-    let mut cmd = Command::new(bin);
-    for a in args {
-        cmd.arg(a);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("SCRIBE_LOG_DIR", log_dir)
-        .env("ROBONIX_SOMA_STAGE_FD", SOMA_STAGE_FD.to_string())
-        .process_group(0);
-
-    // Hand the child's raw read fd into the closure. We can NOT let
-    // `read_fd` (the OwnedFd) run its Drop in the parent before the
-    // child inherits it — that would close the fd. Move ownership
-    // into the closure and leak/consume it there.
-    let read_owned = read_fd; // captured
-    let child_target = SOMA_STAGE_FD;
-    // Safety: pre_exec runs in the forked child before exec. Only
-    // async-signal-safe syscalls are permitted; dup2 and close are
-    // both on that list.
-    unsafe {
-        cmd.pre_exec(move || {
-            // dup2(oldfd, newfd) atomically closes newfd (if open)
-            // and duplicates oldfd onto it. The new fd has
-            // CLOEXEC=0 by default, which is what we want (soma
-            // needs to see it after exec).
-            let old = read_owned.as_raw_fd();
-            if old != child_target {
-                let ret = libc_dup2(old, child_target);
-                if ret < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Original fd number is no longer needed in the
-                // child; close it so it doesn't linger.
-                let _ = libc_close(old);
-            }
-            Ok(())
-        });
-    }
-
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "failed to spawn system binary `{bin}` — is it installed (try `make install` from the rust/ workspace)?"
-        )
-    })?;
-    let pid = child
-        .id()
-        .ok_or_else(|| anyhow::anyhow!("spawned `{bin}` but it had no pid"))?;
-
-    // fork() + our pre_exec dup2 have run; the child has its own
-    // copy on fd 3 and the fork copy of read_owned (whatever number
-    // pipe() picked). The parent's read_owned has been consumed by
-    // the closure — the value inside the parent process is a dead
-    // OwnedFd shell that will drop at the end of pre_exec's scope.
-    // Nothing left to close on this side; child_raw is only used
-    // for the debug/log line below.
-    let _ = child_raw;
-
-    // Turn the parent's write-end OwnedFd into a std File so the
-    // caller can write! into it. into_raw_fd releases ownership;
-    // File::from_raw_fd takes it back.
-    let write_raw = write_fd.into_raw_fd();
-    // Safety: write_raw is a valid, open, owned fd we just released
-    // from OwnedFd — we're transferring ownership one hop over.
-    let writer = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(write_raw) };
-
-    // Pipe stdout / stderr into Scribe. (Same pattern as
-    // spawn_system_binary — kept inline rather than extracted so
-    // both call sites stay readable.)
-    let stdout = child.stdout.take().expect("stdout not piped");
-    let stderr = child.stderr.take().expect("stderr not piped");
-    let tag_out = name.to_string();
-    let tag_err = name.to_string();
-    tokio::spawn(async move {
-        let reader = tokio::io::BufReader::new(stdout);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            scribe::ingest(&tag_out, &line);
-        }
-    });
-    tokio::spawn(async move {
-        let reader = tokio::io::BufReader::new(stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            scribe::ingest(&tag_err, &line);
-        }
-    });
-
-    let detail = system_boot_detail(name, args);
-    output::boot_ok(name, &detail);
-    Ok((
-        Spawned {
-            name: name.to_string(),
-            kind: "system_builtin".to_string(),
-            child,
-            pid,
-            pgid: pid,
-            provider_id: None,
-            driver_contract: None,
-            config_json: None,
-            package_dir: None,
-            stop: None,
-        },
-        writer,
-    ))
-}
-
-// Local libc thunks to avoid pulling libc as a direct dep — nix
-// exposes these via `nix::unistd::dup2` / `close`, but we need
-// async-signal-safety inside pre_exec and can't rely on nix's
-// wrappers not allocating on the error path. Raw syscalls are the
-// safe choice.
-unsafe extern "C" {
-    fn dup2(oldfd: i32, newfd: i32) -> i32;
-    fn close(fd: i32) -> i32;
-}
-#[inline]
-fn libc_dup2(oldfd: RawFd, newfd: RawFd) -> i32 {
-    unsafe { dup2(oldfd, newfd) }
-}
-#[inline]
-fn libc_close(fd: RawFd) -> i32 {
-    unsafe { close(fd) }
 }
 
 struct PackageSpawnEnv<'a> {
@@ -942,39 +755,14 @@ pub async fn execute(
         super::check_remotes::report_outdated(&manifest_path);
     }
 
-    // soma owns primitive + skill bring-up (see
-    // docs/soma_two_stage_bringup.md). If the manifest declares ANY
-    // primitive or skill, we MUST start a soma — otherwise those
-    // packages are silently never spawned (boot looks "OK" because rbnx
-    // got through atlas/executor/pilot, but the robot stays dead).
-    //
-    // Two manifest patterns we want to keep working without forcing
-    // every existing deploy to add a `system.soma:` block:
-    //   1. manifest has primitive/skill, no system.soma at all
-    //      → inject a default soma block.
-    //   2. manifest has system.soma but didn't set deployments / didn't
-    //      set start_packages → fill in sane defaults (deployments =
-    //      [this manifest's dir], start_packages = true).
-    //
-    // Both branches route through `ensure_soma_defaults` so the rest of
-    // deploy.rs (spawning the soma binary in the builtin loop, sending
-    // the stage 2 trigger after service: bring-up) just sees a
-    // populated system.soma entry like any other.
-    //
-    // Existing operator-supplied values are NEVER overwritten — this
-    // hole-fills, it does not override intent.
-    //
-    // We also run this whenever `system.soma` was explicitly declared,
-    // even if there are no primitives/skills that would auto-imply
-    // soma. Rationale: `ensure_soma_defaults` no longer just fills in
-    // a mapping shell — it also resolves `robot_yaml` / `config`
-    // relative paths against manifest_dir. An operator who writes
-    // `system.soma: { config: soma_config.local.yaml }` on its own
-    // deserves the same path-normalisation as the auto-injected case.
+    // Soma serves the deployment's body description and live body state; it
+    // does not own package processes. Keep the existing sidecar convention:
+    // a deployment with `soma.yaml` gets the builtin even when `system.soma`
+    // is omitted. rbnx itself launches primitive/service/skill entries below.
     let soma_declared = deploy.system.contains_key("soma");
-    let soma_implied = !deploy.primitive.is_empty() || !deploy.skill.is_empty();
+    let soma_implied = manifest_dir.join("soma.yaml").is_file();
     if (soma_declared || soma_implied) && !skip_system {
-        ensure_soma_defaults(&mut deploy.system, &manifest_dir, &manifest_path);
+        ensure_soma_defaults(&mut deploy.system, &manifest_dir);
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
@@ -1052,12 +840,6 @@ pub async fn execute(
     // streams are reused for the post-boot idle wait further down.
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
-
-    // Owns the parent side of the stage-2 trigger pipe (created inside
-    // `spawn_soma_binary`, drained by `write_stage2_trigger`). Declared
-    // outside `bringup` so it survives the async-block scope even
-    // though we only assign into it from inside.
-    let mut soma_stage_writer: Option<std::fs::File> = None;
 
     let bringup = async {
         if !skip_system {
@@ -1160,15 +942,7 @@ pub async fn execute(
                     anyhow::bail!("system/{name}: {e}");
                 }
 
-                let sp = if *name == "soma" {
-                    // soma needs an inherited pipe fd for the stage-2
-                    // trigger. Everything else uses the plain spawn path.
-                    let (sp, writer) = spawn_soma_binary(&log_dir, name, bin, &args).await?;
-                    soma_stage_writer = Some(writer);
-                    sp
-                } else {
-                    spawn_system_binary(&log_dir, name, bin, &args).await?
-                };
+                let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
                 children.push(sp);
                 persist_state(
                     &state_path,
@@ -1179,70 +953,20 @@ pub async fn execute(
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                 if *name == "soma" {
-                    if !deploy.primitive.is_empty() {
-                        output::boot_section("primitive");
-                        for entry in &deploy.primitive {
-                            output::boot_note(&entry.name, "delegated to soma stage 1");
-                        }
-                    }
-                    let mut stage1_atlas = AtlasClient::connect_with_retry(
+                    let mut soma_atlas = AtlasClient::connect_with_retry(
                         &atlas_endpoint,
                         20,
                         Duration::from_millis(500),
                     )
                     .await
                     .with_context(|| {
-                        format!("connect to atlas at '{atlas_endpoint}' for soma stage 1 wait")
+                        format!("connect to atlas at '{atlas_endpoint}' for Soma readiness")
                     })?;
-                    // We just pushed the soma `Spawned` above; grab a
-                    // mutable borrow on its Child so the stage-1 waiter
-                    // can `try_wait()` per tick. Without this the waiter
-                    // sits for the full SOMA_STAGE1_TIMEOUT even when
-                    // soma exited immediately (e.g. `missing robot_yaml`
-                    // config error). The unwrap is safe: we just pushed.
                     let soma_child = &mut children
                         .last_mut()
                         .expect("soma Spawned pushed above")
                         .child;
-                    wait_for_soma_stage1(
-                        &mut stage1_atlas,
-                        deploy.primitive.len(),
-                        soma_child,
-                        &log_dir,
-                    )
-                    .await?;
-
-                    // soma just finished stage 1 (all primitives ACTIVE). The
-                    // next thing the operator sees on this terminal is the
-                    // remaining builtins (pilot, liaison — whichever come
-                    // after soma in `bin_map`) followed by the non-builtin
-                    // `system:` entries loop below (memory / scene / speech
-                    // / …). Both cohorts are *system services*, NOT
-                    // primitives, but without a fresh section header they
-                    // visually chain onto the "primitive" header just above
-                    // and readers routinely mistake pilot for a primitive
-                    // — the exact confusion this header exists to prevent.
-                    //
-                    // Only emit the header if there's actually something
-                    // downstream to label. Concretely: at least one builtin
-                    // ordered after soma in `bin_map` is declared in the
-                    // manifest, OR the manifest has any non-builtin
-                    // `system:` key that will run in the loop after this
-                    // for-loop finishes. Otherwise (e.g. an atlas-executor-
-                    // soma-only deploy) skip the header — dangling section
-                    // titles with nothing under them are worse than none.
-                    let builtin_after_soma = bin_map
-                        .iter()
-                        .skip_while(|(n, _)| *n != "soma")
-                        .skip(1) // drop soma itself
-                        .any(|(n, _)| deploy.system.contains_key(*n));
-                    let has_non_builtin_system = deploy
-                        .system
-                        .keys()
-                        .any(|k| !bin_map.iter().any(|(n, _)| n == k));
-                    if builtin_after_soma || has_non_builtin_system {
-                        output::boot_section("system service");
-                    }
+                    wait_for_soma_ready(&mut soma_atlas, soma_child, &log_dir).await?;
                 }
             }
         } else {
@@ -1276,8 +1000,41 @@ pub async fn execute(
         // bail-on-error: nothing else makes sense without those.
         let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
 
+        // rbnx is the single process owner for every deployment package.
+        // Primitives come first because system services such as Scene and
+        // Mapping may consume their ROS streams during initialization.
+        if !deploy.primitive.is_empty() {
+            output::boot_section("primitive");
+        }
+        for entry in &deploy.primitive {
+            match spawn_and_init("primitive", entry, &spawn_env, &mut atlas).await {
+                Ok(sp) => {
+                    children.push(sp);
+                    persist_state(
+                        &state_path,
+                        &manifest_path,
+                        &atlas_endpoint,
+                        started_at_ms,
+                        &children,
+                    );
+                }
+                Err(error) => failures.push((
+                    "primitive".to_string(),
+                    entry.name.clone(),
+                    format!("{error:#}"),
+                )),
+            }
+        }
+
         if !skip_system {
             let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+            let has_non_builtin_system = deploy
+                .system
+                .keys()
+                .any(|key| !builtin_names.contains(&key.as_str()));
+            if has_non_builtin_system {
+                output::boot_section("system service");
+            }
             for (key, value) in &deploy.system {
                 if builtin_names.contains(&key.as_str()) {
                     continue;
@@ -1322,16 +1079,6 @@ pub async fn execute(
             }
         }
 
-        // primitive: handled by soma's stage 1 (kicked off when soma
-        //   starts up, finishes before soma declares get_yaml/get_urdf).
-        // skill:     handled by soma's stage 2 (kicked off by the
-        //   StageTrigger("stage2") we send below, after non-builtin
-        //   system services and service: entries have finished
-        //   bring-up — which is the earliest skills can safely talk
-        //   to executor/pilot/memory/scene from their MCP tools).
-        // The deploy.primitive / deploy.skill fields stay in the
-        // manifest schema because soma reads them; rbnx just doesn't
-        // launch those processes any more.
         if !deploy.service.is_empty() {
             output::boot_section("service");
         }
@@ -1353,29 +1100,31 @@ pub async fn execute(
             }
         }
 
-        // All system + service bring-up done; fire soma's stage 2
-        // trigger so it spawns + INITs the skill packages. Best
-        // effort: a soma that never went ACTIVE (or shut down
-        // between our checks and this NotifyProvider) is a deploy
-        // problem the operator already sees in earlier boot output;
-        // we log and continue rather than tearing everything down
-        // for the skills that never started.
-        //
-        // The section is labelled "skill" (not "stage 2") because
-        // that's what the operator actually sees launching under the
-        // header — the "stage 2" name is an internal rbnx↔soma pipe
-        // protocol detail (see `STAGE2_TRIGGER` in soma/main.rs and
-        // `write_stage2_trigger` below). Keeping the wire word out
-        // of the terminal UI avoids operators having to learn our
-        // two-stage bring-up vocabulary just to read boot output.
-        if deploy.system.contains_key("soma") && !skip_system {
+        // Skills are normal long-lived packages. rbnx starts them and waits
+        // for registration + INIT exactly as it does for services; they remain
+        // INACTIVE until Executor activates them on the first invocation.
+        if !deploy.skill.is_empty() {
             output::boot_section("skill");
-            if let Err(e) = write_stage2_trigger(&mut soma_stage_writer) {
-                failures.push((
-                    "system".to_string(),
-                    "soma".to_string(),
-                    format!("write stage 2 trigger: {e:#}"),
-                ));
+        }
+        for entry in &deploy.skill {
+            match spawn_and_init("skill", entry, &spawn_env, &mut atlas).await {
+                Ok(sp) => {
+                    children.push(sp);
+                    persist_state(
+                        &state_path,
+                        &manifest_path,
+                        &atlas_endpoint,
+                        started_at_ms,
+                        &children,
+                    );
+                }
+                Err(error) => {
+                    failures.push((
+                        "skill".to_string(),
+                        entry.name.clone(),
+                        format!("{error:#}"),
+                    ));
+                }
             }
         }
         Ok(failures)
@@ -1755,14 +1504,8 @@ fn system_cli_args(
             push_pair(&mut out, "--log", s("log"));
         }
         "soma" => {
-            // v2 flat schema: four keys, four CLI flags. rbnx no longer
-            // passes `--rbnx-bin` (soma calls the on-PATH `rbnx`),
-            // `--default-robot` / `--deployment` (single robot, deployment
-            // path derived from --robot-yaml's parent), or
-            // `--start-packages` (soma always spawns primitives + skills;
-            // opting out was never actually used). Stage 2 is delivered
-            // over an inherited pipe fd (see spawn_soma_binary), not
-            // atlas RPC.
+            // Soma serves body description/state only. Package locations,
+            // manifests and lifecycle configuration stay owned by rbnx.
             push_pair(&mut out, "--listen", s("listen"));
             push_pair(
                 &mut out,
@@ -1773,7 +1516,6 @@ fn system_cli_args(
             );
             push_pair(&mut out, "--provider-id", s("provider_id"));
             push_pair(&mut out, "--robot-yaml", s("robot_yaml"));
-            push_pair(&mut out, "--deployment-manifest", s("deployment_manifest"));
             push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--log", s("log"));
         }
@@ -1996,49 +1738,44 @@ where
     }
 }
 
-async fn wait_for_soma_stage1(
+async fn wait_for_soma_ready(
     atlas: &mut AtlasClient,
-    primitive_count: usize,
     soma_child: &mut Child,
     log_dir: &Path,
 ) -> Result<()> {
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: usize = 5; // poll atlas every 500 ms
-    const SOMA_STAGE1_TIMEOUT: Duration = Duration::from_secs(180);
+    const SOMA_READY_TIMEOUT: Duration = Duration::from_secs(30);
     const SOMA_GET_YAML_CONTRACT: &str = "robonix/system/soma/get_yaml";
 
     let started = Instant::now();
-    let deadline = started + SOMA_STAGE1_TIMEOUT;
+    let deadline = started + SOMA_READY_TIMEOUT;
     let mut frame: usize = 0;
     if output::boot_verbose() {
-        output::boot_wait("soma stage 1", "waiting for primitive readiness");
+        output::boot_wait("soma", "waiting for body API readiness");
     }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
-        let detail = if primitive_count == 0 {
-            format!("waiting for Soma gRPC readiness… {elapsed_s:>4.1}s")
-        } else {
-            format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
-        };
+        let detail = format!("waiting for body API readiness… {elapsed_s:>4.1}s");
         if output::boot_verbose() {
             if frame > 0 && frame.is_multiple_of(50) {
-                output::boot_note("soma stage 1", &detail);
+                output::boot_note("soma", &detail);
             }
         } else {
-            output::boot_progress("soma stage 1", &detail, frame);
+            output::boot_progress("soma", &detail, frame);
         }
         // Check every tick whether soma is still alive. If it exited
         // (typically: `missing robot_yaml`, `read Soma config`, port
         // bind failure), surface that immediately with the tail of
         // its own log rather than sitting on this spinner for the
-        // full SOMA_STAGE1_TIMEOUT (180s) which frustrates operators
+        // full readiness timeout, which frustrates operators
         // and blocks CI. try_wait is non-blocking; Ok(Some(_)) means
         // the child has been reaped and the OS-level status is known.
         if let Ok(Some(status)) = soma_child.try_wait() {
             let log_file = log_dir.join("soma.log");
             let tail = read_log_tail(&log_file, 20);
             output::boot_fail(
-                "soma stage 1",
+                "soma",
                 &format!(
                     "soma exited before becoming ACTIVE (status={status:?}); see {}",
                     log_file.display()
@@ -2050,7 +1787,7 @@ async fn wait_for_soma_stage1(
                 format!("\n--- soma.log tail ---\n{tail}\n--- end ---")
             };
             anyhow::bail!(
-                "soma exited with {status:?} before stage 1 became ACTIVE; \
+                "soma exited with {status:?} before becoming ACTIVE; \
                  log: {}{hint}",
                 log_file.display()
             );
@@ -2059,32 +1796,21 @@ async fn wait_for_soma_stage1(
             let providers = atlas
                 .query_capabilities("soma", SOMA_GET_YAML_CONTRACT, atlas_pb::Transport::Grpc)
                 .await
-                .context("wait for soma stage 1 readiness")?;
+                .context("wait for Soma readiness")?;
             if let Some(soma) = providers.into_iter().find(|p| p.id == "soma")
                 && soma.state == atlas_pb::LifecycleState::StateActive as i32
                 && soma_grpc_ready(atlas, SOMA_GET_YAML_CONTRACT).await
             {
-                let ready_detail = if primitive_count == 0 {
-                    "Soma gRPC ready".to_string()
-                } else {
-                    format!("{primitive_count} primitive package(s) handled by soma")
-                };
-                output::boot_ok("soma stage 1", &ready_detail);
+                output::boot_ok("soma", "ACTIVE  body API ready");
                 return Ok(());
             }
         }
         if Instant::now() >= deadline {
             output::boot_fail(
-                "soma stage 1",
-                &format!(
-                    "timeout after {:?}; service bring-up needs primitives ACTIVE first",
-                    SOMA_STAGE1_TIMEOUT
-                ),
+                "soma",
+                &format!("body API readiness timeout after {:?}", SOMA_READY_TIMEOUT),
             );
-            anyhow::bail!(
-                "soma stage 1 did not become ACTIVE within {:?}; refusing to start service packages before primitives are ready",
-                SOMA_STAGE1_TIMEOUT
-            );
+            anyhow::bail!("soma did not become ACTIVE within {:?}", SOMA_READY_TIMEOUT);
         }
         tokio::time::sleep(SPINNER_TICK).await;
         frame = frame.wrapping_add(1);
@@ -2132,36 +1858,6 @@ async fn soma_grpc_ready(atlas: &mut AtlasClient, contract_id: &str) -> bool {
     };
     let _ = atlas.disconnect_capability(&channel_id).await;
     ready
-}
-
-/// Write the `stage2\n` trigger into the pipe rbnx and soma share
-/// (see `spawn_soma_binary`). This is a one-shot: soma reads the
-/// line, unblocks its skill-package launcher, and closes its read
-/// end. rbnx-side we drop the writer here — no reason to hold it
-/// open, and closing gives soma an immediate EOF on the (very
-/// unlikely) chance it re-reads.
-///
-/// If we don't have a writer (soma wasn't spawned by us, e.g.
-/// --skip-system), this is a no-op with a warning: someone else
-/// owns soma's fd and there's nothing rbnx can meaningfully do.
-fn write_stage2_trigger(writer: &mut Option<std::fs::File>) -> Result<()> {
-    use std::io::Write;
-    let Some(mut w) = writer.take() else {
-        output::boot_skip(
-            "soma",
-            "stage 2 trigger skipped: no stage-fd writer (soma not spawned by this rbnx)",
-        );
-        return Ok(());
-    };
-    w.write_all(b"stage2\n")
-        .context("write 'stage2' to soma stage-trigger pipe")?;
-    w.flush().context("flush soma stage-trigger pipe")?;
-    // "written", not "delivered": all we know at this point is that
-    // the bytes hit the pipe. Actual delivery (soma reads the line,
-    // spawns skills, and their MCP tools/caps register) is verified
-    // downstream by the boot-poll cap-wait loop, not here.
-    output::boot_ok("soma", "stage 2 trigger written");
-    Ok(())
 }
 
 /// Issue one Driver(cmd) RPC against a freshly-connected channel, then
