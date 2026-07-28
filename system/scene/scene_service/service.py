@@ -1532,6 +1532,7 @@ async def _run() -> None:
     # description / JSON schema stay in sync with the codegen types.
     for fn in (
         mcp_tools.list_objects,
+        mcp_tools.list_regions,
         mcp_tools.get_robot_context,
         mcp_tools.goal_near,
         mcp_tools.goal_room,
@@ -1553,7 +1554,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 7 MCP tools at %s", scene.mcp_endpoint)
+    log.info("scene declared 8 MCP tools at %s", scene.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;

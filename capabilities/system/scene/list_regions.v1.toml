@@ -1,0 +1,10 @@
+# Return user-authored room regions without mixing them with perceived objects.
+[contract]
+id      = "robonix/system/scene/list_regions"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/ListRegions.srv"
+description = "List all registered room regions with stable IDs and polygon metadata. Use this before goal_room; use list_objects only for perceived physical objects."
+
+[mode]
+type = "rpc"

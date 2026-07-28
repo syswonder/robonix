@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""FastMCP tool definitions — two read-only handlers, that's it.
+"""FastMCP tool definitions for read-only Scene queries.
 
-  list_objects()           → flat list of every object in the registry
+  list_objects()           → perceived physical objects in the registry
+  list_regions()           → user-authored room regions with stable IDs
   goal_near(object_id)     → reachable approach pose for a physical object
   goal_room(room_id)       → reachable pose inside a room polygon
 
@@ -46,9 +47,12 @@ from semantic_map_mcp import (  # type: ignore
     GetSceneGraph_Response,
     ListObjects_Request,
     ListObjects_Response,
+    ListRegions_Request,
+    ListRegions_Response,
     ListRelations_Request,
     ListRelations_Response,
     Object,
+    Region,
     SceneAnnotation as SceneAnnotationIDL,
     SceneGraphEdge as SceneGraphEdgeIDL,
     SceneGraphNode as SceneGraphNodeIDL,
@@ -261,12 +265,12 @@ def _to_idl(o: SceneObject) -> Object:
     )
 
 
-def _annotation_centroid(a: "Annotation") -> tuple[float, float]:
-    return polygon_centroid(getattr(a, "points", []) or [])
-
-
 def _annotation_object_id(a: "Annotation") -> str:
     return f"scene.{a.kind}.{a.annotation_id}"
+
+
+def _annotation_centroid(a: "Annotation") -> tuple[float, float]:
+    return polygon_centroid(getattr(a, "points", []) or [])
 
 
 def _annotation_to_object(a: "Annotation") -> Object:
@@ -366,10 +370,10 @@ mcp = FastMCP("scene_provider")
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/list_objects")
 async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
-    """Return every object the scene registry currently believes
-    exists, plus room annotations, as a flat list. Use this tool to discover
-    stable object/room IDs before goal_near or goal_room. Use get_scene_graph
-    only when object relationships are needed.
+    """Return perceived objects plus compatibility room entries.
+
+    New callers should call list_regions for full room geometry and staleness.
+    Use get_scene_graph only when object relationships are needed.
     Contract: robonix/system/scene/list_objects."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
@@ -377,7 +381,11 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     visible = [o for o in objs.values() if not o.missing]
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
-        objects.extend(_annotation_to_object(a) for a in _ANNO_STORE.list() if a.kind == "room")
+        objects.extend(
+            _annotation_to_object(annotation)
+            for annotation in _ANNO_STORE.list()
+            if annotation.kind == "room"
+        )
 
     # Scene Hook: auto-save observation when objects are visible.
     # This is fire-and-forget — list_objects returns immediately
@@ -387,6 +395,45 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
 
     return ListObjects_Response(
         objects=objects,
+        stamp_unix=time.time(),
+    )
+
+
+def _annotation_to_region(a: "Annotation") -> Region:
+    points_xy: list[float] = []
+    for point in a.points or []:
+        if len(point) >= 2:
+            points_xy.extend([float(point[0]), float(point[1])])
+    return Region(
+        id=_annotation_object_id(a),
+        kind=a.kind,
+        name=a.name,
+        points_xy=points_xy,
+        theta=float(a.theta) if a.theta is not None else 0.0,
+        stale=bool(a.stale),
+        stale_reason=a.stale_reason or "",
+        updated_at_unix=float(a.updated_at or 0.0),
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/list_regions")
+async def list_regions(_req: ListRegions_Request) -> ListRegions_Response:
+    """Return every registered room region with its stable goal_room ID.
+
+    Perceived physical objects are intentionally excluded. Stale annotations
+    remain visible and are marked explicitly so callers never infer absence
+    from a hidden or incomplete room list.
+    Contract: robonix/system/scene/list_regions.
+    """
+    if _ANNO_STORE is None:
+        raise RuntimeError("scene annotation store is unavailable")
+    return ListRegions_Response(
+        regions=[
+            _annotation_to_region(annotation)
+            for annotation in _ANNO_STORE.list()
+            if annotation.kind == "room"
+        ],
+        map_id=_ANNO_STORE.map_id,
         stamp_unix=time.time(),
     )
 
@@ -598,15 +645,6 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
     The result never falls outside the room polygon.
     Contract: robonix/system/scene/goal_room.
     """
-    footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
-    if footprint is None:
-        return GoalRoom_Response(
-            reachable=False,
-            x=0.0,
-            y=0.0,
-            yaw=0.0,
-            reason="Soma footprint unavailable — robot geometry is not ready",
-        )
     room, ambiguous = _resolve_room_target(req.room_id)
     if ambiguous:
         candidates = ", ".join(
@@ -625,10 +663,27 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
                 f"unknown room reference '{req.room_id}'; pass a stable ID or "
-                f"unique room name returned by list_objects; {_room_id_hint()}"
+                f"unique room name returned by list_regions; {_room_id_hint()}"
             ),
         )
     stable_room_id = _annotation_object_id(room)
+    if room.stale:
+        return GoalRoom_Response(
+            reachable=False, x=0.0, y=0.0, yaw=0.0,
+            reason=(
+                f"room '{room.name}' ({stable_room_id}) is stale: "
+                f"{room.stale_reason or 'geometry may not match the active map'}"
+            ),
+        )
+    footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
+    if footprint is None:
+        return GoalRoom_Response(
+            reachable=False,
+            x=0.0,
+            y=0.0,
+            yaw=0.0,
+            reason="Soma footprint unavailable — robot geometry is not ready",
+        )
     if _HUB is None or not _HUB.has("occupancy_grid"):
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
@@ -830,6 +885,7 @@ __all__ = [
     "attach_annotation_store",
     "get_robot_context",
     "list_objects",
+    "list_regions",
     "goal_near",
     "goal_room",
     "get_scene_graph",

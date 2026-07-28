@@ -23,6 +23,7 @@ start: ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
 capabilities:
   - name: robonix/system/scene/list_objects
   - name: robonix/system/scene/get_robot_context
+  - name: robonix/system/scene/list_regions
   - name: robonix/system/scene/goal_near
   - name: robonix/system/scene/goal_room
   - name: robonix/system/scene/get_scene_graph
