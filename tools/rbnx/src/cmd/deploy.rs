@@ -6,23 +6,14 @@
 //   - `system:` Rust binaries (atlas / pilot / executor) are launched with
 //     CLI arguments translated from the manifest block (`--listen`,
 //     `--log`, `--vlm-*`, …). No env-var translation, no YAML config files.
-//   - Package entries (`primitive` / `service`) are launched serially:
-//     spawn → wait for the package to register a provider with a `*/driver`
-//     capability on atlas → call Driver(CMD_INIT, config_json) → wait for
-//     `ok=true`. Only after every primitive's driver returns ok do we move
-//     on to `service:` (which can depend on primitive data being ready).
-//     The package's `config:` block is JSON-encoded and delivered ONLY via
-//     Driver(CMD_INIT)'s config_json field. The provider process never sees a
-//     config file or env var — that's the v0.1 layering invariant.
-//   - `skill:` entries are spawned identically to `service:` — they
-//     need a long-lived process for their MCP tools to be registered
-//     on atlas. The semantic difference (skill = atomic intent
-//     invokable by pilot, service = always-on capability) lives in
-//     the contract namespace (`robonix/skill/*` vs `robonix/service/*`),
-//     not in the lifecycle. The earlier "skill is registered but not
-//     spawned" model lied about what was actually running and forced
-//     manifest authors to put skills like explore in `service:` as a
-//     workaround.
+//   - Soma owns primitive and skill process launch, lifecycle transitions,
+//     runtime records, and shutdown. rbnx only sequences Soma's two stages
+//     and observes the resulting Atlas lifecycle state.
+//   - Stage 1 brings every primitive to ACTIVE before services start.
+//     Stage 2 brings every skill to INACTIVE after INIT; Executor lazily
+//     activates a skill on first invocation.
+//   - `service:` entries remain directly owned by rbnx and follow the usual
+//     spawn → register → Driver(INIT) → Driver(ACTIVATE) sequence.
 //
 // Out of scope: crash-restart, health checks beyond Driver(INIT).
 
@@ -232,6 +223,22 @@ stop: "true"
             .map(|pair| pair[1].as_str());
 
         assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn soma_managed_skill_is_ready_after_init_or_activation() {
+        assert!(soma_skill_ready(
+            atlas_pb::LifecycleState::StateInactive as i32
+        ));
+        assert!(soma_skill_ready(
+            atlas_pb::LifecycleState::StateActive as i32
+        ));
+        assert!(!soma_skill_ready(
+            atlas_pb::LifecycleState::StateRegistered as i32
+        ));
+        assert!(!soma_skill_ready(
+            atlas_pb::LifecycleState::StateError as i32
+        ));
     }
 }
 
@@ -1060,6 +1067,7 @@ pub async fn execute(
     let mut soma_stage_writer: Option<std::fs::File> = None;
 
     let bringup = async {
+        let mut soma_primitives_ready = false;
         if !skip_system {
             output::boot_section("system");
             // System Rust binaries: launched in atlas → executor → pilot order.
@@ -1179,12 +1187,6 @@ pub async fn execute(
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                 if *name == "soma" {
-                    if !deploy.primitive.is_empty() {
-                        output::boot_section("primitive");
-                        for entry in &deploy.primitive {
-                            output::boot_note(&entry.name, "delegated to soma stage 1");
-                        }
-                    }
                     let mut stage1_atlas = AtlasClient::connect_with_retry(
                         &atlas_endpoint,
                         20,
@@ -1206,43 +1208,16 @@ pub async fn execute(
                         .child;
                     wait_for_soma_stage1(
                         &mut stage1_atlas,
-                        deploy.primitive.len(),
+                        &deploy
+                            .primitive
+                            .iter()
+                            .map(|entry| entry.name.clone())
+                            .collect::<Vec<_>>(),
                         soma_child,
                         &log_dir,
                     )
                     .await?;
-
-                    // soma just finished stage 1 (all primitives ACTIVE). The
-                    // next thing the operator sees on this terminal is the
-                    // remaining builtins (pilot, liaison — whichever come
-                    // after soma in `bin_map`) followed by the non-builtin
-                    // `system:` entries loop below (memory / scene / speech
-                    // / …). Both cohorts are *system services*, NOT
-                    // primitives, but without a fresh section header they
-                    // visually chain onto the "primitive" header just above
-                    // and readers routinely mistake pilot for a primitive
-                    // — the exact confusion this header exists to prevent.
-                    //
-                    // Only emit the header if there's actually something
-                    // downstream to label. Concretely: at least one builtin
-                    // ordered after soma in `bin_map` is declared in the
-                    // manifest, OR the manifest has any non-builtin
-                    // `system:` key that will run in the loop after this
-                    // for-loop finishes. Otherwise (e.g. an atlas-executor-
-                    // soma-only deploy) skip the header — dangling section
-                    // titles with nothing under them are worse than none.
-                    let builtin_after_soma = bin_map
-                        .iter()
-                        .skip_while(|(n, _)| *n != "soma")
-                        .skip(1) // drop soma itself
-                        .any(|(n, _)| deploy.system.contains_key(*n));
-                    let has_non_builtin_system = deploy
-                        .system
-                        .keys()
-                        .any(|k| !bin_map.iter().any(|(n, _)| n == k));
-                    if builtin_after_soma || has_non_builtin_system {
-                        output::boot_section("system service");
-                    }
+                    soma_primitives_ready = true;
                 }
             }
         } else {
@@ -1322,6 +1297,18 @@ pub async fn execute(
             }
         }
 
+        // Soma has already completed stage 1, but keep every system entry
+        // under one public `system` section. Report the verified primitive
+        // results only after all builtin and package-backed system providers
+        // have finished, so the public boot order remains:
+        // system → primitive → service → skill.
+        if soma_primitives_ready && !deploy.primitive.is_empty() {
+            output::boot_section("primitive");
+            for entry in &deploy.primitive {
+                output::boot_ok(&entry.name, "ACTIVE  (managed by soma)");
+            }
+        }
+
         // primitive: handled by soma's stage 1 (kicked off when soma
         //   starts up, finishes before soma declares get_yaml/get_urdf).
         // skill:     handled by soma's stage 2 (kicked off by the
@@ -1369,13 +1356,26 @@ pub async fn execute(
         // of the terminal UI avoids operators having to learn our
         // two-stage bring-up vocabulary just to read boot output.
         if deploy.system.contains_key("soma") && !skip_system {
-            output::boot_section("skill");
+            if !deploy.skill.is_empty() {
+                output::boot_section("skill");
+            }
             if let Err(e) = write_stage2_trigger(&mut soma_stage_writer) {
                 failures.push((
-                    "system".to_string(),
+                    "skill".to_string(),
                     "soma".to_string(),
-                    format!("write stage 2 trigger: {e:#}"),
+                    format!("start Soma-managed skill packages: {e:#}"),
                 ));
+            } else if let Err(e) = wait_for_soma_skills(
+                &mut atlas,
+                &deploy
+                    .skill
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            {
+                failures.push(("skill".to_string(), "soma".to_string(), format!("{e:#}")));
             }
         }
         Ok(failures)
@@ -1998,7 +1998,7 @@ where
 
 async fn wait_for_soma_stage1(
     atlas: &mut AtlasClient,
-    primitive_count: usize,
+    primitive_names: &[String],
     soma_child: &mut Child,
     log_dir: &Path,
 ) -> Result<()> {
@@ -2010,22 +2010,26 @@ async fn wait_for_soma_stage1(
     let started = Instant::now();
     let deadline = started + SOMA_STAGE1_TIMEOUT;
     let mut frame: usize = 0;
+    let mut active_primitives: HashSet<String> = HashSet::new();
     if output::boot_verbose() {
-        output::boot_wait("soma stage 1", "waiting for primitive readiness");
+        output::boot_wait("soma", "waiting for managed primitive readiness");
     }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
-        let detail = if primitive_count == 0 {
+        let detail = if primitive_names.is_empty() {
             format!("waiting for Soma gRPC readiness… {elapsed_s:>4.1}s")
         } else {
-            format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
+            format!(
+                "starting {} managed primitive package(s)… {elapsed_s:>4.1}s",
+                primitive_names.len()
+            )
         };
         if output::boot_verbose() {
             if frame > 0 && frame.is_multiple_of(50) {
-                output::boot_note("soma stage 1", &detail);
+                output::boot_note("soma", &detail);
             }
         } else {
-            output::boot_progress("soma stage 1", &detail, frame);
+            output::boot_progress("soma", &detail, frame);
         }
         // Check every tick whether soma is still alive. If it exited
         // (typically: `missing robot_yaml`, `read Soma config`, port
@@ -2038,7 +2042,7 @@ async fn wait_for_soma_stage1(
             let log_file = log_dir.join("soma.log");
             let tail = read_log_tail(&log_file, 20);
             output::boot_fail(
-                "soma stage 1",
+                "soma",
                 &format!(
                     "soma exited before becoming ACTIVE (status={status:?}); see {}",
                     log_file.display()
@@ -2050,45 +2054,143 @@ async fn wait_for_soma_stage1(
                 format!("\n--- soma.log tail ---\n{tail}\n--- end ---")
             };
             anyhow::bail!(
-                "soma exited with {status:?} before stage 1 became ACTIVE; \
+                "soma exited with {status:?} before primitive readiness; \
                  log: {}{hint}",
                 log_file.display()
             );
         }
         if frame.is_multiple_of(POLLS_PER_TICK) {
+            for name in primitive_names {
+                let providers = atlas
+                    .query_capabilities(name, "", atlas_pb::Transport::Unspecified)
+                    .await
+                    .with_context(|| {
+                        format!("poll Soma-managed primitive '{name}' during bring-up")
+                    })?;
+                let Some(provider) = providers.into_iter().find(|provider| provider.id == *name)
+                else {
+                    continue;
+                };
+                if provider.state == atlas_pb::LifecycleState::StateActive as i32 {
+                    active_primitives.insert(name.clone());
+                } else if provider.state == atlas_pb::LifecycleState::StateError as i32 {
+                    anyhow::bail!(
+                        "Soma-managed primitive '{name}' entered ERROR; \
+                         see soma.log and the provider log"
+                    );
+                }
+            }
             let providers = atlas
                 .query_capabilities("soma", SOMA_GET_YAML_CONTRACT, atlas_pb::Transport::Grpc)
                 .await
-                .context("wait for soma stage 1 readiness")?;
+                .context("wait for Soma primitive readiness")?;
             if let Some(soma) = providers.into_iter().find(|p| p.id == "soma")
                 && soma.state == atlas_pb::LifecycleState::StateActive as i32
                 && soma_grpc_ready(atlas, SOMA_GET_YAML_CONTRACT).await
+                && active_primitives.len() == primitive_names.len()
             {
-                let ready_detail = if primitive_count == 0 {
-                    "Soma gRPC ready".to_string()
-                } else {
-                    format!("{primitive_count} primitive package(s) handled by soma")
-                };
-                output::boot_ok("soma stage 1", &ready_detail);
                 return Ok(());
             }
         }
         if Instant::now() >= deadline {
+            let pending = primitive_names
+                .iter()
+                .filter(|name| !active_primitives.contains(*name))
+                .cloned()
+                .collect::<Vec<_>>();
             output::boot_fail(
-                "soma stage 1",
+                "soma",
                 &format!(
-                    "timeout after {:?}; service bring-up needs primitives ACTIVE first",
-                    SOMA_STAGE1_TIMEOUT
+                    "primitive readiness timeout after {:?}; pending: {}",
+                    SOMA_STAGE1_TIMEOUT,
+                    pending.join(", ")
                 ),
             );
             anyhow::bail!(
-                "soma stage 1 did not become ACTIVE within {:?}; refusing to start service packages before primitives are ready",
-                SOMA_STAGE1_TIMEOUT
+                "Soma primitive bring-up did not become ready within {:?}; \
+                 refusing to start service packages; pending: {}",
+                SOMA_STAGE1_TIMEOUT,
+                pending.join(", ")
             );
         }
         tokio::time::sleep(SPINNER_TICK).await;
         frame = frame.wrapping_add(1);
     }
+}
+
+fn lifecycle_state_label(state: i32) -> &'static str {
+    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
+        "REGISTERED"
+    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
+        "INACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
+        "ACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateError as i32 {
+        "ERROR"
+    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
+        "TERMINATED"
+    } else {
+        "STARTING"
+    }
+}
+
+fn soma_skill_ready(state: i32) -> bool {
+    state == atlas_pb::LifecycleState::StateInactive as i32
+        || state == atlas_pb::LifecycleState::StateActive as i32
+}
+
+async fn wait_for_soma_skills(atlas: &mut AtlasClient, skill_names: &[String]) -> Result<()> {
+    const TIMEOUT: Duration = Duration::from_secs(180);
+    if skill_names.is_empty() {
+        return Ok(());
+    }
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut observed_states: HashMap<String, i32> = HashMap::new();
+    let mut ready: HashSet<String> = HashSet::new();
+    while Instant::now() < deadline {
+        for name in skill_names {
+            let providers = atlas
+                .query_capabilities(name, "", atlas_pb::Transport::Unspecified)
+                .await
+                .with_context(|| format!("poll Soma-managed skill '{name}' during bring-up"))?;
+            let Some(provider) = providers.into_iter().find(|provider| provider.id == *name) else {
+                continue;
+            };
+            if observed_states.insert(name.clone(), provider.state) != Some(provider.state) {
+                let state = lifecycle_state_label(provider.state);
+                if soma_skill_ready(provider.state) {
+                    output::boot_ok(name, &format!("{state}  (managed by soma)"));
+                    ready.insert(name.clone());
+                } else if provider.state == atlas_pb::LifecycleState::StateError as i32 {
+                    output::boot_fail(name, "ERROR; see soma.log and provider log");
+                    anyhow::bail!("Soma-managed skill '{name}' entered ERROR during bring-up");
+                } else if output::boot_verbose() {
+                    output::boot_note(name, state);
+                }
+            }
+        }
+        if ready.len() == skill_names.len() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let pending = skill_names
+        .iter()
+        .filter(|name| !ready.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in &pending {
+        output::boot_fail(
+            name,
+            "registration/INIT timeout; see soma.log and provider log",
+        );
+    }
+    anyhow::bail!(
+        "Soma skill bring-up timed out after {TIMEOUT:?}: {}",
+        pending.join(", ")
+    )
 }
 
 /// Read the last `max_lines` lines of a file for embedding into an
@@ -2156,11 +2258,6 @@ fn write_stage2_trigger(writer: &mut Option<std::fs::File>) -> Result<()> {
     w.write_all(b"stage2\n")
         .context("write 'stage2' to soma stage-trigger pipe")?;
     w.flush().context("flush soma stage-trigger pipe")?;
-    // "written", not "delivered": all we know at this point is that
-    // the bytes hit the pipe. Actual delivery (soma reads the line,
-    // spawns skills, and their MCP tools/caps register) is verified
-    // downstream by the boot-poll cap-wait loop, not here.
-    output::boot_ok("soma", "stage 2 trigger written");
     Ok(())
 }
 
