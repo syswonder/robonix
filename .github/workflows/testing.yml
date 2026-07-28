@@ -388,32 +388,6 @@ jobs:
           # The capacity gate deliberately runs before checkout. Self-hosted
           # workspaces persist between jobs, so remove only generated evidence
           # from the previous run before a pre-checkout failure can upload it.
-          remove_generated_path() {
-            root="$1"
-            relative="$2"
-            target="$root/$relative"
-            [ -e "$target" ] || return 0
-            if rm -rf -- "$target" 2>/dev/null; then
-              return 0
-            fi
-            # Docker-backed providers can leave root-owned files in a
-            # bind-mounted log directory. This runner has no passwordless
-            # sudo, so use the same bounded container cleanup as the full
-            # workspace reset below.
-            if ! docker image inspect busybox:latest >/dev/null 2>&1; then
-              echo "::error::cannot remove root-owned generated path and busybox:latest is unavailable: $target"
-              return 1
-            fi
-            timeout 60s docker run --rm --network none \
-              -v "$root:$root:rw" \
-              -w "$root" \
-              busybox:latest sh -c 'rm -rf -- "$1"' sh "$relative"
-            if [ -e "$target" ]; then
-              echo "::error::could not remove stale generated evidence: $target"
-              return 1
-            fi
-          }
-
           for relative in \
             testing/logs \
             testing/report \
@@ -421,22 +395,31 @@ jobs:
             examples/webots/rbnx-boot/processes.json \
             examples/webots/logs \
             system/scene/logs; do
-            remove_generated_path "$GITHUB_WORKSPACE" "$relative"
+            target="$GITHUB_WORKSPACE/$relative"
+            [ -e "$target" ] || continue
+            sudo -n chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null || true
+            rm -rf -- "$target"
+            if [ -e "$target" ]; then
+              echo "::error::could not remove stale generated evidence: $target"
+              exit 1
+            fi
           done
 
-          for relative in \
-            sim-logs \
-            lifecycle-logs \
-            report-assets \
-            cache-provider-logs \
-            report-metadata.json \
-            remote-provenance.txt \
-            fake_vlm.log \
-            rbnx-boot.log \
-            lifecycle.out \
-            scenarios.out \
-            scenarios.restart.out; do
-            remove_generated_path "$RUNNER_TEMP" "$relative"
+          for target in \
+            "$RUNNER_TEMP/sim-logs" \
+            "$RUNNER_TEMP/lifecycle-logs" \
+            "$RUNNER_TEMP/report-assets" \
+            "$RUNNER_TEMP/cache-provider-logs" \
+            "$RUNNER_TEMP/report-metadata.json" \
+            "$RUNNER_TEMP/remote-provenance.txt" \
+            "$RUNNER_TEMP/fake_vlm.log" \
+            "$RUNNER_TEMP/rbnx-boot.log" \
+            "$RUNNER_TEMP/lifecycle.out" \
+            "$RUNNER_TEMP/scenarios.out" \
+            "$RUNNER_TEMP/scenarios.restart.out"; do
+            [ -e "$target" ] || continue
+            sudo -n chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null || true
+            rm -rf -- "$target"
           done
           mkdir -p "$RUNNER_TEMP/sim-logs"
           printf 'Webots suite has not started for run %s attempt %s.\n' \
