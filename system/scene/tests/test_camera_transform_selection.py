@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Scene camera-transform precedence and compatibility validation tests."""
 
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,10 +20,15 @@ def _identity_quaternion() -> SimpleNamespace:
     return SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)
 
 
-def _pose_message(x: float, y: float, z: float) -> SimpleNamespace:
+def _pose_message(
+    x: float, y: float, z: float, *, world_frame: str = "map"
+) -> SimpleNamespace:
     """Build a PoseWithCovarianceStamped-like sample."""
     pose = SimpleNamespace(position=_xyz(x, y, z), orientation=_identity_quaternion())
-    return SimpleNamespace(pose=SimpleNamespace(pose=pose))
+    return SimpleNamespace(
+        header=SimpleNamespace(frame_id=world_frame),
+        pose=SimpleNamespace(pose=pose),
+    )
 
 
 def _odom_message(
@@ -70,7 +76,7 @@ class _FakeHub:
     def latest(self, kind: str):
         """Return a live compatibility sample."""
         self.latest_calls.append(kind)
-        return self.samples[kind], 1.0, 1
+        return self.samples[kind], time.time(), 1
 
 
 def _detector(
@@ -78,6 +84,7 @@ def _detector(
     *,
     camera_frame: str = "selected_camera_optical",
     base_frame: str | None = None,
+    live_base_frame: str | None = None,
 ):
     """Construct only the transform-selection state without loading models."""
     detector = ConceptGraphsDetector.__new__(ConceptGraphsDetector)
@@ -85,8 +92,11 @@ def _detector(
     detector._camera_frame = camera_frame
     detector._base_frame = base_frame or ""
     detector._world_frame_fn = lambda: "map"
-    detector._chassis = lambda: (0.0, 0.0, 0.0, 0.0)
-    detector._cam_z = 1.1
+    detector._robot_base_frame_fn = lambda: (
+        base_frame
+        or ("base_link" if live_base_frame is None else live_base_frame)
+    )
+    detector._pose_max_age_s = 2.0
     return detector
 
 
@@ -162,7 +172,7 @@ def test_extrinsics_parent_can_be_derived_from_live_odometry() -> None:
     samples["odom"] = odom
     hub = _FakeHub(None, samples)
 
-    detector = _detector(hub)
+    detector = _detector(hub, live_base_frame="")
     pose_transform = detector._slot_pose_transform()
     assert pose_transform is not None
     _pose, body_frame = pose_transform
@@ -222,7 +232,7 @@ def test_explicit_base_frame_rejects_conflicting_odometry_child(caplog) -> None:
     actual = _detector(hub, base_frame="mobile_base")._slot_pose_transform()
 
     assert actual is None
-    assert "configured base_frame asserts 'mobile_base'" in caplog.text
+    assert "active base frame is 'mobile_base'" in caplog.text
 
 
 @pytest.mark.parametrize(
