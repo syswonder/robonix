@@ -808,6 +808,46 @@ fn feed_results_into_history(
     history::trim(history, MAX_HISTORY);
 }
 
+/// Persist the exact capability calls handed to Executor so a later planning
+/// round can correlate terminal results with work it already dispatched.
+///
+/// RTDL is a custom planning protocol rather than an OpenAI tool call, so the
+/// model's structured plan is otherwise lost when only `content` is appended to
+/// chat history. That made a successful physical step look unexecuted on the
+/// mandatory post-PlanDone round and allowed the same user step to be planned a
+/// second time from the robot's new state.
+fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: &str) {
+    let calls: Vec<serde_json::Value> = plan
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let call = node.call.as_ref()?;
+            let args = serde_json::from_str::<serde_json::Value>(&call.args_json)
+                .unwrap_or_else(|_| serde_json::Value::String(call.args_json.clone()));
+            Some(serde_json::json!({
+                "call_id": call.call_id,
+                "op_id": node.op_id,
+                "step": node.description,
+                "provider_id": call.provider_id,
+                "contract_id": call.contract_id,
+                "args": args,
+            }))
+        })
+        .collect();
+    if calls.is_empty() {
+        return;
+    }
+    let record = serde_json::json!({
+        "plan_id": plan.plan_id,
+        "description": description,
+        "calls": calls,
+    });
+    history.push(Message::user(&format!(
+        "Pilot harness dispatch record (already sent to Executor; not a new user request): {record}"
+    )));
+    history::trim(history, MAX_HISTORY);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     task: &Task,
@@ -1712,6 +1752,7 @@ pub async fn run_turn(
             )))
             .await;
         cancel_requested.extend(cancel_targets);
+        record_dispatched_plan(history, &graph, &rtdl_description);
         forest.insert(
             plan_id.clone(),
             TreeMeta {
@@ -2662,6 +2703,12 @@ by planning capability calls available to you.
 - Some later messages may be labelled `Executor feedback for the current task`.
   Treat those as results of capability calls you already planned, not as new
   user requests.
+- `Pilot harness dispatch record` messages are the authoritative record of RTDL
+  calls already sent to Executor. Correlate each result by `plan_id` and
+  `call_id`. When a recorded step succeeds, do not plan that same user-requested
+  step again from newly observed state; use the recorded args and result to
+  decide whether the success criterion is met. A genuinely different dependent
+  step may still use the same capability.
 - If executor feedback already contains enough information to answer the
   user's request, answer in `content`, set `task_update.status` to `done`, and
   output an empty RTDL sequence. Do not repeat the same observation capability
@@ -2719,7 +2766,7 @@ mod tests {
         feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
         is_legacy_plan_control_contract, mixes_control_inspection_with_action, parse_meta_plan_op,
         parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end,
     };
@@ -3011,6 +3058,59 @@ mod tests {
         assert!(scope.contains("plan_id=9"));
         assert!(scope.contains("start greet watch"));
         assert!(scope.contains("does not cancel or invalidate other in-flight trees"));
+    }
+
+    #[test]
+    fn completed_plan_context_preserves_original_call_before_replanning() {
+        let original_target = 1.4430711285352669;
+        let plan = Plan {
+            plan_id: "5".into(),
+            nodes: vec![RtdlNode {
+                node_kind: RTDL_DO,
+                op_id: "6".into(),
+                description: "navigate to the original one-metre target".into(),
+                call: Some(CapabilityCall {
+                    call_id: "5:0".into(),
+                    provider_id: "nav2".into(),
+                    contract_id: "robonix/service/navigation/navigate".into(),
+                    args_json: json!({
+                        "goal": {
+                            "header": {"frame_id": "map"},
+                            "pose": {"position": {"x": original_target, "y": -0.0019468723}}
+                        }
+                    })
+                    .to_string(),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut history = Vec::new();
+        record_dispatched_plan(&mut history, &plan, "move forward one metre");
+        feed_results_into_history(
+            &mut history,
+            "5",
+            "move forward one metre",
+            &[CapabilityCallResult {
+                call_id: "5:0".into(),
+                contract_id: "robonix/service/navigation/navigate".into(),
+                success: true,
+                output: r#"{"state":"SUCCEEDED","detail":"last_pose=(1.160,-0.050)"}"#.into(),
+                ..Default::default()
+            }],
+        );
+
+        let visible = crate::history::sanitize_for_vlm(&history);
+        let context = visible
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(context.contains("Pilot harness dispatch record"));
+        assert!(context.contains("\"plan_id\":\"5\""));
+        assert!(context.contains("\"call_id\":\"5:0\""));
+        assert!(context.contains(&original_target.to_string()));
+        assert!(context.contains("SUCCEEDED"));
     }
 
     #[test]
