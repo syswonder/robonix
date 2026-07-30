@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MulanPSL-2.0
+import math
 from types import SimpleNamespace
 
 import numpy as np
 
-from scene_service.goal_planner import object_goal, room_goal
+from scene_service.goal_planner import object_goal, room_goal, room_yaw_candidates
 from scene_service.robot_geometry import RobotFootprint
 
 
@@ -42,8 +43,28 @@ def test_room_goal_changes_with_soma_footprint():
     """The same room must accept a small robot and reject an oversized one."""
     grid = _grid()
     room = [(-0.3, -0.5), (0.3, -0.5), (0.3, 0.5), (-0.3, 0.5)]
-    assert room_goal(grid, room, _footprint(0.1, 0.1), yaw=0.0) is not None
-    assert room_goal(grid, room, _footprint(0.4, 0.1), yaw=0.0) is None
+    headings = room_yaw_candidates(room)
+    assert room_goal(
+        grid, room, _footprint(0.1, 0.1), yaw_candidates=headings
+    ) is not None
+    assert room_goal(
+        grid, room, _footprint(0.6, 0.6), yaw_candidates=headings
+    ) is None
+
+
+def test_room_goal_rotates_asymmetric_go2_footprint_to_fit_corridor():
+    """An elongated Go2-like base must not be rejected at a fixed yaw of zero."""
+    grid = _grid()
+    room = [(-0.18, -0.5), (0.18, -0.5), (0.18, 0.5), (-0.18, 0.5)]
+    result = room_goal(
+        grid,
+        room,
+        _footprint(0.4, 0.1),
+        yaw_candidates=room_yaw_candidates(room),
+    )
+    assert result is not None
+    _, _, yaw = result
+    assert abs(abs(yaw) - math.pi / 2.0) < 1e-9
 
 
 def test_object_goal_uses_complete_polygon():
@@ -68,4 +89,9 @@ def test_room_goal_accepts_ros_signed_int8_sequence():
     grid = _grid(fill=-1)
     grid.data = [-1] * (grid.info.width * grid.info.height)
     room = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)]
-    assert room_goal(grid, room, _footprint(0.1, 0.1), yaw=0.0) is None
+    assert room_goal(
+        grid,
+        room,
+        _footprint(0.1, 0.1),
+        yaw_candidates=room_yaw_candidates(room),
+    ) is None

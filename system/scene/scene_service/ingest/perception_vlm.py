@@ -90,6 +90,7 @@ class VLMObjectDetector:
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         period_s: float = 3.0,
         intrinsics: Optional[_CamIntrinsics] = None,
+        intrinsics_fn: Optional[Callable[[], Optional[_CamIntrinsics]]] = None,
     ) -> None:
         # `rgb_fetcher` returns the latest JPEG bytes (or None when no
         # frame has arrived yet). When ROS subscribers are the source,
@@ -100,6 +101,7 @@ class VLMObjectDetector:
         self.on_detections = on_detections
         self.period_s = period_s
         self.intrinsics = intrinsics
+        self.intrinsics_fn = intrinsics_fn
         self._missing_intrinsics_logged = False
         self._missing_transform_logged = False
         self._task: Optional[asyncio.Task[None]] = None
@@ -217,12 +219,13 @@ class VLMObjectDetector:
         import numpy as np
 
         out: list[Detection] = []
-        K = self.intrinsics
+        K = self.intrinsics_fn() if self.intrinsics_fn is not None else self.intrinsics
         if K is None:
             if not self._missing_intrinsics_logged:
                 log.warning("[scene-vlm] camera intrinsics unavailable; skipping projection")
                 self._missing_intrinsics_logged = True
             return []
+        self._missing_intrinsics_logged = False
         transform_state = self.camera_to_world_fn()
         if transform_state is None:
             if not self._missing_transform_logged:
