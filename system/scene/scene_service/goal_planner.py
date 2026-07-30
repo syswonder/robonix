@@ -101,6 +101,36 @@ def transformed_footprint(
     ]
 
 
+def room_yaw_candidates(room_points: Sequence[Point]) -> tuple[float, ...]:
+    """Return deterministic headings aligned with the room boundary.
+
+    Rooms do not own a preferred heading. Testing only zero radians makes an
+    elongated robot falsely unreachable in a corridor that it can enter after
+    rotating. Boundary-aligned headings cover that common constrained case
+    without inventing a robot-specific orientation.
+    """
+    candidates = [0.0]
+    room = [(float(x), float(y)) for x, y in room_points]
+    for start, end in zip(room, room[1:] + room[:1]):
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        if math.hypot(dx, dy) <= 1e-9:
+            continue
+        edge_yaw = math.atan2(dy, dx)
+        candidates.extend((edge_yaw, edge_yaw + math.pi / 2.0))
+
+    unique: list[float] = []
+    for yaw in candidates:
+        normalized = math.atan2(math.sin(yaw), math.cos(yaw))
+        if not any(
+            abs(math.atan2(math.sin(normalized - item), math.cos(normalized - item)))
+            <= 1e-9
+            for item in unique
+        ):
+            unique.append(normalized)
+    return tuple(unique)
+
+
 def _grid_metadata(grid_msg):
     info = grid_msg.info
     width = int(info.width)
@@ -168,8 +198,8 @@ def room_goal(
     room_points: Sequence[Point],
     footprint: RobotFootprint,
     *,
-    yaw: float,
-) -> tuple[float, float] | None:
+    yaw_candidates: Sequence[float],
+) -> tuple[float, float, float] | None:
     """Choose the centroid-nearest known-free pose fitting the real footprint."""
     room = [(float(x), float(y)) for x, y in room_points]
     if len(room) < 3:
@@ -188,30 +218,40 @@ def room_goal(
         height - 1,
         math.floor((max(y for _, y in room) - origin_y) / resolution),
     )
-    candidates: list[tuple[float, float, float]] = []
+    headings = tuple(float(yaw) for yaw in yaw_candidates)
+    if not headings or any(not math.isfinite(yaw) for yaw in headings):
+        return None
+    candidates: list[tuple[float, int, float, float, float]] = []
     for gy in range(min_gy, max_gy + 1):
         y = origin_y + (gy + 0.5) * resolution
         for gx in range(min_gx, max_gx + 1):
             x = origin_x + (gx + 0.5) * resolution
-            candidate = transformed_footprint(footprint, x, y, yaw)
-            if not polygon_inside_polygon(candidate, room):
-                continue
-            if _footprint_clear(
-                blocked,
-                width=width,
-                height=height,
-                resolution=resolution,
-                origin_x=origin_x,
-                origin_y=origin_y,
-                polygon=candidate,
-            ):
-                candidates.append(
-                    ((x - centroid_x) ** 2 + (y - centroid_y) ** 2, x, y)
-                )
+            for heading_rank, yaw in enumerate(headings):
+                candidate = transformed_footprint(footprint, x, y, yaw)
+                if not polygon_inside_polygon(candidate, room):
+                    continue
+                if _footprint_clear(
+                    blocked,
+                    width=width,
+                    height=height,
+                    resolution=resolution,
+                    origin_x=origin_x,
+                    origin_y=origin_y,
+                    polygon=candidate,
+                ):
+                    candidates.append(
+                        (
+                            (x - centroid_x) ** 2 + (y - centroid_y) ** 2,
+                            heading_rank,
+                            x,
+                            y,
+                            yaw,
+                        )
+                    )
     if not candidates:
         return None
-    _, x, y = min(candidates)
-    return x, y
+    _, _, x, y, yaw = min(candidates)
+    return x, y, yaw
 
 
 def _ring_cells(center_x: int, center_y: int, radius: int) -> Iterable[tuple[int, int]]:

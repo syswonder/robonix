@@ -51,3 +51,29 @@ def test_vlm_projection_fails_closed_without_transform_or_depth():
     }]
     assert _detector(None)._project_to_world(raw) == []
     assert _detector(np.eye(4))._project_to_world(raw) == []
+
+
+def test_vlm_projection_recovers_when_intrinsics_arrive_after_startup():
+    holder = {"intrinsics": None}
+    detector = VLMObjectDetector(
+        rgb_fetcher=lambda: None,
+        camera_to_world_fn=lambda: (np.eye(4), "fixture_world"),
+        on_detections=_ignore,
+        intrinsics_fn=lambda: holder["intrinsics"],
+    )
+    raw = [{
+        "cls": "cup",
+        "confidence": 0.8,
+        "bbox_2d": [300, 220, 340, 260],
+        "approximate_depth_m": 2.0,
+    }]
+    assert detector._project_to_world(raw) == []
+    holder["intrinsics"] = _CamIntrinsics(
+        width=640,
+        height=480,
+        fx=320.0,
+        fy=320.0,
+        cx=320.0,
+        cy=240.0,
+    )
+    assert len(detector._project_to_world(raw)) == 1

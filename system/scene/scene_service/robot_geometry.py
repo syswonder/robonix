@@ -67,6 +67,12 @@ class RobotGeometryState:
         self._footprint = footprint
         return changed
 
+    def clear(self) -> bool:
+        """Discard geometry that can no longer be confirmed by Soma."""
+        changed = self._footprint is not None
+        self._footprint = None
+        return changed
+
 
 def validate_footprint_response(response, *, provider_id: str = "") -> RobotFootprint:
     """Validate the wire response again at the Scene trust boundary."""
@@ -152,6 +158,7 @@ async def reconcile_robot_geometry(
         try:
             footprint = await asyncio.to_thread(fetcher)
             if footprint is None:
+                state.clear()
                 if last_error != "missing":
                     log.warning(
                         "[scene-geometry] waiting for %s; spatial goals are unavailable",
@@ -175,6 +182,7 @@ async def reconcile_robot_geometry(
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
+            state.clear()
             message = str(exc)
             if message != last_error:
                 log.warning(

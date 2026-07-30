@@ -686,32 +686,30 @@ async def _start_ros_ingest(
                 return None
             return _image_msg_to_jpeg(msg)
 
-        # Use the contract K when it has already landed, else the same explicit
-        # deployment fallback accepted by the metric path. Do not invent a
-        # camera model here: even approximate VLM detections become misleading
-        # when projected through an unreviewed K.
-        vlm_intrinsics: Optional[_CamIntrinsics] = None
-        if hub.has("intrinsics"):
-            msg, stamp, _ = hub.latest("intrinsics")
-            if msg is not None and stamp > 0.0:
-                info_frame = str(
-                    getattr(getattr(msg, "header", None), "frame_id", "") or ""
-                ).strip()
-                if info_frame == _active_camera_frame():
-                    vlm_intrinsics = _cam_info_to_intrinsics(msg)
-                else:
-                    log.warning(
-                        "[scene] VLM intrinsics frame mismatch: "
-                        "CameraInfo=%s active_camera=%s",
-                        info_frame or "unknown",
-                        _active_camera_frame() or "unknown",
-                    )
-        if vlm_intrinsics is None and intrinsics_fallback is not None:
-            _, vlm_intrinsics = intrinsics_fallback
-        log.info(
-            "[scene] VLM intrinsics: %s",
-            "configured" if vlm_intrinsics is not None else "unavailable",
-        )
+        # Resolve the contract K at projection time because CameraInfo often
+        # arrives after the service starts. Fall back only to the same explicit
+        # deployment calibration accepted by the metric path; never invent K.
+        def _vlm_intrinsics() -> Optional[_CamIntrinsics]:
+            if hub.has("intrinsics"):
+                msg, stamp, _ = hub.latest("intrinsics")
+                if msg is not None and stamp > 0.0:
+                    info_frame = str(
+                        getattr(getattr(msg, "header", None), "frame_id", "") or ""
+                    ).strip()
+                    if info_frame == _active_camera_frame():
+                        intrinsics = _cam_info_to_intrinsics(msg)
+                        if intrinsics is not None:
+                            return intrinsics
+                    else:
+                        log.warning(
+                            "[scene] VLM intrinsics frame mismatch: "
+                            "CameraInfo=%s active_camera=%s",
+                            info_frame or "unknown",
+                            _active_camera_frame() or "unknown",
+                        )
+            if intrinsics_fallback is not None:
+                return intrinsics_fallback[1]
+            return None
 
         detector = VLMObjectDetector(
             rgb_fetcher=_rgb_jpeg,
@@ -724,7 +722,7 @@ async def _start_ros_ingest(
             ),
             on_detections=lambda dets: _ingest_detections(registry, dets),
             period_s=4.0,
-            intrinsics=vlm_intrinsics,
+            intrinsics_fn=_vlm_intrinsics,
         )
         await detector.start()
     else:

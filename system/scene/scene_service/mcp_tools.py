@@ -25,7 +25,7 @@ from .state import ObjectRegistry, SceneObject
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
 from .geometry import point_in_polygon, polygon_centroid
-from .goal_planner import object_goal, room_goal
+from .goal_planner import object_goal, room_goal, room_yaw_candidates
 from .robot_geometry import RobotGeometryState
 
 if TYPE_CHECKING:
@@ -712,14 +712,18 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
             yaw=0.0,
             reason="occupancy_grid frame is unknown",
         )
-    room_yaw = float(room.theta or 0.0)
-    found = room_goal(msg, room.points, footprint, yaw=room_yaw)
+    found = room_goal(
+        msg,
+        room.points,
+        footprint,
+        yaw_candidates=room_yaw_candidates(room.points),
+    )
     if found is None:
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=f"no known free pose inside room '{room.name}' ({stable_room_id})",
         )
-    x, y = found
+    x, y, room_yaw = found
     if not point_in_polygon(x, y, room.points):
         return GoalRoom_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
