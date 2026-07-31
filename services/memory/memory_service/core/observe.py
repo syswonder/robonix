@@ -1,6 +1,8 @@
 """VLM helpers — image description and question answering.
 
-Reuses Pilot's VLM config (VLM_BASE_URL / VLM_API_KEY / VLM_MODEL).
+VLM config priority:
+  MEM_VLM_BASE_URL/KEY/MODEL  >  VLM_BASE_URL/KEY/MODEL (Pilot)  >  OPENAI_*
+
 Falls back to template-based summary when VLM is unavailable.
 
 Image saving is handled by ``RememberPipeline`` — when ``image_base64``
@@ -22,15 +24,19 @@ from .types import ObjectCoord
 
 log = logging.getLogger("scribe_mem")
 
-# ── VLM config (reuses Pilot's env vars) ───────────────────────────────────
+# ── VLM config ─────────────────────────────────────────────────────────
+# Priority: MEM_VLM_*  >  VLM_* (Pilot)  >  OPENAI_*  >  "gpt-4.1"
 
 def _vlm_config() -> dict:
     return {
-        "base_url": (os.environ.get("VLM_BASE_URL")
+        "base_url": (os.environ.get("MEM_VLM_BASE_URL")
+                     or os.environ.get("VLM_BASE_URL")
                      or os.environ.get("OPENAI_BASE_URL") or ""),
-        "api_key": (os.environ.get("VLM_API_KEY")
+        "api_key": (os.environ.get("MEM_VLM_API_KEY")
+                    or os.environ.get("VLM_API_KEY")
                     or os.environ.get("OPENAI_API_KEY") or ""),
-        "model": (os.environ.get("VLM_MODEL")
+        "model": (os.environ.get("MEM_VLM_MODEL")
+                  or os.environ.get("VLM_MODEL")
                   or os.environ.get("OPENAI_MODEL") or "gpt-4.1"),
     }
 

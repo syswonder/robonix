@@ -33,7 +33,10 @@ log = logging.getLogger("scribe_mem")
 # ── LLM configuration ──────────────────────────────────────────────────────
 
 def _llm_config() -> dict:
-    """Resolve LLM endpoint from env vars with standard fallbacks."""
+    """Resolve LLM endpoint from env vars with standard fallbacks.
+
+    Priority: MEMGRAPH_LLM_*  >  VLM_* (Pilot)  >  OPENAI_*  >  "gpt-4.1"
+    """
     base_url = (
         os.environ.get("MEMGRAPH_LLM_BASE_URL")
         or os.environ.get("VLM_BASE_URL")
@@ -283,3 +286,89 @@ async def llm_rank(
 
     log.info("llm_search: \"%s\" → %d ranked by LLM", query[:60], len(results))
     return results[:top_k]
+
+
+_VLM_NEEDED_PROMPT = (
+    "You are a memory retrieval system for an embodied robot.\n"
+    "Below are memory nodes relevant to the user's query.\n"
+    "Each node has a text summary, tags, and spatial positions.\n"
+    "Some nodes also have images attached.\n\n"
+    "Decide: can you answer the user's question from the TEXT alone,\n"
+    "or do you NEED to examine the images?\n\n"
+    "Reply with a single JSON object:\n"
+    '  {"need_image": false, "answer": "your text answer"}  — if text is enough\n'
+    '  {"need_image": true,  "answer": ""}                  — if images are required\n\n'
+    "Only set need_image=true when the question explicitly asks about\n"
+    "visual details (color, shape, count, whether something is present)\n"
+    "that cannot be inferred from the text labels and spatial data alone.\n"
+)
+
+
+async def llm_decide_vlm(
+    query: str,
+    node_contexts: list[str],
+    has_images: bool,
+) -> tuple[bool, str]:
+    """Ask the LLM whether VLM image analysis is needed to answer the query.
+
+    Returns:
+        (need_image, text_answer)
+        - need_image=True  → proceed to VLM QA
+        - need_image=False → use text_answer directly
+    """
+    if not has_images:
+        return False, ""
+    cfg = _llm_config()
+    if not cfg["api_key"] or not cfg["base_url"]:
+        return True, ""  # can't decide → default to VLM
+
+    # Build prompt
+    ctx_text = "\n\n".join(
+        f"[{i+1}] {ctx}" for i, ctx in enumerate(node_contexts)
+    )
+    prompt = (
+        f"{_VLM_NEEDED_PROMPT}\n\n"
+        f"Memory nodes ({len(node_contexts)} total):\n{ctx_text}\n\n"
+        f"User question: {query}"
+    )
+
+    import httpx
+    url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {cfg['api_key']}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 256,
+        "temperature": 0.0,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(url, json=body, headers=headers)
+            if r.status_code >= 400:
+                log.debug("llm_decide_vlm: LLM returned %d", r.status_code)
+                return True, ""
+            data = r.json()
+        content = data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log.debug("llm_decide_vlm: call failed: %s", e)
+        return True, ""
+
+    # Parse LLM response
+    import json as _json
+    try:
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1]
+            content = content.rsplit("```", 1)[0]
+        result = _json.loads(content)
+        need = bool(result.get("need_image", True))
+        answer = str(result.get("answer", ""))
+        log.info("llm_decide_vlm: need_image=%s answer=%r", need, answer[:120])
+        return need, answer
+    except Exception as e:
+        log.debug("llm_decide_vlm: parse failed: %s", e)
+        return True, ""

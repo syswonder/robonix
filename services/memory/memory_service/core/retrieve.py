@@ -158,7 +158,6 @@ class RetrievePipeline:
             all_image_refs: List[str] = []
             node_ctx: List[str] = []
             for n in result_nodes[:3]:
-                # Build a compact context string for each node
                 parts = [f"summary: \"{n.summary}\""]
                 if n.tags:
                     parts.append(f"scene={n.tags.scene_type or '?'}")
@@ -175,19 +174,32 @@ class RetrievePipeline:
                 node_ctx.append(" | ".join(parts))
                 if n.image_refs:
                     all_image_refs.extend(n.image_refs)
+
             if all_image_refs or node_ctx:
-                log.info("search: vlm_qa → %d images, %d contexts for query %r",
-                         len(all_image_refs), len(node_ctx), request.query[:60])
-                from .observe import vlm_answer_question
-                answer = await vlm_answer_question(
+                # ── LLM decides: can we answer from text alone? ──
+                need_image, text_answer = await llm_search.llm_decide_vlm(
                     query=request.query,
-                    image_paths=all_image_refs,
                     node_contexts=node_ctx,
+                    has_images=bool(all_image_refs),
                 )
-                if answer:
-                    vlm_answer = answer
-                    log.info("search: vlm_qa answer → %r", answer[:120])
+                if not need_image and text_answer:
+                    vlm_answer = text_answer
+                    log.info("search: llm_decide_vlm → answer from text (no VLM)")
+                elif all_image_refs:
+                    log.info("search: vlm_qa → %d images, %d contexts for query %r",
+                             len(all_image_refs), len(node_ctx), request.query[:60])
+                    from .observe import vlm_answer_question
+                    answer = await vlm_answer_question(
+                        query=request.query,
+                        image_paths=all_image_refs,
+                        node_contexts=node_ctx,
+                    )
+                    if answer:
+                        vlm_answer = answer
+                        log.info("search: vlm_qa answer → %r", answer[:120])
+                    else:
+                        log.info("search: vlm_qa — VLM unavailable, skipping")
                 else:
-                    log.info("search: vlm_qa — VLM unavailable, skipping")
+                    log.info("search: vlm_qa — no images to show")
 
         return SearchResponse(nodes=result_nodes, vlm_answer=vlm_answer)
