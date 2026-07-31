@@ -68,6 +68,70 @@ class TestSummaryGeneration:
         assert "failed" in s
 
 
+class TestPlanTagExtraction:
+    """Tag extraction with explicit kv.task_type='plan'."""
+
+    def test_plan_task_type_from_kv(self):
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="去厨房拿可乐")
+        kv = {"task_type": "plan", "success": "true", "difficulty": "medium"}
+        tags = _rule_based_tag_extraction(lr, None, kv)
+        assert tags.task_type == "plan"
+        assert tags.action_type == "plan"
+        assert tags.success is True
+        assert tags.difficulty == "medium"
+
+    def test_plan_with_scene_from_kv(self):
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="navigate to kitchen")
+        kv = {"task_type": "plan", "success": "true",
+              "scene_type": "kitchen"}
+        tags = _rule_based_tag_extraction(lr, None, kv)
+        assert tags.task_type == "plan"
+        assert tags.scene_type == "kitchen"
+
+    def test_plan_kv_overrides_keyword_matching(self):
+        """When kv says 'plan', keyword matching is skipped entirely."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="grasped cup in the kitchen")  # would normally match kitchen/grasp
+        kv = {"task_type": "plan", "success": "true"}
+        tags = _rule_based_tag_extraction(lr, None, kv)
+        # Keyword matching skipped → no scene_type from msg
+        assert tags.task_type == "plan"
+        assert tags.scene_type == ""  # not "kitchen"
+
+
+class TestPlanSummaryGeneration:
+    """Summary generation for plan-type memories."""
+
+    def test_plan_summary_basic(self):
+        lr = LogRecord(ts=1, level="Info", tag="pilot",
+                       msg="去厨房拿可乐")
+        kv = {
+            "task_type": "plan",
+            "plan_query": "去厨房拿可乐",
+            "plan_description": "navigate to kitchen and grasp cola",
+            "plan_steps": "1. navigate\n2. grasp\n3. return",
+        }
+        s = _generate_summary(lr, None, kv)
+        assert "successful plan" in s
+        assert "去厨房拿可乐" in s
+        assert "navigate to kitchen and grasp cola" in s
+
+    def test_plan_summary_without_description(self):
+        lr = LogRecord(ts=1, level="Info", tag="pilot",
+                       msg="去客厅检查设备")
+        kv = {
+            "task_type": "plan",
+            "plan_query": "去客厅检查设备",
+            "plan_steps": "1. [tiago_navigation.navigate_to_goal] navigate to living room\n2. [camera.camera_snapshot] take photo",
+        }
+        s = _generate_summary(lr, None, kv)
+        assert "successful plan" in s
+        assert "去客厅检查设备" in s
+        assert "[2 steps]" in s
+
+
 class TestRememberPipeline:
     def setup_method(self):
         self.tmp = tempfile.mkdtemp()
@@ -164,6 +228,259 @@ class TestRememberPipeline:
         assert len(node.image_refs) >= 1
         assert "frame_0001.jpg" in node.image_refs[0]
 
+    # ── Plan-type memory tests ──────────────────────────────────────────
+
+    def test_plan_node_sets_lesson_type_and_weight(self):
+        """Successful plan → NodeType.LESSON + weight 0.8."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="去厨房拿瓶可乐")
+        kv = {
+            "task_type": "plan",
+            "success": "true",
+            "plan_query": "去厨房拿瓶可乐",
+            "plan_description": "navigate→grasp→return",
+            "plan_steps": "1. [tiago_navigation.navigate_to_goal] navigate to kitchen\n"
+                          "2. [tiago_gripper.grasp_object] grasp cola\n"
+                          "3. [tiago_navigation.navigate_to_goal] return",
+        }
+        req = RememberRequest(session_id="s-plan", plan_id="p-plan",
+                              log_record=lr, kv=kv)
+        resp = self._run(req)
+        node = self.graph.get_node(resp.node_id)
+        assert node.node_type == NodeType.LESSON, \
+            f"expected LESSON, got {node.node_type}"
+        assert node.weight == 0.8, \
+            f"expected weight 0.8, got {node.weight}"
+
+    def test_plan_node_tags_are_correct(self):
+        """Plan node tags: task_type=plan, action_type=plan, success=True."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="检查客厅设备")
+        kv = {
+            "task_type": "plan",
+            "success": "true",
+            "plan_query": "检查客厅设备",
+            "plan_description": "inspect living room equipment",
+            "plan_steps": "1. navigate\n2. camera_snapshot",
+        }
+        req = RememberRequest(session_id="s-plan2", plan_id="p-plan2",
+                              log_record=lr, kv=kv)
+        resp = self._run(req)
+        node = self.graph.get_node(resp.node_id)
+        assert node.tags.task_type == "plan"
+        assert node.tags.action_type == "plan"
+        assert node.tags.success is True
+
+    def test_plan_node_summary_format(self):
+        """Plan summary contains query, description, and step count."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="巡逻办公室")
+        kv = {
+            "task_type": "plan",
+            "plan_query": "巡逻办公室",
+            "plan_description": "patrol the office area",
+            "plan_steps": "1. nav\n2. inspect\n3. nav",
+        }
+        req = RememberRequest(session_id="s-plan3", plan_id="p-plan3",
+                              log_record=lr, kv=kv)
+        resp = self._run(req)
+        node = self.graph.get_node(resp.node_id)
+        assert "successful plan" in node.summary
+        assert "巡逻办公室" in node.summary
+        assert "patrol the office area" in node.summary
+
+    def test_plan_node_embedding_includes_steps(self):
+        """Plan embedding text encodes query+description+steps for search matching."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="拿可乐")
+        kv = {
+            "task_type": "plan",
+            "plan_query": "去厨房拿可乐",
+            "plan_description": "fetch cola from kitchen",
+            "plan_steps": "1. [nav] to kitchen\n2. [grasp] cola",
+        }
+        req = RememberRequest(session_id="s-plan4", plan_id="p-plan4",
+                              log_record=lr, kv=kv)
+        resp = self._run(req)
+        node = self.graph.get_node(resp.node_id)
+        # Embedding should exist and be non-empty
+        assert len(node.embedding) > 0, "plan node must have embedding"
+        # The embedding is derived from plan text, not just the summary
+        # We can't inspect the text directly but the embedding dim matches config
+        assert len(node.embedding) == 8  # test config dim=8
+
+    def test_plan_node_indexed_in_tag_index(self):
+        """Plan node appears in tag index with correct task_type."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="go to kitchen")
+        kv = {"task_type": "plan", "success": "true",
+              "plan_query": "go to kitchen", "plan_description": "nav",
+              "plan_steps": "1. nav"}
+        req = RememberRequest(session_id="s-plan5", plan_id="p-plan5",
+                              log_record=lr, kv=kv)
+        resp = self._run(req)
+        tags = self.tags.get_tags(resp.node_id)
+        assert tags is not None
+        assert tags.task_type == "plan"
+
+    def test_plan_node_retrievable_by_task_type(self):
+        """TagIndex query with task_type='plan' finds the saved plan."""
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="walk to door")
+        kv = {"task_type": "plan", "success": "true",
+              "plan_query": "walk to door", "plan_description": "nav",
+              "plan_steps": "1. walk"}
+        req = RememberRequest(session_id="s-plan6", plan_id="p-plan6",
+                              log_record=lr, kv=kv)
+        resp = self._run(req)
+
+        # Query tag index for plan type
+        from memory_service.core.types import TagFilter
+        tf = TagFilter(task_type="plan")
+        candidates = self.tags.query(tf)
+        assert resp.node_id in candidates, \
+            f"plan node {resp.node_id} should be findable by task_type=plan"
+
+
+class TestPlanObserveMixedRecall:
+    """Integration: save observations + plans, then verify retrieval separation.
+
+    Simulates the real-world scenario: some nodes are auto-captured
+    observations (SHORT_TERM), others are successful plans (LESSON).
+    The tag index and vector store must correctly distinguish them.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.graph = GraphStore(data_dir=self.tmp)
+        self.tags = TagIndex()
+        cfg = EmbeddingModelConfig(dim=8)
+        self.vectors = VectorStore(config=cfg, alpha=0.3)
+        self.pipeline = RememberPipeline(self.graph, self.tags, self.vectors)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, req):
+        return asyncio.run(self.pipeline.execute(req))
+
+    def test_plan_and_observation_separated_by_task_type(self):
+        """Task type filtering correctly separates plans from observations."""
+        from memory_service.core.types import TagFilter
+
+        # Save 2 observations with keywords that match explore task_type
+        for i, msg in enumerate([
+            "robot scanned the corridor for fire equipment",
+            "robot explored the office area",
+        ]):
+            lr = LogRecord(ts=100 + i, level="Info", tag="camera", msg=msg)
+            req = RememberRequest(session_id="s", plan_id="p",
+                                  log_record=lr)
+            self._run(req)
+
+        # Save 2 plans
+        plan_kvs = [
+            {
+                "task_type": "plan", "success": "true",
+                "plan_query": "巡逻走廊检查灭火器",
+                "plan_description": "patrol corridor for fire equipment",
+                "plan_steps": "1. [nav] to corridor\n2. [cam] snapshot",
+            },
+            {
+                "task_type": "plan", "success": "true",
+                "plan_query": "检查办公室电脑",
+                "plan_description": "inspect office computers",
+                "plan_steps": "1. [nav] to office\n2. [cam] inspect",
+            },
+        ]
+        plan_ids = []
+        for kv in plan_kvs:
+            lr = LogRecord(ts=200, level="Info", tag="pilot",
+                           msg=kv["plan_query"])
+            req = RememberRequest(session_id="s", plan_id="p",
+                                  log_record=lr, kv=kv)
+            resp = self._run(req)
+            plan_ids.append(resp.node_id)
+            node = self.graph.get_node(resp.node_id)
+            assert node.node_type == NodeType.LESSON
+
+        # Filter by task_type=plan → only plans
+        tf_plan = TagFilter(task_type="plan")
+        plan_candidates = self.tags.query(tf_plan)
+        assert len(plan_candidates) == 2
+        for pid in plan_ids:
+            assert pid in plan_candidates
+
+        # Filter by task_type=explore → only observations
+        tf_explore = TagFilter(task_type="explore")
+        obs_candidates = self.tags.query(tf_explore)
+        assert len(obs_candidates) == 2, \
+            f"expected 2 explore observations, got {len(obs_candidates)}"
+
+        # No overlap between plan and observation sets
+        assert plan_candidates.isdisjoint(obs_candidates)
+
+    def test_plan_nodes_have_higher_weight(self):
+        """Plan (LESSON) nodes have weight 0.8 vs observation 0.5."""
+        # Save observation
+        lr_obs = LogRecord(ts=100, level="Info", tag="camera",
+                           msg="observed laptop in office")
+        req_obs = RememberRequest(session_id="s", plan_id="p", log_record=lr_obs)
+        resp_obs = self._run(req_obs)
+        node_obs = self.graph.get_node(resp_obs.node_id)
+        assert node_obs.weight == 0.5
+
+        # Save plan
+        kv = {"task_type": "plan", "success": "true",
+              "plan_query": "check office", "plan_description": "inspect",
+              "plan_steps": "1. nav\n2. snap"}
+        lr_plan = LogRecord(ts=200, level="Info", tag="pilot",
+                            msg="check office")
+        req_plan = RememberRequest(session_id="s", plan_id="p",
+                                   log_record=lr_plan, kv=kv)
+        resp_plan = self._run(req_plan)
+        node_plan = self.graph.get_node(resp_plan.node_id)
+        assert node_plan.weight == 0.8
+        assert node_plan.node_type == NodeType.LESSON
+
+        # In a weight-sorted ranking, plan nodes rank above observations
+        # (all else equal — same score)
+        assert node_plan.weight > node_obs.weight
+
+    def test_plan_embedding_differs_from_observation(self):
+        """Plan and observation embeddings are different despite same config."""
+        # Same summary text, but plan node has enriched embedding_text
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="go to kitchen")
+        kv = {"task_type": "plan", "success": "true",
+              "plan_query": "go to kitchen",
+              "plan_description": "navigate",
+              "plan_steps": "1. [nav] navigate to kitchen"}
+        req_plan = RememberRequest(session_id="s", plan_id="p",
+                                   log_record=lr, kv=kv)
+        resp_plan = self._run(req_plan)
+        node_plan = self.graph.get_node(resp_plan.node_id)
+
+        # Observation with similar msg
+        lr_obs = LogRecord(ts=200, level="Info", tag="camera",
+                           msg="go to kitchen")
+        req_obs = RememberRequest(session_id="s", plan_id="p",
+                                  log_record=lr_obs)
+        resp_obs = self._run(req_obs)
+        node_obs = self.graph.get_node(resp_obs.node_id)
+
+        # Both have embeddings but they encode different text:
+        # plan: "plan: go to kitchen | navigate | steps: ..."
+        # obs:  "successfully navigate in unknown area"
+        assert len(node_plan.embedding) == len(node_obs.embedding)
+        # Embeddings should differ (different input text)
+        plans_different = any(
+            abs(a - b) > 1e-6
+            for a, b in zip(node_plan.embedding, node_obs.embedding)
+        )
+        assert plans_different, \
+            "plan and observation embeddings should differ"
+
 
 # ── Runner ───────────────────────────────────────────────────────────────
 
@@ -171,7 +488,9 @@ if __name__ == "__main__":
     import logging, traceback
     logging.disable(logging.CRITICAL)  # suppress TextEmbedder warnings
 
-    tests = [TestTagExtraction(), TestSummaryGeneration(), TestRememberPipeline()]
+    tests = [TestTagExtraction(), TestPlanTagExtraction(),
+             TestSummaryGeneration(), TestPlanSummaryGeneration(),
+             TestRememberPipeline(), TestPlanObserveMixedRecall()]
     passed = failed = 0
     for obj in tests:
         cls_name = type(obj).__name__

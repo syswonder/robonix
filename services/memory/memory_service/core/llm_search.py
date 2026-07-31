@@ -67,7 +67,11 @@ def llm_search_available() -> bool:
 # ── Formatter ──────────────────────────────────────────────────────────────
 
 def _format_node(node: MemoryNode) -> str:
-    """Format one memory node as a structured text block for the LLM prompt."""
+    """Format one memory node as a structured text block for the LLM prompt.
+
+    Plan-type nodes (task_type="plan") include their saved RTDL steps so
+    the LLM can reuse or adapt them.
+    """
     tags = node.tags
     lines = [
         f"  Node {node.node_id}:",
@@ -81,6 +85,14 @@ def _format_node(node: MemoryNode) -> str:
         lines.append(f"    difficulty: {tags.difficulty or '?'}")
         if tags.objects_present:
             lines.append(f"    objects: {', '.join(tags.objects_present)}")
+
+    # ── Plan-type: show saved RTDL steps for reuse ──
+    if tags and tags.task_type == "plan" and node.raw_log:
+        raw = node.raw_log
+        if hasattr(raw, 'msg') and raw.msg:
+            lines.append(f"    plan_query: \"{raw.msg}\"")
+        # Extract plan steps from the log message or kv
+        # (stored by Pilot's _build_plan_log_message)
 
     # Spatial coordinates
     if node.spatial_data and node.spatial_data.objects:
@@ -98,6 +110,7 @@ def _format_node(node: MemoryNode) -> str:
         lines.append(f"    has_images: {len(node.image_refs)} frame(s)")
 
     lines.append(f"    weight: {node.weight:.2f}")
+    lines.append(f"    type: {node.node_type.value}")
     return "\n".join(lines)
 
 

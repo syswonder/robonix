@@ -169,10 +169,11 @@ struct TreeMeta {
     steps: Vec<TreeStep>,
 }
 
-struct TreeStep {
-    op_id: String,
-    description: String,
-    capability: String,
+#[derive(Clone, Debug)]
+pub(crate) struct TreeStep {
+    pub op_id: String,
+    pub description: String,
+    pub capability: String,
 }
 
 /// Events fed from per-tree driver tasks back to the supervisor loop. One
@@ -923,6 +924,12 @@ pub async fn run_turn(
         .find(|(_, cap)| cap.contract_id == "robonix/service/memory/search")
         .map(|(provider_id, cap)| (provider_id.clone(), cap.contract_id.clone()));
 
+    // Also discover the remember capability for saving successful plans later.
+    let remember_memory_target = initial_caps
+        .iter()
+        .find(|(_, cap)| cap.contract_id == "robonix/service/memory/remember")
+        .map(|(provider_id, cap)| (provider_id.clone(), cap.contract_id.clone()));
+
     // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
     // relevant past context is available from the start of the turn.
@@ -1157,6 +1164,29 @@ pub async fn run_turn(
                                 .await;
                         }
                         Some(ForestEvent::PlanDone { plan_id, results, any_failed, canceled }) => {
+                            // ── Save successful plan as a reusable memory node ──
+                            // Fire-and-forget: spawns a background task to call
+                            // memory/remember with the RTDL steps and user query.
+                            if !any_failed && !canceled {
+                                if let Some(tree_meta) = forest.get(&plan_id) {
+                                    if let Some(ref target) = remember_memory_target {
+                                        let user_goal = standing_task
+                                            .as_ref()
+                                            .map(|s| s.goal.clone())
+                                            .unwrap_or_default();
+                                        if !user_goal.is_empty() {
+                                            memory::save_plan(
+                                                executor.graph.clone(),
+                                                target.clone(),
+                                                plan_id.clone(),
+                                                user_goal,
+                                                tree_meta.description.clone(),
+                                                tree_meta.steps.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             forest.remove(&plan_id);
                             let requested_cancellation = cancel_requested.remove(&plan_id);
                             if requested_cancellation {

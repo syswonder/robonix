@@ -2729,3 +2729,174 @@ VLM 被"干扰"无法聚焦到目标物体上。需要为每个保存的物体�
 |------|------|
 | `system/scene/scene_service/object_watchdog.py` | `_capture_frame(obj)` 新增遮罩参数 + `_project_to_pixel()` + `_apply_object_mask()` |
 | `system/scene/scene_service/object_watchdog.py` | `_tick()` 每物体单独调用 `_capture_frame(obj)` 代替批量共用一帧 |
+
+---
+
+## 成功规划保存（2026-07-31 完成）
+
+### 需求
+
+当 Pilot 的 VLM 产出一个 RTDL 规划并**全部成功执行**后，将该规划保存为记忆节点。下次用户提出相似问题时，记忆检索可以发现这个可靠规划，将其注入系统 prompt，VLM 可复用或改编它，而非从零推理。
+
+核心闭环：
+
+```
+用户提问 "去厨房拿可乐"
+  → VLM 规划 "navigate→grasp→return" 全部 SUCCEEDED
+  → 自动保存为 NodeType::LESSON（受保护的记忆节点）
+  → (未来) 用户问 "帮我拿瓶可乐"
+  → prefetch 匹配到历史成功规划 → 注入系统 prompt
+  → VLM 参考历史 RTDL 快速生成相似规划
+```
+
+### 设计决策
+
+1. **复用 Memory 基础设施**：不新建 PlanStore，直接走现有的 `remember` → `GraphStore + TagIndex + VectorStore` 链路。BM25+Embedding 检索对 plan 类型节点同样生效。
+
+2. **使用 `NodeType::LESSON`**：不是 `SKILL`（需要 N≥3 相似经历才能提取），`LESSON` 受 forget 保护但不需要泛化。每次成功的规划都独立保存。
+
+3. **写入侧零成本**：Pilot 在 PlanDone 时 fire-and-forget 一个后台任务调用 `memory/remember`，不阻塞 supervisor 循环。
+
+4. **检索侧自然集成**：plan 节点的 `embedding_text` 包含 `"plan: {query} | {description} | steps: {steps_text}"`，BM25+Embedding 可直接匹配相似查询。
+
+### 实现
+
+#### 改动 1：Memory 侧 — remember pipeline 识别 plan 类型
+
+**文件**：`services/memory/memory_service/core/remember.py`
+
+**`_rule_based_tag_extraction(log_record, spatial, kv)`** 新增 `kv` 参数：
+- 当 `kv.task_type == "plan"` 时，跳过关键词匹配，直接设置：
+  - `tags.task_type = "plan"`
+  - `tags.success = True`
+  - `tags.action_type = "plan"`
+- 其余类型走原有关键词匹配逻辑
+
+**`_generate_summary(log_record, spatial, kv)`** 新增 `kv` 参数：
+- plan 类型生成摘要：`"successful plan: \"{plan_query}\" ({plan_description}) [{n} steps]"`
+
+**`RememberPipeline.execute()`**：
+- 将 `request.kv` 传递给 tag extraction 和 summary generation
+- plan 类型节点自动设置：
+  - `node_type = NodeType.LESSON`（受 forget 保护）
+  - `weight = 0.8`（高于普通观测的 0.5）
+  - `embedding_text = "plan: {query} | {desc} | steps: {steps}"`（比 summary 更丰富，提升检索匹配率）
+
+#### 改动 2：Memory 侧 — LLM 检索时展示 plan 类型
+
+**文件**：`services/memory/memory_service/core/llm_search.py`
+
+**`_format_node()`**：
+- 对 `task_type == "plan"` 的节点，在格式化输出中显示 `plan_query` 和 `type: lesson`
+- 使 VLM 在做 relevance ranking 时能区分 plan 和普通观测
+
+#### 改动 3：Pilot 侧 — 保存成功规划
+
+**文件**：`system/pilot/src/memory.rs`
+
+**新增 `save_plan()`**：
+```rust
+pub fn save_plan(
+    executor_graph: RobonixSystemExecutorExecuteClient<Channel>,
+    remember_target: (String, String),  // (provider_id, contract_id)
+    plan_id: String,
+    user_query: String,                  // standing_task.goal
+    plan_description: String,            // TreeMeta.description
+    steps: Vec<TreeStep>,               // TreeMeta.steps
+)
+```
+
+- Fire-and-forget：spawn tokio task，不阻塞调用方
+- 将 steps 格式化为 `"1. [capability_name] description\n2. ..."`
+- 构造 `remember` 请求 payload，通过 Executor 的 MCP 通道发送到 memory 服务
+- 成功/失败均通过 `robonix_scribe` log 记录，不影响主流程
+
+**`TreeStep`** 改为 `pub(crate)` + `#[derive(Clone, Debug)]`：
+- 字段 `op_id`、`description`、`capability` 改为 `pub`
+- 使 `memory` 模块可以读取步骤信息
+
+#### 改动 4：Pilot 侧 — PlanDone 时触发保存
+
+**文件**：`system/pilot/src/planner.rs`
+
+**`run_turn()` 初始化**：
+- 新增 `remember_memory_target` 发现逻辑（与 `search_memory_target` 并列）
+- 从 `initial_caps` 查找 `robonix/service/memory/remember`
+
+**PlanDone 处理**：
+```rust
+if !any_failed && !canceled {
+    if let Some(tree_meta) = forest.get(&plan_id) {
+        if let Some(ref target) = remember_memory_target {
+            memory::save_plan(
+                executor.graph.clone(),
+                target.clone(),
+                plan_id.clone(),
+                standing_task.goal,
+                tree_meta.description.clone(),
+                tree_meta.steps.clone(),
+            );
+        }
+    }
+}
+```
+
+仅在**全部成功且非取消**时触发。保存时机在 `forest.remove()` 之前，以获取 `TreeMeta`。
+
+### 数据流
+
+```
+Pilot                               Executor                    Memory Service
+─────                               ────────                    ──────────────
+PlanDone (!any_failed)
+  │
+  ├─ forest.get(plan_id)
+  │    → TreeMeta { description, steps }
+  │
+  ├─ standing_task.goal
+  │    → user_query
+  │
+  └─ memory::save_plan()
+       │
+       └─ spawn task ───────────────────────────────────────────►
+            │                                                     │
+            ├─ build remember payload:                            │
+            │  session_id: "pilot-save-plan-{plan_id}"            │
+            │  plan_id: "{plan_id}"                                │
+            │  log_record.msg: "{user_query}"                      │
+            │  kv.task_type: "plan"                                │
+            │  kv.success: "true"                                  │
+            │  kv.plan_query: "{user_query}"                       │
+            │  kv.plan_description: "{rtdl_description}"           │
+            │  kv.plan_steps: "1. [nav] navigate\n2. [grasp] ..." │
+            │                                                     │
+            └─ execute(plan) ──────► MCP call_tool ──────────────►│
+                                                         _mcp_remember()
+                                                           │
+                                                           ├─ tags.task_type = "plan"
+                                                           ├─ node_type = LESSON
+                                                           ├─ weight = 0.8
+                                                           ├─ embedding = encode(
+                                                           │    "plan: {query} | {desc}
+                                                           │     | steps: {steps}")
+                                                           │
+                                                           └─ → GraphStore + TagIndex
+                                                                + VectorStore
+```
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `services/memory/memory_service/core/remember.py` | `_rule_based_tag_extraction` + `_generate_summary` 增加 `kv` 参数；`execute()` plan 类型设为 LESSON + weight 0.8 |
+| `services/memory/memory_service/core/llm_search.py` | `_format_node()` 展示 plan 类型和 `node_type` |
+| `system/pilot/src/memory.rs` | 新增 `save_plan()` 函数；增加 `RobonixSystemExecutorExecuteClient` + `TreeStep` import |
+| `system/pilot/src/planner.rs` | `TreeStep` 改为 `pub(crate)` + `Clone`；新增 `remember_memory_target` 发现；PlanDone 时调用 `save_plan()` |
+
+### 后续工作（Phase 2）
+
+- [ ] Pilot `prefetch` 增加 `tags.task_type: "plan"` 过滤，优先返回 plan 类型记忆
+- [ ] 系统 prompt 增加 "Similar successful plans" 区块，格式化展示历史 RTDL 步骤
+- [ ] TagIndex 增加 `task_type` 维度索引以加速 plan 过滤
+- [ ] LLM ranker prompt 增加 plan reuse 指令（"优先复用相似 plan，只修改差异部分"）
+- [ ] `SkillTemplate` 自动提取：当同一 task_type 下积累 ≥3 个相似 plan 时，泛化为 Skill

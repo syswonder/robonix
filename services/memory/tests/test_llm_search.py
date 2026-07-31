@@ -12,7 +12,7 @@ if str(_SVC) not in sys.path:
     sys.path.insert(0, str(_SVC))
 
 from memory_service.core import llm_search
-from memory_service.core.types import MemoryNode, TagSet
+from memory_service.core.types import MemoryNode, TagSet, NodeType, LogRecord
 
 
 class TestFormatNode(unittest.TestCase):
@@ -47,6 +47,72 @@ class TestFormatNode(unittest.TestCase):
         line = llm_search._format_node(node)
         assert "Node 0" in line
         assert '"bare node"' in line
+
+    def test_format_plan_node_shows_node_type(self):
+        """Plan-type nodes show type: lesson in formatted output."""
+        node = MemoryNode(
+            node_id=42,
+            summary='successful plan: "去厨房拿可乐" (navigate→grasp→return) [3 steps]',
+            tags=TagSet(
+                task_type="plan", action_type="plan",
+                success=True, difficulty="medium",
+            ),
+            node_type=NodeType.LESSON,
+            weight=0.8,
+            raw_log=LogRecord(
+                ts=100, level="Info", tag="pilot",
+                msg="去厨房拿可乐",
+            ),
+        )
+        line = llm_search._format_node(node)
+        assert "Node 42" in line
+        assert "task: plan" in line
+        assert "success: True" in line
+        assert "weight: 0.80" in line
+        assert "type: lesson" in line
+
+    def test_format_plan_node_in_prompt(self):
+        """Plan nodes appear correctly in the LLM ranking prompt."""
+        nodes = [
+            MemoryNode(
+                node_id=10,
+                summary="observed fire_extinguisher in corridor",
+                tags=TagSet(scene_type="corridor", action_type="observe",
+                           task_type="explore", success=True),
+                node_type=NodeType.SHORT_TERM,
+                weight=0.5,
+            ),
+            MemoryNode(
+                node_id=11,
+                summary='successful plan: "巡逻走廊" (patrol corridor) [2 steps]',
+                tags=TagSet(task_type="plan", action_type="plan",
+                           success=True, difficulty="easy"),
+                node_type=NodeType.LESSON,
+                weight=0.8,
+                raw_log=LogRecord(
+                    ts=200, level="Info", tag="pilot",
+                    msg="巡逻走廊",
+                ),
+            ),
+        ]
+        prompt = llm_search._build_prompt("how to patrol corridor", nodes)
+        assert "2 nodes" in prompt
+        assert "observed fire_extinguisher" in prompt
+        assert "successful plan" in prompt
+        assert "type: lesson" in prompt
+        assert "type: short_term" in prompt
+        assert '"nodes"' in prompt
+
+    def test_format_regular_node_shows_node_type(self):
+        """Regular observation nodes also show their node_type."""
+        node = MemoryNode(
+            node_id=7,
+            summary="grasped cup",
+            tags=TagSet(action_type="grasp", success=True),
+            node_type=NodeType.SHORT_TERM,
+        )
+        line = llm_search._format_node(node)
+        assert "type: short_term" in line
 
     def test_build_prompt_structure(self):
         nodes = [

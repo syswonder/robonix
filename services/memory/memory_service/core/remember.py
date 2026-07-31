@@ -55,13 +55,33 @@ _TASK_KEYWORDS = {
 
 
 def _rule_based_tag_extraction(log_record: LogRecord,
-                                spatial: Optional[SpatialContext]) -> TagSet:
+                                spatial: Optional[SpatialContext],
+                                kv: Optional[dict] = None) -> TagSet:
     """Extract TagSet using keyword matching on LogRecord.msg.
 
     Phase1 rule-based extraction. Phase2: upgrade to LLM-based extraction.
+
+    When ``kv`` carries ``task_type`` (set by Pilot for plan-save calls),
+    tag extraction skips keyword matching and uses the explicit fields.
     """
+    kv = kv or {}
     msg_lower = log_record.msg.lower()
     tags = TagSet()
+
+    # ── Explicit task_type from kv (Pilot plan-save path) ──
+    explicit_task = kv.get("task_type", "")
+    if explicit_task == "plan":
+        tags.task_type = "plan"
+        tags.success = kv.get("success", "true") in ("true", "True", True, 1)
+        tags.action_type = "plan"
+        tags.difficulty = kv.get("difficulty", "medium")
+        # scene_type if provided via kv
+        if kv.get("scene_type"):
+            tags.scene_type = kv.get("scene_type", "")
+        # tool source
+        if log_record.tag:
+            tags.tool_used = [log_record.tag]
+        return tags
 
     # ── Scene type ──
     for scene, keywords in _SCENE_KEYWORDS.items():
@@ -116,11 +136,29 @@ def _rule_based_tag_extraction(log_record: LogRecord,
 
 
 def _generate_summary(log_record: LogRecord,
-                       spatial: Optional[SpatialContext]) -> str:
+                       spatial: Optional[SpatialContext],
+                       kv: Optional[dict] = None) -> str:
     """Template-based summary generation. Phase2: upgrade to LLM.
 
     Format: "[{action}] {success/failure} in {scene}: {key objects}"
+
+    For plan-type memories, the summary is derived from ``kv.plan_query``
+    and ``kv.plan_description`` so it reads as a reusable reference plan.
     """
+    kv = kv or {}
+
+    # ── Plan-type summary ──
+    if kv.get("task_type") == "plan":
+        plan_query = kv.get("plan_query", log_record.msg)
+        plan_desc = kv.get("plan_description", "")
+        n_steps = len(kv.get("plan_steps", "").split("\n")) if kv.get("plan_steps") else 0
+        parts = [f"successful plan: \"{plan_query}\""]
+        if plan_desc:
+            parts.append(f"({plan_desc})")
+        if n_steps:
+            parts.append(f"[{n_steps} steps]")
+        return " ".join(parts)
+
     msg_lower = log_record.msg.lower()
 
     # Determine action
@@ -184,16 +222,30 @@ class RememberPipeline:
         """
         log_record = request.log_record
         spatial = request.spatial
+        kv = request.kv or {}
 
-        # 1. Extract tags
-        tags = _rule_based_tag_extraction(log_record, spatial)
+        # 1. Extract tags (kv carries explicit fields from Pilot plan-save)
+        tags = _rule_based_tag_extraction(log_record, spatial, kv)
 
-        # 2. Generate summary
-        summary = _generate_summary(log_record, spatial)
+        # 2. Generate summary (plan-type uses kv.plan_query / kv.plan_description)
+        summary = _generate_summary(log_record, spatial, kv)
 
         # 3. Build MemoryNode (without node_id — GraphStore assigns it)
         now = time.time_ns()
-        embedding_text = summary  # Phase1: embed the summary text
+        # Embedding text: for plans, include query + description + steps
+        # so BM25 and vector search can match future similar queries.
+        if kv.get("task_type") == "plan":
+            plan_query = kv.get("plan_query", "")
+            plan_desc = kv.get("plan_description", "")
+            plan_steps = kv.get("plan_steps", "")
+            embedding_text = f"plan: {plan_query} | {plan_desc} | steps: {plan_steps}"
+            node_type = NodeType.LESSON  # protected from auto-forget
+            weight = 0.8                 # higher weight for proven plans
+        else:
+            embedding_text = summary
+            node_type = NodeType.SHORT_TERM
+            weight = 0.5
+
         embedding = self._vectors.encode(embedding_text, modality="text")
 
         node = MemoryNode(
@@ -203,9 +255,9 @@ class RememberPipeline:
             timestamp=log_record.ts or now,
             spatial_data=spatial,
             tags=tags,
-            weight=0.5,
+            weight=weight,
             embedding=embedding,
-            node_type=NodeType.SHORT_TERM,
+            node_type=node_type,
             created_at=now,
             version=1,
         )

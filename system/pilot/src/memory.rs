@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Long-term-memory dispatch (best-effort, fire-and-forget on errors).
 //
-// `prefetch` runs before the first VLM call, `compact` on session_end.
-// Both build a one-call Plan and hand it to executor; the corresponding
+// `prefetch` runs before the first VLM call, `compact` on session_end,
+// `save_plan` runs after a successful plan completes.
+// Each builds a one-call Plan and hands it to executor; the corresponding
 // memory provider is looked up via atlas the same way every other capability
 // is. Missing providers are silently tolerated — memory is never load-bearing.
 
 use crate::discovery;
+use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
 use crate::pb::executor::rtdl_event::RtdlEventEnum;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
-use crate::planner::ExecutorConn;
+use crate::planner::{ExecutorConn, TreeStep};
 use robonix_atlas::client::AtlasClient;
-use robonix_scribe::debug;
+use robonix_scribe::{debug, info, warn};
 use tonic::Request;
 use uuid::Uuid;
 
@@ -142,6 +144,95 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             return;
         }
     }
+}
+
+/// Fire-and-forget: save a successful RTDL plan as a ``NodeType::LESSON``
+/// memory node so future similar queries can retrieve and reuse it.
+///
+/// Called from the forest supervisor after a PlanDone with ``!any_failed``
+/// and ``!canceled``.  The caller has already discovered the
+/// ``robonix/service/memory/remember`` capability and passes the
+/// ``(provider_id, contract_id)`` target.  Spawns a background task to
+/// dispatch the ``remember`` call — errors are logged but never propagated
+/// (plan-saving is not load-bearing).
+pub fn save_plan(
+    executor_graph: RobonixSystemExecutorExecuteClient<tonic::transport::Channel>,
+    remember_target: (String, String),
+    plan_id: String,
+    user_query: String,
+    plan_description: String,
+    steps: Vec<TreeStep>,
+) {
+    tokio::spawn(async move {
+        let (provider_id, contract_id) = remember_target;
+
+        // Build plan steps text for embedding and retrieval.
+        let steps_text: String = steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("{}. [{}] {}", i + 1, s.capability, s.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Build the remember request payload (JSON object → string for String.data).
+        let remember_payload = serde_json::json!({
+            "session_id": format!("pilot-save-plan-{plan_id}"),
+            "plan_id": &plan_id,
+            "log_record": {
+                "ts": 0,
+                "level": "Info",
+                "tag": "pilot",
+                "msg": &user_query,
+            },
+            "kv": {
+                "task_type": "plan",
+                "success": "true",
+                "plan_query": &user_query,
+                "plan_description": &plan_description,
+                "plan_steps": &steps_text,
+            },
+        });
+        let payload_str = serde_json::to_string(&remember_payload).unwrap_or_default();
+        let args_json = serde_json::json!({ "data": payload_str }).to_string();
+
+        let plan = single_call_plan(
+            Uuid::new_v4().to_string(),
+            format!("memory-save-plan-{plan_id}"),
+            0,
+            CapabilityCall {
+                call_id: Uuid::new_v4().to_string(),
+                provider_id,
+                contract_id,
+                args_json,
+            },
+        );
+
+        let submitted_plan = plan.clone();
+        let mut executor = executor_graph;
+        let Ok(mut stream) = executor
+            .execute(Request::new(plan))
+            .await
+            .map(|r| r.into_inner())
+        else {
+            warn!("[pilot] save_plan plan_id={plan_id}: executor Execute RPC failed");
+            return;
+        };
+        while let Ok(Some(event)) = stream.message().await {
+            if event.event_kind == RtdlEventEnum::NodeState as u32
+                && let Some(ns) = event.node_state
+                && is_terminal_executor_state(ns.state)
+            {
+                let r = executor_node_state_to_result(&submitted_plan, ns);
+                if r.success {
+                    info!("[pilot] save_plan plan_id={plan_id}: saved as memory node — \"{user_query}\"");
+                } else {
+                    warn!("[pilot] save_plan plan_id={plan_id}: remember failed: {}", r.error);
+                }
+                return;
+            }
+        }
+        warn!("[pilot] save_plan plan_id={plan_id}: executor stream ended without terminal state");
+    });
 }
 
 fn is_terminal_executor_state(state: u32) -> bool {
