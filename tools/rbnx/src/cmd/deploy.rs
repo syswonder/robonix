@@ -175,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boot_prerequisites_build_non_builtin_system_packages() {
+    fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -186,6 +186,7 @@ mod tests {
         ));
         let scene = temp.join("system/scene");
         std::fs::create_dir_all(&scene).expect("scene package directory");
+        std::fs::create_dir_all(temp.join("system/vitals")).expect("vitals builtin directory");
         std::fs::write(
             scene.join("package_manifest.yaml"),
             r#"manifestVersion: 1
@@ -202,7 +203,10 @@ stop: "true"
         .expect("test package manifest");
 
         let deploy = DeployManifest {
-            system: HashMap::from([("scene".to_string(), serde_yaml::Value::Null)]),
+            system: HashMap::from([
+                ("scene".to_string(), serde_yaml::Value::Null),
+                ("vitals".to_string(), serde_yaml::Value::Null),
+            ]),
             ..Default::default()
         };
         let manifest_dir = temp.join("deployment");
@@ -403,7 +407,7 @@ fn check_prerequisites(
     // otherwise `rbnx start` performs the build after spawn and the provider
     // registration timeout can kill a legitimate first build (Scene model
     // downloads are a common example).
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
     if let Some(source_root) = robonix_source_path {
         for name in deploy.system.keys() {
             if SYSTEM_BUILTINS.contains(&name.as_str()) {
