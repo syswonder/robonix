@@ -281,8 +281,9 @@ if [[ "$TARGET" == "jetson-native" ]]; then
         "protobuf=6.33.6" \
         "grpcio=1.80.0"
 
-    # Pre-fetch the CLIP weights into the host HF cache (start_native points
-    # HF_HOME here). Also pre-warm Ultralytics YOLO-World's text encoder path:
+    # Validate the host-staged open_clip checkpoint without contacting the
+    # Hugging Face metadata API. Also pre-warm Ultralytics YOLO-World's text
+    # encoder path:
     # YOLOWorld.set_classes() uses openai/clip via Ultralytics' weights_dir,
     # not open_clip's HF cache. If this is left to start_native, first boot can
     # spend minutes downloading ViT-B-32.pt and miss the scene/object test flow.
@@ -336,13 +337,6 @@ model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
 model.set_classes(classes)
 PY
     ULTRALYTICS_CLIP="$UWD/clip/ViT-B-32.pt"
-    HF_CLIP="$HFD/clip/ViT-B-32.pt"
-    if [[ ! -s "$ULTRALYTICS_CLIP" && -s "$HF_CLIP" ]]; then
-        mkdir -p "$(dirname "$ULTRALYTICS_CLIP")"
-        ln "$HF_CLIP" "$ULTRALYTICS_CLIP" 2>/dev/null \
-            || cp "$HF_CLIP" "$ULTRALYTICS_CLIP"
-        echo "[build] staged Ultralytics CLIP weight: $ULTRALYTICS_CLIP"
-    fi
     if [[ ! -s "$ULTRALYTICS_CLIP" ]]; then
         echo "[build] error: missing $ULTRALYTICS_CLIP after prefetch" >&2
         exit 1

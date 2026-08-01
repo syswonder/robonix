@@ -141,6 +141,12 @@ class SceneBuildConfigTest(unittest.TestCase):
         self.assertNotIn("||", install_line)
         self.assertIn('"$PY" "$PKG/scripts/verify_python_codegen.py"', build)
 
+    def test_native_clip_validation_has_no_removed_hf_cache_reference(self):
+        build = (ROOT / "scripts" / "build.sh").read_text()
+        self.assertNotIn("$HFD", build)
+        self.assertIn('ULTRALYTICS_CLIP="$UWD/clip/ViT-B-32.pt"', build)
+        self.assertIn('if [[ ! -s "$ULTRALYTICS_CLIP" ]]', build)
+
     def test_executable_codegen_import_provenance_regression(self):
         script = ROOT / "tests" / "test_python_codegen.sh"
         self.assertTrue(os.access(script, os.X_OK), f"not executable: {script}")
