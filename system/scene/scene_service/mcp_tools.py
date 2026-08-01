@@ -13,10 +13,12 @@ into a JSON-schema-typed MCP tool that Pilot discovers via atlas.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import math
 import os
 import time
+from collections.abc import Iterable
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
@@ -583,6 +585,56 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     )
 
 
+def _cells_nearest_to(
+    *,
+    min_gx: int,
+    max_gx: int,
+    min_gy: int,
+    max_gy: int,
+    resolution: float,
+    origin_x: float,
+    origin_y: float,
+    target_x: float,
+    target_y: float,
+) -> Iterable[tuple[float, float, int, int]]:
+    """Yield grid cells in increasing distance from a target point.
+
+    The priority flood retains only its explored frontier, allowing room-goal
+    search to stop at the nearest safe cell instead of scanning the full room.
+    """
+    start_gx = min(
+        max(math.floor((target_x - origin_x) / resolution), min_gx),
+        max_gx,
+    )
+    start_gy = min(
+        max(math.floor((target_y - origin_y) / resolution), min_gy),
+        max_gy,
+    )
+    pending: list[tuple[float, float, float, int, int]] = []
+    visited: set[tuple[int, int]] = set()
+
+    def push(gx: int, gy: int) -> None:
+        """Add one unseen in-bounds cell to the distance frontier."""
+        if not (min_gx <= gx <= max_gx and min_gy <= gy <= max_gy):
+            return
+        if (gx, gy) in visited:
+            return
+        visited.add((gx, gy))
+        x = origin_x + (gx + 0.5) * resolution
+        y = origin_y + (gy + 0.5) * resolution
+        distance_sq = (x - target_x) ** 2 + (y - target_y) ** 2
+        heapq.heappush(pending, (distance_sq, x, y, gx, gy))
+
+    push(start_gx, start_gy)
+    while pending:
+        _distance_sq, x, y, gx, gy = heapq.heappop(pending)
+        yield x, y, gx, gy
+        push(gx - 1, gy)
+        push(gx + 1, gy)
+        push(gx, gy - 1)
+        push(gx, gy + 1)
+
+
 def _occupancy_room_goal(grid_msg, points) -> tuple[float, float] | None:
     """Choose the safest free grid cell nearest a room's polygon centroid."""
     import numpy as np
@@ -606,30 +658,34 @@ def _occupancy_room_goal(grid_msg, points) -> tuple[float, float] | None:
     max_x = min(width - 1, int((max(x for x, _ in polygon) - origin_x) / resolution))
     min_y = max(0, int((min(y for _, y in polygon) - origin_y) / resolution))
     max_y = min(height - 1, int((max(y for _, y in polygon) - origin_y) / resolution))
-    candidates = []
-    for gy in range(min_y, max_y + 1):
-        wy = origin_y + (gy + 0.5) * resolution
-        for gx in range(min_x, max_x + 1):
-            wx = origin_x + (gx + 0.5) * resolution
-            if not disc_inside_polygon(wx, wy, footprint_radius, polygon):
-                continue
-            if (
-                gx - inflation_cells < 0
-                or gy - inflation_cells < 0
-                or gx + inflation_cells >= width
-                or gy + inflation_cells >= height
-            ):
-                continue
-            local = blocked[
-                gy - inflation_cells: gy + inflation_cells + 1,
-                gx - inflation_cells: gx + inflation_cells + 1,
-            ]
-            if not bool(local.any()):
-                candidates.append(((wx - centroid_x) ** 2 + (wy - centroid_y) ** 2, wx, wy))
-    if not candidates:
-        return None
-    _, x, y = min(candidates)
-    return x, y
+    cells = _cells_nearest_to(
+        min_gx=min_x,
+        max_gx=max_x,
+        min_gy=min_y,
+        max_gy=max_y,
+        resolution=resolution,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        target_x=centroid_x,
+        target_y=centroid_y,
+    )
+    for wx, wy, gx, gy in cells:
+        if not disc_inside_polygon(wx, wy, footprint_radius, polygon):
+            continue
+        if (
+            gx - inflation_cells < 0
+            or gy - inflation_cells < 0
+            or gx + inflation_cells >= width
+            or gy + inflation_cells >= height
+        ):
+            continue
+        local = blocked[
+            gy - inflation_cells: gy + inflation_cells + 1,
+            gx - inflation_cells: gx + inflation_cells + 1,
+        ]
+        if not bool(local.any()):
+            return wx, wy
+    return None
 
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/goal_room")
