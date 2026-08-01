@@ -2,6 +2,7 @@
 """Robot-footprint-aware occupancy planning for Scene spatial goals."""
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Iterable, Sequence
 
@@ -193,6 +194,56 @@ def _footprint_clear(
     return True
 
 
+def _cells_nearest_to(
+    *,
+    min_gx: int,
+    max_gx: int,
+    min_gy: int,
+    max_gy: int,
+    resolution: float,
+    origin_x: float,
+    origin_y: float,
+    target_x: float,
+    target_y: float,
+) -> Iterable[tuple[float, float]]:
+    """Yield bounding-box cell centres in increasing distance from a target.
+
+    The priority flood only retains the explored frontier, so a safe pose near
+    the room centroid can be returned without sorting or testing the full room.
+    """
+    start_gx = min(
+        max(math.floor((target_x - origin_x) / resolution), min_gx),
+        max_gx,
+    )
+    start_gy = min(
+        max(math.floor((target_y - origin_y) / resolution), min_gy),
+        max_gy,
+    )
+    pending: list[tuple[float, float, float, int, int]] = []
+    visited: set[tuple[int, int]] = set()
+
+    def push(gx: int, gy: int) -> None:
+        """Add one in-bounds cell to the distance-ordered frontier."""
+        if not (min_gx <= gx <= max_gx and min_gy <= gy <= max_gy):
+            return
+        if (gx, gy) in visited:
+            return
+        visited.add((gx, gy))
+        x = origin_x + (gx + 0.5) * resolution
+        y = origin_y + (gy + 0.5) * resolution
+        distance_sq = (x - target_x) ** 2 + (y - target_y) ** 2
+        heapq.heappush(pending, (distance_sq, x, y, gx, gy))
+
+    push(start_gx, start_gy)
+    while pending:
+        _distance_sq, x, y, gx, gy = heapq.heappop(pending)
+        yield x, y
+        push(gx - 1, gy)
+        push(gx + 1, gy)
+        push(gx, gy - 1)
+        push(gx, gy + 1)
+
+
 def room_goal(
     grid_msg,
     room_points: Sequence[Point],
@@ -221,37 +272,33 @@ def room_goal(
     headings = tuple(float(yaw) for yaw in yaw_candidates)
     if not headings or any(not math.isfinite(yaw) for yaw in headings):
         return None
-    candidates: list[tuple[float, int, float, float, float]] = []
-    for gy in range(min_gy, max_gy + 1):
-        y = origin_y + (gy + 0.5) * resolution
-        for gx in range(min_gx, max_gx + 1):
-            x = origin_x + (gx + 0.5) * resolution
-            for heading_rank, yaw in enumerate(headings):
-                candidate = transformed_footprint(footprint, x, y, yaw)
-                if not polygon_inside_polygon(candidate, room):
-                    continue
-                if _footprint_clear(
-                    blocked,
-                    width=width,
-                    height=height,
-                    resolution=resolution,
-                    origin_x=origin_x,
-                    origin_y=origin_y,
-                    polygon=candidate,
-                ):
-                    candidates.append(
-                        (
-                            (x - centroid_x) ** 2 + (y - centroid_y) ** 2,
-                            heading_rank,
-                            x,
-                            y,
-                            yaw,
-                        )
-                    )
-    if not candidates:
-        return None
-    _, _, x, y, yaw = min(candidates)
-    return x, y, yaw
+    cells = _cells_nearest_to(
+        min_gx=min_gx,
+        max_gx=max_gx,
+        min_gy=min_gy,
+        max_gy=max_gy,
+        resolution=resolution,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        target_x=centroid_x,
+        target_y=centroid_y,
+    )
+    for x, y in cells:
+        for yaw in headings:
+            candidate = transformed_footprint(footprint, x, y, yaw)
+            if not polygon_inside_polygon(candidate, room):
+                continue
+            if _footprint_clear(
+                blocked,
+                width=width,
+                height=height,
+                resolution=resolution,
+                origin_x=origin_x,
+                origin_y=origin_y,
+                polygon=candidate,
+            ):
+                return x, y, yaw
+    return None
 
 
 def _ring_cells(center_x: int, center_y: int, radius: int) -> Iterable[tuple[int, int]]:
