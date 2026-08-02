@@ -1,0 +1,10 @@
+# Read the configured and effective navigation speed limits.
+[contract]
+id      = "robonix/service/navigation/get_speed_limit"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/GetNavigationSpeedLimit.srv"
+description = "Read the configured and effective navigation speed limits."
+
+[mode]
+type = "rpc"

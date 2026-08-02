@@ -1,0 +1,26 @@
+# robonix/service/navigation/adjust_speed — change the speed limit of an
+# active navigation run without replacing its goal.
+#
+# direction:
+#   "faster" — increase by the provider's configured percentage step
+#   "slower" — decrease by the configured percentage step
+#   "normal" — restore the configured default percentage
+#
+# Empty run_id targets the most recent active navigation run. By default the
+# adjustment belongs to that run and is restored when the run terminates.
+# persist=true applies the adjustment to the provider session instead; run_id
+# is then ignored.
+string direction
+string run_id
+bool persist
+---
+bool accepted
+bool changed
+# Percentage of the deployment-configured linear-speed ceiling.
+float64 effective_percentage
+# Planar linear-speed ceiling in metres per second (m/s).
+float64 effective_linear_speed_mps
+# "goal" for an automatically restored override, or "session" if persistent.
+string scope
+string run_id
+string detail

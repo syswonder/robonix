@@ -1,0 +1,11 @@
+# Set an explicit percentage of the deployment-configured maximum navigation
+# speed.
+[contract]
+id      = "robonix/service/navigation/set_speed_limit"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/SetNavigationSpeedLimit.srv"
+description = "Set an explicit bounded navigation speed percentage."
+
+[mode]
+type = "rpc"

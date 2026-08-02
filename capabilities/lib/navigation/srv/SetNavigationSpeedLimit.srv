@@ -1,0 +1,21 @@
+# robonix/service/navigation/set_speed_limit — set an explicit percentage of
+# the deployment-configured maximum navigation speed.
+#
+# Empty run_id targets the most recent active navigation run. By default the
+# limit belongs to that run and is restored when the run terminates.
+# persist=true applies the limit to the provider session instead; run_id is
+# then ignored.
+float64 percentage
+string run_id
+bool persist
+---
+bool accepted
+bool changed
+# Percentage of the deployment-configured linear-speed ceiling.
+float64 effective_percentage
+# Planar linear-speed ceiling in metres per second (m/s).
+float64 effective_linear_speed_mps
+# "goal" for an automatically restored override, or "session" if persistent.
+string scope
+string run_id
+string detail

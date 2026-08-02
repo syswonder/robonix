@@ -1,0 +1,11 @@
+# Make an active navigation run faster, slower, or normal without replacing
+# its goal.
+[contract]
+id      = "robonix/service/navigation/adjust_speed"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/AdjustNavigationSpeed.srv"
+description = "Adjust an active navigation run by the deployment-configured speed step."
+
+[mode]
+type = "rpc"
