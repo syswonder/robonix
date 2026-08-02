@@ -1,0 +1,31 @@
+manifestVersion: 1
+name: robonix-webots-sentinel-demo
+
+# SENTINEL_DEMO.md documents the versioned first-boot policy and reset path.
+
+system:
+  atlas:
+    listen: 0.0.0.0:50051
+    log: info
+
+  keystone:
+    listen: 0.0.0.0:50095
+    log: info
+    database: ${HOME}/.robonix/data/keystone.db
+    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
+
+  executor:
+    listen: 127.0.0.1:50061
+    sentinel_listen: 0.0.0.0:50062
+    sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
+    sentinel_rules_seed: sentinel-rules.v1.json
+    log: info
+
+# Keeping the simulated camera under primitive preserves the normal package
+# semantics. rbnx therefore injects Soma automatically; Scene/navigation are
+# intentionally absent from this focused Sentinel acceptance deployment.
+primitive:
+  - name: tiago_camera
+    path: ./primitives/tiago_camera
+    config:
+      sentinel_timeout_s: 150

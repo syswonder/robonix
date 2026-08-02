@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/sentinel/list_rules"
+version = "1"
+kind = "service"
+idl = "sentinel/srv/ListRules.srv"
+description = "List the robot-wide Sentinel rules for an authenticated administrator."
+
+[mode]
+type = "rpc"

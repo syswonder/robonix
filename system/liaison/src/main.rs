@@ -48,6 +48,7 @@ use pb::contracts::{
     },
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
+use pb::keystone::User;
 use pb::liaison::{
     GetHandsfreeStatusRequest, GetHandsfreeStatusResponse, SetHandsfreeRequest,
     SetHandsfreeResponse, StartVoiceSessionRequest, VoiceEvent, WatchHandsfreeEventsRequest,
@@ -191,7 +192,7 @@ impl LiaisonPipeline {
 }
 
 /// Resolve the login token, replace caller-supplied identity with Keystone's
-/// canonical account, and remove the secret before forwarding to Pilot.
+/// canonical account, and move the secret into the typed internal-only field.
 async fn authenticate_task(
     keystone: &keystone_gateway::KeystoneGateway,
     task: &mut Task,
@@ -207,6 +208,18 @@ async fn authenticate_task(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| Status::unauthenticated("login session is required"))?;
     let user = keystone.resolve_session(&token).await?;
+    install_authenticated_identity(task, context, token, user)
+}
+
+fn install_authenticated_identity(
+    task: &mut Task,
+    mut context: serde_json::Value,
+    token: String,
+    user: User,
+) -> Result<(), Status> {
+    let object = context
+        .as_object_mut()
+        .ok_or_else(|| Status::invalid_argument("Task.context_json must be a JSON object"))?;
     object.insert("user_id".to_string(), serde_json::json!(user.user_id));
     object.insert("username".to_string(), serde_json::json!(user.username));
     object.insert(
@@ -216,6 +229,9 @@ async fn authenticate_task(
     object.insert("roles".to_string(), serde_json::json!(user.roles));
     task.context_json =
         serde_json::to_string(&context).map_err(|error| Status::internal(error.to_string()))?;
+    // Never trust a caller-supplied typed value. Only the credential that was
+    // successfully resolved above may cross the Liaison -> Pilot boundary.
+    task.auth_session_token = token;
     Ok(())
 }
 
@@ -443,6 +459,7 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
         audio_data: vec![],
         context_json: r#"{"session_end":true}"#.to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     };
     match pipeline.handle_intent(task).await {
         Ok(rx) => {
@@ -483,6 +500,7 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
             audio_data: vec![],
             context_json: String::new(),
             timestamp_ms: now_ms(),
+            auth_session_token: String::new(),
         };
 
         match pipeline.handle_intent(task).await {
@@ -880,6 +898,7 @@ mod tests {
             audio_data: vec![],
             context_json: String::new(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         };
         ensure_user_id(&mut t);
         let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
@@ -898,6 +917,7 @@ mod tests {
             audio_data: vec![],
             context_json: r#"{"foo":"bar","user_id":"voice:alice"}"#.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         };
         ensure_user_id(&mut t);
         let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
@@ -916,7 +936,33 @@ mod tests {
             audio_data: vec![],
             context_json: r#"{"user_id":"local:alice"}"#.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         };
         assert_eq!(task_user_id(&t), "local:alice");
+    }
+
+    #[test]
+    fn authenticated_identity_overwrites_caller_claims_and_typed_secret() {
+        let mut task = Task {
+            context_json: r#"{"user_id":"forged","roles":["admin"]}"#.into(),
+            auth_session_token: "caller-supplied-secret".into(),
+            ..Default::default()
+        };
+        let context: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
+        let user = User {
+            user_id: "canonical-user".into(),
+            username: "canonical".into(),
+            display_name: "Canonical User".into(),
+            roles: vec!["user".into()],
+            ..Default::default()
+        };
+
+        install_authenticated_identity(&mut task, context, "validated-session".into(), user)
+            .unwrap();
+
+        let context: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
+        assert_eq!(context["user_id"], "canonical-user");
+        assert_eq!(context["roles"], serde_json::json!(["user"]));
+        assert_eq!(task.auth_session_token, "validated-session");
     }
 }

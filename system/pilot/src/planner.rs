@@ -140,6 +140,14 @@ fn task_modality(task: &Task) -> Option<String> {
         })
 }
 
+/// Build the user-visible Plan event without exposing the reusable Keystone
+/// credential carried by the internal Executor copy.
+fn public_plan(plan: &Plan) -> Plan {
+    let mut public = plan.clone();
+    public.auth_session_token.clear();
+    public
+}
+
 /// Skip vector memory prefetch for trivial chit-chat (saves latency and noise).
 fn skip_memory_prefetch(user_text: &str) -> bool {
     let t = user_text.trim();
@@ -1567,7 +1575,8 @@ pub async fn run_turn(
             continue 'supervisor;
         }
 
-        let graph = graph.expect("non-meta RTDL response must carry a graph");
+        let mut graph = graph.expect("non-meta RTDL response must carry a graph");
+        graph.auth_session_token = task.auth_session_token.clone();
 
         let calls = plan_call_count(&graph);
         let call_signatures = plan_call_signatures(&graph);
@@ -1712,7 +1721,7 @@ pub async fn run_turn(
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
-                PilotStreamBody::Plan(graph.clone()),
+                PilotStreamBody::Plan(public_plan(&graph)),
             )))
             .await;
         cancel_requested.extend(cancel_targets);
@@ -2081,6 +2090,7 @@ fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan 
             description: "recovery: no valid plan produced".to_string(),
         }],
         root_index: 0,
+        auth_session_token: String::new(),
     }
 }
 
@@ -2128,6 +2138,7 @@ fn expand_rtdl_to_plan(
         round,
         nodes,
         root_index,
+        auth_session_token: String::new(),
     })
 }
 
@@ -2812,7 +2823,7 @@ mod tests {
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
         is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
         parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        public_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end,
     };
@@ -3280,6 +3291,7 @@ mod tests {
             audio_data: Vec::new(),
             context_json: ctx.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         }
     }
 
@@ -3303,6 +3315,16 @@ mod tests {
     }
 
     #[test]
+    fn public_plan_redacts_internal_auth_credential() {
+        let mut internal = single_do_plan("robonix/test/run");
+        internal.auth_session_token = "reusable-secret".into();
+
+        let public = public_plan(&internal);
+        assert!(public.auth_session_token.is_empty());
+        assert_eq!(internal.auth_session_token, "reusable-secret");
+    }
+
+    #[test]
     fn skip_prefetch_chitchat() {
         assert!(skip_memory_prefetch("hi"));
         assert!(skip_memory_prefetch("Hello"));
@@ -3320,6 +3342,7 @@ mod tests {
             session_id: "s".into(),
             round: 0,
             root_index: 0,
+            auth_session_token: String::new(),
             nodes: vec![RtdlNode {
                 node_kind: RTDL_DO,
                 children: vec![],

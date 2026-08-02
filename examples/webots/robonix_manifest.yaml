@@ -30,6 +30,14 @@ system:
   # execution layer
   executor:
     listen: 127.0.0.1:50061
+    # Executor execution remains robot-local, while the macOS Client must be
+    # able to reach the admin-only Sentinel management provider through Atlas.
+    sentinel_listen: 0.0.0.0:50062
+    # Rules belong to this robot and survive rebuilds or alternate worktrees.
+    sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
+    # Copied only when the robot-local file is absent; later admin edits win.
+    # See SENTINEL_DEMO.md for the baseline policy and fresh-demo procedure.
+    sentinel_rules_seed: sentinel-rules.v1.json
     log: info
   # interaction layer
   pilot:

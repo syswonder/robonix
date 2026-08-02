@@ -41,6 +41,7 @@ fn single_call_plan(plan_id: String, session_id: String, round: u32, call: Capab
             },
         ],
         root_index: 0,
+        auth_session_token: String::new(),
     }
 }
 

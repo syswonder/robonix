@@ -65,7 +65,10 @@ forwarding work. Client-supplied `user_id`, display name, and roles are never
 authorization inputs.
 
 Accepted Pilot tasks contain canonical `user_id`, `username`, `display_name`,
-and `roles`. The session token itself is removed before forwarding to Pilot.
+and `roles` for conversational context. Liaison moves the validated session
+token into a typed internal field; Pilot does not parse it and redacts it from
+client events, while Executor uses it once to resolve canonical Sentinel
+identity directly from Keystone before dispatch.
 
 Text turns require a valid account session and never require Voiceprint. For
 voice turns:
