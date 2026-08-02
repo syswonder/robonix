@@ -110,6 +110,11 @@ def _rule_based_tag_extraction(log_record: LogRecord,
         if tags.task_type:
             break
 
+    # Default: observations with no matched task_type → "observe".
+    # Plan nodes skip this path entirely (kv.task_type="plan" early return).
+    if not tags.task_type:
+        tags.task_type = "observe"
+
     # ── Success ──
     tags.success = (log_record.level.lower() not in ("error", "warn"))
 

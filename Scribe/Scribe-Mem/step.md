@@ -2895,8 +2895,163 @@ PlanDone (!any_failed)
 
 ### 后续工作（Phase 2）
 
-- [ ] Pilot `prefetch` 增加 `tags.task_type: "plan"` 过滤，优先返回 plan 类型记忆
-- [ ] 系统 prompt 增加 "Similar successful plans" 区块，格式化展示历史 RTDL 步骤
 - [ ] TagIndex 增加 `task_type` 维度索引以加速 plan 过滤
-- [ ] LLM ranker prompt 增加 plan reuse 指令（"优先复用相似 plan，只修改差异部分"）
 - [ ] `SkillTemplate` 自动提取：当同一 task_type 下积累 ≥3 个相似 plan 时，泛化为 Skill
+- [ ] 中文分词 + bge-m3 多语言 embedding（见 `记忆系统检索质量优化方案` Phase 1）
+
+---
+
+## 成功规划检索复用（2026-08-01 完成）
+
+### 需求
+
+在上一阶段（成功规划保存）基础上，当用户提出新问题时，Pilot 的 `prefetch` 自动检索历史记忆中最相似的成功规划，将其注入系统 prompt，VLM 参考历史 RTDL 进行规划。
+
+### 实现
+
+#### 改动 1：规划步骤存入 `raw_log.msg`
+
+**文件**：`system/pilot/src/memory.rs` — `save_plan()`
+
+```rust
+let log_msg = format!("plan: {}\nsteps:\n{}", user_query, steps_text);
+```
+
+之前 `log_record.msg` 仅包含用户查询原文。现在改为结构化格式：
+
+```
+plan: 向前移动1米
+steps:
+1. [get_pose] get current pose from SLAM
+2. [navigate] Navigate to goal 1 meter ahead
+```
+
+当记忆节点被检索时，`raw_log.msg` 字段包含完整规划结构，VLM 可直接读取并复用 capability 名称。
+
+#### 改动 2：修复 prefetch contract ID 不匹配
+
+**文件**：`system/pilot/src/planner.rs`
+
+```rust
+// 修复前（查不到任何东西）
+.find(|(_, cap)| cap.contract_id == "robonix/service/memory/search")
+
+// 修复后（匹配 memgraph 注册的 MCP tool name）
+.find(|(_, cap)| cap.contract_id == "robonix/service/memory/hybrid_search")
+```
+
+Pilot 查找的 contract ID 是 `robonix/service/memory/search`，但 Memory 服务注册的是 `robonix/service/memory/hybrid_search`。这是一个预存在的 bug，导致 prefetch 一直不工作。修复后 prefetch 能正确调用 memory 搜索。
+
+#### 改动 3：修复 prefetch 的 JSON 请求格式
+
+**文件**：`system/pilot/src/memory.rs` — `prefetch()`
+
+```rust
+// 修复前（msg.data 是裸字符串 → "Invalid JSON in request body"）
+args_json: serde_json::json!({ "data": query }).to_string(),
+
+// 修复后（msg.data 是合法 JSON → 正确解析）
+let search_payload = serde_json::json!({"query": query, "top_k": 5});
+let payload_str = serde_json::to_string(&search_payload).unwrap_or_default();
+args_json: serde_json::json!({ "data": payload_str }).to_string(),
+```
+
+Memory 服务的 `_mcp_search` 期望 `msg.data` 是一个 JSON 对象字符串（`{"query": "...", "top_k": 5}`），而非裸文本。
+
+#### 改动 4：系统 prompt 增加 Plan Reuse Guideline
+
+**文件**：`system/pilot/src/planner.rs`
+
+在 prefetch 结果注入的系统 prompt 中增加 VLM 指令：
+
+```markdown
+### Plan reuse guideline
+If a memory entry shows "task_type": "plan" and "node_type": "lesson",
+it describes a previously SUCCESSFUL RTDL plan. The "raw_log"."msg" field
+contains the original user query and the numbered execution steps with
+capability names. When the user's current request is semantically similar to
+a saved plan, reuse or adapt its steps: copy the capability names EXACTLY
+from the saved plan's steps, adjusting only the arguments (e.g. target
+coordinates, object names). Plans with higher "weight" (0.8) are more
+reliable than ordinary observations (0.5). Do NOT reuse a plan if the
+current situation requires different capabilities or the environment has
+changed significantly.
+```
+
+### 端到端测试结果
+
+测试环境：Webots office 场景 + Tiago 机器人 + deepseek-v4-pro
+
+| 测试步骤 | 操作 | 结果 |
+|----------|------|------|
+| 1 | 发送 "向前移动1米" | get_pose → navigate → 成功，3 个 plan 节点保存 ✅ |
+| 2 | 发送 "帮我前进大概一米" | prefetch 运行 ✅，plan 保存 ✅ |
+| 3 | 重启 rbnx（MEMGRAPH_KEEP_DATA=1）| 10 个节点保留，9 个 plan 节点 ✅ |
+| 4 | 发送 "移动一下，往前走一段" | prefetch 返回结果 ✅，VLM 正常规划 ✅ |
+
+**检索验证**：
+
+```
+Graph store: 10 nodes, 9 plan nodes preserved after reboot
+
+★ node 1 [lesson]: successful plan: "向前移动1米" (get initial pose) [1 steps]
+    msg: plan: 向前移动1米
+    steps:
+    1. [get_pose] get current pose from SLAM
+
+★ node 2 [lesson]: successful plan: "向前移动1米" (navigate forward 1m) [1 steps]
+    msg: plan: 向前移动1米
+    steps:
+    1. [navigate] Navigate to goal 1 meter ahead of current pose
+...
+```
+
+**已知限制**：
+
+- BM25 中文分词缺失 → 中文查询无法通过关键词匹配命中中文 plan 摘要
+- Embedding 默认关闭 → 无语义检索能力
+- 当前 LLM search path 返回空 → 回退到时间排序，只能返回最近节点
+
+这些是 `记忆系统检索质量优化方案` 文档中记录的预存在问题，需要 Phase 1 改动（bge-m3 多语言 embedding + 中文分词 + 同义词映射表）来解决。本 PR 的检索基础设施已就绪，一旦 embedding/search 改进到位，plan 检索将自动生效。
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `system/pilot/src/memory.rs` | `save_plan()` 将规划步骤写入 `raw_log.msg`；`prefetch()` 修复 JSON 请求格式 |
+| `system/pilot/src/planner.rs` | 修复 prefetch contract ID (`search` → `hybrid_search`)；系统 prompt 增加 Plan reuse guideline |
+| `Scribe/Scribe-Mem/step.md` | 本文档 |
+
+### 完整数据流
+
+```
+用户提问 "帮我前进大概一米"
+  │
+  ▼
+Pilot::run_turn()
+  │
+  ├─ memory::prefetch("帮我前进大概一米")
+  │   │
+  │   ├─ Executor → MCP call_tool("hybrid_search", {query, top_k:5})
+  │   │   │
+  │   │   └─ Memory Service → RetrievePipeline
+  │   │       ├─ TagIndex.query(TagFilter{}) → all 10 nodes
+  │   │       ├─ LLM rank (or BM25 + chronological fallback)
+  │   │       └─ → top 5 nodes as JSON
+  │   │
+  │   └─ System prompt += "## Relevant past memories\n{JSON}\n### Plan reuse guideline"
+  │
+  ├─ VLM receives:
+  │   - User query: "帮我前进大概一米"
+  │   - Memory: ★ plan node "向前移动1米" with steps [get_pose, navigate]
+  │   - Instructions: "copy capability names EXACTLY from saved plan's steps"
+  │
+  ├─ VLM generates RTDL reusing the plan structure:
+  │   { "op": "sequence", "children": [
+  │     { "op": "do", "cap": "tiago_chassis.get_pose", ... },     ← reused
+  │     { "op": "do", "cap": "tiago_navigation.navigate_to_goal", ... }  ← reused
+  │   ]}
+  │
+  └─ Executor executes → PlanDone(!any_failed)
+      └─ memory::save_plan() → stores as another LESSON node
+```

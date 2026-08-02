@@ -55,6 +55,21 @@ pub async fn prefetch(
     target: Option<(String, String)>,
 ) -> Option<String> {
     let (provider_id, contract_id) = target?;
+
+    // Build the search request payload as a JSON string for String.data.
+    // The memory service expects msg.data to be valid JSON with "query" and
+    // optional "top_k", "tags", etc.
+    // Filter for task_type="plan" so scene observations don't pollute
+    // the plan-reuse section of the system prompt.
+    let search_payload = serde_json::json!({
+        "query": query,
+        "top_k": 5,
+        "tags": {
+            "task_type": "plan",
+        },
+    });
+    let payload_str = serde_json::to_string(&search_payload).unwrap_or_default();
+
     let plan = single_call_plan(
         Uuid::new_v4().to_string(),
         "memory-prefetch".to_string(),
@@ -63,7 +78,7 @@ pub async fn prefetch(
             call_id: Uuid::new_v4().to_string(),
             provider_id,
             contract_id,
-            args_json: serde_json::json!({ "data": query }).to_string(),
+            args_json: serde_json::json!({ "data": payload_str }).to_string(),
         },
     );
 
@@ -174,6 +189,11 @@ pub fn save_plan(
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Build a rich log message so that when the memory is retrieved,
+        // the VLM can see the full plan structure (query + steps) in
+        // raw_log.msg and reuse or adapt it.
+        let log_msg = format!("plan: {}\nsteps:\n{}", user_query, steps_text);
+
         // Build the remember request payload (JSON object → string for String.data).
         let remember_payload = serde_json::json!({
             "session_id": format!("pilot-save-plan-{plan_id}"),
@@ -182,7 +202,7 @@ pub fn save_plan(
                 "ts": 0,
                 "level": "Info",
                 "tag": "pilot",
-                "msg": &user_query,
+                "msg": &log_msg,
             },
             "kv": {
                 "task_type": "plan",
@@ -224,9 +244,14 @@ pub fn save_plan(
             {
                 let r = executor_node_state_to_result(&submitted_plan, ns);
                 if r.success {
-                    info!("[pilot] save_plan plan_id={plan_id}: saved as memory node — \"{user_query}\"");
+                    info!(
+                        "[pilot] save_plan plan_id={plan_id}: saved as memory node — \"{user_query}\""
+                    );
                 } else {
-                    warn!("[pilot] save_plan plan_id={plan_id}: remember failed: {}", r.error);
+                    warn!(
+                        "[pilot] save_plan plan_id={plan_id}: remember failed: {}",
+                        r.error
+                    );
                 }
                 return;
             }
