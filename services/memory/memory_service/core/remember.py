@@ -310,5 +310,27 @@ class RememberPipeline:
                 log.warning("remember: parent_node_id %d not found, skipping edge",
                            request.parent_node_id)
 
+        # 9. Plan-type nodes → also save to standalone ptdl_store.json
+        if kv.get("task_type") == "plan":
+            try:
+                from ..storage.ptdl_store import get_ptdl_store
+                ptdl = get_ptdl_store()
+                steps_list = [
+                    s.strip()
+                    for s in kv.get("plan_steps", "").split("\n")
+                    if s.strip()
+                ]
+                plan_count = int(kv.get("plan_count", "1"))
+                canceled_count = int(kv.get("canceled_count", "0"))
+                ptdl.add(
+                    query=kv.get("plan_query", log_record.msg),
+                    description=kv.get("plan_description", ""),
+                    steps=steps_list,
+                    plan_count=plan_count,
+                    canceled_count=canceled_count,
+                )
+            except Exception as e:
+                log.warning("remember: ptdl_store save failed: %s", e)
+
         log.info("remember: node %d → \"%s\"", node_id, summary)
         return RememberResponse(node_id=node_id, message=f"Memory saved as node {node_id}")

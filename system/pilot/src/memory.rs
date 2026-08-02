@@ -170,6 +170,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
 /// ``(provider_id, contract_id)`` target.  Spawns a background task to
 /// dispatch the ``remember`` call — errors are logged but never propagated
 /// (plan-saving is not load-bearing).
+#[allow(clippy::too_many_arguments)]
 pub fn save_plan(
     executor_graph: RobonixSystemExecutorExecuteClient<tonic::transport::Channel>,
     remember_target: (String, String),
@@ -177,6 +178,8 @@ pub fn save_plan(
     user_query: String,
     plan_description: String,
     steps: Vec<TreeStep>,
+    tree_count: usize,
+    canceled_count: usize,
 ) {
     tokio::spawn(async move {
         let (provider_id, contract_id) = remember_target;
@@ -210,6 +213,8 @@ pub fn save_plan(
                 "plan_query": &user_query,
                 "plan_description": &plan_description,
                 "plan_steps": &steps_text,
+                "plan_count": tree_count.to_string(),
+                "canceled_count": canceled_count.to_string(),
             },
         });
         let payload_str = serde_json::to_string(&remember_payload).unwrap_or_default();

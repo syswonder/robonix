@@ -890,6 +890,8 @@ fn flush_accumulated_plan(
             user_goal.to_string(),
             plan_desc,
             steps,
+            n_trees,
+            0, // canceled_count: tracked per-tree, not accumulated here
         );
     }
 }
