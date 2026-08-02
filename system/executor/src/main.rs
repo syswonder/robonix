@@ -9,7 +9,10 @@
 //      so pilot's atlas-driven discovery surfaces them to the LLM as plain
 //      capabilities. Calls hitting these contracts short-circuit to in-process
 //      handlers in `dispatch::builtin` — no MCP loopback.
-//   4. Serves Execute on `listen`. Per-call dispatch resolves provider via
+//   4. Serves Executor RPCs on `listen` and Sentinel management RPCs on the
+//      adjacent (or configured) `sentinel_listen` endpoint. Atlas requires
+//      endpoints to be unique across providers.
+//   5. Per-call dispatch resolves provider via
 //      `ConnectCapability(provider_id, contract_id, MCP)` on atlas.
 
 mod config;
@@ -17,6 +20,7 @@ mod dispatch;
 mod pb;
 mod plan_runtime;
 mod rtdl_wire;
+mod sentinel_runtime;
 mod service;
 
 use anyhow::{Context, Result};
@@ -28,9 +32,12 @@ use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExe
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
 use pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealthServer;
 use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlansServer;
+use pb::contracts::robonix_system_sentinel_list_rules_server::RobonixSystemSentinelListRulesServer;
+use pb::contracts::robonix_system_sentinel_replace_rules_server::RobonixSystemSentinelReplaceRulesServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
+use sentinel_runtime::{SENTINEL_NAMESPACE, SENTINEL_PROVIDER_ID, SentinelRuntime};
 use service::ExecutorServiceImpl;
 use std::time::Duration;
 
@@ -54,16 +61,30 @@ async fn main() -> Result<()> {
         .register_service(&cfg.id, EXECUTOR_NAMESPACE, "")
         .await?;
     info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
+    atlas
+        .register_service(SENTINEL_PROVIDER_ID, SENTINEL_NAMESPACE, "")
+        .await?;
+    info!("registered as '{SENTINEL_PROVIDER_ID}' under '{SENTINEL_NAMESPACE}'");
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
         .parse()
         .with_context(|| format!("invalid executor listen address '{}'", cfg.listen))?;
+    let sentinel_listen_addr: std::net::SocketAddr = cfg
+        .sentinel_listen
+        .parse()
+        .with_context(|| format!("invalid Sentinel listen address '{}'", cfg.sentinel_listen))?;
     let advertised = match listen_addr.ip() {
         std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
             format!("127.0.0.1:{}", listen_addr.port())
         }
         _ => listen_addr.to_string(),
+    };
+    let sentinel_advertised = match sentinel_listen_addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            format!("127.0.0.1:{}", sentinel_listen_addr.port())
+        }
+        _ => sentinel_listen_addr.to_string(),
     };
 
     // Execute RPC: pilot → executor for plan dispatch.
@@ -80,6 +101,31 @@ async fn main() -> Result<()> {
             ),
         )
         .await?;
+
+    for (contract_id, contract_path, service_name, method_path) in [
+        (
+            "robonix/system/sentinel/list_rules",
+            "capabilities/system/sentinel/list_rules.v1.toml",
+            "robonix.contracts.RobonixSystemSentinelListRules",
+            "/robonix.contracts.RobonixSystemSentinelListRules/ListRules",
+        ),
+        (
+            "robonix/system/sentinel/replace_rules",
+            "capabilities/system/sentinel/replace_rules.v1.toml",
+            "robonix.contracts.RobonixSystemSentinelReplaceRules",
+            "/robonix.contracts.RobonixSystemSentinelReplaceRules/ReplaceRules",
+        ),
+    ] {
+        atlas
+            .declare_capability(
+                SENTINEL_PROVIDER_ID,
+                contract_id,
+                atlas_pb::Transport::Grpc,
+                &sentinel_advertised,
+                atlas_client::grpc_params(contract_path, service_name, method_path),
+            )
+            .await?;
+    }
 
     // Out-of-band RTDL meta operations. These never enter PlanRuntime as a
     // new plan, so canceling work cannot create a self-referential cancel tree.
@@ -176,37 +222,56 @@ async fn main() -> Result<()> {
     {
         warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
+    if let Err(e) = atlas
+        .set_lifecycle_state(
+            SENTINEL_PROVIDER_ID,
+            atlas_pb::LifecycleState::StateActive,
+            "",
+        )
+        .await
+    {
+        warn!("Sentinel SetLifecycleState(ACTIVE) failed: {e:#}");
+    }
 
     // Atlas evicts providers after ~60s without a heartbeat. Send one every
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();
-        let provider_id = cfg.id.clone();
+        let provider_ids = [cfg.id.clone(), SENTINEL_PROVIDER_ID.to_owned()];
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(20));
             tick.tick().await;
             loop {
                 tick.tick().await;
-                if let Err(e) = hb.heartbeat(&provider_id).await {
-                    warn!("heartbeat failed: {e:#}");
+                for provider_id in &provider_ids {
+                    if let Err(e) = hb.heartbeat(provider_id).await {
+                        warn!("heartbeat for '{provider_id}' failed: {e:#}");
+                    }
                 }
             }
         });
     }
 
-    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
+    let sentinel = SentinelRuntime::load(cfg.sentinel_rules.clone())
+        .with_context(|| format!("load Sentinel rules '{}'", cfg.sentinel_rules.display()))?;
+    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone(), sentinel);
     info!("executor gRPC on {listen_addr}");
+    info!("sentinel gRPC on {sentinel_listen_addr}");
     info!("robonix-executor ready on {listen_addr}");
 
-    tonic::transport::Server::builder()
+    let executor_server = tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorGetHealthServer::new(svc))
-        .serve(listen_addr)
-        .await
-        .context("executor gRPC server failed")?;
+        .add_service(RobonixSystemExecutorGetHealthServer::new(svc.clone()))
+        .serve(listen_addr);
+    let sentinel_server = tonic::transport::Server::builder()
+        .add_service(RobonixSystemSentinelListRulesServer::new(svc.clone()))
+        .add_service(RobonixSystemSentinelReplaceRulesServer::new(svc))
+        .serve(sentinel_listen_addr);
+    tokio::try_join!(executor_server, sentinel_server)
+        .context("Executor or Sentinel gRPC server failed")?;
 
     Ok(())
 }

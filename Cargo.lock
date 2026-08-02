@@ -3217,6 +3217,7 @@ name = "robonix-executor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "nix 0.31.3",
  "prost",
@@ -3225,6 +3226,7 @@ dependencies = [
  "robonix-atlas",
  "robonix-codegen",
  "robonix-scribe",
+ "robonix-sentinel",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3325,6 +3327,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "robonix-sentinel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

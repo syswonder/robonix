@@ -26,3 +26,7 @@ string text
 uint8[] audio_data
 string context_json
 uint64 timestamp_ms
+# Opaque Keystone credential installed by Liaison after authentication. Pilot
+# must never parse or expose it; it is forwarded only to Executor for canonical
+# identity revalidation before capability dispatch.
+string auth_session_token

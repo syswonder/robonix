@@ -19,6 +19,9 @@ use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::{PlanRuntime, StopWhen};
 use crate::rtdl_wire::{self, NodeEventContext};
+use crate::sentinel_runtime::{
+    SENTINEL_PROVIDER_ID, SentinelIdentity, SentinelRuntime, resolve_session_identity,
+};
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
 use std::collections::HashSet;
@@ -40,23 +43,25 @@ const MODULE_HEALTH_TTL_MS: u32 = 5000;
 /// dispatch runs without serialising on a single mutex.
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
-    atlas: AtlasClient,
+    pub(crate) atlas: AtlasClient,
     /// Executor's own provider_id. Two roles:
     ///   1. consumer_id passed to atlas on every ConnectCapability so the
     ///      channel record reflects who is using each downstream provider.
     ///   2. self-detection: when a CapabilityCall in the plan targets this
     ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
-    provider_id: String,
+    pub(crate) provider_id: String,
     runtime: PlanRuntime,
+    pub(crate) sentinel: SentinelRuntime,
 }
 
 impl ExecutorServiceImpl {
-    pub fn new(atlas: AtlasClient, provider_id: String) -> Self {
+    pub fn new(atlas: AtlasClient, provider_id: String, sentinel: SentinelRuntime) -> Self {
         Self {
             atlas,
             provider_id,
             runtime: PlanRuntime::default(),
+            sentinel,
         }
     }
 }
@@ -69,12 +74,28 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
         &self,
         request: Request<Plan>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        let plan = request.into_inner();
+        let mut plan = request.into_inner();
         validate_plan(&plan).map_err(Status::invalid_argument)?;
+        // An empty credential preserves non-Keystone/local deployments, but it
+        // never makes caller-supplied identity trusted. Subject-scoped rules
+        // therefore fail closed for direct Pilot/Executor callers. A supplied
+        // credential must resolve successfully before PlanStarted is emitted.
+        let identity = if plan.auth_session_token.is_empty() {
+            SentinelIdentity::default()
+        } else {
+            resolve_session_identity(&self.atlas, &self.provider_id, &plan.auth_session_token)
+                .await?
+        };
+        plan.auth_session_token.clear();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let atlas = self.atlas.clone();
-        let provider_id = self.provider_id.clone();
         let runtime = self.runtime.clone();
+        let context = ExecutionContext {
+            atlas: self.atlas.clone(),
+            provider_id: self.provider_id.clone(),
+            runtime: runtime.clone(),
+            sentinel: self.sentinel.clone(),
+            identity,
+        };
 
         tokio::spawn(async move {
             let plan_id = plan.plan_id.clone();
@@ -86,9 +107,7 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
                 Arc::clone(&plan),
                 plan.root_index as usize,
                 tx.clone(),
-                atlas,
-                provider_id,
-                runtime.clone(),
+                context,
             )
             .await;
             let cancelled = runtime.is_cancelled(&plan_id).await;
@@ -112,11 +131,11 @@ fn execute_node(
     plan: Arc<Plan>,
     node_index: usize,
     tx: Sender<Result<RtdlEvent, Status>>,
-    atlas: AtlasClient,
-    provider_id: String,
-    runtime: PlanRuntime,
+    context: ExecutionContext,
 ) -> ExecuteNodeFuture {
     Box::pin(async move {
+        let runtime = context.runtime.clone();
+        let provider_id = context.provider_id.clone();
         let node = &plan.nodes[node_index];
         let node_ctx = node_event_context(&plan, node_index);
         let op_id = node.op_id.clone();
@@ -137,14 +156,14 @@ fn execute_node(
             .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnEnter)
             .await
         {
-            let mut atlas = atlas;
+            let mut atlas = context.atlas.clone();
             runtime
                 .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
                 .await;
             send_stop_on_enter(&tx, &node_ctx, &runtime).await;
             return true;
         }
-        let mut atlas_after = atlas.clone();
+        let mut atlas_after = context.atlas.clone();
         let failed = match node.node_kind {
             RTDL_SEQUENCE => {
                 let mut any_failed = false;
@@ -159,9 +178,7 @@ fn execute_node(
                         Arc::clone(&plan),
                         *child as usize,
                         tx.clone(),
-                        atlas.clone(),
-                        provider_id.clone(),
-                        runtime.clone(),
+                        context.clone(),
                     )
                     .await;
                     if any_failed {
@@ -191,20 +208,10 @@ fn execute_node(
                 for child in &node.children {
                     let child_plan = Arc::clone(&plan);
                     let child_tx = tx.clone();
-                    let child_atlas = atlas.clone();
-                    let child_provider_id = provider_id.clone();
-                    let child_runtime = runtime.clone();
+                    let child_context = context.clone();
                     let child_index = *child as usize;
                     handles.push(tokio::spawn(async move {
-                        execute_node(
-                            child_plan,
-                            child_index,
-                            child_tx,
-                            child_atlas,
-                            child_provider_id,
-                            child_runtime,
-                        )
-                        .await
+                        execute_node(child_plan, child_index, child_tx, child_context).await
                     }));
                 }
                 let mut any_failed = false;
@@ -240,15 +247,7 @@ fn execute_node(
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                execute_call(
-                    call,
-                    node_ctx,
-                    tx,
-                    atlas,
-                    provider_id.clone(),
-                    runtime.clone(),
-                )
-                .await
+                execute_call(call, node_ctx, tx, context).await
             }
             _ => {
                 warn!(
@@ -360,15 +359,68 @@ async fn send_operator_terminal(
         .await;
 }
 
+/// Per-plan dependencies and canonical identity shared by every tree node.
+#[derive(Clone)]
+struct ExecutionContext {
+    atlas: AtlasClient,
+    provider_id: String,
+    runtime: PlanRuntime,
+    sentinel: SentinelRuntime,
+    identity: SentinelIdentity,
+}
+
 /// Dispatch one RTDL `do` node and stream node_state events.
 async fn execute_call(
     call: &CapabilityCall,
     node: NodeEventContext,
     tx: Sender<Result<RtdlEvent, Status>>,
-    mut atlas: AtlasClient,
-    provider_id: String,
-    runtime: PlanRuntime,
+    context: ExecutionContext,
 ) -> bool {
+    let ExecutionContext {
+        mut atlas,
+        provider_id,
+        runtime,
+        sentinel,
+        identity,
+    } = context;
+    let decision = sentinel
+        .check(
+            &atlas,
+            SENTINEL_PROVIDER_ID,
+            &call.contract_id,
+            &call.args_json,
+            &identity,
+        )
+        .await;
+    if !decision.allow {
+        let result = CapabilityCallResult {
+            call_id: call.call_id.clone(),
+            provider_id: call.provider_id.clone(),
+            contract_id: call.contract_id.clone(),
+            success: false,
+            output: String::new(),
+            error: format!(
+                "Sentinel denied capability call by rule '{}': {}",
+                decision.rule_id, decision.reason
+            ),
+        };
+        warn!(
+            "[sentinel] denied call_id={} contract='{}' rule='{}': {}",
+            call.call_id, call.contract_id, decision.rule_id, decision.reason
+        );
+        runtime
+            .record_op_state(&node.plan_id, &node.op_id, RtdlNodeStateEnum::Failed as u32)
+            .await;
+        let _ = tx
+            .send(Ok(rtdl_wire::node_state_from_result(
+                &node,
+                result,
+                RtdlNodeStateEnum::Failed as u32,
+            )))
+            .await;
+        return true;
+    }
+
     // Log the args too (bounded) so the log shows what each call requested —
     // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
     // and any cap call. Truncated to keep large payloads (images, file content)
@@ -781,6 +833,7 @@ mod tests {
             round: 0,
             nodes,
             root_index,
+            auth_session_token: String::new(),
         }
     }
 

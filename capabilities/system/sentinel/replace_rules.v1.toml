@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/sentinel/replace_rules"
+version = "1"
+kind = "service"
+idl = "sentinel/srv/ReplaceRules.srv"
+description = "Atomically replace robot-wide Sentinel rules as an authenticated administrator."
+
+[mode]
+type = "rpc"

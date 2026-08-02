@@ -893,6 +893,7 @@ mod tests {
             plan_id: "p".into(),
             session_id: "s".into(),
             round: 0,
+            auth_session_token: String::new(),
             root_index: 0,
             nodes: vec![
                 RtdlNode {
@@ -954,6 +955,7 @@ mod tests {
                 plan_id: "p1".into(),
                 session_id: "s".into(),
                 round: 0,
+                auth_session_token: String::new(),
                 root_index: 0,
                 nodes: vec![RtdlNode {
                     node_kind: 0,

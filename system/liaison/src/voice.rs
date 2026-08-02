@@ -302,6 +302,10 @@ async fn run_session(
     } else {
         None
     };
+    let auth_session_token = keystone_account
+        .as_ref()
+        .map(|_| req.session_token.clone())
+        .unwrap_or_default();
     // `record_seconds` is now a hard-stop ceiling on streaming capture
     // (FunASR's VAD ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
@@ -500,6 +504,7 @@ async fn run_session(
         &principal,
         &audio_pcm,
         &req.context_json,
+        &auth_session_token,
     );
 
     let mut accumulated_text = String::new();
@@ -1158,6 +1163,7 @@ fn build_task(
     principal: &VoicePrincipal,
     audio_pcm: &[u8],
     extra_context_json: &str,
+    auth_session_token: &str,
 ) -> Task {
     let mut ctx: serde_json::Value = if extra_context_json.trim().is_empty() {
         serde_json::json!({})
@@ -1204,6 +1210,7 @@ fn build_task(
         audio_data: audio_pcm.to_vec(),
         context_json: ctx.to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: auth_session_token.to_string(),
     }
 }
 
@@ -1427,6 +1434,7 @@ mod tests {
             },
             &[],
             r#"{"foo":"bar"}"#,
+            "validated-session",
         );
         let v: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
         assert_eq!(v["user_id"], "user-alice");
@@ -1437,6 +1445,7 @@ mod tests {
         assert_eq!(v["access"]["allowed"], true);
         assert_eq!(v["access"]["method"], "voiceprint");
         assert_eq!(v["foo"], "bar");
+        assert_eq!(task.auth_session_token, "validated-session");
     }
 
     #[test]

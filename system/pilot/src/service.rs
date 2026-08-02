@@ -590,6 +590,7 @@ mod tests {
             audio_data: Vec::new(),
             context_json: ctx.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         }
     }
 

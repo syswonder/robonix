@@ -20,14 +20,29 @@ by `make build` and `make install` respectively.
 Manual launch:
 
 ```sh
-robonix-executor --atlas 127.0.0.1:50051 --listen 127.0.0.1:50072
+robonix-executor --atlas 127.0.0.1:50051 --listen 127.0.0.1:50061
 ```
 
 Important configuration:
 
 - `--atlas` / `ROBONIX_ATLAS_ENDPOINT`: Atlas endpoint. Defaults to `127.0.0.1:50051`.
-- `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50072`.
+- `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50061`.
+- `--sentinel-listen` / `ROBONIX_SENTINEL_LISTEN`: Sentinel management gRPC listen address. Defaults to the Executor address with its port incremented by one (`127.0.0.1:50062` for the defaults). Atlas requires distinct providers to advertise distinct endpoints.
 - `--id` / `ROBONIX_EXECUTOR_PROVIDER_ID`: provider id registered with Atlas. Defaults to `executor`.
+- `--sentinel-rules` / `ROBONIX_SENTINEL_RULES`: robot-local Sentinel rule file. Defaults to `$ROBONIX_DATA_DIR/sentinel-rules.json`, or `rbnx-boot/data/sentinel-rules.json` when the data directory is unset.
+
+For a remote Client, bind only the Sentinel management endpoint externally and
+keep Executor execution robot-local. Like other robot-local providers, Atlas
+records the loopback advertise address; robonix-client rewrites that host to
+the configured remote Atlas host while preserving port `50062`:
+
+```yaml
+system:
+  executor:
+    listen: 127.0.0.1:50061
+    sentinel_listen: 0.0.0.0:50062
+    sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
+```
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_executor=info`.
 
 ## RTDL Execution
@@ -50,7 +65,12 @@ skips children that have not started yet, `parallel` shares the cancellation
 state across branches, and the target plan still emits `plan_complete` with
 `any_failed=true`.
 
-Executor declares two gRPC contracts:
+Executor declares its execution/control contracts on the Executor endpoint and
+the admin-only Sentinel rule-management contracts on the separate Sentinel
+endpoint. Both servers live in the same process; capability dispatch is still
+checked in Executor immediately before provider invocation.
+
+The primary Executor contracts include:
 
 - `robonix/system/executor/execute`: Pilot submits one `Plan` and receives an
   `RtdlEvent` stream.
