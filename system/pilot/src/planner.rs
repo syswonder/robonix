@@ -1265,19 +1265,50 @@ pub async fn run_turn(
                                 .await;
                         }
                         Some(ForestEvent::PlanDone { plan_id, results, any_failed, canceled }) => {
-                            // ── Collect successful steps for end-of-turn plan save ──
-                            // Instead of saving each tree independently (which
-                            // fragments one user question into N one-step nodes),
-                            // accumulate successful steps here and flush ONE
-                            // complete node when the turn ends.
+                            // ── Collect + IMMEDIATELY persist successful steps ──
+                            // Previously steps were only accumulated in memory and
+                            // flushed at turn end.  If the process crashed mid-turn,
+                            // all accumulated steps were lost.
+                            //
+                            // Now each successful tree is saved immediately to
+                            // ptdl_store.json (fire-and-forget), AND accumulated
+                            // for the end-of-turn merged node.
                             if !any_failed
                                 && !canceled
                                 && let Some(tree_meta) = forest.get(&plan_id)
                             {
+                                // Accumulate for end-of-turn merged flush
                                 accumulated_steps.extend(tree_meta.steps.clone());
                                 if !tree_meta.description.is_empty() {
                                     accumulated_descriptions
                                         .push(tree_meta.description.clone());
+                                }
+
+                                // ── Immediate save: each successful tree → ptdl_store.json ──
+                                if let Some(ref target) = remember_memory_target {
+                                    let user_goal = standing_task
+                                        .as_ref()
+                                        .map(|s| s.goal.clone())
+                                        .unwrap_or_default();
+                                    if !user_goal.is_empty()
+                                        && !tree_meta.steps.is_empty()
+                                    {
+                                        let desc = if tree_meta.description.is_empty() {
+                                            format!("plan_id={}", plan_id)
+                                        } else {
+                                            tree_meta.description.clone()
+                                        };
+                                        memory::save_plan(
+                                            executor.graph.clone(),
+                                            target.clone(),
+                                            plan_id.clone(),
+                                            user_goal.clone(),
+                                            desc,
+                                            tree_meta.steps.clone(),
+                                            1, // single tree
+                                            0, // not canceled
+                                        );
+                                    }
                                 }
                             }
                             forest.remove(&plan_id);
