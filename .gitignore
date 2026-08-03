@@ -33,6 +33,7 @@ rust/debug
 rbnx-boot
 tmp*
 .libero/
+Scribe/maps
 
 # memory service
 agent_milvus.db*

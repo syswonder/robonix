@@ -1265,7 +1265,7 @@ async def _run() -> None:
         # Best-effort in its OWN guard: a cleanup failure must not take
         # the whole annotation API down with a misattributed init error.
         try:
-            for leftover in Path(anno_dir).expanduser().glob(".live*.json"):
+            for leftover in Path(anno_dir).expanduser().glob(".live-*.json"):
                 leftover.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -1374,7 +1374,7 @@ async def _run() -> None:
         # SCENE_OBJECT_WATCHDOG=0 to disable.
         *([asyncio.create_task(
             ObjectWatchdog(
-                registry=registry, hub=hub,
+                registry=registry, hub=hub, anno_store=anno_store,
             ).run(),
             name="object-watchdog",
         )] if os.environ.get("SCENE_OBJECT_WATCHDOG", "1") in ("1", "true", "yes") else []),

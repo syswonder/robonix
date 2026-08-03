@@ -137,6 +137,14 @@ def _rule_based_tag_extraction(log_record: LogRecord,
     if log_record.tag:
         tags.tool_used = [log_record.tag]
 
+    # ── Region from kv (scene passes room name via kv.region) ──
+    region = kv.get("region", "")
+    if region:
+        tags.region = str(region)
+        # Also set scene_type from region if not already set by keyword match
+        if not tags.scene_type:
+            tags.scene_type = str(region)
+
     return tags
 
 
@@ -179,7 +187,9 @@ def _generate_summary(log_record: LogRecord,
     # Determine outcome
     outcome = "successfully" if log_record.level.lower() not in ("error", "warn") else "failed to"
 
-    # Determine scene
+    # Determine scene — keyword match first, then fall back to region from
+    # annotations (kv.region is set by scene's ObjectWatchdog via point_in_polygon
+    # lookup against SCENE_ANNOTATIONS_DIR/<map_id>.json room polygons).
     scene = "unknown area"
     for s, keywords in _SCENE_KEYWORDS.items():
         for kw in keywords:
@@ -188,6 +198,10 @@ def _generate_summary(log_record: LogRecord,
                 break
         if scene != "unknown area":
             break
+    if scene == "unknown area":
+        region = kv.get("region", "")
+        if region:
+            scene = str(region)
 
     # Objects
     obj_names: List[str] = []

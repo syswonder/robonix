@@ -65,10 +65,12 @@ class ObjectWatchdog:
         hub,               # SubscribersHub (for .latest("rgb"))
         memgraph_url: str = _MEMGRAPH_HOOK_URL,
         interval_s: float = 0.0,
+        anno_store = None, # Optional AnnotationStore for room lookup
     ) -> None:
         self._registry = registry
         self._hub = hub
         self._memgraph_url = memgraph_url
+        self._anno_store = anno_store  # AnnotationStore or None
         self._interval = (
             interval_s
             if interval_s > 0
@@ -395,6 +397,19 @@ class ObjectWatchdog:
         v = int(fy * oy / oz + cy)
         return max(0, min(img_w - 1, u)), max(0, min(img_h - 1, v))
 
+    # ── Room/region lookup ─────────────────────────────────────────────
+
+    def _lookup_region(self, x: float, y: float) -> str:
+        """Return the room name that contains (x, y), or '' if none match."""
+        if self._anno_store is None:
+            return ""
+        from .geometry import point_in_polygon
+        for ann in self._anno_store.list():
+            if ann.kind == "room" and not ann.stale:
+                if point_in_polygon(x, y, ann.points):
+                    return ann.name
+        return ""
+
     # ── POST to memgraph ───────────────────────────────────────────────
 
     async def _save_object(self, obj, img_b64: str) -> bool:
@@ -402,6 +417,10 @@ class ObjectWatchdog:
         import httpx
 
         now_ns = time.time_ns()
+        ox, oy = float(obj.pose.x), float(obj.pose.y)
+        region = self._lookup_region(ox, oy)
+        if region:
+            log.info("object_watchdog: %s@%.1f,%.1f → region=%s", obj.cls, ox, oy, region)
         payload: Dict[str, Any] = {
             "session_id": "scene-watchdog",
             "plan_id": "scene-watchdog",
@@ -417,13 +436,14 @@ class ObjectWatchdog:
                     {
                         "obj_id": obj.object_id,
                         "label": obj.cls,
-                        "x": float(obj.pose.x),
-                        "y": float(obj.pose.y),
+                        "x": ox,
+                        "y": oy,
                         "z": float(obj.pose.z),
                     }
                 ],
             },
             "image_base64": img_b64,
+            "kv": {"region": region} if region else {},
         }
 
         try:
