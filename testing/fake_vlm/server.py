@@ -687,7 +687,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.pending_steps.pop(name, None)
                 envelope = terminal_envelope("scripted steps complete")
 
-        self._stream_envelope(req.get("model", "fake-vlm"), envelope)
+        self._stream_envelope(req, envelope)
 
     def _all_user_text(self, messages: list[dict]) -> str:
         parts: list[str] = []
@@ -719,10 +719,23 @@ class Handler(BaseHTTPRequestHandler):
         self._emit(f"scenario {scenario['name']!r} round {round_index}: timeline sleep {delay:.3f}s")
         time.sleep(delay)
 
-    def _stream_envelope(self, model: str, envelope: dict):
+    def _stream_envelope(self, request: dict, envelope: dict):
+        model = request.get("model", "fake-vlm")
         payload = json.dumps(envelope, ensure_ascii=False)
         created = int(time.time())
         base = {"id": "fake-cmpl", "object": "chat.completion.chunk", "created": created, "model": model}
+        messages = request.get("messages", [])
+        prompt_bytes = sum(
+            len(message.get("content", "").encode())
+            for message in messages
+            if isinstance(message.get("content"), str)
+        )
+        prompt_tokens = max(1, math.ceil(prompt_bytes / 4))
+        completion_tokens = max(1, math.ceil(len(payload.encode()) / 4))
+        self._emit(
+            f"prompt bytes={prompt_bytes} estimated_tokens={prompt_tokens} "
+            f"messages={len(messages)}"
+        )
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -736,6 +749,16 @@ class Handler(BaseHTTPRequestHandler):
 
         chunk({"role": "assistant", "content": payload}, None)
         chunk({}, "stop")
+        if request.get("stream_options", {}).get("include_usage"):
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
+            obj = dict(base, choices=[], usage=usage)
+            self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
+            self.wfile.flush()
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
