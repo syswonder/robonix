@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Long-term-memory dispatch (best-effort, fire-and-forget on errors).
 //
-// `prefetch` runs before the first VLM call, `compact` on session_end,
-// `save_plan` runs after a successful plan completes.
-// Each builds a one-call Plan and hands it to executor; the corresponding
-// memory provider is looked up via atlas the same way every other capability
-// is. Missing providers are silently tolerated — memory is never load-bearing.
+// Plan memory uses standalone `ptdl_store.json` (via `ptdl_remember` /
+// `ptdl_retrieve` MCP tools) — independent of the CKG graph_store.
+//
+// `prefetch` runs before the first VLM call (opt-in via
+//  ROBONIX_MEMORY_PREFETCH_ENABLED=1).
+// `save_plan` runs after a successful plan completes (fire-and-forget).
+// `try_compact` on session_end.
+//
+// Missing providers are silently tolerated — memory is never load-bearing.
 
-use crate::discovery;
 use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
 use crate::pb::executor::rtdl_event::RtdlEventEnum;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
@@ -21,7 +24,13 @@ use uuid::Uuid;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_DO: u32 = 2;
 
-fn single_call_plan(plan_id: String, session_id: String, round: u32, call: CapabilityCall) -> Plan {
+fn single_call_plan(
+    plan_id: String,
+    session_id: String,
+    round: u32,
+    call: CapabilityCall,
+    label: &str,
+) -> Plan {
     Plan {
         plan_id,
         session_id,
@@ -31,24 +40,30 @@ fn single_call_plan(plan_id: String, session_id: String, round: u32, call: Capab
                 node_kind: RTDL_SEQUENCE,
                 children: vec![1],
                 call: None,
-                op_id: "memory_prefetch_sequence".to_string(),
-                description: "Run memory prefetch before planning".to_string(),
+                op_id: format!("{label}_sequence"),
+                description: format!("{label} dispatch wrapper"),
             },
             RtdlNode {
                 node_kind: RTDL_DO,
                 children: Vec::new(),
                 call: Some(call),
-                op_id: "memory_prefetch_search".to_string(),
-                description: "Search memory for context relevant to the user request".to_string(),
+                op_id: format!("{label}_call"),
+                description: format!("{label} dispatch"),
             },
         ],
         root_index: 0,
     }
 }
 
-/// Dispatch one `search_memory` call and return the result text. Returns
-/// `None` if the provider is not registered, the index is empty, or any error
-/// occurs.
+// ── PTDL prefetch ──────────────────────────────────────────────────────────
+
+/// Search `ptdl_store.json` for plans similar to *query*.  Returns formatted
+/// text suitable for injection into the system prompt, or `None` when the
+/// store is empty, the provider is absent, or an error occurs.
+///
+/// **Explicit opt-in**: planner.rs gates this behind
+/// `ROBONIX_MEMORY_PREFETCH_ENABLED=1`.  When disabled (default), planning
+/// runs without historical plan context.
 pub async fn prefetch(
     query: &str,
     executor: &mut ExecutorConn,
@@ -56,19 +71,11 @@ pub async fn prefetch(
 ) -> Option<String> {
     let (provider_id, contract_id) = target?;
 
-    // Build the search request payload as a JSON string for String.data.
-    // The memory service expects msg.data to be valid JSON with "query" and
-    // optional "top_k", "tags", etc.
-    // Filter for task_type="plan" so scene observations don't pollute
-    // the plan-reuse section of the system prompt.
-    let search_payload = serde_json::json!({
+    let payload = serde_json::json!({
         "query": query,
         "top_k": 5,
-        "tags": {
-            "task_type": "plan",
-        },
     });
-    let payload_str = serde_json::to_string(&search_payload).unwrap_or_default();
+    let payload_str = serde_json::to_string(&payload).unwrap_or_default();
 
     let plan = single_call_plan(
         Uuid::new_v4().to_string(),
@@ -80,6 +87,7 @@ pub async fn prefetch(
             contract_id,
             args_json: serde_json::json!({ "data": payload_str }).to_string(),
         },
+        "memory_prefetch",
     );
 
     let submitted_plan = plan.clone();
@@ -95,21 +103,175 @@ pub async fn prefetch(
             && is_terminal_executor_state(ns.state)
         {
             let r = executor_node_state_to_result(&submitted_plan, ns);
-            let out = r.output;
-            if r.success && !out.contains("No relevant memories") && !out.is_empty() {
-                debug!("[pilot] memory prefetch: {out}");
-                return Some(out);
+            if !r.success || r.output.is_empty() {
+                return None;
             }
-            return None;
+            // Parse ptdl_retrieve response: {"plans": [...]}
+            let parsed: serde_json::Value = serde_json::from_str(&r.output).ok()?;
+            let plans = parsed.get("plans")?.as_array()?;
+            if plans.is_empty() {
+                return None;
+            }
+            // Format plans for VLM consumption
+            let mut out = String::from("## Similar successful plans\n\n");
+            for (i, p) in plans.iter().enumerate() {
+                let q = p.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+                let d = p
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let steps: Vec<&str> = p
+                    .get("steps")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
+                out.push_str(&format!("**Plan {}:** {}\n", i + 1, q));
+                if !d.is_empty() {
+                    out.push_str(&format!("  description: {}\n", d));
+                }
+                if !steps.is_empty() {
+                    out.push_str("  steps:\n");
+                    for s in steps {
+                        out.push_str(&format!("    {}\n", s));
+                    }
+                }
+                out.push('\n');
+            }
+            debug!("[pilot] memory prefetch: {} plans", plans.len());
+            return Some(out);
         }
     }
     None
 }
 
+// ── PTDL save ──────────────────────────────────────────────────────────────
+
+/// Fire-and-forget: save a successful RTDL plan to `ptdl_store.json` via
+/// the `ptdl_remember` MCP tool on the memory service.
+///
+/// Called from the forest supervisor after a PlanDone with `!any_failed`
+/// and `!canceled`.  The caller has already discovered the
+/// `robonix/service/memory/ptdl_remember` capability and passes the
+/// `(provider_id, contract_id)` target.  Spawns a background task —
+/// errors are logged but never propagated (plan-saving is not load-bearing).
+#[allow(clippy::too_many_arguments)]
+pub fn save_plan(
+    executor_graph: RobonixSystemExecutorExecuteClient<tonic::transport::Channel>,
+    ptdl_target: (String, String),
+    user_query: String,
+    plan_description: String,
+    steps: Vec<TreeStep>,
+    tree_count: usize,
+    canceled_count: usize,
+) {
+    tokio::spawn(async move {
+        let _ = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open("/tmp/pilot_ptdl_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(
+                    f,
+                    "save_plan ENTERED: \"{q}\" steps={n} trees={t} canceled={c}",
+                    q = user_query, n = steps.len(), t = tree_count, c = canceled_count,
+                )
+            });
+        let (provider_id, contract_id) = ptdl_target;
+
+        let steps_text: Vec<String> = steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("{}. [{}] {}", i + 1, s.capability, s.description))
+            .collect();
+
+        let payload = serde_json::json!({
+            "query": &user_query,
+            "description": &plan_description,
+            "steps": &steps_text,
+            "plan_count": tree_count,
+            "canceled_count": canceled_count,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+        let args_json = serde_json::json!({ "data": payload_str }).to_string();
+
+        let plan = single_call_plan(
+            Uuid::new_v4().to_string(),
+            format!("ptdl-save-{}", Uuid::new_v4()),
+            0,
+            CapabilityCall {
+                call_id: Uuid::new_v4().to_string(),
+                provider_id,
+                contract_id,
+                args_json,
+            },
+            "ptdl_save",
+        );
+
+        let submitted_plan = plan.clone();
+        let mut executor = executor_graph;
+        let stream_result = executor.execute(Request::new(plan)).await;
+        match stream_result {
+            Ok(resp) => {
+                let mut stream = resp.into_inner();
+                while let Ok(Some(event)) = stream.message().await {
+                    if event.event_kind == RtdlEventEnum::NodeState as u32
+                        && let Some(ns) = event.node_state
+                        && is_terminal_executor_state(ns.state)
+                    {
+                        let r = executor_node_state_to_result(&submitted_plan, ns);
+                        if r.success {
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("/tmp/pilot_ptdl_debug.log")
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(f, "save_plan: OK \"{user_query}\"")
+                                });
+                            info!("[pilot] ptdl save: \"{user_query}\" ({n} steps)", n = steps_text.len());
+                        } else {
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("/tmp/pilot_ptdl_debug.log")
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(f, "save_plan: MEMORY ERROR \"{user_query}\": {}", r.error)
+                                });
+                            warn!("[pilot] ptdl save: \"{user_query}\" memory error: {}", r.error);
+                        }
+                        return;
+                    }
+                }
+                let _ = std::fs::OpenOptions::new()
+                    .create(true).append(true)
+                    .open("/tmp/pilot_ptdl_debug.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "save_plan: NO TERMINAL STATE \"{user_query}\"")
+                    });
+            }
+            Err(status) => {
+                let _ = std::fs::OpenOptions::new()
+                    .create(true).append(true)
+                    .open("/tmp/pilot_ptdl_debug.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "save_plan: RPC FAILED \"{user_query}\": {status}")
+                    });
+            }
+        }
+    });
+}
+
+// ── Compact (unchanged) ────────────────────────────────────────────────────
+
 /// Best-effort `compact_memory` on session teardown. Logs failures, never
 /// propagates errors (the provider may be absent entirely).
-pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _consumer_id: &str) {
-    let providers = match discovery::discover(atlas).await {
+pub async fn try_compact(
+    executor: &mut ExecutorConn,
+    atlas: &mut AtlasClient,
+    _consumer_id: &str,
+) {
+    let providers = match crate::discovery::discover(atlas).await {
         Ok(c) => c,
         Err(e) => {
             debug!("[pilot] compact_memory: discovery failed: {e}");
@@ -133,6 +295,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             contract_id: cap.contract_id.clone(),
             args_json: "{}".to_string(),
         },
+        "memory_compact",
     );
 
     let submitted_plan = plan.clone();
@@ -150,133 +313,30 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             && is_terminal_executor_state(ns.state)
         {
             let r = executor_node_state_to_result(&submitted_plan, ns);
-            let out = r.output;
             if r.success {
-                debug!("[pilot] compact_memory: {out}");
+                debug!("[pilot] compact_memory: {}", r.output);
             } else {
-                debug!("[pilot] compact_memory failed: {out}");
+                debug!("[pilot] compact_memory failed: {}", r.output);
             }
             return;
         }
     }
 }
 
-/// Fire-and-forget: save a successful RTDL plan as a ``NodeType::LESSON``
-/// memory node so future similar queries can retrieve and reuse it.
-///
-/// Called from the forest supervisor after a PlanDone with ``!any_failed``
-/// and ``!canceled``.  The caller has already discovered the
-/// ``robonix/service/memory/remember`` capability and passes the
-/// ``(provider_id, contract_id)`` target.  Spawns a background task to
-/// dispatch the ``remember`` call — errors are logged but never propagated
-/// (plan-saving is not load-bearing).
-#[allow(clippy::too_many_arguments)]
-pub fn save_plan(
-    executor_graph: RobonixSystemExecutorExecuteClient<tonic::transport::Channel>,
-    remember_target: (String, String),
-    plan_id: String,
-    user_query: String,
-    plan_description: String,
-    steps: Vec<TreeStep>,
-    tree_count: usize,
-    canceled_count: usize,
-) {
-    tokio::spawn(async move {
-        let (provider_id, contract_id) = remember_target;
-
-        // Build plan steps text for embedding and retrieval.
-        let steps_text: String = steps
-            .iter()
-            .enumerate()
-            .map(|(i, s)| format!("{}. [{}] {}", i + 1, s.capability, s.description))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Build a rich log message so that when the memory is retrieved,
-        // the VLM can see the full plan structure (query + steps) in
-        // raw_log.msg and reuse or adapt it.
-        let log_msg = format!("plan: {}\nsteps:\n{}", user_query, steps_text);
-
-        // Build the remember request payload (JSON object → string for String.data).
-        let remember_payload = serde_json::json!({
-            "session_id": format!("pilot-save-plan-{plan_id}"),
-            "plan_id": &plan_id,
-            "log_record": {
-                "ts": 0,
-                "level": "Info",
-                "tag": "pilot",
-                "msg": &log_msg,
-            },
-            "kv": {
-                "task_type": "plan",
-                "success": "true",
-                "plan_query": &user_query,
-                "plan_description": &plan_description,
-                "plan_steps": &steps_text,
-                "plan_count": tree_count.to_string(),
-                "canceled_count": canceled_count.to_string(),
-            },
-        });
-        let payload_str = serde_json::to_string(&remember_payload).unwrap_or_default();
-        let args_json = serde_json::json!({ "data": payload_str }).to_string();
-
-        let plan = single_call_plan(
-            Uuid::new_v4().to_string(),
-            format!("memory-save-plan-{plan_id}"),
-            0,
-            CapabilityCall {
-                call_id: Uuid::new_v4().to_string(),
-                provider_id,
-                contract_id,
-                args_json,
-            },
-        );
-
-        let submitted_plan = plan.clone();
-        let mut executor = executor_graph;
-        let Ok(mut stream) = executor
-            .execute(Request::new(plan))
-            .await
-            .map(|r| r.into_inner())
-        else {
-            warn!("[pilot] save_plan plan_id={plan_id}: executor Execute RPC failed");
-            return;
-        };
-        while let Ok(Some(event)) = stream.message().await {
-            if event.event_kind == RtdlEventEnum::NodeState as u32
-                && let Some(ns) = event.node_state
-                && is_terminal_executor_state(ns.state)
-            {
-                let r = executor_node_state_to_result(&submitted_plan, ns);
-                if r.success {
-                    info!(
-                        "[pilot] save_plan plan_id={plan_id}: saved as memory node — \"{user_query}\""
-                    );
-                } else {
-                    warn!(
-                        "[pilot] save_plan plan_id={plan_id}: remember failed: {}",
-                        r.error
-                    );
-                }
-                return;
-            }
-        }
-        warn!("[pilot] save_plan plan_id={plan_id}: executor stream ended without terminal state");
-    });
-}
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 fn is_terminal_executor_state(state: u32) -> bool {
     matches!(
         RtdlNodeStateEnum::try_from(state as i32),
-        Ok(RtdlNodeStateEnum::Succeeded
-            | RtdlNodeStateEnum::Failed
-            | RtdlNodeStateEnum::Canceled
-            | RtdlNodeStateEnum::Timeout)
+        Ok(
+            RtdlNodeStateEnum::Succeeded
+                | RtdlNodeStateEnum::Failed
+                | RtdlNodeStateEnum::Canceled
+                | RtdlNodeStateEnum::Timeout
+        )
     )
 }
 
-/// Convert memory helper node events into the shared result record. `do` nodes
-/// carry a concrete capability result; operator detail is only a fallback.
 fn executor_node_state_to_result(
     plan: &Plan,
     ns: crate::pb::pilot::RtdlNodeState,

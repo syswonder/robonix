@@ -90,12 +90,23 @@ MEMORY_DIR = str(
 _KEEP_DATA = os.environ.get("MEMGRAPH_KEEP_DATA", "0") in ("1", "true", "yes")
 
 def _clean_slate() -> None:
-    """Delete graph_store.json and all image directories from prior runs."""
+    """Delete graph_store.json, ptdl_store.json, and all image directories from prior runs."""
     import shutil
     graph_json = os.path.join(MEMORY_DIR, "graph_store.json")
     if os.path.exists(graph_json):
         os.remove(graph_json)
         log.info("scribe_mem: cleaned %s", graph_json)
+
+    ptdl_json = os.path.join(MEMORY_DIR, "ptdl_store.json")
+    if os.path.exists(ptdl_json):
+        os.remove(ptdl_json)
+        log.info("scribe_mem: cleaned %s", ptdl_json)
+    # Reset the in-memory singleton so it reloads from scratch
+    try:
+        from .storage.ptdl_store import _ptdl_store_reset
+        _ptdl_store_reset()
+    except Exception:
+        pass
 
     images_dir = str(Path(__file__).resolve().parent.parent / "data" / "images")
     if os.path.isdir(images_dir):
@@ -515,6 +526,101 @@ if _MCP_AVAILABLE:
         log.info("API compact: done — %d compacted (%d total)",
                  resp.nodes_compacted, _graph.count())
         return _json_ok({"summary": resp.summary, "nodes_compacted": resp.nodes_compacted})
+
+    @_memory_svc.mcp("robonix/service/memory/ptdl_remember")
+    async def _mcp_ptdl_remember(msg: String) -> String:
+        """Save a successful RTDL plan to the standalone plan store (ptdl_store.json).
+
+        Plans are stored INDEPENDENTLY of the CKG memory graph — they survive
+        graph clean_start wipes and do not participate in graph search/compact.
+
+        Request JSON schema:
+        {
+          "query":       "去厨房拿可乐",                 // required — user's original request
+          "description": "navigate→grasp→return",         // optional — plan summary
+          "steps": [                                      // required — ordered plan steps
+            "1. [nav] navigate to kitchen",
+            "2. [gripper] grasp cola",
+            "3. [nav] return"
+          ],
+          "plan_count":    1,                              // optional — number of RTDL trees
+          "canceled_count": 0                              // optional — canceled tree count
+        }
+
+        Response JSON: {"ok": true, "message": "Plan saved: \"去厨房拿可乐\" (3 steps)"}
+        """
+        req_dict = _parse_json(msg.data, ctx="ptdl_remember")
+        if req_dict is None:
+            return _json_error("Invalid JSON", ctx="ptdl_remember")
+
+        query = (req_dict.get("query") or "").strip()
+        if not query:
+            return _json_error("Missing required field: query", ctx="ptdl_remember")
+
+        steps = req_dict.get("steps")
+        if not steps or not isinstance(steps, list):
+            steps = []
+
+        from .storage.ptdl_store import get_ptdl_store
+        ptdl = get_ptdl_store()
+        ptdl.add(
+            query=query,
+            description=req_dict.get("description", ""),
+            steps=steps,
+            plan_count=int(req_dict.get("plan_count", 1)),
+            canceled_count=int(req_dict.get("canceled_count", 0)),
+        )
+        log.info("API ptdl_remember: \"%s\" (%d steps)", query, len(steps))
+        return _json_ok({"ok": True, "message": f"Plan saved: \"{query}\" ({len(steps)} steps)"})
+
+    @_memory_svc.mcp("robonix/service/memory/ptdl_retrieve")
+    async def _mcp_ptdl_retrieve(msg: String) -> String:
+        """Search previously saved RTDL plans by keyword match.
+
+        Returns the top-N matching plans from ptdl_store.json.  Does NOT
+        search the main CKG graph — only standalone plan records.
+
+        Explicit opt-in: set ``ROBONIX_MEMORY_PREFETCH_ENABLED=1`` to enable
+        this path; when disabled (default), Pilot skips plan retrieval entirely.
+
+        Request JSON schema:
+        {
+          "query":  "去厨房",     // required — search query
+          "top_k":  5              // optional — max results (default 5)
+        }
+
+        Response JSON:
+        {
+          "plans": [
+            {
+              "query": "去厨房拿可乐",
+              "description": "navigate→grasp→return",
+              "steps": ["1. [nav] navigate to kitchen", ...],
+              "timestamp_ns": 1785600000000000000,
+              "plan_count": 1,
+              "canceled_count": 0
+            }
+          ]
+        }
+        """
+        req_dict = _parse_json(msg.data, ctx="ptdl_retrieve")
+        if req_dict is None:
+            return _json_error("Invalid JSON", ctx="ptdl_retrieve")
+
+        query = (req_dict.get("query") or "").strip()
+        if not query:
+            return _json_error("Missing required field: query", ctx="ptdl_retrieve")
+
+        try:
+            top_k = max(1, min(int(req_dict.get("top_k", 5)), 20))
+        except (TypeError, ValueError):
+            return _json_error("Invalid top_k", ctx="ptdl_retrieve")
+
+        from .storage.ptdl_store import get_ptdl_store
+        ptdl = get_ptdl_store()
+        plans = ptdl.search(query=query, top_k=top_k)
+        log.info("API ptdl_retrieve: \"%s\" → %d plans", query[:80], len(plans))
+        return _json_ok({"plans": plans})
 
     @_memory_svc.on_init
     def _on_init(cfg):

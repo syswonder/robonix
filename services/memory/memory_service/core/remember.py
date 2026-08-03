@@ -229,23 +229,54 @@ class RememberPipeline:
         spatial = request.spatial
         kv = request.kv or {}
 
-        # 1. Extract tags (kv carries explicit fields from Pilot plan-save)
+        # ── Plan shortcut: plan nodes live only in ptdl_store ──
+        # Plans are NOT stored in the CKG (graph_store / tag_index /
+        # vector_store).  They go exclusively to the standalone
+        # ptdl_store.json so plan history is independent of the
+        # per-session graph lifecycle (clean_start, compact, forget).
+        if kv.get("task_type") == "plan":
+            try:
+                from ..storage.ptdl_store import get_ptdl_store
+                ptdl = get_ptdl_store()
+                steps_list = [
+                    s.strip()
+                    for s in kv.get("plan_steps", "").split("\n")
+                    if s.strip()
+                ]
+                plan_count = int(kv.get("plan_count", "1"))
+                canceled_count = int(kv.get("canceled_count", "0"))
+                ptdl.add(
+                    query=kv.get("plan_query", log_record.msg),
+                    description=kv.get("plan_description", ""),
+                    steps=steps_list,
+                    plan_count=plan_count,
+                    canceled_count=canceled_count,
+                )
+                plan_query = kv.get("plan_query", log_record.msg)
+                log.info("remember: plan → ptdl_store only: \"%s\" (%d steps)",
+                         plan_query, len(steps_list))
+                return RememberResponse(
+                    node_id=-1,
+                    message=f"Plan saved to ptdl_store: \"{plan_query}\"",
+                )
+            except Exception as e:
+                log.warning("remember: ptdl_store save failed: %s", e)
+                return RememberResponse(
+                    node_id=-1,
+                    message=f"Plan save failed: {e}",
+                )
+
+        # 1. Extract tags
         tags = _rule_based_tag_extraction(log_record, spatial, kv)
 
-        # 2. Generate summary (plan-type uses kv.plan_query / kv.plan_description)
+        # 2. Generate summary
         summary = _generate_summary(log_record, spatial, kv)
 
         # 3. Build MemoryNode (without node_id — GraphStore assigns it)
         now = time.time_ns()
-        # Embedding text: for plans, include query + description + steps
-        # so BM25 and vector search can match future similar queries.
         if kv.get("task_type") == "plan":
-            plan_query = kv.get("plan_query", "")
-            plan_desc = kv.get("plan_description", "")
-            plan_steps = kv.get("plan_steps", "")
-            embedding_text = f"plan: {plan_query} | {plan_desc} | steps: {plan_steps}"
-            node_type = NodeType.LESSON  # protected from auto-forget
-            weight = 0.8                 # higher weight for proven plans
+            # unreachable — handled by early return above
+            raise AssertionError("plan should not reach here")
         else:
             embedding_text = summary
             node_type = NodeType.SHORT_TERM
@@ -302,35 +333,30 @@ class RememberPipeline:
         # 7. Vector + BM25 index
         self._vectors.insert(node_id, embedding, summary)
 
-        # 8. Causal edge
+        # 8. Causal edges — explicit parent + auto-linker
         if request.parent_node_id is not None:
             try:
                 self._graph.add_edge(request.parent_node_id, node_id)
             except ValueError:
                 log.warning("remember: parent_node_id %d not found, skipping edge",
                            request.parent_node_id)
+        # Auto-link: session pipeline, plan child, spatial co-location
+        try:
+            from .causal import link_new_node
+            n_added = link_new_node(
+                self._graph, node,
+                session_id=request.session_id,
+                plan_id=request.plan_id,
+            )
+            if n_added:
+                log.debug("remember: auto-link added %d edge(s) for node %d",
+                          n_added, node_id)
+        except Exception as e:
+            log.debug("remember: auto-link skipped for node %d: %s",
+                      node_id, e)
 
-        # 9. Plan-type nodes → also save to standalone ptdl_store.json
-        if kv.get("task_type") == "plan":
-            try:
-                from ..storage.ptdl_store import get_ptdl_store
-                ptdl = get_ptdl_store()
-                steps_list = [
-                    s.strip()
-                    for s in kv.get("plan_steps", "").split("\n")
-                    if s.strip()
-                ]
-                plan_count = int(kv.get("plan_count", "1"))
-                canceled_count = int(kv.get("canceled_count", "0"))
-                ptdl.add(
-                    query=kv.get("plan_query", log_record.msg),
-                    description=kv.get("plan_description", ""),
-                    steps=steps_list,
-                    plan_count=plan_count,
-                    canceled_count=canceled_count,
-                )
-            except Exception as e:
-                log.warning("remember: ptdl_store save failed: %s", e)
+        # 9. done — plan nodes are handled by early return above;
+        # non-plan nodes go through graph_store + index pipeline.
 
         log.info("remember: node %d → \"%s\"", node_id, summary)
         return RememberResponse(node_id=node_id, message=f"Memory saved as node {node_id}")

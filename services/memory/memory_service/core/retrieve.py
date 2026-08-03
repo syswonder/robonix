@@ -106,10 +106,20 @@ class RetrievePipeline:
         # Build (node_id → hybrid_score) map
         score_map = {nid: score for nid, score in ranked}
 
-        # ── Stage 3: Causal filter (Phase1: skip) ──
-        # Phase2: for each candidate, check if all causal_chain parents
-        # are satisfied in the current environment.
+        # ── Stage 3: Causal expansion ──
+        # For each ranked candidate, pull in its immediate causal parents
+        # and children so the VLM sees richer context.  Expanding both
+        # directions costs little (small fan-out) and helps the VLM
+        # understand why a plan was made or what it led to.
         post_causal = set(nid for nid, _ in ranked)
+        if request.require_executable:
+            for nid in list(post_causal):
+                for parent_id in self._graph.get_parents(nid):
+                    post_causal.add(parent_id)
+                for child_id in self._graph.get_children(nid):
+                    post_causal.add(child_id)
+            log.debug("search: causal expansion → %d nodes (was %d)",
+                      len(post_causal), len(ranked))
 
         # ── Stage 4: Time filter ──
         if request.time_range is not None:

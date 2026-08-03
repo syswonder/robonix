@@ -76,6 +76,66 @@ class PtdlStore:
         """Return all saved plan records (most recent last)."""
         return list(self._entries)
 
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Keyword-match plans against *query* and return the top *top_k*.
+
+        Scoring combines:
+        1. Substring containment — query appears as-is in plan text (high boost)
+        2. Token overlap — whitespace-split BOW overlap (works for English)
+        3. Character bigram overlap — CJK-friendly fallback
+
+        No embedding model is required.
+        """
+        if not query or not self._entries:
+            return []
+
+        query_lower = query.lower()
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        for entry in self._entries:
+            # Build a keyword-rich text block from the plan record
+            text = (
+                entry.get("query", "")
+                + " "
+                + entry.get("description", "")
+                + " "
+                + " ".join(entry.get("steps", []))
+            ).lower()
+
+            score = 0.0
+
+            # 1. Substring match (strongest signal)
+            if query_lower in text:
+                score += 2.0
+
+            # 2. Token overlap (whitespace-split, works for English)
+            q_tokens = set(query_lower.split())
+            t_tokens = set(text.split())
+            overlap = len(q_tokens & t_tokens)
+            score += overlap / (len(q_tokens) + 1.0)
+
+            # 3. Character bigram overlap (CJK-friendly)
+            q_bigrams = _char_bigrams(query_lower)
+            t_bigrams = _char_bigrams(text)
+            if q_bigrams:
+                bg_overlap = len(q_bigrams & t_bigrams)
+                score += bg_overlap / (len(q_bigrams) + 1.0)
+
+            if score > 0.0:
+                scored.append((score, entry))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [entry for _, entry in scored[:top_k]]
+
+    def remove(self, query: str) -> bool:
+        """Remove the first entry whose query matches exactly. Returns True
+        if an entry was removed."""
+        for i, entry in enumerate(self._entries):
+            if entry.get("query") == query:
+                self._entries.pop(i)
+                self._save()
+                return True
+        return False
+
     def count(self) -> int:
         return len(self._entries)
 
@@ -101,6 +161,14 @@ class PtdlStore:
             log.warning("ptdl_store: failed to save %s: %s", self._path, e)
 
 
+def _char_bigrams(s: str) -> set:
+    """Extract character bigrams for CJK-friendly fuzzy matching."""
+    stripped = "".join(c for c in s if c.isalnum())
+    if len(stripped) < 2:
+        return {stripped} if stripped else set()
+    return {stripped[i:i + 2] for i in range(len(stripped) - 1)}
+
+
 # Module-level singleton, created on first import.
 _ptdl_store: PtdlStore | None = None
 
@@ -110,3 +178,9 @@ def get_ptdl_store(path: str = "") -> PtdlStore:
     if _ptdl_store is None:
         _ptdl_store = PtdlStore(path)
     return _ptdl_store
+
+
+def _ptdl_store_reset() -> None:
+    """Clear the module-level singleton (used by clean_start)."""
+    global _ptdl_store
+    _ptdl_store = None

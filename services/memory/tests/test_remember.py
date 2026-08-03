@@ -228,10 +228,10 @@ class TestRememberPipeline:
         assert len(node.image_refs) >= 1
         assert "frame_0001.jpg" in node.image_refs[0]
 
-    # ── Plan-type memory tests ──────────────────────────────────────────
+    # ── Plan-type memory tests (ptdl_store only, NOT graph_store) ───────
 
-    def test_plan_node_sets_lesson_type_and_weight(self):
-        """Successful plan → NodeType.LESSON + weight 0.8."""
+    def test_plan_node_skips_graph_store(self):
+        """Plan nodes go to ptdl_store only — graph_store is untouched."""
         lr = LogRecord(ts=100, level="Info", tag="pilot",
                        msg="去厨房拿瓶可乐")
         kv = {
@@ -246,14 +246,23 @@ class TestRememberPipeline:
         req = RememberRequest(session_id="s-plan", plan_id="p-plan",
                               log_record=lr, kv=kv)
         resp = self._run(req)
-        node = self.graph.get_node(resp.node_id)
-        assert node.node_type == NodeType.LESSON, \
-            f"expected LESSON, got {node.node_type}"
-        assert node.weight == 0.8, \
-            f"expected weight 0.8, got {node.weight}"
+        # Plan returns -1 (not in graph_store)
+        assert resp.node_id == -1, f"plan should return -1, got {resp.node_id}"
+        assert self.graph.get_node(-1) is None
+        assert self.graph.count() == 0, "plan must not add graph nodes"
 
-    def test_plan_node_tags_are_correct(self):
-        """Plan node tags: task_type=plan, action_type=plan, success=True."""
+        # Verify ptdl_store received it
+        from memory_service.storage.ptdl_store import get_ptdl_store
+        ptdl = get_ptdl_store()
+        entries = ptdl.list_all()
+        assert len(entries) >= 1
+        last = entries[-1]
+        assert last["query"] == "去厨房拿瓶可乐"
+        assert last["description"] == "navigate→grasp→return"
+        assert len(last["steps"]) == 3
+
+    def test_plan_node_not_in_tag_index(self):
+        """Plan nodes skip tag_index — only ptdl_store receives them."""
         lr = LogRecord(ts=100, level="Info", tag="pilot",
                        msg="检查客厅设备")
         kv = {
@@ -266,13 +275,17 @@ class TestRememberPipeline:
         req = RememberRequest(session_id="s-plan2", plan_id="p-plan2",
                               log_record=lr, kv=kv)
         resp = self._run(req)
-        node = self.graph.get_node(resp.node_id)
-        assert node.tags.task_type == "plan"
-        assert node.tags.action_type == "plan"
-        assert node.tags.success is True
+        assert resp.node_id == -1
 
-    def test_plan_node_summary_format(self):
-        """Plan summary contains query, description, and step count."""
+        # tag_index should NOT have this plan
+        from memory_service.core.types import TagFilter
+        tf = TagFilter(task_type="plan")
+        candidates = self.tags.query(tf)
+        assert len(candidates) == 0, \
+            "plan should not appear in tag_index"
+
+    def test_plan_node_saved_to_ptdl_store(self):
+        """Plan summary shows in ptdl_store entry, not graph_store."""
         lr = LogRecord(ts=100, level="Info", tag="pilot",
                        msg="巡逻办公室")
         kv = {
@@ -284,13 +297,16 @@ class TestRememberPipeline:
         req = RememberRequest(session_id="s-plan3", plan_id="p-plan3",
                               log_record=lr, kv=kv)
         resp = self._run(req)
-        node = self.graph.get_node(resp.node_id)
-        assert "successful plan" in node.summary
-        assert "巡逻办公室" in node.summary
-        assert "patrol the office area" in node.summary
+        assert resp.node_id == -1
 
-    def test_plan_node_embedding_includes_steps(self):
-        """Plan embedding text encodes query+description+steps for search matching."""
+        from memory_service.storage.ptdl_store import get_ptdl_store
+        ptdl = get_ptdl_store()
+        entries = ptdl.list_all()
+        found = any(e["query"] == "巡逻办公室" for e in entries)
+        assert found, "plan should be in ptdl_store"
+
+    def test_plan_node_not_in_vector_store(self):
+        """Plan nodes skip vector_store — no embedding in graph."""
         lr = LogRecord(ts=100, level="Info", tag="pilot",
                        msg="拿可乐")
         kv = {
@@ -302,15 +318,14 @@ class TestRememberPipeline:
         req = RememberRequest(session_id="s-plan4", plan_id="p-plan4",
                               log_record=lr, kv=kv)
         resp = self._run(req)
-        node = self.graph.get_node(resp.node_id)
-        # Embedding should exist and be non-empty
-        assert len(node.embedding) > 0, "plan node must have embedding"
-        # The embedding is derived from plan text, not just the summary
-        # We can't inspect the text directly but the embedding dim matches config
-        assert len(node.embedding) == 8  # test config dim=8
+        assert resp.node_id == -1
 
-    def test_plan_node_indexed_in_tag_index(self):
-        """Plan node appears in tag index with correct task_type."""
+        # vector_store should be empty (no graph nodes to embed)
+        assert self.vectors.count() == 0, \
+            "plan must not add to vector_store"
+
+    def test_plan_node_not_in_tag_query(self):
+        """TagIndex query with task_type='plan' returns empty after plan save."""
         lr = LogRecord(ts=100, level="Info", tag="pilot",
                        msg="go to kitchen")
         kv = {"task_type": "plan", "success": "true",
@@ -318,36 +333,41 @@ class TestRememberPipeline:
               "plan_steps": "1. nav"}
         req = RememberRequest(session_id="s-plan5", plan_id="p-plan5",
                               log_record=lr, kv=kv)
-        resp = self._run(req)
-        tags = self.tags.get_tags(resp.node_id)
-        assert tags is not None
-        assert tags.task_type == "plan"
+        self._run(req)
 
-    def test_plan_node_retrievable_by_task_type(self):
-        """TagIndex query with task_type='plan' finds the saved plan."""
-        lr = LogRecord(ts=100, level="Info", tag="pilot",
-                       msg="walk to door")
-        kv = {"task_type": "plan", "success": "true",
-              "plan_query": "walk to door", "plan_description": "nav",
-              "plan_steps": "1. walk"}
-        req = RememberRequest(session_id="s-plan6", plan_id="p-plan6",
-                              log_record=lr, kv=kv)
-        resp = self._run(req)
-
-        # Query tag index for plan type
         from memory_service.core.types import TagFilter
         tf = TagFilter(task_type="plan")
         candidates = self.tags.query(tf)
-        assert resp.node_id in candidates, \
-            f"plan node {resp.node_id} should be findable by task_type=plan"
+        assert len(candidates) == 0, \
+            "plan must not be in tag_index"
+
+    def test_ptdl_store_separate_from_graph(self):
+        """Plans and observations live in different stores."""
+        # Save a regular observation
+        lr_obs = LogRecord(ts=100, level="Info", tag="camera",
+                           msg="observed couch")
+        req_obs = RememberRequest(session_id="s", plan_id="p", log_record=lr_obs)
+        self._run(req_obs)
+        assert self.graph.count() == 1
+
+        # Save a plan — doesn't touch graph
+        kv = {"task_type": "plan", "success": "true",
+              "plan_query": "walk to door", "plan_description": "nav",
+              "plan_steps": "1. walk"}
+        lr_plan = LogRecord(ts=200, level="Info", tag="pilot",
+                            msg="walk to door")
+        req_plan = RememberRequest(session_id="s-plan6", plan_id="p-plan6",
+                                   log_record=lr_plan, kv=kv)
+        self._run(req_plan)
+        # Graph still has only 1 node (the observation)
+        assert self.graph.count() == 1
 
 
 class TestPlanObserveMixedRecall:
-    """Integration: save observations + plans, then verify retrieval separation.
+    """Integration: observations go to graph, plans go to ptdl_store.
 
-    Simulates the real-world scenario: some nodes are auto-captured
-    observations (SHORT_TERM), others are successful plans (LESSON).
-    The tag index and vector store must correctly distinguish them.
+    The two stores are independent — observation queries don't see plans
+    and vice versa.
     """
 
     def setup_method(self):
@@ -365,10 +385,10 @@ class TestPlanObserveMixedRecall:
         return asyncio.run(self.pipeline.execute(req))
 
     def test_plan_and_observation_separated_by_task_type(self):
-        """Task type filtering correctly separates plans from observations."""
+        """Observations are in graph+tag_index; plans are only in ptdl_store."""
         from memory_service.core.types import TagFilter
 
-        # Save 2 observations with keywords that match explore task_type
+        # Save 2 observations
         for i, msg in enumerate([
             "robot scanned the corridor for fire equipment",
             "robot explored the office area",
@@ -379,49 +399,38 @@ class TestPlanObserveMixedRecall:
             self._run(req)
 
         # Save 2 plans
-        plan_kvs = [
-            {
-                "task_type": "plan", "success": "true",
-                "plan_query": "巡逻走廊检查灭火器",
-                "plan_description": "patrol corridor for fire equipment",
-                "plan_steps": "1. [nav] to corridor\n2. [cam] snapshot",
-            },
-            {
-                "task_type": "plan", "success": "true",
-                "plan_query": "检查办公室电脑",
-                "plan_description": "inspect office computers",
-                "plan_steps": "1. [nav] to office\n2. [cam] inspect",
-            },
-        ]
-        plan_ids = []
-        for kv in plan_kvs:
+        for kv in [
+            {"task_type": "plan", "success": "true",
+             "plan_query": "巡逻走廊检查灭火器",
+             "plan_description": "patrol corridor for fire equipment",
+             "plan_steps": "1. [nav] to corridor\n2. [cam] snapshot"},
+            {"task_type": "plan", "success": "true",
+             "plan_query": "检查办公室电脑",
+             "plan_description": "inspect office computers",
+             "plan_steps": "1. [nav] to office\n2. [cam] inspect"},
+        ]:
             lr = LogRecord(ts=200, level="Info", tag="pilot",
                            msg=kv["plan_query"])
             req = RememberRequest(session_id="s", plan_id="p",
                                   log_record=lr, kv=kv)
             resp = self._run(req)
-            plan_ids.append(resp.node_id)
-            node = self.graph.get_node(resp.node_id)
-            assert node.node_type == NodeType.LESSON
+            assert resp.node_id == -1  # plans go to ptdl only
 
-        # Filter by task_type=plan → only plans
-        tf_plan = TagFilter(task_type="plan")
-        plan_candidates = self.tags.query(tf_plan)
-        assert len(plan_candidates) == 2
-        for pid in plan_ids:
-            assert pid in plan_candidates
+        # Graph has only observations
+        assert self.graph.count() == 2
 
-        # Filter by task_type=explore → only observations
+        # TagIndex has only observations
         tf_explore = TagFilter(task_type="explore")
         obs_candidates = self.tags.query(tf_explore)
-        assert len(obs_candidates) == 2, \
-            f"expected 2 explore observations, got {len(obs_candidates)}"
+        assert len(obs_candidates) == 2
 
-        # No overlap between plan and observation sets
-        assert plan_candidates.isdisjoint(obs_candidates)
+        # TagIndex has NO plans
+        tf_plan = TagFilter(task_type="plan")
+        plan_candidates = self.tags.query(tf_plan)
+        assert len(plan_candidates) == 0
 
-    def test_plan_nodes_have_higher_weight(self):
-        """Plan (LESSON) nodes have weight 0.8 vs observation 0.5."""
+    def test_ptdl_plans_not_in_graph_weight(self):
+        """Plan weight is irrelevant — plans aren't in graph_store at all."""
         # Save observation
         lr_obs = LogRecord(ts=100, level="Info", tag="camera",
                            msg="observed laptop in office")
@@ -430,7 +439,7 @@ class TestPlanObserveMixedRecall:
         node_obs = self.graph.get_node(resp_obs.node_id)
         assert node_obs.weight == 0.5
 
-        # Save plan
+        # Save plan — doesn't touch graph weight
         kv = {"task_type": "plan", "success": "true",
               "plan_query": "check office", "plan_description": "inspect",
               "plan_steps": "1. nav\n2. snap"}
@@ -439,47 +448,43 @@ class TestPlanObserveMixedRecall:
         req_plan = RememberRequest(session_id="s", plan_id="p",
                                    log_record=lr_plan, kv=kv)
         resp_plan = self._run(req_plan)
-        node_plan = self.graph.get_node(resp_plan.node_id)
-        assert node_plan.weight == 0.8
-        assert node_plan.node_type == NodeType.LESSON
+        assert resp_plan.node_id == -1
 
-        # In a weight-sorted ranking, plan nodes rank above observations
-        # (all else equal — same score)
-        assert node_plan.weight > node_obs.weight
+        # Graph unchanged — only the observation with weight 0.5
+        assert self.graph.count() == 1
 
-    def test_plan_embedding_differs_from_observation(self):
-        """Plan and observation embeddings are different despite same config."""
-        # Same summary text, but plan node has enriched embedding_text
-        lr = LogRecord(ts=100, level="Info", tag="pilot",
-                       msg="go to kitchen")
+    def test_ptdl_store_has_plans_graph_has_observations(self):
+        """Same query text → plan goes to ptdl, obs goes to graph."""
+        # Plan save
         kv = {"task_type": "plan", "success": "true",
               "plan_query": "go to kitchen",
               "plan_description": "navigate",
               "plan_steps": "1. [nav] navigate to kitchen"}
+        lr = LogRecord(ts=100, level="Info", tag="pilot",
+                       msg="go to kitchen")
         req_plan = RememberRequest(session_id="s", plan_id="p",
                                    log_record=lr, kv=kv)
         resp_plan = self._run(req_plan)
-        node_plan = self.graph.get_node(resp_plan.node_id)
+        assert resp_plan.node_id == -1
 
-        # Observation with similar msg
+        # Observation save (same msg but different path)
         lr_obs = LogRecord(ts=200, level="Info", tag="camera",
                            msg="go to kitchen")
         req_obs = RememberRequest(session_id="s", plan_id="p",
                                   log_record=lr_obs)
         resp_obs = self._run(req_obs)
-        node_obs = self.graph.get_node(resp_obs.node_id)
+        # Observation IS in graph_store
+        obs_node = self.graph.get_node(resp_obs.node_id)
+        assert obs_node is not None
+        assert obs_node.node_type == NodeType.SHORT_TERM
+        assert obs_node.weight == 0.5
 
-        # Both have embeddings but they encode different text:
-        # plan: "plan: go to kitchen | navigate | steps: ..."
-        # obs:  "successfully navigate in unknown area"
-        assert len(node_plan.embedding) == len(node_obs.embedding)
-        # Embeddings should differ (different input text)
-        plans_different = any(
-            abs(a - b) > 1e-6
-            for a, b in zip(node_plan.embedding, node_obs.embedding)
-        )
-        assert plans_different, \
-            "plan and observation embeddings should differ"
+        # ptdl_store has the plan
+        from memory_service.storage.ptdl_store import get_ptdl_store
+        ptdl = get_ptdl_store()
+        entries = ptdl.list_all()
+        plans = [e for e in entries if e["query"] == "go to kitchen"]
+        assert len(plans) >= 1
 
 
 # ── Runner ───────────────────────────────────────────────────────────────
