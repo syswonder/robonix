@@ -1,4 +1,22 @@
-robonix/** linguist-vendored
-rust/examples/** linguist-vendored
-rust/tools/** linguist-vendored
-rust/_deprecated/** linguist-vendored
+# GitHub Linguist reports Robonix product code in every implementation language,
+# including Rust, Python, shell scripts, and frontend code.  Only non-product
+# material is excluded from the language bar; all files remain reviewable.
+
+# Tests and evaluation infrastructure.
+**/tests/** linguist-detectable=false
+**/test/** linguist-detectable=false
+**/__tests__/** linguist-detectable=false
+**/test_*.* linguist-detectable=false
+**/*_test.* linguist-detectable=false
+**/*.test.* linguist-detectable=false
+**/*.spec.* linguist-detectable=false
+testing/** linguist-detectable=false
+**/benchmarks/** linguist-detectable=false
+**/benchmark/** linguist-detectable=false
+
+# Examples, fixtures, generated outputs, and local build artifacts.
+examples/** linguist-detectable=false
+**/fixtures/** linguist-detectable=false
+**/generated/** linguist-detectable=false
+**/proto_gen/** linguist-detectable=false
+**/rbnx-build/** linguist-detectable=false
