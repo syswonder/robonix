@@ -1,12 +1,11 @@
-# Return every object the scene registry currently believes exists.
-# No filters, no scoping; the LLM filters client-side. Pilot calls
-# this every round to ground its world model.
+# Return every object the scene registry currently believes exists. Room
+# entries remain for v1 compatibility; list_regions exposes full geometry.
 [contract]
 id      = "robonix/system/scene/list_objects"
 version = "1"
 kind    = "service"
 idl     = "semantic_map/srv/ListObjects.srv"
-description = "List all objects currently known to the scene registry."
+description = "List objects currently known to Scene, including compatibility room entries. Use list_regions for room geometry and staleness."
 
 [mode]
 type = "rpc"

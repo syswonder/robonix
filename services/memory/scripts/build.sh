@@ -32,7 +32,6 @@ for _candidate in \
     "$HOME/.cargo/bin/uv" \
     "$HOME/.local/bin/uv" \
     /usr/local/bin/uv \
-    /home/hyl/miniconda3/envs/env_robonix/bin/uv \
 ; do
     if [[ -n "$_candidate" && -x "$_candidate" ]]; then
         _UV="$_candidate"
@@ -41,7 +40,7 @@ for _candidate in \
 done
 if [[ -z "$_UV" ]]; then
     echo "[build] error: 'uv' not found." >&2
-    echo "[build] Checked: PATH, ~/.cargo/bin/uv, ~/.local/bin/uv, conda env_robonix." >&2
+    echo "[build] Checked: PATH, ~/.cargo/bin/uv, ~/.local/bin/uv, /usr/local/bin/uv." >&2
     echo "[build] Install: https://docs.astral.sh/uv/getting-started/installation" >&2
     echo "[build] Or:   conda activate env_robonix && rbnx boot" >&2
     exit 1

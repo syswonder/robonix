@@ -98,8 +98,8 @@ impl ForestView {
 
 /// The standard LLM-facing capability name, exactly as pilot presents it to
 /// the model and as the model emits it in `do.cap`: `provider_id.<area>_<leaf>`
-/// — e.g. `tiago_camera.camera_snapshot`, `tiago_lidar.lidar_snapshot`,
-/// `explore.explore_status`, `executor.builtin_read_file`. The `<area>_<leaf>`
+/// — e.g. `front_camera.camera_snapshot`, `explore.explore_status`,
+/// `executor.builtin_read_file`. The `<area>_<leaf>`
 /// part mirrors `robonix_pilot::discovery::llm_name` (kept in sync here since
 /// rbnx-cli doesn't depend on the pilot crate); the `<area>` prefix is what
 /// disambiguates the shared `snapshot` / `status` leaves across providers.

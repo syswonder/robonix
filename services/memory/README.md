@@ -40,7 +40,10 @@ print(f'Nodes: {svc.graph.count()}')
 ## Configuration
 
 - `EMBEDDING_MODEL_PATH` — path to all-MiniLM-L6-v2 model directory
-  (defaults to `~/EmbodyMemory/memory/all-MiniLM-L6-v2`)
+  (optional; otherwise sentence-transformers uses its standard model cache)
+- Spatial records containing objects must provide their actual coordinate
+  frame in `origin`; missing origins are rejected rather than labelled
+  `world`.
 - Falls back to deterministic hash embeddings when model unavailable
 
 ## Status

@@ -15,6 +15,7 @@ appearance embeddings, learned association.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -29,6 +30,8 @@ from .object_registry import (
     SceneObject,
     now_unix,
 )
+
+log = logging.getLogger(__name__)
 
 
 # Per-class gating radius in metres. Below this distance, an existing
@@ -57,8 +60,8 @@ _COST_ALPHA = 0.5
 @dataclass
 class Detection:
     """One per-frame perception output. Stable id is NOT supplied — it's
-    this layer's job to assign / find one. `pose` is in `map` frame
-    (ingest does the TF transform before producing Detection)."""
+    this layer's job to assign / find one. `pose` and `bbox` must carry
+    the same explicit destination frame established by ingest."""
     cls: str
     pose: Pose3D
     bbox: BBox3D
@@ -92,27 +95,46 @@ def associate(
         now = now_unix()
     if not detections:
         return [], []
+    valid_detections: list[Detection] = []
+    for detection in detections:
+        pose_frame = str(detection.pose.frame_id or "").strip()
+        bbox_frame = str(detection.bbox.frame_id or "").strip()
+        if not pose_frame or pose_frame != bbox_frame:
+            log.warning(
+                "dropping detection %r with unknown or mixed frames "
+                "(pose=%s bbox=%s)",
+                detection.cls,
+                pose_frame or "unknown",
+                bbox_frame or "unknown",
+            )
+            continue
+        valid_detections.append(detection)
+    if not valid_detections:
+        return [], []
 
-    # Bucket existing objects by class — class-match gate is a hard
-    # filter; no point including, say, all "table" objects in the
-    # cost matrix when we're matching cups.
-    by_cls: dict[str, list[SceneObject]] = {}
+    # Bucket by class and frame. Coordinates from distinct frames are never
+    # comparable, even when their numeric values happen to be nearby.
+    by_key: dict[tuple[str, str], list[SceneObject]] = {}
     for obj in registry.all_objects():
         # Robot self-object never participates in detection matching.
         if obj.attributes.get("is_robot"):
             continue
-        by_cls.setdefault(obj.cls, []).append(obj)
+        pose_frame = str(obj.pose.frame_id or "").strip()
+        bbox_frame = str(obj.bbox.frame_id or "").strip()
+        if pose_frame and pose_frame == bbox_frame:
+            by_key.setdefault((obj.cls, pose_frame), []).append(obj)
 
     matched_ids: list[str] = []
     new_ids: list[str] = []
 
-    # Process per-class so the cost matrix stays small.
-    by_cls_dets: dict[str, list[Detection]] = {}
-    for d in detections:
-        by_cls_dets.setdefault(d.cls, []).append(d)
+    # Process per class+frame so the cost matrix stays small and meaningful.
+    by_key_dets: dict[tuple[str, str], list[Detection]] = {}
+    for detection in valid_detections:
+        key = (detection.cls, str(detection.pose.frame_id).strip())
+        by_key_dets.setdefault(key, []).append(detection)
 
-    for cls, dets in by_cls_dets.items():
-        objs = by_cls.get(cls, [])
+    for (cls, frame_id), dets in by_key_dets.items():
+        objs = by_key.get((cls, frame_id), [])
         gate = _gate_radius(cls)
         if not objs:
             for d in dets:

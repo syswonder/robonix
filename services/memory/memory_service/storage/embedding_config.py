@@ -8,7 +8,7 @@ Current: "text" only.
 
 Model path precedence:
   1. EMBEDDING_MODEL_PATH env var
-  2. ~/EmbodyMemory/memory/all-MiniLM-L6-v2
+  2. sentence-transformers' standard cache for `model_name`
 """
 
 from __future__ import annotations
@@ -34,14 +34,7 @@ class EmbeddingModelConfig:
 
     def __post_init__(self):
         if not self.model_path:
-            env_path = os.environ.get("EMBEDDING_MODEL_PATH", "")
-            if env_path:
-                self.model_path = env_path
-            else:
-                self.model_path = os.path.join(
-                    os.path.expanduser("~"),
-                    "EmbodyMemory", "memory", "all-MiniLM-L6-v2"
-                )
+            self.model_path = os.environ.get("EMBEDDING_MODEL_PATH", "")
         self.model_path = os.path.expanduser(self.model_path)
 
 

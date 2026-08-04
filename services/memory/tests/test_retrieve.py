@@ -77,9 +77,15 @@ class TestRetrievePipeline:
 
     def test_tag_plus_semantic_narrows_candidates(self):
         self._remember("s1", "p1", "grasped cup in the kitchen",
-                       spatial=SpatialContext(objects=[ObjectCoord("o1", "cup")]))
+                       spatial=SpatialContext(
+                           objects=[ObjectCoord("o1", "cup")],
+                           origin="fixture_frame",
+                       ))
         self._remember("s1", "p1", "grasped cup in the living room",
-                       spatial=SpatialContext(objects=[ObjectCoord("o2", "cup")]))
+                       spatial=SpatialContext(
+                           objects=[ObjectCoord("o2", "cup")],
+                           origin="fixture_frame",
+                       ))
         # Without tag filter — both returned
         resp_all = self._search("grasp cup")
         assert len(resp_all.nodes) >= 1

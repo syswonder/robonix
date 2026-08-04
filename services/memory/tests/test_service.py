@@ -34,6 +34,7 @@ class TestMemoryService:
             level="Info", tag="exec",
             msg="robot grasped the red cup from the kitchen counter",
             objects=[("scene.obj.cup_001", "red cup", 1.0, 2.0, 0.8)],
+            spatial_origin="fixture_frame",
         ))
         assert nid >= 0
 
@@ -52,6 +53,7 @@ class TestMemoryService:
             level="Info", tag="exec",
             msg="placed red cup on the kitchen counter",
             objects=[("scene.obj.cup_001", "red cup", 1.0, 2.0, 0.8)],
+            spatial_origin="fixture_frame",
         ))
 
         # Day 1: also placed cup in living room (decoy)
@@ -60,6 +62,7 @@ class TestMemoryService:
             level="Info", tag="exec",
             msg="placed blue cup on the living room coffee table",
             objects=[("scene.obj.cup_002", "blue cup", 3.0, 4.0, 0.5)],
+            spatial_origin="fixture_frame",
         ))
 
         # Day 2: ask "where was the red cup yesterday?"
@@ -134,7 +137,8 @@ class TestMemoryService:
         asyncio.run(self.svc.remember(
             session_id="s1", plan_id="p1", log_record=lr_old,
             spatial=SpatialContext(
-                objects=[ObjectCoord("o1", "cup", 1.0, 2.0, 0.5)]
+                objects=[ObjectCoord("o1", "cup", 1.0, 2.0, 0.5)],
+                origin="fixture_frame",
             ),
         ))
 
@@ -144,7 +148,8 @@ class TestMemoryService:
         asyncio.run(self.svc.remember(
             session_id="s1", plan_id="p2", log_record=lr_recent,
             spatial=SpatialContext(
-                objects=[ObjectCoord("o2", "cup", 1.1, 2.1, 0.5)]
+                objects=[ObjectCoord("o2", "cup", 1.1, 2.1, 0.5)],
+                origin="fixture_frame",
             ),
         ))
 
@@ -205,18 +210,21 @@ class TestMemoryService:
             level="Info", tag="exec",
             msg="grasped red cup in the kitchen",
             objects=[("scene.obj.cup_001", "red cup", 1.0, 2.0, 0.8)],
+            spatial_origin="fixture_frame",
         )))
         ids.append(asyncio.run(svc1.remember_from_log(
             session_id="sess-reboot", plan_id="plan-2",
             level="Error", tag="exec",
             msg="failed to grasp slippery glass on the kitchen sink",
             objects=[("scene.obj.glass_001", "glass", 1.2, 2.3, 1.0)],
+            spatial_origin="fixture_frame",
         )))
         ids.append(asyncio.run(svc1.remember_from_log(
             session_id="sess-reboot", plan_id="plan-3",
             level="Info", tag="pilot",
             msg="crafted stone axe in the workshop",
             objects=[("scene.obj.axe_001", "stone axe", 7.1, 8.1, 1.0)],
+            spatial_origin="fixture_frame",
         )))
 
         # Verify Boot 1 search works

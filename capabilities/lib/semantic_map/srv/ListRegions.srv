@@ -1,0 +1,6 @@
+# robonix/system/scene/list_regions — return user-authored room regions.
+# Physical objects are deliberately excluded; use list_objects for them.
+---
+Region[] regions
+string map_id
+float64 stamp_unix

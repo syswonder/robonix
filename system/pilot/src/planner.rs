@@ -1852,7 +1852,7 @@ assigns the real id) and a short `description` of THIS node's intent, plus:\n\
 A capability name goes ONLY in a do node's `cap` — NEVER as an `op`. \
 Beyond `op_id` and `description`, do NOT add other node fields (no `plan_id`, no `out`, no `id`). \
 Copy each `cap` EXACTLY from a capability_name in the list below (it is provider-qualified, \
-e.g. `tiago_camera.camera_snapshot`); never invent or shorten names.\n\
+as returned by discovery); never invent, guess, or shorten names.\n\
 `task_update`: null keeps current progress, or {\"goal\",\"success_criterion\",\"status\"}. \
 The harness owns the instruction history: copy it EXACTLY from \"Current overall task\" and never \
 rewrite it. Interpret entries chronologically: the newest user instruction overrides conflicting \

@@ -24,13 +24,11 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Mount, Route
-from starlette.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from robonix_api import ATLAS
 
@@ -381,7 +379,7 @@ def _image_to_png_b64(msg: Any, *, kind: str) -> Optional[dict]:
         elif enc == "rgba8":
             arr = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
         elif enc == "bgra8":
-            # webots head camera publishes BGRA8.
+            # Some camera providers publish BGRA8.
             arr = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(h, w, 4)[:, :, :3][:, :, ::-1]
         elif enc == "mono8":
             arr = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(h, w)
@@ -478,7 +476,8 @@ def _camera_json_bytes(hub: Any) -> bytes:
 def _state_payload(registry: ObjectRegistry,
                    hub: Any, sg_store: Any = None,
                    anno_store: Any = None,
-                   map_binding: Optional[dict] = None) -> dict:
+                   map_binding: Optional[dict] = None,
+                   robot_geometry: Any = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
     sees a half-updated registry. The "relations" field shows the fast
@@ -536,6 +535,11 @@ def _state_payload(registry: ObjectRegistry,
         "relations": out_relations,
         "scene_graph": sg_payload,
         "robot": robot_pose,
+        "robot_footprint": (
+            robot_geometry.current().to_json()
+            if robot_geometry is not None and robot_geometry.current() is not None
+            else None
+        ),
         "occupancy": _occupancy_payload(hub),
         "annotations": anno_store.list_json() if anno_store is not None else [],
         "map_binding": map_binding,
@@ -670,7 +674,8 @@ def make_app(*, registry: ObjectRegistry,
              object_store: Any = None, map_meta: Any = None,
              map_binding: Optional[dict] = None,
              ops_lock: Optional[asyncio.Lock] = None,
-             semantic_hold: Optional[dict] = None) -> Starlette:
+             semantic_hold: Optional[dict] = None,
+             robot_geometry: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
@@ -851,7 +856,14 @@ def make_app(*, registry: ObjectRegistry,
 
     async def state(_request) -> JSONResponse:
         return JSONResponse(
-            _state_payload(registry, hub, sg_store, anno_store, map_binding)
+            _state_payload(
+                registry,
+                hub,
+                sg_store,
+                anno_store,
+                map_binding,
+                robot_geometry,
+            )
         )
 
     # ── annotation CRUD ──────────────────────────────────────────────
@@ -1461,12 +1473,6 @@ def make_app(*, registry: ObjectRegistry,
             camera_preview_completed_s = loop.time()
             return Response(payload, media_type="application/json")
 
-    # Static asset directory ships with scene_service; holds the
-    # tiago URDF mesh assets (STL/DAE files lifted from PAL Robotics's
-    # tiago_description + pmb2_description). Mounted under /static so
-    # the 3D viz can fetch them via STLLoader without any extra wiring.
-    static_dir = Path(__file__).parent / "static"
-
     routes = [
         Route("/", index, methods=["GET"]),
         Route("/2d", index2d, methods=["GET"]),
@@ -1488,8 +1494,6 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/maps/delete", maps_delete, methods=["POST"]),
         Route("/api/maps/pose_estimate", maps_pose_estimate, methods=["POST"]),
     ]
-    if static_dir.is_dir():
-        routes.append(Mount("/static", StaticFiles(directory=str(static_dir)), name="static"))
     return Starlette(routes=routes)
 
 
@@ -2178,95 +2182,37 @@ _INDEX_3D_HTML = r"""<!doctype html>
     raycaster.params.Line = { threshold: 0.05 };
     let highlighted = null;
 
-    // ── Robot body — composite Tiago-like proxy ────────────────────────
-    // Hierarchy of primitives that match Tiago's silhouette:
-    //   mobile base (cylinder, 0.54 m dia)
-    //   torso column (cylinder)
-    //   shoulder block (box, where the arm mounts)
-    //   neck stub + head (sphere with eye accent)
-    //   forward camera bezel (the head's "face")
-    // Everything is parented to a `THREE.Group` so updateRobotPose
-    // moves the whole body atomically. Materials are translucent so the
-    // ConceptGraphs object pcds rendered behind/around the robot stay
-    // visible.
-    //
-    // (We had a brief attempt to load the real Tiago STL meshes from
-    // PAL's tiago_description / pmb2_description packages; the 5
-    // visual STLs are still under static/urdf/meshes/ for future use,
-    // but loading them in three.js needs work — the meshes have
-    // per-link local origins that don't compose into the right body
-    // shape without the actual URDF joint chain. Reverted to the
-    // proxy so the user can at least see the robot.)
+    // ── Robot footprint — deployment geometry supplied by Soma ─────────
     const robotGroup = new THREE.Group();
-
-    // Visual style — slightly different shades per part so the
-    // articulation reads at a glance.
-    const robotMatBase = new THREE.MeshStandardMaterial({
+    const robotMaterial = new THREE.MeshStandardMaterial({
         color: 0xffaa33, transparent: true, opacity: 0.65,
         emissive: 0x553300, emissiveIntensity: 0.20,
-        metalness: 0.15, roughness: 0.55,
+        metalness: 0.10, roughness: 0.60, side: THREE.DoubleSide,
     });
-    const robotMatTorso = new THREE.MeshStandardMaterial({
-        color: 0xfff0d0, transparent: true, opacity: 0.55,
-        emissive: 0x442200, emissiveIntensity: 0.15,
-        metalness: 0.05, roughness: 0.65,
-    });
-    const robotMatHead = new THREE.MeshStandardMaterial({
-        color: 0xfff0d0, transparent: true, opacity: 0.7,
-        emissive: 0x442200, emissiveIntensity: 0.18,
-        metalness: 0.10, roughness: 0.5,
-    });
-    const robotMatAccent = new THREE.MeshStandardMaterial({
-        color: 0x222831, transparent: false,
-        emissive: 0x000000, metalness: 0.30, roughness: 0.40,
-    });
-
-    // 1) Mobile base — Tiago is ~54 cm dia, 30 cm tall. Stand it up by
-    //    rotating CylinderGeometry's natural Y-up axis to Z-up.
-    const baseGeom = new THREE.CylinderGeometry(0.27, 0.27, 0.30, 24);
-    baseGeom.rotateX(Math.PI / 2);
-    const baseMesh = new THREE.Mesh(baseGeom, robotMatBase);
-    baseMesh.position.set(0, 0, 0.15);
-    robotGroup.add(baseMesh);
-
-    // 2) Torso column — slimmer, sits on top of the base.
-    const torsoGeom = new THREE.CylinderGeometry(0.13, 0.15, 0.55, 20);
-    torsoGeom.rotateX(Math.PI / 2);
-    const torsoMesh = new THREE.Mesh(torsoGeom, robotMatTorso);
-    torsoMesh.position.set(0, 0, 0.30 + 0.275);
-    robotGroup.add(torsoMesh);
-
-    // 3) Shoulder block — wider plate where Tiago's arm mounts.
-    const shoulderGeom = new THREE.BoxGeometry(0.32, 0.42, 0.18);
-    const shoulderMesh = new THREE.Mesh(shoulderGeom, robotMatTorso);
-    shoulderMesh.position.set(0.0, 0.0, 0.30 + 0.55 + 0.09);
-    robotGroup.add(shoulderMesh);
-
-    // 4) Neck stub.
-    const neckGeom = new THREE.CylinderGeometry(0.05, 0.06, 0.08, 16);
-    neckGeom.rotateX(Math.PI / 2);
-    const neckMesh = new THREE.Mesh(neckGeom, robotMatHead);
-    neckMesh.position.set(0.02, 0, 0.30 + 0.55 + 0.18 + 0.04);
-    robotGroup.add(neckMesh);
-
-    // 5) Head — sphere with darker face plate pointing +X.
-    const headGeom = new THREE.SphereGeometry(0.12, 24, 16);
-    const headMesh = new THREE.Mesh(headGeom, robotMatHead);
-    headMesh.position.set(0.05, 0, 0.30 + 0.55 + 0.18 + 0.08 + 0.10);
-    robotGroup.add(headMesh);
-
-    const faceGeom = new THREE.BoxGeometry(0.04, 0.18, 0.07);
-    const faceMesh = new THREE.Mesh(faceGeom, robotMatAccent);
-    faceMesh.position.set(0.05 + 0.10, 0, 0.30 + 0.55 + 0.18 + 0.08 + 0.10);
-    robotGroup.add(faceMesh);
-
-    // 6) Stylised arm — single capsule angled forward+down.
-    const armGeom = new THREE.CapsuleGeometry(0.045, 0.45, 6, 12);
-    const armMesh = new THREE.Mesh(armGeom, robotMatBase);
-    armMesh.position.set(0.05, -0.20, 0.30 + 0.55 + 0.18 + 0.05);
-    armMesh.rotation.set(0, 0.55, 0);
-    robotGroup.add(armMesh);
-
+    let footprintKey = '';
+    function updateRobotFootprint(footprint) {
+        if (!footprint || !Array.isArray(footprint.points) || footprint.points.length < 3) {
+            robotGroup.visible = false;
+            return;
+        }
+        robotGroup.visible = true;
+        const key = JSON.stringify(footprint.points);
+        if (key === footprintKey) return;
+        footprintKey = key;
+        while (robotGroup.children.length) {
+            const child = robotGroup.remove(robotGroup.children[0]);
+            if (child.geometry) child.geometry.dispose();
+        }
+        const shape = new THREE.Shape();
+        footprint.points.forEach((point, index) => {
+            if (index === 0) shape.moveTo(point[0], point[1]);
+            else shape.lineTo(point[0], point[1]);
+        });
+        shape.closePath();
+        const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), robotMaterial);
+        mesh.position.z = 0.02;
+        robotGroup.add(mesh);
+    }
     scene.add(robotGroup);
 
     // Forward-pointing arrow so yaw is visible even when zoomed out.
@@ -2274,8 +2220,9 @@ _INDEX_3D_HTML = r"""<!doctype html>
     // rotation that we set per-frame from yaw.
     const arrowDir = new THREE.Vector3(1, 0, 0);
     const robotArrow = new THREE.ArrowHelper(
-        arrowDir, new THREE.Vector3(0, 0, 0.55), 0.6, 0xff5522, 0.18, 0.10,
+        arrowDir, new THREE.Vector3(0, 0, 0.08), 0.5, 0xff5522, 0.14, 0.08,
     );
+    robotArrow.visible = false;
     scene.add(robotArrow);
 
     // Robot label sprite (separate so it doesn't tilt with the group).
@@ -2294,19 +2241,26 @@ _INDEX_3D_HTML = r"""<!doctype html>
         map: new THREE.CanvasTexture(robotLabelCv), transparent: true, depthTest: false,
     }));
     robotLabel.scale.set(0.5, 0.14, 1);
+    robotLabel.visible = false;
     scene.add(robotLabel);
 
-    function updateRobotPose(rx, ry, rz, ryaw) {
-        // The whole composite body moves+rotates as one rigid frame.
+    function updateRobotPose(rx, ry, rz, ryaw, footprint) {
+        updateRobotFootprint(footprint);
+        const radius = Number(footprint && footprint.circumscribed_radius_m);
+        if (!robotGroup.visible || !Number.isFinite(radius) || radius <= 0) {
+            robotArrow.visible = false;
+            robotLabel.visible = false;
+            return;
+        }
+        robotArrow.visible = true;
+        robotLabel.visible = true;
         robotGroup.position.set(rx, ry, rz);
         robotGroup.rotation.set(0, 0, ryaw);
-        // Arrow: rotate the forward unit-vec by yaw, then place at the
-        // body's mid-height for visibility.
         const dir = new THREE.Vector3(Math.cos(ryaw), Math.sin(ryaw), 0);
-        robotArrow.position.set(rx, ry, rz + 0.55);
+        robotArrow.setLength(Math.max(0.25, radius * 1.5), 0.14, 0.08);
+        robotArrow.position.set(rx, ry, rz + 0.08);
         robotArrow.setDirection(dir);
-        // Label hovers above the head.
-        robotLabel.position.set(rx, ry, rz + 1.40);
+        robotLabel.position.set(rx, ry, rz + 0.35);
     }
 
     async function pollRobot() {
@@ -2315,7 +2269,14 @@ _INDEX_3D_HTML = r"""<!doctype html>
             const j = await r.json();
             const rb = j.robot;
             if (rb && Number.isFinite(rb.x)) {
-                updateRobotPose(rb.x || 0, rb.y || 0, rb.z || 0, rb.yaw || 0);
+                updateRobotPose(
+                    rb.x || 0, rb.y || 0, rb.z || 0, rb.yaw || 0,
+                    j.robot_footprint,
+                );
+            } else {
+                robotGroup.visible = false;
+                robotArrow.visible = false;
+                robotLabel.visible = false;
             }
         } catch (e) {}
     }
