@@ -1,0 +1,10 @@
+# scripts/start.sh regenerates Python protobuf stubs inside the exact runtime
+# image with networking disabled. Keep this aligned with scene-base grpcio.
+grpcio-tools==1.80.0
+# grpcio-tools 1.80 requires >=77.0.1; ROS colcon-core requires <80.
+setuptools==79.0.1
+# setuptools 79 calls packaging.utils.canonicalize_version with the
+# strip_trailing_zero keyword while Ubuntu 22.04 ships packaging 21.3. Pin a
+# compatible runtime so the generated ros2_idl overlay can complete its
+# ament_cmake_python/colcon build inside both full and lite images.
+packaging==25.0

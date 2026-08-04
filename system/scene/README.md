@@ -1,6 +1,6 @@
 # `system/scene` — live semantic + geometric map
 
-Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes read-only MCP tools that Pilot calls during RTDL planning/execution, and a self-contained 2D + 3D web viewer.
+Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. It exposes query tools plus epoch-checked operator corrections, and a self-contained 2D + 3D web viewer.
 
 This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
 
@@ -20,14 +20,20 @@ system/scene/
 │   └── start.sh                 docker run wrapper used by `rbnx boot`
 ├── scene_service/
 │   ├── service.py               entrypoint: atlas register + asyncio + FastMCP
-│   ├── mcp_tools.py             5 @mcp_contract handlers (thin wrappers)
+│   ├── mcp_tools.py             query and epoch-checked correction contracts
+│   ├── lifecycle_runtime.py     Driver config and owned-resource cleanup
+│   ├── object_mutations.py      transactional object correction coordinator
 │   ├── web.py                   2D + 3D web viewer (Starlette + three.js)
 │   ├── state/                   ObjectRegistry, data assoc, snapshot
 │   ├── scene_graph/             relations: fast geometric loop (reachable_by) + image-grounded VLM (image_relations.py) + store
 │   ├── ingest/
 │   │   ├── ros_subscribers.py   rclpy hub: /tf2 + topic slots (rgb/depth/lidar/...)
 │   │   ├── capabilities.py      hardware probe → perception tier (metric/visual/geometric)
-│   │   ├── perception_concept_graphs.py  perception pipeline (this file)
+│   │   ├── perception_concept_graphs.py  perception and persistent map pipeline
+│   │   ├── cg_kernels.py        deployment-owned ConceptGraphs kernels
+│   │   ├── model_storage.py     local model checkpoint loading
+│   │   ├── perception_profiles.py full/lite runtime selection
+│   │   ├── tensorrt_cache.py    versioned Jetson engine cache
 │   │   └── perception_vlm.py    VLM fallback (no-depth deploys only)
 ```
 
@@ -57,14 +63,35 @@ Periodic cleanup (every 30 ticks) runs concept-graphs's `denoise_objects` + `fil
 Unlike the Rust system binaries (atlas / executor / pilot / liaison — one
 static binary, architecture-agnostic), scene ships a heavy Python + CUDA
 perception stack, so it is **platform-specific at both build and run time**.
-One repo covers three targets, picked by the per-target package manifest
+One repo covers full and lite variants for each target. The per-target package manifest
 (`rbnx deploy` selects it via the deploy entry's `manifest:` field):
 
-| Target | manifest | torch source | how it runs |
+| Target | full manifest | lite manifest | execution |
 |---|---|---|---|
-| **x86-docker** (default) | `package_manifest.yaml` | cu128 x86 wheels baked into `docker/Dockerfile` | `docker run --gpus all` |
-| **jetson-docker** | `package_manifest.jetson-docker.yaml` | NVIDIA jetson-ai-lab wheels in `docker/Dockerfile.jetson` | `docker run --runtime nvidia` |
-| **jetson-native** | `package_manifest.jetson-native.yaml` | **host JetPack torch** (no image) | host `python3 -m scene_service.service` |
+| **x86 Docker** (default) | `package_manifest.yaml` | `package_manifest.lite.yaml` | Docker; full uses NVIDIA GPU when available |
+| **Jetson Docker** | `package_manifest.jetson-docker.yaml` | `package_manifest.jetson-docker-lite.yaml` | NVIDIA container runtime |
+| **Jetson native** | `package_manifest.jetson-native.yaml` | `package_manifest.jetson-native-lite.yaml` | host ROS/Python/JetPack stack |
+
+Full profiles run RGB-D perception and the persistent object map. Lite profiles
+keep the lifecycle, map/annotation, object-query, mutation, persistence, and web
+surfaces but intentionally omit torch, YOLO, SAM, OpenCLIP, and ConceptGraphs.
+
+New deployments select the manifest and send runtime settings through the
+shared lifecycle Driver channel:
+
+```yaml
+system:
+  scene:
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      camera_provider_id: front_camera
+      web_port: 50107
+```
+
+`rbnx boot` sends only the nested `config` through `Driver(CMD_INIT)` before
+activation. The legacy flat `system.scene` shape and `RBNX_CONFIG_FILE` remain
+migration paths and emit deprecation warnings; they are not used by new
+deployments.
 
 `scripts/build.sh` branches on `RBNX_BUILD_TARGET`; `scripts/start.sh` branches
 on `ROBONIX_SCENE_FORCE` (`native`/`docker`, or auto from

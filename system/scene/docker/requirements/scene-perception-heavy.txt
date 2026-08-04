@@ -1,5 +1,2 @@
-# Open3D is concept-graphs' point-cloud rep. Pcd ops are CPU-bound
-# but we don't accumulate tens of thousands per frame; one per object
-# per tick is fine.
-open3d>=0.17,<0.19
-faiss-cpu==1.7.4 
+# Intentionally empty. Point clouds, voxel kernels, DBSCAN, and AABBs are
+# implemented with NumPy/SciPy in scene_service.ingest.cg_kernels.

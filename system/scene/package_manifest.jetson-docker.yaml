@@ -1,13 +1,14 @@
 # Scene MCP server — Jetson + DOCKER deployment target.
 #
 #   build → RBNX_BUILD_TARGET=jetson-docker scripts/build.sh: docker build
-#           with docker/Dockerfile.jetson (NVIDIA L4T PyTorch base, so torch +
-#           CUDA come from the image instead of host-cu128 x86 wheels).
+#           with docker/Dockerfile.jetson (Jetson PyTorch/Torch-TensorRT wheels
+#           in the image; JetPack TensorRT/CUDA libraries come from the host
+#           through the NVIDIA container runtime).
 #   start → ROBONIX_SCENE_FORCE=docker scripts/start.sh: docker run with the
 #           NVIDIA container runtime for GPU passthrough.
 #
-# Use this on a Jetson when you want a self-contained image (no host ROS /
-# torch needed). Heavier first build than jetson-native; see the scene README.
+# Use this on a Jetson when you want containerized ROS/Python dependencies.
+# A matching host JetPack installation remains required for CUDA/TensorRT.
 manifestVersion: 1
 
 package:
@@ -18,7 +19,7 @@ package:
   license: MulanPSL-2.0
 
 build: RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
-start: ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+start: SCENE_PERCEPTION_PROFILE=jetson ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
 
 capabilities:
   - name: robonix/system/scene/list_objects
@@ -29,3 +30,7 @@ capabilities:
   - name: robonix/system/scene/get_scene_graph
   - name: robonix/system/scene/get_object_context
   - name: robonix/system/scene/list_relations
+  - name: robonix/system/scene/update_object_label
+  - name: robonix/system/scene/update_object_geometry
+  - name: robonix/system/scene/delete_object
+  - name: robonix/system/scene/flush_objects

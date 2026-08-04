@@ -1,0 +1,8 @@
+# Jetson Orin first-boot TensorRT export toolchain.  Install this file from
+# https://pypi.jetson-ai-lab.io/jp6/cu126 after the JetPack-compatible
+# torch/torchvision pair.  TensorRT itself is supplied by JetPack 6.2.
+numpy>=1.23.2,<2
+onnx==1.22.0
+onnxruntime-gpu==1.23.0
+onnxslim==0.1.95
+dllist==2.0.0

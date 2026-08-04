@@ -1,0 +1,28 @@
+# Scene lite deployment for Jetson with containerized ROS/Python dependencies.
+# The image is multi-arch and intentionally contains no CUDA or model runtime;
+# the NVIDIA runtime is not required by the lite profile.
+manifestVersion: 1
+
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Scene pose, rooms, annotations, map binding and APIs on Jetson without object perception.
+  license: MulanPSL-2.0
+
+build: RBNX_BUILD_TARGET=jetson-docker ROBONIX_SCENE_BUILD_PROFILE=lite ROBONIX_SCENE_IMAGE=robonix-scene-lite-jetson bash scripts/build.sh
+start: SCENE_PERCEPTION_PROFILE=lite ROBONIX_SCENE_IMAGE=robonix-scene-lite-jetson ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+stop: docker rm -f "${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
+
+capabilities:
+  - name: robonix/system/scene/list_objects
+  - name: robonix/system/scene/get_robot_context
+  - name: robonix/system/scene/goal_near
+  - name: robonix/system/scene/goal_room
+  - name: robonix/system/scene/get_scene_graph
+  - name: robonix/system/scene/get_object_context
+  - name: robonix/system/scene/list_relations
+  - name: robonix/system/scene/update_object_label
+  - name: robonix/system/scene/update_object_geometry
+  - name: robonix/system/scene/delete_object
+  - name: robonix/system/scene/flush_objects

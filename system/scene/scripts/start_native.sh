@@ -3,7 +3,7 @@
 # scene native start — run scene_service directly on the host (no docker).
 #
 # Used on Jetson (and any host with ROS 2 + a CUDA-capable python that already
-# has torch/torchvision/ultralytics/open3d). Selected by the jetson-native
+# has torch/torchvision/ultralytics). Selected by the jetson-native
 # manifest (`ROBONIX_SCENE_FORCE=native bash scripts/start.sh`, which execs
 # this). The build phase (build_native.sh) created rbnx-build/venv with
 # --system-site-packages so the heavy CUDA wheels come from the host JetPack
@@ -17,14 +17,10 @@ set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 
-# Native scene runs on the host python (the build installed scene's light deps
-# into the user site next to the host JetPack torch — no venv; see build.sh).
+# Native Scene runs on the host Python. The lite profile deliberately works on
+# hosts without torch; metric profiles validate their model dependencies only
+# when the detector is actually started.
 PY="${SCENE_NATIVE_PYTHON:-python3}"
-"$PY" -c "import torch" 2>/dev/null || {
-    echo "[scene/native] error: '$PY' has no torch — run the jetson-native build" >&2
-    echo "               and install the JetPack CUDA stack first (see scene README)." >&2
-    exit 1
-}
 
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 # shellcheck disable=SC1091
@@ -36,27 +32,38 @@ if ROBONIX_API="$(rbnx path robonix-api 2>/dev/null)"; then
     export PYTHONPATH="$ROBONIX_API:$PYTHONPATH"
 fi
 
-# Model weights: build.sh fetches yolo + mobile_sam to docker/_weights and
-# pre-warms both CLIP paths. Keep these envs aligned with build.sh so start is
-# offline-fast and never downloads model weights during robot boot.
-W="$PKG/docker/_weights"
-export SCENE_YOLO_WORLD_WEIGHTS="${SCENE_YOLO_WORLD_WEIGHTS:-$W/yolov8l-world.pt}"
-export SCENE_MOBILE_SAM_WEIGHTS="${SCENE_MOBILE_SAM_WEIGHTS:-$W/mobile_sam.pt}"
-export SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}"
-export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-$W/open_clip_pytorch_model.bin}"
-export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
-ULTRALYTICS_CLIP_WEIGHTS="$YOLO_CONFIG_DIR/weights/clip/ViT-B-32.pt"
-for model_path in \
-    "$SCENE_YOLO_WORLD_WEIGHTS" \
-    "$SCENE_MOBILE_SAM_WEIGHTS" \
-    "$SCENE_CLIP_PRETRAINED" \
-    "$ULTRALYTICS_CLIP_WEIGHTS"; do
-    if [[ ! -s "$model_path" ]]; then
-        echo "[scene/native] error: missing model weight $model_path" >&2
-        echo "               run system/scene/scripts/build.sh before starting scene." >&2
-        exit 1
-    fi
-done
+PERCEPTION_PROFILE="${SCENE_PERCEPTION_PROFILE:-full}"
+if [[ "$PERCEPTION_PROFILE" == "lite" ]]; then
+    echo "[scene/native] profile=lite: skipping all perception model checks"
+else
+    # Model weights: build.sh freezes YOLO-World's prompt embeddings into a
+    # native build artifact. Robot boot must never invoke the YOLO text encoder
+    # or fetch model weights.
+    BAKED_YOLO="$PKG/rbnx-build/data/models/yolov8l-world-baked.safetensors"
+    BAKED_YOLO_JETSON="$PKG/rbnx-build/data/models/yolov8s-worldv2-baked.safetensors"
+    export SCENE_YOLO_WORLD_WEIGHTS_FULL="${SCENE_YOLO_WORLD_WEIGHTS_FULL:-$BAKED_YOLO}"
+    export SCENE_YOLO_WORLD_WEIGHTS_JETSON="${SCENE_YOLO_WORLD_WEIGHTS_JETSON:-$BAKED_YOLO_JETSON}"
+    export SCENE_YOLO_WORLD_WEIGHTS="${SCENE_YOLO_WORLD_WEIGHTS:-$SCENE_YOLO_WORLD_WEIGHTS_FULL}"
+    export SCENE_MOBILE_SAM_WEIGHTS="${SCENE_MOBILE_SAM_WEIGHTS:-$PKG/rbnx-build/data/models/mobile_sam.fp16.safetensors}"
+    export SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}"
+    export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-$PKG/rbnx-build/data/models/open_clip_vit_b32.fp16.safetensors}"
+    export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
+    export SCENE_TENSORRT_CACHE_DIR="${SCENE_TENSORRT_CACHE_DIR:-$PKG/rbnx-build/data/model-cache}"
+    mkdir -p "$SCENE_TENSORRT_CACHE_DIR"
+    for model_path in \
+        "$SCENE_YOLO_WORLD_WEIGHTS" \
+        "${SCENE_YOLO_WORLD_WEIGHTS%.safetensors}.classes.json" \
+        "$SCENE_YOLO_WORLD_WEIGHTS_JETSON" \
+        "${SCENE_YOLO_WORLD_WEIGHTS_JETSON%.safetensors}.classes.json" \
+        "$SCENE_MOBILE_SAM_WEIGHTS" \
+        "$SCENE_CLIP_PRETRAINED"; do
+        if [[ ! -s "$model_path" ]]; then
+            echo "[scene/native] error: missing model weight $model_path" >&2
+            echo "               run system/scene/scripts/build.sh before starting scene." >&2
+            exit 1
+        fi
+    done
+fi
 
 # Host-persisted scene state (object-memory DB + scene-graph caches).
 mkdir -p "$PKG/rbnx-build/data/robonix"

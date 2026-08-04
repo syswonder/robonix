@@ -1,11 +1,20 @@
 # ── Generic scene ────────────────────────────────────────────────
+# ROS Humble's cv_bridge/python3-opencv are compiled against the NumPy 1.x
+# C ABI. Keep every profile on that ABI instead of allowing scipy/pymilvus
+# to replace the apt package with NumPy 2 at runtime.
+numpy>=1.23.2,<2
 scipy>=1.11
-mcp
-fastmcp
-grpcio
-grpcio-tools
-protobuf
-pymilvus[milvus_lite]!=2.6.10,>=2.5.0
+mcp==1.29.0
+# Runtime libraries shared by the service and image-matched code generator.
+# The generator itself is installed late from scene-runtime-codegen.txt so a
+# generator-only change does not invalidate the large perception-model layers.
+grpcio==1.80.0
+protobuf==6.33.6
+pymilvus!=2.6.10,>=2.5.0
+# pymilvus 3.x no longer exposes the historical ``milvus_lite`` extra.
+# Keep the embedded backend explicit so a clean lite image does not silently
+# ship only the client library and lose warm persistence.
+milvus-lite==3.1.1
 uvicorn
 httpx
 Pillow

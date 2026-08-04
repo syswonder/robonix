@@ -1,0 +1,26 @@
+# Scene lite deployment for Jetson using host ROS 2 and host Python.
+# No torch, CUDA, TensorRT, or perception model is required.
+manifestVersion: 1
+
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Scene pose, rooms, annotations, map binding and APIs on native Jetson without object perception.
+  license: MulanPSL-2.0
+
+build: RBNX_BUILD_TARGET=jetson-native ROBONIX_SCENE_BUILD_PROFILE=lite bash scripts/build.sh
+start: SCENE_PERCEPTION_PROFILE=lite ROBONIX_SCENE_FORCE=native bash scripts/start.sh
+
+capabilities:
+  - name: robonix/system/scene/list_objects
+  - name: robonix/system/scene/get_robot_context
+  - name: robonix/system/scene/goal_near
+  - name: robonix/system/scene/goal_room
+  - name: robonix/system/scene/get_scene_graph
+  - name: robonix/system/scene/get_object_context
+  - name: robonix/system/scene/list_relations
+  - name: robonix/system/scene/update_object_label
+  - name: robonix/system/scene/update_object_geometry
+  - name: robonix/system/scene/delete_object
+  - name: robonix/system/scene/flush_objects

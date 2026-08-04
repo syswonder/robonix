@@ -1,0 +1,7 @@
+# ROS Humble cv_bridge and the apt OpenCV bindings are compiled against the
+# NumPy 1.x C ABI. Pass this file as a constraint to every independent pip
+# resolver invocation; a pin in scene-base.txt alone cannot constrain the
+# later Ultralytics/opencv-python dependency solve.
+numpy>=1.23.2,<2
+opencv-python>=4.8,<4.12
+opencv-python-headless>=4.8,<4.12

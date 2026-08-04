@@ -36,6 +36,10 @@ ARG ROS_DISTRO=humble
 ARG ROS_BASE_IMAGE=robonix-ros:humble-ros-base
 FROM ${ROS_BASE_IMAGE}
 
+# Global ARG values can select FROM but are out of scope in the stage.  Keep
+# package names independent of whether the selected base exports ROS_DISTRO.
+ARG ROS_DISTRO
+
 # ── Build-time proxy helpers ──────────────────────────────────────
 # Usage:
 #   - apt / pip: use `without-proxy ...`
@@ -113,7 +117,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy python3 -m pip install \
         --progress-bar on \
-        --timeout 60 \
+        --timeout 180 \
         --retries 3 \
         --upgrade pip
 
@@ -138,13 +142,29 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         base="https://mirrors.aliyun.com/pytorch-wheels/cu128"; \
         tw="torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
         tvw="torchvision-0.22.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
-        curl -fSL --retry 5 --retry-delay 2 -C - -o "/tmp/$tw" \
-             "$base/torch-2.7.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
-        curl -fSL --retry 5 --retry-delay 2 -C - -o "/tmp/$tvw" \
-             "$base/torchvision-0.22.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        wheel_cache=/root/.cache/pip/scene-wheels; \
+        mkdir -p "$wheel_cache"; \
+        download_wheel() { \
+            url="$1"; dest="$2"; max_time="$3"; attempt=1; \
+            while [ "$attempt" -le 6 ]; do \
+                if curl -fSL --connect-timeout 20 --max-time "$max_time" \
+                        --speed-time 60 --speed-limit 1024 \
+                        -C - -o "$dest" "$url"; then \
+                    return 0; \
+                fi; \
+                attempt=$((attempt + 1)); \
+                sleep 2; \
+            done; \
+            return 1; \
+        }; \
+        download_wheel \
+             "$base/torch-2.7.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl" \
+             "$wheel_cache/$tw" 900; \
+        download_wheel \
+             "$base/torchvision-0.22.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl" \
+             "$wheel_cache/$tvw" 300; \
         python3 -m pip install --progress-bar on --timeout 60 --retries 3 \
-             "/tmp/$tw" "/tmp/$tvw"; \
-        rm -f "/tmp/$tw" "/tmp/$tvw"' \
+             "$wheel_cache/$tw" "$wheel_cache/$tvw"' \
     || with-build-proxy python3 -m pip install \
         --progress-bar on \
         --timeout 60 \
@@ -152,39 +172,60 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         --index-url https://download.pytorch.org/whl/cu128 \
         torch==2.7.1 torchvision==0.22.1
 
-# Generic scene deps + concept-graphs perception stack.
+# Generic scene deps + self-contained perception stack.
 # pip: do NOT use proxy; use PIP_INDEX_URL=TUNA.
 
+# Override only the dependency layers below. Keeping this ARG after apt and
+# Torch preserves their expensive cache chain when an operator changes PyPI
+# mirrors to recover from a stalled regional index.
+ARG SCENE_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${SCENE_PIP_INDEX_URL} \
+    UV_INDEX_URL=${SCENE_PIP_INDEX_URL}
+
 # base
+COPY requirements/scene-numpy1-abi.txt /tmp/requirements/scene-numpy1-abi.txt
 COPY requirements/scene-base.txt /tmp/requirements/scene-base.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install -r /tmp/requirements/scene-base.txt \
+    without-proxy pip install \
+        -c /tmp/requirements/scene-numpy1-abi.txt \
+        -r /tmp/requirements/scene-base.txt \
         --progress-bar on \
         --timeout 60 \
         --retries 3 \
+    && without-proxy pip uninstall -y faiss-cpu \
     && rm /tmp/requirements/scene-base.txt
 
 # core
+COPY patch_ultralytics_runtime.py /tmp/patch_ultralytics_runtime.py
 COPY requirements/scene-perception-core.txt /tmp/requirements/scene-perception-core.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install -r /tmp/requirements/scene-perception-core.txt \
+    without-proxy pip install \
+        -c /tmp/requirements/scene-numpy1-abi.txt \
+        -r /tmp/requirements/scene-perception-core.txt \
         --progress-bar on \
         --timeout 60 \
         --retries 3 \
-    && rm /tmp/requirements/scene-perception-core.txt
+    && python3 /tmp/patch_ultralytics_runtime.py \
+    && without-proxy pip uninstall -y faiss-cpu matplotlib \
+    && rm /tmp/requirements/scene-perception-core.txt \
+        /tmp/requirements/scene-numpy1-abi.txt \
+        /tmp/patch_ultralytics_runtime.py \
+    && python3 - <<'PY'
+import importlib.util
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
 
-# network heavy
-COPY requirements/scene-perception-heavy.txt /tmp/requirements/scene-perception-heavy.txt
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install -r /tmp/requirements/scene-perception-heavy.txt \
-        --progress-bar on \
-        --timeout 60 \
-        --retries 3 \
-    && rm /tmp/requirements/scene-perception-heavy.txt
-
-# Force protobuf upgrade — host rbnx codegen emits >=7.35 protos;
-# the base ROS image ships an older runtime.
-RUN without-proxy pip install --upgrade "protobuf>=7.35"
+for name in ("faiss", "matplotlib"):
+    if importlib.util.find_spec(name) is not None:
+        raise RuntimeError(f"unused heavyweight dependency leaked: {name}")
+from ultralytics import SAM, YOLO  # noqa: F401
+task_map = YOLO.task_map.fget(None)
+if "detect" not in task_map or "semantic" in task_map:
+    raise RuntimeError("Ultralytics detect task-map patch is inconsistent")
+if int(np.__version__.split(".", 1)[0]) >= 2:
+    raise RuntimeError("ROS Humble cv_bridge requires the NumPy 1.x ABI")
+PY
 
 # pytorch3d (see requirements/scene-pytorch3d.txt to decide whether installing it or not.)
 # COPY requirements/scene-pytorch3d.txt /tmp/requirements/scene-pytorch3d.txt
@@ -202,49 +243,43 @@ ARG HTTP_PROXY_HOST
 ARG HTTPS_PROXY_HOST
 ARG NO_PROXY_HOST
 
-# concept-graphs source from the ali-dev branch.
-# git clone: use proxy.
-RUN set -eux; \
-    rm -rf /opt/concept-graphs; \
-    with-build-proxy git clone --depth 1 --branch ali-dev \
-        https://ghfast.top/https://github.com/concept-graphs/concept-graphs.git \
-        /opt/concept-graphs \
-    || ( \
-        rm -rf /opt/concept-graphs && \
-        with-build-proxy git clone --depth 1 --branch ali-dev \
-            https://github.com/concept-graphs/concept-graphs.git \
-            /opt/concept-graphs \
-    )
-
-# concept-graphs editable install.
-# pip: do NOT use proxy.
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install --no-deps -e /opt/concept-graphs
-
 # Bake CV model weights into the image.
 ENV HF_HOME=/opt/models/hf \
     YOLO_CONFIG_DIR=/opt/ultralytics
 
-RUN mkdir -p /opt/models /opt/models/hf /opt/models/ultralytics /opt/ultralytics
+RUN mkdir -p /opt/models /opt/models/hf /opt/models/ultralytics/clip /opt/ultralytics
 
-COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
-COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
-COPY _weights/open_clip_pytorch_model.bin /opt/models/open_clip_pytorch_model.bin
+COPY bake_yolo_world.py /tmp/bake_yolo_world.py
+COPY bake_fp16_weights.py /tmp/bake_fp16_weights.py
+COPY yolo_world_classes.json /tmp/yolo_world_classes.json
 
 # Two CLIP-flavored downloads bake in here:
 #   1. open_clip's ViT-B-32 LAION-2B — copied above from the host model cache.
 #   2. Ultralytics YOLO-World's text encoder — goes to the Ultralytics
-#      weights_dir under /opt/models/ultralytics.
+#      weights_dir under /opt/models/ultralytics, only while the fixed prompt
+#      embeddings are baked. The text-encoder package and weights are removed
+#      in the same layer and are not present at runtime.
 #
 # open_clip receives a local checkpoint path, so it never calls the Hugging
 # Face metadata API. Ultralytics uses openai/clip internally from
 # YOLOWorld.set_classes(); run that exact path at build time so start never
 # downloads the 354 MB ViT-B-32.pt into /scene/weights/clip.
-RUN with-build-proxy sh <<'EOF'
+RUN --mount=type=bind,source=_weights/yolov8l-world.pt,target=/tmp/yolov8l-world.pt,ro \
+    --mount=type=bind,source=_weights/yolov8s-worldv2.pt,target=/tmp/yolov8s-worldv2.pt,ro \
+    --mount=type=bind,source=_weights/mobile_sam.pt,target=/tmp/mobile_sam.pt,ro \
+    --mount=type=bind,source=_weights/open_clip_pytorch_model.bin,target=/tmp/open_clip_pytorch_model.bin,ro \
+    --mount=type=bind,source=_weights/ViT-B-32.pt,target=/opt/models/ultralytics/clip/ViT-B-32.pt,ro \
+    with-build-proxy sh <<'EOF'
 set -eux
 export YOLO_CONFIG_DIR=/opt/ultralytics
+without-proxy python3 -m pip install --no-deps "clip-anytorch>=2.6"
 
-python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='/opt/models/open_clip_pytorch_model.bin')"
+python3 /tmp/bake_fp16_weights.py \
+    --open-clip-input /tmp/open_clip_pytorch_model.bin \
+    --open-clip-output /opt/models/open_clip_vit_b32.fp16.safetensors \
+    --mobile-sam-input /tmp/mobile_sam.pt \
+    --mobile-sam-output /opt/models/mobile_sam.fp16.safetensors
+python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='/opt/models/open_clip_vit_b32.fp16.safetensors')"
 
 python3 - <<'PY'
 from ultralytics.utils import SETTINGS
@@ -257,50 +292,58 @@ SETTINGS.update({
 })
 PY
 
+python3 /tmp/bake_yolo_world.py \
+    --input /tmp/yolov8l-world.pt \
+    --output /opt/models/yolov8l-world-baked.safetensors \
+    --architecture yolov8l-world.yaml \
+    --classes /tmp/yolo_world_classes.json
+python3 /tmp/bake_yolo_world.py \
+    --input /tmp/yolov8s-worldv2.pt \
+    --output /opt/models/yolov8s-worldv2-baked.safetensors \
+    --architecture yolov8s-worldv2.yaml \
+    --classes /tmp/yolo_world_classes.json
+
+test -s /opt/models/yolov8l-world-baked.safetensors
+test -s /opt/models/yolov8l-world-baked.classes.json
+test -s /opt/models/yolov8s-worldv2-baked.safetensors
+test -s /opt/models/yolov8s-worldv2-baked.classes.json
+test -s /opt/models/mobile_sam.fp16.safetensors
+test -s /opt/models/open_clip_vit_b32.fp16.safetensors
+without-proxy python3 -m pip uninstall -y clip-anytorch
+rm -f /tmp/bake_yolo_world.py /tmp/bake_fp16_weights.py /tmp/yolo_world_classes.json
 python3 - <<'PY'
-from pathlib import Path
-from ultralytics.utils import WEIGHTS_DIR
-
-expected = Path("/opt/models/ultralytics")
-if Path(WEIGHTS_DIR) != expected:
-    raise RuntimeError(f"Ultralytics WEIGHTS_DIR={WEIGHTS_DIR!s}, expected {expected!s}")
-
-from ultralytics import YOLO
-
-classes = [
-    "chair", "table", "desk", "couch", "sofa", "bookshelf", "shelf",
-    "cabinet", "drawer", "whiteboard",
-    "monitor", "laptop", "keyboard", "mouse", "computer tower",
-    "monitor stand", "headphones", "webcam", "router", "power strip",
-    "cup", "mug", "water bottle", "thermos", "paper cup",
-    "backpack", "handbag", "book", "notebook", "pen", "pencil",
-    "phone", "tablet",
-    "box", "cardboard box", "tray", "basket", "trash bin",
-    "tool", "screwdriver", "wrench", "tape",
-    "plant", "potted plant", "lamp", "clock", "picture frame",
-    "snack", "fruit", "apple", "banana",
-    "door", "doorway", "fire extinguisher", "person",
-]
-
-model = YOLO("/opt/models/yolov8l-world.pt")
-model.set_classes(classes)
+import importlib.util
+if importlib.util.find_spec("clip") is not None:
+    raise RuntimeError("YOLO text encoder package leaked into the runtime image")
 PY
+chmod -R a+rX,u+rwX /opt/ultralytics
+chmod a+r /opt/models/*.safetensors /opt/models/*.json
 
-test -s /opt/models/ultralytics/clip/ViT-B-32.pt
-chmod -R a+rX,u+rwX /opt/ultralytics /opt/models/ultralytics
-
-ls -la /opt/models/ /opt/models/ultralytics/clip/
+ls -la /opt/models/
 EOF
 
 # No global proxy ENV was set, so there is no build-time proxy to clear here.
 
 # Fixed env so perception_concept_graphs.py knows where the weights
 # live without each deployment having to override.
-ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
-    SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
+ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world-baked.safetensors \
+    SCENE_YOLO_WORLD_WEIGHTS_FULL=/opt/models/yolov8l-world-baked.safetensors \
+    SCENE_YOLO_WORLD_WEIGHTS_JETSON=/opt/models/yolov8s-worldv2-baked.safetensors \
+    SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.fp16.safetensors \
     YOLO_CONFIG_DIR=/opt/ultralytics \
     SCENE_CLIP_MODEL=ViT-B-32 \
-    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin
+    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_vit_b32.fp16.safetensors
+
+# start.sh regenerates protobuf stubs with this image's exact runtime ABI.
+# Keep this late so a codegen-tool-only change does not rebake perception
+# models or invalidate their large layers.
+COPY requirements/scene-runtime-codegen.txt /tmp/requirements/scene-runtime-codegen.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy python3 -m pip install \
+        --progress-bar on --timeout 180 --retries 3 \
+        -r /tmp/requirements/scene-runtime-codegen.txt \
+    && python3 -m grpc_tools.protoc --version \
+    && rm /tmp/requirements/scene-runtime-codegen.txt
 
 WORKDIR /scene
 

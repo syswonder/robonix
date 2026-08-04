@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Scene lite multi-arch image for x86_64 simulation and Jetson container
+# deployments: lifecycle, pose, rooms, annotations, map binding, MCP/web;
+# intentionally no torch, CUDA, YOLO, SAM, CLIP, ConceptGraphs, or Open3D.
+
+ARG ROS_DISTRO=humble
+ARG ROS_BASE_IMAGE=robonix-ros:humble-ros-base
+FROM ${ROS_BASE_IMAGE}
+
+# Do not rely on the chosen base image to duplicate this build argument into
+# its environment; the stage uses it to construct ROS package names.
+ARG ROS_DISTRO
+
+RUN cat > /usr/local/bin/without-proxy <<'EOF' \
+ && chmod +x /usr/local/bin/without-proxy
+#!/usr/bin/env sh
+set -eu
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+unset ALL_PROXY all_proxy NO_PROXY no_proxy
+exec "$@"
+EOF
+
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SCENE_PERCEPTION_PROFILE=lite
+
+RUN set -eux; \
+    find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
+      | xargs -0 -r sed -i --follow-symlinks \
+          -e 's|http://packages\.ros\.org/ros2/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu|g' \
+          -e 's|^Types: deb deb-src$|Types: deb|'; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i --follow-symlinks \
+            -e 's|http://archive\.ubuntu\.com/ubuntu/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
+            -e 's|http://security\.ubuntu\.com/ubuntu/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
+            -e 's|http://ports\.ubuntu\.com/ubuntu-ports/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' \
+            /etc/apt/sources.list; \
+    fi
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    without-proxy sh -c ' \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            python3-pip \
+            python3-cv-bridge \
+            python3-numpy \
+            ros-$ROS_DISTRO-tf2-ros \
+            ros-$ROS_DISTRO-tf-transformations \
+            ros-$ROS_DISTRO-rmw-cyclonedds-cpp \
+            ros-$ROS_DISTRO-rmw-zenoh-cpp \
+            ros-$ROS_DISTRO-zenoh-bridge-dds && \
+        rm -rf /var/lib/apt/lists/* \
+    '
+
+ARG SCENE_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${SCENE_PIP_INDEX_URL} \
+    UV_INDEX_URL=${SCENE_PIP_INDEX_URL}
+COPY requirements/scene-numpy1-abi.txt /tmp/requirements/scene-numpy1-abi.txt
+COPY requirements/scene-base.txt /tmp/requirements/scene-base.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy python3 -m pip install \
+        --progress-bar on --timeout 180 --retries 3 \
+        -c /tmp/requirements/scene-numpy1-abi.txt \
+        -r /tmp/requirements/scene-base.txt \
+    && without-proxy python3 -m pip uninstall -y faiss-cpu \
+    && without-proxy python3 -c 'import cv2, numpy; from cv_bridge import CvBridge; assert int(numpy.__version__.split(".", 1)[0]) < 2' \
+    && rm /tmp/requirements/scene-base.txt \
+        /tmp/requirements/scene-numpy1-abi.txt
+
+# Lite has no perception models, but start.sh still requires image-matched
+# protobuf generation before the service container starts.
+COPY requirements/scene-runtime-codegen.txt /tmp/requirements/scene-runtime-codegen.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy python3 -m pip install \
+        --progress-bar on --timeout 180 --retries 3 \
+        -r /tmp/requirements/scene-runtime-codegen.txt \
+    && python3 -m grpc_tools.protoc --version \
+    && rm /tmp/requirements/scene-runtime-codegen.txt
+
+WORKDIR /scene
+COPY entrypoint.sh /entrypoint.sh
+COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
+RUN chmod +x /entrypoint.sh
+ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml \
+    RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ENTRYPOINT ["/entrypoint.sh"]
