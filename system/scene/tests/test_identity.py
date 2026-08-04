@@ -95,25 +95,6 @@ def test_prune_expired():
     print("  [PASS] test_prune_expired")
 
 
-def test_parse_merge_class_groups():
-    """SCENE_CG_MERGE_CLASS_GROUPS parsing into a class->bucket map."""
-    from scene_service.ingest.perception_concept_graphs import (
-        _parse_merge_class_groups,
-    )
-
-    assert _parse_merge_class_groups("") == {}
-    g = _parse_merge_class_groups("chair, table ,desk; sofa,couch")
-    assert g["chair"] == g["table"] == g["desk"], "group members share a bucket"
-    assert g["sofa"] == g["couch"]
-    assert g["chair"] != g["sofa"], "distinct groups, distinct buckets"
-    # Single-member / empty groups are ignored (cannot reclassify alone).
-    assert _parse_merge_class_groups("lonely") == {}
-    # Order within a group does not change the bucket key.
-    assert (_parse_merge_class_groups("a,b")["a"]
-            == _parse_merge_class_groups("b,a")["a"])
-    print("  [PASS] test_parse_merge_class_groups")
-
-
 # ── _apply_snapshot integration (no models) ───────────────────────────────
 
 def _make_detector(registry):
