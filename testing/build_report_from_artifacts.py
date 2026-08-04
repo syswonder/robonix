@@ -52,6 +52,24 @@ def _empty_summary(path: Path, reason: str) -> Path:
     return path
 
 
+def _missing_summary_reason(artifact_root: Path) -> str:
+    infrastructure = _find_file(artifact_root, "infrastructure.txt")
+    if infrastructure is not None:
+        try:
+            reason = infrastructure.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).strip()
+        except OSError:
+            reason = ""
+        if reason:
+            return reason[:2000]
+    return (
+        "No machine-readable scenario summary was produced; "
+        "logs are still embedded below."
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build Robonix Webots report from artifacts")
     ap.add_argument("--artifact-root", type=Path, required=True)
@@ -73,7 +91,7 @@ def main() -> int:
     if summary_json is None:
         summary_json = _empty_summary(
             args.out_dir / "synthetic-summary.json",
-            "No machine-readable scenario summary was produced; logs are still embedded below.",
+            _missing_summary_reason(artifact_root),
         )
 
     metadata_jsons = list(args.metadata_json)

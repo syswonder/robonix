@@ -1,0 +1,18 @@
+# robonix/service/navigation/get_speed_limit — read the configured and current
+# navigation speed limits without changing them.
+---
+bool available
+# Deployment hard ceiling for planar linear speed, in metres per second (m/s).
+float64 max_linear_speed_mps
+# All percentage fields use percent in the range (0, 100].
+float64 default_percentage
+float64 min_percentage
+# Additive change in percentage points, not a multiplicative ratio.
+float64 step_percentage
+float64 effective_percentage
+# Current planar linear-speed ceiling in metres per second (m/s).
+float64 effective_linear_speed_mps
+# "goal" or "session".
+string scope
+string run_id
+string detail

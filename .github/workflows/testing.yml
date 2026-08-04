@@ -325,8 +325,8 @@ jobs:
     timeout-minutes: 90
     env:
       # ── Build-env fixes for this box (see examples/webots/TROUBLESHOOTING.md) ──
-      # Keep provider clones deterministic on runners with unreliable direct
-      # GitHub access by routing them through the configured mirror.
+      # Prefer the GitHub mirror, but fall back to GitHub through the runner's
+      # loopback Clash proxy when the mirror is unavailable.
       GIT_MIRROR_INSTEADOF: "true"
       # codegen grpcio-tools MUST match the runtime grpcio pinned by packages
       # (1.80.0) or RegisterService fails with a version-skew error.
@@ -376,6 +376,59 @@ jobs:
             registry-1.docker.io:443
             auth.docker.io:443
             production.cloudflare.docker.com:443
+
+      - name: Initialize current-run diagnostics
+        run: |
+          set -euo pipefail
+          case "${GITHUB_WORKSPACE:-}" in
+            /home/*/*/_work/*/*) ;;
+            *) echo "::error::refusing to sanitize unexpected workspace: ${GITHUB_WORKSPACE:-<unset>}"; exit 1 ;;
+          esac
+
+          # The capacity gate deliberately runs before checkout. Self-hosted
+          # workspaces persist between jobs, so remove only generated evidence
+          # from the previous run before a pre-checkout failure can upload it.
+          for relative in \
+            testing/logs \
+            testing/report \
+            examples/webots/rbnx-boot/logs \
+            examples/webots/rbnx-boot/processes.json \
+            examples/webots/logs \
+            system/scene/logs; do
+            target="$GITHUB_WORKSPACE/$relative"
+            [ -e "$target" ] || continue
+            sudo -n chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null || true
+            rm -rf -- "$target"
+            if [ -e "$target" ]; then
+              echo "::error::could not remove stale generated evidence: $target"
+              exit 1
+            fi
+          done
+
+          for target in \
+            "$RUNNER_TEMP/sim-logs" \
+            "$RUNNER_TEMP/lifecycle-logs" \
+            "$RUNNER_TEMP/report-assets" \
+            "$RUNNER_TEMP/cache-provider-logs" \
+            "$RUNNER_TEMP/report-metadata.json" \
+            "$RUNNER_TEMP/remote-provenance.txt" \
+            "$RUNNER_TEMP/fake_vlm.log" \
+            "$RUNNER_TEMP/rbnx-boot.log" \
+            "$RUNNER_TEMP/lifecycle.out" \
+            "$RUNNER_TEMP/scenarios.out" \
+            "$RUNNER_TEMP/scenarios.restart.out"; do
+            [ -e "$target" ] || continue
+            sudo -n chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null || true
+            rm -rf -- "$target"
+          done
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          printf 'Webots suite has not started for run %s attempt %s.\n' \
+            "$RUN_ID" "$RUN_ATTEMPT" \
+            >"$RUNNER_TEMP/sim-logs/infrastructure.txt"
+          {
+            echo "ROBONIX_CI_CHECKOUT_READY=false"
+            echo "ROBONIX_CI_ISOLATION_READY=false"
+          } >> "$GITHUB_ENV"
 
       - name: Select runner GPU
         run: |
@@ -427,6 +480,9 @@ jobs:
           done
           if [ "$free_mib" -lt "$ROBONIX_CI_MIN_GPU_FREE_MIB" ]; then
             echo "::error title=Runner GPU unavailable::GPU ${ROBONIX_CI_GPU_ID} has ${free_mib} MiB free; ${ROBONIX_CI_MIN_GPU_FREE_MIB} MiB is required"
+            printf 'Runner GPU capacity gate failed before checkout: GPU %s has %s MiB free; %s MiB is required.\n' \
+              "$ROBONIX_CI_GPU_ID" "$free_mib" "$ROBONIX_CI_MIN_GPU_FREE_MIB" \
+              >"$RUNNER_TEMP/sim-logs/infrastructure.txt"
             nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || true
             exit 1
           fi
@@ -455,17 +511,32 @@ jobs:
         if: env.GIT_MIRROR_INSTEADOF == 'true'
         run: |
           set -euo pipefail
-          # Keep the checkout mirror scoped to this Actions job. The runner is
-          # also a developer workstation, so CI must not mutate ~/.gitconfig.
+          # Keep all routing scoped to this Actions job. The runner is also a
+          # developer workstation, so CI must not mutate ~/.gitconfig.
           git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
           : > "$git_config"
-          git config --file "$git_config" url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          if timeout 15s git ls-remote --exit-code \
+              "https://ghfast.top/https://github.com/syswonder/robonix.git" \
+              HEAD >/dev/null 2>&1; then
+            git config --file "$git_config" \
+              url."https://ghfast.top/https://github.com/".insteadOf \
+              "https://github.com/"
+            echo "Using ghfast.top for GitHub clones"
+          else
+            git config --file "$git_config" \
+              'http.https://github.com/.proxy' \
+              'http://127.0.0.1:7897'
+            echo "ghfast.top unavailable; using GitHub through Clash at 127.0.0.1:7897"
+          fi
           echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.pr_number != '' && (inputs.pr_base_ref || github.event.repository.default_branch) || inputs.ref }}
           fetch-depth: ${{ inputs.pr_number != '' && '0' || '1' }}
+
+      - name: Mark checkout ready
+        run: echo "ROBONIX_CI_CHECKOUT_READY=true" >> "$GITHUB_ENV"
 
       - name: Merge PR head into current base
         if: ${{ inputs.pr_number != '' }}
@@ -481,12 +552,6 @@ jobs:
       - name: Initialize submodules
         run: |
           set -euo pipefail
-          # Keep the GitHub mirror rewrite process-scoped. The self-hosted
-          # runner is also a developer workstation, so CI must not mutate the
-          # user's global git config.
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
-          export GIT_CONFIG_VALUE_0='https://github.com/'
           git submodule sync --recursive
           git submodule update --init --recursive
 
@@ -613,6 +678,7 @@ jobs:
             echo "RBNX_MODEL_DOWNLOAD_MAX_TIME=600"
             echo "RBNX_MODEL_DOWNLOAD_CONNECT_TIMEOUT=20"
             echo "RBNX_MODEL_DOWNLOAD_RETRIES=2"
+            echo "ROBONIX_CI_ISOLATION_READY=true"
           } >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TOOL_CACHE:-$HOME/.cache}/robonix-models"
 
@@ -649,11 +715,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
-          # Apply the GitHub mirror rewrite only to this build process. Do not
-          # write it to the shared runner user's global git config.
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
-          export GIT_CONFIG_VALUE_0='https://github.com/'
           rbnx build 2>&1 | tee "$RUNNER_TEMP/sim-logs/build-webots-deployment.log"
           # provenance: record exactly which upstream commit each remote built from
           for d in rbnx-boot/cache/*/; do
@@ -1187,6 +1248,10 @@ jobs:
       - name: Capture runtime logs
         if: always()
         run: |
+          if [ "${ROBONIX_CI_ISOLATION_READY:-false}" != "true" ]; then
+            echo "per-run isolation was not initialized; refusing to inspect default or unrelated runtime resources"
+            exit 0
+          fi
           # Capture the sim/webots container stdout and the in-container ROS
           # logs so a failure leaves a full trace alongside the scribe logs.
           mkdir -p "$RUNNER_TEMP/sim-logs"
@@ -1219,9 +1284,21 @@ jobs:
       - name: Stop run resources
         if: always()
         run: |
+          if [ "${ROBONIX_CI_ISOLATION_READY:-false}" != "true" ]; then
+            echo "per-run isolation was not initialized; refusing unscoped shutdown"
+            docker ps -aq --filter "name=ci-${RUN_KEY}-" | while read -r cid; do
+              [ -n "$cid" ] || continue
+              docker rm -f "$cid" >/dev/null 2>&1 || true
+            done
+            docker volume ls -q --filter "name=ci-${RUN_KEY}_" | while read -r vid; do
+              [ -n "$vid" ] || continue
+              docker volume rm -f "$vid" >/dev/null 2>&1 || true
+            done
+            exit 0
+          fi
           # never touch other users' containers/processes; match on the run-id
           # prefix. $RUN_ID is the GitHub-assigned numeric id (job-level env).
-          rbnx shutdown --server "${ROBONIX_CI_ATLAS:-127.0.0.1:50051}" 2>/dev/null || true
+          rbnx shutdown --server "$ROBONIX_CI_ATLAS" 2>/dev/null || true
           [ -n "${RBNX_BOOT_PID:-}" ] && kill "${RBNX_BOOT_PID}" 2>/dev/null || true
           [ -n "${FAKE_VLM_PID:-}" ] && kill "${FAKE_VLM_PID}" 2>/dev/null || true
           for port in "${ATLAS_PORT:-}" "${EXECUTOR_PORT:-}" "${SOMA_PORT:-}" "${PILOT_PORT:-}" "${LIAISON_PORT:-}" "${FAKE_VLM_PORT:-}" "${ROBONIX_SIM_STREAM_PORT:-}" "${ROBONIX_SIM_VIEWER_PORT:-}" "${MAPPING_GRPC_PORT:-}" "${NAV2_DRIVER_PORT:-}" "${SCENE_WEB_PORT:-}"; do
@@ -1279,13 +1356,13 @@ jobs:
           done
 
       - name: Prepare self-contained report viewer assets
-        if: always()
+        if: ${{ always() && env.ROBONIX_CI_CHECKOUT_READY == 'true' }}
         run: |
           set -euo pipefail
           python3 testing/prepare_report_assets.py --asset-dir "$RUNNER_TEMP/report-assets"
 
       - name: Generate test report
-        if: always()
+        if: ${{ always() && env.ROBONIX_CI_CHECKOUT_READY == 'true' }}
         env:
           REPORT_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
           REPORT_PR_TITLE: ${{ inputs.pr_title || github.event.pull_request.title || '' }}
