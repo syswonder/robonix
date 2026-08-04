@@ -166,6 +166,13 @@ service:
       params_file: config/nav2_params.yaml
       use_sim_time: true
       action_wait_s: 240.0
+      # Keep startup behavior at the controller's existing 0.26 m/s ceiling;
+      # runtime speed commands can then adjust it in 20-point increments.
+      dynamic_speed:
+        max_linear_speed_mps: 0.26
+        default_percentage: 100
+        step_percentage: 20
+        min_percentage: 20
       # The simulation goal checker enters at 0.25 m. Keep the terminal
       # rotation guard inside that boundary so path-alignment turns are not
       # mistaken for a stuck final-yaw correction.
