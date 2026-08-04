@@ -117,6 +117,11 @@ def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
     declared = str(spec.qos_profile or "default").strip().lower().replace("-", "_")
     if declared in {"best_effort", "sensor_data"}:
         return "best_effort", "volatile", depth
+    # Atlas' current ``qos=reliable`` declaration carries reliability but not
+    # ROS 2 durability. OccupancyGrid is a latched map snapshot in Nav2 and
+    # RTAB-Map, so subscribing VOLATILE here loses the map whenever Scene
+    # starts after Mapping. Preserve the semantic map durability until the
+    # contract can express both QoS dimensions independently.
     if declared == "reliable" and spec.kind == "occupancy_grid":
         return "reliable", "transient_local", depth
     if declared == "reliable":
@@ -378,20 +383,26 @@ class SubscribersHub:
         self,
         target_frame: str,
         source_frame: str,
+        *,
+        stamp: Any = None,
     ):
         """Return a 4x4 numpy homogeneous transform that maps points
         from `target_frame` into `source_frame`. None when tf isn't
-        available. Used by perception only after both frame names have
-        been learned from data or explicit deployment configuration."""
+        available. When ``stamp`` is supplied, resolve the transform at that
+        observation time; callers may omit it only for explicitly slow,
+        latest-state corrections such as map-to-odom. Used by perception only
+        after both frame names have been learned from data or explicit
+        deployment configuration."""
         if self._ros is None or self._tf_buffer is None:
             return None
         try:
             import numpy as np
             Time = self._ros["Time"]
             Duration = self._ros["Duration"]
+            lookup_time = Time() if stamp is None else Time.from_msg(stamp)
             tf = self._tf_buffer.lookup_transform(
                 source_frame, target_frame,
-                Time(),
+                lookup_time,
                 Duration(seconds=0.1),
             )
         except Exception as e:  # noqa: BLE001

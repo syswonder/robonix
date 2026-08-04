@@ -1,0 +1,12 @@
+# Delete one derived Scene object by stable id.
+# The robot self-object and user-authored annotations are not accepted.
+
+string object_id
+string expected_map_id
+int64 expected_generation
+bool persist_to_snapshot
+---
+string deleted_id
+string map_id
+int64 generation
+bool persisted

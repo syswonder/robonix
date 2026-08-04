@@ -7,6 +7,7 @@ Capability owns atlas register / driver lifecycle / MCP HTTP / heartbeat
 is scene-specific: registry + geometric relation loop, ROS2 ingest hub,
 VLM perception + scene-graph enrichment, web debug UI.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,15 +15,16 @@ import contextlib
 import faulthandler
 import json
 import logging
+import math
 import os
 import signal
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
 
-# torch + open3d C-extension calls can segfault on driver / kernel
+# GPU extension calls can segfault on driver / kernel
 # mismatches. Without faulthandler, exit 139 lands without a Python
 # trace and we have to guess. Enable it as early as possible so the C
 # stack lands in scene's stderr the moment a SIGSEGV/SIGFPE hits.
@@ -37,16 +39,21 @@ scene = Service(id="scene", namespace="robonix/system/scene")
 from . import mcp_tools
 from . import web as web_ui
 from .annotations import AnnotationStore
-from .ingest.capabilities import plan_perception
+from .ingest.capabilities import plan_perception, provider_for_kind
+from .ingest.perception_profiles import resolve_perception_profile
 from .map_binding import MapBinding, choose_map_binding, read_latched_lifecycle
 from .object_watchdog import ObjectWatchdog
-from .map_meta import MapMetaStore
 from .robot_geometry import RobotGeometryState, reconcile_robot_geometry
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
     SubscribersHub,
     TopicSpec,
+)
+from .map_meta import MapMetaStore
+from .lifecycle_runtime import (
+    SceneLifecycleRuntime,
+    close_scene_runtime_resources,
 )
 from .state import (
     BBox3D,
@@ -56,7 +63,6 @@ from .state import (
 from .state.object_registry import now_unix
 from .web_binding import resolve_web_host
 
-
 logging.basicConfig(
     level=os.environ.get("SCENE_LOG_LEVEL", "INFO").upper(),
     format="[scene-service] %(levelname)s %(message)s",
@@ -64,39 +70,40 @@ logging.basicConfig(
 log = logging.getLogger("scene-service")
 
 
-def _load_config() -> dict:
-    """Read RBNX_CONFIG_FILE if set; otherwise return an empty config.
+_lifecycle = SceneLifecycleRuntime(log)
 
-    An explicitly requested config is safety-relevant input. Unreadable,
-    malformed, empty, or non-mapping content must stop startup instead of
-    silently widening bind addresses and other settings to legacy defaults.
 
-    Empty `observations` triggers auto-discovery against atlas — scene
-    asks for every cap with a ROS2 topic_out interface and subscribes
-    by contract leaf. The manifest only needs to populate
-    `observations[]` to override / disable a kind for a deployment.
-    """
-    path = os.environ.get("RBNX_CONFIG_FILE")
-    if not path:
-        return {}
-    try:
-        text = Path(path).read_text()
-    except OSError as exc:
-        raise RuntimeError(f"failed to read explicit Scene config {path}") from exc
-    try:
-        cfg = json.loads(text)
-    except json.JSONDecodeError:
-        import yaml  # PyYAML is in deps
+@scene.on_init
+def _on_init(cfg: dict):
+    """Receive the deployment's nested system.scene.config mapping."""
+    return _lifecycle.on_init(cfg)
 
-        try:
-            cfg = yaml.safe_load(text)
-        except yaml.YAMLError as exc:
-            raise RuntimeError(
-                f"failed to parse explicit Scene config {path}"
-            ) from exc
-    if not isinstance(cfg, dict):
-        raise ValueError(f"explicit Scene config root must be a mapping: {path}")
-    return cfg
+
+@scene.on_activate
+def _on_activate():
+    """Wait until Scene's async runtime is fully initialized."""
+    return _lifecycle.on_activate()
+
+
+@scene.on_shutdown
+def _on_shutdown():
+    """Wait until Scene's async runtime has released its resources."""
+    return _lifecycle.on_shutdown()
+
+
+@scene.on_deactivate
+def _on_deactivate():
+    """Keep Scene ACTIVE until a real pause/resume lifecycle is implemented."""
+    return _lifecycle.on_deactivate()
+
+
+async def _wait_for_lifecycle_event(event) -> bool:
+    """Wait without blocking asyncio; return false if shutdown wins."""
+    while not event.is_set():
+        if _lifecycle.shutdown_requested.is_set():
+            return False
+        await asyncio.sleep(0.05)
+    return True
 
 
 # scene's input set is fixed: it knows exactly which contracts it consumes.
@@ -110,24 +117,21 @@ def _load_config() -> dict:
 # foreign namespaces; if you want scene to consume your data, declare it
 # under one of these contract ids (which is the whole point of contracts).
 _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
-    ("rgb",               "robonix/primitive/camera/rgb",        "Image"),
-    ("depth",             "robonix/primitive/camera/depth",      "Image"),
-    ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
-    ("lidar3d",           "robonix/primitive/lidar/lidar3d",     "PointCloud2"),
+    ("rgb", "robonix/primitive/camera/rgb", "Image"),
+    ("depth", "robonix/primitive/camera/depth", "Image"),
+    ("lidar2d", "robonix/primitive/lidar/lidar", "LaserScan"),
+    ("lidar3d", "robonix/primitive/lidar/lidar3d", "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
-    ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
-    ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
-    # Mapping may reuse external chassis odometry and then intentionally does
-    # not redeclare map/odom. Consume the primitive's canonical continuous
-    # odometry contract directly; map-corrected pose still comes from TF/pose.
-    ("odom",              "robonix/primitive/chassis/odom",      "Odometry"),
-    ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
+    ("intrinsics", "robonix/primitive/camera/intrinsics", "CameraInfo"),
+    ("pose", "robonix/service/map/pose", "PoseWithCovarianceStamped"),
+    ("odom", "robonix/primitive/chassis/odom", "Odometry"),
+    ("occupancy_grid", "robonix/service/map/occupancy_grid", "OccupancyGrid"),
     # Latched {map_id, mode, generation} broadcast from mapping. Startup
     # binding is probed separately (_discover_map_binding, before the hub
     # exists); this hub subscription feeds the runtime mismatch watcher
     # (_lifecycle_watch). Needs the generated `map` interface package
     # (ros2_idl overlay) — the hub skips the row gracefully when missing.
-    ("map_lifecycle",     "robonix/service/map/lifecycle",       "MapLifecycle"),
+    ("map_lifecycle", "robonix/service/map/lifecycle", "MapLifecycle"),
 ]
 
 # Optional manifest opt-out: kinds listed here are dropped even if atlas
@@ -163,7 +167,10 @@ _LAST_RESOLVED: dict[tuple, tuple] = {}
 
 
 def _build_topic_specs(
-    observations: list[dict], atlas_stub, transport: str
+    observations: list[dict],
+    atlas_stub,
+    transport: str,
+    camera_provider_id: str = "",
 ) -> list[TopicSpec]:
     """Two paths:
 
@@ -183,11 +190,13 @@ def _build_topic_specs(
     """
     pb_t = _resolve_pb_transport(transport)
     if observations:
-        return _resolve_explicit(observations, atlas_stub, pb_t)
-    return _resolve_auto(atlas_stub, pb_t)
+        return _resolve_explicit(observations, atlas_stub, pb_t, camera_provider_id)
+    return _resolve_auto(atlas_stub, pb_t, camera_provider_id)
 
 
-def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
+def _resolve_auto(
+    _unused, pb_transport: int, camera_provider_id: str = ""
+) -> list[TopicSpec]:
     """Walk `_SCENE_CONTRACTS` and use `ATLAS.find_capability` + `connect_capability`
     to resolve each contract. atlas hands out the endpoint via
     ConnectCapability; the cap framework also tracks the channel for
@@ -204,7 +213,13 @@ def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
     for kind, contract_id, msg_type in _SCENE_CONTRACTS:
         if kind in _DEFAULT_DISABLED_KINDS:
             continue
-        spec = _resolve_one_contract(transport, kind, contract_id, msg_type)
+        spec = _resolve_one_contract(
+            transport,
+            kind,
+            contract_id,
+            msg_type,
+            provider_id=provider_for_kind(kind, camera_provider_id),
+        )
         if spec is not None:
             out.append(spec)
     return out
@@ -215,10 +230,16 @@ def _resolve_one_contract(
     kind: str,
     contract_id: str,
     msg_type: str,
+    *,
+    provider_id: str = "",
 ) -> Optional[TopicSpec]:
     """ATLAS.find_capability(contract) → connect_capability → endpoint. Returns None when no
     cap currently advertises the contract over this transport."""
-    caps = ATLAS.find_capability(contract_id=contract_id, transport=transport)
+    caps = ATLAS.find_capability(
+        contract_id=contract_id,
+        transport=transport,
+        provider_id=provider_id,
+    )
     if not caps:
         return None
     cap_view = caps[0]
@@ -227,7 +248,9 @@ def _resolve_one_contract(
     except Exception as e:  # noqa: BLE001
         log.warning(
             "[scene] connect_capability(%s/%s) failed: %s",
-            cap_view.provider_id, contract_id, e,
+            cap_view.provider_id,
+            contract_id,
+            e,
         )
         return None
     endpoint = (ch.endpoint or "").strip()
@@ -244,8 +267,12 @@ def _resolve_one_contract(
     if prev != sig:
         log.info(
             "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
-            kind, endpoint, msg_type, qos_profile or "default",
-            contract_id, cap_view.provider_id,
+            kind,
+            endpoint,
+            msg_type,
+            qos_profile or "default",
+            contract_id,
+            cap_view.provider_id,
         )
         _LAST_RESOLVED[(transport, contract_id)] = sig
     return TopicSpec(
@@ -273,14 +300,19 @@ def _discover_map_binding(wait_s: float) -> Optional[dict]:
     while True:
         try:
             spec = _resolve_one_contract(
-                Transport.ROS2, "map_lifecycle",
-                "robonix/service/map/lifecycle", "MapLifecycle",
+                Transport.ROS2,
+                "map_lifecycle",
+                "robonix/service/map/lifecycle",
+                "MapLifecycle",
             )
         except Exception as e:  # noqa: BLE001
             # Probe runs before bootstrap; if atlas isn't reachable yet a
             # wire error must degrade to static binding, not kill startup.
-            log.warning("[scene] lifecycle probe: atlas query failed (%s) — "
-                        "falling back to static map binding", e)
+            log.warning(
+                "[scene] lifecycle probe: atlas query failed (%s) — "
+                "falling back to static map binding",
+                e,
+            )
             return None
         if spec is not None:
             sample = read_latched_lifecycle(spec.topic, timeout_s=5.0)
@@ -297,7 +329,10 @@ def _discover_map_binding(wait_s: float) -> Optional[dict]:
 
 
 def _resolve_explicit(
-    observations: list[dict], atlas_stub, pb_transport: int
+    observations: list[dict],
+    atlas_stub,
+    pb_transport: int,
+    camera_provider_id: str = "",
 ) -> list[TopicSpec]:
     """Manifest-driven override path. Each entry pairs a logical kind
     with a contract id; we go through the same single-contract resolver
@@ -317,14 +352,26 @@ def _resolve_explicit(
                 "[scene] observation %r: missing kind/contract; skipping", entry
             )
             continue
-        msg_type = str(entry.get("msg_type", "")) or by_contract.get(contract, (kind, ""))[1]
+        msg_type = (
+            str(entry.get("msg_type", "")) or by_contract.get(contract, (kind, ""))[1]
+        )
         if not msg_type:
             log.warning(
                 "[scene] observation %r: no msg_type — add it to the entry "
-                "or to _SCENE_CONTRACTS in service.py", entry
+                "or to _SCENE_CONTRACTS in service.py",
+                entry,
             )
             continue
-        spec = _resolve_one_contract(Transport(pb_transport), kind, contract, msg_type)
+        provider_id = str(entry.get("provider_id") or "")
+        if not provider_id:
+            provider_id = provider_for_kind(kind, camera_provider_id)
+        spec = _resolve_one_contract(
+            Transport(pb_transport),
+            kind,
+            contract,
+            msg_type,
+            provider_id=provider_id,
+        )
         if spec is not None:
             out.append(spec)
     return out
@@ -420,7 +467,13 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
 
 
 async def _auto_discover_loop(
-    *, atlas_stub, hub, transport: str, explicit: list[dict], period_s: float = 5.0
+    *,
+    atlas_stub,
+    hub,
+    transport: str,
+    explicit: list[dict],
+    camera_provider_id: str = "",
+    period_s: float = 5.0,
 ) -> None:
     """Background reconciler. Re-runs discovery every `period_s` and
     dynamically adds new (kind, topic) subscriptions as they appear.
@@ -433,7 +486,9 @@ async def _auto_discover_loop(
         try:
             await asyncio.sleep(period_s)
             current = hub.has_kinds()
-            specs = _build_topic_specs(explicit, atlas_stub, transport)
+            specs = _build_topic_specs(
+                explicit, atlas_stub, transport, camera_provider_id
+            )
             for spec in specs:
                 if spec.kind not in current:
                     hub.add_spec(spec)
@@ -476,13 +531,21 @@ async def _start_ros_ingest(
     # those references are static and authoritative.
     explicit = config.get("observations") or []
     transport = str(config.get("transport") or "ros2")
-    specs = _build_topic_specs(explicit, atlas_stub, transport)
+    camera_provider_id = str(config.get("camera_provider_id") or "").strip()
+    if camera_provider_id:
+        log.info(
+            "[scene] RGB-D camera pinned to provider %s",
+            camera_provider_id,
+        )
+    specs = _build_topic_specs(explicit, atlas_stub, transport, camera_provider_id)
     if not specs and not explicit:
         attempt = 0
         while not specs:
             attempt += 1
             await asyncio.sleep(2.0)
-            specs = _build_topic_specs(explicit, atlas_stub, transport)
+            specs = _build_topic_specs(
+                explicit, atlas_stub, transport, camera_provider_id
+            )
             if specs:
                 log.info(
                     "[scene] auto-discover: found %d topic(s) on attempt %d",
@@ -511,6 +574,892 @@ async def _start_ros_ingest(
     )
     if pose_max_age_s <= 0.0:
         raise ValueError("pose_max_age_s must be greater than zero")
+    perception_cfg = config.get("perception") or {}
+    if not isinstance(perception_cfg, dict):
+        raise ValueError("perception must be a mapping")
+    perception_profile = resolve_perception_profile(
+        perception_cfg,
+        environment_default=os.environ.get("SCENE_PERCEPTION_PROFILE", ""),
+    )
+    perception_profile_name = str(perception_profile["name"])
+    geometry_cfg = perception_cfg.get("geometry") or {}
+    if not isinstance(geometry_cfg, dict):
+        raise ValueError("perception.geometry must be a mapping")
+    surface_snap_cfg = geometry_cfg.get("surface_snap") or {}
+    if not isinstance(surface_snap_cfg, dict):
+        raise ValueError(
+            "perception.geometry.surface_snap must be a mapping"
+        )
+    scale_aware_cfg = geometry_cfg.get("scale_aware") or {}
+    if not isinstance(scale_aware_cfg, dict):
+        raise ValueError(
+            "perception.geometry.scale_aware must be a mapping"
+        )
+    stationary_refinement_cfg = (
+        perception_cfg.get("stationary_refinement") or {}
+    )
+    if not isinstance(stationary_refinement_cfg, dict):
+        raise ValueError(
+            "perception.stationary_refinement must be a mapping"
+        )
+    vocabulary_cfg = perception_cfg.get("vocabulary") or {}
+    if not isinstance(vocabulary_cfg, dict):
+        raise ValueError("perception.vocabulary must be a mapping")
+    label_cfg = perception_cfg.get("label") or {}
+    if not isinstance(label_cfg, dict):
+        raise ValueError("perception.label must be a mapping")
+    association_cfg = perception_cfg.get("association") or {}
+    if not isinstance(association_cfg, dict):
+        raise ValueError("perception.association must be a mapping")
+
+    def _config_bool(
+        mapping: dict,
+        prefix: str,
+        key: str,
+        default: Optional[bool],
+    ) -> Optional[bool]:
+        value = mapping.get(key, default)
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {
+            "true", "false", "1", "0", "yes", "no",
+        }:
+            return value.strip().lower() in {"true", "1", "yes"}
+        raise ValueError(f"{prefix}.{key} must be a boolean")
+
+    def _string_list(
+        mapping: dict,
+        prefix: str,
+        key: str,
+        *,
+        allow_empty: bool,
+    ) -> Optional[list[str]]:
+        if key not in mapping:
+            return None
+        value = mapping[key]
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value
+        ):
+            raise ValueError(f"{prefix}.{key} must be a list of strings")
+        normalized = [
+            item.strip().lower()
+            for item in value
+            if item.strip()
+        ]
+        if not normalized and not allow_empty:
+            raise ValueError(f"{prefix}.{key} must not be empty")
+        return normalized
+
+    classes = _string_list(
+        vocabulary_cfg,
+        "perception.vocabulary",
+        "classes",
+        allow_empty=False,
+    )
+    additional_classes = _string_list(
+        vocabulary_cfg,
+        "perception.vocabulary",
+        "additional_classes",
+        allow_empty=True,
+    )
+    label_history_size = int(label_cfg.get("history_size", 20))
+    label_min_switch_observations = int(
+        label_cfg.get("min_switch_observations", 2)
+    )
+    label_min_winner_share = float(label_cfg.get("min_winner_share", 0.55))
+    label_switch_margin = float(label_cfg.get("switch_margin", 0.15))
+    clip_rerank_cfg = label_cfg.get("clip_rerank") or {}
+    if not isinstance(clip_rerank_cfg, dict):
+        raise ValueError("perception.label.clip_rerank must be a mapping")
+    clip_rerank_groups: list[list[str]] = []
+    clip_rerank_group_min_margins: list[float | None] = []
+    raw_clip_rerank_groups = clip_rerank_cfg.get("groups") or []
+    if not isinstance(raw_clip_rerank_groups, list):
+        raise ValueError(
+            "perception.label.clip_rerank.groups must be a list of "
+            "string lists or {labels, min_margin} mappings"
+        )
+    for raw_group in raw_clip_rerank_groups:
+        group_min_margin = None
+        if isinstance(raw_group, list):
+            raw_labels = raw_group
+        elif isinstance(raw_group, dict):
+            unknown_keys = set(raw_group) - {"labels", "min_margin"}
+            if unknown_keys:
+                raise ValueError(
+                    "perception.label.clip_rerank group mappings contain "
+                    "unknown keys: " + ", ".join(sorted(unknown_keys))
+                )
+            raw_labels = raw_group.get("labels")
+            if "min_margin" in raw_group:
+                group_min_margin = float(raw_group["min_margin"])
+        else:
+            raw_labels = None
+        if (
+            not isinstance(raw_labels, list)
+            or len(raw_labels) < 2
+            or any(not isinstance(item, str) for item in raw_labels)
+        ):
+            raise ValueError(
+                "each perception.label.clip_rerank group must be a string "
+                "list or a {labels, min_margin} mapping with at least two "
+                "members"
+            )
+        clip_rerank_groups.append(
+            [item.strip().lower() for item in raw_labels if item.strip()]
+        )
+        clip_rerank_group_min_margins.append(group_min_margin)
+    if any(len(set(group)) < 2 for group in clip_rerank_groups):
+        raise ValueError(
+            "each perception.label.clip_rerank.groups entry must contain "
+            "at least two distinct non-empty labels"
+        )
+    clip_rerank_routes: dict[str, list[str]] = {}
+    clip_rerank_route_min_margins: dict[str, float] = {}
+    raw_clip_rerank_routes = clip_rerank_cfg.get("routes") or {}
+    if not isinstance(raw_clip_rerank_routes, dict):
+        raise ValueError(
+            "perception.label.clip_rerank.routes must map source labels to "
+            "string lists or {labels, min_margin} mappings"
+        )
+    for raw_source, raw_route in raw_clip_rerank_routes.items():
+        if not isinstance(raw_source, str) or not raw_source.strip():
+            raise ValueError(
+                "perception.label.clip_rerank.routes source labels must be "
+                "non-empty strings"
+            )
+        route_min_margin = None
+        if isinstance(raw_route, list):
+            raw_labels = raw_route
+        elif isinstance(raw_route, dict):
+            unknown_keys = set(raw_route) - {"labels", "min_margin"}
+            if unknown_keys:
+                raise ValueError(
+                    "perception.label.clip_rerank route mappings contain "
+                    "unknown keys: " + ", ".join(sorted(unknown_keys))
+                )
+            raw_labels = raw_route.get("labels")
+            if "min_margin" in raw_route:
+                route_min_margin = float(raw_route["min_margin"])
+        else:
+            raw_labels = None
+        if (
+            not isinstance(raw_labels, list)
+            or len(raw_labels) < 2
+            or any(not isinstance(item, str) for item in raw_labels)
+        ):
+            raise ValueError(
+                "each perception.label.clip_rerank route must be a string "
+                "list or a {labels, min_margin} mapping with at least two "
+                "members"
+            )
+        source = raw_source.strip().lower()
+        labels = list(
+            dict.fromkeys(
+                item.strip().lower()
+                for item in raw_labels
+                if item.strip()
+            )
+        )
+        if len(labels) < 2 or source not in labels:
+            raise ValueError(
+                "each perception.label.clip_rerank route must contain its "
+                "source and at least one distinct alternative label"
+            )
+        clip_rerank_routes[source] = labels
+        if route_min_margin is not None:
+            clip_rerank_route_min_margins[source] = route_min_margin
+    raw_clip_rerank_prompts = clip_rerank_cfg.get("prompts") or {}
+    if not isinstance(raw_clip_rerank_prompts, dict) or any(
+        not isinstance(label, str)
+        or not isinstance(prompts, list)
+        or not prompts
+        or any(not isinstance(prompt, str) or not prompt.strip() for prompt in prompts)
+        for label, prompts in raw_clip_rerank_prompts.items()
+    ):
+        raise ValueError(
+            "perception.label.clip_rerank.prompts must map labels to "
+            "non-empty lists of non-empty strings"
+        )
+    clip_rerank_prompts = {
+        label.strip().lower(): [prompt.strip() for prompt in prompts]
+        for label, prompts in raw_clip_rerank_prompts.items()
+        if label.strip()
+    }
+    if len(clip_rerank_prompts) != len(raw_clip_rerank_prompts):
+        raise ValueError(
+            "perception.label.clip_rerank.prompts labels must not be empty"
+        )
+    persistent_geometry_cfg = (
+        clip_rerank_cfg.get("persistent_geometry") or {}
+    )
+    if not isinstance(persistent_geometry_cfg, dict):
+        raise ValueError(
+            "perception.label.clip_rerank.persistent_geometry must be a "
+            "mapping"
+        )
+    unknown_persistent_geometry_keys = set(persistent_geometry_cfg) - {
+        "score_bonus",
+        "labels",
+    }
+    if unknown_persistent_geometry_keys:
+        raise ValueError(
+            "perception.label.clip_rerank.persistent_geometry contains "
+            "unknown keys: "
+            + ", ".join(sorted(unknown_persistent_geometry_keys))
+        )
+    clip_rerank_geometry_bonus = float(
+        persistent_geometry_cfg.get("score_bonus", 0.0)
+    )
+    raw_geometry_constraints = persistent_geometry_cfg.get("labels") or {}
+    if not isinstance(raw_geometry_constraints, dict):
+        raise ValueError(
+            "perception.label.clip_rerank.persistent_geometry.labels must "
+            "map labels to constraint mappings"
+        )
+    clip_rerank_geometry_constraints: dict[str, dict[str, Any]] = {}
+    for raw_label, raw_constraints in raw_geometry_constraints.items():
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise ValueError(
+                "persistent geometry constraint labels must be non-empty "
+                "strings"
+            )
+        if not isinstance(raw_constraints, dict) or not raw_constraints:
+            raise ValueError(
+                "each persistent geometry label must contain at least one "
+                "constraint"
+            )
+        unknown_constraint_keys = set(raw_constraints) - {
+            "source_labels",
+            "min_horizontal_extent_m",
+            "max_horizontal_extent_m",
+        }
+        if unknown_constraint_keys:
+            raise ValueError(
+                "persistent geometry label constraints contain unknown keys: "
+                + ", ".join(sorted(unknown_constraint_keys))
+            )
+        source_labels = raw_constraints.get("source_labels")
+        if source_labels is not None and (
+            not isinstance(source_labels, list)
+            or not source_labels
+            or any(
+                not isinstance(label, str) or not label.strip()
+                for label in source_labels
+            )
+        ):
+            raise ValueError(
+                "persistent geometry source_labels must be a non-empty list "
+                "of non-empty strings"
+            )
+        normalized_constraints: dict[str, Any] = {
+            key: float(value)
+            for key, value in raw_constraints.items()
+            if key != "source_labels"
+        }
+        if source_labels is not None:
+            normalized_constraints["source_labels"] = list(
+                dict.fromkeys(
+                    label.strip().lower() for label in source_labels
+                )
+            )
+        clip_rerank_geometry_constraints[
+            raw_label.strip().lower()
+        ] = normalized_constraints
+    clip_rerank_min_score = float(
+        clip_rerank_cfg.get("min_score", 0.20)
+    )
+    clip_rerank_min_margin = float(
+        clip_rerank_cfg.get("min_margin", 0.04)
+    )
+    clip_rerank_min_margin_by_label = {
+        label: margin
+        for group, margin in zip(
+            clip_rerank_groups,
+            clip_rerank_group_min_margins,
+        )
+        if margin is not None
+        for label in group
+    }
+    clip_rerank_min_margin_by_label.update(
+        clip_rerank_route_min_margins
+    )
+    raw_label_aliases = label_cfg.get("aliases") or {}
+    if not isinstance(raw_label_aliases, dict) or any(
+        not isinstance(alias, str) or not isinstance(canonical, str)
+        for alias, canonical in raw_label_aliases.items()
+    ):
+        raise ValueError("perception.label.aliases must be a string-to-string mapping")
+    label_aliases = {
+        alias.strip().lower(): canonical.strip().lower()
+        for alias, canonical in raw_label_aliases.items()
+        if alias.strip() and canonical.strip()
+    }
+    if len(label_aliases) != len(raw_label_aliases):
+        raise ValueError("perception.label.aliases keys and values must not be empty")
+    for legacy_identity_key in (
+        "allow_cross_class_merge",
+        "confusable_class_groups",
+        "cross_class_centroid_max_m",
+        "cross_class_iou_thresh",
+        "cross_class_overlap_thresh",
+        "same_class_centroid_max_m",
+        "same_class_min_voxel_coverage",
+        "same_class_max_extent_ratio",
+        "same_class_disjoint_min_unique_frames",
+        "same_class_disjoint_max_frame_gap",
+        "same_class_disjoint_max_center_major_extent_ratio",
+        "same_class_disjoint_min_visual_similarity",
+        "same_class_merge_interval_ticks",
+    ):
+        if legacy_identity_key in association_cfg:
+            log.warning(
+                "perception.association.%s is deprecated and ignored; "
+                "Scene identity is class-agnostic",
+                legacy_identity_key,
+            )
+    association_min_spatial_similarity = float(
+        association_cfg.get("min_spatial_similarity", 0.03)
+    )
+    association_min_visual_similarity = float(
+        association_cfg.get("min_visual_similarity", 0.65)
+    )
+    association_max_extent_ratio = float(
+        association_cfg.get("max_extent_ratio", 8.0)
+    )
+    association_adaptive_extent_scale = float(
+        association_cfg.get("adaptive_extent_scale", 0.45)
+    )
+    association_cleanup_interval_ticks = int(
+        association_cfg.get("cleanup_interval_ticks", 10)
+    )
+    exact_duplicate_centroid_max_m = float(
+        association_cfg.get("exact_duplicate_centroid_max_m", 0.15)
+    )
+    exact_duplicate_min_voxel_coverage = float(
+        association_cfg.get("exact_duplicate_min_voxel_coverage", 0.40)
+    )
+    exact_duplicate_max_extent_ratio = float(
+        association_cfg.get("exact_duplicate_max_extent_ratio", 1.50)
+    )
+    coobserved_duplicate_min_shared_frames = int(
+        association_cfg.get(
+            "coobserved_duplicate_min_shared_frames",
+            3,
+        )
+    )
+    coobserved_duplicate_min_median_iou = float(
+        association_cfg.get(
+            "coobserved_duplicate_min_median_iou",
+            0.85,
+        )
+    )
+    coobserved_duplicate_max_extent_ratio = float(
+        association_cfg.get(
+            "coobserved_duplicate_max_extent_ratio",
+            2.0,
+        )
+    )
+    coobserved_duplicate_min_visual_similarity = float(
+        association_cfg.get(
+            "coobserved_duplicate_min_visual_similarity",
+            0.90,
+        )
+    )
+    identity_rebind_max_distance_m = float(
+        association_cfg.get("identity_rebind_max_distance_m", 0.45)
+    )
+    if identity_rebind_max_distance_m < 0.0:
+        raise ValueError(
+            "perception.association.identity_rebind_max_distance_m "
+            "must not be negative"
+        )
+    def _geometry_bool(key: str, default: bool) -> bool:
+        return bool(
+            _config_bool(
+                geometry_cfg,
+                "perception.geometry",
+                key,
+                default,
+            )
+        )
+    surface_snap_labels = _string_list(
+        surface_snap_cfg,
+        "perception.geometry.surface_snap",
+        "labels",
+        allow_empty=True,
+    ) or []
+    surface_snap_max_distance_m = float(
+        surface_snap_cfg.get("max_distance_m", 0.60)
+    )
+    surface_snap_tangent_padding_m = float(
+        surface_snap_cfg.get("tangent_padding_m", 0.25)
+    )
+    surface_snap_min_shift_m = float(
+        surface_snap_cfg.get("min_shift_m", 0.05)
+    )
+    surface_snap_min_support_cells = int(
+        surface_snap_cfg.get("min_support_cells", 30)
+    )
+    surface_snap_min_dominant_share = float(
+        surface_snap_cfg.get("min_dominant_share", 0.55)
+    )
+    surface_snap_min_tangent_coverage = float(
+        surface_snap_cfg.get("min_tangent_coverage", 0.50)
+    )
+    surface_snap_occupancy_threshold = int(
+        surface_snap_cfg.get("occupancy_threshold", 50)
+    )
+    detection_period_s = float(
+        perception_cfg["period_s"]
+        if perception_cfg.get("period_s") is not None
+        else (
+            os.environ.get("SCENE_DETECT_PERIOD_S")
+            or perception_profile["period_s"]
+            or 0.6
+        )
+    )
+    perception_input_size = int(
+        perception_cfg.get("input_size")
+        if perception_cfg.get("input_size") is not None
+        else (perception_profile["input_size"] or 640)
+    )
+    inference_precision = str(
+        perception_cfg.get("precision")
+        or os.environ.get("SCENE_INFERENCE_PRECISION")
+        or perception_profile["inference_precision"]
+    ).strip().lower()
+    tensor_rt_mode = str(
+        perception_cfg.get("tensor_rt")
+        or os.environ.get("SCENE_TENSORRT")
+        or perception_profile["tensor_rt"]
+    ).strip().lower()
+    tensor_rt_cache_dir = str(
+        os.environ.get("SCENE_TENSORRT_CACHE_DIR")
+        or "/opt/models/runtime-cache"
+    ).strip()
+    if perception_profile_name == "jetson":
+        yolo_weights_path = str(
+            os.environ.get("SCENE_YOLO_WORLD_WEIGHTS_JETSON")
+            or perception_profile["yolo_weights_path"]
+        )
+    else:
+        yolo_weights_path = str(
+            os.environ.get("SCENE_YOLO_WORLD_WEIGHTS_FULL")
+            or os.environ.get("SCENE_YOLO_WORLD_WEIGHTS")
+            or perception_profile["yolo_weights_path"]
+            or ""
+        )
+    confidence_threshold = float(
+        perception_cfg.get("confidence_threshold", 0.30)
+    )
+    max_detections = int(
+        perception_cfg.get("max_detections")
+        if perception_cfg.get("max_detections") is not None
+        else perception_profile["max_detections"]
+    )
+    visible_miss_frames = int(
+        perception_cfg.get("visible_miss_frames")
+        if perception_cfg.get("visible_miss_frames") is not None
+        else 3
+    )
+    visibility_depth_margin_m = float(
+        perception_cfg.get("visibility_depth_margin_m")
+        if perception_cfg.get("visibility_depth_margin_m") is not None
+        else 0.10
+    )
+    visibility_min_clear_samples = int(
+        perception_cfg.get("visibility_min_clear_samples")
+        if perception_cfg.get("visibility_min_clear_samples") is not None
+        else 3
+    )
+    visibility_min_clear_fraction = float(
+        perception_cfg.get("visibility_min_clear_fraction")
+        if perception_cfg.get("visibility_min_clear_fraction") is not None
+        else 0.60
+    )
+    visibility_max_projected_samples = int(
+        perception_cfg.get("visibility_max_projected_samples")
+        if perception_cfg.get("visibility_max_projected_samples") is not None
+        else 25
+    )
+    object_ttl_s = float(
+        perception_cfg.get("object_ttl_s")
+        if perception_cfg.get("object_ttl_s") is not None
+        else 30.0
+    )
+    confirmation_min_unique_frames = int(
+        perception_cfg.get("confirmation_min_unique_frames")
+        if perception_cfg.get("confirmation_min_unique_frames") is not None
+        else 2
+    )
+    confirmation_singleton_min_mean_confidence = float(
+        perception_cfg.get(
+            "confirmation_singleton_min_mean_confidence"
+        )
+        if perception_cfg.get(
+            "confirmation_singleton_min_mean_confidence"
+        )
+        is not None
+        else 0.0
+    )
+    mask_erosion_px = int(geometry_cfg.get("mask_erosion_px", 1))
+    min_depth_m = float(geometry_cfg.get("min_depth_m", 0.15))
+    max_depth_m = float(geometry_cfg.get("max_depth_m", 6.0))
+    depth_mad_scale = float(geometry_cfg.get("depth_mad_scale", 3.5))
+    depth_min_band_m = float(geometry_cfg.get("depth_min_band_m", 0.12))
+    frame_dbscan = _geometry_bool("frame_dbscan", True)
+    scale_aware_geometry = bool(
+        _config_bool(
+            scale_aware_cfg,
+            "perception.geometry.scale_aware",
+            "enabled",
+            True,
+        )
+    )
+    scale_min_voxel_size_m = float(
+        scale_aware_cfg.get("min_voxel_size_m", 0.01)
+    )
+    scale_min_points_floor = int(
+        scale_aware_cfg.get("min_points_floor", 8)
+    )
+    scale_transition_extent_m = float(
+        scale_aware_cfg.get("transition_extent_m", 0.30)
+    )
+    scale_voxel_extent_factor = float(
+        scale_aware_cfg.get("voxel_extent_factor", 0.30)
+    )
+    stationary_refinement = bool(
+        _config_bool(
+            stationary_refinement_cfg,
+            "perception.stationary_refinement",
+            "enabled",
+            False,
+        )
+    )
+    stationary_refinement_min_stationary_s = float(
+        stationary_refinement_cfg.get("min_stationary_s", 2.0)
+    )
+    stationary_refinement_interval_s = float(
+        stationary_refinement_cfg.get("interval_s", 30.0)
+    )
+    stationary_refinement_translation_m = float(
+        stationary_refinement_cfg.get("translation_threshold_m", 0.03)
+    )
+    stationary_refinement_rotation_deg = float(
+        stationary_refinement_cfg.get("rotation_threshold_deg", 2.0)
+    )
+    stationary_refinement_grid_size = int(
+        stationary_refinement_cfg.get("grid_size", 2)
+    )
+    stationary_refinement_overlap_fraction = float(
+        stationary_refinement_cfg.get("overlap_fraction", 0.20)
+    )
+    stationary_refinement_input_size = int(
+        stationary_refinement_cfg.get("input_size")
+        if stationary_refinement_cfg.get("input_size") is not None
+        else perception_profile["stationary_input_size"] or 640
+    )
+    stationary_refinement_edge_margin_px = int(
+        stationary_refinement_cfg.get("edge_margin_px", 4)
+    )
+    stationary_refinement_duplicate_iou = float(
+        stationary_refinement_cfg.get("duplicate_iou", 0.50)
+    )
+    stationary_refinement_max_detections = int(
+        stationary_refinement_cfg.get("max_supplemental_detections")
+        if stationary_refinement_cfg.get("max_supplemental_detections")
+        is not None
+        else perception_profile["stationary_max_detections"]
+    )
+    require_occupancy_bounds = _geometry_bool("require_occupancy_bounds", True)
+    map_bounds_margin_m = float(geometry_cfg.get("map_bounds_margin_m", 0.25))
+    map_max_outside_fraction = float(
+        geometry_cfg.get("map_max_outside_fraction", 0.20)
+    )
+    bbox_low_percentile = float(geometry_cfg.get("bbox_low_percentile", 5.0))
+    bbox_high_percentile = float(geometry_cfg.get("bbox_high_percentile", 95.0))
+    max_bbox_extent_m = float(geometry_cfg.get("max_bbox_extent_m", 3.0))
+    if "rebase_map_corrections" in geometry_cfg:
+        log.warning(
+            "perception.geometry.rebase_map_corrections is deprecated and "
+            "ignored; historical map-frame geometry is immutable"
+        )
+    if detection_period_s <= 0.0:
+        raise ValueError("perception.period_s must be greater than zero")
+    if not 0.0 < confidence_threshold <= 1.0:
+        raise ValueError(
+            "perception.confidence_threshold must be in (0, 1]"
+        )
+    if perception_profile["enabled"] and max_detections < 1:
+        raise ValueError("perception.max_detections must be at least one")
+    if perception_profile["enabled"] and perception_input_size < 320:
+        raise ValueError("perception.input_size must be at least 320")
+    if inference_precision not in {"auto", "fp16", "fp32"}:
+        raise ValueError(
+            "perception.precision must be one of auto, fp16, or fp32"
+        )
+    if tensor_rt_mode not in {"off", "auto", "required"}:
+        raise ValueError(
+            "perception.tensor_rt must be one of off, auto, or required"
+        )
+    if scale_min_voxel_size_m <= 0.0:
+        raise ValueError(
+            "perception.geometry.scale_aware.min_voxel_size_m must be positive"
+        )
+    if scale_min_points_floor < 1:
+        raise ValueError(
+            "perception.geometry.scale_aware.min_points_floor must be at least one"
+        )
+    if scale_transition_extent_m <= 0.0:
+        raise ValueError(
+            "perception.geometry.scale_aware.transition_extent_m must be positive"
+        )
+    if scale_voxel_extent_factor <= 0.0:
+        raise ValueError(
+            "perception.geometry.scale_aware.voxel_extent_factor must be positive"
+        )
+    if stationary_refinement_min_stationary_s < 0.0:
+        raise ValueError(
+            "perception.stationary_refinement.min_stationary_s must not be negative"
+        )
+    if stationary_refinement_interval_s <= 0.0:
+        raise ValueError(
+            "perception.stationary_refinement.interval_s must be positive"
+        )
+    if (
+        stationary_refinement_translation_m < 0.0
+        or stationary_refinement_rotation_deg < 0.0
+    ):
+        raise ValueError(
+            "stationary refinement motion thresholds must not be negative"
+        )
+    if stationary_refinement_grid_size < 1:
+        raise ValueError(
+            "perception.stationary_refinement.grid_size must be at least one"
+        )
+    if not 0.0 <= stationary_refinement_overlap_fraction <= 0.80:
+        raise ValueError(
+            "perception.stationary_refinement.overlap_fraction must be in [0, 0.8]"
+        )
+    if stationary_refinement_input_size < 320:
+        raise ValueError(
+            "perception.stationary_refinement.input_size must be at least 320"
+        )
+    if stationary_refinement_edge_margin_px < 0:
+        raise ValueError(
+            "perception.stationary_refinement.edge_margin_px must not be negative"
+        )
+    if not 0.0 <= stationary_refinement_duplicate_iou <= 1.0:
+        raise ValueError(
+            "perception.stationary_refinement.duplicate_iou must be in [0, 1]"
+        )
+    if stationary_refinement_max_detections < 0:
+        raise ValueError(
+            "stationary refinement max_supplemental_detections must not be negative"
+        )
+    if visible_miss_frames < 1:
+        raise ValueError("perception.visible_miss_frames must be at least one")
+    if visibility_depth_margin_m < 0.0:
+        raise ValueError(
+            "perception.visibility_depth_margin_m must not be negative"
+        )
+    if visibility_min_clear_samples < 1:
+        raise ValueError(
+            "perception.visibility_min_clear_samples must be at least one"
+        )
+    if not 0.0 < visibility_min_clear_fraction <= 1.0:
+        raise ValueError(
+            "perception.visibility_min_clear_fraction must be in (0, 1]"
+        )
+    if visibility_max_projected_samples < visibility_min_clear_samples:
+        raise ValueError(
+            "perception.visibility_max_projected_samples must be at least "
+            "perception.visibility_min_clear_samples"
+        )
+    if object_ttl_s < 0.0:
+        raise ValueError("perception.object_ttl_s must not be negative")
+    if confirmation_min_unique_frames < 1:
+        raise ValueError(
+            "perception.confirmation_min_unique_frames must be at least one"
+        )
+    if not 0.0 <= confirmation_singleton_min_mean_confidence <= 1.0:
+        raise ValueError(
+            "perception.confirmation_singleton_min_mean_confidence "
+            "must be in [0, 1]"
+        )
+    if mask_erosion_px < 0:
+        raise ValueError("perception.geometry.mask_erosion_px must not be negative")
+    if min_depth_m < 0.0 or max_depth_m <= min_depth_m:
+        raise ValueError(
+            "perception.geometry depth range must satisfy "
+            "0 <= min_depth_m < max_depth_m"
+        )
+    if depth_mad_scale < 0.0 or depth_min_band_m < 0.0:
+        raise ValueError(
+            "perception.geometry depth filters must not be negative"
+        )
+    if map_bounds_margin_m < 0.0:
+        raise ValueError(
+            "perception.geometry.map_bounds_margin_m must not be negative"
+        )
+    if not 0.0 <= map_max_outside_fraction <= 1.0:
+        raise ValueError(
+            "perception.geometry.map_max_outside_fraction must be in [0, 1]"
+        )
+    if not 0.0 <= bbox_low_percentile < bbox_high_percentile <= 100.0:
+        raise ValueError(
+            "perception.geometry bbox percentiles must satisfy "
+            "0 <= low < high <= 100"
+        )
+    if max_bbox_extent_m <= 0.0:
+        raise ValueError(
+            "perception.geometry.max_bbox_extent_m must be greater than zero"
+        )
+    if surface_snap_max_distance_m <= 0.0:
+        raise ValueError(
+            "perception.geometry.surface_snap.max_distance_m must be "
+            "greater than zero"
+        )
+    if surface_snap_tangent_padding_m < 0.0:
+        raise ValueError(
+            "perception.geometry.surface_snap.tangent_padding_m must not "
+            "be negative"
+        )
+    if not 0.0 <= surface_snap_min_shift_m <= surface_snap_max_distance_m:
+        raise ValueError(
+            "perception.geometry.surface_snap.min_shift_m must be in "
+            "[0, max_distance_m]"
+        )
+    if surface_snap_min_support_cells < 1:
+        raise ValueError(
+            "perception.geometry.surface_snap.min_support_cells must be "
+            "at least one"
+        )
+    if not 0.0 < surface_snap_min_dominant_share <= 1.0:
+        raise ValueError(
+            "perception.geometry.surface_snap.min_dominant_share must be "
+            "in (0, 1]"
+        )
+    if not 0.0 < surface_snap_min_tangent_coverage <= 1.0:
+        raise ValueError(
+            "perception.geometry.surface_snap.min_tangent_coverage must be "
+            "in (0, 1]"
+        )
+    if not 1 <= surface_snap_occupancy_threshold <= 100:
+        raise ValueError(
+            "perception.geometry.surface_snap.occupancy_threshold must be "
+            "in [1, 100]"
+        )
+    if label_history_size < 1:
+        raise ValueError("perception.label.history_size must be at least one")
+    if label_min_switch_observations < 1:
+        raise ValueError(
+            "perception.label.min_switch_observations must be at least one"
+        )
+    if not 0.0 <= label_min_winner_share <= 1.0:
+        raise ValueError(
+            "perception.label.min_winner_share must be in [0, 1]"
+        )
+    if not 0.0 <= label_switch_margin <= 1.0:
+        raise ValueError("perception.label.switch_margin must be in [0, 1]")
+    if not -1.0 <= clip_rerank_min_score <= 1.0:
+        raise ValueError(
+            "perception.label.clip_rerank.min_score must be in [-1, 1]"
+        )
+    if not 0.0 <= clip_rerank_min_margin <= 2.0:
+        raise ValueError(
+            "perception.label.clip_rerank.min_margin must be in [0, 2]"
+        )
+    if not math.isfinite(clip_rerank_geometry_bonus) or not (
+        0.0 <= clip_rerank_geometry_bonus <= 2.0
+    ):
+        raise ValueError(
+            "perception.label.clip_rerank.persistent_geometry.score_bonus "
+            "must be finite and in [0, 2]"
+        )
+    for label, constraints in clip_rerank_geometry_constraints.items():
+        minimum = constraints.get("min_horizontal_extent_m")
+        maximum = constraints.get("max_horizontal_extent_m")
+        if any(
+            not math.isfinite(value) or value <= 0.0
+            for key, value in constraints.items()
+            if key != "source_labels"
+        ):
+            raise ValueError(
+                "persistent geometry extents must be finite positive metres "
+                f"for label {label!r}"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "persistent geometry min_horizontal_extent_m must not exceed "
+                f"max_horizontal_extent_m for label {label!r}"
+            )
+    if any(
+        not 0.0 <= margin <= 2.0
+        for margin in clip_rerank_min_margin_by_label.values()
+    ):
+        raise ValueError(
+            "perception.label.clip_rerank group and route min_margin values "
+            "must be in [0, 2]"
+        )
+    if exact_duplicate_centroid_max_m < 0.0:
+        raise ValueError(
+            "perception.association.exact_duplicate_centroid_max_m "
+            "must not be negative"
+        )
+    if not 0.0 <= association_min_spatial_similarity <= 1.0:
+        raise ValueError(
+            "perception.association.min_spatial_similarity must be in [0, 1]"
+        )
+    if not -1.0 <= association_min_visual_similarity <= 1.0:
+        raise ValueError(
+            "perception.association.min_visual_similarity must be in [-1, 1]"
+        )
+    if association_max_extent_ratio < 1.0:
+        raise ValueError(
+            "perception.association.max_extent_ratio must be at least one"
+        )
+    if association_adaptive_extent_scale < 0.0:
+        raise ValueError(
+            "perception.association.adaptive_extent_scale must not be negative"
+        )
+    if association_cleanup_interval_ticks < 1:
+        raise ValueError(
+            "perception.association.cleanup_interval_ticks must be at least one"
+        )
+    if not 0.0 <= exact_duplicate_min_voxel_coverage <= 1.0:
+        raise ValueError(
+            "perception.association.exact_duplicate_min_voxel_coverage "
+            "must be in [0, 1]"
+        )
+    if exact_duplicate_max_extent_ratio < 1.0:
+        raise ValueError(
+            "perception.association.exact_duplicate_max_extent_ratio "
+            "must be at least one"
+        )
+    if coobserved_duplicate_min_shared_frames < 1:
+        raise ValueError(
+            "perception.association."
+            "coobserved_duplicate_min_shared_frames must be at least one"
+        )
+    if not 0.0 <= coobserved_duplicate_min_median_iou <= 1.0:
+        raise ValueError(
+            "perception.association."
+            "coobserved_duplicate_min_median_iou must be in [0, 1]"
+        )
+    if coobserved_duplicate_max_extent_ratio < 1.0:
+        raise ValueError(
+            "perception.association."
+            "coobserved_duplicate_max_extent_ratio must be at least one"
+        )
+    if not -1.0 <= coobserved_duplicate_min_visual_similarity <= 1.0:
+        raise ValueError(
+            "perception.association."
+            "coobserved_duplicate_min_visual_similarity must be in [-1, 1]"
+        )
 
     # ── self-pose bridge ───────────────────────────────────────────────────
     # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
@@ -532,6 +1481,13 @@ async def _start_ros_ingest(
         )
     )
 
+    if not perception_profile["enabled"]:
+        log.info(
+            "[scene] perception profile=lite: object perception disabled; "
+            "pose, rooms, annotations, map binding, and Scene APIs remain active"
+        )
+        return hub, None, bg_tasks
+
     # Perception startup races with camera primitive cap registration:
     # the chassis cap usually shows up first (its `pose`/`odom` topics
     # populate hub.specs at the initial discovery), but the camera
@@ -543,7 +1499,9 @@ async def _start_ros_ingest(
     deadline = time.time() + perception_wait_s
     while time.time() < deadline and not (hub.has("rgb") and hub.has("depth")):
         # Pull fresh specs from atlas and add anything new.
-        new_specs = _build_topic_specs(explicit, atlas_stub, transport)
+        new_specs = _build_topic_specs(
+            explicit, atlas_stub, transport, camera_provider_id
+        )
         for spec in new_specs:
             if spec.kind not in hub.has_kinds():
                 hub.add_spec(spec)
@@ -551,6 +1509,16 @@ async def _start_ros_ingest(
             log.info("[scene] perception-wait: rgb+depth now available")
             break
         await asyncio.sleep(2.0)
+
+    if camera_provider_id:
+        missing = [kind for kind in ("rgb", "depth") if not hub.has(kind)]
+        if missing:
+            log.warning(
+                "[scene] camera provider %s is missing required RGB-D "
+                "contract(s): %s",
+                camera_provider_id,
+                ", ".join(missing),
+            )
 
     # ── perception ─────────────────────────────────────────────────────────
     # Which perception tier the current hardware supports is decided by the
@@ -565,6 +1533,11 @@ async def _start_ros_ingest(
     camera_frame = str(
         config.get("camera_frame")
         or os.environ.get("SCENE_CAMERA_FRAME")
+        or ""
+    ).strip()
+    configured_base_frame = str(
+        config.get("base_frame")
+        or os.environ.get("SCENE_BASE_FRAME")
         or ""
     ).strip()
     def _rgb_msg() -> Optional[Any]:
@@ -626,7 +1599,12 @@ async def _start_ros_ingest(
                             log.info(
                                 "[scene] camera intrinsics from contract: "
                                 "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
-                                k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                                k.fx,
+                                k.fy,
+                                k.cx,
+                                k.cy,
+                                k.width,
+                                k.height,
                             )
                             intrinsics_logged["ok"] = True
                         return k
@@ -645,7 +1623,13 @@ async def _start_ros_ingest(
                     log.warning(
                         "[scene] camera intrinsics fallback: %s "
                         "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
-                        source, k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                        source,
+                        k.fx,
+                        k.fy,
+                        k.cx,
+                        k.cy,
+                        k.width,
+                        k.height,
                     )
                     intrinsics_logged["fallback"] = True
                 return k
@@ -658,18 +1642,164 @@ async def _start_ros_ingest(
             world_frame_fn=lambda: self_tracker.world_frame_id,
             on_detections=lambda dets: _ingest_detections(registry, dets),
             registry=registry,
+            # Pass the hub so the detector can resolve camera→world from the
+            # authoritative TF tree. The pose + camera-extrinsics contracts
+            # remain a validated compatibility fallback when TF is unavailable.
             robot_base_frame_fn=_active_base_frame,
-            # Pass the hub so the detector can compose camera→world from
-            # Atlas-resolved pose and camera-extrinsics contracts.
             hub=hub,
             # Detection cadence. The default 0.6 s keeps objects fresh but runs
             # YOLO+CLIP on the GPU continuously; on a shared Jetson GPU that
             # starves co-located GPU work (e.g. FunASR ASR), making voice slow.
             # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
             # speech + perception together.
-            period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            period_s=detection_period_s,
+            confidence_threshold=confidence_threshold,
+            max_detections=max_detections,
+            profile=perception_profile_name,
+            input_size=perception_input_size,
+            inference_precision=inference_precision,
+            tensor_rt_mode=tensor_rt_mode,
+            tensor_rt_cache_dir=tensor_rt_cache_dir,
+            yolo_weights_path=yolo_weights_path,
             pose_max_age_s=pose_max_age_s,
+            visible_miss_threshold=visible_miss_frames,
+            visibility_depth_margin_m=visibility_depth_margin_m,
+            visibility_min_clear_samples=visibility_min_clear_samples,
+            visibility_min_clear_fraction=visibility_min_clear_fraction,
+            visibility_max_projected_samples=(
+                visibility_max_projected_samples
+            ),
+            object_ttl_s=object_ttl_s,
+            confirmation_min_unique_frames=(
+                confirmation_min_unique_frames
+            ),
+            confirmation_singleton_min_mean_confidence=(
+                confirmation_singleton_min_mean_confidence
+            ),
+            mask_erosion_px=mask_erosion_px,
+            min_depth_m=min_depth_m,
+            max_depth_m=max_depth_m,
+            depth_mad_scale=depth_mad_scale,
+            depth_min_band_m=depth_min_band_m,
+            frame_dbscan=frame_dbscan,
+            scale_aware_geometry=scale_aware_geometry,
+            scale_min_voxel_size_m=scale_min_voxel_size_m,
+            scale_min_points_floor=scale_min_points_floor,
+            scale_transition_extent_m=scale_transition_extent_m,
+            scale_voxel_extent_factor=scale_voxel_extent_factor,
+            stationary_refinement=stationary_refinement,
+            stationary_refinement_min_stationary_s=(
+                stationary_refinement_min_stationary_s
+            ),
+            stationary_refinement_interval_s=(
+                stationary_refinement_interval_s
+            ),
+            stationary_refinement_translation_m=(
+                stationary_refinement_translation_m
+            ),
+            stationary_refinement_rotation_deg=(
+                stationary_refinement_rotation_deg
+            ),
+            stationary_refinement_grid_size=(
+                stationary_refinement_grid_size
+            ),
+            stationary_refinement_overlap_fraction=(
+                stationary_refinement_overlap_fraction
+            ),
+            stationary_refinement_input_size=(
+                stationary_refinement_input_size
+            ),
+            stationary_refinement_edge_margin_px=(
+                stationary_refinement_edge_margin_px
+            ),
+            stationary_refinement_duplicate_iou=(
+                stationary_refinement_duplicate_iou
+            ),
+            stationary_refinement_max_detections=(
+                stationary_refinement_max_detections
+            ),
+            require_occupancy_bounds=require_occupancy_bounds,
+            map_bounds_margin_m=map_bounds_margin_m,
+            map_max_outside_fraction=map_max_outside_fraction,
+            bbox_low_percentile=bbox_low_percentile,
+            bbox_high_percentile=bbox_high_percentile,
+            max_bbox_extent_m=max_bbox_extent_m,
+            surface_snap_labels=surface_snap_labels,
+            surface_snap_max_distance_m=surface_snap_max_distance_m,
+            surface_snap_tangent_padding_m=(
+                surface_snap_tangent_padding_m
+            ),
+            surface_snap_min_shift_m=surface_snap_min_shift_m,
+            surface_snap_min_support_cells=(
+                surface_snap_min_support_cells
+            ),
+            surface_snap_min_dominant_share=(
+                surface_snap_min_dominant_share
+            ),
+            surface_snap_min_tangent_coverage=(
+                surface_snap_min_tangent_coverage
+            ),
+            surface_snap_occupancy_threshold=(
+                surface_snap_occupancy_threshold
+            ),
+            classes=classes,
+            additional_classes=additional_classes,
+            label_history_size=label_history_size,
+            label_min_switch_observations=label_min_switch_observations,
+            label_min_winner_share=label_min_winner_share,
+            label_switch_margin=label_switch_margin,
+            label_aliases=label_aliases,
+            clip_rerank_groups=clip_rerank_groups,
+            clip_rerank_routes=clip_rerank_routes,
+            clip_rerank_prompts=clip_rerank_prompts,
+            clip_rerank_min_score=clip_rerank_min_score,
+            clip_rerank_min_margin=clip_rerank_min_margin,
+            clip_rerank_min_margin_by_label=(
+                clip_rerank_min_margin_by_label
+            ),
+            clip_rerank_geometry_bonus=clip_rerank_geometry_bonus,
+            clip_rerank_geometry_constraints=(
+                clip_rerank_geometry_constraints
+            ),
+            association_min_spatial_similarity=(
+                association_min_spatial_similarity
+            ),
+            association_min_visual_similarity=(
+                association_min_visual_similarity
+            ),
+            association_max_extent_ratio=association_max_extent_ratio,
+            association_adaptive_extent_scale=(
+                association_adaptive_extent_scale
+            ),
+            association_cleanup_interval_ticks=(
+                association_cleanup_interval_ticks
+            ),
+            exact_duplicate_centroid_max_m=(
+                exact_duplicate_centroid_max_m
+            ),
+            exact_duplicate_min_voxel_coverage=(
+                exact_duplicate_min_voxel_coverage
+            ),
+            exact_duplicate_max_extent_ratio=(
+                exact_duplicate_max_extent_ratio
+            ),
+            coobserved_duplicate_min_shared_frames=(
+                coobserved_duplicate_min_shared_frames
+            ),
+            coobserved_duplicate_min_median_iou=(
+                coobserved_duplicate_min_median_iou
+            ),
+            coobserved_duplicate_max_extent_ratio=(
+                coobserved_duplicate_max_extent_ratio
+            ),
+            coobserved_duplicate_min_visual_similarity=(
+                coobserved_duplicate_min_visual_similarity
+            ),
+            identity_rebind_max_distance_m=(
+                identity_rebind_max_distance_m
+            ),
             camera_frame=camera_frame,
+            base_frame=configured_base_frame or None,
         )
         await detector.start()
         log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
@@ -1124,32 +2254,10 @@ async def _lifecycle_watch(
     live_binding: Optional[dict] = None,
     ops_lock: Optional[asyncio.Lock] = None,
     semantic_hold: Optional[dict] = None,
+    derived_state_reset: Optional[Callable[[], Awaitable[None]]] = None,
     interval_s: float = 5.0,
 ) -> None:
-    """Lifecycle linkage: track mapping's latched identity broadcast against
-    the session's LIVE binding (`live_binding` — the same dict the web
-    facade's Save/Load update, so a facade-initiated load never reads as
-    drift) and REACT to a frame-epoch change instead of only warning:
-
-    - generation bump on the SAME map (reset / mapping re-init underneath
-      scene): every stored map-frame coordinate just went stale. Derived
-      objects are flushed from the registry (re-observation rebuilds them
-      in the new frame); room annotations are user assets — flagged stale
-      for confirmation, never deleted. The live binding's generation is
-      advanced so the response fires exactly once per epoch.
-    - a DIFFERENT map_id (map loaded/switched outside scene's facade):
-      the registry's objects belong to the previous frame and are flushed,
-      but scene cannot restore the new map's semantic state from here —
-      that stays a WARNING telling the operator to Load via the map UI
-      (or restart scene). The live binding is left pointing at what scene
-      last knowingly bound.
-
-    Every reaction is best-effort: a failing marker write / flush must
-    never kill the watcher — the drift detection itself is load-bearing.
-
-    A static binding carries no generation, so the epoch reference is
-    learned from the FIRST confirming broadcast: without that, `gen_ok`
-    would stay vacuously true and runtime bumps would be invisible."""
+    """React to map-frame epoch changes and external map switches."""
     if live_binding is None:
         live_binding = {
             "map_id": binding.map_id,
@@ -1164,21 +2272,22 @@ async def _lifecycle_watch(
     last_warned: Optional[tuple] = None
 
     async def _flush_registry(why: str) -> bool:
-        """Flush the registry; a failure is loud and non-fatal, but the
-        result is returned so callers can withhold whatever acknowledgement
-        (epoch advance, warn-once latch) would otherwise stop the retry."""
-        if registry is None:
-            return True
         try:
-            async with registry.lock():
-                dropped = registry.clear_objects()
-            log.warning("[scene] flushed %d mis-anchored object(s) %s",
-                        dropped, why)
+            if derived_state_reset is not None:
+                await derived_state_reset()
+            dropped = 0
+            if registry is not None:
+                async with registry.lock():
+                    dropped = registry.clear_objects()
+            log.warning(
+                "[scene] flushed %d mis-anchored object(s) %s", dropped, why
+            )
             return True
         except Exception as e:  # noqa: BLE001
             log.error(
                 "[scene] object flush failed — mis-anchored objects remain "
-                "until the flush is retried: %s", e,
+                "until the flush is retried: %s",
+                e,
             )
             return False
 
@@ -1191,10 +2300,6 @@ async def _lifecycle_watch(
         bound_id = str(live_binding.get("map_id") or "")
         ref_gen = live_binding.get("generation")
         if not live_id:
-            # Ephemeral broadcast: no named identity to compare — but if
-            # scene statically bound a NAMED map, that named partition is
-            # being fed coordinates from a frame that resets every boot.
-            # Say so once instead of guarding silently forever.
             if not warned_ephemeral and binding.source in ("config", "env"):
                 log.warning(
                     "[scene] mapping broadcasts an EPHEMERAL session (empty "
@@ -1203,7 +2308,9 @@ async def _lifecycle_watch(
                     "mapping session as %r first, then Load that saved map or "
                     "restart in localization mode for a stable cross-boot "
                     "binding",
-                    binding.map_id, binding.source, binding.map_id,
+                    binding.map_id,
+                    binding.source,
+                    binding.map_id,
                 )
                 warned_ephemeral = True
             return
@@ -1211,12 +2318,12 @@ async def _lifecycle_watch(
             if confirmed_key != (live_id, live_gen):
                 log.info(
                     "[scene] map binding confirmed by mapping lifecycle: "
-                    "id=%s gen=%d mode=%s", live_id, live_gen, str(msg.mode),
+                    "id=%s gen=%d mode=%s",
+                    live_id,
+                    live_gen,
+                    str(msg.mode),
                 )
                 confirmed_key = (live_id, live_gen)
-                # Learn the epoch (static bindings start without one); from
-                # now on a bump IS detectable. The annotation store compares
-                # the confirmed epoch against the one its file recorded.
                 live_binding["generation"] = live_gen
                 if anno_store is not None:
                     try:
@@ -1226,34 +2333,30 @@ async def _lifecycle_watch(
                         # dir); the watcher itself must survive it.
                         log.error(
                             "[scene-anno] generation reconcile failed "
-                            "(annotation staleness may be outdated): %s", e,
+                            "(annotation staleness may be outdated): %s",
+                            e,
                         )
             last_warned = None
             return
         if live_id == bound_id:
-            # Same map, new frame epoch. Respond, don't just warn — under
-            # the shared ops lock so the reaction can't interleave with a
-            # facade Save/Load that is mid-flight.
             async with ops_lock:
-                # Re-read under the lock: a facade op may have advanced the
-                # binding while we waited — its update IS the new truth.
                 ref_gen = live_binding.get("generation")
-                if (str(live_binding.get("map_id") or "") != live_id
-                        or live_gen == ref_gen):
+                if (
+                    str(live_binding.get("map_id") or "") != live_id
+                    or live_gen == ref_gen
+                ):
                     return
                 log.warning(
                     "[scene] map %s frame epoch changed under scene (gen "
                     "%s→%d, mode=%s) — flushing derived objects "
                     "(re-observation rebuilds them in the new frame); room "
                     "annotations are flagged stale for confirmation",
-                    live_id, ref_gen, live_gen, str(msg.mode),
+                    live_id,
+                    ref_gen,
+                    live_gen,
+                    str(msg.mode),
                 )
                 if not await _flush_registry("after epoch bump"):
-                    # Do NOT acknowledge the new generation: with the
-                    # mis-anchored objects still in the registry, advancing
-                    # would make the next tick see no mismatch and never
-                    # retry. Leaving state untouched re-triggers this whole
-                    # reaction (flush included) on the next tick.
                     return
                 if anno_store is not None:
                     try:
@@ -1264,18 +2367,15 @@ async def _lifecycle_watch(
                         if n:
                             log.warning(
                                 "[scene-anno] %d annotation(s) marked stale "
-                                "— confirm or redraw them in the map UI", n,
+                                "— confirm or redraw them in the map UI",
+                                n,
                             )
                     except Exception as e:  # noqa: BLE001
-                        # Losing the stale marker is recoverable (next
-                        # boot's load-time epoch check re-judges); losing
-                        # this watcher would silence ALL drift handling.
                         log.error(
                             "[scene-anno] stale marking failed (annotations "
-                            "may show as fresh until restart): %s", e,
+                            "may show as fresh until restart): %s",
+                            e,
                         )
-                # Advance the live epoch: the response fired once for this
-                # bump and the next bump is measured against it.
                 live_binding["generation"] = live_gen
                 if str(msg.mode):
                     live_binding["mode"] = str(msg.mode)
@@ -1285,8 +2385,6 @@ async def _lifecycle_watch(
         if key != last_warned:
             async with ops_lock:
                 if str(live_binding.get("map_id") or "") == live_id:
-                    # A facade Load bound this map while we waited — the
-                    # mismatch we saw is already resolved, not drift.
                     return
                 log.warning(
                     "[scene] mapping's live map identity (id=%s gen=%d "
@@ -1294,21 +2392,18 @@ async def _lifecycle_watch(
                     "gen=%s source=%s) — flushing stale objects; Load the "
                     "map in the map UI (or restart scene) to bind its "
                     "semantic state.",
-                    live_id, live_gen, str(msg.mode),
-                    bound_id, ref_gen, live_binding.get("source"),
+                    live_id,
+                    live_gen,
+                    str(msg.mode),
+                    bound_id,
+                    ref_gen,
+                    live_binding.get("source"),
                 )
                 if semantic_hold is not None:
-                    # Scene stays bound to the previous map while mapping
-                    # runs another one: a Save would commit the flushed
-                    # (or newly foreign-frame) registry as the OLD map's
-                    # snapshot and purge its last valid one. Held until a
-                    # facade Load completes and re-converges the binding.
                     semantic_hold["reason"] = (
                         f"mapping switched to map {live_id} outside scene"
                     )
                 if not await _flush_registry("after external map switch"):
-                    # Don't latch this key into `last_warned` — the next
-                    # tick warns again and retries the flush.
                     return
             last_warned = key
 
@@ -1319,42 +2414,30 @@ async def _lifecycle_watch(
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            # The watcher is the session's only runtime epoch guard — one
-            # malformed sample / failed reaction must never end it.
             log.error(
-                "[scene] lifecycle watch tick failed (watch continues): %s", e,
+                "[scene] lifecycle watch tick failed (watch continues): %s", e
             )
 
 
-# ── main ───────────────────────────────────────────────────────────────────
-async def _run() -> None:
-    config = _load_config()
-
-    # Hand the FastMCP app from mcp_tools to Capability so it owns the
-    # HTTP server. Capability auto-allocates the port (was hand-set to
-    # 50106) and atlas-routes consumers via QueryCapabilities. The 6
-    # tools were already decorated with @mcp_contract on mcp_tools.mcp
-    # at import time; we still need to declare each on atlas — Capability
-    # only auto-declares tools registered via @scene.mcp(), and we kept
-    # the @mcp_contract pattern in mcp_tools to avoid a cyclic-import
-    # rewrite. Manual declare per tool:
-    scene.use_mcp_app(mcp_tools.mcp)
-
+# ── active runtime ─────────────────────────────────────────────────────────
+async def _run_active(config: dict) -> None:
+    """Start Scene resources after Driver(INIT) and Driver(ACTIVATE)."""
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
     robot_geometry = RobotGeometryState()
     self_tracker = _SelfTracker(registry, robot_geometry)
 
-    # Object persistence. The store backs the map UI's Save/Load snapshots;
-    # boot-time warm restore and builder-driven continuous writes exist only
-    # under the legacy SCENE_RESTORE_ON_START mode. Created before
-    # perception so a legacy restore repopulates the registry before the
-    # first detections arrive; the embedder is wired in later.
+    # Object persistence (warm restore across restarts). Created before
+    # perception so the registry is repopulated before the first detections
+    # arrive; the embedder is wired in later (only needed for writes). The
+    # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
+    # prior boot wrote rows — but writes are driven by the scene-graph builder.
     # Which SLAM map this scene session belongs to. This is the join key
-    # against mapping (lifecycle watch) and, in legacy mode, the partition
-    # key for scene's persistent state; the default mode partitions session
-    # state under the constant `.live` label and persists object snapshots
-    # under per-Save tokens instead.
+    # against mapping and the scope key for ALL of scene's persistent state:
+    # object poses are only valid in their own map's frame, and so are the
+    # scene-graph caption/relation caches. Computed once here so the object
+    # store (below) and the scene-graph cache (further down) partition on
+    # the same value.
     #
     # Binding precedence (choose_map_binding): mapping's latched lifecycle
     # broadcast — the authoritative map identity, probed briefly here —
@@ -1369,29 +2452,22 @@ async def _run() -> None:
         broadcast, config.get("map_id"), os.environ.get("SCENE_MAP_ID")
     )
     map_id = binding.map_id
-    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in ("true", "1", "yes")
-    # A live (unsaved) session is NEVER persisted — objects only reach the
-    # DB via an explicit Save snapshot (web facade) or, in the legacy
-    # restore_on_start mode, the builder's continuous writes under the bound
-    # map id. The constant `.live` name is just the in-memory partition label
-    # for the annotation/scene-graph session state below.
+    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     scene_state_map_id = map_id if restore_on_start else ".live"
     log.info(
         "[scene] map binding: id=%s gen=%s source=%s mode=%s restore_on_start=%s state_partition=%s",
-        binding.map_id, binding.generation, binding.source, binding.mode,
-        restore_on_start, scene_state_map_id,
+        binding.map_id,
+        binding.generation,
+        binding.source,
+        binding.mode,
+        restore_on_start,
+        scene_state_map_id,
     )
-    # The session's LIVE binding view — one mutable dict shared by the web
-    # facade (Save/Load update it), the /user page header (reads it), and
-    # the lifecycle watcher (epoch bumps update it + flush derived state).
-    # `binding` above stays the immutable startup record. `map_ops_lock`
-    # serializes the facade's Save/Load/Delete with the watcher's epoch
-    # response — both suspend at awaits mid-critical-section.
     map_ops_lock = asyncio.Lock()
-    # Shared between the web facade (Save honors it, Load sets/clears it)
-    # and the lifecycle watcher (an external map switch raises it): while
-    # `reason` is non-None, scene's semantic state may not match the map
-    # mapping runs, and Save is refused until a Load completes.
     semantic_hold: dict = {"reason": None}
     live_binding: dict = {
         "map_id": binding.map_id,
@@ -1402,19 +2478,25 @@ async def _run() -> None:
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # mapping is provably UP but running ephemeral (no map_id) — its
         # frame resets every boot, so the named partition scene just bound
-        # statically will not re-anchor across boots until the operator saves
-        # this live session and later loads it in localization mode.
+        # statically will never re-anchor. Likely a manifest misconfig
+        # (SCENE_MAP_ID set, mapping's config.map_id forgotten).
         log.warning(
             "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
             "while scene binds %r from %s — objects stored under this id "
             "won't re-anchor across boots; Save the current mapping session "
             "as %r first, then Load that saved map or restart in localization "
             "mode",
-            binding.map_id, binding.source, binding.map_id,
+            binding.map_id,
+            binding.source,
+            binding.map_id,
         )
 
     obj_store = None
-    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
+    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    ):
         from .persistence import ObjectStore
 
         db_path = os.environ.get(
@@ -1426,7 +2508,8 @@ async def _run() -> None:
             if purged:
                 log.info(
                     "[scene-persist] purged %d leftover live-session row(s) "
-                    "from earlier boots", purged,
+                    "from earlier boots",
+                    purged,
                 )
             restored = obj_store.load_all() if restore_on_start else []
             if restored:
@@ -1435,7 +2518,10 @@ async def _run() -> None:
                         registry.restore_object(o)
             log.info(
                 "[scene-persist] object store ready: restored %d object(s) (partition=%s, restore_on_start=%s) from %s",
-                len(restored), obj_store.map_id, restore_on_start, db_path,
+                len(restored),
+                obj_store.map_id,
+                restore_on_start,
+                db_path,
             )
         except Exception as e:  # noqa: BLE001
             # Object memory is opted in (default on), so a failure here is not
@@ -1444,33 +2530,29 @@ async def _run() -> None:
             log.error(
                 "[scene-persist] object memory enabled but store init/restore "
                 "failed — persistence OFF for this session (no restore, no "
-                "writes): %s", e,
+                "writes): %s",
+                e,
             )
             obj_store = None
 
     # User annotations (rooms / POIs) — user-authored semantics on the same
     # map_id partition rule as the object store; validity is additionally
-    # tracked against mapping's generation epoch (recorded in the file —
-    # objects get their epoch guarantee from snapshot partitions + the
-    # watcher's flush instead). A failure here disables the annotation API
-    # for the session (web answers 503) but never blocks scene itself.
+    # tracked against mapping's generation epoch (annotations only — the
+    # object store has no epoch concept). A failure here disables the
+    # annotation API for the session (web answers 503) but never blocks
+    # scene itself.
     anno_dir = os.environ.get(
         "SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"
     )
     if not restore_on_start:
-        # Fresh live session: drop unsaved annotations left by previous
-        # live sessions (constant `.live` partition) and the per-boot
-        # files earlier builds leaked (`.live-<pid>-<ts>.json`). Saved
-        # rooms were carried into their map's own file at Save time.
-        # Best-effort in its OWN guard: a cleanup failure must not take
-        # the whole annotation API down with a misattributed init error.
         try:
             for leftover in Path(anno_dir).expanduser().glob(".live*.json"):
                 leftover.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001
             log.warning(
                 "[scene-anno] live-session file cleanup failed (leftovers "
-                "may resurface next boot): %s", e,
+                "may resurface next boot): %s",
+                e,
             )
     anno_store: Optional[AnnotationStore] = None
     try:
@@ -1483,20 +2565,17 @@ async def _run() -> None:
         log.info(
             "[scene-anno] annotation store ready: %d annotation(s), %d stale "
             "(map_id=%s) at %s",
-            len(anns), sum(a.stale for a in anns), anno_store.map_id,
+            len(anns),
+            sum(a.stale for a in anns),
+            anno_store.map_id,
             anno_store.path,
         )
     except Exception as e:  # noqa: BLE001
         log.error(
             "[scene-anno] annotation store init failed — annotation API "
-            "disabled for this session: %s", e,
+            "disabled for this session: %s",
+            e,
         )
-
-    # Epoch sidecar (map_id → object snapshot partition; see map_meta.py).
-    # Defaults next to the annotation dir so docker (/data/robonix) and
-    # native ($PKG/rbnx-build/data/robonix) deployments both get a writable
-    # location without new script plumbing. Without it, Save/Load degrade
-    # to annotations-only (loudly, in the web response).
     map_meta: Optional[MapMetaStore] = None
     try:
         meta_dir = os.environ.get("SCENE_MAP_META_DIR") or os.path.join(
@@ -1506,7 +2585,8 @@ async def _run() -> None:
     except Exception as e:  # noqa: BLE001
         log.error(
             "[scene-mapmeta] sidecar store init failed — Save/Load will not "
-            "snapshot/restore objects this session: %s", e,
+            "snapshot/restore objects this session: %s",
+            e,
         )
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
     # supplied later in _start_ros_ingest). The geometric relation loop +
@@ -1517,43 +2597,12 @@ async def _run() -> None:
     )
     mcp_tools.attach_annotation_store(anno_store)
 
-    # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
-    # keeps running its own asyncio event loop after this returns.
-    scene.bootstrap()
+    # Geometry is a live Soma dependency of the active Scene runtime. The
+    # capability/lifecycle servers were already bootstrapped by `_run()`.
     geometry_task = asyncio.create_task(
         reconcile_robot_geometry(robot_geometry),
         name="scene-robot-geometry",
     )
-
-    # Declare each scene MCP tool on atlas. Each handler has
-    # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
-    # description / JSON schema stay in sync with the codegen types.
-    for fn in (
-        mcp_tools.list_objects,
-        mcp_tools.list_regions,
-        mcp_tools.get_robot_context,
-        mcp_tools.goal_near,
-        mcp_tools.goal_room,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.list_relations,
-    ):
-        cid = getattr(fn, "_robonix_contract_id", None)
-        if cid is None:
-            log.warning(
-                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
-            )
-            continue
-        in_cls = getattr(fn, "_robonix_input_cls", None)
-        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
-        scene.declare_mcp(
-            cid,
-            scene.mcp_endpoint,
-            description=(fn.__doc__ or "").strip(),
-            input_schema_json=schema,
-        )
-    log.info("scene declared 8 MCP tools at %s", scene.mcp_endpoint)
-
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
     # reach into ATLAS's wire client directly for that.
@@ -1583,23 +2632,18 @@ async def _run() -> None:
     bg_tasks = [
         geometry_task,
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
-        # Object-level watchdog: polls the registry for NEW objects and
-        # saves one image per object to memgraph.  Default on; set
-        # SCENE_OBJECT_WATCHDOG=0 to disable.
-        *([asyncio.create_task(
-            ObjectWatchdog(
-                registry=registry, hub=hub,
-            ).run(),
-            name="object-watchdog",
-        )] if os.environ.get("SCENE_OBJECT_WATCHDOG", "1") in ("1", "true", "yes") else []),
-        # P2 guard: warn when mapping's live map identity drifts from the
-        # binding scene started with (P3 will act on it instead).
-        asyncio.create_task(
-            _lifecycle_watch(hub, binding, anno_store,
-                             registry=registry, live_binding=live_binding,
-                             ops_lock=map_ops_lock,
-                             semantic_hold=semantic_hold),
-            name="scene-lifecycle-watch",
+        # Preserve the stable-dev Scene-to-Memory demo bridge while the Scene
+        # runtime itself follows the shared Driver lifecycle above.
+        *(
+            [
+                asyncio.create_task(
+                    ObjectWatchdog(registry=registry, hub=hub).run(),
+                    name="object-watchdog",
+                )
+            ]
+            if os.environ.get("SCENE_OBJECT_WATCHDOG", "1").lower()
+            in ("1", "true", "yes")
+            else []
         ),
         # Background reconciler: keeps scene's hub adding subscriptions
         # for new ROS2 topic_outs that appear on atlas after start
@@ -1611,16 +2655,12 @@ async def _run() -> None:
                 hub=hub,
                 transport=str(config.get("transport") or "ros2"),
                 explicit=(config.get("observations") or []),
+                camera_provider_id=str(config.get("camera_provider_id") or "").strip(),
             ),
             name="scene-auto-discover",
         ),
         *ingest_bg,
     ]
-    # These tasks are fire-and-forget: nothing awaits them, so an uncaught
-    # exception would otherwise vanish until shutdown (the failure mode of
-    # the failure-detectors themselves). Surface any death immediately.
-    for _t in bg_tasks:
-        _t.add_done_callback(_log_bg_task_exit)
 
     # ── Relation layer ───────────────────────────────────────────────
     # Fast geometric relations (contact/containment + reachable_by) are
@@ -1633,23 +2673,67 @@ async def _run() -> None:
     sg_cache_dir = os.environ.get(
         "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
     )
-    # Partition the scene-graph caches by the session state label (`.live`
-    # by default, the bound map id in legacy mode). The web facade's Load
-    # rebinds the annotation store and restores objects into the registry;
-    # this cache is session state and stays on its label.
+    # Partition the scene-graph caches by the same runtime state partition as
+    # the object store. Startup defaults to a live session; explicit Load rebinds
+    # persistent room/object state through the web map facade.
     sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=scene_state_map_id)
     log.info(
         "[scene-graph] cache base=%s partitioned by map_id=%s",
-        sg_cache_dir, scene_state_map_id,
+        sg_cache_dir,
+        map_id,
     )
     mcp_tools.attach_scene_graph_store(sg_store)
+    from .object_mutations import ObjectMutationCoordinator
+
+    object_mutations = ObjectMutationCoordinator(
+        registry=registry,
+        detector=perception,
+        scene_graph_store=sg_store,
+        live_binding=live_binding,
+        ops_lock=map_ops_lock,
+        semantic_hold=semantic_hold,
+        object_store=obj_store,
+        map_meta=map_meta,
+    )
+    mcp_tools.attach_object_mutations(object_mutations)
     geo_loop = GeometricRelationLoop(registry, sg_store)
     await geo_loop.start()
+
+    async def _reset_derived_state() -> None:
+        reset = getattr(perception, "reset_derived_state", None)
+        if reset is not None:
+            await reset()
+        sg_store.clear_derived_state()
+
+    bg_tasks.append(
+        asyncio.create_task(
+            _lifecycle_watch(
+                hub,
+                binding,
+                anno_store,
+                registry=registry,
+                live_binding=live_binding,
+                ops_lock=map_ops_lock,
+                semantic_hold=semantic_hold,
+                derived_state_reset=_reset_derived_state,
+            ),
+            name="scene-lifecycle-watch",
+        )
+    )
+    # These tasks are fire-and-forget: nothing awaits them, so an uncaught
+    # exception would otherwise vanish until shutdown (the failure mode of
+    # the failure-detectors themselves). Surface any death immediately.
+    for _t in bg_tasks:
+        _t.add_done_callback(_log_bg_task_exit)
 
     # ── Scene Graph (optional LLM enrichment of the residual) ────────
     sg_stop: asyncio.Event | None = None
     if os.environ.get("SCENE_GRAPH_ENABLED", "true").lower() in ("true", "1", "yes"):
-        from .scene_graph.builder import SceneGraphBuilder, SceneGraphConfig, scene_graph_loop
+        from .scene_graph.builder import (
+            SceneGraphBuilder,
+            SceneGraphConfig,
+            scene_graph_loop,
+        )
         from .scene_graph.captioner import NodeCaptioner
         from .scene_graph.llm_client import SceneGraphLLMClient
         from .scene_graph.relations import RelationInferer
@@ -1710,6 +2794,8 @@ async def _run() -> None:
             ops_lock=map_ops_lock,
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
+            derived_state_reset=_reset_derived_state,
+            object_mutations=object_mutations,
         )
         web_uv = uvicorn.Config(
             app=web_app,
@@ -1727,37 +2813,103 @@ async def _run() -> None:
         scene.mcp_endpoint,
         len(config.get("observations", [])),
     )
+    _lifecycle.mark_runtime_ready()
 
-    # Wait for SIGTERM/SIGINT.
-    stop = asyncio.Event()
+    await _wait_for_lifecycle_event(_lifecycle.shutdown_requested)
+    log.info("shutdown requested; tearing down")
+
+    # Driver(SHUTDOWN) must not acknowledge until every producer and owned
+    # task has exited, uvicorn has released its listening socket, and the
+    # milvus-lite lock is closed. The coordinator attempts every step before
+    # surfacing a cleanup error to the lifecycle handler.
+    await close_scene_runtime_resources(
+        background_tasks=bg_tasks,
+        scene_graph_stop=sg_stop,
+        perception=perception,
+        hub=hub,
+        geometric_loop=geo_loop,
+        web_server=web_server,
+        web_task=web_task,
+        object_store=obj_store,
+    )
+    mcp_tools.attach_object_mutations(None)
+
+
+async def _run() -> None:
+    """Register Scene, receive lifecycle config, then run active resources."""
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop.set)
-    await stop.wait()
-    log.info("shutdown signal received; tearing down")
+            loop.add_signal_handler(sig, _lifecycle.request_process_shutdown)
 
-    # Tear down ingest first so we stop mutating the registry…
-    if sg_stop is not None:
-        sg_stop.set()
-    if perception is not None:
-        with contextlib.suppress(Exception):
-            await perception.stop()
-    with contextlib.suppress(Exception):
-        await hub.stop()
-    await geo_loop.stop()
-    for t in bg_tasks:
-        t.cancel()
-    if web_server is not None:
-        web_server.should_exit = True
+    # Capability owns lifecycle gRPC, heartbeat, and MCP HTTP. Bootstrap must
+    # happen before config-dependent resources so rbnx can deliver CMD_INIT.
+    scene.use_mcp_app(mcp_tools.mcp)
+    scene.bootstrap()
 
-    # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.
-    scene._teardown()
+    # These tools are decorated on the FastMCP app rather than through
+    # @scene.mcp(), so declare their existing metadata after bootstrap.
+    scene_tools = (
+        mcp_tools.list_objects,
+        mcp_tools.list_regions,
+        mcp_tools.goal_near,
+        mcp_tools.goal_room,
+        mcp_tools.get_scene_graph,
+        mcp_tools.get_object_context,
+        mcp_tools.get_robot_context,
+        mcp_tools.list_relations,
+        mcp_tools.update_object_label,
+        mcp_tools.update_object_geometry,
+        mcp_tools.delete_object,
+        mcp_tools.flush_objects,
+    )
+    for fn in scene_tools:
+        cid = getattr(fn, "_robonix_contract_id", None)
+        if cid is None:
+            log.warning(
+                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
+            )
+            continue
+        in_cls = getattr(fn, "_robonix_input_cls", None)
+        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
+        scene.declare_mcp(
+            cid,
+            scene.mcp_endpoint,
+            description=(fn.__doc__ or "").strip(),
+            input_schema_json=schema,
+        )
+    log.info(
+        "scene declared %d MCP tools at %s",
+        len(scene_tools),
+        scene.mcp_endpoint,
+    )
 
-    # Release the milvus-lite lock so the next boot can re-open the .db.
-    if obj_store is not None:
-        with contextlib.suppress(Exception):
-            obj_store.close()
+    run_error: BaseException | None = None
+    try:
+        if not await _wait_for_lifecycle_event(_lifecycle.initialized):
+            return
+        if not await _wait_for_lifecycle_event(_lifecycle.activation_requested):
+            return
+        await _run_active(_lifecycle.config)
+    except BaseException as exc:
+        run_error = exc
+        _lifecycle.mark_runtime_failed(exc)
+        raise
+    finally:
+        # Release the Driver(SHUTDOWN) handler only after active resources are
+        # closed. Its gRPC completion callback tears down the capability server
+        # after the response has left the server. Direct signals have no such
+        # callback, so they tear the capability down here.
+        _lifecycle.mark_shutdown_complete(run_error)
+        if _lifecycle.driver_shutdown_requested.is_set():
+            stopped = await asyncio.to_thread(scene._stopping.wait, 3.0)
+            if not stopped:
+                log.warning(
+                    "Driver(SHUTDOWN) response completion was not observed "
+                    "before process exit"
+                )
+        else:
+            scene._teardown()
 
 
 def main() -> None:

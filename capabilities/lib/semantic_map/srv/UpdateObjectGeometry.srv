@@ -1,0 +1,22 @@
+# Replace one derived Scene object's pose and yaw-only bounding box.
+# Coordinates and dimensions use SI units: metres and radians.
+# The frame must match the object's existing authoritative world frame.
+# Manual geometry is provenance-marked and is not navigation-grade.
+
+string object_id
+float64 x
+float64 y
+float64 z
+float64 yaw
+float64 size_x
+float64 size_y
+float64 size_z
+string frame_id
+string expected_map_id
+int64 expected_generation
+bool persist_to_snapshot
+---
+Object object
+string map_id
+int64 generation
+bool persisted

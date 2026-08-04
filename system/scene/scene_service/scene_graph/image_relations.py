@@ -165,8 +165,11 @@ def annotate_frame(
 
 IMAGE_RELATION_SYSTEM_PROMPT = """\
 You are a robot's scene-graph reasoner. You see one RGB camera image in which
-objects are outlined by GREEN numbered boxes. Report the physical relations that
-hold BETWEEN the numbered objects, judging from what you see.
+objects are outlined by GREEN numbered boxes. Give every visible numbered
+object a concise concrete name and report the physical relations that hold
+BETWEEN the numbered objects, judging from what you see. The supplied labels
+are weak detector priors, not an allowed vocabulary; correct them when the
+image supports a more precise name.
 
 Return ONLY valid JSON.
 
@@ -182,11 +185,17 @@ Allowed relation values (use these exactly; source/target are box numbers):
 Rules:
 - Only relate objects that are actually drawn as numbered boxes. Never invent
   objects or numbers not present.
+- Name every numbered object with a short singular noun phrase grounded in the
+  image (for example "office chair", "kitchen counter", "wine glass").
+- Names are open-vocabulary. Do not copy a detector prior when it conflicts
+  with the image, and do not answer with generic words such as "object".
 - Omit a pair entirely when no listed relation holds (do NOT output "none"/"near").
 - Prefer the strongest single relation per ordered pair.
 
 Output schema:
-{"edges": [{"source": <int>, "target": <int>, "relation": "...",
+{"objects": [{"box_id": <int>, "name": "...", "confidence": 0.0,
+              "reason": "brief"}],
+ "edges": [{"source": <int>, "target": <int>, "relation": "...",
             "confidence": 0.0, "reason": "brief"}]}
 """
 
@@ -199,8 +208,9 @@ def build_image_relation_user_text(legend: list[tuple[int, str]]) -> str:
     for box_id, label in legend:
         lines.append(f"  {box_id}: {label}")
     lines.append(
-        "Enumerate the relations among these numbered objects as JSON "
-        '{"edges": [...]} per the schema. Use only the allowed relations.'
+        "Name every numbered object and enumerate their relations as JSON "
+        '{"objects": [...], "edges": [...]} per the schema. Relation values '
+        "must use only the allowed vocabulary; object names are open-vocabulary."
     )
     return "\n".join(lines)
 
@@ -210,7 +220,7 @@ def build_image_relation_user_text(legend: list[tuple[int, str]]) -> str:
 def parse_image_relations(
     raw: dict, box_to_oid: dict[int, str]
 ) -> list[SceneGraphEdge]:
-    """Turn the VLM's ``{"edges": [...]}`` into validated ``SceneGraphEdge``s.
+    """Turn the VLM's ``{"edges": [...]}`` into validated graph edges.
 
     Drops edges whose box numbers are unknown, self-edges, duplicates of an
     already-seen ``(source, target, relation)``, and relations outside
@@ -252,6 +262,48 @@ def parse_image_relations(
     return edges
 
 
+def parse_image_names(
+    raw: dict,
+    box_to_oid: dict[int, str],
+) -> dict[str, dict[str, Any]]:
+    """Validate open-vocabulary VLM names and map box ids to object ids."""
+
+    names: dict[str, dict[str, Any]] = {}
+    for item in raw.get("objects", ()) or ():
+        if not isinstance(item, dict):
+            continue
+        try:
+            box_id = int(item.get("box_id", item.get("id")))
+        except (TypeError, ValueError):
+            continue
+        object_id = box_to_oid.get(box_id)
+        if object_id is None:
+            continue
+        raw_name = str(item.get("name", "") or "").strip().lower()
+        normalized = " ".join(raw_name.replace("_", " ").split())
+        if (
+            not normalized
+            or len(normalized) > 64
+            or normalized in {"object", "thing", "unknown", "item"}
+            or not any(character.isalpha() for character in normalized)
+            or any(
+                not (character.isalnum() or character in " -/")
+                for character in normalized
+            )
+        ):
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        names[object_id] = {
+            "label": normalized,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "reason": str(item.get("reason", "") or "")[:160],
+        }
+    return names
+
+
 # ── orchestration ──────────────────────────────────────────────────────────
 
 class ImageRelationInferer:
@@ -272,9 +324,11 @@ class ImageRelationInferer:
         self,
         nodes: list[SceneGraphNode],
         bundle: tuple[np.ndarray, Any, np.ndarray],
-    ) -> Optional[list[SceneGraphEdge]]:
-        """Return the round's relation edges, or None when the pass could not be
-        run (no VLM creds, <2 visible objects, or VLM failure/empty) so the
+    ) -> Optional[tuple[list[SceneGraphEdge], dict[str, dict[str, Any]]]]:
+        """Return this round's edges and open-vocabulary names.
+
+        Return None when the pass could not be
+        run (no VLM creds, no visible objects, or VLM failure/empty) so the
         builder keeps prior edges via hysteresis instead of wiping the graph.
         An empty list means "ran, found no relations" (authoritative)."""
         if not self.llm_client.available:
@@ -298,7 +352,7 @@ class ImageRelationInferer:
             box_to_oid[next_id] = node.object_id
             next_id += 1
 
-        if len(box_to_oid) < 2:
+        if not box_to_oid:
             return None
 
         image_b64 = annotate_frame(rgb_bgr, boxes, max_dim=self.max_dim)
@@ -313,4 +367,7 @@ class ImageRelationInferer:
         )
         if not raw:
             return None
-        return parse_image_relations(raw, box_to_oid)
+        return (
+            parse_image_relations(raw, box_to_oid),
+            parse_image_names(raw, box_to_oid),
+        )

@@ -339,11 +339,24 @@ def _occupancy_payload(hub: Any) -> Optional[dict]:
     buf = io.BytesIO()
     PILImage.fromarray(out, mode="L").save(buf, format="PNG", optimize=False)
     payload = {
+        "frame_id": str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).strip(),
         "width": w,
         "height": h,
         "resolution": float(info.resolution),
         "origin_x": float(info.origin.position.x),
         "origin_y": float(info.origin.position.y),
+        "origin_yaw": math.atan2(
+            2.0 * (
+                float(info.origin.orientation.w) * float(info.origin.orientation.z)
+                + float(info.origin.orientation.x) * float(info.origin.orientation.y)
+            ),
+            1.0 - 2.0 * (
+                float(info.origin.orientation.y) ** 2
+                + float(info.origin.orientation.z) ** 2
+            ),
+        ),
         "stamp_ms": int(stamp_unix * 1000),
         "png_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
     }
@@ -477,7 +490,8 @@ def _state_payload(registry: ObjectRegistry,
                    hub: Any, sg_store: Any = None,
                    anno_store: Any = None,
                    map_binding: Optional[dict] = None,
-                   robot_geometry: Any = None) -> dict:
+                   robot_geometry: Any = None,
+                   detector: Any = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
     sees a half-updated registry. The "relations" field shows the fast
@@ -496,12 +510,42 @@ def _state_payload(registry: ObjectRegistry,
             "id": o.object_id,
             "short_id": _shorten_id(o.object_id),
             "cls": o.cls,
-            "pose": {"x": o.pose.x, "y": o.pose.y, "z": o.pose.z, "yaw": o.pose.yaw},
+            "pose": {
+                "x": o.pose.x,
+                "y": o.pose.y,
+                "z": o.pose.z,
+                "yaw": o.pose.yaw,
+                "frame_id": o.pose.frame_id,
+            },
             "bbox": {
                 "size_x": o.bbox.size_x, "size_y": o.bbox.size_y, "size_z": o.bbox.size_z,
-                "yaw": o.bbox.yaw,
+                "yaw": o.bbox.yaw, "frame_id": o.bbox.frame_id,
             },
             "confidence": o.confidence,
+            "label_confidence": float(
+                o.attributes.get("label_confidence", 0.0) or 0.0
+            ),
+            "label_provisional": bool(
+                o.attributes.get("label_provisional", False)
+            ),
+            "label_evidence_count": int(
+                o.attributes.get("label_evidence_count", 0) or 0
+            ),
+            "label_candidates": list(
+                o.attributes.get("label_candidates", ()) or ()
+            ),
+            "navigation_grade": bool(
+                o.attributes.get("navigation_grade", False)
+            ),
+            "label_source": str(
+                o.attributes.get("label_source", "model") or "model"
+            ),
+            "geometry_source": str(
+                o.attributes.get("geometry_source", "") or ""
+            ),
+            "operator_geometry": bool(
+                o.attributes.get("operator_geometry", False)
+            ),
             "observation_count": o.observation_count,
             "missing": o.missing,
         })
@@ -538,6 +582,11 @@ def _state_payload(registry: ObjectRegistry,
         "robot_footprint": (
             robot_geometry.current().to_json()
             if robot_geometry is not None and robot_geometry.current() is not None
+            else None
+        ),
+        "perception_quality": (
+            detector.quality_metrics()
+            if detector is not None and hasattr(detector, "quality_metrics")
             else None
         ),
         "occupancy": _occupancy_payload(hub),
@@ -675,7 +724,9 @@ def make_app(*, registry: ObjectRegistry,
              map_binding: Optional[dict] = None,
              ops_lock: Optional[asyncio.Lock] = None,
              semantic_hold: Optional[dict] = None,
-             robot_geometry: Any = None) -> Starlette:
+             robot_geometry: Any = None,
+             derived_state_reset: Any = None,
+             object_mutations: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
@@ -690,6 +741,7 @@ def make_app(*, registry: ObjectRegistry,
       GET /api/objects3d   — JSON for the 3D viz (per-object pcd + bbox)
       GET /api/camera      — JSON: latest RGB + depth frames
       /api/annotations[..] — user annotation CRUD (see below)
+      /api/objects[..]     — epoch-checked derived-object correction
       /api/maps[..]        — scene-owned map library façade over map capabilities
 
     `hub` is the SubscribersHub — passed so the JSON state can include
@@ -711,6 +763,10 @@ def make_app(*, registry: ObjectRegistry,
     watcher's epoch response (service.py shares the same lock): the handlers
     suspend at RPC awaits mid-critical-section, and an interleaved flush or
     second Save would mix sessions/epochs in one snapshot.
+    `derived_state_reset` clears detector maps, UUID bindings, and scene-graph
+    state before a successful map Load restores the new epoch.
+    `object_mutations` is the same epoch-checked coordinator used by MCP, so
+    web edits cannot bypass map concurrency or coupled-store cleanup.
 
     Annotation API contract (STABLE once shipped — any frontend builds on
     it; see system/scene/README.md):
@@ -863,6 +919,7 @@ def make_app(*, registry: ObjectRegistry,
                 anno_store,
                 map_binding,
                 robot_geometry,
+                detector,
             )
         )
 
@@ -883,6 +940,197 @@ def make_app(*, registry: ObjectRegistry,
         if anno_store is None:
             return _anno_error(503, "annotation store unavailable")
         return JSONResponse({"ok": True, "annotations": anno_store.list_json()})
+
+    # ── derived object correction ─────────────────────────────────────
+    def _mutation_epoch(body: dict) -> tuple[str, int, bool]:
+        if "expected_map_id" not in body or "expected_generation" not in body:
+            raise ValueError(
+                "expected_map_id and expected_generation are required; "
+                "refresh /api/state and retry"
+            )
+        generation = body["expected_generation"]
+        if isinstance(generation, bool):
+            raise ValueError("expected_generation must be an integer")
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_generation must be an integer") from exc
+        persist = body.get("persist_to_snapshot", False)
+        if not isinstance(persist, bool):
+            raise ValueError("persist_to_snapshot must be a boolean")
+        return str(body["expected_map_id"]), generation, persist
+
+    def _mutation_response(
+        *,
+        obj: Any = None,
+        map_id: str,
+        generation: int,
+        persisted: bool,
+        **extra,
+    ) -> JSONResponse:
+        payload = {
+            "ok": True,
+            "map_id": map_id,
+            "generation": generation,
+            "persisted": persisted,
+            **extra,
+        }
+        if obj is not None:
+            payload["object"] = {
+                "id": obj.object_id,
+                "label": obj.cls,
+                "pose": {
+                    "x": obj.pose.x,
+                    "y": obj.pose.y,
+                    "z": obj.pose.z,
+                    "yaw": obj.pose.yaw,
+                    "frame_id": obj.pose.frame_id,
+                },
+                "bbox": {
+                    "size_x": obj.bbox.size_x,
+                    "size_y": obj.bbox.size_y,
+                    "size_z": obj.bbox.size_z,
+                    "yaw": obj.bbox.yaw,
+                    "frame_id": obj.bbox.frame_id,
+                },
+                "label_source": obj.attributes.get("label_source", "model"),
+                "geometry_source": obj.attributes.get("geometry_source", ""),
+                "navigation_grade": bool(
+                    obj.attributes.get("navigation_grade", False)
+                ),
+            }
+        return JSONResponse(payload)
+
+    async def _mutation_error(exc: Exception) -> JSONResponse:
+        if isinstance(exc, KeyError):
+            return _anno_error(404, str(exc.args[0] if exc.args else exc))
+        if isinstance(exc, ValueError):
+            return _anno_error(400, str(exc))
+        if isinstance(exc, RuntimeError):
+            return _anno_error(409, str(exc))
+        log.exception("Scene object mutation failed")
+        return _anno_error(500, str(exc))
+
+    async def object_label_update(request) -> JSONResponse:
+        if object_mutations is None:
+            return _anno_error(503, "object mutation coordinator unavailable")
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        try:
+            map_id, generation, persist = _mutation_epoch(body)
+            clear_override = body.get("clear_override", False)
+            if not isinstance(clear_override, bool):
+                raise ValueError("clear_override must be a boolean")
+            obj, persisted, current_map, current_generation = (
+                await object_mutations.update_label(
+                    object_id=request.path_params["object_id"],
+                    label=body.get("label", ""),
+                    clear_override=clear_override,
+                    expected_map_id=map_id,
+                    expected_generation=generation,
+                    persist_to_snapshot=persist,
+                )
+            )
+            return _mutation_response(
+                obj=obj,
+                map_id=current_map,
+                generation=current_generation,
+                persisted=persisted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return await _mutation_error(exc)
+
+    async def object_geometry_update(request) -> JSONResponse:
+        if object_mutations is None:
+            return _anno_error(503, "object mutation coordinator unavailable")
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        try:
+            map_id, generation, persist = _mutation_epoch(body)
+            required = (
+                "x", "y", "z", "yaw",
+                "size_x", "size_y", "size_z", "frame_id",
+            )
+            missing = [name for name in required if name not in body]
+            if missing:
+                raise ValueError(
+                    "missing geometry fields: " + ", ".join(missing)
+                )
+            obj, persisted, current_map, current_generation = (
+                await object_mutations.update_geometry(
+                    object_id=request.path_params["object_id"],
+                    x=body["x"],
+                    y=body["y"],
+                    z=body["z"],
+                    yaw=body["yaw"],
+                    size_x=body["size_x"],
+                    size_y=body["size_y"],
+                    size_z=body["size_z"],
+                    frame_id=body["frame_id"],
+                    expected_map_id=map_id,
+                    expected_generation=generation,
+                    persist_to_snapshot=persist,
+                )
+            )
+            return _mutation_response(
+                obj=obj,
+                map_id=current_map,
+                generation=current_generation,
+                persisted=persisted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return await _mutation_error(exc)
+
+    async def object_delete(request) -> JSONResponse:
+        if object_mutations is None:
+            return _anno_error(503, "object mutation coordinator unavailable")
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        try:
+            map_id, generation, persist = _mutation_epoch(body)
+            deleted_id, persisted, current_map, current_generation = (
+                await object_mutations.delete_object(
+                    object_id=request.path_params["object_id"],
+                    expected_map_id=map_id,
+                    expected_generation=generation,
+                    persist_to_snapshot=persist,
+                )
+            )
+            return _mutation_response(
+                map_id=current_map,
+                generation=current_generation,
+                persisted=persisted,
+                deleted_id=deleted_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return await _mutation_error(exc)
+
+    async def objects_flush(request) -> JSONResponse:
+        if object_mutations is None:
+            return _anno_error(503, "object mutation coordinator unavailable")
+        body = await _anno_body(request)
+        if body is None:
+            return _anno_error(400, "request body must be a JSON object")
+        try:
+            map_id, generation, persist = _mutation_epoch(body)
+            count, persisted, current_map, current_generation = (
+                await object_mutations.flush_objects(
+                    expected_map_id=map_id,
+                    expected_generation=generation,
+                    persist_to_snapshot=persist,
+                )
+            )
+            return _mutation_response(
+                map_id=current_map,
+                generation=current_generation,
+                persisted=persisted,
+                deleted_count=count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return await _mutation_error(exc)
 
     async def annotations_create(request) -> JSONResponse:
         """POST /api/annotations — validate {kind, name, points, theta?}
@@ -1221,7 +1469,15 @@ def make_app(*, registry: ObjectRegistry,
             # recreate the mixed-epoch state this ordering exists to
             # prevent.
             try:
-                async with registry.lock():
+                if derived_state_reset is not None:
+                    await derived_state_reset()
+                registry_lock = getattr(registry, "lock", None)
+                if callable(registry_lock):
+                    async with registry_lock():
+                        flushed = registry.clear_objects()
+                else:
+                    # Minimal registry adapters used by embedded callers may
+                    # already serialize access and expose only clear_objects.
                     flushed = registry.clear_objects()
                 if flushed:
                     out["objects_flushed"] = flushed
@@ -1432,10 +1688,74 @@ def make_app(*, registry: ObjectRegistry,
     async def index3d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_3D_HTML)
 
-    async def objects3d(_request) -> JSONResponse:
+    async def objects3d(request) -> JSONResponse:
+        debug_clip_features = str(
+            request.query_params.get("debug_clip_features", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if detector is None or not hasattr(detector, "export_3d_snapshot"):
-            return JSONResponse({"objects": [], "stamp_unix": 0.0})
-        return JSONResponse(detector.export_3d_snapshot())
+            snapshot = {"objects": [], "stamp_unix": time.time()}
+        else:
+            snapshot = detector.export_3d_snapshot(
+                include_clip_feature=debug_clip_features
+            )
+        # A manually corrected bbox intentionally has no point cloud. Emit its
+        # registry geometry separately so 3D reflects the correction instead
+        # of continuing to display stale RGB-D points from the old track.
+        for obj in dict(registry._objects).values():  # noqa: SLF001
+            if (
+                obj.missing
+                or obj.attributes.get("is_robot")
+                or not obj.attributes.get("operator_geometry")
+            ):
+                continue
+            cosine = math.cos(obj.bbox.yaw)
+            sine = math.sin(obj.bbox.yaw)
+            hx, hy, hz = (
+                obj.bbox.size_x * 0.5,
+                obj.bbox.size_y * 0.5,
+                obj.bbox.size_z * 0.5,
+            )
+            corners = []
+            for lx, ly, lz in (
+                (-hx, -hy, -hz), (hx, -hy, -hz),
+                (-hx, hy, -hz), (-hx, -hy, hz),
+                (hx, hy, hz), (-hx, hy, hz),
+                (hx, -hy, hz), (hx, hy, -hz),
+            ):
+                corners.append([
+                    obj.pose.x + cosine * lx - sine * ly,
+                    obj.pose.y + sine * lx + cosine * ly,
+                    obj.pose.z + lz,
+                ])
+            snapshot["objects"].append({
+                "id": obj.object_id,
+                "cls": obj.cls,
+                "label_confidence": float(
+                    obj.attributes.get("label_confidence", 0.0) or 0.0
+                ),
+                "label_provisional": bool(
+                    obj.attributes.get("label_provisional", False)
+                ),
+                "label_evidence_count": int(
+                    obj.attributes.get("label_evidence_count", 0) or 0
+                ),
+                "label_candidates": list(
+                    obj.attributes.get("label_candidates", ()) or ()
+                ),
+                "label_source": str(
+                    obj.attributes.get("label_source", "model") or "model"
+                ),
+                "num_detections": obj.observation_count,
+                "n_points": 0,
+                "conf_mean": obj.confidence,
+                "center": [obj.pose.x, obj.pose.y, obj.pose.z],
+                "bbox_corners": corners,
+                "inst_color": [0.95, 0.65, 0.2],
+                "points": [],
+                "point_colors": None,
+                "geometry_source": "operator_bbox",
+            })
+        return JSONResponse(snapshot)
 
     async def cam(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_CAM_HTML)
@@ -1487,6 +1807,13 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/annotations/{annotation_id}", annotations_update,
               methods=["PUT"]),
         Route("/api/annotations/{annotation_id}", annotations_delete,
+              methods=["DELETE"]),
+        Route("/api/objects/flush", objects_flush, methods=["POST"]),
+        Route("/api/objects/{object_id}/label", object_label_update,
+              methods=["POST"]),
+        Route("/api/objects/{object_id}/geometry", object_geometry_update,
+              methods=["POST"]),
+        Route("/api/objects/{object_id}", object_delete,
               methods=["DELETE"]),
         Route("/api/maps", maps_list, methods=["GET"]),
         Route("/api/maps/save", maps_save, methods=["POST"]),
@@ -2699,6 +3026,21 @@ _USER_HTML = r"""<!doctype html>
     button.danger { border-color: #6b3640; color: var(--danger); }
     #room-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px 10px;
       overscroll-behavior: contain; scrollbar-gutter: stable; }
+    #object-tools { padding: 9px 12px; border-top: 1px solid #232936;
+      border-bottom: 1px solid #232936; display: grid; gap: 7px; }
+    #object-tools .head { display: flex; align-items: center; justify-content: space-between;
+      gap: 6px; font-size: 12px; font-weight: 700; }
+    #object-tools label { color: var(--muted); font-size: 10px; font-weight: 400; }
+    #object-list { max-height: min(34vh, 260px); overflow-y: auto; padding: 7px 10px;
+      overscroll-behavior: contain; scrollbar-gutter: stable; }
+    .derived-object { border: 1px solid #232936; border-radius: 7px;
+      padding: 6px 8px; margin-bottom: 6px; font-size: 12px; }
+    .derived-object .name { font-weight: 650; }
+    .derived-object .sub { color: var(--muted); font-size: 10px;
+      margin: 2px 0 5px; overflow-wrap: anywhere; }
+    .derived-object .badge { border: 1px solid #6a5630; color: var(--warn);
+      border-radius: 4px; padding: 0 4px; font-size: 9px; margin-left: 5px; }
+    .derived-object .btns { display: flex; gap: 5px; flex-wrap: wrap; }
     .room { --room-color: var(--acc); border: 1px solid #232936;
       border-left: 3px solid var(--room-color); border-radius: 7px; padding: 6px 8px;
       margin-bottom: 6px; font-size: 12px; }
@@ -2792,6 +3134,15 @@ _USER_HTML = r"""<!doctype html>
       <div id="room-list"><div id="empty">No rooms yet. Click “Annotate room”,
         then click on the map to outline one (double-click or Enter to finish,
         Esc to cancel).</div></div>
+      <div id="object-tools">
+        <div class="head">
+          <span>Derived objects</span>
+          <label><input type="checkbox" id="persist-object-edits" />
+            persist to saved snapshot</label>
+        </div>
+        <button class="small danger" id="btn-flush-objects">Flush derived objects</button>
+      </div>
+      <div id="object-list"><div id="empty">No derived objects.</div></div>
     </div>
     <div id="canvas-wrap">
       <canvas id="c"></canvas>
@@ -2915,7 +3266,7 @@ function setMapStatus(text, kind = '') {
 }
 function setMapBusy(on, label = '') {
     mapBusy = on;
-    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #btn-draw, #room-list button')
+    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #btn-draw, #room-list button, #object-tools button, #object-list button')
         .forEach(el => el.disabled = on);
     if (!on) {
         renderMaps();
@@ -3140,17 +3491,43 @@ function draw() {
         ctx.fillText(hoverObj.cls, px + 8, py);
     }
 
-    // robot marker (small arrow, subtle)
+    // Robot marker: fixed-size, high-contrast body plus a long directional
+    // nose. Keeping it in screen pixels makes the pose readable at every map
+    // zoom level, including over dark occupied cells and pale free space.
     const robot = state.robot;
     if (robot) {
         const [rx, ry] = w2p(robot.x, robot.y);
         const yaw = robot.yaw || 0;
-        ctx.strokeStyle = '#7aa7ff'; ctx.fillStyle = '#7aa7ff'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(rx, ry, 5, 0, Math.PI * 2); ctx.stroke();
+        const robotMarkerNose = 24;
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
         ctx.beginPath();
-        ctx.moveTo(rx, ry);
-        ctx.lineTo(rx + Math.cos(yaw) * 14, ry - Math.sin(yaw) * 14);
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(7, 10, 16, 0.92)';
+        ctx.fill();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#ffffff';
         ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(robotMarkerNose, 0);
+        ctx.lineTo(-7, -10);
+        ctx.lineTo(-3, 0);
+        ctx.lineTo(-7, 10);
+        ctx.closePath();
+        ctx.fillStyle = '#ff5a1f';
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(0, 0, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.restore();
     }
 
     // draft polygon (draw mode)
@@ -3490,20 +3867,21 @@ function renderPanel() {
         list.innerHTML = '<div id="empty">No rooms yet. Click “Annotate room”, ' +
           'then click on the map to outline one (double-click or Enter to ' +
           'finish, Esc to cancel).</div>';
-        return;
+    } else {
+        list.innerHTML = rooms.map(a => `
+          <div class="room ${a.annotation_id === selectedId ? 'selected' : ''}"
+               data-id="${a.annotation_id}" style="--room-color:${roomColor(a).stroke}">
+            <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || '(unnamed)')}</span>
+            ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
+            <div class="sub">${a.points.length} corners</div>
+            <div class="btns">
+              <button class="small" data-act="rename" ${mapBusy ? 'disabled' : ''}>Rename</button>
+              ${a.stale ? `<button class="small" data-act="confirm" ${mapBusy ? 'disabled' : ''}>Still valid</button>` : ''}
+              <button class="small danger" data-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
+            </div>
+          </div>`).join('');
     }
-    list.innerHTML = rooms.map(a => `
-      <div class="room ${a.annotation_id === selectedId ? 'selected' : ''}"
-           data-id="${a.annotation_id}" style="--room-color:${roomColor(a).stroke}">
-        <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || '(unnamed)')}</span>
-        ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
-        <div class="sub">${a.points.length} corners</div>
-        <div class="btns">
-          <button class="small" data-act="rename" ${mapBusy ? 'disabled' : ''}>Rename</button>
-          ${a.stale ? `<button class="small" data-act="confirm" ${mapBusy ? 'disabled' : ''}>Still valid</button>` : ''}
-          <button class="small danger" data-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
-        </div>
-      </div>`).join('');
+    renderObjects();
 }
 document.getElementById('room-list').addEventListener('click', async (ev) => {
     if (mapBusy) return;
@@ -3523,6 +3901,116 @@ document.getElementById('room-list').addEventListener('click', async (ev) => {
         if (await askConfirm('Delete room', `Delete room “${room.name}”?`))
             await api('DELETE', '/api/annotations/' + id);
     }
+});
+
+function objectMutationBody(extra = {}) {
+    const binding = state && state.map_binding;
+    if (!binding || !binding.map_id) {
+        toast('Scene map epoch is unavailable; wait for mapping state.');
+        return null;
+    }
+    return {
+        ...extra,
+        expected_map_id: String(binding.map_id),
+        expected_generation: binding.generation == null ? -1 : Number(binding.generation),
+        persist_to_snapshot: Boolean(
+            document.getElementById('persist-object-edits').checked
+        ),
+    };
+}
+
+function renderObjects() {
+    const list = document.getElementById('object-list');
+    const objects = (state && state.objects || []).filter(
+        object => object.cls !== 'robot'
+    );
+    if (!objects.length) {
+        list.innerHTML = '<div id="empty">No derived objects.</div>';
+        return;
+    }
+    list.innerHTML = objects.map(object => `
+      <div class="derived-object" data-id="${esc(object.id)}">
+        <span class="name">${esc(object.cls)}</span>
+        ${object.missing ? '<span class="badge">MISSING</span>' : ''}
+        ${object.operator_geometry ? '<span class="badge">OPERATOR BBOX</span>' : ''}
+        <div class="sub">${esc(object.short_id || object.id)} · ${esc(object.pose.frame_id || 'frame unknown')} ·
+          (${Number(object.pose.x).toFixed(2)}, ${Number(object.pose.y).toFixed(2)}, ${Number(object.pose.z).toFixed(2)}) m ·
+          ${esc(object.geometry_source || 'geometry unknown')}</div>
+        <div class="btns">
+          <button class="small" data-object-act="label" ${mapBusy ? 'disabled' : ''}>Edit label</button>
+          ${object.label_source === 'operator' ? `<button class="small" data-object-act="reset-label" ${mapBusy ? 'disabled' : ''}>Reset label</button>` : ''}
+          <button class="small" data-object-act="geometry" ${mapBusy ? 'disabled' : ''}>Edit geometry</button>
+          <button class="small danger" data-object-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
+        </div>
+      </div>`).join('');
+}
+
+document.getElementById('object-list').addEventListener('click', async (ev) => {
+    if (mapBusy) return;
+    const row = ev.target.closest('.derived-object');
+    const action = ev.target.dataset && ev.target.dataset.objectAct;
+    if (!row || !action) return;
+    const object = (state.objects || []).find(item => item.id === row.dataset.id);
+    if (!object) return;
+    if (action === 'label') {
+        const label = await askModal({
+            title: 'Correct object label',
+            message: `Object ${object.id}. The operator label remains sticky until deletion or flush.`,
+            defaultValue: object.cls,
+            input: true,
+            okText: 'Apply',
+        });
+        if (!label) return;
+        const body = objectMutationBody({label});
+        if (body) await api('POST', `/api/objects/${encodeURIComponent(object.id)}/label`, body);
+    } else if (action === 'reset-label') {
+        const body = objectMutationBody({label: '', clear_override: true});
+        if (body) await api('POST', `/api/objects/${encodeURIComponent(object.id)}/label`, body);
+    } else if (action === 'geometry') {
+        const pose = object.pose || {};
+        const bbox = object.bbox || {};
+        const value = [
+            pose.x, pose.y, pose.z, pose.yaw,
+            bbox.size_x, bbox.size_y, bbox.size_z,
+        ].map(number => Number(number).toFixed(4)).join(', ');
+        const corrected = await askModal({
+            title: 'Correct object geometry',
+            message: 'Enter x, y, z, yaw, size_x, size_y, size_z. Metres and radians. The corrected bbox is provenance-marked and non-navigation-grade.',
+            defaultValue: value,
+            input: true,
+            okText: 'Apply',
+        });
+        if (!corrected) return;
+        const numbers = corrected.split(',').map(value => Number(value.trim()));
+        if (numbers.length !== 7 || numbers.some(value => !Number.isFinite(value))) {
+            toast('Geometry needs exactly 7 finite comma-separated numbers.');
+            return;
+        }
+        const body = objectMutationBody({
+            x: numbers[0], y: numbers[1], z: numbers[2], yaw: numbers[3],
+            size_x: numbers[4], size_y: numbers[5], size_z: numbers[6],
+            frame_id: pose.frame_id || bbox.frame_id || '',
+        });
+        if (body) await api('POST', `/api/objects/${encodeURIComponent(object.id)}/geometry`, body);
+    } else if (action === 'delete') {
+        if (!(await askConfirm(
+            'Delete derived object',
+            `Delete ${object.cls} (${object.id})?`,
+        ))) return;
+        const body = objectMutationBody();
+        if (body) await api('DELETE', `/api/objects/${encodeURIComponent(object.id)}`, body);
+    }
+});
+
+document.getElementById('btn-flush-objects').addEventListener('click', async () => {
+    if (mapBusy) return;
+    if (!(await askConfirm(
+        'Flush derived objects',
+        'Clear every derived object and relation while preserving the robot, rooms, POIs, and occupancy map?',
+        'Flush',
+    ))) return;
+    const body = objectMutationBody();
+    if (body) await api('POST', '/api/objects/flush', body);
 });
 
 // ── draw mode ────────────────────────────────────────────────────────────

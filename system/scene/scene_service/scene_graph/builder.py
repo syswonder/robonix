@@ -61,6 +61,16 @@ class SceneGraphConfig:
         # image-grounded VLM call owns the relational + semantic edges. Off
         # falls back to the text-only per-pair inference.
         self.image_relations_enabled = _env_bool("SCENE_GRAPH_IMAGE_RELATIONS", True)
+        self.image_naming_enabled = _env_bool("SCENE_GRAPH_IMAGE_NAMING", True)
+        self.image_naming_min_confidence = _env_float(
+            "SCENE_GRAPH_IMAGE_NAMING_MIN_CONFIDENCE", 0.65
+        )
+        self.image_naming_strong_confidence = _env_float(
+            "SCENE_GRAPH_IMAGE_NAMING_STRONG_CONFIDENCE", 0.85
+        )
+        self.image_naming_consensus_rounds = _env_int(
+            "SCENE_GRAPH_IMAGE_NAMING_CONSENSUS_ROUNDS", 2
+        )
         # Edge hysteresis: keep an edge for up to N rebuild rounds in
         # which it was not re-confirmed by the current candidate set
         # (e.g. one of the endpoints temporarily missing, candidate
@@ -206,9 +216,11 @@ class SceneGraphBuilder:
         confirmed_pairs: set[tuple[str, str]] = set()
 
         if self.cfg.relation_enabled and len(nodes) >= 2:
-            image_edges = await self._maybe_image_edges(nodes)
-            if image_edges is not None:
-                edges = image_edges
+            image_inference = await self._maybe_image_edges(nodes)
+            if image_inference is not None:
+                edges, image_names = image_inference
+                if self.cfg.image_naming_enabled and image_names:
+                    await self._apply_image_names(image_names)
                 confirmed_pairs = {(e.source_id, e.target_id) for e in edges}
             else:
                 edges, confirmed_pairs = await self._infer_text_edges(nodes)
@@ -280,7 +292,9 @@ class SceneGraphBuilder:
 
     async def _maybe_image_edges(
         self, nodes: list[SceneGraphNode]
-    ) -> Optional[list[SceneGraphEdge]]:
+    ) -> Optional[
+        tuple[list[SceneGraphEdge], dict[str, dict[str, Any]]]
+    ]:
         """Run the image-grounded relation pass when the perception detector
         provides a camera frame bundle. Returns the round's edges (possibly
         empty = "ran, no relations"), or None to signal "not run" so the caller
@@ -294,10 +308,60 @@ class SceneGraphBuilder:
             bundle = get_bundle()
             if bundle is None:
                 return None
-            return await self.image_inferer.infer(nodes, bundle)
+            result = await self.image_inferer.infer(nodes, bundle)
+            if result is None:
+                return None
+            # Backward-compatible with a test or external inferer that still
+            # returns only edges.
+            if isinstance(result, list):
+                return result, {}
+            edges, names = result
+            return list(edges), dict(names)
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-graph] image relation pass failed: %s", e)
             return None
+
+    async def _apply_image_names(
+        self,
+        names: dict[str, dict[str, Any]],
+    ) -> int:
+        """Apply VLM names as model evidence, never as identity or override."""
+
+        accepted = names
+        update_detector = getattr(
+            self.perception,
+            "update_object_vlm_labels",
+            None,
+        )
+        if callable(update_detector):
+            accepted = await update_detector(
+                names,
+                min_confidence=self.cfg.image_naming_min_confidence,
+                strong_confidence=self.cfg.image_naming_strong_confidence,
+                consensus_rounds=self.cfg.image_naming_consensus_rounds,
+            )
+        else:
+            accepted = {
+                object_id: payload
+                for object_id, payload in names.items()
+                if float(payload.get("confidence", 0.0))
+                >= self.cfg.image_naming_min_confidence
+            }
+        if not accepted:
+            return 0
+        applied = 0
+        async with self.registry.lock():
+            for object_id, payload in accepted.items():
+                if self.registry.update_model_label(
+                    object_id,
+                    str(payload.get("label", "") or ""),
+                    confidence=float(payload.get("confidence", 0.0)),
+                    source="model_vlm",
+                ):
+                    applied += 1
+        if applied:
+            log.info("[scene-graph] applied %d image-grounded names", applied)
+        return applied
 
     async def _infer_text_edges(
         self, nodes: list[SceneGraphNode]

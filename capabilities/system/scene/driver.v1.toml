@@ -1,0 +1,14 @@
+# Lifecycle interface for the Scene system service.
+# `rbnx boot` sends system.scene.config through Driver(CMD_INIT) before
+# activation. The shared lifecycle IDL keeps deployment config out of
+# process-specific environment files while the contract remains namespaced
+# to the Scene provider.
+[contract]
+id      = "robonix/system/scene/driver"
+version = "1"
+kind    = "service"
+idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle and deployment-config interface for Scene providers."
+
+[mode]
+type = "rpc"
