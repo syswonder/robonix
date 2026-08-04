@@ -325,8 +325,8 @@ jobs:
     timeout-minutes: 90
     env:
       # ── Build-env fixes for this box (see examples/webots/TROUBLESHOOTING.md) ──
-      # Keep provider clones deterministic on runners with unreliable direct
-      # GitHub access by routing them through the configured mirror.
+      # Prefer the GitHub mirror, but fall back to GitHub through the runner's
+      # loopback Clash proxy when the mirror is unavailable.
       GIT_MIRROR_INSTEADOF: "true"
       # codegen grpcio-tools MUST match the runtime grpcio pinned by packages
       # (1.80.0) or RegisterService fails with a version-skew error.
@@ -511,11 +511,23 @@ jobs:
         if: env.GIT_MIRROR_INSTEADOF == 'true'
         run: |
           set -euo pipefail
-          # Keep the checkout mirror scoped to this Actions job. The runner is
-          # also a developer workstation, so CI must not mutate ~/.gitconfig.
+          # Keep all routing scoped to this Actions job. The runner is also a
+          # developer workstation, so CI must not mutate ~/.gitconfig.
           git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
           : > "$git_config"
-          git config --file "$git_config" url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          if timeout 15s git ls-remote --exit-code \
+              "https://ghfast.top/https://github.com/syswonder/robonix.git" \
+              HEAD >/dev/null 2>&1; then
+            git config --file "$git_config" \
+              url."https://ghfast.top/https://github.com/".insteadOf \
+              "https://github.com/"
+            echo "Using ghfast.top for GitHub clones"
+          else
+            git config --file "$git_config" \
+              'http.https://github.com/.proxy' \
+              'http://127.0.0.1:7897'
+            echo "ghfast.top unavailable; using GitHub through Clash at 127.0.0.1:7897"
+          fi
           echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
@@ -540,12 +552,6 @@ jobs:
       - name: Initialize submodules
         run: |
           set -euo pipefail
-          # Keep the GitHub mirror rewrite process-scoped. The self-hosted
-          # runner is also a developer workstation, so CI must not mutate the
-          # user's global git config.
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
-          export GIT_CONFIG_VALUE_0='https://github.com/'
           git submodule sync --recursive
           git submodule update --init --recursive
 
@@ -709,11 +715,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
-          # Apply the GitHub mirror rewrite only to this build process. Do not
-          # write it to the shared runner user's global git config.
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0='url.https://ghfast.top/https://github.com/.insteadOf'
-          export GIT_CONFIG_VALUE_0='https://github.com/'
           rbnx build 2>&1 | tee "$RUNNER_TEMP/sim-logs/build-webots-deployment.log"
           # provenance: record exactly which upstream commit each remote built from
           for d in rbnx-boot/cache/*/; do
