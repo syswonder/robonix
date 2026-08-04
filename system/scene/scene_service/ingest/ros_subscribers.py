@@ -120,6 +120,8 @@ def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
     declared = str(spec.qos_profile or "default").strip().lower().replace("-", "_")
     if declared in {"best_effort", "sensor_data"}:
         return "best_effort", "volatile", depth
+    if declared == "reliable" and spec.kind == "occupancy_grid":
+        return "reliable", "transient_local", depth
     if declared == "reliable":
         return "reliable", "volatile", depth
     if declared in {"latched", "transient_local"}:
