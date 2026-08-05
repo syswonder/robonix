@@ -80,7 +80,8 @@ services:
       ROBONIX_WEBOTS_ASSETS_URL: "${ROBONIX_WEBOTS_ASSETS_URL:-}"
       ROBONIX_WEBOTS_ASSETS_MIRROR: "${ROBONIX_WEBOTS_ASSETS_MIRROR:-https://ghfast.top/}"
       # Match docker/run.sh so Webots can use host GL stack when GPU is wired in.
-      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
+      # compose.gpu.yaml's device_ids request scopes the container to the GPU
+      # selected by start.sh; do not independently widen visibility here.
       NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-graphics,utility,compute}"
       # Webots fetches proto/texture assets from raw.githubusercontent.com on first use.
       # Pass host proxies through if set (Qt Network / curl both honor these):

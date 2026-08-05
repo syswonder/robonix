@@ -151,12 +151,12 @@ PY
 }
 
 start_nvidia_xorg() {
-  # Pick the GPU with the most free memory and translate its PCI BusID
-  # ("00000000:9D:00.0") into the Xorg ServerLayout form ("PCI:157:0:0").
+  # Compose limits visibility to the host-selected GPU. Pick from that visible
+  # set and translate its PCI BusID into the Xorg ServerLayout form.
   local pick gpu_idx free_mib busid_full bus_hex_full bus_hex seg dev_str func busid
-  pick=$(nvidia-smi --query-gpu=index,memory.free,pci.bus_id \
+  pick=$(LC_ALL=C nvidia-smi --query-gpu=index,memory.free,pci.bus_id \
                     --format=csv,noheader,nounits 2>/dev/null \
-         | sort -t',' -k2 -nr | head -1)
+         | sort -t',' -k2,2nr | head -1)
   if [ -z "$pick" ]; then
     echo "[entrypoint] nvidia-smi returned no GPUs"
     return 1

@@ -797,7 +797,14 @@ jobs:
             echo "[webots-cache] using prewarmed $ROBONIX_WEBOTS_CACHE_VOLUME ($cache_count files)"
           fi
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
-          docker compose -p "$ROBONIX_SIM_PROJECT" -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
+          source ./nvidia_host.sh
+          robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+          docker compose -p "$ROBONIX_SIM_PROJECT" \
+            -f compose.yaml \
+            -f compose.gpu.yaml \
+            -f compose.nvidia-xorg.yaml \
+            -f compose.stream.yaml \
+            up --build -d
           # robot publishes /scanner /odom /head_front_camera/* within ~15s.
           for i in $(seq 1 40); do
             if docker exec "$ROBONIX_SIM_CONTAINER" bash -lc 'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | grep -qx /scanner' 2>/dev/null; then

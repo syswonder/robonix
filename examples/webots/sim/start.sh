@@ -5,7 +5,7 @@
 # container started here, so the container has to exist first.
 #
 # Auto-detects nvidia-smi to merge compose.gpu.yaml. To force CPU-only,
-# unset CUDA_VISIBLE_DEVICES or set ROBONIX_FORCE_CPU=1.
+# set ROBONIX_FORCE_CPU=1.
 #
 # Re-running is safe: docker compose up reuses the running container.
 # Stop with Ctrl-C, or from another terminal: `docker compose -f compose.yaml down`.
@@ -36,6 +36,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # Override ROBONIX_SIM_ROS_BASE_IMAGE for a custom/mirror/digest base.
 # shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/docker_base_image.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/nvidia_host.sh"
 export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
 robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
 cd "$SCRIPT_DIR"
@@ -113,18 +115,20 @@ if [[ ! -f "$ROBONIX_HOST_XAUTH" ]]; then
 fi
 
 CF=(-f compose.yaml)
+EFFECTIVE_HEADLESS_MODE=$(robonix_effective_webots_headless_mode \
+  "${WEBOTS_HEADLESS_MODE:-}" "${ROBONIX_SIM_STREAM:-0}")
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)
-  # Auto-select the GPU with most free memory unless user already set ROBONIX_GPU_ID.
-  if [[ -z "${ROBONIX_GPU_ID:-}" ]]; then
-    ROBONIX_GPU_ID=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
-      | sort -t',' -k2 -nr | head -1 | cut -d',' -f1 | tr -d ' ')
-    export ROBONIX_GPU_ID
-    echo "[sim/start] auto-selected GPU $ROBONIX_GPU_ID (most free memory)"
-  else
-    echo "[sim/start] using user-specified GPU $ROBONIX_GPU_ID"
+  robonix_select_nvidia_gpu "${ROBONIX_GPU_ID:-}"
+  if [[ "$EFFECTIVE_HEADLESS_MODE" == "nvidia" || "$EFFECTIVE_HEADLESS_MODE" == "auto" ]]; then
+    robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+    CF+=(-f compose.nvidia-xorg.yaml)
   fi
 else
+  if [[ "$EFFECTIVE_HEADLESS_MODE" == "nvidia" ]]; then
+    echo "[sim/start] WEBOTS_HEADLESS_MODE=nvidia requires an available NVIDIA GPU" >&2
+    exit 1
+  fi
   echo "[sim/start] no GPU (or ROBONIX_FORCE_CPU=1) — CPU-only Webots"
 fi
 
