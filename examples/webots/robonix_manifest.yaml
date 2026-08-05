@@ -34,6 +34,10 @@ system:
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
       api_format: openai
+  # health monitoring layer
+  vitals:
+    listen: 127.0.0.1:50093
+    log: info
   liaison:
     listen: 0.0.0.0:50081
     log: info
@@ -79,6 +83,19 @@ primitive:
       # example place holders
       update_rate: 10
       frame_id: lidar
+  # Deterministic simulated hardware telemetry consumed by Soma and Vitals.
+  # Keep scenario=normal for the current demo; the field is reserved as the
+  # stable entry point for future fault-injection profiles.
+  - name: tiago_health
+    path: ./primitives/tiago_health
+    config:
+      # Empty means lite; boot.sh sets full alongside soma.full.yaml.
+      variant: ${ROBONIX_TIAGO_VARIANT}
+      scenario: normal
+      interval_s: 0.5
+      battery_percent: 82.0
+      voltage: 24.8
+      remaining_s: 10800
   # ── audio mic/speaker source ─────────────────────────────────────────────
   # Local ALSA provider. It remains available for robot-local audio.
   - name: audio_driver
