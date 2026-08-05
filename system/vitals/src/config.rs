@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 //
-// Vitals config — same three-source resolution as executor:
-//   compiled defaults < YAML at $ROBONIX_CONFIG_PATH < CLI flags / env.
+// Vitals config resolution:
+//   compiled defaults < YAML < rbnx manifest JSON < CLI flags / env.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -84,6 +84,7 @@ pub struct ExpectedModuleConfig {
 }
 
 impl ExpectedModuleConfig {
+    /// Return the configured provider identity, falling back to the module identity.
     pub fn module_key(&self) -> String {
         self.provider_id
             .as_deref()
@@ -101,7 +102,7 @@ impl ExpectedModuleConfig {
     }
 }
 
-/// Resolved Vitals configuration: compiled defaults < YAML < CLI/env.
+/// Resolved Vitals configuration: defaults < YAML < manifest JSON < CLI/env.
 #[derive(Debug, Clone)]
 pub struct VitalsConfig {
     pub atlas_endpoint: String,
@@ -194,6 +195,10 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
 
+    /// The `system.vitals` manifest block serialized to JSON by rbnx.
+    #[arg(long)]
+    pub config_json: Option<String>,
+
     /// Log filter (env_logger syntax; e.g. `info`, `robonix_vitals=debug`).
     /// Default: `robonix_vitals=info`. Falls back to `RUST_LOG` if unset.
     #[arg(long)]
@@ -202,7 +207,7 @@ pub struct Args {
 
 #[derive(Default, Deserialize)]
 struct FileConfig {
-    #[serde(default)]
+    #[serde(default, alias = "atlas")]
     atlas_endpoint: Option<String>,
     #[serde(default)]
     listen: Option<String>,
@@ -237,11 +242,15 @@ struct FileConfig {
 }
 
 impl VitalsConfig {
-    /// Resolve configuration from defaults, optional YAML file, and CLI args.
-    /// Priority: CLI/env > YAML file > compiled defaults.
+    /// Resolve defaults, optional YAML, manifest JSON, and CLI/env values.
+    /// Priority: CLI/env > manifest JSON > YAML file > compiled defaults.
     pub fn resolve(args: Args) -> Result<Self> {
         let file_cfg: FileConfig = match &args.config {
             Some(path) => load_yaml(path)?,
+            None => FileConfig::default(),
+        };
+        let manifest_cfg: FileConfig = match args.config_json.as_deref() {
+            Some(raw) => serde_json::from_str(raw).context("parse vitals --config-json")?,
             None => FileConfig::default(),
         };
 
@@ -250,11 +259,13 @@ impl VitalsConfig {
 
         let arm_kind = args
             .mock_soma_arm
+            .or(manifest_cfg.mock_soma_arm)
             .or(file_cfg.mock_soma_arm)
             .unwrap_or_else(|| "synthetic".to_string());
 
         let bridge_python = args
             .mock_soma_bridge_python
+            .or(manifest_cfg.mock_soma_bridge_python)
             .or(file_cfg.mock_soma_bridge_python)
             .unwrap_or_else(|| DEFAULT_BRIDGE_PYTHON.to_string());
 
@@ -262,10 +273,12 @@ impl VitalsConfig {
             "piper" => {
                 let can = args
                     .mock_soma_piper_can
+                    .or(manifest_cfg.mock_soma_piper_can)
                     .or(file_cfg.mock_soma_piper_can)
                     .unwrap_or_else(|| "can0".to_string());
                 let script = args
                     .mock_soma_piper_script
+                    .or(manifest_cfg.mock_soma_piper_script)
                     .or(file_cfg.mock_soma_piper_script)
                     .unwrap_or_else(|| {
                         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/piper_bridge.py")
@@ -279,10 +292,12 @@ impl VitalsConfig {
             "koch" => {
                 let port = args
                     .mock_soma_koch_port
+                    .or(manifest_cfg.mock_soma_koch_port)
                     .or(file_cfg.mock_soma_koch_port)
                     .unwrap_or_else(|| "/dev/ttyUSB0".to_string());
                 let script = args
                     .mock_soma_koch_script
+                    .or(manifest_cfg.mock_soma_koch_script)
                     .or(file_cfg.mock_soma_koch_script)
                     .unwrap_or_else(|| {
                         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/koch_bridge.py")
@@ -306,43 +321,55 @@ impl VitalsConfig {
 
         let id = args
             .id
+            .or(manifest_cfg.id)
             .or(file_cfg.id)
             .unwrap_or_else(|| DEFAULT_VITALS_PROVIDER_ID.to_string());
-        let expected_modules = file_cfg
+        let expected_modules = manifest_cfg
             .expected_modules
+            .or(file_cfg.expected_modules)
             .unwrap_or_else(|| default_expected_modules(&id));
         validate_expected_modules(&expected_modules)?;
 
         Ok(Self {
             atlas_endpoint: args
                 .atlas
+                .or(manifest_cfg.atlas_endpoint)
                 .or(file_cfg.atlas_endpoint)
                 .unwrap_or_else(|| DEFAULT_ATLAS_ENDPOINT.to_string()),
             listen: args
                 .listen
+                .or(manifest_cfg.listen)
                 .or(file_cfg.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
             id,
             thresholds_path: args
                 .thresholds_path
+                .or(manifest_cfg.thresholds_path)
                 .or(file_cfg.thresholds_path)
                 .unwrap_or(default_thresholds),
-            soma_endpoint: args.soma_endpoint.or(file_cfg.soma_endpoint),
+            soma_endpoint: args
+                .soma_endpoint
+                .or(manifest_cfg.soma_endpoint)
+                .or(file_cfg.soma_endpoint),
             mock_soma: args.mock_soma,
             mock_soma_id: args
                 .mock_soma_id
+                .or(manifest_cfg.mock_soma_id)
                 .or(file_cfg.mock_soma_id)
                 .unwrap_or_else(|| "mock-soma".to_string()),
             mock_soma_listen: args
                 .mock_soma_listen
+                .or(manifest_cfg.mock_soma_listen)
                 .or(file_cfg.mock_soma_listen)
                 .unwrap_or_else(|| DEFAULT_MOCK_SOMA_LISTEN.to_string()),
             mock_soma_scenario: args
                 .mock_soma_scenario
+                .or(manifest_cfg.mock_soma_scenario)
                 .or(file_cfg.mock_soma_scenario)
                 .unwrap_or_else(|| "normal".to_string()),
             mock_soma_interval_ms: args
                 .mock_soma_interval_ms
+                .or(manifest_cfg.mock_soma_interval_ms)
                 .or(file_cfg.mock_soma_interval_ms)
                 .unwrap_or(DEFAULT_MOCK_SOMA_INTERVAL_MS),
             mock_soma_arm,
@@ -351,6 +378,7 @@ impl VitalsConfig {
     }
 }
 
+/// Supervise Vitals itself plus the two system modules with typed health clients.
 pub fn default_expected_modules(vitals_provider_id: &str) -> Vec<ExpectedModuleConfig> {
     vec![
         ExpectedModuleConfig {
@@ -407,6 +435,7 @@ mod tests {
         assert!(args.atlas.is_none());
         assert!(args.listen.is_none());
         assert!(args.soma_endpoint.is_none());
+        assert!(args.config_json.is_none());
     }
 
     #[test]
@@ -504,6 +533,61 @@ mod tests {
         assert_eq!(cfg.id, "custom-vitals");
         assert_eq!(cfg.listen, "0.0.0.0:9999");
         assert_eq!(cfg.soma_endpoint.unwrap(), "10.0.0.1:50092");
+    }
+
+    /// Verifies that rbnx's manifest JSON configures scalar fields and the
+    /// nested module supervision policy that has no standalone CLI flag.
+    #[test]
+    fn resolve_manifest_json() {
+        let manifest_json = r#"{
+            "atlas": "10.0.0.2:50051",
+            "listen": "127.0.0.1:50093",
+            "id": "webots-vitals",
+            "thresholds_path": "/tmp/vitals-thresholds.yaml",
+            "expected_modules": [
+                {
+                    "module_id": "executor",
+                    "provider_id": "executor-main",
+                    "policy": "required",
+                    "ttl_ms": 2500
+                }
+            ]
+        }"#;
+        let args = Args::try_parse_from(["robonix-vitals", "--config-json", manifest_json])
+            .expect("parse manifest JSON arg");
+
+        let cfg = VitalsConfig::resolve(args).expect("resolve manifest JSON");
+        assert_eq!(cfg.atlas_endpoint, "10.0.0.2:50051");
+        assert_eq!(cfg.listen, "127.0.0.1:50093");
+        assert_eq!(cfg.id, "webots-vitals");
+        assert_eq!(
+            cfg.thresholds_path,
+            PathBuf::from("/tmp/vitals-thresholds.yaml")
+        );
+        assert_eq!(cfg.expected_modules.len(), 1);
+        assert_eq!(cfg.expected_modules[0].module_key(), "executor-main");
+        assert_eq!(cfg.expected_modules[0].ttl_ms, 2500);
+    }
+
+    /// Verifies that explicit CLI values remain authoritative over values
+    /// delivered in the manifest JSON by rbnx.
+    #[test]
+    fn resolve_cli_overrides_manifest_json() {
+        let args = Args::try_parse_from([
+            "robonix-vitals",
+            "--config-json",
+            r#"{"id":"manifest-vitals","listen":"127.0.0.1:50093"}"#,
+            "--id",
+            "cli-vitals",
+            "--listen",
+            "127.0.0.1:50094",
+        ])
+        .expect("parse CLI and manifest args");
+
+        let cfg = VitalsConfig::resolve(args).expect("resolve CLI overrides");
+        assert_eq!(cfg.id, "cli-vitals");
+        assert_eq!(cfg.listen, "127.0.0.1:50094");
+        assert_eq!(cfg.expected_modules[0].provider_id_or_empty(), "cli-vitals");
     }
 
     #[test]

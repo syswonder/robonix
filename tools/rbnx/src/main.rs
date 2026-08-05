@@ -142,6 +142,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn build_accepts_explicit_deploy_manifest() {
@@ -191,6 +192,18 @@ mod tests {
             cli.command,
             cmd::Commands::Boot { verbose: true, .. }
         ));
+    }
+
+    /// Keep boot help aligned with the supported built-in system components.
+    #[test]
+    fn boot_help_lists_vitals() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("boot")
+            .expect("boot subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("vitals"));
     }
 
     #[test]
