@@ -58,12 +58,29 @@ class RosBackend:
             log.info("rclpy backend started (node=%s)", node_name)
 
     def _spin(self) -> None:
+        import rclpy  # type: ignore
         try:
-            import rclpy  # type: ignore
-            while rclpy.ok():
+            from rclpy.handle import InvalidHandle  # type: ignore
+        except ImportError:
+            # Humble exposes InvalidHandle only from the pybind module;
+            # newer rclpy releases provide the public rclpy.handle path.
+            from rclpy._rclpy_pybind11 import InvalidHandle  # type: ignore
+
+        while rclpy.ok():
+            try:
                 self._executor.spin_once(timeout_sec=0.05)
-        except Exception as e:  # noqa: BLE001
-            log.warning("rclpy spin loop exited: %s", e)
+            except InvalidHandle as e:
+                # A short-lived sentinel subscription may be destroyed by the
+                # lifecycle thread while the executor is rebuilding its wait
+                # set.  rclpy reports that normal entity hand-off as a
+                # transient InvalidHandle; the next spin rebuilds the set.
+                # Exiting here would permanently stop every ROS callback in
+                # the provider (including latched camera extrinsics).
+                log.debug("rclpy entity changed during spin; retrying: %s", e)
+                time.sleep(0.01)
+            except Exception as e:  # noqa: BLE001
+                log.warning("rclpy spin loop exited: %s", e)
+                return
 
     @property
     def node(self):
