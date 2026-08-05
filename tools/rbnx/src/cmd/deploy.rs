@@ -32,7 +32,7 @@ use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::PackageRuntimeRecord;
 use robonix_cli::output;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -56,9 +56,6 @@ const CMD_ACTIVATE: u32 = 1;
 const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 const CMD_SHUTDOWN: u32 = 3;
-// How long to wait for a freshly spawned package to register its driver
-// capability with atlas before giving up.
-const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 // Default Driver(CMD_INIT) deadline. Webots CI can override this with
 // ROBONIX_DRIVER_INIT_TIMEOUT_S for real stacks whose lifecycle bringup may
 // exceed 90s on a cold self-hosted runner.
@@ -1795,13 +1792,9 @@ async fn spawn_and_init(
     spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
 ) -> Result<Spawned> {
-    let before: HashSet<String> = atlas
-        .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+    let before = robonix_cli::launch::snapshot_provider_registration(atlas, &entry.name)
         .await
-        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?
-        .into_iter()
-        .map(|r| r.id)
-        .collect();
+        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?;
 
     let mut sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
@@ -2289,125 +2282,54 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
 
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
-    before: &HashSet<String>,
+    before: &robonix_cli::launch::ProviderRegistrationSnapshot,
     expected_provider_id: &str,
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
 ) -> Result<(String, Option<String>)> {
-    if before.contains(expected_provider_id) {
-        anyhow::bail!(
-            "[{component}/{pkg_label}] deployment instance '{expected_provider_id}' \
-             was already registered before spawn"
-        );
-    }
-
-    // Wait only for this manifest entry's exact provider id. Other packages
-    // may register concurrently and must not receive this instance's config.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
-    const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
-    let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
+    let who = format!("{component}/{pkg_label}");
+    let registration = robonix_cli::launch::wait_for_registration_core(atlas, before, &who);
+    tokio::pin!(registration);
     if output::boot_verbose() {
         output::boot_wait(display_label, "registering with atlas");
     }
     loop {
-        let elapsed_s = started.elapsed().as_secs_f32();
-        let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
-        if output::boot_verbose() {
-            if frame > 0 && frame.is_multiple_of(50) {
-                output::boot_note(display_label, &detail);
+        tokio::select! {
+            result = &mut registration => {
+                match result {
+                    Ok(outcome) => {
+                        debug_assert_eq!(outcome.provider_id, expected_provider_id);
+                        return Ok((outcome.provider_id, outcome.driver_contract));
+                    }
+                    Err(error) => {
+                        let log_file = log_path(log_dir, pkg_label);
+                        output::boot_fail(
+                            display_label,
+                            &format!("registration failed — see {}", log_file.display()),
+                        );
+                        return Err(error).with_context(|| {
+                            format!("[{who}] registration failed. Log: {}", log_file.display())
+                        });
+                    }
+                }
             }
-        } else {
-            output::boot_progress(display_label, &detail, frame);
-        }
-        if frame.is_multiple_of(POLLS_PER_TICK as usize) {
-            let providers = atlas
-                .query_capabilities("", "", atlas_pb::Transport::Unspecified)
-                .await
-                .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            let matched = providers.iter().find(|provider| {
-                robonix_cli::launch::is_expected_provider_registration(
-                    provider,
-                    before,
-                    expected_provider_id,
-                )
-            });
-            if let Some(first) = matched {
-                let provider_id = first.id.clone();
-                // RegisterPrimitive/Service/Skill and DeclareCapability are
-                // two separate RPCs from the package side — Register lands
-                // first, declares follow within a few hundred ms. Give it
-                // up to a 1 s settle window so we don't false-fire the
-                // "no driver" path on a fast poll. Capped by the outer
-                // `deadline` so we never exceed user-facing timeout.
-                let settle_until = Instant::now()
-                    .checked_add(Duration::from_millis(1000))
-                    .map(|t| t.min(deadline))
-                    .unwrap_or(deadline);
-                let mut current: atlas_pb::CapabilityProvider = (*first).clone();
-                let driver_contract_id = loop {
-                    let driver = current.capabilities.iter().find(|cap| {
-                        cap.transport == atlas_pb::Transport::Grpc as i32
-                            && cap.contract_id.ends_with("/driver")
-                    });
-                    if driver.is_some() {
-                        break driver.map(|c| c.contract_id.clone());
+            _ = tokio::time::sleep(SPINNER_TICK) => {
+                let elapsed_s = started.elapsed().as_secs_f32();
+                let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
+                if output::boot_verbose() {
+                    if frame > 0 && frame.is_multiple_of(50) {
+                        output::boot_note(display_label, &detail);
                     }
-                    if Instant::now() >= settle_until {
-                        break None;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let providers = atlas
-                        .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
-                        .await
-                        .with_context(|| format!("[{component}/{pkg_label}] re-poll for driver"))?;
-                    match providers.into_iter().find(|p| p.id == provider_id) {
-                        Some(p) => current = p,
-                        None => {
-                            // Provider vanished between the original match
-                            // and now (crashed mid-settle, atlas evicted,
-                            // heartbeat lapsed). Report loudly — silently
-                            // returning "no driver" would let downstream
-                            // boot logic march on against a dead process.
-                            let log_file = log_path(log_dir, pkg_label);
-                            output::boot_fail(
-                                display_label,
-                                &format!(
-                                    "provider '{provider_id}' disappeared during settle — see {}",
-                                    log_file.display()
-                                ),
-                            );
-                            anyhow::bail!(
-                                "[{component}/{pkg_label}] provider '{provider_id}' \
-                                 unregistered during settle window. Log: {}",
-                                log_file.display()
-                            );
-                        }
-                    }
-                };
-                return Ok((provider_id, driver_contract_id));
+                } else {
+                    output::boot_progress(display_label, &detail, frame);
+                }
+                frame = frame.wrapping_add(1);
             }
         }
-        if Instant::now() >= deadline {
-            let log_file = log_path(log_dir, pkg_label);
-            output::boot_fail(
-                display_label,
-                &format!(
-                    "registration timeout after {:?} — see {}",
-                    DRIVER_REGISTER_TIMEOUT,
-                    log_file.display()
-                ),
-            );
-            anyhow::bail!(
-                "[{component}/{pkg_label}] timed out after {:?} — package never registered a provider with atlas. Log: {}",
-                DRIVER_REGISTER_TIMEOUT,
-                log_file.display()
-            );
-        }
-        tokio::time::sleep(SPINNER_TICK).await;
-        frame = frame.wrapping_add(1);
     }
 }
