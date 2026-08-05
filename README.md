@@ -90,7 +90,7 @@ rbnx boot
 
 Then run `rbnx chat` in a third terminal. Try `go to room 101`, `what can you
 see?`, or `explore the office`. See the
-[Getting Started guide](https://robonix.syswonder.org/getting-started/quickstart.html)
+[Getting Started guide](https://robonix-book.syswonder.org/getting-started/quickstart)
 for the complete walkthrough.
 
 https://github.com/user-attachments/assets/604b2c7f-3b6d-46be-858b-c52acaf686e3
@@ -273,7 +273,7 @@ Run `rbnx caps` to inspect the live providers, then try `rbnx chat` and ask the
 robot to say hello. Each example package keeps its manifest, `config.spec`,
 build/start scripts, implementation, and optional capability definitions in
 one directory. Start there, then follow the
-[package integration guide](https://robonix.syswonder.org/integration-guide/package-catalog.html)
+[package integration guide](https://robonix-book.syswonder.org/integration-guide/package-catalog)
 to publish a reusable package.
 
 ## Repository Layout
@@ -300,9 +300,9 @@ lives, not the implementation language.
 
 Dive deeper:
 
-* [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
-* [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
-* [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
+* [**Overview**](https://robonix-book.syswonder.org/architecture/components) — control plane, one full request end-to-end
+* [**Namespaces & contracts**](https://robonix-book.syswonder.org/architecture/namespace-and-contracts) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
+* [**Interface catalog**](https://robonix-book.syswonder.org/interface-catalog/) — every primitive + service contract
 
 ## Package Model
 
@@ -312,7 +312,7 @@ more capability contracts normally grouped under a primary
 implemented across those provider namespaces. Namespace mismatches are
 diagnostic rather than a runtime authorization boundary. The contract
 definitions are documented in the
-[interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md).
+[interface catalog](https://robonix-book.syswonder.org/interface-catalog/).
 
 This repository contains Robonix system components, built-in reference services, and
 examples such as Webots/Tiago. Reusable community packages are indexed by the
@@ -383,7 +383,7 @@ for its multi-container ROS graph. Primitive, service, and skill code continues
 to use normal ROS 2 APIs; the deployment selects the RMW through its process
 environment. See the
 [`rmw_zenoh` design](https://github.com/ros2/rmw_zenoh/blob/rolling/docs/design.md)
-and the [robot integration guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html)
+and the [robot integration guide](https://robonix-book.syswonder.org/integration-guide/vendor-onboarding)
 for topology and deployment details.
 
 ## Contributing
