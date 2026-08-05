@@ -16,9 +16,35 @@ Start the sim **first**, then `rbnx boot` from `examples/webots/`:
 bash examples/webots/sim/start.sh
 
 # Terminal 2 — robonix:
-cd examples/webots
-rbnx boot
+bash examples/webots/boot.sh
 ```
+
+## Robot selection
+
+TIAGo Lite remains the default:
+
+```bash
+bash examples/webots/sim/start.sh --tiago-variant lite
+```
+
+Select the complete single-arm Webots TIAGo with its default parallel gripper:
+
+```bash
+bash examples/webots/sim/start.sh --tiago-variant full
+```
+
+The launcher enables the official Webots R2025a asset download automatically
+for `full`. The first download is about 661 MB; the persistent cache makes
+subsequent starts skip it. Set `ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=0` only to
+opt out explicitly. In the Robonix terminal use the same selection so Soma and
+Vitals expose the matching body:
+
+```bash
+bash examples/webots/boot.sh --tiago-variant full
+```
+
+You can also export `ROBONIX_TIAGO_VARIANT=lite|full`. An explicit `--robot`
+still overrides the variant's adapter URDF for advanced testing.
 
 World selection:
 
@@ -105,7 +131,7 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `bridge/webots_stream_proxy.py` | Forward the live W3D stream while dropping unused robot-window camera payloads. |
 | `bridge/streaming_healthcheck.py` | Verify that both browser-stream helpers are alive and reachable. |
 | `bridge/update-webots-seed.sh` | Maintainer tool that exports an updated office cache for publication in `syswonder/robonix-assets`. |
-| `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
+| `ros_ws/src/eaios_webots` | ROS 2 launch, Lite/full adapter URDFs, deterministic world conversion, and Webots worlds. |
 
 ## Headless / browser-streaming mode
 

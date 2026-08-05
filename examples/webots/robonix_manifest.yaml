@@ -13,6 +13,10 @@ system:
   atlas:
     listen: 0.0.0.0:50051
     log: info
+  soma:
+    # Empty when boot is invoked directly, so rbnx falls back to ./soma.yaml.
+    # examples/webots/boot.sh sets this to soma.full.yaml for the full model.
+    robot_yaml: ${ROBONIX_SOMA_ROBOT_YAML}
   # soma+scene layer
   scene:
     log: info

@@ -45,33 +45,61 @@ cd "$SCRIPT_DIR"
 # Webots world / robot launch args.
 # Usage:
 #   ./start.sh --world your_new_world.wbt
+#   ./start.sh --tiago-variant full
 #   ROBONIX_WEBOTS_WORLD=your_new_world.wbt ./start.sh
 export ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
-export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+export ROBONIX_TIAGO_VARIANT="${ROBONIX_TIAGO_VARIANT:-lite}"
+export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --world|-w)
+      [[ $# -ge 2 ]] || { echo "[sim/start] --world requires a value" >&2; exit 2; }
       export ROBONIX_WEBOTS_WORLD="$2"
       shift 2
       ;;
     --robot|-r)
+      [[ $# -ge 2 ]] || { echo "[sim/start] --robot requires a value" >&2; exit 2; }
       export ROBONIX_WEBOTS_ROBOT="$2"
       shift 2
       ;;
+    --tiago-variant)
+      [[ $# -ge 2 ]] || { echo "[sim/start] --tiago-variant requires a value" >&2; exit 2; }
+      export ROBONIX_TIAGO_VARIANT="$2"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]"
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]"
       exit 0
       ;;
     *)
       echo "[sim/start] unknown argument: $1" >&2
-      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]" >&2
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]" >&2
       exit 1
       ;;
   esac
 done
 
+case "$ROBONIX_TIAGO_VARIANT" in
+  lite)
+    export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+    ;;
+  full)
+    export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_full_webots.urdf}"
+    ;;
+  *)
+    echo "[sim/start] unsupported TIAGo variant: $ROBONIX_TIAGO_VARIANT (choose lite or full)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$ROBONIX_TIAGO_VARIANT" == "full" && -z "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS+x}" ]]; then
+  export ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
+  echo "[sim/start] full TIAGo: enabling the one-time Webots R2025a asset download (~661 MB)"
+fi
+
 echo "[sim/start] using Webots world: $ROBONIX_WEBOTS_WORLD"
+echo "[sim/start] using TIAGo variant: $ROBONIX_TIAGO_VARIANT"
 echo "[sim/start] using robot URDF: $ROBONIX_WEBOTS_ROBOT"
 
 # Auto-detect DISPLAY if the launching shell didn't export one. Probes

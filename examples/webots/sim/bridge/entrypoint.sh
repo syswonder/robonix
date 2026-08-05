@@ -360,9 +360,38 @@ fi
 WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
 
 ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
-ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+ROBONIX_TIAGO_VARIANT="${ROBONIX_TIAGO_VARIANT:-lite}"
+ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-}"
+
+case "$ROBONIX_TIAGO_VARIANT" in
+  lite)
+    ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+    ;;
+  full)
+    ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_full_webots.urdf}"
+    ;;
+  *)
+    echo "[entrypoint] unsupported ROBONIX_TIAGO_VARIANT=$ROBONIX_TIAGO_VARIANT (choose lite or full)" >&2
+    exit 2
+    ;;
+esac
+
+PACKAGE_SHARE="$(ros2 pkg prefix eaios_webots)/share/eaios_webots"
+if [[ "$ROBONIX_WEBOTS_WORLD" = /* ]]; then
+  WORLD_SOURCE="$ROBONIX_WEBOTS_WORLD"
+else
+  WORLD_SOURCE="$PACKAGE_SHARE/worlds/$ROBONIX_WEBOTS_WORLD"
+fi
+export ROBONIX_WEBOTS_WORLD_PATH
+ROBONIX_WEBOTS_WORLD_PATH="$(
+  python3 -m eaios_webots.world_variant \
+    "$WORLD_SOURCE" \
+    --variant "$ROBONIX_TIAGO_VARIANT"
+)"
 
 echo "[entrypoint] Webots world: ${ROBONIX_WEBOTS_WORLD}"
+echo "[entrypoint] TIAGo variant: ${ROBONIX_TIAGO_VARIANT}"
+echo "[entrypoint] materialized world: ${ROBONIX_WEBOTS_WORLD_PATH}"
 echo "[entrypoint] robot URDF: ${ROBONIX_WEBOTS_ROBOT}"
 
 ros2 launch eaios_webots robot_launch.py \
