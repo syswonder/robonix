@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod deployment;
+pub mod health;
 pub mod launcher;
 pub mod pb;
 pub mod report;

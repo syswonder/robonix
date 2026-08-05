@@ -198,6 +198,7 @@ async fn fetch_urdf(atlas: &mut AtlasClient, consumer_id: &str) -> Result<String
         let response = client
             .get_urdf(GetUrdfRequest {
                 robot_id: String::new(),
+                include_assets: false,
             })
             .await
             .context("call Soma get_urdf")?

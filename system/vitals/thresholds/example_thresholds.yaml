@@ -17,6 +17,14 @@ rules:
     error_above: 85.0
     unit: "degC"
 
+  - id: "wheel_driver_temp"
+    selector:
+      kind: "WHEEL"
+      signal: "driver_temp"
+    warn_above: 75.0
+    error_above: 90.0
+    unit: "degC"
+
   - id: "battery_soc"
     selector:
       kind: "BATTERY"
