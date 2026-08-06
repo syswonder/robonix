@@ -52,6 +52,23 @@ struct DisplayCapability<'a> {
     cap: &'a atlas_pb::Capability,
 }
 
+/// Contracts the deployment marks as closed-loop observation boundaries.
+///
+/// An adapter sets `ROBONIX_PILOT_REPLAN_AFTER_EACH_CALL_CONTRACTS` to a
+/// comma-separated contract list when acting on the world invalidates the
+/// observation the plan was built from. Pilot then keeps only the first call of
+/// a plan made entirely of those contracts, so the next action is chosen from a
+/// fresh observation rather than executed blind.
+fn replan_after_each_call_contracts() -> HashSet<String> {
+    std::env::var("ROBONIX_PILOT_REPLAN_AFTER_EACH_CALL_CONTRACTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|contract| !contract.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn max_tool_rounds() -> usize {
     std::env::var("ROBONIX_PILOT_MAX_TOOL_ROUNDS")
         .ok()
@@ -1070,6 +1087,7 @@ pub async fn run_turn(
     let mut forest: HashMap<String, TreeMeta> = HashMap::new();
     let mut cancel_requested: HashSet<String> = HashSet::new();
     let forest_revision = Arc::new(AtomicU64::new(0));
+    let replan_boundary_contracts = replan_after_each_call_contracts();
     let mut should_plan = true;
     // Last user-facing narration; surfaced as FinalText when the turn ends.
     let mut last_content = String::new();
@@ -1643,7 +1661,22 @@ pub async fn run_turn(
             continue 'supervisor;
         }
 
-        let graph = graph.expect("non-meta RTDL response must carry a graph");
+        let mut graph = graph.expect("non-meta RTDL response must carry a graph");
+        if let Some(deferred_calls) =
+            apply_replan_after_each_call_boundary(&mut graph, &replan_boundary_contracts)
+        {
+            info!(
+                "[pilot/harness] closed-loop boundary retained one call and deferred \
+                 {deferred_calls} call(s) until a fresh observation"
+            );
+            history.push(Message::user(&format!(
+                "Pilot harness feedback: this capability is configured as a closed-loop \
+                 observation boundary. Only the first proposed call will run now; \
+                 {deferred_calls} later call(s) were not executed and must be reconsidered \
+                 from the next observation and result."
+            )));
+            history::trim(history, MAX_HISTORY);
+        }
 
         let calls = plan_call_count(&graph);
         let call_signatures = plan_call_signatures(&graph);
@@ -2108,6 +2141,41 @@ fn parse_task_update(v: &serde_json::Value) -> Result<TaskUpdate> {
         success_criterion: get_opt("success_criterion")?,
         status,
     })
+}
+
+/// Trim a plan to its first call when every call crosses a closed-loop
+/// observation boundary.
+///
+/// Returns the number of deferred calls, or `None` when the plan is untouched
+/// (no boundary configured, a single call, or a mixed plan — a mixed plan still
+/// carries non-boundary work that is safe to run in the same round).
+fn apply_replan_after_each_call_boundary(
+    plan: &mut Plan,
+    contracts: &HashSet<String>,
+) -> Option<usize> {
+    if contracts.is_empty() {
+        return None;
+    }
+    let call_nodes: Vec<RtdlNode> = plan
+        .nodes
+        .iter()
+        .filter(|node| node.node_kind == RTDL_DO && node.call.is_some())
+        .cloned()
+        .collect();
+    if call_nodes.len() <= 1
+        || !call_nodes.iter().all(|node| {
+            node.call
+                .as_ref()
+                .is_some_and(|call| contracts.contains(&call.contract_id))
+        })
+    {
+        return None;
+    }
+
+    let original_calls = call_nodes.len();
+    plan.nodes = vec![call_nodes[0].clone()];
+    plan.root_index = 0;
+    Some(original_calls - 1)
 }
 
 fn raw_preview(raw: &str) -> String {
@@ -2903,12 +2971,13 @@ Concretely:
 mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
-        RTDL_SEQUENCE, TaskState, TaskUpdate, TreeMeta, TreeStep, append_steer, apply_task_update,
-        build_executor_active_block, build_forest_block, compact_tool_result,
-        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
-        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        RTDL_SEQUENCE, TaskState, TaskUpdate, TreeMeta, TreeStep, append_steer,
+        apply_replan_after_each_call_boundary, apply_task_update, build_executor_active_block,
+        build_forest_block, compact_tool_result, configured_vlm_idle_timeout,
+        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        is_legacy_plan_control_contract, mixes_control_inspection_with_action, parse_meta_plan_op,
+        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end,
@@ -3675,6 +3744,74 @@ mod tests {
             true,
         );
         assert_eq!(standing.unwrap().status, "done");
+    }
+
+    fn test_call(contract_id: &str, action_id: i64) -> RtdlNode {
+        RtdlNode {
+            node_kind: RTDL_DO,
+            op_id: format!("op-{action_id}"),
+            call: Some(CapabilityCall {
+                provider_id: "benchmark".into(),
+                contract_id: contract_id.into(),
+                args_json: format!(r#"{{"action_id":{action_id}}}"#),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn configured_closed_loop_contract_keeps_one_call_per_observation() {
+        // Acting on the world invalidates the observation the rest of the plan
+        // was built from, so only the first call may run this round.
+        let contract = "robonix/skill/embodiedbench/habitat_step";
+        let mut plan = Plan {
+            nodes: vec![
+                test_call(contract, 1),
+                test_call(contract, 2),
+                test_call(contract, 3),
+            ],
+            root_index: 0,
+            ..Default::default()
+        };
+        let deferred =
+            apply_replan_after_each_call_boundary(&mut plan, &HashSet::from([contract.into()]));
+        assert_eq!(deferred, Some(2));
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.root_index, 0);
+        assert_eq!(
+            plan.nodes[0].call.as_ref().unwrap().args_json,
+            r#"{"action_id":1}"#
+        );
+    }
+
+    #[test]
+    fn mixed_rtdl_tree_is_not_truncated_by_closed_loop_policy() {
+        // A mixed plan still carries non-boundary work that is safe to run in
+        // the same round, so truncating it would needlessly serialise the tree.
+        let boundary = "robonix/skill/embodiedbench/habitat_step";
+        let mut plan = Plan {
+            nodes: vec![test_call(boundary, 1), test_call("test/speak", 2)],
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_replan_after_each_call_boundary(&mut plan, &HashSet::from([boundary.into()])),
+            None
+        );
+        assert_eq!(plan.nodes.len(), 2);
+    }
+
+    #[test]
+    fn no_boundary_configured_leaves_the_plan_alone() {
+        let mut plan = Plan {
+            nodes: vec![test_call("a/b/c", 1), test_call("a/b/c", 2)],
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_replan_after_each_call_boundary(&mut plan, &HashSet::new()),
+            None
+        );
+        assert_eq!(plan.nodes.len(), 2);
     }
 
     #[test]
