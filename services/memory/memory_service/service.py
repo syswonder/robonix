@@ -124,6 +124,56 @@ def _clean_slate() -> None:
         if count:
             log.info("scribe_mem: cleaned %d entries from %s", count, images_dir)
 
+def _reset_memory_state() -> None:
+    """Clear all in-memory state AND persisted files (runtime reset).
+
+    Used by POST /reset — wipes the graph, indices, images, and PTDL store
+    without restarting the service.  Safe to call at any time (e.g. start
+    of a recording session).
+    """
+    import shutil
+
+    # 1. Clear graph in-memory + persist empty state
+    _graph.clear_all()
+
+    # 2. Rebuild empty tag/vector indices
+    _tags.rebuild([])
+    _vectors.rebuild([])
+
+    # 3. Wipe persisted files (same as _clean_slate)
+    graph_json = os.path.join(MEMORY_DIR, "graph_store.json")
+    if os.path.exists(graph_json):
+        os.remove(graph_json)
+
+    ptdl_json = os.path.join(MEMORY_DIR, "ptdl_store.json")
+    if os.path.exists(ptdl_json):
+        os.remove(ptdl_json)
+    try:
+        from .storage.ptdl_store import _ptdl_store_reset
+        _ptdl_store_reset()
+    except Exception:
+        pass
+
+    images_dir = str(Path(__file__).resolve().parent.parent / "data" / "images")
+    if os.path.isdir(images_dir):
+        count = 0
+        for entry in os.listdir(images_dir):
+            entry_path = os.path.join(images_dir, entry)
+            try:
+                if os.path.isdir(entry_path):
+                    shutil.rmtree(entry_path, ignore_errors=True)
+                else:
+                    os.remove(entry_path)
+                count += 1
+            except OSError as e:
+                log.debug("scribe_mem: reset_images: %s: %s", entry, e)
+        if count:
+            log.info("scribe_mem: reset: cleaned %d entries from %s", count, images_dir)
+
+    log.info("scribe_mem: reset complete — graph=%d nodes, tags=%d, vectors=%d",
+             _graph.count(), _tags.count(), _vectors.count())
+
+
 if not _KEEP_DATA:
     _clean_slate()
 
@@ -699,6 +749,21 @@ def _start_scene_hook_server() -> None:
             t0 = time.time()
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else b""
+
+            # ── /reset — clear all memory ───────────────────────────
+            if self.path == "/reset":
+                try:
+                    count_before = _graph.count()
+                    _reset_memory_state()
+                    log.info("scene_hook.http: /reset — cleared %d nodes → 0",
+                             count_before)
+                    self._reply(200, {"ok": True, "message": f"Reset complete: "
+                                     f"cleared {count_before} nodes"})
+                except Exception as e:
+                    log.warning("scene_hook.http: /reset error: %s: %s", type(e).__name__, e)
+                    self._reply(500, {"error": str(e)})
+                return
+
             try:
                 data = _json.loads(body)
             except Exception:
