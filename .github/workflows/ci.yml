@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main, dev, dev-next, dev/**]
 
+# Least privilege: every job here only reads the checked-out tree.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
