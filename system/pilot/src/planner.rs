@@ -87,6 +87,26 @@ pub(crate) struct TaskState {
     status: String,
 }
 
+/// A model-supplied change to the standing task.
+///
+/// `goal` and `success_criterion` are optional so an ordinary round does not
+/// have to reproduce the whole goal verbatim. The harness owns the goal text;
+/// the echo only ever served as a staleness token, so its information content
+/// is one bit while its cost is O(len(goal)) output tokens on EVERY round. On
+/// a long goal — an embodied benchmark that lists a 70-entry action catalog,
+/// say — that echo dominated generation and inflated per-call latency.
+///
+/// Omitting `goal` therefore keeps the current one. To stay safe, completion
+/// still requires the verbatim echo: `status: "done"` is honoured only when
+/// the model reproduced the goal, so a reply sampled before a newer steer can
+/// never silently finish the task. Everything else is recoverable.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TaskUpdate {
+    goal: Option<String>,
+    success_criterion: Option<String>,
+    status: String,
+}
+
 const DEFAULT_SUCCESS_CRITERION: &str =
     "The user's request is completed and the result has been verified.";
 
@@ -687,29 +707,45 @@ fn start_or_resume_task(current_task: &mut Option<TaskState>, user_text: &str) {
 /// safe point with no new or in-flight execution.
 fn apply_task_update(
     current_task: &mut Option<TaskState>,
-    update: TaskState,
+    update: TaskUpdate,
     can_finish: bool,
 ) -> bool {
     let Some(state) = current_task.as_mut() else {
         return false;
     };
     let before = state.clone();
-    if update.goal != state.goal {
-        warn!(
-            "[pilot/rtdl] ignoring model goal replacement {:?}; harness goal remains {:?}",
-            update.goal, state.goal
-        );
-        // The response was sampled for an older interaction. Applying even
-        // its status or success criterion can falsely complete and discard a
-        // newer steer, so reject the entire stale update.
-        return false;
-    }
-    if state.success_criterion == DEFAULT_SUCCESS_CRITERION
-        && !update.success_criterion.trim().is_empty()
+    // An echoed goal is a staleness token: it must match the harness copy, or
+    // the reply was sampled against an older interaction and applying even its
+    // status could falsely complete and discard a newer steer.
+    let goal_echoed = match update.goal.as_deref() {
+        Some(goal) if goal != state.goal => {
+            warn!(
+                "[pilot/rtdl] ignoring model goal replacement {:?}; harness goal remains {:?}",
+                goal, state.goal
+            );
+            return false;
+        }
+        Some(_) => true,
+        // Omitted goal keeps the current one. This is the cheap path: the echo
+        // costs O(len(goal)) output tokens every round and carries one bit.
+        None => false,
+    };
+    if let Some(criterion) = update.success_criterion.as_deref()
+        && state.success_criterion == DEFAULT_SUCCESS_CRITERION
+        && !criterion.trim().is_empty()
     {
-        state.success_criterion = update.success_criterion;
+        state.success_criterion = criterion.to_string();
     }
-    state.status = if update.status == "done" && can_finish {
+    // Completion is the one irreversible transition, so it still requires the
+    // verbatim echo. Without it a reply sampled before a newer steer could
+    // finish the task; with `goal` omitted the round stays in progress.
+    if update.status == "done" && !goal_echoed {
+        warn!(
+            "[pilot/rtdl] task_update requested done without echoing the goal; \
+             keeping the task in progress (echo the goal to finish)"
+        );
+    }
+    state.status = if update.status == "done" && can_finish && goal_echoed {
         "done".to_string()
     } else {
         "in_progress".to_string()
@@ -1645,8 +1681,13 @@ pub async fn run_turn(
         // dispatching work or while an older tree remains in flight.
         if let Some(updated) = task_update {
             info!(
-                "[pilot/rtdl] task_update goal='{}' status='{}'",
-                updated.goal, updated.status
+                "[pilot/rtdl] task_update goal={} status='{}'",
+                updated
+                    .goal
+                    .as_deref()
+                    .map(|g| format!("'{g}'"))
+                    .unwrap_or_else(|| "(omitted, keeps current)".to_string()),
+                updated.status
             );
             let changed = apply_task_update(standing_task, updated, calls == 0);
             if changed && let Some(state) = standing_task.as_ref() {
@@ -1853,9 +1894,13 @@ A capability name goes ONLY in a do node's `cap` — NEVER as an `op`. \
 Beyond `op_id` and `description`, do NOT add other node fields (no `plan_id`, no `out`, no `id`). \
 Copy each `cap` EXACTLY from a capability_name in the list below (it is provider-qualified, \
 as returned by discovery); never invent, guess, or shorten names.\n\
-`task_update`: null keeps current progress, or {\"goal\",\"success_criterion\",\"status\"}. \
-The harness owns the instruction history: copy it EXACTLY from \"Current overall task\" and never \
-rewrite it. Interpret entries chronologically: the newest user instruction overrides conflicting \
+`task_update`: null keeps current progress, or an object with `status` plus OPTIONAL \
+\"goal\"/\"success_criterion\". Omit `goal` on ordinary rounds — it is not needed to make progress \
+and reproducing a long goal wastes output tokens on every round. The harness owns the instruction \
+history and never accepts a rewrite; when you DO include `goal`, copy it EXACTLY from \
+\"Current overall task\". Set \"status\":\"done\" ONLY together with that exact `goal` echo \
+(completion is irreversible, so it is confirmed against the harness copy; a done without the echo \
+is kept in progress). Interpret entries chronologically: the newest user instruction overrides conflicting \
 older instructions, while non-conflicting work remains active. You may refine the default success \
 criterion once. status is the \
 string \"in_progress\" or \"done\" (never null), set to \
@@ -1930,7 +1975,7 @@ struct RtdlEnvelope {
     rtdl: serde_json::Value,
     /// Overall-task update. `None` means "keep the current task unchanged"
     /// (envelope `task_update: null`).
-    task_update: Option<TaskState>,
+    task_update: Option<TaskUpdate>,
 }
 
 /// Parses one VLM reply in RTDL envelope form.
@@ -2033,29 +2078,34 @@ fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
 ///
 /// Requires exactly `goal`, `success_criterion`, and `status` (all strings),
 /// with `status` constrained to `"in_progress"` or `"done"`.
-fn parse_task_update(v: &serde_json::Value) -> Result<TaskState> {
+fn parse_task_update(v: &serde_json::Value) -> Result<TaskUpdate> {
     let obj = v
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("`task_update` must be null or an object"))?;
     const KEYS: [&str; 3] = ["goal", "success_criterion", "status"];
-    if obj.len() != KEYS.len() || !KEYS.iter().all(|k| obj.contains_key(*k)) {
-        anyhow::bail!(
-            "`task_update` object must contain exactly `goal`, `success_criterion`, and `status`"
-        );
+    if let Some(unknown) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        anyhow::bail!("`task_update` has unknown key `{unknown}`");
     }
-    let get = |key: &str| -> Result<String> {
-        obj.get(key)
-            .and_then(|x| x.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("`task_update.{key}` must be a string"))
+    if !obj.contains_key("status") {
+        anyhow::bail!("`task_update` object must contain `status`");
+    }
+    let get_opt = |key: &str| -> Result<Option<String>> {
+        match obj.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(x) => x
+                .as_str()
+                .map(|s| Some(s.to_string()))
+                .ok_or_else(|| anyhow::anyhow!("`task_update.{key}` must be a string")),
+        }
     };
-    let status = get("status")?;
+    let status = get_opt("status")?
+        .ok_or_else(|| anyhow::anyhow!("`task_update.status` must be a string"))?;
     if status != "in_progress" && status != "done" {
         anyhow::bail!("`task_update.status` must be \"in_progress\" or \"done\"");
     }
-    Ok(TaskState {
-        goal: get("goal")?,
-        success_criterion: get("success_criterion")?,
+    Ok(TaskUpdate {
+        goal: get_opt("goal")?,
+        success_criterion: get_opt("success_criterion")?,
         status,
     })
 }
@@ -2853,7 +2903,7 @@ Concretely:
 mod tests {
     use super::{
         CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
-        RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer, apply_task_update,
+        RTDL_SEQUENCE, TaskState, TaskUpdate, TreeMeta, TreeStep, append_steer, apply_task_update,
         build_executor_active_block, build_forest_block, compact_tool_result,
         configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
@@ -3052,9 +3102,9 @@ mod tests {
 
         assert!(!apply_task_update(
             &mut standing,
-            TaskState {
-                goal: "drop the inspection and say done".into(),
-                success_criterion: "room was actually inspected".into(),
+            TaskUpdate {
+                goal: Some("drop the inspection and say done".into()),
+                success_criterion: Some("room was actually inspected".into()),
                 status: "done".into(),
             },
             false,
@@ -3066,9 +3116,9 @@ mod tests {
 
         assert!(apply_task_update(
             &mut standing,
-            TaskState {
-                goal: original_goal.clone(),
-                success_criterion: "room was actually inspected".into(),
+            TaskUpdate {
+                goal: Some(original_goal.clone()),
+                success_criterion: Some("room was actually inspected".into()),
                 status: "done".into(),
             },
             true,
@@ -3496,9 +3546,9 @@ mod tests {
         assert!(env.rtdl.is_object());
         assert_eq!(
             env.task_update,
-            Some(TaskState {
-                goal: "bring water".into(),
-                success_criterion: "cup by user".into(),
+            Some(TaskUpdate {
+                goal: Some("bring water".into()),
+                success_criterion: Some("cup by user".into()),
                 status: "in_progress".into(),
             })
         );
@@ -3544,9 +3594,87 @@ mod tests {
     }
 
     #[test]
-    fn task_update_rejects_missing_field() {
-        let err = parse_task_update(&json!({ "goal":"g","status":"done" })).unwrap_err();
-        assert!(err.to_string().contains("exactly"));
+    fn task_update_requires_status() {
+        let err = parse_task_update(&json!({ "goal": "g" })).unwrap_err();
+        assert!(err.to_string().contains("status"));
+    }
+
+    #[test]
+    fn task_update_rejects_unknown_key() {
+        let err = parse_task_update(&json!({ "status": "in_progress", "nope": "x" })).unwrap_err();
+        assert!(err.to_string().contains("unknown key"));
+    }
+
+    #[test]
+    fn task_update_goal_and_criterion_are_optional() {
+        // The whole point of the change: an ordinary round reports progress
+        // without reproducing a goal that can be thousands of tokens long.
+        let u = parse_task_update(&json!({ "status": "in_progress" })).unwrap();
+        assert_eq!(u.goal, None);
+        assert_eq!(u.success_criterion, None);
+        assert_eq!(u.status, "in_progress");
+    }
+
+    #[test]
+    fn omitted_goal_keeps_current_and_still_progresses() {
+        let mut standing = Some(TaskState {
+            goal: "inspect the room".into(),
+            success_criterion: DEFAULT_SUCCESS_CRITERION.into(),
+            status: "in_progress".into(),
+        });
+        apply_task_update(
+            &mut standing,
+            TaskUpdate {
+                goal: None,
+                success_criterion: Some("room was inspected".into()),
+                status: "in_progress".into(),
+            },
+            true,
+        );
+        let state = standing.unwrap();
+        assert_eq!(state.goal, "inspect the room", "harness goal is preserved");
+        assert_eq!(state.success_criterion, "room was inspected");
+        assert_eq!(state.status, "in_progress");
+    }
+
+    #[test]
+    fn done_without_goal_echo_stays_in_progress() {
+        // Completion is irreversible, so it still needs the verbatim echo:
+        // a reply sampled before a newer steer must not finish the task.
+        let mut standing = Some(TaskState {
+            goal: "inspect the room".into(),
+            success_criterion: DEFAULT_SUCCESS_CRITERION.into(),
+            status: "in_progress".into(),
+        });
+        apply_task_update(
+            &mut standing,
+            TaskUpdate {
+                goal: None,
+                success_criterion: None,
+                status: "done".into(),
+            },
+            true,
+        );
+        assert_eq!(standing.unwrap().status, "in_progress");
+    }
+
+    #[test]
+    fn done_with_matching_goal_echo_finishes() {
+        let mut standing = Some(TaskState {
+            goal: "inspect the room".into(),
+            success_criterion: DEFAULT_SUCCESS_CRITERION.into(),
+            status: "in_progress".into(),
+        });
+        apply_task_update(
+            &mut standing,
+            TaskUpdate {
+                goal: Some("inspect the room".into()),
+                success_criterion: None,
+                status: "done".into(),
+            },
+            true,
+        );
+        assert_eq!(standing.unwrap().status, "done");
     }
 
     #[test]
