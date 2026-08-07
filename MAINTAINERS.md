@@ -5,7 +5,7 @@ Each maintainer is written `Name (@github, email)` so the contact stays bound to
 the person; components with two owners separate them with `;`. A public email is
 shown only where the person publishes one on their GitHub profile.
 
-- Project: <https://robonix.syswonder.org>
+- Project: <https://book.robonix.ai>
 - Mailing list: robotos@syswonder.org
 - Contributor roster: <https://www.syswonder.org>
 
