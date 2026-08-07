@@ -27,7 +27,7 @@ Piper CAN0 → health_piper (Python Primitive, robonix_api)
 
 The `health_piper` primitive implements `robonix/primitive/health/stream` and
 wraps `piper_sdk`. It is **not** part of the Robonix source tree — create it in your
-deployment's `primitives/` directory following the [vendor onboarding guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html).
+deployment's `primitives/` directory following the [vendor onboarding guide](https://book.robonix.ai/integration-guide/vendor-onboarding.html).
 
 ### Mock SOMA path (no SOMA needed)
 
@@ -165,7 +165,7 @@ cargo test --workspace --all-targets
 
 Prerequisites: Piper arm connected via CAN0, `~/roboarm/.venv` with `piper-sdk>=0.6.1`,
 and a `health_piper` primitive package created in your deployment per the
-[vendor onboarding guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html).
+[vendor onboarding guide](https://book.robonix.ai/integration-guide/vendor-onboarding.html).
 
 **Step 1: Create the primitive** in your deployment directory (e.g. `~/roboarm/robonix/primitives/health_piper/`), then run `rbnx codegen -p .` inside it.
 
