@@ -187,8 +187,13 @@ jobs:
         id: pr_review
         uses: actions/github-script@v7
         env:
-          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
-          PR_HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
+          # ChatOps (`workflow_call`) already resolved and froze the PR head at
+          # its own authorization gate; reuse that value instead of re-reading
+          # the live head here. Re-reading would reopen a time-of-check /
+          # time-of-use window in which the PR author can push a new commit
+          # between authorization and the approval match below.
+          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || inputs.pr_number || '' }}
+          PR_HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || inputs.pr_head_sha || '' }}
         with:
           script: |
             const prNumber = process.env.PR_NUMBER;
