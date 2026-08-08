@@ -20,7 +20,17 @@ cd "$PKG"
 # Native Scene runs on the host Python. The lite profile deliberately works on
 # hosts without torch; metric profiles validate their model dependencies only
 # when the detector is actually started.
-PY="${SCENE_NATIVE_PYTHON:-python3}"
+#
+# The lite build installs into rbnx-build/native-venv rather than the user site,
+# because a PEP 668 system python refuses `pip install --user`. Prefer that venv
+# when the build created one; metric profiles have no venv and fall through to
+# the host python that owns the JetPack CUDA stack.
+NATIVE_VENV_PY="$PKG/rbnx-build/native-venv/bin/python"
+if [[ -z "${SCENE_NATIVE_PYTHON:-}" && -x "$NATIVE_VENV_PY" ]]; then
+    PY="$NATIVE_VENV_PY"
+else
+    PY="${SCENE_NATIVE_PYTHON:-python3}"
+fi
 
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 # shellcheck disable=SC1091

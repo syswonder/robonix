@@ -249,36 +249,49 @@ fi
 # the host JetPack stack via --system-site-packages; we only pip-install the
 # light pure-python deps on top. Mirrors mapping_rbnx's native target.
 if [[ "$TARGET" == "jetson-native" ]]; then
-    # No venv on purpose. A --system-site-packages venv can't see the host
-    # JetPack torch (it's typically a `pip install --user` in ~/.local), and
-    # forcing the user-site onto PYTHONPATH drags shadowing shims (e.g. enum34)
-    # ahead of the stdlib and breaks the interpreter. The host python already
-    # has the correct sys.path order AND sees the JetPack torch — so install
-    # scene's light pure-python deps into the user site alongside it.
-    PY=python3
     PIP_IDX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-    echo "[build] jetson-native: host python ($("$PY" --version 2>&1)), pip install --user"
-    "$PY" -m pip install --user --upgrade pip --index-url "$PIP_IDX" || true
     # scene-base contains the provider's RPC/MCP runtime. A failed install is
     # fatal: otherwise rbnx writes a successful build stamp and the native
     # process can die on generated imports before it registers with Atlas.
     BASE_REQ="docker/requirements/scene-base.txt"
     ABI_REQ="docker/requirements/scene-numpy1-abi.txt"
-    echo "[build] pip install --user -r $BASE_REQ"
-    "$PY" -m pip install --user -c "$ABI_REQ" -r "$BASE_REQ" \
-        --index-url "$PIP_IDX"
 
     if [[ "$BUILD_PROFILE" == "lite" ]]; then
+        # Lite needs no JetPack torch, so unlike the metric profiles below it is
+        # free to own a venv — and on a Debian/Ubuntu system python that is the
+        # only way to install at all, since PEP 668 rejects `pip install --user`
+        # with "externally-managed-environment". --system-site-packages keeps
+        # the host's ROS 2 rclpy visible.
+        NATIVE_VENV="$PKG/rbnx-build/native-venv"
+        python3 -m venv --system-site-packages "$NATIVE_VENV"
+        PY="$NATIVE_VENV/bin/python"
+        echo "[build] jetson-native lite: venv $NATIVE_VENV ($("$PY" --version 2>&1))"
+        "$PY" -m pip install --upgrade pip --index-url "$PIP_IDX" || true
+        echo "[build] pip install -r $BASE_REQ"
+        "$PY" -m pip install -c "$ABI_REQ" -r "$BASE_REQ" --index-url "$PIP_IDX"
         PROTO_ROOT="$PKG/rbnx-build/codegen/proto_gen"
         MCP_ROOT="$PKG/rbnx-build/codegen/robonix_mcp_types"
         PYTHONPATH="$PROTO_ROOT:$MCP_ROOT" \
             "$PY" "$PKG/scripts/verify_python_codegen.py" \
             "$PROTO_ROOT" "$MCP_ROOT" \
-            "protobuf=6.33.6" \
-            "grpcio=1.80.0"
+            "protobuf>=6.33.6" \
+            "grpcio>=1.80.0"
         echo "[build] done (jetson-native lite; no torch import or perception deps)."
         exit 0
     fi
+
+    # No venv on purpose for the metric profiles. A --system-site-packages venv
+    # can't see the host JetPack torch (it's typically a `pip install --user` in
+    # ~/.local), and forcing the user-site onto PYTHONPATH drags shadowing shims
+    # (e.g. enum34) ahead of the stdlib and breaks the interpreter. The host
+    # python already has the correct sys.path order AND sees the JetPack torch —
+    # so install scene's light pure-python deps into the user site alongside it.
+    PY=python3
+    echo "[build] jetson-native: host python ($("$PY" --version 2>&1)), pip install --user"
+    "$PY" -m pip install --user --upgrade pip --index-url "$PIP_IDX" || true
+    echo "[build] pip install --user -r $BASE_REQ"
+    "$PY" -m pip install --user -c "$ABI_REQ" -r "$BASE_REQ" \
+        --index-url "$PIP_IDX"
 
     "$PY" -c "import torch" 2>/dev/null || {
         echo "[build] error: host python has no torch — install the JetPack CUDA" >&2
@@ -346,8 +359,8 @@ PY
     PYTHONPATH="$PROTO_ROOT:$MCP_ROOT" \
         "$PY" "$PKG/scripts/verify_python_codegen.py" \
         "$PROTO_ROOT" "$MCP_ROOT" \
-        "protobuf=6.33.6" \
-        "grpcio=1.80.0"
+        "protobuf>=6.33.6" \
+        "grpcio>=1.80.0"
 
     # Validate the visual CLIP checkpoint and freeze YOLO-World's text prompts
     # into a deployment checkpoint. clip-anytorch lives only in BAKE_DEPS and
