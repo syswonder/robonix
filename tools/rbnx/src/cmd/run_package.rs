@@ -275,7 +275,7 @@ fn build_deploy_manifest(
     // instead of being declared with an explicit `path:` / `url:`. The
     // builtin Rust binaries (atlas / executor / pilot / liaison / soma) are
     // shipped via `cargo install` and skipped here.
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "keystone", "pilot", "liaison", "soma"];
     if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
         let source_root = config.robonix_source_path.as_ref();
         for (key, _value) in map {

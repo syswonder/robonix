@@ -1,0 +1,11 @@
+string user_id
+string username
+string display_name
+string email
+bool enabled
+string[] roles
+bool voice_guard_enabled
+bool voiceprint_enrolled
+bool password_change_required
+uint64 created_at_ms
+uint64 updated_at_ms

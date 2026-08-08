@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/admin_reset_voiceprint"
+version = "1"
+kind = "service"
+idl = "keystone/srv/AdminResetVoiceprint.srv"
+description = "Remove another user's voiceprint binding as an administrator."
+
+[mode]
+type = "rpc"

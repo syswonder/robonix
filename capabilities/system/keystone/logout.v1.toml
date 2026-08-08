@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/logout"
+version = "1"
+kind = "service"
+idl = "keystone/srv/Logout.srv"
+description = "Revoke the current Robonix account session."
+
+[mode]
+type = "rpc"

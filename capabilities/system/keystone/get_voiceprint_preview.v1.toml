@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/get_voiceprint_preview"
+version = "1"
+kind = "service"
+idl = "keystone/srv/GetVoiceprintPreview.srv"
+description = "Return the current account's saved voiceprint preview sample."
+
+[mode]
+type = "rpc"

@@ -11,5 +11,6 @@ string  voiceprint_node_id      # ""
 string  tts_node_id             # ""
 string  speaker_node_id         # ""
 string  context_json            # extra fields merged into Task.context_json
+string  session_token           # opaque Keystone login session; never forwarded to Pilot
 ---
 liaison/VoiceEvent event        # streamed

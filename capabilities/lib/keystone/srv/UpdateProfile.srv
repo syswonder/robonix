@@ -1,0 +1,5 @@
+string session_token
+string display_name
+string email
+---
+keystone/User user

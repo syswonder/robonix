@@ -7,7 +7,7 @@
 # managed by uv from this same root.
 
 .PHONY: help build release install clean fmt check pyrightconfig \
-        build-atlas build-pilot build-executor build-liaison build-soma build-vitals
+        build-atlas build-pilot build-executor build-keystone build-liaison build-soma build-vitals
 .DEFAULT_GOAL := help
 
 BUILD_MODE ?= debug
@@ -22,6 +22,7 @@ help:
 	@echo "    make build-atlas     - Install robonix-atlas to ~/.cargo/bin"
 	@echo "    make build-pilot     - Install robonix-pilot to ~/.cargo/bin"
 	@echo "    make build-executor  - Install robonix-executor to ~/.cargo/bin"
+	@echo "    make build-keystone - Install robonix-keystone to ~/.cargo/bin"
 	@echo "    make build-liaison   - Install robonix-liaison to ~/.cargo/bin"
 	@echo "    make build-soma      - Install robonix-soma to ~/.cargo/bin"
 	@echo "    make build-vitals    - Install robonix-vitals to ~/.cargo/bin"
@@ -51,6 +52,9 @@ build-pilot:
 build-executor:
 	cargo install --force --path system/executor --bin robonix-executor $(CARGO_FLAGS)
 
+build-keystone:
+	cargo install --force --path system/keystone --bin robonix-keystone $(CARGO_FLAGS)
+
 build-liaison:
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)
 
@@ -72,6 +76,7 @@ install:
 	cargo install --force --path system/atlas    --bin robonix-atlas    $(CARGO_FLAGS)
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --force --path system/executor --bin robonix-executor $(CARGO_FLAGS)
+	cargo install --force --path system/keystone --bin robonix-keystone $(CARGO_FLAGS)
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)
 	cargo install --force --path system/soma     --bin robonix-soma     $(CARGO_FLAGS)
 	cargo install --force --path system/vitals   --bin robonix-vitals   $(CARGO_FLAGS)

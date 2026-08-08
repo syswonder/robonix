@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/keystone/list_users"
+version = "1"
+kind = "service"
+idl = "keystone/srv/ListUsers.srv"
+description = "List user accounts for an authenticated administrator."
+
+[mode]
+type = "rpc"

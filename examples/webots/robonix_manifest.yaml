@@ -13,6 +13,16 @@ system:
   atlas:
     listen: 0.0.0.0:50051
     log: info
+  keystone:
+    # robonix-client discovers Keystone through Atlas and connects directly.
+    listen: 0.0.0.0:50095
+    log: info
+    # Accounts belong to this robot, not to a disposable source checkout.
+    # Keep both the identity database and first-boot credential file outside
+    # rbnx-boot so rebuilding or testing from another worktree does not create
+    # a second, apparently empty user directory.
+    database: ${HOME}/.robonix/data/keystone.db
+    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
   # soma+scene layer
   scene:
     log: info
@@ -33,6 +43,7 @@ system:
   liaison:
     listen: 0.0.0.0:50081
     log: info
+    keystone_endpoint: 127.0.0.1:50095
     # Disabled until the operator enables it from robonix-client. The client
     # then supplies its persisted input/output provider selection; no client
     # address is stored in this deployment.

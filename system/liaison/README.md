@@ -1,8 +1,9 @@
 # robonix-liaison
 
-Liaison is the user-input gateway in front of Pilot. It exposes one text/API
-submission path and one push-to-talk voice path, normalises identity metadata,
-applies optional access policy, then forwards accepted tasks to Pilot.
+Liaison is the authenticated user-input gateway in front of Pilot. It exposes
+text, voice, hands-free, and Keystone account APIs, resolves the login session
+to a canonical account, applies per-user access policy, then forwards accepted
+tasks to Pilot.
 
 Liaison does not implement ASR, TTS, microphone capture, speaker output, or
 voiceprint itself. Those are separate providers discovered through Atlas.
@@ -16,8 +17,8 @@ User
   │     │
   │     ▼
   │   robonix/system/liaison/submit
-  │     │ normalize context_json.user_id
-  │     │ optional access check
+  │     │ authenticate session with Keystone
+  │     │ inject canonical account identity
   │     ▼
   │   Pilot SubmitTask
   │     │
@@ -31,9 +32,9 @@ User
         │
         ├─ robonix/primitive/audio/mic_stream
         ├─ robonix/service/speech/asr_stream
-        ├─ robonix/service/voiceprint/identify
-        ├─ voice access gate before Pilot/TTS/action
-        ├─ build pilot::Task with text + context_json.user_id/access
+        ├─ optional robonix/service/voiceprint/identify
+        ├─ Keystone voice guard before Pilot/TTS/action
+        ├─ build pilot::Task with canonical account context
         ├─ Pilot SubmitTask
         ├─ optional robonix/service/speech/tts
         ├─ optional speaker playback
@@ -48,30 +49,34 @@ User
   `PilotEvent` responses back to the caller.
 - `robonix/system/liaison/voice`: starts a voice session and streams
   `VoiceEvent` state, ASR, voiceprint, Pilot, and TTS progress.
+- `robonix/system/liaison/handsfree/*`: enables, observes, and disables the
+  robot-local wake-word loop. Enabling requires a live Keystone session.
+- `robonix.keystone.v1.Keystone/*`: account API proxied by Liaison so clients
+  do not need network access to Keystone's private listener.
 
-Both contracts are registered by the `liaison` provider id.
+The Liaison capability contracts are registered by the `liaison` provider id.
 
 ## Identity and access
 
-Pilot `Task` does not have a top-level `user_id` field. Liaison stores the
-normalised identity in `Task.context_json.user_id`:
+In a Keystone-enabled deployment, the client carries an opaque
+`context_json.session_token` for text tasks and a typed `session_token` for
+voice and hands-free RPCs. Liaison resolves it before opening audio devices or
+forwarding work. Client-supplied `user_id`, display name, and roles are never
+authorization inputs.
 
-- text/API path: defaults to `local:<os_user>` when absent,
-- voice path: uses `voice:<speaker_id>` from voiceprint when available.
+Accepted Pilot tasks contain canonical `user_id`, `username`, `display_name`,
+and `roles`. The session token itself is removed before forwarding to Pilot.
 
-When `ROBONIX_LIAISON_ACCESS_ENABLED=1`:
+Text turns require a valid account session and never require Voiceprint. For
+voice turns:
 
-- text/API tasks must carry, or be normalised to, a user id listed in
-  `ROBONIX_LIAISON_ALLOWED_USERS`;
-- voice turns may capture audio and run voiceprint first, but cannot enter
-  Pilot, TTS, or any robot action unless voiceprint identifies an enrolled
-  speaker above `ROBONIX_LIAISON_VOICE_THRESHOLD` and `voice:<speaker_id>` is
-  allowed;
-- a client-provided user hint is audit metadata only for the voice path and
-  cannot bypass voiceprint.
+- voice guard off: use the canonical login identity and skip Voiceprint;
+- voice guard on: Voiceprint must identify the same account above the
+  configured threshold, otherwise the turn ends before Pilot, TTS, or action.
 
-Accepted tasks also get `context_json.access` metadata so downstream logs can
-distinguish allow-list and voiceprint grants.
+When Liaison is intentionally deployed without `keystone_endpoint`, the
+existing `ROBONIX_LIAISON_ACCESS_*` allow-list policy remains available for
+backward compatibility.
 
 ## Mock mode
 
@@ -90,6 +95,7 @@ robonix-liaison
 |------|--------|------|
 | `ROBONIX_ATLAS` | `127.0.0.1:50051` | Atlas address |
 | `ROBONIX_PILOT_ENDPOINT` | `127.0.0.1:50071` | Pilot address |
+| `ROBONIX_KEYSTONE_ENDPOINT` | (unset) | Keystone address; when set, account authentication is mandatory |
 | `ROBONIX_LIAISON_PORT` | `50081` | Liaison listen port |
 | `ROBONIX_LIAISON_VOICE_MOCK` | (unset) | Set to `1` to skip real mic+ASR and use preset text |
 | `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `Hello, please introduce yourself.` | Text used in mock mode |
