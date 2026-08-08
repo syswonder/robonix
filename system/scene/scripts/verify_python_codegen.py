@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 from importlib.metadata import version
+from itertools import takewhile
 from pathlib import Path
 import sys
 
@@ -33,6 +34,42 @@ _REQUIRED_SCENE_DRIVER_GRPC_TYPES = (
 )
 
 
+def _release(raw: str) -> tuple[int, ...]:
+    """Parse a release version into comparable integer components."""
+    parts: list[int] = []
+    for component in raw.split("."):
+        digits = "".join(takewhile(str.isdigit, component))
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def _check_version(item: str) -> None:
+    """Assert one `name=version` (exact) or `name>=version` (floor) requirement.
+
+    The generator venv is pinned exactly, because a different protoc emits
+    different stubs. Runtime interpreters only need a floor: `_pb2_grpc.py` and
+    `_pb2.py` each enforce a *minimum* runtime, and pinning them exactly is what
+    made the uv workspace unsatisfiable against services/memory.
+    """
+    name, separator, expected = item.partition(">=")
+    if not separator:
+        name, separator, expected = item.partition("=")
+    if not separator or not name or not expected:
+        raise ValueError(f"invalid distribution version check: {item!r}")
+    actual = version(name)
+    if separator == ">=":
+        if _release(actual) < _release(expected):
+            raise RuntimeError(
+                f"Scene runtime requires {name}>={expected}; found {actual}"
+            )
+    elif actual != expected:
+        raise RuntimeError(
+            f"Scene codegen environment mismatch: {name} {actual} != {expected}"
+        )
+
+
 def _is_within(path: Path, root: Path) -> bool:
     """Return whether the resolved module path is inside its expected root."""
     try:
@@ -47,29 +84,15 @@ def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print(
             "usage: verify_python_codegen.py <proto-root> <mcp-root> "
-            "[distribution=version ...]",
+            "[distribution=version | distribution>=version ...]",
             file=sys.stderr,
         )
         return 2
 
     proto_root = Path(argv[1]).resolve()
     mcp_root = Path(argv[2]).resolve()
-    expected_versions: dict[str, str] = {}
     for item in argv[3:]:
-        name, separator, expected = item.partition("=")
-        if not separator or not name or not expected:
-            raise ValueError(f"invalid distribution version check: {item!r}")
-        expected_versions[name] = expected
-
-    actual_versions = {
-        distribution: version(distribution)
-        for distribution in expected_versions
-    }
-    if actual_versions != expected_versions:
-        raise RuntimeError(
-            f"Scene protobuf environment mismatch: "
-            f"{actual_versions} != {expected_versions}"
-        )
+        _check_version(item)
 
     expected_modules = {
         "map_pb2": proto_root,

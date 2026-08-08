@@ -34,10 +34,14 @@ dependencies = [
     "open3d>=0.18; platform_machine == 'x86_64' and python_version < '3.13'",
     "mcp",
     "fastmcp",
-    # Generated stubs from scripts/run_python_codegen.sh require these runtime
-    # versions. The protobuf compiler stays in its isolated codegen venv.
-    "grpcio==1.80.0",
-    "protobuf==6.33.6",
+    # Floors, not pins. `_pb2_grpc.py` enforces a *minimum* grpcio and `_pb2.py`
+    # a *minimum* protobuf at import, so these are the versions the stubs from
+    # scripts/run_python_codegen.sh need — not versions they need exclusively.
+    # Exact pins here made the uv workspace unsatisfiable against
+    # services/memory (grpcio>=1.81.1). The generator itself is pinned exactly,
+    # in its isolated codegen venv, which is where reproducibility belongs.
+    "grpcio>=1.80.0",
+    "protobuf>=6.33.6",
     "uvicorn",
     "httpx",
     "Pillow",
