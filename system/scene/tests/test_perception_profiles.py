@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Scene deployment-profile and perception-tuning contracts."""
 
+from dataclasses import fields
+
 import pytest
 
 from scene_service.ingest.perception_profiles import resolve_perception_profile
@@ -9,6 +11,8 @@ from scene_service.ingest.perception_tuning import (
     CANDIDATE_LABEL_ALIASES,
     CANDIDATE_SURFACE_SNAP_LABELS,
     PerceptionTuning,
+    _SCALARS,
+    _knob,
 )
 
 
@@ -48,6 +52,44 @@ def test_lite_profile_has_no_perception_model_path() -> None:
 def test_unknown_profile_is_rejected() -> None:
     with pytest.raises(ValueError, match="full, jetson, or lite"):
         resolve_perception_profile({"profile": "maximum"})
+
+
+def test_every_numeric_knob_is_range_checked() -> None:
+    """A knob with no range check is one a deployment can set to nonsense.
+
+    Most are covered by an interval in the `_SCALARS` table. The handful listed
+    here are profile-derived rather than config-derived, so `_validate_cross_field`
+    checks them against the resolved profile instead; anything outside both sets
+    would reach the detector unvalidated.
+    """
+    tabled = {_knob(entry)[0] for entry in _SCALARS}
+    profile_derived = {
+        "period_s",
+        "input_size",
+        "max_detections",
+        "stationary_refinement_input_size",
+        "stationary_refinement_max_detections",
+    }
+    numeric = {
+        field.name
+        for field in fields(PerceptionTuning)
+        if field.type in ("int", "float")
+    }
+    assert numeric - tabled - profile_derived == set()
+
+    for cfg, message in (
+        ({"period_s": 0.0}, "perception.period_s"),
+        ({"max_detections": 0}, "perception.max_detections"),
+        ({"input_size": 128}, "perception.input_size"),
+        (
+            {"stationary_refinement": {"input_size": 128}},
+            "perception.stationary_refinement.input_size",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message.replace(".", r"\.")):
+            PerceptionTuning.from_config(
+                cfg, profile=resolve_perception_profile(cfg)
+            )
 
 
 def test_label_correction_ships_scoped_to_nothing() -> None:
