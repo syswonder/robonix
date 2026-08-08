@@ -133,6 +133,22 @@ RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user 
 ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
 ```
 
+The **lite** native profile needs no torch, so it installs into its own
+`rbnx-build/native-venv` instead of the user site. That is also what makes it
+work on a Debian/Ubuntu system python, where PEP 668 rejects `pip install
+--user` with `error: externally-managed-environment`:
+
+```bash
+RBNX_BUILD_TARGET=jetson-native ROBONIX_SCENE_BUILD_PROFILE=lite \
+    bash scripts/build.sh                               # venv; no torch, no models
+ROBONIX_SCENE_FORCE=native SCENE_PERCEPTION_PROFILE=lite bash scripts/start.sh
+```
+
+`scripts/start_native.sh` picks up that venv automatically when it exists; set
+`SCENE_NATIVE_PYTHON` to override. The metric profiles keep the venv-free
+`pip --user` path on purpose — a venv cannot see a JetPack torch installed in
+`~/.local`.
+
 > Native scene uses the same ROS 2 RMW configuration as the host process. Set
 > `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
 > the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set
@@ -292,11 +308,9 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
-| `SCENE_CG_CROSS_CLASS_CENTROID_MAX_M` | `0.5` | per-tick class-gate bypass radius: a detection within this of an existing object may merge despite a different class label (handles YOLO label flicker on one fixture) |
-| `SCENE_CG_CROSS_CLASS_IOU_THRESH` / `SCENE_CG_CROSS_CLASS_OVERLAP_THRESH` | `0.30` / `0.50` | periodic class-agnostic collapse: fold two records when AABB IoU ≥ first **or** one-inside-other overlap ≥ second, regardless of class/visual sim. Lower to be more aggressive on a flickering desk (`chair` vs `table` split) |
 | `SCENE_CG_MERGE_OVERLAP_THRESH` / `SCENE_CG_MERGE_VISUAL_SIM_THRESH` | `0.50` / `0.65` | periodic `merge_overlap` pass: fold pairs with pcd-overlap ≥ first **and** CLIP cosine ≥ second |
-| `SCENE_CG_SAME_CLASS_MERGE_DIST_M` | `0.4` | lenient dedup: fold two SAME-class (or same `SCENE_CG_MERGE_CLASS_GROUPS` bucket) records whose centroids are within this distance, regardless of visual sim (kills "one keyboard → three"). `0` disables |
-| `SCENE_CG_MERGE_CLASS_GROUPS` | `` | opt-in confusable-class reconciliation, e.g. `chair,table,desk;sofa,couch` — listed classes share one merge bucket so label flicker across the group collapses while distinct, distant objects stay separate. Empty = off (never relabels) |
+| `SCENE_CG_ONE_TO_ONE_ASSOCIATION` | `true` | one detection binds at most one map object per frame; the losing pairs are counted in `/api/state` → `perception_quality.association` |
+| `SCENE_CG_CROSS_CLASS_*`, `SCENE_CG_SAME_CLASS_*`, `SCENE_CG_MERGE_CLASS_GROUPS` | — | **deprecated and ignored.** Scene identity is class-agnostic: a detector label is mutable semantic evidence, never an identity key, so geometry, observation history and visual similarity are the only association inputs. Setting any of them logs one warning at startup and changes nothing |
 | `SCENE_OBJECT_TTL_SEC` | `30` | how long a soft-evicted (`missing`) object is kept so a re-detection can re-bind its id + observation_count before it is hard-pruned; decouples object identity from per-tick uuid churn |
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
@@ -310,6 +324,57 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_MAP_META_DIR` | sibling `scene_maps/` of the annotations dir | epoch sidecar files pairing each saved map with the object-snapshot partition written at its Save (see "Map library") |
 | `SCENE_RESTORE_ON_START` | `false` | LEGACY mode: bind the startup map id, restore its objects at boot, and let the scene-graph builder persist continuously. Default off — a boot starts a fresh live session and objects are only persisted by an explicit Save |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
+
+## Tuning label correction
+
+Everything the perception pipeline reads lives in one validated record,
+`ingest/perception_tuning.py` → `PerceptionTuning`, built from the Driver
+`CMD_INIT` config's `perception` section. Out-of-range values fail the boot
+naming the offending path (`perception.geometry.max_bbox_extent_m must be
+greater than 0`) rather than being clamped silently, and `/api/state` →
+`perception_quality.tuning` reports every knob actually in force.
+
+Three label-correction mechanisms ship **scoped to nothing**, because the
+pipeline's measured F1 and label accuracy were taken with them off. Candidate
+scopes for each live in `perception_tuning.py` as `CANDIDATE_*` constants and
+are validated against the shipped vocabulary by the test suite. Adopt one by
+copying it into the config, then re-measure:
+
+```toml
+[perception.label.clip_rerank]
+# CLIP rescores a detection only within its own group, and only switches when
+# it clears both thresholds. Groups must be disjoint.
+groups = [
+    ["cabinet", "drawer", "dresser", "wardrobe"],
+    ["table", "desk", "workbench", "counter"],
+    { labels = ["cup", "mug", "glass", "paper cup"], min_margin = 0.08 },
+]
+min_score = 0.20
+min_margin = 0.04
+
+[perception.label]
+# Pure synonyms: collapse before voting so two spellings stop splitting one
+# object's label history.
+aliases = { sofa = "couch" }
+
+[perception.geometry.surface_snap]
+# Snap a partial front-face cloud onto the occupancy surface behind it.
+labels = ["cabinet", "wardrobe", "bookshelf", "refrigerator"]
+
+[perception.stationary_refinement]
+# Extra tiled detection passes while the robot is parked. Costs GPU time on
+# every interval — leave off on Jetson.
+enabled = false
+```
+
+A `route` is the asymmetric form: `routes = { window = ["window", "cabinet"] }`
+rescores detections currently labelled `window` against `cabinet` but not the
+reverse. A route source may not also belong to a symmetric group.
+
+Note what this does *not* fix: an object matched to the wrong *location*
+(a `cabinet` bound to a track 1.4 m away) is an association failure, not a label
+failure. Those gates are `perception.association.*` and the
+`SCENE_CG_ASSOCIATION_*` environment overrides.
 
 ## Object memory (Save/Load snapshots)
 
@@ -488,9 +553,9 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 **Lots of duplicate objects across the room ("ghosting")** — lower `SCENE_CG_MERGE_THRESHOLD` (default 0.55). Or raise `SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g. big tables) that span >1.5 m.
 
-**One physical object shows as several same-class records** (e.g. one keyboard → three) — raise `SCENE_CG_SAME_CLASS_MERGE_DIST_M` so the lenient same-class proximity collapse folds them; `0` disables it.
+**One physical object shows as several records** (e.g. one keyboard → three) — the duplicate collapse is class-agnostic and geometric. Raise `SCENE_CG_ASSOCIATION_MAX_EXTENT_RATIO` if the fragments differ a lot in size, or lower `SCENE_CG_ASSOCIATION_MIN_VISUAL_SIMILARITY` (default 0.65) if the fragments are seen from angles CLIP scores as different objects. Check `/api/state` → `perception_quality.association.recent_unmatched` for which gate rejected the pair.
 
-**One fixture flickers between two class labels and splits into two records** (e.g. a desk as both `chair` and `table`) — lower `SCENE_CG_CROSS_CLASS_IOU_THRESH` / `SCENE_CG_CROSS_CLASS_OVERLAP_THRESH` so the class-agnostic collapse merges them, or set `SCENE_CG_MERGE_CLASS_GROUPS=chair,table,desk` to treat those labels as one merge bucket.
+**One fixture flickers between two class labels** (e.g. a desk reported as both `chair` and `table`) — it no longer splits the record: association ignores labels entirely, so the two readings land on one object and the label vote picks a winner. If the *winner* keeps changing, raise `perception.label.min_winner_share` / `min_switch_observations`. If the winner is stable but wrong, see "Tuning label correction" above.
 
 **Object set collapses (e.g. 9 → 1) within minutes** — a transient cleanup cull used to hard-delete records and reset `observation_count`. Records are now soft-evicted (`missing`) and re-bound by class+pose on re-detection within `SCENE_OBJECT_TTL_SEC`; raise it if objects briefly leave view longer than 30 s.
 
