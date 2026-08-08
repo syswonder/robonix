@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 from collections import Counter
+from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,19 +51,11 @@ import numpy as np
 log = logging.getLogger("scene.ingest.cg")
 
 
+from .perception_tuning import PerceptionTuning
 from .perception_vlm import _CamIntrinsics, _canon_class
 from ..state.data_assoc import Detection
 from ..state.object_registry import BBox3D, ObjectRegistry, Pose3D, SceneObject
 
-
-# ── Open-vocab class list ────────────────────────────────────────────────
-# One build-owned vocabulary drives both runtime class resolution and the
-# checkpoint baker. Changing it therefore requires a package rebuild instead
-# of allocating YOLO-World's CLIP text tower during robot boot.
-_YOLO_CLASSES_PATH = (
-    Path(__file__).resolve().parents[2] / "docker" / "yolo_world_classes.json"
-)
-_DEFAULT_OPEN_VOCAB = json.loads(_YOLO_CLASSES_PATH.read_text(encoding="utf-8"))
 
 _BG_CLASSES = frozenset({"floor", "wall", "ceiling", "carpet"})
 
@@ -137,35 +130,6 @@ def _is_floor_noise_detection(label: str, points: Any) -> bool:
 
     rejected, _evidence = _floor_noise_detection_evidence(label, points)
     return rejected
-
-
-def _resolved_classes(
-    configured: Optional[list[str]] = None,
-    additional: Optional[list[str]] = None,
-) -> list[str]:
-    """Resolve the open-vocabulary prompt list with stable de-duplication.
-
-    Normal deployments use Driver config. ``SCENE_OPEN_VOCAB_CLASSES`` remains
-    a legacy full override only when no configured base list is supplied.
-    """
-    raw = (
-        os.environ.get("SCENE_OPEN_VOCAB_CLASSES", "").strip()
-        if configured is None and additional is None
-        else ""
-    )
-    if raw:
-        candidates = [s.strip() for s in raw.split(",") if s.strip()]
-    else:
-        candidates = list(configured or _DEFAULT_OPEN_VOCAB)
-        candidates.extend(additional or ())
-    out: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        label = str(candidate or "").strip().lower()
-        if label and label not in seen:
-            seen.add(label)
-            out.append(label)
-    return out
 
 
 def _label_evidence(
@@ -2371,103 +2335,14 @@ class ConceptGraphsDetector:
         camera_info_fetcher: Callable[[], Optional[_CamIntrinsics]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         registry: ObjectRegistry,
+        # Every perception knob, already range-checked by PerceptionTuning.
+        # Tests and the lite profile can leave it unset and take the defaults.
+        tuning: Optional[PerceptionTuning] = None,
         # Returns the current world frame id from the active localizer.
         # An empty result means spatial projection is not ready.
         world_frame_fn: Optional[Callable[[], str]] = None,
         robot_base_frame_fn: Optional[Callable[[], str]] = None,
-        period_s: float = 0.6,
         pose_max_age_s: float = 2.0,
-        visible_miss_threshold: int = 3,
-        visibility_depth_margin_m: float = 0.10,
-        visibility_min_clear_samples: int = 3,
-        visibility_min_clear_fraction: float = 0.60,
-        visibility_max_projected_samples: int = 25,
-        visibility_upper_sample_fraction: float = 0.70,
-        visibility_min_depth_margin_m: float = 0.015,
-        visibility_extent_margin_scale: float = 0.30,
-        object_ttl_s: float = 30.0,
-        confirmation_min_unique_frames: int = 2,
-        confirmation_singleton_min_mean_confidence: float = 0.0,
-        mask_erosion_px: int = 1,
-        min_depth_m: float = 0.15,
-        max_depth_m: float = 6.0,
-        depth_mad_scale: float = 3.5,
-        depth_min_band_m: float = 0.12,
-        frame_dbscan: bool = True,
-        scale_aware_geometry: bool = True,
-        scale_min_voxel_size_m: float = 0.01,
-        scale_min_points_floor: int = 8,
-        scale_transition_extent_m: float = 0.30,
-        scale_voxel_extent_factor: float = 0.30,
-        stationary_refinement: bool = False,
-        stationary_refinement_min_stationary_s: float = 2.0,
-        stationary_refinement_interval_s: float = 30.0,
-        stationary_refinement_translation_m: float = 0.03,
-        stationary_refinement_rotation_deg: float = 2.0,
-        stationary_refinement_grid_size: int = 2,
-        stationary_refinement_overlap_fraction: float = 0.20,
-        stationary_refinement_input_size: int = 640,
-        stationary_refinement_edge_margin_px: int = 4,
-        stationary_refinement_duplicate_iou: float = 0.50,
-        stationary_refinement_max_detections: int = 8,
-        require_occupancy_bounds: bool = True,
-        map_bounds_margin_m: float = 0.25,
-        map_max_outside_fraction: float = 0.20,
-        bbox_low_percentile: float = 5.0,
-        bbox_high_percentile: float = 95.0,
-        max_bbox_extent_m: float = 3.0,
-        rebase_map_corrections: Optional[bool] = None,
-        surface_snap_labels: Optional[list[str]] = None,
-        surface_snap_max_distance_m: float = 0.60,
-        surface_snap_tangent_padding_m: float = 0.25,
-        surface_snap_min_shift_m: float = 0.05,
-        surface_snap_min_support_cells: int = 30,
-        surface_snap_min_dominant_share: float = 0.55,
-        surface_snap_min_tangent_coverage: float = 0.50,
-        surface_snap_occupancy_threshold: int = 50,
-        classes: Optional[list[str]] = None,
-        additional_classes: Optional[list[str]] = None,
-        label_history_size: int = 20,
-        label_min_switch_observations: int = 2,
-        label_min_winner_share: float = 0.55,
-        label_switch_margin: float = 0.15,
-        label_aliases: Optional[dict[str, str]] = None,
-        clip_rerank_groups: Optional[list[list[str]]] = None,
-        clip_rerank_routes: Optional[dict[str, list[str]]] = None,
-        clip_rerank_prompts: Optional[dict[str, list[str]]] = None,
-        clip_rerank_min_score: float = 0.20,
-        clip_rerank_min_margin: float = 0.04,
-        clip_rerank_min_margin_by_label: Optional[dict[str, float]] = None,
-        clip_rerank_geometry_bonus: float = 0.0,
-        clip_rerank_geometry_constraints: Optional[
-            dict[str, dict[str, Any]]
-        ] = None,
-        allow_cross_class_merge: Optional[bool] = None,
-        confusable_class_groups: Optional[list[list[str]]] = None,
-        exact_duplicate_centroid_max_m: float = 0.15,
-        exact_duplicate_min_voxel_coverage: float = 0.40,
-        exact_duplicate_max_extent_ratio: float = 1.50,
-        coobserved_duplicate_min_shared_frames: int = 3,
-        coobserved_duplicate_min_median_iou: float = 0.85,
-        coobserved_duplicate_max_extent_ratio: float = 2.0,
-        coobserved_duplicate_min_visual_similarity: float = 0.90,
-        identity_rebind_max_distance_m: float = 0.45,
-        association_min_spatial_similarity: float = 0.03,
-        association_min_visual_similarity: float = 0.65,
-        association_max_extent_ratio: float = 8.0,
-        association_adaptive_extent_scale: float = 0.45,
-        association_cleanup_interval_ticks: int = 10,
-        confidence_threshold: float = 0.30,
-        max_detections: int = 30,
-        profile: str = "full",
-        input_size: int = 640,
-        inference_precision: str = "auto",
-        tensor_rt_mode: str = "off",
-        tensor_rt_cache_dir: str = "/opt/models/runtime-cache",
-        yolo_weights_path: Optional[str] = None,
-        sam_weights_path: Optional[str] = None,
-        clip_model_name: Optional[str] = None,
-        clip_pretrained: Optional[str] = None,
         cfg_overrides: Optional[dict] = None,
         # `hub` exposes the Atlas-selected ROS2 contract slots used to
         # compose the camera-to-world transform.
@@ -2478,228 +2353,141 @@ class ConceptGraphsDetector:
         # Soma's live footprint base frame is preferred when available.
         base_frame: Optional[str] = None,
     ) -> None:
+        """Wire the detector to its I/O callables and its validated tuning.
+
+        Everything the perception algorithm reads lives on `tuning`; the rest is
+        deployment wiring — ROS message fetchers, the registry to project into,
+        and the frames the camera-to-world transform chain asserts.
+        """
+        t = tuning or PerceptionTuning()
+        self._tuning = t
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
         self._cam_info = camera_info_fetcher
         self._on_dets = on_detections
         self._registry = registry
-        self._period_s = period_s
-        self._conf_thresh = confidence_threshold
-        self._max_dets = max_detections
-        self._profile = str(profile).strip().lower()
-        self._input_size = max(320, int(input_size))
-        self._requested_inference_precision = str(
-            inference_precision
-        ).strip().lower()
-        self._tensor_rt_mode = str(tensor_rt_mode).strip().lower()
-        self._tensor_rt_cache_dir = str(tensor_rt_cache_dir).strip()
-        self._yolo_weights = yolo_weights_path
-        self._sam_weights = sam_weights_path
-        self._clip_model_name = clip_model_name
-        self._clip_pretrained = clip_pretrained
         self._hub = hub
         self._camera_frame = camera_frame
         self._base_frame = (base_frame or "").strip().lstrip("/")
         self._world_frame_fn = world_frame_fn or (lambda: "")
         self._robot_base_frame_fn = robot_base_frame_fn or (lambda: "")
         self._pose_max_age_s = max(0.0, float(pose_max_age_s))
-        self._visible_miss_threshold = max(1, int(visible_miss_threshold))
-        self._visibility_depth_margin_m = max(
-            0.0,
-            float(visibility_depth_margin_m),
+
+        # Flat mirrors of the tuning record. The per-frame kernels read these
+        # hundreds of times per tick and the short names keep those call sites
+        # readable; PerceptionTuning has already range-checked every value, so
+        # nothing is re-clamped here.
+        self._period_s = t.period_s
+        self._conf_thresh = t.confidence_threshold
+        self._max_dets = t.max_detections
+        self._profile = t.profile
+        self._input_size = t.input_size
+        self._requested_inference_precision = t.inference_precision
+        self._tensor_rt_mode = t.tensor_rt_mode
+        self._tensor_rt_cache_dir = t.tensor_rt_cache_dir
+        self._yolo_weights = t.yolo_weights_path
+        self._sam_weights = t.sam_weights_path
+        self._clip_model_name = t.clip_model_name
+        self._clip_pretrained = t.clip_pretrained
+        self._visible_miss_threshold = t.visible_miss_threshold
+        self._visibility_depth_margin_m = t.visibility_depth_margin_m
+        self._visibility_min_clear_samples = t.visibility_min_clear_samples
+        self._visibility_min_clear_fraction = t.visibility_min_clear_fraction
+        self._visibility_max_projected_samples = (
+            t.visibility_max_projected_samples
         )
-        self._visibility_min_clear_samples = max(
-            1,
-            int(visibility_min_clear_samples),
+        self._visibility_upper_sample_fraction = (
+            t.visibility_upper_sample_fraction
         )
-        self._visibility_min_clear_fraction = max(
-            0.0,
-            min(1.0, float(visibility_min_clear_fraction)),
+        self._visibility_min_depth_margin_m = t.visibility_min_depth_margin_m
+        self._visibility_extent_margin_scale = t.visibility_extent_margin_scale
+        self._object_ttl_s = t.object_ttl_s
+        self._confirmation_min_unique_frames = t.confirmation_min_unique_frames
+        self._confirmation_singleton_min_mean_confidence = (
+            t.confirmation_singleton_min_mean_confidence
         )
-        self._visibility_max_projected_samples = max(
-            self._visibility_min_clear_samples,
-            int(visibility_max_projected_samples),
+        self._mask_erosion_px = t.mask_erosion_px
+        self._min_depth_m = t.min_depth_m
+        self._max_depth_m = t.max_depth_m
+        self._depth_mad_scale = t.depth_mad_scale
+        self._depth_min_band_m = t.depth_min_band_m
+        self._frame_dbscan = t.frame_dbscan
+        self._scale_aware_geometry = t.scale_aware_geometry
+        self._scale_min_voxel_size_m = t.scale_min_voxel_size_m
+        self._scale_min_points_floor = t.scale_min_points_floor
+        self._scale_transition_extent_m = t.scale_transition_extent_m
+        self._scale_voxel_extent_factor = t.scale_voxel_extent_factor
+        self._stationary_refinement = t.stationary_refinement
+        self._stationary_refinement_min_stationary_s = (
+            t.stationary_refinement_min_stationary_s
         )
-        self._visibility_upper_sample_fraction = max(
-            0.0,
-            min(1.0, float(visibility_upper_sample_fraction)),
+        self._stationary_refinement_interval_s = (
+            t.stationary_refinement_interval_s
         )
-        self._visibility_min_depth_margin_m = max(
-            0.0,
-            float(visibility_min_depth_margin_m),
-        )
-        self._visibility_extent_margin_scale = max(
-            0.0,
-            float(visibility_extent_margin_scale),
-        )
-        self._object_ttl_s = max(0.0, float(object_ttl_s))
-        self._confirmation_min_unique_frames = max(
-            1,
-            int(confirmation_min_unique_frames),
-        )
-        self._confirmation_singleton_min_mean_confidence = max(
-            0.0,
-            min(
-                1.0,
-                float(confirmation_singleton_min_mean_confidence),
-            ),
-        )
-        self._mask_erosion_px = max(0, int(mask_erosion_px))
-        self._min_depth_m = max(0.0, float(min_depth_m))
-        self._max_depth_m = max(self._min_depth_m, float(max_depth_m))
-        self._depth_mad_scale = max(0.0, float(depth_mad_scale))
-        self._depth_min_band_m = max(0.0, float(depth_min_band_m))
-        self._frame_dbscan = bool(frame_dbscan)
-        self._scale_aware_geometry = bool(scale_aware_geometry)
-        self._scale_min_voxel_size_m = max(
-            1e-4,
-            float(scale_min_voxel_size_m),
-        )
-        self._scale_min_points_floor = max(1, int(scale_min_points_floor))
-        self._scale_transition_extent_m = max(
-            1e-4,
-            float(scale_transition_extent_m),
-        )
-        self._scale_voxel_extent_factor = max(
-            0.0,
-            float(scale_voxel_extent_factor),
-        )
-        self._stationary_refinement = bool(stationary_refinement)
-        self._stationary_refinement_min_stationary_s = max(
-            0.0,
-            float(stationary_refinement_min_stationary_s),
-        )
-        self._stationary_refinement_interval_s = max(
-            self._period_s,
-            float(stationary_refinement_interval_s),
-        )
-        self._stationary_refinement_translation_m = max(
-            0.0,
-            float(stationary_refinement_translation_m),
+        self._stationary_refinement_translation_m = (
+            t.stationary_refinement_translation_m
         )
         self._stationary_refinement_rotation_rad = math.radians(
-            max(0.0, float(stationary_refinement_rotation_deg))
+            t.stationary_refinement_rotation_deg
         )
-        self._stationary_refinement_grid_size = max(
-            1,
-            int(stationary_refinement_grid_size),
+        self._stationary_refinement_grid_size = t.stationary_refinement_grid_size
+        self._stationary_refinement_overlap_fraction = (
+            t.stationary_refinement_overlap_fraction
         )
-        self._stationary_refinement_overlap_fraction = max(
-            0.0,
-            min(0.80, float(stationary_refinement_overlap_fraction)),
+        self._stationary_refinement_input_size = (
+            t.stationary_refinement_input_size
         )
-        self._stationary_refinement_input_size = max(
-            320,
-            int(stationary_refinement_input_size),
+        self._stationary_refinement_edge_margin_px = (
+            t.stationary_refinement_edge_margin_px
         )
-        self._stationary_refinement_edge_margin_px = max(
-            0,
-            int(stationary_refinement_edge_margin_px),
+        self._stationary_refinement_duplicate_iou = (
+            t.stationary_refinement_duplicate_iou
         )
-        self._stationary_refinement_duplicate_iou = max(
-            0.0,
-            min(1.0, float(stationary_refinement_duplicate_iou)),
+        self._stationary_refinement_max_detections = (
+            t.stationary_refinement_max_detections
         )
-        self._stationary_refinement_max_detections = max(
-            0,
-            int(stationary_refinement_max_detections),
+        self._require_occupancy_bounds = t.require_occupancy_bounds
+        self._map_bounds_margin_m = t.map_bounds_margin_m
+        self._map_max_outside_fraction = t.map_max_outside_fraction
+        self._bbox_low_percentile = t.bbox_low_percentile
+        self._bbox_high_percentile = t.bbox_high_percentile
+        self._max_bbox_extent_m = t.max_bbox_extent_m
+        self._surface_snap_labels = set(t.surface_snap_labels)
+        self._surface_snap_max_distance_m = t.surface_snap_max_distance_m
+        self._surface_snap_tangent_padding_m = t.surface_snap_tangent_padding_m
+        self._surface_snap_min_shift_m = t.surface_snap_min_shift_m
+        self._surface_snap_min_support_cells = t.surface_snap_min_support_cells
+        self._surface_snap_min_dominant_share = (
+            t.surface_snap_min_dominant_share
         )
-        self._require_occupancy_bounds = bool(require_occupancy_bounds)
-        self._map_bounds_margin_m = max(0.0, float(map_bounds_margin_m))
-        self._map_max_outside_fraction = max(
-            0.0,
-            min(1.0, float(map_max_outside_fraction)),
+        self._surface_snap_min_tangent_coverage = (
+            t.surface_snap_min_tangent_coverage
         )
-        self._bbox_low_percentile = max(
-            0.0,
-            min(100.0, float(bbox_low_percentile)),
+        self._surface_snap_occupancy_threshold = (
+            t.surface_snap_occupancy_threshold
         )
-        self._bbox_high_percentile = max(
-            self._bbox_low_percentile,
-            min(100.0, float(bbox_high_percentile)),
+        self._label_history_size = t.label_history_size
+        self._label_min_switch_observations = t.label_min_switch_observations
+        self._label_min_winner_share = t.label_min_winner_share
+        self._label_switch_margin = t.label_switch_margin
+        self._exact_duplicate_centroid_max_m = t.exact_duplicate_centroid_max_m
+        self._exact_duplicate_min_voxel_coverage = (
+            t.exact_duplicate_min_voxel_coverage
         )
-        self._max_bbox_extent_m = max(0.05, float(max_bbox_extent_m))
-        if rebase_map_corrections is not None:
-            log.warning(
-                "rebase_map_corrections is deprecated and ignored; "
-                "historical map-frame geometry is immutable"
-            )
-        self._surface_snap_labels = {
-            str(label).strip().lower()
-            for label in (surface_snap_labels or ())
-            if str(label).strip()
-        }
-        self._surface_snap_max_distance_m = max(
-            0.0,
-            float(surface_snap_max_distance_m),
+        self._exact_duplicate_max_extent_ratio = (
+            t.exact_duplicate_max_extent_ratio
         )
-        self._surface_snap_tangent_padding_m = max(
-            0.0,
-            float(surface_snap_tangent_padding_m),
+        self._coobserved_duplicate_min_shared_frames = (
+            t.coobserved_duplicate_min_shared_frames
         )
-        self._surface_snap_min_shift_m = max(
-            0.0,
-            float(surface_snap_min_shift_m),
+        self._coobserved_duplicate_min_median_iou = (
+            t.coobserved_duplicate_min_median_iou
         )
-        self._surface_snap_min_support_cells = max(
-            1,
-            int(surface_snap_min_support_cells),
+        self._coobserved_duplicate_max_extent_ratio = (
+            t.coobserved_duplicate_max_extent_ratio
         )
-        self._surface_snap_min_dominant_share = max(
-            0.0,
-            min(1.0, float(surface_snap_min_dominant_share)),
-        )
-        self._surface_snap_min_tangent_coverage = max(
-            0.0,
-            min(1.0, float(surface_snap_min_tangent_coverage)),
-        )
-        self._surface_snap_occupancy_threshold = max(
-            1,
-            min(100, int(surface_snap_occupancy_threshold)),
-        )
-        self._label_history_size = max(1, int(label_history_size))
-        self._label_min_switch_observations = max(
-            1,
-            int(label_min_switch_observations),
-        )
-        self._label_min_winner_share = max(
-            0.0,
-            min(1.0, float(label_min_winner_share)),
-        )
-        self._label_switch_margin = max(
-            0.0,
-            min(1.0, float(label_switch_margin)),
-        )
-        self._exact_duplicate_centroid_max_m = max(
-            0.0,
-            float(exact_duplicate_centroid_max_m),
-        )
-        self._exact_duplicate_min_voxel_coverage = max(
-            0.0,
-            min(1.0, float(exact_duplicate_min_voxel_coverage)),
-        )
-        self._exact_duplicate_max_extent_ratio = max(
-            1.0,
-            float(exact_duplicate_max_extent_ratio),
-        )
-        self._coobserved_duplicate_min_shared_frames = max(
-            1,
-            int(coobserved_duplicate_min_shared_frames),
-        )
-        self._coobserved_duplicate_min_median_iou = max(
-            0.0,
-            min(1.0, float(coobserved_duplicate_min_median_iou)),
-        )
-        self._coobserved_duplicate_max_extent_ratio = max(
-            1.0,
-            float(coobserved_duplicate_max_extent_ratio),
-        )
-        self._coobserved_duplicate_min_visual_similarity = max(
-            -1.0,
-            min(
-                1.0,
-                float(coobserved_duplicate_min_visual_similarity),
-            ),
+        self._coobserved_duplicate_min_visual_similarity = (
+            t.coobserved_duplicate_min_visual_similarity
         )
 
         self._yolo: Any = None
@@ -2732,294 +2520,49 @@ class ConceptGraphsDetector:
         self._periodic_object_cleanup_plan: list[dict[str, Any]] = []
         self._periodic_cleanup_input_state: dict[str, dict[str, str]] = {}
         self._periodic_cleanup_recent: list[dict[str, Any]] = []
-        self._classes = _resolved_classes(classes, additional_classes)
-        if not self._classes:
-            raise ValueError("open-vocabulary class list must not be empty")
-        unknown_surface_snap_labels = (
-            self._surface_snap_labels - set(self._classes)
-        )
-        if unknown_surface_snap_labels:
-            raise ValueError(
-                "surface snap labels reference labels outside the resolved "
-                "vocabulary: "
-                + ", ".join(sorted(unknown_surface_snap_labels))
-            )
+        self._classes = t.resolved_classes
         self._class_index = {
             label: index for index, label in enumerate(self._classes)
         }
-        self._label_aliases = {
-            str(alias).strip().lower(): str(canonical).strip().lower()
-            for alias, canonical in (label_aliases or {}).items()
-            if str(alias).strip()
-            and str(canonical).strip()
-            and str(alias).strip().lower() != str(canonical).strip().lower()
-        }
-        unknown_alias_labels = (
-            set(self._label_aliases) | set(self._label_aliases.values())
-        ) - set(self._classes)
-        if unknown_alias_labels:
-            raise ValueError(
-                "label aliases reference labels outside the resolved vocabulary: "
-                + ", ".join(sorted(unknown_alias_labels))
-            )
-        chained_aliases = set(self._label_aliases.values()) & set(self._label_aliases)
-        if chained_aliases:
-            raise ValueError(
-                "label alias targets must be canonical, not another alias: "
-                + ", ".join(sorted(chained_aliases))
-            )
+        self._label_aliases = dict(t.label_aliases)
         self._clip_rerank_groups = [
-            tuple(
-                dict.fromkeys(
-                    str(label).strip().lower()
-                    for label in group
-                    if str(label).strip()
-                )
-            )
-            for group in (clip_rerank_groups or ())
+            tuple(group) for group in t.clip_rerank_groups
         ]
-        if any(len(group) < 2 for group in self._clip_rerank_groups):
-            raise ValueError(
-                "each CLIP rerank group must contain at least two distinct "
-                "non-empty labels"
-            )
-        flattened_clip_labels = [
-            label
-            for group in self._clip_rerank_groups
-            for label in group
-        ]
-        unknown_clip_labels = set(flattened_clip_labels) - set(self._classes)
-        if unknown_clip_labels:
-            raise ValueError(
-                "CLIP rerank groups reference labels outside the resolved "
-                "vocabulary: "
-                + ", ".join(sorted(unknown_clip_labels))
-            )
-        repeated_clip_labels = {
-            label
-            for label in flattened_clip_labels
-            if flattened_clip_labels.count(label) > 1
-        }
-        if repeated_clip_labels:
-            raise ValueError(
-                "CLIP rerank labels may appear in only one group: "
-                + ", ".join(sorted(repeated_clip_labels))
-            )
         self._clip_rerank_group_by_label = {
             label: group
             for group in self._clip_rerank_groups
             for label in group
         }
         self._clip_rerank_routes = {
-            str(source).strip().lower(): tuple(
-                dict.fromkeys(
-                    str(label).strip().lower()
-                    for label in labels
-                    if str(label).strip()
-                )
-            )
-            for source, labels in (clip_rerank_routes or {}).items()
-            if str(source).strip()
+            source: tuple(labels)
+            for source, labels in t.clip_rerank_routes.items()
         }
-        invalid_clip_routes = {
-            source
-            for source, labels in self._clip_rerank_routes.items()
-            if len(labels) < 2 or source not in labels
-        }
-        if invalid_clip_routes:
-            raise ValueError(
-                "each CLIP rerank route must contain its source and at least "
-                "one alternative label: "
-                + ", ".join(sorted(invalid_clip_routes))
-            )
-        ambiguous_clip_sources = (
-            set(self._clip_rerank_routes)
-            & set(self._clip_rerank_group_by_label)
-        )
-        if ambiguous_clip_sources:
-            raise ValueError(
-                "CLIP rerank route sources must not also belong to symmetric "
-                "groups: " + ", ".join(sorted(ambiguous_clip_sources))
-            )
-        configured_clip_labels = set(flattened_clip_labels)
-        configured_clip_labels.update(
-            label
-            for labels in self._clip_rerank_routes.values()
-            for label in labels
-        )
-        unknown_route_labels = configured_clip_labels - set(self._classes)
-        if unknown_route_labels:
-            raise ValueError(
-                "CLIP rerank scopes reference labels outside the resolved "
-                "vocabulary: " + ", ".join(sorted(unknown_route_labels))
-            )
+        # One lookup for both scope kinds: a symmetric group maps every member
+        # to the whole group, a route maps only its source to its alternatives.
         self._clip_rerank_candidates_by_label = {
             **self._clip_rerank_group_by_label,
             **self._clip_rerank_routes,
         }
         self._clip_rerank_prompts = {
-            str(label).strip().lower(): tuple(
-                str(prompt).strip()
-                for prompt in prompts
-                if str(prompt).strip()
-            )
-            for label, prompts in (clip_rerank_prompts or {}).items()
+            label: tuple(prompts)
+            for label, prompts in t.clip_rerank_prompts.items()
         }
-        unknown_prompt_labels = (
-            set(self._clip_rerank_prompts)
-            - configured_clip_labels
+        self._clip_rerank_min_score = t.clip_rerank_min_score
+        self._clip_rerank_min_margin = t.clip_rerank_min_margin
+        self._clip_rerank_min_margin_by_label = dict(
+            t.clip_rerank_min_margin_by_label
         )
-        if unknown_prompt_labels:
-            raise ValueError(
-                "CLIP rerank prompts reference labels outside the configured "
-                "groups or routes: "
-                + ", ".join(sorted(unknown_prompt_labels))
-            )
-        empty_prompt_labels = {
-            label
-            for label, prompts in self._clip_rerank_prompts.items()
-            if not prompts
-        }
-        if empty_prompt_labels:
-            raise ValueError(
-                "CLIP rerank prompt lists must not be empty: "
-                + ", ".join(sorted(empty_prompt_labels))
-            )
-        self._clip_rerank_min_score = max(
-            -1.0, min(1.0, float(clip_rerank_min_score))
-        )
-        self._clip_rerank_min_margin = max(
-            0.0, min(2.0, float(clip_rerank_min_margin))
-        )
-        self._clip_rerank_min_margin_by_label = {
-            str(label).strip().lower(): float(margin)
-            for label, margin in (
-                clip_rerank_min_margin_by_label or {}
-            ).items()
-            if str(label).strip()
-        }
-        unknown_margin_labels = (
-            set(self._clip_rerank_min_margin_by_label)
-            - set(self._clip_rerank_candidates_by_label)
-        )
-        if unknown_margin_labels:
-            raise ValueError(
-                "CLIP rerank margin overrides reference labels outside "
-                "configured groups or route sources: "
-                + ", ".join(sorted(unknown_margin_labels))
-            )
-        invalid_margins = {
-            label
-            for label, margin in self._clip_rerank_min_margin_by_label.items()
-            if not math.isfinite(margin) or not 0.0 <= margin <= 2.0
-        }
-        if invalid_margins:
-            raise ValueError(
-                "CLIP rerank margin overrides must be finite values in "
-                "[0, 2]: " + ", ".join(sorted(invalid_margins))
-            )
-        self._clip_rerank_geometry_bonus = float(
-            clip_rerank_geometry_bonus
-        )
-        if not math.isfinite(self._clip_rerank_geometry_bonus) or not (
-            0.0 <= self._clip_rerank_geometry_bonus <= 2.0
-        ):
-            raise ValueError(
-                "CLIP rerank persistent geometry score bonus must be finite "
-                "and in [0, 2]"
-            )
+        self._clip_rerank_geometry_bonus = t.clip_rerank_geometry_bonus
         self._clip_rerank_geometry_constraints = {
-            str(label).strip().lower(): {
-                str(key): (
-                    [
-                        str(source).strip().lower()
-                        for source in value
-                        if str(source).strip()
-                    ]
-                    if str(key) == "source_labels"
-                    else float(value)
-                )
-                for key, value in constraints.items()
-            }
-            for label, constraints in (
-                clip_rerank_geometry_constraints or {}
-            ).items()
-            if str(label).strip()
+            label: dict(constraints)
+            for label, constraints in t.clip_rerank_geometry_constraints.items()
         }
-        unknown_geometry_labels = (
-            set(self._clip_rerank_geometry_constraints)
-            - configured_clip_labels
-        )
-        if unknown_geometry_labels:
-            raise ValueError(
-                "CLIP rerank persistent geometry constraints reference "
-                "labels outside configured groups or routes: "
-                + ", ".join(sorted(unknown_geometry_labels))
-            )
-        allowed_geometry_keys = {
-            "source_labels",
-            "min_horizontal_extent_m",
-            "max_horizontal_extent_m",
-        }
-        for label, constraints in self._clip_rerank_geometry_constraints.items():
-            unknown_keys = set(constraints) - allowed_geometry_keys
-            if unknown_keys:
-                raise ValueError(
-                    "CLIP rerank persistent geometry constraints contain "
-                    "unknown keys: " + ", ".join(sorted(unknown_keys))
-                )
-            source_labels = constraints.get("source_labels")
-            if source_labels is not None and (
-                not isinstance(source_labels, list) or not source_labels
-            ):
-                raise ValueError(
-                    "CLIP rerank persistent geometry source_labels must be "
-                    "a non-empty list"
-                )
-            if source_labels is not None:
-                unreachable_sources = sorted(
-                    source
-                    for source in source_labels
-                    if label not in self._clip_rerank_candidates_by_label.get(
-                        source,
-                        (),
-                    )
-                )
-                if unreachable_sources:
-                    raise ValueError(
-                        "CLIP rerank persistent geometry source labels cannot "
-                        f"reach candidate {label!r}: "
-                        + ", ".join(unreachable_sources)
-                    )
-            metric_constraints = {
-                key: value
-                for key, value in constraints.items()
-                if key != "source_labels"
-            }
-            if not metric_constraints or any(
-                not math.isfinite(value) or value <= 0.0
-                for value in metric_constraints.values()
-            ):
-                raise ValueError(
-                    "CLIP rerank persistent geometry extents must be finite "
-                    f"positive metres for label {label!r}"
-                )
-            minimum = constraints.get("min_horizontal_extent_m")
-            maximum = constraints.get("max_horizontal_extent_m")
-            if (
-                minimum is not None
-                and maximum is not None
-                and minimum > maximum
-            ):
-                raise ValueError(
-                    "CLIP rerank persistent geometry minimum must not exceed "
-                    f"maximum for label {label!r}"
-                )
         self._clip_rerank_text_features: dict[str, np.ndarray] = {}
         self._clip_rerank_recent: list[dict[str, Any]] = []
+        # Counters from the periodic merge's own decision path — candidates
+        # considered, pairs selected, pairs the physical gate rejected. Filled
+        # by `_apply_periodic_merge_plan_locked`, not by a separate pass.
         self._merge_gate_diagnostics: dict[str, Any] = {}
-        self._coobserved_merge_admissions: list[dict[str, Any]] = []
-        self._coobserved_merge_events: list[dict[str, Any]] = []
         self._floor_noise_rejections_by_label: dict[str, int] = {}
         self._floor_noise_rejections_recent: list[dict[str, Any]] = []
         self._association_recent: list[dict[str, Any]] = []
@@ -3057,29 +2600,21 @@ class ConceptGraphsDetector:
         self.cfg = dict(_CFG_DEFAULTS)
         self.cfg.update(
             {
-                "identity_rebind_max_distance_m": max(
-                    0.0,
-                    float(identity_rebind_max_distance_m),
+                "identity_rebind_max_distance_m": (
+                    t.identity_rebind_max_distance_m
                 ),
-                "association_min_spatial_similarity": max(
-                    0.0,
-                    min(1.0, float(association_min_spatial_similarity)),
+                "association_min_spatial_similarity": (
+                    t.association_min_spatial_similarity
                 ),
-                "association_min_visual_similarity": max(
-                    -1.0,
-                    min(1.0, float(association_min_visual_similarity)),
+                "association_min_visual_similarity": (
+                    t.association_min_visual_similarity
                 ),
-                "association_max_extent_ratio": max(
-                    1.0,
-                    float(association_max_extent_ratio),
+                "association_max_extent_ratio": t.association_max_extent_ratio,
+                "adaptive_merge_extent_scale": (
+                    t.association_adaptive_extent_scale
                 ),
-                "adaptive_merge_extent_scale": max(
-                    0.0,
-                    float(association_adaptive_extent_scale),
-                ),
-                "merge_overlap_interval_ticks": max(
-                    1,
-                    int(association_cleanup_interval_ticks),
+                "merge_overlap_interval_ticks": (
+                    t.association_cleanup_interval_ticks
                 ),
             }
         )
@@ -3284,10 +2819,10 @@ class ConceptGraphsDetector:
             except ValueError:
                 pass
         # A detector label is mutable semantic evidence, never an identity
-        # key. Keep accepting the two legacy knobs so old manifests still
-        # boot, but ignore them rather than silently restoring class-gated
-        # association. Geometry, observation history and visual evidence are
-        # the only identity inputs.
+        # key. The legacy environment knobs below are still recognised so an
+        # old deployment boots, but they are ignored rather than silently
+        # restoring class-gated association. Geometry, observation history and
+        # visual evidence are the only identity inputs.
         legacy_identity_envs = tuple(
             name
             for name in (
@@ -3308,19 +2843,11 @@ class ConceptGraphsDetector:
             )
             if os.environ.get(name, "").strip()
         )
-        if (
-            allow_cross_class_merge is not None
-            or confusable_class_groups is not None
-            or legacy_identity_envs
-        ):
+        if legacy_identity_envs:
             log.warning(
-                "class-gated Scene identity configuration is deprecated "
-                "and ignored; identity is class-agnostic%s",
-                (
-                    f" (environment: {', '.join(legacy_identity_envs)})"
-                    if legacy_identity_envs
-                    else ""
-                ),
+                "class-gated Scene identity configuration is deprecated and "
+                "ignored; identity is class-agnostic (environment: %s)",
+                ", ".join(legacy_identity_envs),
             )
 
     async def start(self) -> None:
@@ -3686,8 +3213,6 @@ class ConceptGraphsDetector:
             getattr(self, "_floor_noise_rejections_by_label", {}).clear()
             getattr(self, "_floor_noise_rejections_recent", []).clear()
             self._merge_gate_diagnostics = {}
-            self._coobserved_merge_admissions = []
-            getattr(self, "_coobserved_merge_events", []).clear()
             getattr(self, "_association_recent", []).clear()
             getattr(self, "_association_unmatched_recent", []).clear()
             getattr(self, "_current_frame_duplicate_recent", []).clear()
@@ -3975,383 +3500,113 @@ class ConceptGraphsDetector:
             return None
 
     def quality_metrics(self) -> dict[str, Any]:
-        """Return cumulative admission counters for operator/CI reporting."""
-        provisional_count = 0
-        persistent_clip_count = 0
-        persistent_vlm_count = 0
-        unconfirmed_candidate_count = 0
-        confirmed_candidate_count = 0
-        if self._map_objects is not None:
-            provisional_count = sum(
-                bool(obj.get("label_provisional", True))
-                for obj in self._map_objects
-            )
-            persistent_clip_count = sum(
-                str(obj.get("label_source", "") or "") == "model_clip"
-                for obj in self._map_objects
-            )
-            persistent_vlm_count = sum(
-                str(obj.get("label_source", "") or "") == "model_vlm"
-                for obj in self._map_objects
-            )
-            confirmation_min = int(
-                getattr(self, "_confirmation_min_unique_frames", 1)
-            )
-            singleton_confidence = float(
-                getattr(
-                    self,
-                    "_confirmation_singleton_min_mean_confidence",
-                    0.0,
-                )
-            )
-            unconfirmed_candidate_count = sum(
-                not _object_confirmation_status(
-                    obj,
-                    min_unique_frames=confirmation_min,
-                    singleton_min_mean_confidence=singleton_confidence,
-                )[3]
-                for obj in self._map_objects
-            )
-            confirmed_candidate_count = (
-                len(self._map_objects) - unconfirmed_candidate_count
-            )
+        """Return cumulative counters, live map statistics, and effective config.
+
+        Served on `/api/state` for operator and CI reporting. Configuration is
+        reported wholesale from the validated tuning record rather than a
+        hand-picked subset, so a knob can never be tuned but invisible here.
+        Bounded `recent` tails are deep-copied because the caller serialises
+        them after releasing the tick lock.
+        """
+        provisional = 0
+        clip_named = 0
+        vlm_named = 0
+        unconfirmed = 0
+        objects = self._map_objects or ()
+        for obj in objects:
+            provisional += bool(obj.get("label_provisional", True))
+            source = str(obj.get("label_source", "") or "")
+            clip_named += source == "model_clip"
+            vlm_named += source == "model_vlm"
+            unconfirmed += not _object_confirmation_status(
+                obj,
+                min_unique_frames=self._confirmation_min_unique_frames,
+                singleton_min_mean_confidence=(
+                    self._confirmation_singleton_min_mean_confidence
+                ),
+            )[3]
+        # `resolved_classes` is ~100 labels of build-owned vocabulary; report
+        # its size rather than repeating it on every poll.
+        tuning = asdict(self._tuning)
+        tuning["resolved_class_count"] = len(tuning.pop("resolved_classes"))
         return {
-            **dict(getattr(self, "_quality_counters", {})),
-            "require_occupancy_bounds": bool(
-                getattr(self, "_require_occupancy_bounds", False)
-            ),
-            "frame_dbscan": bool(getattr(self, "_frame_dbscan", False)),
-            "scale_aware_geometry": {
-                "enabled": bool(
-                    getattr(self, "_scale_aware_geometry", False)
-                ),
-                "min_voxel_size_m": float(
-                    getattr(self, "_scale_min_voxel_size_m", 0.0)
-                ),
-                "min_points_floor": int(
-                    getattr(self, "_scale_min_points_floor", 0)
-                ),
-                "transition_extent_m": float(
-                    getattr(self, "_scale_transition_extent_m", 0.0)
-                ),
-                "voxel_extent_factor": float(
-                    getattr(self, "_scale_voxel_extent_factor", 0.0)
-                ),
-            },
-            "stationary_refinement": {
-                "enabled": bool(
-                    getattr(self, "_stationary_refinement", False)
-                ),
-                "min_stationary_s": float(
-                    getattr(
-                        self,
-                        "_stationary_refinement_min_stationary_s",
-                        0.0,
-                    )
-                ),
-                "interval_s": float(
-                    getattr(
-                        self,
-                        "_stationary_refinement_interval_s",
-                        0.0,
-                    )
-                ),
-                "translation_threshold_m": float(
-                    getattr(
-                        self,
-                        "_stationary_refinement_translation_m",
-                        0.0,
-                    )
-                ),
-                "rotation_threshold_deg": math.degrees(
-                    float(
-                        getattr(
-                            self,
-                            "_stationary_refinement_rotation_rad",
-                            0.0,
-                        )
-                    )
-                ),
-                "grid_size": int(
-                    getattr(
-                        self,
-                        "_stationary_refinement_grid_size",
-                        1,
-                    )
-                ),
-                "overlap_fraction": float(
-                    getattr(
-                        self,
-                        "_stationary_refinement_overlap_fraction",
-                        0.0,
-                    )
-                ),
-                "input_size": int(
-                    getattr(
-                        self,
-                        "_stationary_refinement_input_size",
-                        0,
-                    )
-                ),
-                "max_supplemental_detections": int(
-                    getattr(
-                        self,
-                        "_stationary_refinement_max_detections",
-                        0,
-                    )
-                ),
-            },
-            "depth_range_m": [
-                float(getattr(self, "_min_depth_m", 0.0)),
-                float(getattr(self, "_max_depth_m", 0.0)),
-            ],
-            "confidence_threshold": float(
-                getattr(self, "_conf_thresh", 0.0)
-            ),
-            "perception_profile": str(
-                getattr(self, "_profile", "full")
-            ),
-            "inference_input_size": int(
-                getattr(self, "_input_size", 0)
-            ),
-            "inference_precision": str(
-                getattr(self, "_inference_precision", "fp32")
-            ),
-            "acceleration": copy.deepcopy(
-                getattr(self, "_acceleration", {})
-            ),
-            "max_detections": int(getattr(self, "_max_dets", 0)),
-            "max_bbox_extent_m": float(
-                getattr(self, "_max_bbox_extent_m", 0.0)
-            ),
-            "transform_source_counts": dict(
-                getattr(self, "_transform_source_counts", {})
-            ),
-            "last_transform_source": str(
-                getattr(self, "_last_transform_source", "")
-            ),
-            "last_camera_to_world_pose": dict(
-                getattr(self, "_last_camera_to_world_pose", {})
-            ),
+            **self._quality_counters,
+            "tuning": tuning,
+            "identity_uses_class_labels": False,
+            # Resolved at model-load time, so it is runtime state rather than
+            # tuning: `inference_precision` may differ from what was requested.
+            "inference_precision": self._inference_precision,
+            "acceleration": copy.deepcopy(self._acceleration),
+            "label_provisional_objects": provisional,
+            "unconfirmed_candidate_objects": unconfirmed,
+            "confirmed_candidate_objects": len(objects) - unconfirmed,
+            "clip_rerank_persistent_objects": clip_named,
+            "vlm_named_objects": vlm_named,
+            "clip_rerank_ready_label_count": len(self._clip_rerank_text_features),
+            "clip_rerank_recent": copy.deepcopy(self._clip_rerank_recent),
+            "transform_source_counts": dict(self._transform_source_counts),
+            "last_transform_source": self._last_transform_source,
+            "last_camera_to_world_pose": dict(self._last_camera_to_world_pose),
             "last_observation_transform_evidence": copy.deepcopy(
-                getattr(
-                    self,
-                    "_last_observation_transform_evidence",
-                    {},
-                )
+                self._last_observation_transform_evidence
             ),
             "transform_evidence_recent": copy.deepcopy(
-                getattr(self, "_transform_evidence_recent", [])[-16:]
+                self._transform_evidence_recent[-16:]
             ),
-            "last_rgb_depth_skew_s": getattr(
-                self, "_last_rgb_depth_skew_s", None
-            ),
-            "max_rgb_depth_skew_s": float(
-                getattr(self, "_max_rgb_depth_skew_s", 0.0)
-            ),
-            "map_bounds_margin_m": float(
-                getattr(self, "_map_bounds_margin_m", 0.0)
-            ),
-            "label_provisional_objects": provisional_count,
-            "confirmation_min_unique_frames": int(
-                getattr(self, "_confirmation_min_unique_frames", 1)
-            ),
-            "confirmation_singleton_min_mean_confidence": float(
-                getattr(
-                    self,
-                    "_confirmation_singleton_min_mean_confidence",
-                    0.0,
-                )
-            ),
-            "unconfirmed_candidate_objects": unconfirmed_candidate_count,
-            "confirmed_candidate_objects": confirmed_candidate_count,
-            "clip_rerank_persistent_objects": persistent_clip_count,
-            "vlm_named_objects": persistent_vlm_count,
-            "label_history_size": int(
-                getattr(self, "_label_history_size", 0)
-            ),
-            "identity_uses_class_labels": False,
+            "last_rgb_depth_skew_s": self._last_rgb_depth_skew_s,
+            "max_rgb_depth_skew_s": self._max_rgb_depth_skew_s,
+            # The association gates live on `cfg`, not on the tuning record:
+            # SCENE_CG_* environment overrides and `cfg_overrides` can move them
+            # after construction, so report what is actually in force.
             "association": {
-                "one_to_one": bool(
-                    getattr(self, "cfg", {}).get(
-                        "one_to_one_association",
-                        False,
-                    )
-                ),
-                "adaptive_distance": bool(
-                    getattr(self, "cfg", {}).get(
-                        "adaptive_merge_distance",
-                        False,
-                    )
-                ),
+                "one_to_one": bool(self.cfg["one_to_one_association"]),
+                "adaptive_distance": bool(self.cfg["adaptive_merge_distance"]),
                 "identity_rebind_max_distance_m": float(
-                    getattr(self, "cfg", {}).get(
-                        "identity_rebind_max_distance_m",
-                        0.0,
-                    )
+                    self.cfg["identity_rebind_max_distance_m"]
                 ),
                 "min_spatial_similarity": float(
-                    getattr(self, "cfg", {}).get(
-                        "association_min_spatial_similarity",
-                        0.0,
-                    )
+                    self.cfg["association_min_spatial_similarity"]
                 ),
                 "min_visual_similarity": float(
-                    getattr(self, "cfg", {}).get(
-                        "association_min_visual_similarity",
-                        -1.0,
-                    )
+                    self.cfg["association_min_visual_similarity"]
                 ),
                 "max_extent_ratio": float(
-                    getattr(self, "cfg", {}).get(
-                        "association_max_extent_ratio",
-                        1.0,
-                    )
+                    self.cfg["association_max_extent_ratio"]
                 ),
-                "global_max_distance_m": float(
-                    getattr(self, "cfg", {}).get("max_merge_dist_m", 0.0)
-                ),
+                "global_max_distance_m": float(self.cfg["max_merge_dist_m"]),
                 "adaptive_min_distance_m": float(
-                    getattr(self, "cfg", {}).get(
-                        "adaptive_merge_min_dist_m",
-                        0.0,
-                    )
+                    self.cfg["adaptive_merge_min_dist_m"]
                 ),
                 "adaptive_extent_scale": float(
-                    getattr(self, "cfg", {}).get(
-                        "adaptive_merge_extent_scale",
-                        0.0,
-                    )
+                    self.cfg["adaptive_merge_extent_scale"]
                 ),
-                "recent_matches": copy.deepcopy(
-                    getattr(self, "_association_recent", [])[-32:]
-                ),
+                "recent_matches": copy.deepcopy(self._association_recent[-32:]),
                 "recent_unmatched": copy.deepcopy(
-                    getattr(self, "_association_unmatched_recent", [])[-512:]
+                    self._association_unmatched_recent[-512:]
                 ),
                 "recent_current_frame_merges": copy.deepcopy(
-                    getattr(self, "_current_frame_duplicate_recent", [])[-128:]
+                    self._current_frame_duplicate_recent[-128:]
                 ),
             },
-            "clip_rerank_group_count": len(
-                getattr(self, "_clip_rerank_groups", ())
-            ),
-            "clip_rerank_route_count": len(
-                getattr(self, "_clip_rerank_routes", {})
-            ),
-            "clip_rerank_ready_label_count": len(
-                getattr(self, "_clip_rerank_text_features", {})
-            ),
-            "clip_rerank_min_score": float(
-                getattr(self, "_clip_rerank_min_score", 0.0)
-            ),
-            "clip_rerank_min_margin": float(
-                getattr(self, "_clip_rerank_min_margin", 0.0)
-            ),
-            "clip_rerank_min_margin_by_label": copy.deepcopy(
-                getattr(self, "_clip_rerank_min_margin_by_label", {})
-            ),
-            "clip_rerank_persistent_geometry": {
-                "score_bonus": float(
-                    getattr(self, "_clip_rerank_geometry_bonus", 0.0)
-                ),
-                "labels": copy.deepcopy(
-                    getattr(
-                        self,
-                        "_clip_rerank_geometry_constraints",
-                        {},
-                    )
-                ),
-            },
-            "clip_rerank_recent": copy.deepcopy(
-                getattr(self, "_clip_rerank_recent", ())
-            ),
-            "surface_snap": {
-                "labels": sorted(
-                    getattr(self, "_surface_snap_labels", ())
-                ),
-                "max_distance_m": float(
-                    getattr(self, "_surface_snap_max_distance_m", 0.0)
-                ),
-                "tangent_padding_m": float(
-                    getattr(self, "_surface_snap_tangent_padding_m", 0.0)
-                ),
-                "min_shift_m": float(
-                    getattr(self, "_surface_snap_min_shift_m", 0.0)
-                ),
-                "min_support_cells": int(
-                    getattr(self, "_surface_snap_min_support_cells", 0)
-                ),
-                "min_dominant_share": float(
-                    getattr(
-                        self,
-                        "_surface_snap_min_dominant_share",
-                        0.0,
-                    )
-                ),
-                "min_tangent_coverage": float(
-                    getattr(
-                        self,
-                        "_surface_snap_min_tangent_coverage",
-                        0.0,
-                    )
-                ),
-                "occupancy_threshold": int(
-                    getattr(
-                        self,
-                        "_surface_snap_occupancy_threshold",
-                        0,
-                    )
-                ),
-                "recent": copy.deepcopy(
-                    getattr(self, "_surface_snap_recent", ())
-                ),
-            },
+            "surface_snap_recent": copy.deepcopy(self._surface_snap_recent),
             "floor_noise_filter": {
                 "rejections_by_label": dict(
-                    sorted(
-                        getattr(
-                            self,
-                            "_floor_noise_rejections_by_label",
-                            {},
-                        ).items()
-                    )
+                    sorted(self._floor_noise_rejections_by_label.items())
                 ),
-                "recent": copy.deepcopy(
-                    getattr(self, "_floor_noise_rejections_recent", ())
-                ),
+                "recent": copy.deepcopy(self._floor_noise_rejections_recent),
             },
-            "merge_gate_diagnostics": {
-                **copy.deepcopy(
-                    getattr(self, "_merge_gate_diagnostics", {})
-                ),
-                "recent_coobserved_merge_events": copy.deepcopy(
-                    getattr(self, "_coobserved_merge_events", ())
-                ),
-            },
+            "merge_gate_diagnostics": copy.deepcopy(
+                self._merge_gate_diagnostics
+            ),
             "periodic_cleanup": {
-                "map_generation": int(
-                    getattr(self, "_map_generation", 0)
+                "map_generation": self._map_generation,
+                "in_flight": self._cleanup_future is not None,
+                "registry_projection_pending": (
+                    self._cleanup_registry_projection_pending
                 ),
-                "in_flight": bool(
-                    getattr(self, "_cleanup_future", None) is not None
-                ),
-                "registry_projection_pending": bool(
-                    getattr(
-                        self,
-                        "_cleanup_registry_projection_pending",
-                        False,
-                    )
-                ),
-                "stale_streak": int(
-                    getattr(self, "_cleanup_stale_streak", 0)
-                ),
-                "not_before_tick": int(
-                    getattr(self, "_cleanup_not_before_tick", 0)
-                ),
-                "recent": copy.deepcopy(
-                    getattr(self, "_periodic_cleanup_recent", ())
-                ),
+                "stale_streak": self._cleanup_stale_streak,
+                "not_before_tick": self._cleanup_not_before_tick,
+                "recent": copy.deepcopy(self._periodic_cleanup_recent),
             },
         }
 
@@ -4723,11 +3978,6 @@ class ConceptGraphsDetector:
         with self._inference_lock:
             self._tick_locked()
 
-    def _association_compatible(self, left: str, right: str) -> bool:
-        """Compatibility shim: mutable labels never gate physical identity."""
-        del left, right
-        return True
-
     def _exact_duplicate_geometry_matrices(
         self,
         objects_a,
@@ -4865,534 +4115,6 @@ class ConceptGraphsDetector:
                 if symmetric:
                     result[j, i] = True
         return result, coverage_result
-
-    def _exact_duplicate_geometry_matrix(
-        self,
-        objects_a,
-        objects_b=None,
-        **thresholds,
-    ):
-        """Return the admissibility mask from
-        :meth:`_exact_duplicate_geometry_matrices`.
-
-        The split helper keeps the original boolean API for tests and callers,
-        while the association path also consumes the measured tolerant voxel
-        coverage as its ConceptGraphs spatial score. Without that score, a
-        cross-view pair may pass the physical-identity gate but still fail the
-        upstream merge because exact voxel intersection is near zero.
-        """
-        result, _coverage = self._exact_duplicate_geometry_matrices(
-            objects_a,
-            objects_b,
-            **thresholds,
-        )
-        return result
-
-    def _record_merge_gate_diagnostics(
-        self,
-        objects,
-        *,
-        overlap_matrix: np.ndarray,
-        exact_duplicates: np.ndarray,
-        tolerant_coverage: np.ndarray,
-    ) -> None:
-        """Snapshot why nearby ConceptGraphs tracks do or do not merge.
-
-        This is observation only: it never changes the matrices handed to
-        ConceptGraphs. Details are bounded so `/api/state` remains small.
-        """
-        rows: list[dict[str, Any]] = []
-        counts = {
-            "nearby_pairs": 0,
-            "label_match_pairs": 0,
-            "exact_duplicate_pairs": 0,
-            "overlap_gate_pairs": 0,
-            "visual_gate_pairs": 0,
-            "canonical_eligible_pairs": 0,
-            "coobserved_pairs": 0,
-            "disjoint_frame_history_pairs": 0,
-            "coobserved_high_2d_overlap_pairs": 0,
-            "coobserved_duplicate_pairs": 0,
-        }
-        max_distance = float(self.cfg["max_merge_dist_m"])
-        overlap_threshold = float(self.cfg["merge_overlap_thresh"])
-        visual_threshold = float(self.cfg["merge_visual_sim_thresh"])
-        centroid_threshold = float(self._exact_duplicate_centroid_max_m)
-        coverage_threshold = float(self._exact_duplicate_min_voxel_coverage)
-        extent_threshold = float(self._exact_duplicate_max_extent_ratio)
-        coobserved_min_frames = int(
-            self._coobserved_duplicate_min_shared_frames
-        )
-        coobserved_min_iou = float(
-            self._coobserved_duplicate_min_median_iou
-        )
-        coobserved_extent_threshold = float(
-            self._coobserved_duplicate_max_extent_ratio
-        )
-        coobserved_visual_threshold = float(
-            self._coobserved_duplicate_min_visual_similarity
-        )
-
-        def geometry(obj):
-            try:
-                points = np.asarray(obj["pcd"].points, dtype=np.float64)
-            except (KeyError, TypeError, ValueError):
-                return None
-            points = points[
-                np.all(np.isfinite(points), axis=1)
-            ] if points.ndim == 2 and points.shape[1:] == (3,) else np.empty(
-                (0, 3), dtype=np.float64
-            )
-            if points.shape[0] < 4:
-                return None
-            low = np.percentile(points, 5.0, axis=0)
-            high = np.percentile(points, 95.0, axis=0)
-            return (
-                (low + high) * 0.5,
-                np.maximum(
-                    high - low,
-                    float(self.cfg["downsample_voxel_size"]),
-                ),
-            )
-
-        def clip_cosine(left, right) -> Optional[float]:
-            try:
-                a = np.asarray(left["clip_ft"].detach().cpu(), dtype=float)
-                b = np.asarray(right["clip_ft"].detach().cpu(), dtype=float)
-            except AttributeError:
-                try:
-                    a = np.asarray(left["clip_ft"], dtype=float)
-                    b = np.asarray(right["clip_ft"], dtype=float)
-                except (KeyError, TypeError, ValueError):
-                    return None
-            a = a.reshape(-1)
-            b = b.reshape(-1)
-            denom = float(np.linalg.norm(a) * np.linalg.norm(b))
-            return None if denom <= 1e-12 else float(np.dot(a, b) / denom)
-
-        def bbox_iou(left_box, right_box) -> float:
-            lx0, ly0, lx1, ly1 = left_box
-            rx0, ry0, rx1, ry1 = right_box
-            intersection = max(0.0, min(lx1, rx1) - max(lx0, rx0)) * max(
-                0.0,
-                min(ly1, ry1) - max(ly0, ry0),
-            )
-            left_area = max(0.0, lx1 - lx0) * max(0.0, ly1 - ly0)
-            right_area = max(0.0, rx1 - rx0) * max(0.0, ry1 - ry0)
-            union = left_area + right_area - intersection
-            return intersection / union if union > 1e-9 else 0.0
-
-        def shared_frame_box_ious(
-            left,
-            right,
-        ) -> list[tuple[int, float]]:
-            left_by_frame: dict[int, list[list[float]]] = {}
-            right_by_frame: dict[int, list[list[float]]] = {}
-            for item in _bounded_observation_history(
-                left,
-                self._classes,
-                limit=256,
-            ):
-                left_by_frame.setdefault(item["frame"], []).append(
-                    item["bbox_xyxy"]
-                )
-            for item in _bounded_observation_history(
-                right,
-                self._classes,
-                limit=256,
-            ):
-                right_by_frame.setdefault(item["frame"], []).append(
-                    item["bbox_xyxy"]
-                )
-            result: list[tuple[int, float]] = []
-            for frame in sorted(left_by_frame.keys() & right_by_frame.keys()):
-                result.append(
-                    (
-                        frame,
-                        max(
-                            bbox_iou(left_box, right_box)
-                            for left_box in left_by_frame[frame]
-                            for right_box in right_by_frame[frame]
-                        ),
-                    )
-                )
-            return result
-
-        stats = [geometry(obj) for obj in objects]
-        for i, left in enumerate(objects):
-            if stats[i] is None:
-                continue
-            for j in range(i + 1, len(objects)):
-                if stats[j] is None:
-                    continue
-                right = objects[j]
-                center_distance = float(
-                    np.linalg.norm(stats[i][0] - stats[j][0])
-                )
-                if center_distance > max_distance:
-                    continue
-                counts["nearby_pairs"] += 1
-                extent_ratio = float(
-                    np.max(
-                        np.maximum(
-                            stats[i][1] / stats[j][1],
-                            stats[j][1] / stats[i][1],
-                        )
-                    )
-                )
-                coverage = float(tolerant_coverage[i, j])
-                coverage_evaluated = (
-                    center_distance <= centroid_threshold
-                    and extent_ratio <= extent_threshold
-                )
-                overlap = float(overlap_matrix[i, j])
-                visual = clip_cosine(left, right)
-                labels_match = (
-                    str(left.get("class_name", "")).strip().lower()
-                    == str(right.get("class_name", "")).strip().lower()
-                )
-                exact = bool(exact_duplicates[i, j])
-                left_frames = {
-                    int(value)
-                    for value in list(left.get("image_idx", ()) or ())
-                    if isinstance(value, (int, np.integer))
-                }
-                right_frames = {
-                    int(value)
-                    for value in list(right.get("image_idx", ()) or ())
-                    if isinstance(value, (int, np.integer))
-                }
-                shared_frames = left_frames & right_frames
-                shared_2d_evidence = shared_frame_box_ious(left, right)
-                shared_2d_ious = [
-                    value for _frame, value in shared_2d_evidence
-                ]
-                max_shared_2d_iou = (
-                    max(shared_2d_ious) if shared_2d_ious else 0.0
-                )
-                median_shared_2d_iou = (
-                    float(np.median(shared_2d_ious))
-                    if shared_2d_ious
-                    else 0.0
-                )
-                overlap_pass = overlap > overlap_threshold
-                visual_pass = visual is not None and visual > visual_threshold
-                coobserved_duplicate = bool(
-                    len(shared_frames) >= coobserved_min_frames
-                    and median_shared_2d_iou >= coobserved_min_iou
-                    and center_distance <= centroid_threshold
-                    and extent_ratio <= coobserved_extent_threshold
-                    and overlap_pass
-                    and visual is not None
-                    and visual >= coobserved_visual_threshold
-                )
-                eligible = (
-                    (overlap_pass or exact)
-                    and visual_pass
-                )
-                counts["label_match_pairs"] += int(labels_match)
-                counts["exact_duplicate_pairs"] += int(exact)
-                counts["overlap_gate_pairs"] += int(overlap_pass)
-                counts["visual_gate_pairs"] += int(visual_pass)
-                counts["canonical_eligible_pairs"] += int(eligible)
-                counts["coobserved_pairs"] += int(bool(shared_frames))
-                counts["disjoint_frame_history_pairs"] += int(
-                    bool(left_frames)
-                    and bool(right_frames)
-                    and not shared_frames
-                )
-                counts["coobserved_high_2d_overlap_pairs"] += int(
-                    max_shared_2d_iou >= 0.70
-                )
-                counts["coobserved_duplicate_pairs"] += int(
-                    coobserved_duplicate
-                )
-                reasons = []
-                if not overlap_pass and not exact:
-                    reasons.append("spatial_overlap")
-                if not visual_pass:
-                    reasons.append("visual_similarity")
-                rows.append(
-                    {
-                        "left_index": i,
-                        "right_index": j,
-                        "left": str(left.get("class_name", "")),
-                        "right": str(right.get("class_name", "")),
-                        "left_uuid": str(left.get("id", "") or ""),
-                        "right_uuid": str(right.get("id", "") or ""),
-                        "left_registry_id": self._uuid_to_oid.get(
-                            str(left.get("id", "") or "")
-                        ),
-                        "right_registry_id": self._uuid_to_oid.get(
-                            str(right.get("id", "") or "")
-                        ),
-                        "center_distance_m": round(center_distance, 4),
-                        "max_extent_ratio": round(extent_ratio, 4),
-                        "tolerant_voxel_coverage": round(coverage, 4),
-                        "tolerant_voxel_coverage_evaluated": bool(
-                            coverage_evaluated
-                        ),
-                        "voxel_overlap": round(overlap, 4),
-                        "clip_cosine": (
-                            None if visual is None else round(visual, 4)
-                        ),
-                        "labels_match": bool(labels_match),
-                        "left_frame_count": len(left_frames),
-                        "right_frame_count": len(right_frames),
-                        "shared_frame_count": len(shared_frames),
-                        "coobserved": bool(shared_frames),
-                        "max_shared_frame_2d_iou": round(
-                            max_shared_2d_iou,
-                            4,
-                        ),
-                        "median_shared_frame_2d_iou": round(
-                            median_shared_2d_iou,
-                            4,
-                        ),
-                        "shared_frame_2d_iou_evidence": [
-                            {
-                                "frame": frame,
-                                "iou": round(value, 4),
-                            }
-                            for frame, value in shared_2d_evidence[-8:]
-                        ],
-                        "exact_duplicate": exact,
-                        "coobserved_duplicate": coobserved_duplicate,
-                        "canonical_eligible": bool(eligible),
-                        "rejected_by": reasons,
-                    }
-                )
-        rows.sort(
-            key=lambda row: (
-                row["canonical_eligible"],
-                max(row["voxel_overlap"], row["tolerant_voxel_coverage"]),
-                -row["center_distance_m"],
-            ),
-            reverse=True,
-        )
-        self._coobserved_merge_admissions = [
-            copy.deepcopy(row)
-            for row in rows
-            if row["coobserved_duplicate"]
-        ][:32]
-        self._merge_gate_diagnostics = {
-            **counts,
-            "thresholds": {
-                "max_merge_distance_m": max_distance,
-                "duplicate_centroid_m": centroid_threshold,
-                "duplicate_coverage": coverage_threshold,
-                "duplicate_extent_ratio": extent_threshold,
-                "coobserved_min_shared_frames": coobserved_min_frames,
-                "coobserved_min_median_2d_iou": coobserved_min_iou,
-                "coobserved_max_extent_ratio": (
-                    coobserved_extent_threshold
-                ),
-                "coobserved_min_visual_similarity": (
-                    coobserved_visual_threshold
-                ),
-                "overlap": overlap_threshold,
-                "visual_similarity": visual_threshold,
-            },
-            "candidate_pairs": rows[:32],
-        }
-        return None
-
-    def _snapshot_coobserved_merge_admissions(
-        self,
-        objects,
-        *,
-        selected_pairs: np.ndarray | None = None,
-    ) -> list[dict[str, Any]]:
-        """Freeze admitted-pair evidence before ConceptGraphs mutates objects."""
-        snapshots: list[dict[str, Any]] = []
-        for row in getattr(self, "_coobserved_merge_admissions", ()):
-            i = int(row.get("left_index", -1))
-            j = int(row.get("right_index", -1))
-            if not (0 <= i < len(objects) and 0 <= j < len(objects)):
-                continue
-            if (
-                selected_pairs is not None
-                and not bool(selected_pairs[i, j])
-            ):
-                continue
-            left = objects[i]
-            right = objects[j]
-            snapshot = copy.deepcopy(row)
-            snapshot.update(
-                {
-                    "left_image_idx": [
-                        int(value)
-                        for value in list(left.get("image_idx", ()) or ())
-                        if isinstance(value, (int, np.integer))
-                    ],
-                    "right_image_idx": [
-                        int(value)
-                        for value in list(right.get("image_idx", ()) or ())
-                        if isinstance(value, (int, np.integer))
-                    ],
-                    "left_num_detections": int(
-                        left.get(
-                            "num_detections",
-                            len(left.get("class_id", ()) or ()),
-                        )
-                    ),
-                    "right_num_detections": int(
-                        right.get(
-                            "num_detections",
-                            len(right.get("class_id", ()) or ()),
-                        )
-                    ),
-                }
-            )
-            snapshots.append(snapshot)
-        return snapshots
-
-    def _record_coobserved_merge_outcomes(
-        self,
-        admissions: list[dict[str, Any]],
-        *,
-        merged_objects,
-        index_updates,
-        pre_count: int,
-    ) -> None:
-        """Record whether each admitted pair was actually fused upstream.
-
-        A disappearing index alone is ambiguous: it could have merged into a
-        third object. Confirmation therefore requires the surviving UUID to
-        contain *exactly* the multiset union of both pre-merge ``image_idx``
-        histories and exactly their summed ``num_detections``. A strict
-        superset proves that the canonical call performed an unadmitted
-        transitive merge and must never be reported as a confirmed pair.
-        """
-        if not admissions:
-            return
-        post_by_uuid = {
-            str(obj.get("id", "") or ""): obj for obj in merged_objects
-        }
-        updates = list(index_updates or ())
-        events: list[dict[str, Any]] = []
-        for admission in admissions:
-            left_index = int(admission["left_index"])
-            right_index = int(admission["right_index"])
-            left_uuid = str(admission.get("left_uuid", "") or "")
-            right_uuid = str(admission.get("right_uuid", "") or "")
-            left_removed = (
-                updates[left_index] is None
-                if left_index < len(updates)
-                else left_uuid not in post_by_uuid
-            )
-            right_removed = (
-                updates[right_index] is None
-                if right_index < len(updates)
-                else right_uuid not in post_by_uuid
-            )
-            survivor_uuid = ""
-            removed_uuid = ""
-            if left_removed and not right_removed:
-                removed_uuid, survivor_uuid = left_uuid, right_uuid
-            elif right_removed and not left_removed:
-                removed_uuid, survivor_uuid = right_uuid, left_uuid
-            survivor = post_by_uuid.get(survivor_uuid)
-            expected_history = Counter(
-                admission.get("left_image_idx", ())
-            ) + Counter(admission.get("right_image_idx", ()))
-            actual_history = Counter(
-                list(survivor.get("image_idx", ()) or ())
-                if survivor is not None
-                else ()
-            )
-            history_union_present = bool(survivor is not None) and all(
-                actual_history[frame] >= count
-                for frame, count in expected_history.items()
-            )
-            history_union_exact = bool(
-                survivor is not None
-                and actual_history == expected_history
-            )
-            expected_detections = int(
-                admission.get("left_num_detections", 0)
-            ) + int(admission.get("right_num_detections", 0))
-            actual_detections = (
-                int(survivor.get("num_detections", 0))
-                if survivor is not None
-                else 0
-            )
-            detection_sum_present = (
-                survivor is not None
-                and actual_detections >= expected_detections
-            )
-            detection_sum_exact = bool(
-                survivor is not None
-                and actual_detections == expected_detections
-            )
-            confirmed = bool(
-                survivor_uuid
-                and history_union_exact
-                and detection_sum_exact
-            )
-            if confirmed:
-                outcome = "confirmed_pair_merge"
-            elif (
-                survivor_uuid
-                and history_union_present
-                and detection_sum_present
-            ):
-                outcome = "transitive_survivor"
-            elif left_removed and right_removed:
-                outcome = "both_removed_or_transitive"
-            elif left_removed or right_removed:
-                outcome = "removed_into_other_or_incomplete_evidence"
-            else:
-                outcome = "admitted_not_merged"
-            events.append(
-                {
-                    "tick": int(self._tick_idx),
-                    "left": admission.get("left"),
-                    "right": admission.get("right"),
-                    "left_uuid": left_uuid,
-                    "right_uuid": right_uuid,
-                    "left_registry_id": admission.get("left_registry_id"),
-                    "right_registry_id": admission.get(
-                        "right_registry_id"
-                    ),
-                    "shared_frame_count": admission.get(
-                        "shared_frame_count"
-                    ),
-                    "median_shared_frame_2d_iou": admission.get(
-                        "median_shared_frame_2d_iou"
-                    ),
-                    "center_distance_m": admission.get(
-                        "center_distance_m"
-                    ),
-                    "voxel_overlap": admission.get("voxel_overlap"),
-                    "clip_cosine": admission.get("clip_cosine"),
-                    "removed_uuid": removed_uuid or None,
-                    "survivor_uuid": survivor_uuid or None,
-                    "history_union_present": history_union_present,
-                    "history_union_exact": history_union_exact,
-                    "expected_num_detections": expected_detections,
-                    "actual_num_detections": actual_detections,
-                    "detection_sum_present": detection_sum_present,
-                    "detection_sum_exact": detection_sum_exact,
-                    "confirmed": confirmed,
-                    "outcome": outcome,
-                    "object_count_before": int(pre_count),
-                    "object_count_after": len(merged_objects),
-                }
-            )
-        self._coobserved_merge_events.extend(events)
-        del self._coobserved_merge_events[:-32]
-        log.info(
-            "[scene-cg] coobserved merge evidence: %s",
-            [
-                (
-                    event["left_registry_id"],
-                    event["right_registry_id"],
-                    event["outcome"],
-                )
-                for event in events
-            ],
-        )
 
     def _resolved_object_label_metadata(
         self,
@@ -7650,8 +6372,6 @@ class ConceptGraphsDetector:
         }
         shadow._nn_overlap_cache = {}
         shadow._merge_gate_diagnostics = {}
-        shadow._coobserved_merge_admissions = []
-        shadow._coobserved_merge_events = []
         shadow._periodic_merge_plan = []
         shadow._periodic_object_cleanup_plan = []
         shadow._periodic_cleanup_input_state = (
@@ -7689,12 +6409,6 @@ class ConceptGraphsDetector:
             "quality_counters": shadow._quality_counters,
             "merge_gate_diagnostics": copy.deepcopy(
                 shadow._merge_gate_diagnostics
-            ),
-            "coobserved_merge_admissions": copy.deepcopy(
-                shadow._coobserved_merge_admissions
-            ),
-            "coobserved_merge_events": copy.deepcopy(
-                shadow._coobserved_merge_events
             ),
             "merge_plan": copy.deepcopy(shadow._periodic_merge_plan),
             "object_cleanup_plan": copy.deepcopy(
@@ -8142,14 +6856,6 @@ class ConceptGraphsDetector:
                     "merge_gate_diagnostics",
                     {},
                 )
-                self._coobserved_merge_admissions = result.get(
-                    "coobserved_merge_admissions",
-                    [],
-                )
-                self._coobserved_merge_events.extend(
-                    result.get("coobserved_merge_events", ())
-                )
-                del self._coobserved_merge_events[:-32]
                 self._stabilize_map_labels()
                 # Registry mutation must run from the ordinary tick worker,
                 # not this executor callback: it waits on the asyncio loop and
@@ -8238,21 +6944,6 @@ class ConceptGraphsDetector:
             self._periodic_cleanup_recent.append(record)
             del self._periodic_cleanup_recent[:-16]
 
-    def _maybe_periodic_cleanup(self) -> None:
-        """Synchronous compatibility hook retained for focused unit tests."""
-
-        self._run_periodic_cleanup_sync(
-            run_denoise=(
-                self._tick_idx % self.cfg["denoise_interval_ticks"] == 0
-            ),
-            run_merge=(
-                self._tick_idx
-                % self.cfg["merge_overlap_interval_ticks"]
-                == 0
-            ),
-            project_registry=True,
-        )
-
     def _run_periodic_cleanup_sync(
         self,
         *,
@@ -8313,12 +7004,6 @@ class ConceptGraphsDetector:
                     tolerant_duplicate_coverage,
                 ) = self._exact_duplicate_geometry_matrices(
                     self._map_objects,
-                )
-                self._record_merge_gate_diagnostics(
-                    self._map_objects,
-                    overlap_matrix=overlap_mat,
-                    exact_duplicates=exact_duplicates,
-                    tolerant_coverage=tolerant_duplicate_coverage,
                 )
                 # `merge_overlap_objects` applies its own strict `>` spatial
                 # threshold after our class-safety mask. A pair that passed
@@ -8481,12 +7166,6 @@ class ConceptGraphsDetector:
                     overlap_mat,
                     0.0,
                 )
-                coobserved_admissions = (
-                    self._snapshot_coobserved_merge_admissions(
-                        self._map_objects,
-                        selected_pairs=selected_pairs,
-                    )
-                )
                 # concept-graphs `merge_overlap_objects` returns
                 # `(MapObjectList, index_updates)` — assigning the
                 # tuple directly into self._map_objects silently broke
@@ -8522,12 +7201,6 @@ class ConceptGraphsDetector:
                         device=self._device,
                     )
                     self._map_objects = merged_objs
-                    self._record_coobserved_merge_outcomes(
-                        coobserved_admissions,
-                        merged_objects=merged_objs,
-                        index_updates=index_updates,
-                        pre_count=pre,
-                    )
                 finally:
                     self._stabilize_map_labels()
                 if len(self._map_objects) != pre:
@@ -8592,114 +7265,6 @@ class ConceptGraphsDetector:
                 ] += 1
             retained.append(obj)
         return retained
-
-    # ── Cross-class merge (UNUSED) ────────────────────────────────────
-    # Legacy compatibility helper. Production association and cleanup supply
-    # deployment-owned NumPy/SciPy overlap matrices, and the images do not ship
-    # PyTorch3D. Keep this only for older callers that still request a direct
-    # geometry-only collapse.
-    def _merge_overlap_no_p3d(self, objects):
-        try:
-            import numpy as np
-            import torch
-            import torch.nn.functional as F
-        except Exception:
-            return objects
-        n = len(objects)
-        if n < 2:
-            return objects
-
-        # Stack AABB extents (8 corners → min/max).
-        bboxes = []
-        for o in objects:
-            bb = o["bbox"]
-            try:
-                pts = np.asarray(bb.get_box_points())
-            except Exception:
-                pts = np.asarray(o["pcd"].points)
-            if pts.size == 0:
-                bboxes.append((np.zeros(3), np.zeros(3)))
-                continue
-            mn = pts.min(axis=0); mx = pts.max(axis=0)
-            bboxes.append((mn, mx))
-
-        # CLIP feats stacked.
-        clip_fts = []
-        for o in objects:
-            ft = o["clip_ft"]
-            if isinstance(ft, np.ndarray):
-                ft = torch.from_numpy(ft).float()
-            clip_fts.append(F.normalize(ft.float().flatten(), dim=0))
-        clip_mat = torch.stack(clip_fts, dim=0)  # (N, D)
-
-        merge_obj2_into_obj1 = self._cg.get("merge_obj2_into_obj1")
-        if merge_obj2_into_obj1 is None:
-            return objects
-
-        keep = [True] * n
-        merged_into = list(range(n))  # union-find lite
-        for i in range(n):
-            if not keep[i]:
-                continue
-            for j in range(i + 1, n):
-                if not keep[j]:
-                    continue
-                # AABB IoU
-                a_min, a_max = bboxes[i]
-                b_min, b_max = bboxes[j]
-                inter_min = np.maximum(a_min, b_min)
-                inter_max = np.minimum(a_max, b_max)
-                inter_size = np.maximum(inter_max - inter_min, 0.0)
-                inter_vol = float(np.prod(inter_size))
-                a_vol = float(np.prod(a_max - a_min))
-                b_vol = float(np.prod(b_max - b_min))
-                union = a_vol + b_vol - inter_vol
-                iou = inter_vol / union if union > 1e-9 else 0.0
-                # Visual sim (cosine).
-                vis = float(F.cosine_similarity(
-                    clip_mat[i].unsqueeze(0), clip_mat[j].unsqueeze(0)
-                ).item())
-                # Spatial overlap proxy: max of (inter/a_vol, inter/b_vol).
-                # Same intent as upstream's pcd-based ratio: "how much
-                # of one volume is inside the other".
-                ratio = 0.0
-                if a_vol > 1e-9 and b_vol > 1e-9:
-                    ratio = max(inter_vol / a_vol, inter_vol / b_vol)
-                merge_thr = self.cfg["merge_overlap_thresh"]
-                vis_thr = self.cfg["merge_visual_sim_thresh"]
-                if (ratio >= merge_thr and vis >= vis_thr) or (iou > 0.3 and vis >= vis_thr):
-                    # j is folded into i.
-                    try:
-                        objects[i] = merge_obj2_into_obj1(
-                            obj1=objects[i], obj2=objects[j],
-                            downsample_voxel_size=self.cfg["downsample_voxel_size"],
-                            dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
-                            dbscan_eps=self.cfg["dbscan_eps"],
-                            dbscan_min_points=self.cfg["dbscan_min_points"],
-                            spatial_sim_type=self.cfg["spatial_sim_type"],
-                            device=self._device,
-                            run_dbscan=False,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        log.debug("merge_obj2_into_obj1 failed (i=%d,j=%d): %s", i, j, e)
-                        continue
-                    keep[j] = False
-                    # Update bbox/clip cache for i.
-                    pts = np.asarray(objects[i]["pcd"].points)
-                    if pts.size:
-                        bboxes[i] = (pts.min(axis=0), pts.max(axis=0))
-                    ft = objects[i]["clip_ft"]
-                    if isinstance(ft, np.ndarray):
-                        ft = torch.from_numpy(ft).float()
-                    clip_mat[i] = F.normalize(ft.float().flatten(), dim=0)
-
-        # Build new MapObjectList preserving order.
-        MapObjectList = self._cg["MapObjectList"]
-        out = MapObjectList()
-        for k, alive in enumerate(keep):
-            if alive:
-                out.append(objects[k])
-        return out
 
     # ── Camera-to-world transform ───────────────────────────────────
     def _selected_camera_frame(self) -> str:
