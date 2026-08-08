@@ -14,6 +14,7 @@ to the unit suite.
 
 from __future__ import annotations
 
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -64,3 +65,37 @@ def test_lite_image_carries_no_perception_weights() -> None:
     text = _dockerfile("Dockerfile.lite")
     assert "_weights/" not in text
     assert "safetensors" not in text
+
+
+def _verifier():
+    """Load scripts/verify_python_codegen.py without importing the package."""
+    import importlib.util
+
+    path = SCENE_ROOT / "scripts" / "verify_python_codegen.py"
+    spec = importlib.util.spec_from_file_location("_scene_verifier", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_codegen_version_checks_accept_floors_and_report_what_was_found() -> None:
+    """Exact pins guard the generator; floors guard the runtime.
+
+    The `>=` form exists because scene's runtime deps are floors — asserting
+    equality there would fail a build on a host carrying a newer, valid grpcio.
+    The return value feeds the success line, which is the only place the check
+    is observed when it passes.
+    """
+    verifier = _verifier()
+    assert verifier._release("1.81.1") > verifier._release("1.80.0")
+    assert verifier._release("1.10") > verifier._release("1.9")
+
+    installed = version("pytest")
+    assert verifier._check_version(f"pytest>=0.1") == f"pytest={installed}"
+    assert verifier._check_version(f"pytest={installed}") == f"pytest={installed}"
+    with pytest.raises(RuntimeError, match="requires pytest>=999"):
+        verifier._check_version("pytest>=999.0")
+    with pytest.raises(RuntimeError, match="environment mismatch"):
+        verifier._check_version("pytest=0.0.1")
+    with pytest.raises(ValueError, match="invalid distribution version check"):
+        verifier._check_version("pytest")

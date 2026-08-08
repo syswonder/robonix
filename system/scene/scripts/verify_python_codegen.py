@@ -45,8 +45,11 @@ def _release(raw: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _check_version(item: str) -> None:
+def _check_version(item: str) -> str:
     """Assert one `name=version` (exact) or `name>=version` (floor) requirement.
+
+    Returns `name=actual` for the success line, so the log reports the versions
+    that were present rather than the ones that were asked for.
 
     The generator venv is pinned exactly, because a different protoc emits
     different stubs. Runtime interpreters only need a floor: `_pb2_grpc.py` and
@@ -68,6 +71,7 @@ def _check_version(item: str) -> None:
         raise RuntimeError(
             f"Scene codegen environment mismatch: {name} {actual} != {expected}"
         )
+    return f"{name}={actual}"
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -91,8 +95,7 @@ def main(argv: list[str]) -> int:
 
     proto_root = Path(argv[1]).resolve()
     mcp_root = Path(argv[2]).resolve()
-    for item in argv[3:]:
-        _check_version(item)
+    checked = [_check_version(item) for item in argv[3:]]
 
     expected_modules = {
         "map_pb2": proto_root,
@@ -136,9 +139,7 @@ def main(argv: list[str]) -> int:
             f"{missing_driver_types}"
         )
 
-    versions = " ".join(
-        f"{name}={value}" for name, value in actual_versions.items()
-    )
+    versions = " ".join(checked)
     suffix = f" ({versions})" if versions else ""
     print(f"[scene/codegen] generated protobuf, gRPC, map, and MCP imports OK{suffix}")
     return 0
