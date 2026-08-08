@@ -33,27 +33,118 @@ from ..state.object_registry import BBox3D, Pose3D
 log = logging.getLogger(__name__)
 
 
-_DETECTION_PROMPT = """You are a visual perception module for a robot operating
-in an indoor office. Look at the image and enumerate every distinct physical
+_DEFAULT_DOMAIN = "an indoor office"
+_DEFAULT_CLASSES = (
+    "table, chair, door, cup, bottle, tray, tool, person, robot, "
+    "monitor, keyboard, book, plant, box, trash_bin"
+)
+_DEFAULT_LIMIT = 12
+
+_DETECTION_PROMPT_TEMPLATE = """You are a visual perception module for a robot
+operating in {domain}. Look at the image and enumerate every distinct physical
 object you see that the robot might interact with or need to avoid. For each
 object, report:
 
   - cls: a single lowercase class name from this preferred set when applicable
-    (table, chair, door, cup, bottle, tray, tool, person, robot,
-    monitor, keyboard, book, plant, box, trash_bin); otherwise pick the
-    most specific common noun.
+    ({classes}); otherwise pick the most specific common noun.
   - confidence: 0.0 to 1.0 (how sure you are it's that class).
   - bbox_2d: image-pixel [x_min, y_min, x_max, y_max] integers.
   - approximate_depth_m: rough metres from the camera, your best guess.
 
 Respond ONLY with a JSON object of the form:
-  {"detections": [{"cls": "...", "confidence": 0.83,
+  {{"detections": [{{"cls": "...", "confidence": 0.83,
                    "bbox_2d": [x0, y0, x1, y1],
-                   "approximate_depth_m": 1.7}, ...]}
+                   "approximate_depth_m": 1.7}}, ...]}}
 No prose, no markdown fences, no explanation.
 
-Limit to at most 12 detections, prioritising larger / closer items.
+Limit to at most {limit} detections, prioritising larger / closer items.
 """
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a non-negative float from the environment, or return `default`.
+
+    A malformed or negative value falls back rather than propagating into
+    geometry comparisons, where a negative threshold would silently disable
+    the check it was meant to configure.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= 0.0 else default
+
+
+def _viewpoint_delta(
+    previous: object, current: object
+) -> Optional[tuple[float, float]]:
+    """How far the camera moved and turned between two viewpoints.
+
+    Deployments describe the viewpoint differently — a 4x4 camera-to-world
+    transform where TF is available, a flat `(x, y, yaw, ...)` chassis pose
+    where it is not — and both are legitimate. Returns
+    `(metres, radians-equivalent)`, or None when the two cannot be compared,
+    which callers must treat as "no basis for skipping".
+
+    For a transform the rotation term is the Frobenius distance between the
+    rotation blocks: one scalar that grows with any change of orientation,
+    without unpacking to Euler angles or arguing about their conventions.
+    """
+    import numpy as np
+
+    try:
+        before = np.asarray(previous, dtype=float)
+        after = np.asarray(current, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if before.shape != after.shape:
+        return None
+
+    if before.shape == (4, 4):
+        moved = float(np.linalg.norm(after[:3, 3] - before[:3, 3]))
+        turned = float(np.linalg.norm(after[:3, :3] - before[:3, :3]))
+        return moved, turned
+
+    if before.ndim == 1 and before.size >= 3:
+        moved = float(np.hypot(after[0] - before[0], after[1] - before[1]))
+        # Wrap to (-pi, pi] so a heading crossing +/-pi is not read as a
+        # near-full turn.
+        turned = abs(float((after[2] - before[2] + np.pi) % (2 * np.pi) - np.pi))
+        return moved, turned
+
+    return None
+
+
+def _detection_prompt() -> str:
+    """Build the detection prompt for the deployment's environment.
+
+    The domain, preferred class set and detection cap are the three things
+    that decide what perception is able to see at all, and all three are
+    deployment facts rather than properties of Scene. A kitchen deployment
+    looking for fruit and an office deployment looking for monitors need
+    different values; with them fixed, an object outside the wired-in class
+    set is simply never reported, and a planner asking Scene where something
+    is has no way to learn that the answer was never obtainable.
+
+    Empty or unset variables keep the previous behaviour exactly, so existing
+    deployments are unaffected. A non-numeric or non-positive limit falls back
+    to the default rather than sending a nonsensical cap to the model.
+    """
+    domain = os.environ.get("SCENE_DETECTION_DOMAIN", "").strip() or _DEFAULT_DOMAIN
+    classes = os.environ.get("SCENE_DETECTION_CLASSES", "").strip() or _DEFAULT_CLASSES
+    raw_limit = os.environ.get("SCENE_DETECTION_LIMIT", "").strip()
+    try:
+        limit = int(raw_limit) if raw_limit else _DEFAULT_LIMIT
+    except ValueError:
+        limit = _DEFAULT_LIMIT
+    if limit <= 0:
+        limit = _DEFAULT_LIMIT
+    return _DETECTION_PROMPT_TEMPLATE.format(
+        domain=domain, classes=classes, limit=limit
+    )
 
 
 @dataclass
@@ -107,6 +198,14 @@ class VLMObjectDetector:
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
 
+        # Viewpoint of the last detection that produced anything, used to skip
+        # re-perceiving an unchanged view. See `_should_perceive`.
+        self._last_view: Optional[object] = None
+        self._last_view_at: float = 0.0
+        self._move_epsilon_m = _env_float("SCENE_DETECT_MIN_MOVE_M", 0.15)
+        self._turn_epsilon = _env_float("SCENE_DETECT_MIN_TURN", 0.05)
+        self._max_stale_s = _env_float("SCENE_DETECT_MAX_STALE_S", 30.0)
+
         # Pull VLM creds from env at construction so failures are
         # visible at startup rather than first tick.
         self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
@@ -118,6 +217,10 @@ class VLMObjectDetector:
         # VLM_REASONING_EFFORT=minimal to keep a reasoning VLM_MODEL (e.g.
         # doubao-seed-2-1-pro) fast (~2 s, no thinking); minimal|low|medium|high.
         self.reasoning_effort = os.environ.get("VLM_REASONING_EFFORT", "").strip()
+        # Resolved once at construction, like the credentials above, so a
+        # deployment sees its configured vocabulary in the startup log rather
+        # than discovering on the first tick that it never took effect.
+        self.detection_prompt = _detection_prompt()
         if not self.api_key:
             log.warning("[scene-vlm] VLM_API_KEY not set; perception will be inert")
 
@@ -149,7 +252,62 @@ class VLMObjectDetector:
             except asyncio.TimeoutError:
                 pass
 
+    def _viewpoint(self) -> Optional[object]:
+        """The camera's current viewpoint, however this deployment reports it.
+
+        Prefers the camera-to-world transform when the deployment resolves one
+        and falls back to the chassis pose, which is what a deployment without
+        TF provides. Returns None when neither is available; `_should_perceive`
+        treats that as a reason to perceive rather than to skip.
+        """
+        for name in ("camera_to_world_fn", "chassis_pose_fn"):
+            fn = getattr(self, name, None)
+            if fn is None:
+                continue
+            try:
+                value = fn()
+            except Exception:  # noqa: BLE001 — a pose source must not stop perception
+                continue
+            if value is None:
+                continue
+            # `camera_to_world_fn` returns `(transform, frame)`; a chassis pose
+            # is already the value.
+            if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], str):
+                return value[0]
+            return value
+        return None
+
+    def _should_perceive(self, view: Optional[object]) -> bool:
+        """Whether this tick is worth a detection call.
+
+        A detection costs one round-trip to a vision model — tens of seconds
+        against a large backend — so the loop must not re-perceive a view it
+        has already described. Perceive when the camera has moved past the
+        translation or rotation epsilon, when nothing has been perceived yet,
+        or when the last description is older than `_max_stale_s` (the world
+        can change while the robot stands still).
+
+        Returns True when the viewpoint is unknown or in a shape this cannot
+        compare: without usable geometry there is no basis for skipping, and
+        dropping frames silently would be worse than paying for them.
+        """
+        if self._last_view is None or view is None:
+            return True
+        if time.monotonic() - self._last_view_at >= self._max_stale_s:
+            return True
+        delta = _viewpoint_delta(self._last_view, view)
+        if delta is None:
+            return True
+        moved, turned = delta
+        return moved >= self._move_epsilon_m or turned >= self._turn_epsilon
+
     async def _tick(self) -> None:
+        # The viewpoint decides whether this frame is worth describing at all;
+        # fetch it before the image so an unchanged view costs nothing.
+        view = self._viewpoint()
+        if not self._should_perceive(view):
+            return
+
         # `rgb_fetcher` is a sync callable returning JPEG bytes (or
         # None). Synchronous because the ROS subscriber side caches
         # the latest frame in a thread-safe slot — no awaiting needed.
@@ -160,6 +318,10 @@ class VLMObjectDetector:
         detections_json = await self._call_vlm(jpeg_b64)
         if not detections_json:
             return
+        # Record the viewpoint only once the call has come back, so a failed
+        # or empty call does not suppress the retry from the same place.
+        self._last_view = view
+        self._last_view_at = time.monotonic()
         detections = self._project_to_world(detections_json)
         if detections:
             await self.on_detections(detections)
@@ -181,7 +343,7 @@ class VLMObjectDetector:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": _DETECTION_PROMPT},
+                        {"type": "text", "text": self.detection_prompt},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpeg_b64}"}},
                     ],
                 },
