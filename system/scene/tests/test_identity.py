@@ -183,7 +183,6 @@ if __name__ == "__main__":
     test_find_rebindable()
     test_soft_evict()
     test_prune_expired()
-    test_parse_merge_class_groups()
     test_apply_snapshot_cross_tick_rebind()
     test_apply_snapshot_ttl_prune()
     print("\nAll tests passed!")

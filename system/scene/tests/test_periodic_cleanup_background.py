@@ -17,6 +17,8 @@ from scene_service.ingest.perception_concept_graphs import (
     _import_cg,
     _periodic_object_state_signature,
 )
+from scene_service.ingest.perception_tuning import PerceptionTuning
+from scene_service.state import ObjectRegistry
 
 
 def _map_object(
@@ -49,91 +51,58 @@ def _map_object(
     return obj
 
 
+async def _ignore(_detections) -> None:
+    return None
+
+
 def _minimal_detector(objects=None) -> ConceptGraphsDetector:
-    detector = ConceptGraphsDetector.__new__(ConceptGraphsDetector)
+    """Build a real detector wired to stub I/O, then swap in a test map.
+
+    Constructing through `__init__` rather than `__new__` keeps the fixture
+    honest: every counter, cache, and tuning attribute the cleanup path touches
+    comes from the production initialiser, so a renamed attribute fails here
+    instead of silently reading a stale one the fixture happened to set.
+    """
+    detector = ConceptGraphsDetector(
+        rgb_fetcher_msg=lambda: None,
+        depth_fetcher_msg=lambda: None,
+        camera_info_fetcher=lambda: None,
+        on_detections=_ignore,
+        registry=ObjectRegistry(),
+        tuning=PerceptionTuning(classes=["chair"], scale_aware_geometry=False),
+        # Cleanup cadence and merge gates tightened so a two-object fixture
+        # exercises a full plan/apply cycle on the first tick.
+        cfg_overrides={
+            "denoise_interval_ticks": 1,
+            "merge_overlap_interval_ticks": 1,
+            "downsample_voxel_size": 0.025,
+            "dbscan_remove_noise": False,
+            "dbscan_eps": 0.1,
+            "dbscan_min_points": 2,
+            "spatial_sim_type": "overlap",
+            "merge_overlap_thresh": 0.5,
+            "merge_visual_sim_thresh": 0.8,
+            "merge_text_sim_thresh": 0.8,
+            "max_merge_dist_m": 0.5,
+            "adaptive_merge_distance": True,
+            "adaptive_merge_min_dist_m": 0.06,
+            "adaptive_merge_extent_scale": 1.0,
+            "association_max_extent_ratio": 2.0,
+            "obj_min_points": 10,
+            "obj_min_detections": 1,
+        },
+    )
     detector._cg = _import_cg()
     if objects is None:
         detector._map_objects = [{"id": "original"}]
     else:
         detector._map_objects = detector._cg["MapObjectList"](objects)
-    detector._map_generation = 7
-    detector._cleanup_stale_streak = 0
-    detector._cleanup_not_before_tick = 0
-    detector._inference_lock = threading.RLock()
+    # `start()` normally owns these; the tests drive the cleanup path directly.
     detector._cleanup_executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1,
     )
-    detector._cleanup_future = None
-    detector._cleanup_registry_projection_pending = False
-    detector._periodic_merge_plan = []
-    detector._periodic_object_cleanup_plan = []
-    detector._periodic_cleanup_input_state = {}
-    detector._periodic_cleanup_recent = []
     detector._stop = threading.Event()
-    detector._quality_counters = {
-        "periodic_cleanup_scheduled": 0,
-        "periodic_cleanup_completed": 0,
-        "periodic_cleanup_applied": 0,
-        "periodic_cleanup_discarded_stale": 0,
-        "periodic_cleanup_revalidated_plans": 0,
-        "periodic_cleanup_revalidated_pairs": 0,
-        "periodic_cleanup_revalidated_applied_pairs": 0,
-        "periodic_cleanup_revalidated_skipped_pairs": 0,
-        "periodic_object_cleanup_planned_updates": 0,
-        "periodic_object_cleanup_planned_deletes": 0,
-        "periodic_object_cleanup_revalidated_objects": 0,
-        "periodic_object_cleanup_applied_updates": 0,
-        "periodic_object_cleanup_applied_deletes": 0,
-        "periodic_object_cleanup_skipped_changed": 0,
-        "periodic_object_cleanup_skipped_operator": 0,
-        "periodic_object_cleanup_skipped_missing": 0,
-        "periodic_object_cleanup_skipped_invalid": 0,
-        "periodic_cleanup_skipped_busy": 0,
-        "periodic_cleanup_skipped_backoff": 0,
-        "periodic_cleanup_failures": 0,
-        "scale_aware_objects_preserved": 0,
-        "periodic_merge_candidate_pairs": 0,
-        "periodic_merge_selected_pairs": 0,
-        "periodic_merge_deferred_pairs": 0,
-    }
-    detector._uuid_to_oid = {}
-    detector._operator_labels = {}
-    detector._operator_geometry_oids = set()
-    detector._classes = ["chair"]
-    detector._exact_duplicate_centroid_max_m = 0.15
-    detector._exact_duplicate_min_voxel_coverage = 0.40
-    detector._exact_duplicate_max_extent_ratio = 1.50
-    detector._coobserved_duplicate_min_shared_frames = 3
-    detector._coobserved_duplicate_min_median_iou = 0.85
-    detector._coobserved_duplicate_max_extent_ratio = 2.0
-    detector._coobserved_duplicate_min_visual_similarity = 0.90
-    detector._merge_gate_diagnostics = {}
-    detector._coobserved_merge_admissions = []
-    detector._coobserved_merge_events = []
-    detector._nn_overlap_cache = {}
-    detector._bbox_low_percentile = 5.0
-    detector._bbox_high_percentile = 95.0
-    detector._device = "cpu"
-    detector._scale_aware_geometry = False
-    detector.cfg = {
-        "denoise_interval_ticks": 1,
-        "merge_overlap_interval_ticks": 1,
-        "downsample_voxel_size": 0.025,
-        "dbscan_remove_noise": False,
-        "dbscan_eps": 0.1,
-        "dbscan_min_points": 2,
-        "spatial_sim_type": "overlap",
-        "merge_overlap_thresh": 0.5,
-        "merge_visual_sim_thresh": 0.8,
-        "merge_text_sim_thresh": 0.8,
-        "max_merge_dist_m": 0.5,
-        "adaptive_merge_distance": True,
-        "adaptive_merge_min_dist_m": 0.06,
-        "adaptive_merge_extent_scale": 1.0,
-        "association_max_extent_ratio": 2.0,
-        "obj_min_points": 10,
-        "obj_min_detections": 1,
-    }
+    detector._map_generation = 7
     detector._tick_idx = 1
     detector._stabilize_map_labels = lambda: None
     return detector

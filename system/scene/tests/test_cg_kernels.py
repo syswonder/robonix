@@ -6,7 +6,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-import torch
+import pytest
+
+# Torch is absent from lite profiles by design, and the kernels only reach for
+# it on the CLIP-feature paths exercised here.  Skip rather than fail collection
+# so the rest of the suite still runs on a lite host.
+torch = pytest.importorskip("torch")
 
 from scene_service.ingest.cg_kernels import (
     DetectionList,

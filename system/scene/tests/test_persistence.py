@@ -83,20 +83,20 @@ def test_restore_object_clears_cg_uuid_and_flags_restored():
 
 # ── perception reconcile (warm-restore re-binding) ───────────────────────────
 def _make_detector(reg):
-    """A ConceptGraphsDetector built via __new__ (bypassing __init__, which
-    loads YOLO/SAM/CLIP), wired with only the state `_apply_snapshot` touches."""
+    """A real detector wired to stub I/O; models load in `start()`, not here."""
     from scene_service.ingest.perception_concept_graphs import ConceptGraphsDetector
 
-    p = ConceptGraphsDetector.__new__(ConceptGraphsDetector)
-    p._registry = reg
-    p._uuid_to_oid = {}
-    p._world_frame_fn = lambda: "map"
-    p.cfg = {"max_merge_dist_m": 1.5}
-    # State added by the cross-tick re-bind / soft-eviction work that
-    # _apply_snapshot now also touches.
-    p._object_ttl_s = 30.0
-    p._merge_class_group = {}
-    return p
+    async def _ignore(_detections):
+        return None
+
+    return ConceptGraphsDetector(
+        rgb_fetcher_msg=lambda: None,
+        depth_fetcher_msg=lambda: None,
+        camera_info_fetcher=lambda: None,
+        on_detections=_ignore,
+        registry=reg,
+        world_frame_fn=lambda: "map",
+    )
 
 
 def _snap(uuid_s, cls, x, y, z=0.0, *, obs=4, conf=0.9):
