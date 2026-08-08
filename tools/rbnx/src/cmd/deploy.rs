@@ -167,6 +167,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flag_value_reads_both_argument_forms() {
+        let joined = vec!["--vlm-api-key=-vIJ-secret".to_string()];
+        assert_eq!(flag_value(&joined, "--vlm-api-key"), Some("-vIJ-secret"));
+
+        let split = vec!["--vlm-api-key".to_string(), "plain".to_string()];
+        assert_eq!(flag_value(&split, "--vlm-api-key"), Some("plain"));
+
+        assert_eq!(flag_value(&joined, "--vlm-model"), None);
+        // A flag in last position has no value; reading past the end must not
+        // panic or borrow the flag itself.
+        let dangling = vec!["--vlm-model".to_string()];
+        assert_eq!(flag_value(&dangling, "--vlm-model"), None);
+    }
+
+    #[test]
+    fn pilot_config_beginning_with_a_hyphen_is_accepted() {
+        // Regression: base64url secrets start with `-` about one time in
+        // sixty. Passed as a separate argv entry these are parsed as short
+        // options and the component dies before it runs, so the arguments are
+        // emitted joined and must validate in that form.
+        let args = vec![
+            "--vlm-upstream=http://127.0.0.1:18081/v1".to_string(),
+            "--vlm-api-key=-vIJ-CxheKnzKE1MNKYOB7oNtkWXUKnAteUzkixtg0T3".to_string(),
+            "--vlm-model=gpt-5.6-sol".to_string(),
+        ];
+        assert!(require_system_args("pilot", &args).is_ok());
+
+        let detail = system_boot_detail("pilot", &args);
+        assert!(detail.contains("gpt-5.6-sol"), "{detail}");
+        assert!(detail.contains("127.0.0.1:18081"), "{detail}");
+        // The key is configuration, not something to echo into a boot line.
+        assert!(!detail.contains("vIJ"), "{detail}");
+    }
+
+    #[test]
+    fn pilot_config_is_still_required() {
+        let missing = require_system_args("pilot", &["--vlm-model=m".to_string()])
+            .expect_err("upstream and api key are absent");
+        assert!(missing.contains("vlm.upstream"), "{missing}");
+        assert!(missing.contains("vlm.api_key"), "{missing}");
+        assert!(!missing.contains("vlm.model"), "{missing}");
+
+        let empty = require_system_args("pilot", &["--vlm-upstream=".to_string()])
+            .expect_err("an empty value is not configuration");
+        assert!(empty.contains("vlm.upstream"), "{empty}");
+    }
+
+    #[test]
     fn boot_prerequisites_build_non_builtin_system_packages() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -226,10 +274,7 @@ stop: "true"
 
         ensure_soma_defaults(&mut system, &manifest_dir, &selected);
         let args = system_cli_args("soma", system.get("soma"), None);
-        let manifest_arg = args
-            .windows(2)
-            .find(|pair| pair[0] == "--deployment-manifest")
-            .map(|pair| pair[1].as_str());
+        let manifest_arg = flag_value(&args, "--deployment-manifest");
 
         assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
     }
@@ -1543,6 +1588,23 @@ fn persist_state(
 /// with `missing required field 'vlm.upstream'`, and boot reports
 /// `[ OK ]` because the failure happens after spawn-and-register. Catch
 /// it here so the user sees a `[FAIL]` line naming the bad keys.
+/// Read a flag value from a generated argv, accepting either `--flag value`
+/// or `--flag=value`. Component arguments are emitted in the `=` form so a
+/// value beginning with `-` is not mistaken for a short-option bundle, but
+/// the split form is still accepted for arguments assembled elsewhere.
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let joined = format!("{flag}=");
+    for (index, arg) in args.iter().enumerate() {
+        if let Some(rest) = arg.strip_prefix(&joined) {
+            return Some(rest);
+        }
+        if arg == flag {
+            return args.get(index + 1).map(String::as_str);
+        }
+    }
+    None
+}
+
 fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), String> {
     if name != "pilot" {
         return Ok(());
@@ -1554,11 +1616,7 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
     ];
     let mut missing: Vec<&str> = Vec::new();
     for (flag, label) in need {
-        let val = args
-            .iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1));
-        match val {
+        match flag_value(args, flag) {
             Some(v) if !v.is_empty() => {}
             _ => missing.push(label),
         }
@@ -1576,31 +1634,9 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
 }
 
 fn system_boot_detail(name: &str, args: &[String]) -> String {
-    let mut listen: Option<&str> = None;
-    let mut vlm_upstream: Option<&str> = None;
-    let mut vlm_model: Option<&str> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        let next = args.get(i + 1).map(|s| s.as_str());
-        match (a, next) {
-            ("--listen", Some(v)) => {
-                listen = Some(v);
-                i += 2;
-            }
-            ("--vlm-upstream", Some(v)) => {
-                vlm_upstream = Some(v);
-                i += 2;
-            }
-            ("--vlm-model", Some(v)) => {
-                vlm_model = Some(v);
-                i += 2;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
+    let listen = flag_value(args, "--listen");
+    let vlm_upstream = flag_value(args, "--vlm-upstream");
+    let vlm_model = flag_value(args, "--vlm-model");
     let port = listen
         .and_then(|s| s.rsplit(':').next())
         .map(|p| format!(":{p}"))
@@ -1702,10 +1738,13 @@ fn system_cli_args(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     };
+    // Emit `--flag=value` rather than two argv entries. A manifest value may
+    // legitimately begin with `-` (API keys are base64url, so roughly one in
+    // sixty starts with a hyphen); as a separate argument clap parses it as a
+    // short-option bundle and the component exits before it ever runs.
     let push_pair = |out: &mut Vec<String>, flag: &str, val: Option<String>| {
         if let Some(v) = val {
-            out.push(flag.into());
-            out.push(v);
+            out.push(format!("{flag}={v}"));
         }
     };
     match name {
