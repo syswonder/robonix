@@ -3,20 +3,40 @@
 # The frame must match the object's existing authoritative world frame.
 # Manual geometry is provenance-marked and is not navigation-grade.
 
+# Stable Scene object id, exactly as returned by ListObjects. Not a label.
 string object_id
+# Object centre in `frame_id`, metres.
 float64 x
 float64 y
 float64 z
+# Rotation about the world Z axis, radians. The box is yaw-only: roll and
+# pitch are not representable, because Scene's boxes are gravity-aligned.
 float64 yaw
+# Full extents of the box along its own axes, metres. Must be positive.
 float64 size_x
 float64 size_y
 float64 size_z
+# World frame the coordinates are expressed in. Must equal the object's
+# current frame; Scene rejects a mismatch rather than silently reinterpreting
+# the numbers in another frame.
 string frame_id
+# Map epoch the caller last observed, from the ListObjects response. Scene
+# rejects the call if the live binding has moved since. Re-read ListObjects
+# and retry. This is a staleness check, not an authorization one.
 string expected_map_id
+# Generation from the same ListObjects response; -1 when the active mapping
+# provider exposes no generation. Must match exactly, including -1.
 int64 expected_generation
+# false: apply to the live runtime only, so a reload loses the correction.
+# true: also write it to the saved map's semantic snapshot, making it
+# permanent. Requires the map to have been saved; fails otherwise.
 bool persist_to_snapshot
 ---
+# The object as it now stands, with the geometry and provenance applied.
 Object object
+# Epoch the update actually applied under; equals the expected_* inputs.
 string map_id
 int64 generation
+# Whether the snapshot row was written. Only ever true when the request asked
+# for it; a runtime-only edit reports false rather than failing.
 bool persisted
