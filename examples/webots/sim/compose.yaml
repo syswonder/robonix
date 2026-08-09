@@ -72,8 +72,13 @@ services:
       # through docker exec; those files otherwise make the next clean build
       # fail with EACCES.
       PYTHONDONTWRITEBYTECODE: "1"
-      # Optional full offline Webots asset library. Default is off: office.wbt
-      # uses the seed baked into the image. Set ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
+      # The office seed is fetched once from robonix-assets through the default
+      # GitHub mirror and retained in the named cache volume. Set the mirror to
+      # an empty value to opt into direct GitHub access.
+      ROBONIX_WEBOTS_SEED_URL: "${ROBONIX_WEBOTS_SEED_URL:-}"
+      ROBONIX_WEBOTS_SEED_MIRROR: "${ROBONIX_WEBOTS_SEED_MIRROR-https://ghfast.top/}"
+      # Optional full offline Webots asset library. Default is off. Set
+      # ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
       # before sim/start.sh to download Cyberbotics' assets-R2025a.zip into the
       # persistent Webots cache volume, via ghfast.top by default.
       ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS: "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS:-0}"
