@@ -57,7 +57,13 @@ if [[ "$compatible" != "1" ]]; then
 fi
 
 echo "[scene/codegen] rbnx codegen -p $PKG $*"
-PATH="$VENV/bin:$PATH" rbnx codegen -p "$PKG" "$@"
+# Pin the interpreter both ways. PATH alone is not enough: codegen that
+# resolves python by any other route lands on the system interpreter, which has
+# no grpc_tools, and the package then dies at start with
+# "No module named 'grpc_tools'".
+RBNX_CODEGEN_PYTHON="$VENV/bin/python" \
+    PATH="$VENV/bin:$PATH" \
+    rbnx codegen -p "$PKG" "$@"
 
 # Import the generated modules with the exact generator/runtime versions. Do
 # not inherit the caller's PYTHONPATH: generic module names such as map_pb2 can

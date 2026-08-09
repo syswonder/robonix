@@ -105,7 +105,11 @@ class SceneBuildConfigTest(unittest.TestCase):
         self.assertIn('PROTOBUF_VERSION="6.33.6"', helper)
         self.assertIn('GRPC_TOOLS_VERSION="1.76.0"', helper)
         self.assertIn('GRPCIO_VERSION="1.80.0"', helper)
-        self.assertIn('PATH="$VENV/bin:$PATH" rbnx codegen', helper)
+        # Pinned both ways: PATH alone lets codegen fall back to the system
+        # interpreter, which has no grpc_tools.
+        self.assertIn('RBNX_CODEGEN_PYTHON="$VENV/bin/python"', helper)
+        self.assertIn('PATH="$VENV/bin:$PATH"', helper)
+        self.assertIn("rbnx codegen", helper)
         self.assertIn('PYTHONPATH="$PROTO_ROOT:$MCP_ROOT"', helper)
         self.assertIn("verify_python_codegen.py", helper)
 

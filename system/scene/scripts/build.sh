@@ -4,7 +4,8 @@
 #
 # v2 — scene runs in its own docker image (`robonix-scene`) joined to
 # the host DDS bus. Build phase here:
-#   1. rbnx codegen → rbnx-build/codegen/{proto_gen, robonix_mcp_types}
+#   1. exact-version Python codegen →
+#      rbnx-build/codegen/{proto_gen, robonix_mcp_types}
 #      (still done on host because robonix-codegen is a Rust binary)
 #   2. docker build the scene image, baking in scene's Python deps
 #      (no host venv needed at runtime)
@@ -85,10 +86,7 @@ FLAGS=(--mcp --ros2)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
 echo "[build] rbnx codegen ${FLAGS[*]}"
-# RBNX_CODEGEN_POLICY_EXEMPT: Scene's host codegen stages IDL/ROS artifacts.
-# Docker runtime Python stubs are regenerated and import-validated offline by
-# scripts/start.sh with the exact interpreter and libraries baked into $IMG.
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+bash "$PKG/scripts/run_python_codegen.sh" "$PKG" "${FLAGS[@]}"
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
 # Pulled out of the docker build because direct CDN connections from some
@@ -243,9 +241,16 @@ if [[ "$TARGET" == "jetson-native" ]]; then
         exit 1
     }
     "$PY" -m pip install --user --upgrade pip --index-url "$PIP_IDX" || true
-    # torch & friends are already satisfied by the host stack, so pip skips
-    # them; only the missing pure-python deps get installed.
-    for req in scene-base scene-perception-core scene-perception-heavy; do
+    # scene-base contains the provider's RPC/MCP runtime. A failed install is
+    # fatal: otherwise rbnx writes a successful build stamp and the native
+    # process can die on generated imports before it registers with Atlas.
+    BASE_REQ="docker/requirements/scene-base.txt"
+    echo "[build] pip install --user -r $BASE_REQ"
+    "$PY" -m pip install --user -r "$BASE_REQ" --index-url "$PIP_IDX"
+
+    # Perception layers may degrade independently of the provider's core
+    # lifecycle/MCP runtime, so retain their existing warning behavior.
+    for req in scene-perception-core scene-perception-heavy; do
         f="docker/requirements/${req}.txt"
         [[ -f "$f" ]] || continue
         echo "[build] pip install --user -r $f"
@@ -263,6 +268,19 @@ if [[ "$TARGET" == "jetson-native" ]]; then
             https://github.com/concept-graphs/concept-graphs.git "$CG"
     fi
     "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
+
+    # Verify the actual native interpreter after every dependency install, not
+    # only the isolated generator venv. Keep PYTHONPATH package-local and reject
+    # stale modules from another package before writing a successful build
+    # stamp; optional pip resolution must not have displaced the runtime pins.
+    PROTO_ROOT="$PKG/rbnx-build/codegen/proto_gen"
+    MCP_ROOT="$PKG/rbnx-build/codegen/robonix_mcp_types"
+    PYTHONPATH="$PROTO_ROOT:$MCP_ROOT" \
+        "$PY" "$PKG/scripts/verify_python_codegen.py" \
+        "$PROTO_ROOT" "$MCP_ROOT" \
+        "protobuf=6.33.6" \
+        "grpcio=1.80.0"
+
     # Validate the host-staged open_clip checkpoint without contacting the
     # Hugging Face metadata API. Also pre-warm Ultralytics YOLO-World's text
     # encoder path:

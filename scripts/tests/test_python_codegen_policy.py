@@ -20,15 +20,21 @@ VENV_BACKED_BUILDS = (
     "examples/remote_liaison_demo/skills/summary_skill/scripts/build.sh",
     "examples/remote_liaison_demo/skills/notes_skill/scripts/build.sh",
 )
+# Shared runners that own the venv their `rbnx codegen` call runs in.
+CODEGEN_RUNNERS = (
+    "examples/webots/scripts/run_python_codegen.sh",
+    "system/scene/scripts/run_python_codegen.sh",
+)
 DIRECT_CODEGEN = re.compile(
     r"^[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t\n]+[ \t]+)*"
     r"rbnx[ \t]+codegen\b",
     re.MULTILINE,
 )
-EXEMPT_DIRECT_CODEGEN = {
-    "system/scene/scripts/build.sh":
-        "RBNX_CODEGEN_POLICY_EXEMPT: Scene's host codegen stages IDL/ROS artifacts.",
-}
+# Scene used to be exempt here: its build script called `rbnx codegen`
+# directly and staged IDL/ROS artifacts on the host. It now goes through
+# scripts/run_python_codegen.sh like every other Python package, so the
+# policy applies to it unmodified and no exemption is left.
+EXEMPT_DIRECT_CODEGEN: dict[str, str] = {}
 
 
 def direct_codegen_calls(path: Path) -> list[re.Match[str]]:
@@ -50,9 +56,7 @@ class PythonCodegenPolicyTests(unittest.TestCase):
                 )
 
     def test_codegen_selects_the_runtime_python_both_ways(self):
-        scripts = VENV_BACKED_BUILDS + (
-            "examples/webots/scripts/run_python_codegen.sh",
-        )
+        scripts = VENV_BACKED_BUILDS + CODEGEN_RUNNERS
         for relative in scripts:
             with self.subTest(script=relative):
                 text = (REPO_ROOT / relative).read_text(encoding="utf-8")
@@ -81,9 +85,7 @@ class PythonCodegenPolicyTests(unittest.TestCase):
             if calls:
                 discovered[str(script.relative_to(REPO_ROOT))] = calls
 
-        managed = set(VENV_BACKED_BUILDS) | {
-            "examples/webots/scripts/run_python_codegen.sh",
-        }
+        managed = set(VENV_BACKED_BUILDS) | set(CODEGEN_RUNNERS)
         self.assertEqual(set(discovered), managed | set(EXEMPT_DIRECT_CODEGEN))
 
         for relative, marker in EXEMPT_DIRECT_CODEGEN.items():
