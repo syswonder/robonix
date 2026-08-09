@@ -198,6 +198,11 @@ as long as `VLM_BASE_URL` below matches it.
 python3 testing/fake_vlm/server.py --port 18421
 ```
 
+The fake VLM logs deterministic prompt byte/four-byte-token estimates for every
+request and returns a streaming `usage` chunk when Pilot requests one. This
+makes multi-round prompt regressions visible in `fake_vlm.log` without changing
+the scripted RTDL behavior or calling an external model.
+
 Terminal 3, boot Robonix against that fake VLM:
 
 ```bash

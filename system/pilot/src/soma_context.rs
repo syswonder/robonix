@@ -29,7 +29,7 @@ pub async fn fetch_runtime_prompt_block(atlas: &mut AtlasClient, consumer_id: &s
              authoritative. Stale or missing fields mean unknown; never reconstruct them \
              from conversation history. `likely_holding` means the calibrated gripper is \
              not fully open; it does not identify the object.\n\n{}\n",
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
         ),
         Err(error) => format!(
             "\n\n## Current embodiment state (from Soma)\n\
@@ -155,9 +155,9 @@ pub async fn fetch_system_prompt_block(
          rotate 180 degrees, then use the front camera), state that plan clearly \
          and use motion + observation capabilities rather than pretending a missing \
          sensor exists.\n\n\
-         ### soma.yaml\n\n```yaml\n",
+         ### soma.yaml (compact JSON)\n\n```json\n",
     );
-    block.push_str(yaml.trim());
+    block.push_str(&compact_yaml(&yaml));
     block.push_str("\n```\n");
     if !urdf.trim().is_empty() {
         block.push_str("\n### URDF\n\n```xml\n");
@@ -165,6 +165,18 @@ pub async fn fetch_system_prompt_block(
         block.push_str("\n```\n");
     }
     Ok(Some(block))
+}
+
+/// Serialize Soma YAML without comments or presentation whitespace while
+/// preserving every data field the planner can act on.
+fn compact_yaml(raw: &str) -> String {
+    match serde_yaml::from_str::<serde_yaml::Value>(raw) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| raw.trim().to_string()),
+        Err(error) => {
+            warn!("[pilot/soma] could not compact soma.yaml; keeping source text: {error}");
+            raw.trim().to_string()
+        }
+    }
 }
 
 async fn fetch_yaml(atlas: &mut AtlasClient, consumer_id: &str) -> Result<String> {
@@ -208,4 +220,31 @@ async fn fetch_urdf(atlas: &mut AtlasClient, consumer_id: &str) -> Result<String
     .await;
     let _ = atlas.disconnect_capability(&channel_id).await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_yaml;
+
+    #[test]
+    fn representative_soma_context_is_smaller_without_dropping_body_facts() {
+        let yaml = include_str!("../../../examples/webots/soma.yaml");
+        let urdf = include_str!(
+            "../../../examples/webots/sim/ros_ws/src/eaios_webots/resource/tiago_webots.urdf"
+        );
+        let compact_yaml = compact_yaml(yaml);
+        let yaml_value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let compact_value: serde_json::Value = serde_json::from_str(&compact_yaml).unwrap();
+        let before = yaml.len() + urdf.len();
+        let after = compact_yaml.len() + urdf.trim().len();
+        eprintln!(
+            "representative Soma prompt bytes: before={before} after={after} reduction={:.1}%",
+            100.0 * (before - after) as f64 / before as f64
+        );
+        assert!(after < before);
+        assert_eq!(serde_json::to_value(yaml_value).unwrap(), compact_value);
+        assert!(compact_yaml.contains("front"));
+        assert!(urdf.contains("Tiago Webots"));
+        assert!(urdf.contains("head_front_camera_rgb_optical_frame"));
+    }
 }

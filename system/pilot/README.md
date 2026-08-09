@@ -40,9 +40,13 @@ Common configuration:
 
 ## Prompt assets
 
-The VLM-facing RTDL envelope rules (grammar, example, constraints) live in `rtdl_protocol.md` at the crate root and are embedded at compile time via `include_str!` into the per-turn capability list prompt. Edit that file to change RTDL instructions without touching `planner.rs`.
+The VLM-facing RTDL envelope rules (grammar, example, constraints) live in `rtdl_protocol.md` at the crate root and are embedded at compile time via `include_str!`. Pilot sends that frozen document on the first planning round and a bounded grammar/admission reminder on later rounds. Edit the document to change the authoritative RTDL instructions without touching `planner.rs`.
 
 Pilot's standing system prompt is built in `src/planner.rs`; it includes the runtime operating principles, including the rule that failed required capability calls stop autonomous physical task progress until the user confirms the next step.
+
+Atlas discovery still runs before every planning round. When its LLM-visible provider, contract, description, and schema fields are unchanged, Pilot reuses the rendered capability catalog. The startup-cached Soma YAML is serialized as compact JSON while the authoritative URDF remains unchanged.
+
+Every request writes a `[pilot/prompt]` JSON log with text bytes and four-byte token estimates for the standing context, RTDL protocol, capability catalog, task, in-flight trees, Executor state, live embodiment, environment, history, and correction. Pilot supplies a random per-turn `prompt_cache_key`, with stable sections ordered before live state, so supporting providers can reuse the longest unchanged prefix without receiving a session identifier. Compatible providers also report exact prompt/completion tokens and cached prompt tokens through streaming usage; those totals are logged separately under the same prefix. The fake VLM's reported usage is explicitly a deterministic four-byte estimate, not a production tokenizer result. A provider that rejects a named optional cache/usage field with HTTP 400 or 422 is retried once without those fields; unrelated client errors are returned unchanged.
 
 ## RTDL Planning Flow
 

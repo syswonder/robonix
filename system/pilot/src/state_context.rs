@@ -61,7 +61,7 @@ pub async fn collect(
          room membership, areas, and nearby objects. Atlas state only indicates \
          provider availability; current task progress remains in the in-flight RTDL \
          tree block. Missing or stale state means unknown.\n\n{}\n",
-        serde_json::to_string_pretty(&json!({
+        serde_json::to_string(&json!({
             "scene": scene,
             "provider_availability": providers,
         }))

@@ -22,7 +22,9 @@ use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info, warn};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +32,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tonic::Request;
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
@@ -50,6 +53,102 @@ struct DisplayCapability<'a> {
     display_name: String,
     provider_id: &'a str,
     cap: &'a atlas_pb::Capability,
+}
+
+#[derive(Default)]
+struct CapabilityPromptCache {
+    fingerprint: u64,
+    catalog: String,
+    initialized: bool,
+}
+
+struct PromptSection<'a> {
+    name: &'static str,
+    content: &'a str,
+}
+
+impl CapabilityPromptCache {
+    /// Reuse the rendered catalog while Atlas reports the same provider,
+    /// contract, description, and input-schema data. Discovery still runs on
+    /// every round, so a registration change invalidates the cache immediately.
+    fn render<'a>(&'a mut self, caps: &[DisplayCapability<'_>]) -> (&'a str, bool) {
+        let fingerprint = capability_prompt_fingerprint(caps);
+        let hit = self.initialized && self.fingerprint == fingerprint;
+        if !hit {
+            self.catalog = render_capability_prompt(caps);
+            self.fingerprint = fingerprint;
+            self.initialized = true;
+        }
+        (&self.catalog, hit)
+    }
+}
+
+fn estimated_text_tokens(bytes: usize) -> usize {
+    bytes.div_ceil(4)
+}
+
+/// Assemble one request while emitting a bounded, machine-readable breakdown
+/// of every prompt section. Section token counts are explicit four-byte
+/// estimates; the provider-reported total is logged separately when available.
+fn assemble_planning_messages(
+    round: u32,
+    capability_cache_hit: bool,
+    sections: &[PromptSection<'_>],
+    history_messages: &[Message],
+    correction: Option<&str>,
+) -> Vec<Message> {
+    let system_bytes = sections.iter().map(|section| section.content.len()).sum();
+    let mut system = String::with_capacity(system_bytes);
+    for section in sections {
+        system.push_str(section.content);
+    }
+    let sanitized_history = history::sanitize_for_vlm(history_messages);
+    let history_bytes: usize = sanitized_history
+        .iter()
+        .map(|message| message.content.as_deref().map_or(0, str::len))
+        .sum();
+    let correction_bytes = correction.map_or(0, str::len);
+    let prompt_bytes = system.len() + history_bytes + correction_bytes;
+    let mut section_metrics = sections
+        .iter()
+        .map(|section| {
+            serde_json::json!({
+                "name": section.name,
+                "bytes": section.content.len(),
+                "estimated_tokens": estimated_text_tokens(section.content.len()),
+            })
+        })
+        .collect::<Vec<_>>();
+    section_metrics.push(serde_json::json!({
+        "name": "history",
+        "bytes": history_bytes,
+        "estimated_tokens": estimated_text_tokens(history_bytes),
+    }));
+    section_metrics.push(serde_json::json!({
+        "name": "correction",
+        "bytes": correction_bytes,
+        "estimated_tokens": estimated_text_tokens(correction_bytes),
+    }));
+    info!(
+        "[pilot/prompt] {}",
+        serde_json::json!({
+            "round": round,
+            "prompt_text_bytes": prompt_bytes,
+            "estimated_input_tokens": estimated_text_tokens(prompt_bytes),
+            "history_bytes": history_bytes,
+            "correction_bytes": correction_bytes,
+            "capability_catalog_render_cache_hit": capability_cache_hit,
+            "sections": section_metrics,
+        })
+    );
+
+    let mut messages = Vec::with_capacity(sanitized_history.len() + 2);
+    messages.push(Message::system(&system));
+    messages.extend(sanitized_history);
+    if let Some(correction) = correction {
+        messages.push(Message::user(correction));
+    }
+    messages
 }
 
 fn max_tool_rounds() -> usize {
@@ -775,7 +874,7 @@ async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
 /// Run one non-streaming VLM completion and return the full text (drains the
 /// stream). Returns `None` on any stream error.
 async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<String> {
-    let mut stream = vlm.chat_stream(messages, &[]).await.ok()?;
+    let mut stream = vlm.chat_stream(messages, &[], None).await.ok()?;
     let mut text = String::new();
     while let Some(item) = stream.next().await {
         if let Ok(VlmStreamItem::TextDelta(d)) = item {
@@ -868,6 +967,9 @@ pub async fn run_turn(
     soma_prompt_block: &str,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
+    // Keep the provider's prefix-cache routing stable across planning rounds
+    // without exposing the user-visible or harness-visible session identifier.
+    let prompt_cache_key = Uuid::new_v4().simple().to_string();
 
     macro_rules! return_interrupted {
         ($forest:expr) => {{
@@ -902,11 +1004,8 @@ pub async fn run_turn(
         return Ok(());
     }
 
-    // 1. Build system prompt (once per turn)
-    let mut base_prompt = build_system_prompt(load_agent_soul().as_deref());
-    if !soma_prompt_block.trim().is_empty() {
-        base_prompt.push_str(soma_prompt_block);
-    }
+    // 1. Build stable system-prompt sections once per turn.
+    let standing_prompt = build_system_prompt(load_agent_soul().as_deref());
 
     // Pilot's capability catalog comes straight from atlas (filtered to
     // MCP transport — only those are LLM-callable). McpParams ride along
@@ -926,19 +1025,19 @@ pub async fn run_turn(
     // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
     // relevant past context is available from the start of the turn.
-    let mut system_prompt = if skip_memory_prefetch(&task.text) {
-        base_prompt
+    let memory_prompt = if skip_memory_prefetch(&task.text) {
+        String::new()
     } else {
         match memory::prefetch(&task.text, executor, search_memory_target).await {
             Some(mem) => format!(
-                "{base_prompt}\n\n## Relevant past memories (historical hints only)\n\n\
+                "\n\n## Relevant past memories (historical hints only)\n\n\
                  These entries may be stale or task-specific. They are not current robot state, \
                  not authorization for a physical action, and not a substitute for resolving a \
                  named room, region, object, or person through the current capabilities. In \
                  particular, a remembered grasp or observation pose is not a room navigation \
                  goal.\n\n{mem}\n\n---\n\n"
             ),
-            None => base_prompt,
+            None => String::new(),
         }
     };
 
@@ -949,10 +1048,10 @@ pub async fn run_turn(
     // system prompt tiny while still giving the LLM full per-provider context
     // when relevant. Errors here are non-fatal — providers that didn't register
     // a path simply don't appear in the block.
-    if let Ok(docs) = discovery::cap_md_index(atlas).await
+    let capability_docs_prompt = if let Ok(docs) = discovery::cap_md_index(atlas).await
         && !docs.is_empty()
     {
-        let mut block = String::from(
+        let mut prompt = String::from(
             "\n\n## Capability docs (lazy-load via `read_capability_doc`)\n\
              The providers below ship a CAPABILITY.md manual. Read one by calling \
              the `read_capability_doc` builtin with its `provider_id` (shown in \
@@ -971,13 +1070,15 @@ pub async fn run_turn(
             // CAPABILITY.md frontmatter lets it judge relevance without reading
             // the full manual. The internal `namespace` is deliberately omitted —
             // it is routing detail the model never uses.
-            block.push_str(&format!(
+            prompt.push_str(&format!(
                 "- `{}`{}: {}\n",
                 d.provider_id, tag, d.description
             ));
         }
-        system_prompt.push_str(&block);
-    }
+        prompt
+    } else {
+        String::new()
+    };
 
     // Voice-mode brevity hint. Liaison stamps `context_json.modality =
     // "voice"` for every voice-path Task; in that case we ask the VLM
@@ -985,18 +1086,17 @@ pub async fn run_turn(
     // not read a Markdown wall. Threshold is intentionally tight (~30
     // Chinese chars / ~50 English words) — barge-in matters more than
     // exhaustive coverage and the user can always ask follow-ups.
-    if task_modality(task).as_deref() == Some("voice") {
-        system_prompt.push_str(
-            "\n\n## Voice mode\n\n\
+    let voice_prompt = if task_modality(task).as_deref() == Some("voice") {
+        "\n\n## Voice mode\n\n\
              The user is interacting via voice; this reply will be\n\
              spoken back through TTS. Keep the response short (≤ ~30\n\
              characters Chinese / ~50 words English), no markdown\n\
              lists, no headings, no code blocks, plain conversational\n\
              tone. If the answer genuinely needs structure, summarise\n\
-             out loud and offer to elaborate when asked.\n",
-        );
-    }
-    let system_prompt = system_prompt;
+             out loud and offer to elaborate when asked.\n"
+    } else {
+        ""
+    };
 
     // 2. Add user message to history
     history.push(Message::user(&task.text));
@@ -1035,6 +1135,7 @@ pub async fn run_turn(
     let mut cancel_requested: HashSet<String> = HashSet::new();
     let forest_revision = Arc::new(AtomicU64::new(0));
     let mut should_plan = true;
+    let mut capability_prompt_cache = CapabilityPromptCache::default();
     // Last user-facing narration; surfaced as FinalText when the turn ends.
     let mut last_content = String::new();
 
@@ -1233,7 +1334,9 @@ pub async fn run_turn(
 
         let display_caps = build_display_capabilities(&cap_list);
         let target_map = build_capability_target_map(&display_caps);
-        let rtdl_prompt = build_rtdl_prompt(&display_caps, round == 0)?;
+        let protocol_prompt = rtdl_protocol(round == 0);
+        let (capability_prompt, capability_cache_hit) =
+            capability_prompt_cache.render(&display_caps);
 
         let task_block = standing_task
             .as_ref()
@@ -1258,37 +1361,89 @@ pub async fn run_turn(
         // valid (narration, tree label, plan, id) tuple for the forest dispatch.
         let mut correction: Option<String> = None;
         let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_update, recovered) = loop {
-            let mut messages = vec![Message::system(&format!(
-                "{system_prompt}\n\n{rtdl_prompt}{task_block}{forest_block}{executor_active_block}{embodiment_block}{environment_block}"
-            ))];
-            messages.extend(history::sanitize_for_vlm(history));
-            if let Some(ref correction) = correction {
-                messages.push(Message::user(correction));
-            }
+            let sections = [
+                PromptSection {
+                    name: "standing_system",
+                    content: &standing_prompt,
+                },
+                PromptSection {
+                    name: "embodiment_static",
+                    content: soma_prompt_block,
+                },
+                PromptSection {
+                    name: "memory",
+                    content: &memory_prompt,
+                },
+                PromptSection {
+                    name: "capability_docs",
+                    content: &capability_docs_prompt,
+                },
+                PromptSection {
+                    name: "voice",
+                    content: voice_prompt,
+                },
+                PromptSection {
+                    name: "rtdl_protocol",
+                    content: protocol_prompt,
+                },
+                PromptSection {
+                    name: "capability_catalog",
+                    content: capability_prompt,
+                },
+                PromptSection {
+                    name: "task",
+                    content: &task_block,
+                },
+                PromptSection {
+                    name: "in_flight_trees",
+                    content: &forest_block,
+                },
+                PromptSection {
+                    name: "executor_state",
+                    content: &executor_active_block,
+                },
+                PromptSection {
+                    name: "embodiment_live",
+                    content: &embodiment_block,
+                },
+                PromptSection {
+                    name: "environment_live",
+                    content: &environment_block,
+                },
+            ];
+            let messages = assemble_planning_messages(
+                round,
+                capability_cache_hit,
+                &sections,
+                history,
+                correction.as_deref(),
+            );
 
             let planning_revision = forest_revision.load(Ordering::Acquire);
             let mut vlm_attempt = 0_u8;
             let (content, raw_tool_calls) = loop {
-                let mut stream =
-                    match tokio::time::timeout(vlm_idle_timeout(), vlm.chat_stream(&messages, &[]))
-                        .await
-                    {
-                        Ok(Ok(stream)) => stream,
-                        Ok(Err(error)) if vlm_attempt == 0 => {
-                            warn!("[pilot/vlm] opening stream failed; retrying once: {error:#}");
-                            vlm_attempt += 1;
-                            continue;
-                        }
-                        Ok(Err(error)) => {
-                            return Err(anyhow::anyhow!("VLM stream error: {error:#}"));
-                        }
-                        Err(_) if vlm_attempt == 0 => {
-                            warn!("[pilot/vlm] opening stream timed out; retrying once");
-                            vlm_attempt += 1;
-                            continue;
-                        }
-                        Err(_) => return Err(anyhow::anyhow!("VLM stream open timed out")),
-                    };
+                let mut stream = match tokio::time::timeout(
+                    vlm_idle_timeout(),
+                    vlm.chat_stream(&messages, &[], Some(&prompt_cache_key)),
+                )
+                .await
+                {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) if vlm_attempt == 0 => {
+                        warn!("[pilot/vlm] opening stream failed; retrying once: {error:#}");
+                        vlm_attempt += 1;
+                        continue;
+                    }
+                    Ok(Err(error)) => {
+                        return Err(anyhow::anyhow!("VLM stream error: {error:#}"));
+                    }
+                    Err(_) if vlm_attempt == 0 => {
+                        warn!("[pilot/vlm] opening stream timed out; retrying once");
+                        vlm_attempt += 1;
+                        continue;
+                    }
+                    Err(_) => return Err(anyhow::anyhow!("VLM stream open timed out")),
+                };
                 let mut full_text = String::new();
                 let mut tool_calls: Vec<crate::vlm::ToolCall> = Vec::new();
 
@@ -1322,6 +1477,15 @@ pub async fn run_turn(
                             match item {
                                 VlmStreamItem::TextDelta(delta) => full_text.push_str(&delta),
                                 VlmStreamItem::ToolCall(tc) => tool_calls.push(tc),
+                                VlmStreamItem::Usage(usage) => info!(
+                                    "[pilot/prompt] {}",
+                                    serde_json::json!({
+                                        "round": round,
+                                        "provider_prompt_tokens": usage.prompt_tokens,
+                                        "provider_completion_tokens": usage.completion_tokens,
+                                        "provider_cached_tokens": usage.cached_tokens,
+                                    })
+                                ),
                                 VlmStreamItem::Finish => {}
                             }
                         }
@@ -1799,10 +1963,12 @@ pub async fn run_turn(
     Ok(())
 }
 
+/// Convert Atlas rows to provider-qualified model names and sort them so an
+/// unchanged catalog remains byte-identical even if discovery order varies.
 fn build_display_capabilities(
     cap_list: &[(String, atlas_pb::Capability)],
 ) -> Vec<DisplayCapability<'_>> {
-    cap_list
+    let mut display = cap_list
         .iter()
         .filter(|(_, cap)| !is_legacy_plan_control_contract(&cap.contract_id))
         .map(|(provider_id, cap)| DisplayCapability {
@@ -1810,7 +1976,9 @@ fn build_display_capabilities(
             provider_id: provider_id.as_str(),
             cap,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    display.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    display
 }
 
 fn is_legacy_plan_control_contract(contract_id: &str) -> bool {
@@ -1834,88 +2002,77 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
     out
 }
 
-/// One-line protocol reminder sent on every round after the first. The full
-/// ~9KB `rtdl_protocol.md` is sent only on round 0 (and the model's own prior
-/// envelopes stay in history), so later rounds re-anchor cheaply instead of
-/// re-shipping the whole spec — a large latency/token win on multi-round turns.
-const RTDL_PROTOCOL_REMINDER: &str = "## RTDL output (reminder — same format as your earlier turns)\n\
-Reply with exactly ONE JSON object, keys EXACTLY these four: \
-`content`, `rtdl_description`, `rtdl`, `task_update`. No other top-level keys.\n\
-The whole reply MUST begin with `{` and end with `}` — no prose, narration, or \
-markdown fences before or after it; put any user-facing text inside `content`, never outside the object. \
-Every value must be a literal JSON number or string.\n\
-`rtdl` is a tree; every node carries `op_id` (always write `0`; the system \
-assigns the real id) and a short `description` of THIS node's intent, plus:\n\
-- {\"op\":\"sequence\",\"op_id\":0,\"description\":\"...\",\"children\":[ ...nodes... ]}   (run children in order)\n\
-- {\"op\":\"parallel\",\"op_id\":0,\"description\":\"...\",\"children\":[ ...nodes... ]}   (run children concurrently)\n\
-- {\"op\":\"do\",\"op_id\":0,\"description\":\"...\",\"cap\":\"<capability_name>\",\"args\":{ ... }}   (one capability call)\n\
-A capability name goes ONLY in a do node's `cap` — NEVER as an `op`. \
-Beyond `op_id` and `description`, do NOT add other node fields (no `plan_id`, no `out`, no `id`). \
-Copy each `cap` EXACTLY from a capability_name in the list below (it is provider-qualified, \
-as returned by discovery); never invent, guess, or shorten names.\n\
-`task_update`: null keeps current progress, or {\"goal\",\"success_criterion\",\"status\"}. \
-The harness owns the instruction history: copy it EXACTLY from \"Current overall task\" and never \
-rewrite it. Interpret entries chronologically: the newest user instruction overrides conflicting \
-older instructions, while non-conflicting work remains active. You may refine the default success \
-criterion once. status is the \
-string \"in_progress\" or \"done\" (never null), set to \
-\"done\" only when the success_criterion verifiably holds AND no tree in the \
-\"In-flight trees\" list is still running (cancelling a tree does not make the task done — wait \
-for it to leave the list first).\n\
-Compose multi-step trees; don't drip one node per round. No new capability call this round = \
-{\"op\":\"sequence\",\"op_id\":0,\"description\":\"wait\",\"children\":[]}.\n\
-  Plan control is a root meta op, never a capability or nested RTDL node: \
-  {\"op\":\"cancel_plan\",\"plan_id\":\"<listed id>\",\"wait_ms\":5000}, \
-  {\"op\":\"cancel_all\",\"wait_ms\":5000}, or \
-  {\"op\":\"stop_plan_at\",\"plan_id\":\"<listed id>\",\"target_op_id\":\"<listed op id>\",\"when\":\"on_complete\"}. \
-  A meta op is the entire `rtdl` value for that round and cannot be nested in sequence/parallel/do. \
-  Never call a skill's cancel capability yourself; Executor propagates cancellation to the active provider.\n\
-Executor results are scoped to the plan_id/tree named immediately before them. A failed tree \
-blocks only its dependent steps; do not cancel an unrelated in-flight tree because another \
-tree failed. Cancel only for an explicit user steer covering that tree or a safety hazard.\n\
-For a named room or region, current Scene data is authoritative: call Scene list_regions, then \
-goal_room with its stable ID, then navigation with the returned pose. Never substitute a Memory \
-coordinate or an object/grasp pose. A navigation SUCCEEDED result proves completion only for the \
-resolved requested destination; a zero-distance result does not prove that the robot moved.\n\
-Example: {\"content\":\"listing\",\"rtdl_description\":\"list tmp\",\"rtdl\":{\"op\":\"sequence\",\
-\"op_id\":0,\"description\":\"list /tmp\",\"children\":[{\"op\":\"do\",\"op_id\":0,\
-\"description\":\"list the /tmp directory\",\"cap\":\"executor.builtin_list_dir\",\"args\":{\"path\":\"/tmp\"}}]},\
-\"task_update\":null}\n";
+/// Compact contract reminder for rounds after the first. The complete frozen
+/// protocol is sent on round zero; later requests keep only the wire grammar
+/// and harness invariants that are required to parse and admit the next plan.
+const RTDL_PROTOCOL_REMINDER: &str = r#"## RTDL output (same frozen contract as round 0)
+Reply with exactly one JSON object and no surrounding prose:
+{"content":"...","rtdl_description":"...","rtdl":<node>,"task_update":null|{"goal":"...","success_criterion":"...","status":"in_progress"|"done"}}
 
-/// Build the per-round protocol + capability catalog. `full_protocol` ships the
-/// complete spec (round 0); otherwise a one-line reminder. The capability
-/// catalog is always included because providers can change mid-turn.
-fn build_rtdl_prompt(
-    display_caps: &[DisplayCapability<'_>],
-    full_protocol: bool,
-) -> Result<String> {
-    // Compile-time embedded; edit `rtdl_protocol.md` in this crate root.
-    let mut p = if full_protocol {
-        String::from(include_str!("../rtdl_protocol.md"))
+Nodes are exactly one of:
+- {"op":"sequence","op_id":0,"description":"...","children":[...]}
+- {"op":"parallel","op_id":0,"description":"...","children":[...]}
+- {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
+Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
+
+Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
+
+Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
+
+Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call. task_update.goal must exactly copy Current user interaction. Use status=done only when its success criterion is verified and its relevant tree is no longer running.
+"#;
+
+fn rtdl_protocol(full: bool) -> &'static str {
+    if full {
+        include_str!("../rtdl_protocol.md")
     } else {
-        String::from(RTDL_PROTOCOL_REMINDER)
-    };
-    p.push_str("\n## Available capabilities\n\n");
+        RTDL_PROTOCOL_REMINDER
+    }
+}
 
+/// Hash the exact Atlas fields used by the prompt so registration changes
+/// invalidate the rendered catalog without relying on provider list identity.
+fn capability_prompt_fingerprint(display_caps: &[DisplayCapability<'_>]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for cap in display_caps {
+        cap.display_name.hash(&mut hasher);
+        cap.provider_id.hash(&mut hasher);
+        cap.cap.contract_id.hash(&mut hasher);
+        cap.cap.description.hash(&mut hasher);
+        if let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) = cap
+            .cap
+            .params
+            .as_ref()
+            .and_then(|params| params.kind.as_ref())
+        {
+            mcp.input_schema_json.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Render the complete capability catalog in a compact, deterministic shape.
+/// Names remain on their own line for the CI fake VLM and descriptions are
+/// JSON-escaped so embedded whitespace cannot inflate or corrupt the catalog.
+fn render_capability_prompt(display_caps: &[DisplayCapability<'_>]) -> String {
+    let mut prompt = String::from("\n## Available capabilities\n\n");
     for cap in display_caps {
         let c = cap.cap;
         let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) =
-            c.params.as_ref().and_then(|p| p.kind.as_ref())
+            c.params.as_ref().and_then(|params| params.kind.as_ref())
         else {
             continue;
         };
         let schema: serde_json::Value =
             serde_json::from_str(&mcp.input_schema_json).unwrap_or(serde_json::Value::Null);
-        p.push_str(&format!(
-            "- capability_name: {}\n  - description: {}\n  - args_schema: `{}`\n",
-            cap.display_name,
-            c.description.trim(),
-            schema
+        let description =
+            serde_json::to_string(c.description.trim()).unwrap_or_else(|_| "\"\"".to_string());
+        prompt.push_str(&format!(
+            "- capability_name: {}\n  description: {}\n  args_schema: {}\n",
+            cap.display_name, description, schema
         ));
     }
-
-    // debug!("[pilot/rtdl] rtdl prompt:\n{}", p);
-    Ok(p)
+    prompt
 }
 
 /// One parsed RTDL envelope from the VLM.
@@ -2852,8 +3009,9 @@ Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
-        RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer, apply_task_update,
+        CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO,
+        RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep,
+        append_steer, apply_task_update, build_capability_target_map, build_display_capabilities,
         build_executor_active_block, build_forest_block, compact_tool_result,
         configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
@@ -2864,6 +3022,7 @@ mod tests {
         task_is_session_end,
     };
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
+    use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
@@ -2883,6 +3042,76 @@ mod tests {
             configured_vlm_idle_timeout(Some("bad")),
             Duration::from_secs(30)
         );
+    }
+
+    fn test_capability(provider: &str, leaf: &str) -> (String, atlas_pb::Capability) {
+        (
+            provider.to_string(),
+            atlas_pb::Capability {
+                provider_id: provider.to_string(),
+                contract_id: format!("robonix/service/test/{leaf}"),
+                transport: atlas_pb::Transport::Mcp as i32,
+                params: Some(atlas_pb::TransportParams {
+                    kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
+                        input_schema_json: format!(
+                            r#"{{"type":"object","properties":{{"{leaf}":{{"type":"string"}}}}}}"#
+                        ),
+                    })),
+                }),
+                description: format!("Run {leaf}"),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn later_round_protocol_is_compact_but_keeps_admission_rules() {
+        assert!(RTDL_PROTOCOL_REMINDER.len() < 2_000);
+        for required in [
+            "capability_name",
+            "sequence",
+            "parallel",
+            "cancel_plan",
+            "plan_id/call_id",
+            "task_update.goal",
+            "Scene regions",
+            "Never call a skill's cancel capability",
+        ] {
+            assert!(RTDL_PROTOCOL_REMINDER.contains(required));
+        }
+    }
+
+    #[test]
+    fn stable_catalog_is_cached_and_three_step_tree_stays_one_plan() {
+        let capabilities = vec![
+            test_capability("demo", "observe"),
+            test_capability("demo", "remember"),
+            test_capability("demo", "report"),
+        ];
+        let display = build_display_capabilities(&capabilities);
+        let mut cache = CapabilityPromptCache::default();
+        let (first, first_hit) = cache.render(&display);
+        let first = first.to_string();
+        let (second, second_hit) = cache.render(&display);
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(first, second);
+
+        let targets = build_capability_target_map(&display);
+        let rtdl = json!({
+            "op": "sequence",
+            "op_id": 0,
+            "description": "observe, remember, then report",
+            "children": [
+                {"op":"do","op_id":0,"description":"observe","cap":"demo.test_observe","args":{"observe":"room"}},
+                {"op":"do","op_id":0,"description":"remember","cap":"demo.test_remember","args":{"remember":"room"}},
+                {"op":"do","op_id":0,"description":"report","cap":"demo.test_report","args":{"report":"room"}}
+            ]
+        });
+        let plan =
+            expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "multi-step").unwrap();
+        assert_eq!(super::plan_call_count(&plan), 3);
+        assert_eq!(plan.round, 1);
     }
 
     #[test]

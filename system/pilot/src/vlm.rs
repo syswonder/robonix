@@ -11,9 +11,9 @@ use async_openai::types::chat::{
     ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionTools,
-    CreateChatCompletionRequestArgs, FunctionCall, FunctionObject, FunctionObjectArgs, ImageDetail,
-    ImageUrl, ResponseFormat,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
+    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,21 @@ use std::pin::Pin;
 use std::time::Duration;
 
 const MAX_OPEN_RETRIES: usize = 3;
+
+/// Compatibility fallback is only safe when a client-error response names an
+/// optional field that Pilot added. Unrelated 4xx responses must retain their
+/// original diagnosis instead of being retried with a misleading warning.
+fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::BAD_REQUEST
+        && status != reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    ["stream_options", "include_usage", "prompt_cache_key"]
+        .iter()
+        .any(|field| body.contains(field))
+}
 
 fn open_retry_delay(
     status: reqwest::StatusCode,
@@ -187,10 +202,20 @@ impl Message {
 pub enum VlmStreamItem {
     TextDelta(String),
     ToolCall(ToolCall),
+    /// Provider-reported usage for the complete streamed request. OpenAI sends
+    /// it in a final choice-less chunk when `include_usage` is supported.
+    Usage(VlmUsage),
     /// Stream complete. Finish reason ("stop" / "tool_calls" / "error") is
     /// not surfaced to consumers yet — add a field here when the planner or
     /// downstream PilotEvent grows a use for it.
     Finish,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VlmUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: Option<u64>,
 }
 
 /// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
@@ -223,6 +248,7 @@ impl VlmClient {
         &self,
         messages: &[Message],
         tools: &[ToolDef],
+        prompt_cache_key: Option<&str>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<VlmStreamItem>> + Send>>> {
         let oai_messages = build_openai_messages(messages)?;
         let oai_tools = build_openai_tools(tools)?;
@@ -232,16 +258,26 @@ impl VlmClient {
             .model(&self.model)
             .messages(oai_messages)
             .stream(true)
+            .stream_options(ChatCompletionStreamOptions {
+                include_usage: Some(true),
+                include_obfuscation: None,
+            })
             .response_format(ResponseFormat::JsonObject);
         if !oai_tools.is_empty() {
             req_builder.tools(oai_tools);
         }
+        if let Some(prompt_cache_key) = prompt_cache_key {
+            req_builder.prompt_cache_key(prompt_cache_key);
+        }
         let request = req_builder
             .build()
             .context("build chat completion request")?;
+        let mut request_body = serde_json::to_value(request)
+            .context("serialize chat completion request for transport")?;
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
+        let mut compatibility_fallback_attempted = false;
         let response = loop {
             let response = self
                 .inner
@@ -249,7 +285,7 @@ impl VlmClient {
                 .bearer_auth(&self.api_key)
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .json(&request)
+                .json(&request_body)
                 .send()
                 .await
                 .context("open VLM chat stream")?;
@@ -263,6 +299,21 @@ impl VlmClient {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
+            if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
+                let removed = request_body.as_object_mut().is_some_and(|body| {
+                    let stream_options = body.remove("stream_options").is_some();
+                    let prompt_cache_key = body.remove("prompt_cache_key").is_some();
+                    stream_options || prompt_cache_key
+                });
+                if !removed {
+                    bail!("open VLM chat stream: HTTP {status}: {text}");
+                }
+                robonix_scribe::warn!(
+                    "[pilot/vlm] upstream rejected optional cache/usage fields with HTTP {status}; retrying without them"
+                );
+                compatibility_fallback_attempted = true;
+                continue;
+            }
             if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
                 robonix_scribe::warn!(
                     "[pilot/vlm] open stream HTTP {status}; retry {}/{} in {:.1}s",
@@ -289,7 +340,11 @@ impl VlmClient {
             let mut buf = String::new();
             let mut done = false;
             while !done {
-                let Some(chunk) = upstream.next().await else {
+                let chunk = tokio::select! {
+                    _ = tx.closed() => return,
+                    chunk = upstream.next() => chunk,
+                };
+                let Some(chunk) = chunk else {
                     break;
                 };
                 match chunk {
@@ -359,7 +414,12 @@ impl VlmClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_OPEN_RETRIES, open_retry_delay};
+    use super::{
+        AccumulatedToolCall, MAX_OPEN_RETRIES, VlmStreamItem, VlmUsage, open_retry_delay,
+        parse_usage, process_stream_line, rejects_optional_request_fields,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     #[test]
@@ -384,6 +444,70 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn usage_includes_provider_prompt_cache_tokens() {
+        let usage = parse_usage(&json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 80,
+                "total_tokens": 1280,
+                "prompt_tokens_details": {"cached_tokens": 900}
+            }
+        }));
+        assert_eq!(
+            usage,
+            Some(VlmUsage {
+                prompt_tokens: 1200,
+                completion_tokens: 80,
+                cached_tokens: Some(900),
+            })
+        );
+    }
+
+    #[test]
+    fn optional_field_fallback_does_not_mask_unrelated_client_errors() {
+        assert!(rejects_optional_request_fields(
+            reqwest::StatusCode::BAD_REQUEST,
+            "unknown field prompt_cache_key"
+        ));
+        assert!(rejects_optional_request_fields(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "stream_options is not permitted"
+        ));
+        assert!(!rejects_optional_request_fields(
+            reqwest::StatusCode::BAD_REQUEST,
+            "invalid model name"
+        ));
+        assert!(!rejects_optional_request_fields(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "prompt_cache_key"
+        ));
+    }
+
+    #[tokio::test]
+    async fn choice_less_usage_chunk_reaches_the_consumer() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
+        let mut finish = String::new();
+        process_stream_line(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":900}}}"#,
+            &mut calls,
+            &mut finish,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(Ok(VlmStreamItem::Usage(VlmUsage {
+                prompt_tokens: 1200,
+                completion_tokens: 80,
+                cached_tokens: Some(900),
+            })))
+        ));
     }
 }
 
@@ -414,6 +538,11 @@ async fn process_stream_line(
 
     let v: Value = serde_json::from_str(data)
         .with_context(|| format!("deserialize VLM stream chunk: {data}"))?;
+    if let Some(usage) = parse_usage(&v)
+        && tx.send(Ok(VlmStreamItem::Usage(usage))).await.is_err()
+    {
+        return Ok(true);
+    }
     let Some(choice) = v
         .get("choices")
         .and_then(Value::as_array)
@@ -459,6 +588,24 @@ async fn process_stream_line(
         *finish = fr.to_string();
     }
     Ok(false)
+}
+
+/// Read the standard Chat Completions usage shape without requiring every
+/// OpenAI-compatible provider to deserialize optional detail fields equally.
+fn parse_usage(value: &Value) -> Option<VlmUsage> {
+    let usage = value.get("usage")?.as_object()?;
+    let prompt_tokens = usage.get("prompt_tokens")?.as_u64()?;
+    let completion_tokens = usage.get("completion_tokens")?.as_u64()?;
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(Value::as_object)
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64);
+    Some(VlmUsage {
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
+    })
 }
 
 fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionRequestMessage>> {
