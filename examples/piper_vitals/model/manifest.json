@@ -1,0 +1,63 @@
+{
+  "spdxLicense": "MIT",
+  "upstream": "https://github.com/agilexrobotics/agx_arm_urdf",
+  "revision": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+  "sourceFiles": [
+    "piper/urdf/piper_description.urdf",
+    "piper/urdf/piper_with_gripper_description.xacro"
+  ],
+  "model": {
+    "path": "piper_with_gripper.urdf",
+    "bytes": 8009,
+    "sha256": "95a9226196cfd4b1c3947944921eb630a96becc37dcb7b9e798bb97d34178216",
+    "visuals": 11,
+    "links": 13,
+    "joints": 12
+  },
+  "assets": {
+    "meshes/dae/base_link.dae": {
+      "bytes": 1006256,
+      "sha256": "99cd5083e485e3eb739d967c57451f11e32e80b9f4f293815ba3b546d99bdc3c"
+    },
+    "meshes/dae/flange.dae": {
+      "bytes": 285243,
+      "sha256": "421c3e20c6109df3c96c5ce18ff0b2609b6604135ff790e4bfc1d9a281b0701a"
+    },
+    "meshes/dae/gripper_base.dae": {
+      "bytes": 2721338,
+      "sha256": "aaea10ec06709d6a3343dd3378553eee3df40b43ee276df10c5b68ac7f61bae2"
+    },
+    "meshes/dae/gripper_link1.dae": {
+      "bytes": 176476,
+      "sha256": "b4aaf0e024d09eb0454e70e0c5092638edcf7da7c253d1effdeeaec46f76427b"
+    },
+    "meshes/dae/gripper_link2.dae": {
+      "bytes": 176476,
+      "sha256": "0da1350898b2787b76b84698253aeb1efd2ddb6360b2fa2ae03ecff389883af8"
+    },
+    "meshes/dae/link1.dae": {
+      "bytes": 734613,
+      "sha256": "ea11f3382f6b32ec6d2283db4320ba2065ee1d24358f9b236ce71cfd4cd352cd"
+    },
+    "meshes/dae/link2.dae": {
+      "bytes": 6923319,
+      "sha256": "f6a723ff09c605a4bab19c1581b8879461967afe5626a3b7ca0a884e5f11a869"
+    },
+    "meshes/dae/link3.dae": {
+      "bytes": 3142573,
+      "sha256": "17cee6f92b741f21e29e4a3a3f600ba8093af3e1f61ae717747e03251a76982c"
+    },
+    "meshes/dae/link4.dae": {
+      "bytes": 1402164,
+      "sha256": "2a4d28b04341c22fdc38e9fc576c2386bf6f1e8ef0526d5b2cf179ea9ea650b3"
+    },
+    "meshes/dae/link5.dae": {
+      "bytes": 1362521,
+      "sha256": "fc7253ad4128731fded02700d5f35b94a30f3c219cd2b75b62b0abbd81bf7bff"
+    },
+    "meshes/dae/link6.dae": {
+      "bytes": 88161,
+      "sha256": "92f67e27b573969b4a1806ff3bc427bf9219c8ff78fec80d91ce3f32d69b1b9d"
+    }
+  }
+}

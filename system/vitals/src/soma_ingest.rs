@@ -751,10 +751,7 @@ fn body_components(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> Vec
                 name: first_non_empty(&[&component.name, &component.id]),
                 kind: kind_label(component.kind).to_string(),
                 temperature: component_temperature(actuator, power),
-                error_code: actuator
-                    .map(|a| a.vendor_error_code)
-                    .or_else(|| power.map(|p| p.vendor_status_code))
-                    .unwrap_or(0),
+                error_code: component_error_code(snapshot, component, actuator, power),
                 enabled: component_enabled(component, actuator),
                 id: component.id.clone(),
                 parent_id: component.parent_id.clone(),
@@ -762,6 +759,28 @@ fn body_components(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> Vec
             }
         })
         .collect()
+}
+
+/// Prefer typed device status and fall back to an exact active component fault.
+fn component_error_code(
+    snapshot: &SomaHealthSnapshot,
+    component: &ComponentStatus,
+    actuator: Option<&ActuatorState>,
+    power: Option<&PowerSourceState>,
+) -> u32 {
+    actuator
+        .map(|state| state.vendor_error_code)
+        .filter(|code| *code != 0)
+        .or_else(|| power.map(|state| state.vendor_status_code))
+        .filter(|code| *code != 0)
+        .or_else(|| {
+            snapshot
+                .faults
+                .iter()
+                .find(|fault| fault.active && fault.component_id == component.id)
+                .map(|fault| fault.vendor_code)
+        })
+        .unwrap_or(0)
 }
 
 fn component_contains(root: &ComponentStatus, component_id: &str) -> bool {
@@ -1009,6 +1028,53 @@ rules:
             fault.health, HEALTH_ERROR,
             "unknown fault severity must be treated as ERROR, not OK"
         );
+    }
+
+    /// A non-actuator component retains its vendor code in the body projection.
+    #[test]
+    fn component_fault_supplies_body_error_code() {
+        let mut snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        snapshot.components.push(ComponentStatus {
+            id: "body/arm/gripper".to_string(),
+            parent_id: "body/arm".to_string(),
+            kind: KIND_GRIPPER,
+            name: "gripper".to_string(),
+            frame_id: "gripper_link".to_string(),
+            model: "parallel_gripper".to_string(),
+            serial: String::new(),
+            health: HEALTH_ERROR,
+            operational_state: 8,
+            present: true,
+            online: false,
+            detail: "error_code=0x17".to_string(),
+        });
+        snapshot.faults.push(FaultState {
+            component_id: "body/arm/gripper".to_string(),
+            fault_id: "device_fault".to_string(),
+            severity: FAULT_ERROR,
+            active: true,
+            clearable: true,
+            onset_ts_ns: 0,
+            vendor_code: 23,
+            vendor_code_text: "0x17".to_string(),
+            message: "gripper error_code=0x17".to_string(),
+            attributes: vec![],
+            vendor_raw_json: String::new(),
+        });
+
+        let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
+        let gripper = vitals
+            .bodies
+            .iter()
+            .find(|body| body.body_type == "arm")
+            .and_then(|body| {
+                body.components
+                    .iter()
+                    .find(|component| component.id == "body/arm/gripper")
+            })
+            .expect("gripper body component");
+        assert_eq!(gripper.error_code, 23);
+        assert!(!gripper.enabled);
     }
 
     #[test]

@@ -11,18 +11,44 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct SomaBody {
     pub robot_id: String,
+    pub display_name: String,
+    pub model_name: String,
+    pub root_link: String,
+    pub components: Vec<SomaComponent>,
     pub yaml_path: PathBuf,
     pub yaml_text: String,
     pub urdf_path: PathBuf,
     pub urdf_xml: String,
+    urdf_asset_paths: Vec<UrdfAssetPath>,
     pub footprint: Option<Footprint>,
     pub grippers: Vec<GripperConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SomaComponent {
+    pub id: String,
+    pub parent_id: String,
+    pub component_type: String,
+    pub frame_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct UrdfAssetPath {
+    wire_path: String,
+    source_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SomaUrdfAsset {
+    pub path: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,13 +91,34 @@ struct MinimalSomaDoc {
 #[derive(Debug, Deserialize)]
 struct MinimalUrdf {
     path: PathBuf,
+    #[serde(default)]
+    root_link: String,
+    #[serde(default)]
+    model_name: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct MinimalRobot {
     id: String,
     #[serde(default)]
+    display_name: String,
+    #[serde(default)]
     footprint: Option<FootprintDoc>,
+    #[serde(default)]
+    components: Vec<ComponentDoc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComponentDoc {
+    id: String,
+    #[serde(rename = "type")]
+    component_type: String,
+    #[serde(default)]
+    urdf_link: String,
+    #[serde(default)]
+    urdf_joint: String,
+    #[serde(default)]
+    components: Vec<ComponentDoc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,17 +150,28 @@ impl SomaBody {
         };
         let urdf_xml = std::fs::read_to_string(&urdf_path)
             .with_context(|| format!("read URDF '{}'", urdf_path.display()))?;
+        let urdf_asset_paths = collect_urdf_asset_paths(&urdf_path, &urdf_xml)?;
         let footprint = doc.robot.footprint.map(Footprint::from_doc).transpose()?;
+        let mut components = Vec::new();
+        flatten_components(&doc.robot.components, "body", &mut components)?;
+        let display_name = non_empty_or(&doc.robot.display_name, &doc.robot.id);
+        let model_name = non_empty_or(&doc.urdf.model_name, &doc.robot.id);
+        let root_link = non_empty_or(&doc.urdf.root_link, "base_link");
         let yaml_value: serde_yaml::Value = serde_yaml::from_str(&yaml_text)
             .with_context(|| format!("parse runtime state config in '{}'", yaml_path.display()))?;
         let mut grippers = Vec::new();
         collect_grippers(&yaml_value, None, &mut grippers);
         Ok(Self {
             robot_id: doc.robot.id,
+            display_name,
+            model_name,
+            root_link,
+            components,
             yaml_path: yaml_path.to_path_buf(),
             yaml_text,
             urdf_path,
             urdf_xml,
+            urdf_asset_paths,
             footprint,
             grippers,
         })
@@ -136,6 +194,135 @@ impl SomaBody {
         self.footprint
             .as_ref()
             .ok_or_else(|| StoreError::MissingFootprint(self.robot_id.clone()))
+    }
+
+    /// Read requested URDF-local resources after validating their resolved paths.
+    pub fn read_urdf_assets(&self) -> Result<Vec<SomaUrdfAsset>> {
+        let urdf_dir = self.urdf_path.parent().with_context(|| {
+            format!(
+                "URDF '{}' has no parent directory",
+                self.urdf_path.display()
+            )
+        })?;
+        let canonical_dir = urdf_dir
+            .canonicalize()
+            .with_context(|| format!("resolve URDF directory '{}'", urdf_dir.display()))?;
+        self.urdf_asset_paths
+            .iter()
+            .map(|asset| {
+                let canonical_path = asset.source_path.canonicalize().with_context(|| {
+                    format!("resolve URDF asset '{}'", asset.source_path.display())
+                })?;
+                if !canonical_path.starts_with(&canonical_dir) {
+                    bail!(
+                        "URDF asset '{}' resolves outside '{}'",
+                        asset.wire_path,
+                        urdf_dir.display()
+                    );
+                }
+                let data = std::fs::read(&canonical_path)
+                    .with_context(|| format!("read URDF asset '{}'", canonical_path.display()))?;
+                Ok(SomaUrdfAsset {
+                    path: asset.wire_path.clone(),
+                    data,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Index URDF-local mesh and texture paths without requiring files at startup.
+fn collect_urdf_asset_paths(urdf_path: &Path, urdf_xml: &str) -> Result<Vec<UrdfAssetPath>> {
+    let document = roxmltree::Document::parse(urdf_xml)
+        .with_context(|| format!("parse URDF '{}'", urdf_path.display()))?;
+    let urdf_dir = urdf_path
+        .parent()
+        .with_context(|| format!("URDF '{}' has no parent directory", urdf_path.display()))?;
+    let mut paths = BTreeSet::new();
+    for node in document.descendants().filter(|node| {
+        node.is_element() && (node.has_tag_name("mesh") || node.has_tag_name("texture"))
+    }) {
+        let Some(filename) = node.attribute("filename") else {
+            continue;
+        };
+        if let Some(path) = local_asset_path(filename)? {
+            paths.insert(path);
+        }
+    }
+    Ok(paths
+        .into_iter()
+        .map(|path| UrdfAssetPath {
+            wire_path: path_for_wire(&path),
+            source_path: urdf_dir.join(path),
+        })
+        .collect())
+}
+
+/// Return a normalized URDF-local path, or None for externally resolved URIs.
+fn local_asset_path(filename: &str) -> Result<Option<PathBuf>> {
+    let filename = filename.trim();
+    if filename.is_empty()
+        || filename.starts_with('/')
+        || filename.contains("://")
+        || filename.starts_with("data:")
+    {
+        return Ok(None);
+    }
+    if filename.contains('\\') {
+        bail!("URDF asset paths must use POSIX separators: '{filename}'");
+    }
+    let path = Path::new(filename);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        bail!("URDF asset path must stay below the URDF directory: '{filename}'");
+    }
+    Ok(Some(path.components().collect()))
+}
+
+/// Encode a validated native relative path as a browser-facing POSIX path.
+fn path_for_wire(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Flatten the recursive Soma component tree into stable `body/...` paths.
+fn flatten_components(
+    docs: &[ComponentDoc],
+    parent_id: &str,
+    output: &mut Vec<SomaComponent>,
+) -> Result<()> {
+    for doc in docs {
+        if doc.id.trim().is_empty() {
+            bail!("robot.components[].id must not be empty");
+        }
+        if doc.component_type.trim().is_empty() {
+            bail!("robot component '{}' must define type", doc.id);
+        }
+        let id = format!("{parent_id}/{}", doc.id);
+        let frame_id = non_empty_or(&doc.urdf_link, &doc.urdf_joint);
+        output.push(SomaComponent {
+            id: id.clone(),
+            parent_id: parent_id.to_string(),
+            component_type: doc.component_type.clone(),
+            frame_id,
+        });
+        flatten_components(&doc.components, &id, output)?;
+    }
+    Ok(())
+}
+
+fn non_empty_or(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
     }
 }
 
@@ -346,5 +533,47 @@ robot:
         assert_eq!(grippers[0].provider_id, "piper_ctl");
         assert_eq!(grippers[0].joint_name, "gripper");
         assert!((grippers[0].open_position_m - 0.06937).abs() < 1e-9);
+    }
+
+    /// Missing Mesh files do not block startup but fail an explicit asset request.
+    #[test]
+    fn defers_urdf_asset_reads_until_requested() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let yaml_path = directory.path().join("soma.yaml");
+        std::fs::write(
+            &yaml_path,
+            "urdf:\n  path: robot.urdf\nrobot:\n  id: lazy_assets\n",
+        )
+        .expect("write Soma YAML");
+        std::fs::write(
+            directory.path().join("robot.urdf"),
+            r#"<robot name="lazy_assets"><link name="base_link"><visual><geometry><mesh filename="meshes/link.stl"/></geometry></visual></link></robot>"#,
+        )
+        .expect("write URDF");
+
+        let body = SomaBody::load(&yaml_path).expect("load without local mesh");
+        assert_eq!(body.urdf_asset_paths.len(), 1);
+        assert!(body.read_urdf_assets().is_err());
+
+        std::fs::create_dir(directory.path().join("meshes")).expect("create mesh directory");
+        std::fs::write(
+            directory.path().join("meshes/link.stl"),
+            b"solid link\nendsolid\n",
+        )
+        .expect("write mesh");
+        let assets = body.read_urdf_assets().expect("read requested assets");
+        assert_eq!(assets[0].path, "meshes/link.stl");
+        assert!(!assets[0].data.is_empty());
+    }
+
+    /// Local asset references reject traversal and non-POSIX separators.
+    #[test]
+    fn rejects_non_posix_or_traversing_asset_paths() {
+        assert!(local_asset_path("../outside.stl").is_err());
+        assert!(local_asset_path("meshes\\link.stl").is_err());
+        assert_eq!(
+            local_asset_path("https://example.test/link.stl").expect("external URI"),
+            None
+        );
     }
 }

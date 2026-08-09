@@ -14,3 +14,6 @@ rbnx-*
 # Webots cache archives belong in syswonder/robonix-assets Releases.
 sim/bridge/webots_assets_seed.tar.gz
 sim/bridge/webots-office-seed-*.tar.gz
+
+# Generated texture resources are prepared from pinned official sources.
+sim/ros_ws/src/eaios_webots/resource/textures/

@@ -1,0 +1,191 @@
+{
+  "spdxLicense": "Apache-2.0",
+  "models": {
+    "tiago_webots.urdf": {
+      "source": "tiago_webots.urdf",
+      "overlay": "tiago_webots.overlay.urdf",
+      "bytes": 44358,
+      "sha256": "58adeba4da62afb02c02400e286c4aeed18757a8c2b0b69753ac88056d56dda2",
+      "assetReferences": 30
+    },
+    "tiago_full_webots.urdf": {
+      "source": "tiago_full_webots.urdf",
+      "overlay": "tiago_full_webots.overlay.urdf",
+      "bytes": 65083,
+      "sha256": "a4cf6ff920e83a2d1b1ea062ce05600d0308c08760766e11841e075703186bac",
+      "assetReferences": 46
+    }
+  },
+  "assets": {
+    "meshes/dae/tiago_description__meshes__head__head_1_collision.dae": {
+      "source": "package://tiago_description/meshes/head/head_1_collision.dae",
+      "bytes": 106681,
+      "sha256": "045ee699c6d9c8af5ca214d5040d82c4f1c269a3489a0305c31aea5197f4b5f4"
+    },
+    "meshes/dae/tiago_description__meshes__head__head_2_collision.dae": {
+      "source": "package://tiago_description/meshes/head/head_2_collision.dae",
+      "bytes": 21931,
+      "sha256": "0636f903165d6117a2af0990203c11a97250b477ba413dfedfcb5b6835ead42c"
+    },
+    "meshes/dae/tiago_description__meshes__torso__torso_lift_collision_core.dae": {
+      "source": "package://tiago_description/meshes/torso/torso_lift_collision_core.dae",
+      "bytes": 10537,
+      "sha256": "932e983e0766eba25aef847498280e394c46cb896c73b9af45cb2a7a0600dc3c"
+    },
+    "meshes/dae/tiago_description__meshes__torso__torso_lift_collision_neck.dae": {
+      "source": "package://tiago_description/meshes/torso/torso_lift_collision_neck.dae",
+      "bytes": 7903,
+      "sha256": "4cda49ba69500fd4fdf20dfc4d1e46684f047c6915ad6840a8a0fb87d58fc925"
+    },
+    "meshes/dae/tiago_description__meshes__torso__torso_lift_collision_shoulder.dae": {
+      "source": "package://tiago_description/meshes/torso/torso_lift_collision_shoulder.dae",
+      "bytes": 14255,
+      "sha256": "430bda60fdd7eed7652bad8e66598e6145bc574ed14843a6815a5db9ba366376"
+    },
+    "meshes/stl/pal_gripper_description__meshes__gripper_finger_link.stl": {
+      "source": "package://pal_gripper_description/meshes/gripper_finger_link.stl",
+      "bytes": 71634,
+      "sha256": "49c43b68c72d3d510e231ec5b42ffe99de6b164874e5f79a7ab66d634373bb58"
+    },
+    "meshes/stl/pal_gripper_description__meshes__gripper_link.stl": {
+      "source": "package://pal_gripper_description/meshes/gripper_link.stl",
+      "bytes": 349634,
+      "sha256": "d51a0e30c6c04b74eeb8bbea0b46fb825ef46b9d1aeebebfac4dc865159e8809"
+    },
+    "meshes/stl/pal_gripper_description__meshes__gripper_link_collision.stl": {
+      "source": "package://pal_gripper_description/meshes/gripper_link_collision.stl",
+      "bytes": 31884,
+      "sha256": "9612a2949a34b1ffdfabf268e9cecbf2978e15e966961dce5b3208869eb3a143"
+    },
+    "meshes/stl/pal_urdf_utils__meshes__laser__sick_tim551.stl": {
+      "source": "package://pal_urdf_utils/meshes/laser/sick_tim551.stl",
+      "bytes": 100084,
+      "sha256": "9e0184e01a67754bce3a008fb1f52b292dbda69857ed9092909d211817915cf2"
+    },
+    "meshes/stl/pal_urdf_utils__meshes__laser__srf05.stl": {
+      "source": "package://pal_urdf_utils/meshes/laser/srf05.stl",
+      "bytes": 2534,
+      "sha256": "eeb656cca87825bf212355c73e8f68a2d9de42b429f00348709e9cbdfd528c9d"
+    },
+    "meshes/stl/pmb2_description__meshes__base__base.stl": {
+      "source": "package://pmb2_description/meshes/base/base.stl",
+      "bytes": 1072284,
+      "sha256": "fbb54a6d1c1afca726a7f6b825cee5a0167fb0d1e223746ae06c1d80190b2f71"
+    },
+    "meshes/stl/pmb2_description__meshes__base__base_dock_link.stl": {
+      "source": "package://pmb2_description/meshes/base/base_dock_link.stl",
+      "bytes": 73084,
+      "sha256": "d13ab33c5a39f9daa7f34a1b728c6b8afa2b105671846af29eb9f2d8c617cd0c"
+    },
+    "meshes/stl/pmb2_description__meshes__base__base_ring.stl": {
+      "source": "package://pmb2_description/meshes/base/base_ring.stl",
+      "bytes": 86484,
+      "sha256": "42227bf5392cd4e9a88b971512d8dc92608116b8e2dc186c7b73f1a185eecd36"
+    },
+    "meshes/stl/pmb2_description__meshes__base__high_resolution__base_collision.stl": {
+      "source": "package://pmb2_description/meshes/base/high_resolution/base_collision.stl",
+      "bytes": 28884,
+      "sha256": "d545eff1af2bac20324ee3606b80dad4700f440d8067111a2dd5d6365fbbaa1f"
+    },
+    "meshes/stl/pmb2_description__meshes__objects__antenna.stl": {
+      "source": "package://pmb2_description/meshes/objects/antenna.stl",
+      "bytes": 197484,
+      "sha256": "5dcf4914afdaec9c4682a0ad2f9b2b0b25d120cdbed470026267d843bf7d5119"
+    },
+    "meshes/stl/pmb2_description__meshes__wheels__caster_1.stl": {
+      "source": "package://pmb2_description/meshes/wheels/caster_1.stl",
+      "bytes": 40034,
+      "sha256": "e9bf8ae425cbcafe59b48a5cc955726633f0508f19acd9a06568c1bcff304606"
+    },
+    "meshes/stl/pmb2_description__meshes__wheels__caster_2.stl": {
+      "source": "package://pmb2_description/meshes/wheels/caster_2.stl",
+      "bytes": 25084,
+      "sha256": "27345e857ee7ecdfd21357dc8bd5eeced8d22fceab176dc5b434c2c3ce246ecd"
+    },
+    "meshes/stl/pmb2_description__meshes__wheels__wheel.stl": {
+      "source": "package://pmb2_description/meshes/wheels/wheel.stl",
+      "bytes": 300034,
+      "sha256": "dd1604ddc6bc017837b40aca2e3677375f0e7e2535fd63bb45f86d5f395338a2"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_1.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_1.stl",
+      "bytes": 240384,
+      "sha256": "a98a1becdaa0f17182ae242cbf829c327a108f11bb7dbdf1554ec76d7364c599"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_1_collision.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_1_collision.stl",
+      "bytes": 4684,
+      "sha256": "cd9e8ee419045bae78e07a2423f53fdd162f60f14e99bdc343d3645fb40e9acf"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_2.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_2.stl",
+      "bytes": 988384,
+      "sha256": "1dc20b672b900684e18054a9ca1de0b97ea18eef3dd49ab729374069ce6b423f"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_2_collision.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_2_collision.stl",
+      "bytes": 6584,
+      "sha256": "51764ae510f8a42fe78b092b8d01761ebef3acaf55092435582486b83acfa5b5"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_3.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_3.stl",
+      "bytes": 491084,
+      "sha256": "7894bc60a7c2b68cdeaa991e9ad03f48abcb5e72f8ffb5a50b1f4edadfb417e9"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_3_collision.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_3_collision.stl",
+      "bytes": 4584,
+      "sha256": "caa161d4dfcf4cb0d79cc48ba7baa7563fcf1eec9104601aa6a28346465d2c3e"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_4.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_4.stl",
+      "bytes": 407534,
+      "sha256": "12db11cef0bb9b743ce350946b08124e98890f30592516307a17c5b7c3582ea5"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_4_collision.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_4_collision.stl",
+      "bytes": 5484,
+      "sha256": "f701a62e24aec7164803648848ddb84d23f8141322cf461c931958dd28dd50ec"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_5-wrist-2017.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_5-wrist-2017.stl",
+      "bytes": 187984,
+      "sha256": "ad75b9064ed916360342c78cad139beed42e9f1429986efcad6ea1ad71578c28"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_5_collision-wrist-2017.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_5_collision-wrist-2017.stl",
+      "bytes": 5684,
+      "sha256": "77fffe1281eb37de77829f3874c8bd921dbd4988327d3f6891a3e4335a702efc"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_6-wrist-2017.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_6-wrist-2017.stl",
+      "bytes": 140184,
+      "sha256": "b3599f60d6c1c6df30266e2eee48b3bf1d1d59ded41a7acb134ee2917176be3e"
+    },
+    "meshes/stl/tiago_description__meshes__arm__arm_6_collision-wrist-2017.stl": {
+      "source": "package://tiago_description/meshes/arm/arm_6_collision-wrist-2017.stl",
+      "bytes": 4684,
+      "sha256": "4ffdd2c5d5f47f587f2bd336e4ced385c48bc3f70acf7f4fb1b6e88e09f521d5"
+    },
+    "meshes/stl/tiago_description__meshes__head__head_1.stl": {
+      "source": "package://tiago_description/meshes/head/head_1.stl",
+      "bytes": 80884,
+      "sha256": "da15ef00f276d4692df912889dc49561fc6b7958bf925aada017f52a15036721"
+    },
+    "meshes/stl/tiago_description__meshes__head__head_2.stl": {
+      "source": "package://tiago_description/meshes/head/head_2.stl",
+      "bytes": 144884,
+      "sha256": "8cc0b5fc791d313670f5d857cc83df415de6435a7c83d407b112dc6334a33158"
+    },
+    "meshes/stl/tiago_description__meshes__torso__torso_fix.stl": {
+      "source": "package://tiago_description/meshes/torso/torso_fix.stl",
+      "bytes": 299684,
+      "sha256": "66fff54e21d0bf8174acd445215c86d27720e6953d8f815a62bb9da82ef82a5d"
+    },
+    "meshes/stl/tiago_description__meshes__torso__torso_lift_with_arm.stl": {
+      "source": "package://tiago_description/meshes/torso/torso_lift_with_arm.stl",
+      "bytes": 126784,
+      "sha256": "3626f883472f52f195393100ec9fe2ef35e29b417c7191cb7c18afd3ea1cad1a"
+    }
+  }
+}

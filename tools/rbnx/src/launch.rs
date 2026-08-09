@@ -16,8 +16,9 @@
 //
 // What's here vs what's not:
 //   * `wait_for_registration_core` — atlas-side poll loop, no UI. Accepts
-//     a `before` snapshot so callers can reason about "which provider
-//     appeared because of this spawn." Returns `(provider_id, driver_contract)`.
+//     the expected provider's pre-spawn registration fingerprint so callers
+//     can recognize either a new id or a same-id endpoint takeover. Returns
+//     `(provider_id, driver_contract)`.
 //   * `call_driver_cmd` — one Driver(cmd) RPC against a freshly-connected
 //     channel, no UI. Returns the response's `state` string.
 //   * `CMD_*` constants and the `DRIVER_*_TIMEOUT` values — single source
@@ -46,13 +47,13 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tonic::Request;
 use tonic::transport::Endpoint;
+use tonic::{Code, Request};
 
 // ── Driver.srv command discriminators (mirrors capabilities/lib/lifecycle/srv/Driver.srv) ──
 
@@ -287,33 +288,160 @@ pub fn contract_id_to_service_name(id: &str) -> String {
         .collect::<String>()
 }
 
-/// Snapshot the set of currently-registered provider ids on Atlas. Use
-/// before spawning a package; pass the result to
-/// `wait_for_registration_core` so it can detect the new provider that
-/// shows up afterwards. Returns ids only (no kind/capability info), to
-/// keep the wire query cheap.
-pub async fn snapshot_provider_ids(atlas: &mut AtlasClient) -> Result<HashSet<String>> {
-    Ok(atlas
-        .query_capabilities("", "", atlas_pb::Transport::Unspecified)
-        .await
-        .context("pre-spawn atlas snapshot")?
-        .into_iter()
-        .map(|r| r.id)
-        .collect())
+/// One declared capability's stable registration identity.
+///
+/// Atlas Query intentionally omits resolved endpoints, so fingerprint capture
+/// opens a metadata-only ConnectCapability probe and immediately disconnects
+/// it. The probe never dials the provider process itself.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CapabilityEndpointFingerprint {
+    contract_id: String,
+    transport: i32,
+    endpoint: String,
 }
 
-/// Match only a newly appearing registration for the requested manifest id.
-pub fn is_expected_provider_registration(
-    provider: &atlas_pb::CapabilityProvider,
-    before: &HashSet<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderRegistrationFingerprint {
+    provider_id: String,
+    capabilities: BTreeSet<CapabilityEndpointFingerprint>,
+}
+
+/// Opaque pre-spawn state for exactly one manifest-expected provider id.
+///
+/// Comparing endpoint fingerprints distinguishes the dynamic-port takeover
+/// used by package wrappers without relying on heartbeat or lifecycle state,
+/// both of which change during ordinary operation. A takeover that reuses the
+/// exact same fixed endpoint cannot be distinguished if polling misses Atlas's
+/// brief endpoint-clear interval; that is an explicit boundary of the current
+/// Atlas read protocol.
+#[derive(Debug, Clone)]
+pub struct ProviderRegistrationSnapshot {
+    expected_provider_id: String,
+    fingerprint: Option<ProviderRegistrationFingerprint>,
+}
+
+enum FingerprintRead {
+    Stable(Option<ProviderRegistrationFingerprint>),
+    Retry,
+}
+
+fn atlas_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<tonic::Status>())
+        .any(|status| status.code() == Code::NotFound)
+}
+
+/// Read one expected provider's capability endpoint fingerprint.
+///
+/// Register takeover clears the old capability set before the new process
+/// redeclares it. If that happens between Query and a probe ConnectCapability,
+/// report a transient retry instead of failing package startup. Every probe
+/// that successfully opens a channel disconnects it before this function can
+/// return, including when a later probe encounters an error.
+async fn read_provider_fingerprint(
+    atlas: &mut AtlasClient,
     expected_provider_id: &str,
-) -> bool {
-    provider.id == expected_provider_id && !before.contains(expected_provider_id)
+) -> Result<FingerprintRead> {
+    let providers = atlas
+        .query_capabilities(expected_provider_id, "", atlas_pb::Transport::Unspecified)
+        .await
+        .with_context(|| format!("query expected provider '{expected_provider_id}'"))?;
+    let Some(provider) = providers
+        .into_iter()
+        .find(|provider| provider.id == expected_provider_id)
+    else {
+        return Ok(FingerprintRead::Stable(None));
+    };
+
+    let mut capabilities = BTreeSet::new();
+    for capability in provider.capabilities {
+        let transport = atlas_pb::Transport::try_from(capability.transport)
+            .unwrap_or(atlas_pb::Transport::Unspecified);
+        let connected = atlas
+            .connect_capability(
+                BOOT_CONSUMER_ID,
+                expected_provider_id,
+                &capability.contract_id,
+                transport,
+            )
+            .await;
+        let (channel_id, endpoint, _params) = match connected {
+            Ok(binding) => binding,
+            Err(error) if atlas_not_found(&error) => return Ok(FingerprintRead::Retry),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "probe expected provider '{expected_provider_id}' capability '{}'",
+                        capability.contract_id
+                    )
+                });
+            }
+        };
+        let disconnected = atlas
+            .disconnect_capability(&channel_id)
+            .await
+            .with_context(|| format!("disconnect registration probe '{channel_id}'"))?;
+        if !disconnected {
+            // A same-id takeover auto-drops old channels. The probe has no
+            // remaining Atlas state, but its endpoint sample is no longer a
+            // stable view of the current registration.
+            return Ok(FingerprintRead::Retry);
+        }
+        capabilities.insert(CapabilityEndpointFingerprint {
+            contract_id: capability.contract_id,
+            transport: capability.transport,
+            endpoint,
+        });
+    }
+
+    Ok(FingerprintRead::Stable(Some(
+        ProviderRegistrationFingerprint {
+            provider_id: expected_provider_id.to_string(),
+            capabilities,
+        },
+    )))
+}
+
+/// Snapshot one manifest-expected provider before spawning its package.
+pub async fn snapshot_provider_registration(
+    atlas: &mut AtlasClient,
+    expected_provider_id: &str,
+) -> Result<ProviderRegistrationSnapshot> {
+    // A concurrent takeover can invalidate Query before the endpoint probes.
+    // Re-query without a fixed sleep; ordinary package spawn has not started
+    // yet, so a small bounded retry is sufficient to obtain a stable baseline.
+    const SNAPSHOT_ATTEMPTS: usize = 4;
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        match read_provider_fingerprint(atlas, expected_provider_id).await? {
+            FingerprintRead::Stable(fingerprint) => {
+                return Ok(ProviderRegistrationSnapshot {
+                    expected_provider_id: expected_provider_id.to_string(),
+                    fingerprint,
+                });
+            }
+            FingerprintRead::Retry => tokio::task::yield_now().await,
+        }
+    }
+    anyhow::bail!(
+        "pre-spawn atlas snapshot for '{expected_provider_id}' changed during endpoint probes"
+    )
+}
+
+fn changed_expected_registration<'a>(
+    before: &ProviderRegistrationSnapshot,
+    current: &'a [ProviderRegistrationFingerprint],
+) -> Option<&'a ProviderRegistrationFingerprint> {
+    current.iter().find(|provider| {
+        provider.provider_id == before.expected_provider_id
+            && before.fingerprint.as_ref() != Some(*provider)
+    })
 }
 
 /// Outcome of `wait_for_registration_core`:
-///   * `provider_id` — the new provider that appeared after `before`.
-///   * `driver_contract` — if the new provider also declared a
+///   * `provider_id` — the expected provider whose registration appeared or
+///     changed endpoint fingerprint after `before`.
+///   * `driver_contract` — if that registration also declared a
 ///     `*/driver` gRPC capability within the settle window, its
 ///     contract_id; otherwise `None` (no Driver(CMD_*) lifecycle).
 #[derive(Debug, Clone)]
@@ -322,50 +450,54 @@ pub struct RegistrationOutcome {
     pub driver_contract: Option<String>,
 }
 
-/// Poll atlas until a provider NOT in `before` appears, then briefly
-/// settle to see if it also declares a `*/driver` gRPC capability.
+/// Poll Atlas until the expected provider appears or changes its endpoint
+/// fingerprint, then briefly settle for its `*/driver` gRPC capability.
 ///
 /// No terminal UI — pure RPC + sleep loop. Callers that want spinner /
 /// boot_progress output (rbnx CLI) wrap this with their own decorator.
 /// Soma calls it directly and logs through scribe.
 ///
 /// Errors:
-///   * timeout (no new provider before `DRIVER_REGISTER_TIMEOUT`),
-///   * multiple new providers from a single spawn (a deploy bug — the
-///     spec is one package start = one Capability(id=...)),
-///   * the new provider vanished between matching and settling (crashed
+///   * timeout (the expected registration did not change before
+///     `DRIVER_REGISTER_TIMEOUT`),
+///   * the expected provider vanished between matching and settling (crashed
 ///     or was evicted by heartbeat lapse).
 ///
 /// `who` is a free-form label included in error messages so the caller
 /// can tell which spawn this poll belonged to.
 pub async fn wait_for_registration_core(
     atlas: &mut AtlasClient,
-    before: &HashSet<String>,
-    expected_provider_id: &str,
+    before: &ProviderRegistrationSnapshot,
     who: &str,
 ) -> Result<RegistrationOutcome> {
-    if before.contains(expected_provider_id) {
-        anyhow::bail!(
-            "[{who}] deployment instance '{expected_provider_id}' was already registered before spawn"
-        );
-    }
-
     // Poll cadence is decoupled from any spinner refresh: we just sleep
     // 200ms between Atlas queries. That's the same cadence the CLI used
     // (one query per 2 spinner ticks at 100ms/tick).
     const POLL_INTERVAL: Duration = Duration::from_millis(200);
     let started = Instant::now();
     let deadline = started + DRIVER_REGISTER_TIMEOUT;
-    loop {
-        let providers = atlas
-            .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+    'poll: loop {
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "[{who}] timed out after {DRIVER_REGISTER_TIMEOUT:?} — package never \
+                 registered expected provider '{}' with a new endpoint fingerprint",
+                before.expected_provider_id,
+            );
+        }
+        let current = match read_provider_fingerprint(atlas, &before.expected_provider_id)
             .await
-            .with_context(|| format!("[{who}] poll atlas"))?;
-        let matched = providers.iter().find(|provider| {
-            is_expected_provider_registration(provider, before, expected_provider_id)
-        });
-        if let Some(first) = matched {
-            let provider_id = first.id.clone();
+            .with_context(|| format!("[{who}] poll atlas"))?
+        {
+            FingerprintRead::Stable(current) => current,
+            FingerprintRead::Retry => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        if let Some(first) = current.as_ref().and_then(|provider| {
+            changed_expected_registration(before, std::slice::from_ref(provider))
+        }) {
+            let provider_id = first.provider_id.clone();
             // RegisterPrimitive/Service/Skill and DeclareCapability are
             // two separate RPCs from the package side — Register lands
             // first, declares follow within a few hundred ms. Give it
@@ -376,7 +508,7 @@ pub async fn wait_for_registration_core(
                 .checked_add(Duration::from_millis(1000))
                 .map(|t| t.min(deadline))
                 .unwrap_or(deadline);
-            let mut current: atlas_pb::CapabilityProvider = (*first).clone();
+            let mut current = first.clone();
             let driver_contract = loop {
                 let driver = current.capabilities.iter().find(|cap| {
                     cap.transport == atlas_pb::Transport::Grpc as i32
@@ -389,13 +521,24 @@ pub async fn wait_for_registration_core(
                     break None;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let providers = atlas
-                    .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
+                match read_provider_fingerprint(atlas, &provider_id)
                     .await
-                    .with_context(|| format!("[{who}] re-poll for driver"))?;
-                match providers.into_iter().find(|p| p.id == provider_id) {
-                    Some(p) => current = p,
-                    None => {
+                    .with_context(|| format!("[{who}] re-poll for driver"))?
+                {
+                    FingerprintRead::Retry => continue,
+                    FingerprintRead::Stable(Some(next)) => {
+                        if changed_expected_registration(before, std::slice::from_ref(&next))
+                            .is_none()
+                        {
+                            // The endpoint set returned to its pre-spawn
+                            // fingerprint. We cannot prove this registration
+                            // belongs to the spawned process, so resume the
+                            // outer wait instead of sending CMD_INIT.
+                            continue 'poll;
+                        }
+                        current = next;
+                    }
+                    FingerprintRead::Stable(None) => {
                         // Provider vanished between the original match
                         // and now (crashed mid-settle, atlas evicted,
                         // heartbeat lapsed). Caller's downstream logic
@@ -412,12 +555,6 @@ pub async fn wait_for_registration_core(
                 provider_id,
                 driver_contract,
             });
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "[{who}] timed out after {DRIVER_REGISTER_TIMEOUT:?} — package never \
-                 registered a provider with atlas",
-            );
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -511,39 +648,197 @@ pub async fn call_driver_cmd(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{atlas_pb, is_expected_provider_registration};
-    use std::collections::HashSet;
+mod registration_tests {
+    use super::{
+        CapabilityEndpointFingerprint, ProviderRegistrationFingerprint,
+        ProviderRegistrationSnapshot, changed_expected_registration,
+        snapshot_provider_registration, wait_for_registration_core,
+    };
+    use robonix_atlas::client::{AtlasClient, grpc_params};
+    use robonix_atlas::pb;
+    use robonix_atlas::service::{AtlasRegistry, serve_atlas};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    #[test]
-    fn expected_registration_ignores_unrelated_provider() {
-        let before = HashSet::from(["existing_camera".to_string()]);
-        let provider = |id: &str| atlas_pb::CapabilityProvider {
-            id: id.to_string(),
-            ..Default::default()
-        };
+    const EXPECTED_ID: &str = "health_piper";
+    const DRIVER_CONTRACT: &str = "robonix/primitive/health/driver";
 
-        assert!(!is_expected_provider_registration(
-            &provider("unrelated_lidar"),
-            &before,
-            "camera",
-        ));
-        assert!(is_expected_provider_registration(
-            &provider("camera"),
-            &before,
-            "camera",
-        ));
+    fn grpc_capability(contract_id: &str, endpoint: &str) -> CapabilityEndpointFingerprint {
+        CapabilityEndpointFingerprint {
+            contract_id: contract_id.to_string(),
+            transport: pb::Transport::Grpc as i32,
+            endpoint: endpoint.to_string(),
+        }
     }
 
+    fn provider(
+        provider_id: &str,
+        capabilities: impl IntoIterator<Item = CapabilityEndpointFingerprint>,
+    ) -> ProviderRegistrationFingerprint {
+        ProviderRegistrationFingerprint {
+            provider_id: provider_id.to_string(),
+            capabilities: capabilities.into_iter().collect::<BTreeSet<_>>(),
+        }
+    }
+
+    fn snapshot(
+        expected_provider_id: &str,
+        fingerprint: Option<ProviderRegistrationFingerprint>,
+    ) -> ProviderRegistrationSnapshot {
+        ProviderRegistrationSnapshot {
+            expected_provider_id: expected_provider_id.to_string(),
+            fingerprint,
+        }
+    }
+
+    /// A provider absent from the snapshot is accepted when it first appears.
     #[test]
-    fn expected_registration_rejects_an_already_live_id() {
-        let before = HashSet::from(["camera".to_string()]);
-        let provider = atlas_pb::CapabilityProvider {
-            id: "camera".to_string(),
-            ..Default::default()
-        };
-        assert!(!is_expected_provider_registration(
-            &provider, &before, "camera",
-        ));
+    fn new_expected_provider_matches_registration() {
+        let before = snapshot(EXPECTED_ID, None);
+        let current = provider(
+            EXPECTED_ID,
+            [grpc_capability(DRIVER_CONTRACT, "127.0.0.1:34001")],
+        );
+
+        assert_eq!(
+            changed_expected_registration(&before, std::slice::from_ref(&current)),
+            Some(&current)
+        );
+    }
+
+    /// Reusing an identity with a new endpoint is treated as provider takeover.
+    #[test]
+    fn same_id_new_endpoint_matches_takeover() {
+        let before = snapshot(
+            EXPECTED_ID,
+            Some(provider(
+                EXPECTED_ID,
+                [grpc_capability(DRIVER_CONTRACT, "127.0.0.1:34001")],
+            )),
+        );
+        let takeover = provider(
+            EXPECTED_ID,
+            [grpc_capability(DRIVER_CONTRACT, "127.0.0.1:34513")],
+        );
+
+        assert_eq!(
+            changed_expected_registration(&before, std::slice::from_ref(&takeover)),
+            Some(&takeover)
+        );
+    }
+
+    /// An unchanged endpoint fingerprint cannot satisfy a new launch attempt.
+    #[test]
+    fn same_id_unchanged_fingerprint_does_not_match() {
+        let unchanged = provider(
+            EXPECTED_ID,
+            [grpc_capability(DRIVER_CONTRACT, "127.0.0.1:34001")],
+        );
+        let before = snapshot(EXPECTED_ID, Some(unchanged.clone()));
+
+        assert_eq!(changed_expected_registration(&before, &[unchanged]), None);
+    }
+
+    /// Changes from unrelated providers cannot satisfy the expected registration.
+    #[test]
+    fn unrelated_provider_change_does_not_match_expected_provider() {
+        let expected = provider(
+            EXPECTED_ID,
+            [grpc_capability(DRIVER_CONTRACT, "127.0.0.1:34001")],
+        );
+        let before = snapshot(EXPECTED_ID, Some(expected.clone()));
+        let unrelated = provider(
+            "other_provider",
+            [grpc_capability(
+                "robonix/primitive/other/driver",
+                "127.0.0.1:35001",
+            )],
+        );
+
+        assert_eq!(
+            changed_expected_registration(&before, &[expected, unrelated]),
+            None
+        );
+    }
+
+    /// Takeover waits through Atlas' capability gap until the new driver appears.
+    #[tokio::test]
+    async fn same_id_takeover_waits_for_driver_declared_during_settle() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind Atlas probe");
+        let atlas_addr = probe.local_addr().expect("Atlas probe address");
+        drop(probe);
+
+        let registry = Arc::new(AtlasRegistry::default());
+        let server = tokio::spawn(serve_atlas(Arc::clone(&registry), atlas_addr));
+        let endpoint = format!("http://{atlas_addr}");
+        let mut atlas = AtlasClient::connect_with_retry(&endpoint, 20, Duration::from_millis(25))
+            .await
+            .expect("connect test Atlas");
+
+        atlas
+            .register_primitive(EXPECTED_ID, "robonix/primitive/health", "")
+            .await
+            .expect("register old provider");
+        atlas
+            .declare_capability(
+                EXPECTED_ID,
+                DRIVER_CONTRACT,
+                pb::Transport::Grpc,
+                "127.0.0.1:34001",
+                grpc_params("", "", ""),
+            )
+            .await
+            .expect("declare old driver");
+        let before = snapshot_provider_registration(&mut atlas, EXPECTED_ID)
+            .await
+            .expect("snapshot old provider");
+        let inspect: serde_json::Value = serde_json::from_str(
+            &registry
+                .inspect_json()
+                .await
+                .expect("inspect Atlas after snapshot"),
+        )
+        .expect("parse Atlas inspection");
+        assert_eq!(
+            inspect["channels"]
+                .as_object()
+                .map(|channels| channels.len()),
+            Some(0),
+            "registration fingerprint probes must disconnect every Atlas channel",
+        );
+
+        let mut takeover_client = atlas.clone();
+        let takeover = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            takeover_client
+                .register_primitive(EXPECTED_ID, "robonix/primitive/health", "")
+                .await
+                .expect("take over provider id");
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            takeover_client
+                .declare_capability(
+                    EXPECTED_ID,
+                    DRIVER_CONTRACT,
+                    pb::Transport::Grpc,
+                    "127.0.0.1:34513",
+                    grpc_params("", "", ""),
+                )
+                .await
+                .expect("declare takeover driver");
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            wait_for_registration_core(&mut atlas, &before, "primitive/health_piper"),
+        )
+        .await
+        .expect("registration wait must not reach the 60s production timeout")
+        .expect("recognize same-id takeover");
+
+        assert_eq!(outcome.provider_id, EXPECTED_ID);
+        assert_eq!(outcome.driver_contract.as_deref(), Some(DRIVER_CONTRACT));
+        takeover.await.expect("takeover task");
+        server.abort();
     }
 }

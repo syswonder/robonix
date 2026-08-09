@@ -11,10 +11,14 @@ examples/webots/
 ├── sim/                       NOT a robonix package. Plain docker
 │   ├── start.sh               compose stack (Webots + eaios_webots).
 │   └── ...                    Bring up FIRST, before anything else.
+├── boot.sh                    Variant-aware wrapper around rbnx boot.
+├── soma.yaml                  TIAGo Lite body description (default).
+├── soma.full.yaml             Full single-arm TIAGo body description.
 ├── primitives/                One device = one package.
 │   ├── tiago_chassis/         /amcl_pose + /cmd_vel  → chassis/{state, move}
 │   ├── tiago_camera/          /head_front_camera/*   → camera/{snapshot, depth_snapshot}
 │   ├── tiago_lidar/           /scanner               → lidar/snapshot
+│   ├── tiago_health/          nominal simulated battery/wheel/sensor health
 │   └── audio_driver/          (separate, mic/spkr — old schema, not deployed yet)
 ├── services/
 │   └── tiago_nav2/            Nav2 launch + ActionClient wrapper
@@ -34,9 +38,48 @@ Two terminals only:
 bash examples/webots/sim/start.sh
 
 # T2 — robonix stack (whatever robonix_manifest.yaml declares):
-cd examples/webots
-rbnx boot
+bash examples/webots/boot.sh
 ```
+
+`rbnx boot` from `examples/webots/` remains equivalent to the default Lite
+command. The wrapper is required when selecting the full variant because it
+keeps Soma and simulated health on the same robot description.
+
+## TIAGo variants
+
+The default `lite` variant is the existing TIAGo base and body without an arm:
+
+```bash
+# Terminal 1
+bash examples/webots/sim/start.sh --tiago-variant lite
+
+# Terminal 2
+bash examples/webots/boot.sh --tiago-variant lite
+```
+
+The `full` variant uses Cyberbotics Webots R2025a `Tiago`: the same mobile
+base and sensors plus its seven-axis front arm and default parallel gripper:
+
+```bash
+# Terminal 1 (keep this running)
+bash examples/webots/sim/start.sh --tiago-variant full
+
+# Terminal 2
+bash examples/webots/boot.sh --tiago-variant full
+```
+
+The launcher automatically downloads the official Webots R2025a asset bundle
+(about 661 MB) on the first full start; the Docker volume caches it for later
+starts. Set `ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=0` only when the cache is
+already populated by another method. Both terminals must use the same variant.
+The full profile registers arm and gripper joint interfaces and reports their
+nominal health, but it does not yet deploy a Robonix arm/gripper primitive, so
+agent plans cannot command manipulation tasks yet.
+
+W3D streaming clients resolve mesh and HDR URLs in the browser as well as in
+Webots. The computer running the browser therefore needs direct or proxied
+access to `raw.githubusercontent.com`; the server-side Docker cache does not
+replace that browser requirement.
 
 The sim launcher supports multiple built-in worlds:
 
@@ -76,6 +119,44 @@ Then a third terminal for `rbnx chat`. `rbnx caps` lists the
 capabilities atlas knows about; `rbnx tools` lists the MCP tools
 the LLM agent can call.
 
+## Simulated hardware health
+
+`rbnx boot` starts `tiago_health` during Soma stage 1. The primitive publishes
+nominal battery, wheel, camera, lidar, and audio readings every 500 ms; Soma
+maps those readings onto the component tree in `soma.yaml`. With the `full`
+variant it also publishes all seven arm joints and the gripper against
+`soma.full.yaml`.
+
+The deployment manifest declares Vitals as a built-in system component, so
+`rbnx boot` starts it automatically after Soma and Pilot. Soma uses `50091`
+and voiceprint uses `50092` in this deployment, so Vitals listens on `50093`.
+
+Confirm that Atlas sees it as active:
+
+```bash
+rbnx caps -v | rg vitals
+```
+
+Query the normalized result:
+
+```bash
+cd /path/to/robonix
+PROTO_DIR=$(ls -td target/debug/build/robonix-vitals-*/out | head -n1)
+
+grpcurl -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto robonix_contracts.proto \
+  -d '{}' \
+  127.0.0.1:50093 \
+  robonix.contracts.RobonixSystemVitalsGet/GetVitals | jq
+```
+
+Expected power values are approximately `82%` and `24.8 V`; both wheels are
+online with enabled torque and temperatures below the default thresholds.
+The primitive's manifest config includes `scenario: normal`. This is the
+reserved entry point for future fault profiles; unsupported values currently
+fail initialization instead of returning misleading healthy data.
+
 To tear everything down: Ctrl-C the `rbnx boot` terminal, OR from
 any other shell:
 
@@ -105,9 +186,10 @@ The deploy manifest references these via `${VLM_*}`.
 
 ## What `rbnx boot` does
 
-1. Reads `robonix_manifest.yaml`, brings up the `system:` block (atlas,
-   executor, pilot) using their installed binaries — args (listen
-   address, log level, VLM endpoint) come straight out of the manifest.
+1. Reads `robonix_manifest.yaml`, brings up the `system:` block (including
+   Vitals) and the implicitly required Soma process using their installed
+   binaries. Listen addresses, log levels, and VLM settings come from the
+   manifest.
 2. For each `primitive:` / `service:` entry, in declaration order:
    - Spawns the package via `rbnx start -p <path>` (which runs that
      package's `scripts/start.sh` — for tiago drivers that's a

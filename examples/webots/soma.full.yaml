@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+urdf:
+  path: ./sim/ros_ws/src/eaios_webots/resource/tiago_full_webots.urdf
+  root_link: base_link
+  model_name: tiago_webots_full
+
+robot:
+  id: tiago_webots_full
+  display_name: "Webots TIAGo mobile manipulator"
+  family: mobile_manipulator
+  root_part: base
+  dimensions: { length_m: 0.68, width_m: 0.68, height_m: 1.10 }
+  footprint:
+    base_frame: base_link
+    points:
+      - [0.272, 0.272]
+      - [0.272, -0.272]
+      - [-0.272, -0.272]
+      - [-0.272, 0.272]
+  mass_kg: 70.0
+  passable_door_width_m: 0.80
+  exports:
+    - provider_id: tiago_health
+      capabilities:
+        - { path: robonix/primitive/health/state, description: "Read the current simulated TIAGo hardware health state." }
+        - { path: robonix/primitive/health/stream, description: "Stream simulated TIAGo hardware health into Soma." }
+    - provider_id: tiago_webots_nav2
+      capabilities:
+        - { path: robonix/service/navigation/navigate, description: "Navigate to a 2D goal in the mapped scene." }
+        - { path: robonix/service/navigation/navigate/status, description: "Report the current navigation goal status." }
+        - { path: robonix/service/navigation/navigate/cancel, description: "Cancel the active navigation goal." }
+    - provider_id: skill_explore_room
+      capabilities:
+        - { path: robonix/skill/explore/explore, description: "Run autonomous frontier exploration when the explore skill package is available." }
+        - { path: robonix/skill/explore/explore/status, description: "Report the current frontier-exploration task status." }
+        - { path: robonix/skill/explore/explore/cancel, description: "Cancel the active frontier-exploration task." }
+  components:
+    - id: base
+      type: mobile_base
+      urdf_link: base_link
+      exports:
+        - provider_id: tiago_webots_chassis
+          capabilities:
+            - { path: robonix/primitive/chassis/move, description: "Command chassis motion through Webots ROS2 velocity control." }
+            - { path: robonix/primitive/chassis/odom, description: "Read odometry from the simulated differential drive base." }
+            - { path: robonix/primitive/chassis/twist_in, description: "Accept velocity commands on the chassis command input." }
+      components:
+        - id: left_wheel
+          type: wheel
+          urdf_joint: wheel_left_joint
+          exports: []
+        - id: right_wheel
+          type: wheel
+          urdf_joint: wheel_right_joint
+          exports: []
+        - id: battery
+          type: battery
+          exports: []
+    - id: arm
+      type: arm
+      urdf_link: arm_1_link
+      exports: []
+      components:
+        - { id: joint_1, type: joint, urdf_joint: arm_1_joint, exports: [] }
+        - { id: joint_2, type: joint, urdf_joint: arm_2_joint, exports: [] }
+        - { id: joint_3, type: joint, urdf_joint: arm_3_joint, exports: [] }
+        - { id: joint_4, type: joint, urdf_joint: arm_4_joint, exports: [] }
+        - { id: joint_5, type: joint, urdf_joint: arm_5_joint, exports: [] }
+        - { id: joint_6, type: joint, urdf_joint: arm_6_joint, exports: [] }
+        - { id: joint_7, type: joint, urdf_joint: arm_7_joint, exports: [] }
+        - id: gripper
+          type: gripper
+          urdf_link: wrist_ft_tool_link
+          exports: []
+          components:
+            - id: actuator
+              type: joint
+              urdf_joint: gripper_left_finger_joint
+              exports: []
+    - id: head_camera
+      type: rgbd_camera
+      urdf_link: head_front_camera_rgb_optical_frame
+      exports:
+        - provider_id: tiago_webots_camera
+          capabilities:
+            - { path: robonix/primitive/camera/snapshot, description: "Capture an RGB image from the Webots head camera." }
+            - { path: robonix/primitive/camera/depth_snapshot, description: "Capture a registered depth image from the Webots head camera." }
+            - { path: robonix/primitive/camera/rgb, description: "Expose the RGB image stream for consumers such as mapping." }
+            - { path: robonix/primitive/camera/depth, description: "Expose the depth image stream for consumers such as mapping." }
+            - { path: robonix/primitive/camera/extrinsics, description: "Provide the camera transform relative to the robot base." }
+    - id: hokuyo_lidar
+      type: lidar_2d
+      urdf_link: base_laser_link
+      exports:
+        - provider_id: tiago_webots_lidar
+          capabilities:
+            - { path: robonix/primitive/lidar/snapshot, description: "Capture a planar laser scan from the simulated Hokuyo lidar." }
+    - id: audio
+      type: audio_io
+      exports:
+        - provider_id: tiago_webots_audio
+          capabilities:
+            - { path: robonix/primitive/audio/mic, description: "Stream microphone audio from the selected host ALSA input device." }
+            - { path: robonix/primitive/audio/speaker, description: "Play streamed audio through the selected host ALSA output device." }
+            - { path: robonix/primitive/audio/list_devices, description: "List available host ALSA audio devices." }
+            - { path: robonix/primitive/audio/select_device, description: "Select the active host ALSA audio device." }
+
+description:
+  summary: "A Webots TIAGo mobile manipulator with a differential base, 7-axis arm, parallel gripper, RGB-D camera, planar lidar, health monitoring, audio IO, mapping, navigation, and optional exploration packages."
+  can_do:
+    - "Drive and navigate in the simulated Webots worlds."
+    - "Capture RGB images, registered depth images, and planar lidar scans."
+    - "Render the full single-arm TIAGo body and expose arm and gripper joint state interfaces."
+    - "Publish nominal simulated base, arm, gripper, battery, and sensor health through Soma."
+    - "Provide microphone and speaker audio through the host audio driver."
+  cannot_do:
+    - "Command the arm or gripper through Robonix; this deployment does not yet include an arm primitive."
+    - "Control physical TIAGo hardware."
+    - "Use IMU or 3D point cloud data in the current deployment."
+  notes:
+    - "This profile uses Cyberbotics Webots R2025a Tiago with its default parallel gripper."
+    - "The Webots simulation stack under sim/ must be started with --tiago-variant full before rbnx boot."

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.piper_health
+  version: 0.1.0
+  vendor: robonix
+  description: Runtime-controllable Piper health for the minimal Vitals demo.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+stop: |
+  pkill -TERM -f "[p]ython3 -m piper_health.driver" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/primitive/health/state
+  - name: robonix/primitive/health/stream
+  - name: robonix/primitive/health/driver
+
+depends: []

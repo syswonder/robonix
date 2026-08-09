@@ -16,11 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let idl_root = repo_root.join("capabilities/lib");
     let contracts_root = repo_root.join("capabilities/system/soma");
+    let primitive_health_root = repo_root.join("capabilities/primitive/health");
     let proto_out = PathBuf::from(std::env::var("OUT_DIR")?);
     let selected_contracts = proto_out.join("selected_contracts");
 
     println!("cargo:rerun-if-changed={}", idl_root.display());
     println!("cargo:rerun-if-changed={}", contracts_root.display());
+    println!("cargo:rerun-if-changed={}", primitive_health_root.display());
     println!("cargo:rerun-if-changed=build.rs");
     let _ = std::fs::remove_dir_all(&selected_contracts);
     std::fs::create_dir_all(&selected_contracts)?;
@@ -32,6 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "health.v1.toml",
     ] {
         std::fs::copy(contracts_root.join(name), selected_contracts.join(name))?;
+    }
+    for name in ["state.v1.toml", "stream.v1.toml"] {
+        std::fs::copy(
+            primitive_health_root.join(name),
+            selected_contracts.join(name),
+        )?;
     }
 
     let mut resolver = msg_parser::MsgResolver::new(std::slice::from_ref(&idl_root))?;

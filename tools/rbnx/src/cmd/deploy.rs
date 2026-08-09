@@ -3,7 +3,7 @@
 // `robonix_manifest.yaml`. (`rbnx boot` is a back-compat alias.)
 //
 // Conventions:
-//   - `system:` Rust binaries (atlas / pilot / executor) are launched with
+//   - Built-in `system:` Rust binaries are launched with
 //     CLI arguments translated from the manifest block (`--listen`,
 //     `--log`, `--vlm-*`, …). No env-var translation, no YAML config files.
 //   - Package entries (`primitive` / `service`) are launched serially:
@@ -32,7 +32,7 @@ use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::PackageRuntimeRecord;
 use robonix_cli::output;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -56,14 +56,25 @@ const CMD_ACTIVATE: u32 = 1;
 const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 const CMD_SHUTDOWN: u32 = 3;
-// How long to wait for a freshly spawned package to register its driver
-// capability with atlas before giving up.
-const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 // Default Driver(CMD_INIT) deadline. Webots CI can override this with
 // ROBONIX_DRIVER_INIT_TIMEOUT_S for real stacks whose lifecycle bringup may
 // exceed 90s on a cold self-hosted runner.
 const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
+const BUILTIN_SYSTEM_BINARIES: &[(&str, &str)] = &[
+    ("atlas", "robonix-atlas"),
+    ("executor", "robonix-executor"),
+    ("soma", "robonix-soma"),
+    ("pilot", "robonix-pilot"),
+    ("vitals", "robonix-vitals"),
+    ("liaison", "robonix-liaison"),
+];
+
+pub(super) fn is_builtin_system(name: &str) -> bool {
+    BUILTIN_SYSTEM_BINARIES
+        .iter()
+        .any(|(builtin, _)| *builtin == name)
+}
 
 fn driver_init_timeout() -> Duration {
     std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
@@ -233,6 +244,43 @@ stop: "true"
 
         assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
     }
+
+    /// Verify that Vitals receives typed flags and its complete manifest block.
+    #[test]
+    fn vitals_manifest_is_translated_to_builtin_args() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 127.0.0.1:50093
+id: webots-vitals
+thresholds_path: /tmp/vitals-thresholds.yaml
+soma_endpoint: 127.0.0.1:50091
+log: debug
+expected_modules:
+  - module_id: executor
+    policy: required
+"#,
+        )
+        .expect("parse vitals manifest block");
+
+        let args = system_cli_args("vitals", Some(&cfg), Some("0.0.0.0:50051"));
+        let value_for = |flag: &str| {
+            args.windows(2)
+                .find(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+        };
+
+        assert_eq!(value_for("--listen"), Some("127.0.0.1:50093"));
+        assert_eq!(value_for("--atlas"), Some("0.0.0.0:50051"));
+        assert_eq!(value_for("--id"), Some("webots-vitals"));
+        assert_eq!(
+            value_for("--thresholds-path"),
+            Some("/tmp/vitals-thresholds.yaml")
+        );
+        assert_eq!(value_for("--soma-endpoint"), Some("127.0.0.1:50091"));
+        assert_eq!(value_for("--log"), Some("debug"));
+        let config_json = value_for("--config-json").expect("complete manifest JSON");
+        assert!(config_json.contains("expected_modules"));
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -300,10 +348,9 @@ fn check_prerequisites(
     // otherwise `rbnx start` performs the build after spawn and the provider
     // registration timeout can kill a legitimate first build (Scene model
     // downloads are a common example).
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
     if let Some(source_root) = robonix_source_path {
         for name in deploy.system.keys() {
-            if SYSTEM_BUILTINS.contains(&name.as_str()) {
+            if is_builtin_system(name) {
                 continue;
             }
             let pkg_path = source_root.join("system").join(name);
@@ -1105,14 +1152,7 @@ pub async fn execute(
             } else {
                 Some(atlas_caps_roots.join(","))
             };
-            let bin_map: &[(&str, &str)] = &[
-                ("atlas", "robonix-atlas"),
-                ("executor", "robonix-executor"),
-                ("soma", "robonix-soma"),
-                ("pilot", "robonix-pilot"),
-                ("liaison", "robonix-liaison"),
-            ];
-            for (name, bin) in bin_map {
+            for (name, bin) in BUILTIN_SYSTEM_BINARIES {
                 if !deploy.system.contains_key(*name) {
                     continue;
                 }
@@ -1231,15 +1271,13 @@ pub async fn execute(
                     // for-loop finishes. Otherwise (e.g. an atlas-executor-
                     // soma-only deploy) skip the header — dangling section
                     // titles with nothing under them are worse than none.
-                    let builtin_after_soma = bin_map
+                    let builtin_after_soma = BUILTIN_SYSTEM_BINARIES
                         .iter()
                         .skip_while(|(n, _)| *n != "soma")
                         .skip(1) // drop soma itself
                         .any(|(n, _)| deploy.system.contains_key(*n));
-                    let has_non_builtin_system = deploy
-                        .system
-                        .keys()
-                        .any(|k| !bin_map.iter().any(|(n, _)| n == k));
+                    let has_non_builtin_system =
+                        deploy.system.keys().any(|name| !is_builtin_system(name));
                     if builtin_after_soma || has_non_builtin_system {
                         output::boot_section("system service");
                     }
@@ -1277,9 +1315,8 @@ pub async fn execute(
         let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
 
         if !skip_system {
-            let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
             for (key, value) in &deploy.system {
-                if builtin_names.contains(&key.as_str()) {
+                if is_builtin_system(key) {
                     continue;
                 }
                 let pkg_dir = match config.robonix_source_path.as_ref() {
@@ -1639,7 +1676,7 @@ fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> 
         .get(serde_yaml::Value::String("listen".into()))?
         .as_str()?;
     let trimmed = s.trim();
-    if trimmed.is_empty() || !matches!(name, "atlas" | "executor" | "pilot" | "liaison" | "soma") {
+    if trimmed.is_empty() || !is_builtin_system(name) {
         return None;
     }
     Some(trimmed.to_string())
@@ -1777,6 +1814,18 @@ fn system_cli_args(
             push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--log", s("log"));
         }
+        "vitals" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas").or_else(|| atlas_listen.map(str::to_string)),
+            );
+            push_pair(&mut out, "--id", s("id"));
+            push_pair(&mut out, "--thresholds-path", s("thresholds_path"));
+            push_pair(&mut out, "--soma-endpoint", s("soma_endpoint"));
+            push_pair(&mut out, "--log", s("log"));
+        }
         _ => {}
     }
     out
@@ -1795,13 +1844,9 @@ async fn spawn_and_init(
     spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
 ) -> Result<Spawned> {
-    let before: HashSet<String> = atlas
-        .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+    let before = robonix_cli::launch::snapshot_provider_registration(atlas, &entry.name)
         .await
-        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?
-        .into_iter()
-        .map(|r| r.id)
-        .collect();
+        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?;
 
     let mut sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
@@ -2289,125 +2334,54 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
 
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
-    before: &HashSet<String>,
+    before: &robonix_cli::launch::ProviderRegistrationSnapshot,
     expected_provider_id: &str,
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
 ) -> Result<(String, Option<String>)> {
-    if before.contains(expected_provider_id) {
-        anyhow::bail!(
-            "[{component}/{pkg_label}] deployment instance '{expected_provider_id}' \
-             was already registered before spawn"
-        );
-    }
-
-    // Wait only for this manifest entry's exact provider id. Other packages
-    // may register concurrently and must not receive this instance's config.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
-    const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
-    let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
+    let who = format!("{component}/{pkg_label}");
+    let registration = robonix_cli::launch::wait_for_registration_core(atlas, before, &who);
+    tokio::pin!(registration);
     if output::boot_verbose() {
         output::boot_wait(display_label, "registering with atlas");
     }
     loop {
-        let elapsed_s = started.elapsed().as_secs_f32();
-        let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
-        if output::boot_verbose() {
-            if frame > 0 && frame.is_multiple_of(50) {
-                output::boot_note(display_label, &detail);
+        tokio::select! {
+            result = &mut registration => {
+                match result {
+                    Ok(outcome) => {
+                        debug_assert_eq!(outcome.provider_id, expected_provider_id);
+                        return Ok((outcome.provider_id, outcome.driver_contract));
+                    }
+                    Err(error) => {
+                        let log_file = log_path(log_dir, pkg_label);
+                        output::boot_fail(
+                            display_label,
+                            &format!("registration failed — see {}", log_file.display()),
+                        );
+                        return Err(error).with_context(|| {
+                            format!("[{who}] registration failed. Log: {}", log_file.display())
+                        });
+                    }
+                }
             }
-        } else {
-            output::boot_progress(display_label, &detail, frame);
-        }
-        if frame.is_multiple_of(POLLS_PER_TICK as usize) {
-            let providers = atlas
-                .query_capabilities("", "", atlas_pb::Transport::Unspecified)
-                .await
-                .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            let matched = providers.iter().find(|provider| {
-                robonix_cli::launch::is_expected_provider_registration(
-                    provider,
-                    before,
-                    expected_provider_id,
-                )
-            });
-            if let Some(first) = matched {
-                let provider_id = first.id.clone();
-                // RegisterPrimitive/Service/Skill and DeclareCapability are
-                // two separate RPCs from the package side — Register lands
-                // first, declares follow within a few hundred ms. Give it
-                // up to a 1 s settle window so we don't false-fire the
-                // "no driver" path on a fast poll. Capped by the outer
-                // `deadline` so we never exceed user-facing timeout.
-                let settle_until = Instant::now()
-                    .checked_add(Duration::from_millis(1000))
-                    .map(|t| t.min(deadline))
-                    .unwrap_or(deadline);
-                let mut current: atlas_pb::CapabilityProvider = (*first).clone();
-                let driver_contract_id = loop {
-                    let driver = current.capabilities.iter().find(|cap| {
-                        cap.transport == atlas_pb::Transport::Grpc as i32
-                            && cap.contract_id.ends_with("/driver")
-                    });
-                    if driver.is_some() {
-                        break driver.map(|c| c.contract_id.clone());
+            _ = tokio::time::sleep(SPINNER_TICK) => {
+                let elapsed_s = started.elapsed().as_secs_f32();
+                let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
+                if output::boot_verbose() {
+                    if frame > 0 && frame.is_multiple_of(50) {
+                        output::boot_note(display_label, &detail);
                     }
-                    if Instant::now() >= settle_until {
-                        break None;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let providers = atlas
-                        .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
-                        .await
-                        .with_context(|| format!("[{component}/{pkg_label}] re-poll for driver"))?;
-                    match providers.into_iter().find(|p| p.id == provider_id) {
-                        Some(p) => current = p,
-                        None => {
-                            // Provider vanished between the original match
-                            // and now (crashed mid-settle, atlas evicted,
-                            // heartbeat lapsed). Report loudly — silently
-                            // returning "no driver" would let downstream
-                            // boot logic march on against a dead process.
-                            let log_file = log_path(log_dir, pkg_label);
-                            output::boot_fail(
-                                display_label,
-                                &format!(
-                                    "provider '{provider_id}' disappeared during settle — see {}",
-                                    log_file.display()
-                                ),
-                            );
-                            anyhow::bail!(
-                                "[{component}/{pkg_label}] provider '{provider_id}' \
-                                 unregistered during settle window. Log: {}",
-                                log_file.display()
-                            );
-                        }
-                    }
-                };
-                return Ok((provider_id, driver_contract_id));
+                } else {
+                    output::boot_progress(display_label, &detail, frame);
+                }
+                frame = frame.wrapping_add(1);
             }
         }
-        if Instant::now() >= deadline {
-            let log_file = log_path(log_dir, pkg_label);
-            output::boot_fail(
-                display_label,
-                &format!(
-                    "registration timeout after {:?} — see {}",
-                    DRIVER_REGISTER_TIMEOUT,
-                    log_file.display()
-                ),
-            );
-            anyhow::bail!(
-                "[{component}/{pkg_label}] timed out after {:?} — package never registered a provider with atlas. Log: {}",
-                DRIVER_REGISTER_TIMEOUT,
-                log_file.display()
-            );
-        }
-        tokio::time::sleep(SPINNER_TICK).await;
-        frame = frame.wrapping_add(1);
     }
 }

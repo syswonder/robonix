@@ -5,7 +5,11 @@
 # RDP boxes, or any case where SSH X-forwarding to a laptop is too slow.
 #
 # Usage from this directory:
-#   docker compose -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build
+#   source ./nvidia_host.sh
+#   robonix_select_nvidia_gpu "${ROBONIX_GPU_ID:-}"
+#   robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+#   docker compose -f compose.yaml -f compose.gpu.yaml \
+#     -f compose.nvidia-xorg.yaml -f compose.stream.yaml up --build
 # or set `ROBONIX_SIM_STREAM=1` before `bash start.sh` and the launcher
 # will merge this file automatically (plus print the access URLs).
 #

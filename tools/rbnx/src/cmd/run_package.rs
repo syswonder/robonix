@@ -273,16 +273,15 @@ fn build_deploy_manifest(
     // `system:` non-builtin entries are real packages too (memory / scene
     // / speech / …), they just live under `<robonix_source>/system/<key>/`
     // instead of being declared with an explicit `path:` / `url:`. The
-    // builtin Rust binaries (atlas / executor / pilot / liaison / soma) are
+    // builtin Rust binaries (atlas / executor / soma / pilot / vitals / liaison) are
     // shipped via `cargo install` and skipped here.
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
     if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
         let source_root = config.robonix_source_path.as_ref();
         for (key, _value) in map {
             let Some(key_str) = key.as_str() else {
                 continue;
             };
-            if SYSTEM_BUILTINS.contains(&key_str) {
+            if super::deploy::is_builtin_system(key_str) {
                 continue;
             }
             let Some(source_root) = source_root else {

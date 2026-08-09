@@ -3240,6 +3240,7 @@ dependencies = [
  "robonix-cli",
  "robonix-codegen",
  "robonix-scribe",
+ "roxmltree 0.21.1",
  "serde",
  "serde_json",
  "serde_yaml",

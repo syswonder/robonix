@@ -24,6 +24,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+roxmltree = "0.21.1"
 robonix-atlas = { path = "../atlas" }
 robonix-cli = { path = "../../tools/rbnx" }
 robonix-scribe.workspace = true

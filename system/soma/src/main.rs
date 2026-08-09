@@ -57,6 +57,7 @@ const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
 const GET_FOOTPRINT_TOML: &str = "capabilities/system/soma/footprint.v1.toml";
 const GET_HEALTH_TOML: &str = "capabilities/system/soma/get_health.v1.toml";
 const HEALTH_TOML: &str = "capabilities/system/soma/health.v1.toml";
+const MAX_URDF_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 /// Line rbnx writes to the stage-trigger pipe to release soma's
 /// stage 2. Match this exactly in rbnx's `cmd::deploy.rs` — they're
 /// a contract pair, not configurable per deployment.
@@ -115,21 +116,29 @@ async fn main() -> Result<()> {
     let snapshot_service = Arc::clone(&svc);
     let snapshot_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
-        let mut seq = 0_u64;
         loop {
             tick.tick().await;
-            seq += 1;
-            snapshot_service.publish_runtime_snapshot(seq).await;
+            snapshot_service.publish_runtime_snapshot().await;
         }
     });
     let (body_shutdown_tx, body_shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_service = Arc::clone(&svc);
     let mut body_server = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaFootprintServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaGetHealthServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaHealthServer::from_arc(svc))
+            .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(
+                &server_service,
+            )))
+            .add_service(
+                RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&server_service))
+                    .max_encoding_message_size(MAX_URDF_RESPONSE_BYTES),
+            )
+            .add_service(RobonixSystemSomaFootprintServer::from_arc(Arc::clone(
+                &server_service,
+            )))
+            .add_service(RobonixSystemSomaGetHealthServer::from_arc(Arc::clone(
+                &server_service,
+            )))
+            .add_service(RobonixSystemSomaHealthServer::from_arc(server_service))
             .serve_with_shutdown(listen_addr, async {
                 let _ = body_shutdown_rx.await;
             })
@@ -249,6 +258,22 @@ async fn main() -> Result<()> {
         )
         .await
         .context("set Soma lifecycle ACTIVE")?;
+    {
+        let health_atlas = atlas.clone();
+        let health_body = Arc::clone(&body);
+        let health_service = Arc::clone(&svc);
+        tokio::spawn(async move {
+            if let Err(error) = robonix_soma::health::start_health_collector(
+                health_atlas,
+                health_body,
+                health_service,
+            )
+            .await
+            {
+                warn!("[soma-health] collector failed: {error:#}");
+            }
+        });
+    }
     let runtime_dir = log_dir.join("soma-runtime");
     let runtime_monitor = match robonix_soma::runtime_monitor::start(
         &mut atlas,

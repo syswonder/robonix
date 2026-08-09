@@ -12,12 +12,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "[sim/stop] killing host-side robonix processes (atlas / pilot / executor / liaison / rbnx boot)..."
+echo "[sim/stop] killing host-side robonix processes (atlas / executor / soma / pilot / vitals / liaison / rbnx boot)..."
 # Every binary spawned by `rbnx boot`'s system: block must be listed here,
 # otherwise its TCP port leaks across boot cycles and the next boot fails
 # with `listen address ':50081' is taken`. Add new ones to deploy.rs's
 # system-bin table AND to this regex.
-pkill -9 -f "rbnx boot|rbnx deploy|rbnx start -p|robonix-atlas|robonix-pilot|robonix-executor|robonix-liaison" 2>/dev/null || true
+pkill -9 -f "rbnx boot|rbnx deploy|rbnx start -p|robonix-atlas|robonix-executor|robonix-soma|robonix-pilot|robonix-vitals|robonix-liaison" 2>/dev/null || true
 
 echo "[sim/stop] killing host-side python service zombies (speech / memsearch / scene / audio drivers / nav bridges)..."
 # Host-side packages spawn long-lived Python processes in their own

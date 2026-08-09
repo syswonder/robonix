@@ -6,21 +6,12 @@
 
 services:
   sim:
-    # NVIDIA Xorg needs modesetting permission on some hosts (notably Debian 13
-    # with recent 580-series drivers). Keep this opt-in for normal local use;
-    # CI sets ROBONIX_SIM_PRIVILEGED=true for isolated Webots containers.
-    privileged: ${ROBONIX_SIM_PRIVILEGED:-false}
     environment:
       # PRIME render-offload: prefer the passed-in dGPU for GL. On Optimus
       # laptops Webots/rviz otherwise fall to the iGPU. Export =0 to opt out.
       __NV_PRIME_RENDER_OFFLOAD: "${__NV_PRIME_RENDER_OFFLOAD:-1}"
       __GLX_VENDOR_LIBRARY_NAME: "${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
       __VK_LAYER_NV_optimus: "${__VK_LAYER_NV_optimus:-NVIDIA_only}"  # Vulkan apps -> dGPU too
-    volumes:
-      # Some nvidia-container-toolkit/Docker combinations expose CUDA/NVML but
-      # do not inject the Xorg NVIDIA modules needed by WEBOTS_HEADLESS_MODE=nvidia.
-      - /usr/lib/xorg/modules/drivers/nvidia_drv.so:/usr/lib/xorg/modules/drivers/nvidia_drv.so:ro
-      - /usr/lib/xorg/modules/extensions/libglxserver_nvidia.so:/usr/lib/xorg/modules/extensions/libglxserver_nvidia.so:ro
     deploy:
       resources:
         reservations:

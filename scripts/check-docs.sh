@@ -14,7 +14,8 @@
 #   - tools/codegen/src/codegen/docs_gen.rs       the Chinese-doc generator
 #                                                 (`rbnx docs` emits a Chinese
 #                                                 manual; its templates live here)
-#   - binary assets                              png/gif/svg/jpg/pdf/ico/tar.gz/fonts
+#   - binary/rendering assets                    png/gif/svg/jpg/pdf/ico/dae/stl/
+#                                                tar.gz/fonts
 #   - any line containing 'i18n-ok'              documented encoding/i18n test fixture
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -25,7 +26,7 @@ mapfile -t files < <(git ls-files \
   | grep -vE '^tools/codegen/src/codegen/docs_gen\.rs$' \
   | grep -vEi '(^|/)LICENSE$' \
   | grep -vE '(-zh|_zh)\.[A-Za-z0-9]+$' \
-  | grep -vEi '\.(png|gif|svg|jpe?g|pdf|ico|woff2?|ttf|eot)$' \
+  | grep -vEi '\.(png|gif|svg|jpe?g|pdf|ico|dae|stl|woff2?|ttf|eot)$' \
   | grep -vE '\.tar\.gz$')
 
 python3 - "${files[@]}" <<'PY'
