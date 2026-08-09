@@ -38,11 +38,8 @@ def _import_ros():
     from sensor_msgs.msg import Image, LaserScan, PointCloud2, CameraInfo  # type: ignore
     from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped  # type: ignore
     from nav_msgs.msg import Odometry, OccupancyGrid  # type: ignore
-    # tf2 is the authoritative source for `map → base_link` and
-    # `map → camera_optical`. Reading /odom directly puts the robot in
-    # *odom-frame* — once SLAM accumulates drift, the map → odom
-    # transform is non-identity, and the web UI shows the robot offset
-    # from where rviz (which goes through tf) shows it.
+    # tf2 remains available as a compatibility source for explicitly named
+    # transforms. Generic Scene code never invents either endpoint.
     from tf2_ros import Buffer, TransformListener  # type: ignore
     # map/msg/MapLifecycle comes from the generated ros2_idl overlay
     # (rbnx codegen --ros2 + colcon build), NOT the ROS distro. Import it
@@ -120,6 +117,8 @@ def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
     declared = str(spec.qos_profile or "default").strip().lower().replace("-", "_")
     if declared in {"best_effort", "sensor_data"}:
         return "best_effort", "volatile", depth
+    if declared == "reliable" and spec.kind == "occupancy_grid":
+        return "reliable", "transient_local", depth
     if declared == "reliable":
         return "reliable", "volatile", depth
     if declared in {"latched", "transient_local"}:
@@ -197,10 +196,9 @@ class SubscribersHub:
         Node = self._ros["Node"]
         node = Node(self.node_name)
         self._node = node
-        # tf2 buffer + listener spin alongside the topic subs. The
-        # buffer accumulates /tf + /tf_static; consumers call
-        # `lookup_transform(map, base_link, ...)` to get the SLAM-
-        # corrected pose without ever touching /odom or /amcl_pose.
+        # tf2 buffer + listener spin alongside the topic subscriptions.
+        # Consumers must supply both frame names from contracts, message
+        # headers, or explicit deployment configuration.
         Buffer = self._ros["Buffer"]
         TransformListener = self._ros["TransformListener"]
         self._tf_buffer = Buffer()
@@ -344,16 +342,13 @@ class SubscribersHub:
     # ── tf2 accessors ────────────────────────────────────────────────────
     def lookup_xy_yaw(
         self,
-        target_frame: str = "base_link",
-        source_frame: str = "map",
+        target_frame: str,
+        source_frame: str,
     ) -> Optional[tuple[float, float, float, float]]:
         """Return (x, y, z, yaw) of `target_frame` expressed in
         `source_frame` via tf2, or None when the transform isn't
-        available yet. This is the SLAM-corrected pose: it goes
-        through /tf (rtabmap publishes map→odom; chassis publishes
-        odom→base_link), so it tracks rviz exactly. Reading /odom
-        instead leaves the consumer in odom-frame and drifts away
-        from the map once SLAM corrects.
+        available yet. Both frame arguments must originate outside this
+        generic helper; it deliberately has no robot or map-frame defaults.
         """
         if self._ros is None or self._tf_buffer is None:
             return None
@@ -382,13 +377,12 @@ class SubscribersHub:
     def lookup_transform_4x4(
         self,
         target_frame: str,
-        source_frame: str = "map",
+        source_frame: str,
     ):
         """Return a 4x4 numpy homogeneous transform that maps points
         from `target_frame` into `source_frame`. None when tf isn't
-        available. Used by perception to project camera-optical
-        depth points directly into map frame without composing odom-
-        frame chassis pose by hand."""
+        available. Used by perception only after both frame names have
+        been learned from data or explicit deployment configuration."""
         if self._ros is None or self._tf_buffer is None:
             return None
         try:

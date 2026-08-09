@@ -7,10 +7,22 @@ on:
   pull_request:
     branches: [main, dev, dev-next, dev/**]
 
+# Least privilege: every job here only reads the checked-out tree.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  runtime-portability:
+    name: Generic runtime portability audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject deployment-specific core fallbacks
+        run: python3 scripts/check_runtime_portability.py
+
   webots-streaming-smoke:
     name: Webots streaming smoke test
     runs-on: ubuntu-22.04

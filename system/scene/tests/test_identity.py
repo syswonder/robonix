@@ -128,7 +128,6 @@ def _make_detector(registry):
         rgb_fetcher_msg=lambda: None,
         depth_fetcher_msg=lambda: None,
         camera_info_fetcher=lambda: None,
-        chassis_pose_fn=lambda: None,
         on_detections=_noop,
         registry=registry,
         world_frame_fn=lambda: "map",

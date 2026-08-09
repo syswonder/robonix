@@ -48,13 +48,12 @@ def _log_environment() -> None:
              _ENABLE_EMBEDDING)
     log.info("clean_start: enabled=%s (set MEMGRAPH_KEEP_DATA=1 to preserve)",
              not _KEEP_DATA)
-    model_path = os.environ.get(
-        "EMBEDDING_MODEL_PATH",
-        os.path.join(os.path.expanduser("~"),
-                     "EmbodyMemory", "memory", "all-MiniLM-L6-v2"),
-    )
-    log.info("embedding model path: %s (exists=%s)",
-             model_path, os.path.isdir(model_path))
+    model_path = os.environ.get("EMBEDDING_MODEL_PATH", "")
+    if model_path:
+        log.info("embedding model path: %s (exists=%s)",
+                 model_path, os.path.isdir(model_path))
+    else:
+        log.info("embedding model source: sentence-transformers standard cache")
 
 
 # ── 1. Core backend imports (no rbnx-api dependency) ───────────────────
@@ -208,7 +207,9 @@ class MemoryService:
 
     async def remember_from_log(self, session_id: str, plan_id: str,
                                 level: str, tag: str, msg: str,
-                                objects=None, parent_node_id=None):
+                                objects=None, parent_node_id=None,
+                                spatial_origin: str = ""):
+        """Build a memory record while preserving explicit spatial origin."""
         lr = LogRecord(level=level, tag=tag, msg=msg)
         spatial = None
         if objects:
@@ -217,7 +218,8 @@ class MemoryService:
                                      x=o[2] if len(o)>2 else 0,
                                      y=o[3] if len(o)>3 else 0,
                                      z=o[4] if len(o)>4 else 0)
-                         for o in objects]
+                         for o in objects],
+                origin=spatial_origin,
             )
         resp = await self.remember(session_id, plan_id, lr,
                                    spatial=spatial, parent_node_id=parent_node_id)
@@ -302,7 +304,7 @@ if _MCP_AVAILABLE:
             "msg":   "grasped red cup in kitchen"
           },
           "spatial": {                               // optional
-            "origin":  "world",
+            "origin":  "frame_from_scene",
             "objects": [
               {"obj_id": "scene.obj.cup_001", "label": "red cup",
                "x": 1.0, "y": 2.0, "z": 0.8}
@@ -418,7 +420,7 @@ if _MCP_AVAILABLE:
               "node_id": 42,
               "summary": "successfully grasp red cup in kitchen",
               "tags": {"scene_type": "kitchen", "action_type": "grasp", ...},
-              "spatial_data": {"objects": [...], "origin": "world"},
+              "spatial_data": {"objects": [...], "origin": "frame_from_scene"},
               "weight": 0.5,
               "timestamp": 1765432100123456789,
               "raw_log": {"ts": ..., "level": "Info", "tag": "exec", "msg": "..."},

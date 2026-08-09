@@ -2,7 +2,9 @@
 
 Monitors robot onboard health (CPU/GPU/NVMe temperature, voltage) and body (joint motors), evaluates thresholds, and reports via gRPC.
 
-Vitals consumes the unified health stream (`SomaHealthSnapshot`) from Soma (real or mock). Without Soma, Vitals exits with an error.
+Vitals consumes the unified health stream (`SomaHealthSnapshot`) from Soma
+(real or mock). If Soma is not ready yet, Vitals keeps serving and retries the
+stream connection in the background.
 
 ## Architecture
 
@@ -27,7 +29,7 @@ Piper CAN0 → health_piper (Python Primitive, robonix_api)
 
 The `health_piper` primitive implements `robonix/primitive/health/stream` and
 wraps `piper_sdk`. It is **not** part of the Robonix source tree — create it in your
-deployment's `primitives/` directory following the [vendor onboarding guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html).
+deployment's `primitives/` directory following the [vendor onboarding guide](https://book.robonix.ai/integration-guide/vendor-onboarding.html).
 
 ### Mock SOMA path (no SOMA needed)
 
@@ -42,6 +44,30 @@ Optionally, `--mock-soma-arm piper` spawns `scripts/piper_bridge.py` as a subpro
 
 For a screen-recording-friendly end-to-end health demo, see
 [`VITALS_HEALTH_DEMO.md`](VITALS_HEALTH_DEMO.md).
+
+### With `rbnx boot` (recommended)
+
+Declare Vitals in the deployment manifest's existing `system:` block:
+
+```yaml
+system:
+  vitals:
+    listen: 127.0.0.1:50092
+    log: info
+```
+
+`rbnx boot` starts `robonix-vitals`, supplies the Atlas endpoint from
+`system.atlas.listen`, and passes the complete Vitals block as manifest JSON.
+Fields without standalone CLI flags, including `expected_modules`, can be set
+in this block. Explicit CLI or environment values take precedence over the
+manifest, followed by an optional YAML config file and compiled defaults.
+
+```bash
+rbnx boot -f /path/to/deploy/robonix_manifest.yaml
+```
+
+The Webots example uses `127.0.0.1:50093` because port `50092` is reserved for
+voiceprint in that deployment.
 
 ### With real SOMA (production)
 
@@ -132,6 +158,7 @@ robonix-vitals --log info \
 | `--mock-soma-piper-script` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT` | `<crate>/scripts/piper_bridge.py` |
 | `--mock-soma-koch-script` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_SCRIPT` | `<crate>/scripts/koch_bridge.py` |
 | `--config` | `ROBONIX_CONFIG_PATH` | — |
+| `--config-json` | - | `system.vitals` block supplied by `rbnx boot` |
 | `--log` | `RUST_LOG` | `robonix_vitals=info` |
 
 ## Threshold format
@@ -165,7 +192,7 @@ cargo test --workspace --all-targets
 
 Prerequisites: Piper arm connected via CAN0, `~/roboarm/.venv` with `piper-sdk>=0.6.1`,
 and a `health_piper` primitive package created in your deployment per the
-[vendor onboarding guide](https://robonix.syswonder.org/integration-guide/vendor-onboarding.html).
+[vendor onboarding guide](https://book.robonix.ai/integration-guide/vendor-onboarding.html).
 
 **Step 1: Create the primitive** in your deployment directory (e.g. `~/roboarm/robonix/primitives/health_piper/`), then run `rbnx codegen -p .` inside it.
 

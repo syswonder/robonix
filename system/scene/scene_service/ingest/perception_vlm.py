@@ -19,7 +19,6 @@ import asyncio
 import base64
 import json
 import logging
-import math
 import os
 import re
 import time
@@ -87,23 +86,24 @@ class VLMObjectDetector:
         self,
         *,
         rgb_fetcher: Callable[[], Optional[bytes]],
-        chassis_pose_fn: Callable[[], Optional[tuple[float, float, float, float]]],
+        camera_to_world_fn: Callable[[], Optional[tuple[object, str]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         period_s: float = 3.0,
-        camera_frame_id: str = "camera_optical_frame",
         intrinsics: Optional[_CamIntrinsics] = None,
+        intrinsics_fn: Optional[Callable[[], Optional[_CamIntrinsics]]] = None,
     ) -> None:
         # `rgb_fetcher` returns the latest JPEG bytes (or None when no
         # frame has arrived yet). When ROS subscribers are the source,
         # the hub hands us a sensor_msgs/Image whose `data` is raw RGB;
         # service.py's adapter turns that into JPEG before calling us.
         self.rgb_fetcher = rgb_fetcher
-        self.chassis_pose_fn = chassis_pose_fn
+        self.camera_to_world_fn = camera_to_world_fn
         self.on_detections = on_detections
         self.period_s = period_s
-        self.camera_frame_id = camera_frame_id
         self.intrinsics = intrinsics
+        self.intrinsics_fn = intrinsics_fn
         self._missing_intrinsics_logged = False
+        self._missing_transform_logged = False
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
 
@@ -211,31 +211,38 @@ class VLMObjectDetector:
         return dets if isinstance(dets, list) else []
 
     def _project_to_world(self, raw: list[dict]) -> list[Detection]:
-        """Convert each detection's image bbox + approximate depth into a
-        world-frame Pose3D + BBox3D. Algorithm:
+        """Project image detections through deployment-provided geometry.
 
-          1. bbox center in pixels (cx, cy)
-          2. unproject to camera frame using pinhole + depth_m
-          3. compose with `chassis_pose` (robot in `map`) plus an
-             assumed camera-relative pose (head-mounted, roughly 0,0,1m)
+        Scene admits no spatial object unless intrinsics, a camera-to-world
+        transform, and the transform's destination frame are all known.
+        """
+        import numpy as np
 
-        Step 3 is intentionally crude in v1 (no real TF lookup); it's
-        good enough to put cups in approximately the right map cell so
-        relations work. TODO: consume tf2 once scene runs alongside
-        rclpy on a real robot."""
         out: list[Detection] = []
-        chassis = self.chassis_pose_fn()
-        if chassis is None:
-            rx, ry, rz, ryaw = 0.0, 0.0, 0.0, 0.0
-        else:
-            rx, ry, rz, ryaw = chassis
-        cam_offset_z = 1.1  # head height-ish; configurable later
-
-        K = self.intrinsics
+        K = self.intrinsics_fn() if self.intrinsics_fn is not None else self.intrinsics
         if K is None:
             if not self._missing_intrinsics_logged:
                 log.warning("[scene-vlm] camera intrinsics unavailable; skipping projection")
                 self._missing_intrinsics_logged = True
+            return []
+        self._missing_intrinsics_logged = False
+        transform_state = self.camera_to_world_fn()
+        if transform_state is None:
+            if not self._missing_transform_logged:
+                log.warning(
+                    "[scene-vlm] camera pose/extrinsics unavailable; "
+                    "withholding spatial detections"
+                )
+                self._missing_transform_logged = True
+            return []
+        self._missing_transform_logged = False
+        transform, world_frame = transform_state
+        world_frame = str(world_frame or "").strip()
+        if not world_frame:
+            return []
+        transform = np.asarray(transform, dtype=np.float64)
+        if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+            log.warning("[scene-vlm] invalid camera-to-world transform; skipping")
             return []
 
         for d in raw:
@@ -250,28 +257,21 @@ class VLMObjectDetector:
                 x0, y0, x1, y1 = (float(v) for v in bbox)
                 cx_px = 0.5 * (x0 + x1)
                 cy_px = 0.5 * (y0 + y1)
-                depth = float(d.get("approximate_depth_m", 1.5))
+                if d.get("approximate_depth_m") is None:
+                    continue
+                depth = float(d["approximate_depth_m"])
                 if depth <= 0.05 or depth > 25.0:
-                    depth = 1.5
+                    continue
 
                 # Pinhole back-projection: camera frame X right, Y down, Z forward.
                 X_c = (cx_px - K.cx) * depth / K.fx
                 Y_c = (cy_px - K.cy) * depth / K.fy
                 Z_c = depth
 
-                # Camera→robot: assume camera looks +x of robot, mounted at +z=cam_offset_z.
-                # Robot frame: x forward, y left, z up. Rotate camera (z forward, x right, y down)
-                # into robot axes: robot.x = cam.z, robot.y = -cam.x, robot.z = -cam.y
-                X_r = Z_c
-                Y_r = -X_c
-                Z_r = -Y_c + cam_offset_z
-
-                # Robot→map: rotate by yaw, translate by chassis pose.
-                cos_y = math.cos(ryaw)
-                sin_y = math.sin(ryaw)
-                X_m = rx + cos_y * X_r - sin_y * Y_r
-                Y_m = ry + sin_y * X_r + cos_y * Y_r
-                Z_m = rz + Z_r
+                X_m, Y_m, Z_m, _ = transform @ np.array(
+                    [X_c, Y_c, Z_c, 1.0],
+                    dtype=np.float64,
+                )
 
                 # bbox dimensions: rough scale from pixel size + depth, capped to sane values.
                 px_w = max(1.0, x1 - x0)
@@ -282,8 +282,20 @@ class VLMObjectDetector:
 
                 out.append(Detection(
                     cls=_canon_class(cls),
-                    pose=Pose3D(x=X_m, y=Y_m, z=Z_m, yaw=0.0, frame_id="map"),
-                    bbox=BBox3D(size_x=size_x, size_y=size_y, size_z=size_z, yaw=0.0, frame_id="map"),
+                    pose=Pose3D(
+                        x=float(X_m),
+                        y=float(Y_m),
+                        z=float(Z_m),
+                        yaw=0.0,
+                        frame_id=world_frame,
+                    ),
+                    bbox=BBox3D(
+                        size_x=size_x,
+                        size_y=size_y,
+                        size_z=size_z,
+                        yaw=0.0,
+                        frame_id=world_frame,
+                    ),
                     confidence=max(0.0, min(1.0, conf)),
                     source="vlm",
                 ))

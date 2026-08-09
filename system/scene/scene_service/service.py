@@ -41,6 +41,7 @@ from .ingest.capabilities import plan_perception
 from .map_binding import MapBinding, choose_map_binding, read_latched_lifecycle
 from .object_watchdog import ObjectWatchdog
 from .map_meta import MapMetaStore
+from .robot_geometry import RobotGeometryState, reconcile_robot_geometry
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
@@ -339,15 +340,21 @@ class _SelfTracker:
     consumes for camera-to-map projection.
     """
 
-    def __init__(self, registry: ObjectRegistry) -> None:
+    def __init__(
+        self,
+        registry: ObjectRegistry,
+        robot_geometry: RobotGeometryState,
+    ) -> None:
+        """Track the robot pose and represent its Soma-owned footprint."""
         self.registry = registry
+        self.robot_geometry = robot_geometry
         self._latest: Optional[tuple[float, float, float, float]] = None
         self._object_id: Optional[str] = None
         # World frame name used for stamped outputs. Updated by the
         # pose loop from the localizer's `header.frame_id` so we never
         # hardcode a specific provider's frame name (`map` for rtabmap,
         # `world` for some mocap setups, etc.).
-        self.world_frame_id: str = "map"
+        self.world_frame_id: str = ""
 
     def latest_xy_yaw(self) -> Optional[tuple[float, float, float, float]]:
         return self._latest
@@ -355,6 +362,9 @@ class _SelfTracker:
     async def on_pose(self, x: float, y: float, z: float, yaw: float) -> None:
         self._latest = (x, y, z, yaw)
         wf = self.world_frame_id
+        footprint = self.robot_geometry.current()
+        if not wf or footprint is None:
+            return
         async with self.registry.lock():
             if (
                 self._object_id is None or self._object_id not in self.registry._objects
@@ -362,7 +372,12 @@ class _SelfTracker:
                 obj = self.registry.insert_object(
                     cls="robot",
                     pose=Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id=wf),
-                    bbox=BBox3D(size_x=0.6, size_y=0.6, size_z=1.5, frame_id=wf),
+                    bbox=BBox3D(
+                        size_x=footprint.size_x_m,
+                        size_y=footprint.size_y_m,
+                        size_z=0.0,
+                        frame_id=wf,
+                    ),
                     confidence=1.0,
                     now=now_unix(),
                     is_robot=True,
@@ -375,6 +390,13 @@ class _SelfTracker:
             else:
                 obj = self.registry.get_object(self._object_id)
                 if obj is not None:
+                    obj.bbox = BBox3D(
+                        size_x=footprint.size_x_m,
+                        size_y=footprint.size_y_m,
+                        size_z=0.0,
+                        yaw=yaw,
+                        frame_id=wf,
+                    )
                     self.registry.update_object_pose(
                         obj,
                         Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id=wf),
@@ -482,6 +504,13 @@ async def _start_ros_ingest(
     await hub.start()
 
     bg_tasks: list[asyncio.Task] = []
+    pose_max_age_s = float(
+        config.get("pose_max_age_s")
+        or os.environ.get("SCENE_POSE_MAX_AGE_S")
+        or 2.0
+    )
+    if pose_max_age_s <= 0.0:
+        raise ValueError("pose_max_age_s must be greater than zero")
 
     # ── self-pose bridge ───────────────────────────────────────────────────
     # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
@@ -494,7 +523,12 @@ async def _start_ros_ingest(
     # boots after scene; without this we'd skip task creation forever).
     bg_tasks.append(
         asyncio.create_task(
-            _self_pose_loop(hub, self_tracker), name="scene-self-pose"
+            _self_pose_loop(
+                hub,
+                self_tracker,
+                pose_max_age_s=pose_max_age_s,
+            ),
+            name="scene-self-pose",
         )
     )
 
@@ -528,19 +562,36 @@ async def _start_ros_ingest(
     log.info("[scene] perception plan: %s", plan.summary())
     intrinsics_fallback = _scene_intrinsics_fallback(config.get("intrinsics_fallback"))
     detector: Optional[Any] = None
+    camera_frame = str(
+        config.get("camera_frame")
+        or os.environ.get("SCENE_CAMERA_FRAME")
+        or ""
+    ).strip()
+    def _rgb_msg() -> Optional[Any]:
+        msg, stamp, _ = hub.latest("rgb")
+        if msg is None or stamp == 0.0:
+            return None
+        return msg
+
+    def _depth_msg() -> Optional[Any]:
+        msg, stamp, _ = hub.latest("depth")
+        if msg is None or stamp == 0.0:
+            return None
+        return msg
+
+    def _active_camera_frame() -> str:
+        if camera_frame:
+            return camera_frame
+        msg = _rgb_msg()
+        return str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).strip()
+
+    def _active_base_frame() -> str:
+        footprint = self_tracker.robot_geometry.current()
+        return footprint.base_frame if footprint is not None else ""
+
     if plan.detector == "concept_graphs":
-
-        def _rgb_msg() -> Optional[Any]:
-            msg, stamp, _ = hub.latest("rgb")
-            if msg is None or stamp == 0.0:
-                return None
-            return msg
-
-        def _depth_msg() -> Optional[Any]:
-            msg, stamp, _ = hub.latest("depth")
-            if msg is None or stamp == 0.0:
-                return None
-            return msg
 
         # Prefer the live `primitive/camera/intrinsics` contract. Deployments
         # without a reliable CameraInfo stream may opt in via an explicit
@@ -552,6 +603,22 @@ async def _start_ros_ingest(
         def _cam_info() -> Optional[_CamIntrinsics]:
             if hub.has("intrinsics"):
                 msg, stamp, _ = hub.latest("intrinsics")
+                if msg is not None and stamp > 0.0:
+                    info_frame = str(
+                        getattr(getattr(msg, "header", None), "frame_id", "") or ""
+                    ).strip()
+                    expected_frame = _active_camera_frame()
+                    if not expected_frame or info_frame != expected_frame:
+                        if not intrinsics_logged["bad"]:
+                            log.warning(
+                                "[scene] intrinsics frame mismatch: "
+                                "CameraInfo=%s active_camera=%s; withholding "
+                                "contract calibration",
+                                info_frame or "unknown",
+                                expected_frame or "unknown",
+                            )
+                            intrinsics_logged["bad"] = True
+                        msg = None
                 if msg is not None and stamp > 0.0:
                     k = _cam_info_to_intrinsics(msg)
                     if k is not None:
@@ -584,24 +651,16 @@ async def _start_ros_ingest(
                 return k
             return None
 
-        camera_frame = str(
-            config.get("camera_frame")
-            or os.environ.get("SCENE_CAMERA_FRAME")
-            or "camera_optical_frame"
-        )
-
         detector = ConceptGraphsDetector(
             rgb_fetcher_msg=_rgb_msg,
             depth_fetcher_msg=_depth_msg,
             camera_info_fetcher=_cam_info,
-            chassis_pose_fn=self_tracker.latest_xy_yaw,
-            world_frame_fn=lambda: getattr(self_tracker, "world_frame_id", "map"),
+            world_frame_fn=lambda: self_tracker.world_frame_id,
             on_detections=lambda dets: _ingest_detections(registry, dets),
             registry=registry,
-            # Pass the hub so the detector can compose camera→world
-            # from atlas-resolved contracts (`service/map/pose` ⊕
-            # `primitive/camera/extrinsics`). tf2 is reserved for the
-            # legacy fallback path.
+            robot_base_frame_fn=_active_base_frame,
+            # Pass the hub so the detector can compose camera→world from
+            # Atlas-resolved pose and camera-extrinsics contracts.
             hub=hub,
             # Detection cadence. The default 0.6 s keeps objects fresh but runs
             # YOLO+CLIP on the GPU continuously; on a shared Jetson GPU that
@@ -609,6 +668,7 @@ async def _start_ros_ingest(
             # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
             # speech + perception together.
             period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            pose_max_age_s=pose_max_age_s,
             camera_frame=camera_frame,
         )
         await detector.start()
@@ -626,33 +686,43 @@ async def _start_ros_ingest(
                 return None
             return _image_msg_to_jpeg(msg)
 
-        # Use the contract K when it has already landed, else the same explicit
-        # deployment fallback accepted by the metric path. Do not invent a
-        # camera model here: even approximate VLM detections become misleading
-        # when projected through an unreviewed K.
-        vlm_intrinsics: Optional[_CamIntrinsics] = None
-        if hub.has("intrinsics"):
-            msg, stamp, _ = hub.latest("intrinsics")
-            if msg is not None and stamp > 0.0:
-                vlm_intrinsics = _cam_info_to_intrinsics(msg)
-        if vlm_intrinsics is None and intrinsics_fallback is not None:
-            _, vlm_intrinsics = intrinsics_fallback
-        log.info(
-            "[scene] VLM intrinsics: %s",
-            "configured" if vlm_intrinsics is not None else "unavailable",
-        )
+        # Resolve the contract K at projection time because CameraInfo often
+        # arrives after the service starts. Fall back only to the same explicit
+        # deployment calibration accepted by the metric path; never invent K.
+        def _vlm_intrinsics() -> Optional[_CamIntrinsics]:
+            if hub.has("intrinsics"):
+                msg, stamp, _ = hub.latest("intrinsics")
+                if msg is not None and stamp > 0.0:
+                    info_frame = str(
+                        getattr(getattr(msg, "header", None), "frame_id", "") or ""
+                    ).strip()
+                    if info_frame == _active_camera_frame():
+                        intrinsics = _cam_info_to_intrinsics(msg)
+                        if intrinsics is not None:
+                            return intrinsics
+                    else:
+                        log.warning(
+                            "[scene] VLM intrinsics frame mismatch: "
+                            "CameraInfo=%s active_camera=%s",
+                            info_frame or "unknown",
+                            _active_camera_frame() or "unknown",
+                        )
+            if intrinsics_fallback is not None:
+                return intrinsics_fallback[1]
+            return None
 
         detector = VLMObjectDetector(
             rgb_fetcher=_rgb_jpeg,
-            chassis_pose_fn=self_tracker.latest_xy_yaw,
+            camera_to_world_fn=lambda: _camera_to_world_from_contracts(
+                hub,
+                base_frame=_active_base_frame(),
+                camera_frame=_active_camera_frame(),
+                expected_world_frame=self_tracker.world_frame_id,
+                pose_max_age_s=pose_max_age_s,
+            ),
             on_detections=lambda dets: _ingest_detections(registry, dets),
             period_s=4.0,
-            camera_frame_id=str(
-                config.get("camera_frame")
-                or os.environ.get("SCENE_CAMERA_FRAME")
-                or "camera_optical_frame"
-            ),
-            intrinsics=vlm_intrinsics,
+            intrinsics_fn=_vlm_intrinsics,
         )
         await detector.start()
     else:
@@ -758,21 +828,27 @@ def _cam_info_to_intrinsics(msg: Any) -> Optional[_CamIntrinsics]:
         return None
 
 
-async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> None:
+async def _self_pose_loop(
+    hub: SubscribersHub,
+    self_tracker: "_SelfTracker",
+    *,
+    pose_max_age_s: float,
+) -> None:
     """Feed SelfTracker the robot's world-frame pose, sourced through
     the `service/map/pose` (or fallback `service/map/odom`) atlas
     contract — i.e. whatever provider mapping/AMCL/mocap registered.
 
     Frame name comes from the message's `header.frame_id` (so the
     rest of scene's outputs stamp the same world frame the localizer
-    is using), not a hardcoded `"map"` constant: a Ranger Mini deploy
-    using a stack that publishes pose in `world` or `odom_combined`
+    is using), not a hardcoded `"map"` constant: a deployment
+    publishing pose in `world` or `odom_combined`
     Just Works without scene caring.
 
-    Falls back to tf2 only when neither contract is wired (legacy
-    transition path; logged once).
+    Samples without an explicit source frame are ignored. Scene must not
+    invent a frame for spatial state.
     """
-    fallback_warned = False
+    missing_frame_warned = False
+    stale_warned = False
     while True:
         x = y = z = yaw = None
         frame_id: Optional[str] = None
@@ -780,7 +856,11 @@ async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> 
         # Path A: SLAM-corrected pose contract (preferred — bounded drift).
         if hub.has("pose"):
             msg, stamp_unix, _count = hub.latest("pose")
-            if msg is not None and stamp_unix > 0:
+            if (
+                msg is not None
+                and stamp_unix > 0
+                and time.time() - stamp_unix <= pose_max_age_s
+            ):
                 p = (
                     msg.pose.pose
                     if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
@@ -798,7 +878,17 @@ async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> 
         # Path B: SLAM odom (smoothly varying — for high-rate trackers).
         if x is None and hub.has("odom"):
             msg, stamp_unix, _count = hub.latest("odom")
-            if msg is not None and stamp_unix > 0:
+            footprint = self_tracker.robot_geometry.current()
+            child_frame = str(
+                getattr(msg, "child_frame_id", "") or ""
+            ).strip() if msg is not None else ""
+            if (
+                msg is not None
+                and stamp_unix > 0
+                and time.time() - stamp_unix <= pose_max_age_s
+                and footprint is not None
+                and child_frame == footprint.base_frame
+            ):
                 p = msg.pose.pose
                 q = p.orientation
                 x = float(p.position.x)
@@ -809,26 +899,38 @@ async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> 
                     getattr(getattr(msg, "header", None), "frame_id", None) or None
                 )
 
-        # Path C: tf2 fallback. Only when no pose contract is in atlas.
-        if x is None:
-            if not fallback_warned:
-                log.warning(
-                    "[scene] no pose contract resolved (service/map/pose, /odom). "
-                    "Falling back to tf2 lookup; declare a pose provider in atlas to "
-                    "remove this side-channel."
-                )
-                fallback_warned = True
-            res = hub.lookup_xy_yaw("base_link", "map")
-            if res is not None:
-                x, y, z, yaw = res
-                frame_id = "map"
-
-        if x is not None:
-            if frame_id:
-                self_tracker.world_frame_id = frame_id  # type: ignore[attr-defined]
+        if x is not None and frame_id:
+            self_tracker.world_frame_id = frame_id
             await self_tracker.on_pose(
                 x, y, z, yaw  # pyright: ignore[reportArgumentType]
             )
+            missing_frame_warned = False
+            stale_warned = False
+        elif x is not None and not missing_frame_warned:
+            log.warning(
+                "[scene] pose sample has no header.frame_id; spatial self state "
+                "is withheld until the provider publishes its coordinate frame"
+            )
+            missing_frame_warned = True
+        elif not stale_warned:
+            latest_age = min(
+                (
+                    time.time() - stamp
+                    for kind in ("pose", "odom")
+                    if hub.has(kind)
+                    for _msg, stamp, _count in [hub.latest(kind)]
+                    if stamp > 0.0
+                ),
+                default=0.0,
+            )
+            if latest_age > pose_max_age_s:
+                log.warning(
+                    "[scene] latest pose/odometry sample is %.2fs old; "
+                    "spatial self updates are withheld (limit %.2fs)",
+                    latest_age,
+                    pose_max_age_s,
+                )
+                stale_warned = True
         await asyncio.sleep(0.2)
 
 
@@ -836,6 +938,103 @@ def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
     import math
 
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _camera_to_world_from_contracts(
+    hub: SubscribersHub,
+    *,
+    base_frame: str,
+    camera_frame: str,
+    expected_world_frame: str,
+    pose_max_age_s: float,
+):
+    """Compose camera-to-world only from one validated contract frame chain."""
+    import numpy as np
+
+    def matrix(message, *, transform: bool):
+        value = message.transform if transform else (
+            message.pose.pose
+            if hasattr(message, "pose") and hasattr(message.pose, "pose")
+            else message.pose
+        )
+        translation = value.translation if transform else value.position
+        q = value.rotation if transform else value.orientation
+        x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
+        norm = (x * x + y * y + z * z + w * w) ** 0.5
+        if norm <= 1e-12:
+            return None
+        x, y, z, w = x / norm, y / norm, z / norm, w / norm
+        out = np.array(
+            [
+                [
+                    1 - 2 * (y * y + z * z),
+                    2 * (x * y - z * w),
+                    2 * (x * z + y * w),
+                    float(translation.x),
+                ],
+                [
+                    2 * (x * y + z * w),
+                    1 - 2 * (x * x + z * z),
+                    2 * (y * z - x * w),
+                    float(translation.y),
+                ],
+                [
+                    2 * (x * z - y * w),
+                    2 * (y * z + x * w),
+                    1 - 2 * (x * x + y * y),
+                    float(translation.z),
+                ],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        return out if np.all(np.isfinite(out)) else None
+
+    base_frame = str(base_frame or "").strip()
+    camera_frame = str(camera_frame or "").strip()
+    expected_world_frame = str(expected_world_frame or "").strip()
+    if not base_frame or not camera_frame or not expected_world_frame:
+        return None
+
+    pose_matrix = None
+    world_frame = ""
+    for kind in ("pose", "odom"):
+        if not hub.has(kind):
+            continue
+        message, stamp_unix, _count = hub.latest(kind)
+        if message is None or stamp_unix <= 0:
+            continue
+        if pose_max_age_s > 0.0 and time.time() - stamp_unix > pose_max_age_s:
+            continue
+        world_frame = str(
+            getattr(getattr(message, "header", None), "frame_id", "") or ""
+        ).strip()
+        if world_frame != expected_world_frame:
+            continue
+        if kind == "odom":
+            child_frame = str(
+                getattr(message, "child_frame_id", "") or ""
+            ).strip()
+            if child_frame != base_frame:
+                continue
+        pose_matrix = matrix(message, transform=False)
+        if pose_matrix is not None:
+            break
+    if pose_matrix is None or not hub.has("camera_extrinsics"):
+        return None
+    extrinsics, stamp_unix, _count = hub.latest("camera_extrinsics")
+    if extrinsics is None or stamp_unix <= 0:
+        return None
+    parent_frame = str(
+        getattr(getattr(extrinsics, "header", None), "frame_id", "") or ""
+    ).strip()
+    child_frame = str(getattr(extrinsics, "child_frame_id", "") or "").strip()
+    if parent_frame != base_frame or child_frame != camera_frame:
+        return None
+    extrinsics_matrix = matrix(extrinsics, transform=True)
+    if extrinsics_matrix is None:
+        return None
+    return pose_matrix @ extrinsics_matrix, world_frame
 
 
 def _image_msg_to_jpeg(msg) -> Optional[bytes]:
@@ -1143,7 +1342,8 @@ async def _run() -> None:
 
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
-    self_tracker = _SelfTracker(registry)
+    robot_geometry = RobotGeometryState()
+    self_tracker = _SelfTracker(registry, robot_geometry)
 
     # Object persistence. The store backs the map UI's Save/Load snapshots;
     # boot-time warm restore and builder-driven continuous writes exist only
@@ -1311,18 +1511,27 @@ async def _run() -> None:
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
     # supplied later in _start_ros_ingest). The geometric relation loop +
     # scene-graph store are wired further down, once the registry is live.
-    mcp_tools.attach_state(registry=registry)
+    mcp_tools.attach_state(
+        registry=registry,
+        robot_geometry=robot_geometry,
+    )
     mcp_tools.attach_annotation_store(anno_store)
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
     # keeps running its own asyncio event loop after this returns.
     scene.bootstrap()
+    geometry_task = asyncio.create_task(
+        reconcile_robot_geometry(robot_geometry),
+        name="scene-robot-geometry",
+    )
 
     # Declare each scene MCP tool on atlas. Each handler has
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
     # description / JSON schema stay in sync with the codegen types.
     for fn in (
         mcp_tools.list_objects,
+        mcp_tools.list_regions,
+        mcp_tools.get_robot_context,
         mcp_tools.goal_near,
         mcp_tools.goal_room,
         mcp_tools.get_scene_graph,
@@ -1343,7 +1552,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 6 MCP tools at %s", scene.mcp_endpoint)
+    log.info("scene declared 8 MCP tools at %s", scene.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -1359,7 +1568,11 @@ async def _run() -> None:
     # read the occupancy grid. (Earlier attach_state call set registry
     # only; this one re-binds with the hub — attach_state is intentionally
     # cheap and idempotent.)
-    mcp_tools.attach_state(registry=registry, hub=hub)
+    mcp_tools.attach_state(
+        registry=registry,
+        hub=hub,
+        robot_geometry=robot_geometry,
+    )
 
     # Wire the persistence embedder to perception's loaded CLIP text encoder
     # (same 512-d space as the per-object image features). The VLM-fallback
@@ -1368,6 +1581,7 @@ async def _run() -> None:
     if obj_store is not None:
         obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
+        geometry_task,
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
         # Object-level watchdog: polls the registry for NEW objects and
         # saves one image per object to memgraph.  Default on; set
@@ -1495,6 +1709,7 @@ async def _run() -> None:
             map_binding=live_binding,
             ops_lock=map_ops_lock,
             semantic_hold=semantic_hold,
+            robot_geometry=robot_geometry,
         )
         web_uv = uvicorn.Config(
             app=web_app,

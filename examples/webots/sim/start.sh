@@ -5,7 +5,7 @@
 # container started here, so the container has to exist first.
 #
 # Auto-detects nvidia-smi to merge compose.gpu.yaml. To force CPU-only,
-# unset CUDA_VISIBLE_DEVICES or set ROBONIX_FORCE_CPU=1.
+# set ROBONIX_FORCE_CPU=1.
 #
 # Re-running is safe: docker compose up reuses the running container.
 # Stop with Ctrl-C, or from another terminal: `docker compose -f compose.yaml down`.
@@ -36,6 +36,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # Override ROBONIX_SIM_ROS_BASE_IMAGE for a custom/mirror/digest base.
 # shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/docker_base_image.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/nvidia_host.sh"
 export ROBONIX_SIM_ROS_BASE_IMAGE="${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
 robonix_ensure_local_base_image "$ROBONIX_SIM_ROS_BASE_IMAGE" "osrf/ros:humble-desktop-full"
 cd "$SCRIPT_DIR"
@@ -43,33 +45,61 @@ cd "$SCRIPT_DIR"
 # Webots world / robot launch args.
 # Usage:
 #   ./start.sh --world your_new_world.wbt
+#   ./start.sh --tiago-variant full
 #   ROBONIX_WEBOTS_WORLD=your_new_world.wbt ./start.sh
 export ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
-export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+export ROBONIX_TIAGO_VARIANT="${ROBONIX_TIAGO_VARIANT:-lite}"
+export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --world|-w)
+      [[ $# -ge 2 ]] || { echo "[sim/start] --world requires a value" >&2; exit 2; }
       export ROBONIX_WEBOTS_WORLD="$2"
       shift 2
       ;;
     --robot|-r)
+      [[ $# -ge 2 ]] || { echo "[sim/start] --robot requires a value" >&2; exit 2; }
       export ROBONIX_WEBOTS_ROBOT="$2"
       shift 2
       ;;
+    --tiago-variant)
+      [[ $# -ge 2 ]] || { echo "[sim/start] --tiago-variant requires a value" >&2; exit 2; }
+      export ROBONIX_TIAGO_VARIANT="$2"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]"
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]"
       exit 0
       ;;
     *)
       echo "[sim/start] unknown argument: $1" >&2
-      echo "Usage: $0 [--world WORLD.wbt] [--robot ROBOT.urdf]" >&2
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]" >&2
       exit 1
       ;;
   esac
 done
 
+case "$ROBONIX_TIAGO_VARIANT" in
+  lite)
+    export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_webots.urdf}"
+    ;;
+  full)
+    export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-tiago_full_webots.urdf}"
+    ;;
+  *)
+    echo "[sim/start] unsupported TIAGo variant: $ROBONIX_TIAGO_VARIANT (choose lite or full)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$ROBONIX_TIAGO_VARIANT" == "full" && -z "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS+x}" ]]; then
+  export ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
+  echo "[sim/start] full TIAGo: enabling the one-time Webots R2025a asset download (~661 MB)"
+fi
+
 echo "[sim/start] using Webots world: $ROBONIX_WEBOTS_WORLD"
+echo "[sim/start] using TIAGo variant: $ROBONIX_TIAGO_VARIANT"
 echo "[sim/start] using robot URDF: $ROBONIX_WEBOTS_ROBOT"
 
 # Auto-detect DISPLAY if the launching shell didn't export one. Probes
@@ -113,18 +143,20 @@ if [[ ! -f "$ROBONIX_HOST_XAUTH" ]]; then
 fi
 
 CF=(-f compose.yaml)
+EFFECTIVE_HEADLESS_MODE=$(robonix_effective_webots_headless_mode \
+  "${WEBOTS_HEADLESS_MODE:-}" "${ROBONIX_SIM_STREAM:-0}")
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)
-  # Auto-select the GPU with most free memory unless user already set ROBONIX_GPU_ID.
-  if [[ -z "${ROBONIX_GPU_ID:-}" ]]; then
-    ROBONIX_GPU_ID=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
-      | sort -t',' -k2 -nr | head -1 | cut -d',' -f1 | tr -d ' ')
-    export ROBONIX_GPU_ID
-    echo "[sim/start] auto-selected GPU $ROBONIX_GPU_ID (most free memory)"
-  else
-    echo "[sim/start] using user-specified GPU $ROBONIX_GPU_ID"
+  robonix_select_nvidia_gpu "${ROBONIX_GPU_ID:-}"
+  if [[ "$EFFECTIVE_HEADLESS_MODE" == "nvidia" || "$EFFECTIVE_HEADLESS_MODE" == "auto" ]]; then
+    robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+    CF+=(-f compose.nvidia-xorg.yaml)
   fi
 else
+  if [[ "$EFFECTIVE_HEADLESS_MODE" == "nvidia" ]]; then
+    echo "[sim/start] WEBOTS_HEADLESS_MODE=nvidia requires an available NVIDIA GPU" >&2
+    exit 1
+  fi
   echo "[sim/start] no GPU (or ROBONIX_FORCE_CPU=1) — CPU-only Webots"
 fi
 

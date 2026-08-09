@@ -185,7 +185,7 @@ jobs:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
       REPORTS_REPOSITORY: syswonder/robonix-ci-reports
       REPORTS_BRANCH: main
-      REPORT_BASE_URL: https://syswonder.github.io/robonix-ci-reports
+      REPORT_BASE_URL: https://ci-reports.robonix.ai
     steps:
       - name: Checkout trusted report generator
         uses: actions/checkout@v4

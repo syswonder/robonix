@@ -13,6 +13,10 @@ system:
   atlas:
     listen: 0.0.0.0:50051
     log: info
+  soma:
+    # Empty when boot is invoked directly, so rbnx falls back to ./soma.yaml.
+    # examples/webots/boot.sh sets this to soma.full.yaml for the full model.
+    robot_yaml: ${ROBONIX_SOMA_ROBOT_YAML}
   # soma+scene layer
   scene:
     log: info
@@ -30,6 +34,10 @@ system:
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
       api_format: openai
+  # health monitoring layer
+  vitals:
+    listen: 127.0.0.1:50093
+    log: info
   liaison:
     listen: 0.0.0.0:50081
     log: info
@@ -75,6 +83,19 @@ primitive:
       # example place holders
       update_rate: 10
       frame_id: lidar
+  # Deterministic simulated hardware telemetry consumed by Soma and Vitals.
+  # Keep scenario=normal for the current demo; the field is reserved as the
+  # stable entry point for future fault-injection profiles.
+  - name: tiago_health
+    path: ./primitives/tiago_health
+    config:
+      # Empty means lite; boot.sh sets full alongside soma.full.yaml.
+      variant: ${ROBONIX_TIAGO_VARIANT}
+      scenario: normal
+      interval_s: 0.5
+      battery_percent: 82.0
+      voltage: 24.8
+      remaining_s: 10800
   # ── audio mic/speaker source ─────────────────────────────────────────────
   # Local ALSA provider. It remains available for robot-local audio.
   - name: audio_driver
@@ -166,6 +187,13 @@ service:
       params_file: config/nav2_params.yaml
       use_sim_time: true
       action_wait_s: 240.0
+      # Keep startup behavior at the controller's existing 0.26 m/s ceiling;
+      # runtime speed commands can then adjust it in 20-point increments.
+      dynamic_speed:
+        max_linear_speed_mps: 0.26
+        default_percentage: 100
+        step_percentage: 20
+        min_percentage: 20
       # The simulation goal checker enters at 0.25 m. Keep the terminal
       # rotation guard inside that boundary so path-alignment turns are not
       # mistaken for a stuck final-yaw correction.

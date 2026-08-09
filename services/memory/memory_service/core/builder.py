@@ -37,7 +37,7 @@ def make_log_record(ts: Optional[int] = None, level: str = "Info",
 
 
 def make_spatial(objects: List[Tuple[str, str, float, float, float]],
-                 origin: str = "world") -> SpatialContext:
+                 origin: str = "") -> SpatialContext:
     """Create SpatialContext from a list of (obj_id, label, x, y, z) tuples."""
     return SpatialContext(
         objects=[ObjectCoord(obj_id=oid, label=label, x=x, y=y, z=z)
@@ -164,7 +164,7 @@ async def _import_one_record(service, rec: Dict[str, Any]) -> int:
     if raw_objects:
         spatial = SpatialContext(
             objects=[_parse_object_entry(o) for o in raw_objects],
-            origin=rec.get("spatial_origin", "world"),
+            origin=rec.get("spatial_origin", ""),
         )
 
     # Determine parent

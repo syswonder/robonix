@@ -46,7 +46,7 @@ class TestTagExtraction:
         sp = SpatialContext(objects=[
             ObjectCoord(obj_id="o1", label="red cup"),
             ObjectCoord(obj_id="o2", label="table"),
-        ])
+        ], origin="fixture_frame")
         lr = LogRecord(ts=1, level="Info", tag="t", msg="grasp cup")
         tags = _rule_based_tag_extraction(lr, sp)
         assert "red cup" in tags.objects_present
@@ -107,7 +107,7 @@ class TestRememberPipeline:
     def test_with_spatial_coordinates(self):
         sp = SpatialContext(objects=[
             ObjectCoord(obj_id="o1", label="red cup", x=1.0, y=2.0, z=0.5)
-        ])
+        ], origin="fixture_frame")
         lr = LogRecord(ts=200, level="Info", tag="exec",
                        msg="placed red cup on the kitchen table")
         req = RememberRequest(session_id="s2", plan_id="p2", log_record=lr,

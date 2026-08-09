@@ -16,9 +16,35 @@ Start the sim **first**, then `rbnx boot` from `examples/webots/`:
 bash examples/webots/sim/start.sh
 
 # Terminal 2 — robonix:
-cd examples/webots
-rbnx boot
+bash examples/webots/boot.sh
 ```
+
+## Robot selection
+
+TIAGo Lite remains the default:
+
+```bash
+bash examples/webots/sim/start.sh --tiago-variant lite
+```
+
+Select the complete single-arm Webots TIAGo with its default parallel gripper:
+
+```bash
+bash examples/webots/sim/start.sh --tiago-variant full
+```
+
+The launcher enables the official Webots R2025a asset download automatically
+for `full`. The first download is about 661 MB; the persistent cache makes
+subsequent starts skip it. Set `ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=0` only to
+opt out explicitly. In the Robonix terminal use the same selection so Soma and
+Vitals expose the matching body:
+
+```bash
+bash examples/webots/boot.sh --tiago-variant full
+```
+
+You can also export `ROBONIX_TIAGO_VARIANT=lite|full`. An explicit `--robot`
+still overrides the variant's adapter URDF for advanced testing.
 
 World selection:
 
@@ -82,7 +108,13 @@ is `robonix_tiago_sim` (referenced by every driver package's
   `~/.Xauthority`, or set `XAUTHORITY` to your host cookie path before
   `start.sh`. The sim compose file bind-mounts that file into the
   container as `/root/.Xauthority`.
-- For NVIDIA GPU: `nvidia-container-toolkit` installed on the host.
+- For NVIDIA GPU: `nvidia-container-toolkit` installed on the host. An
+  NVIDIA-backed headless Xorg server additionally requires `nvidia_drv.so` and
+  the driver-version-matched `libglxserver_nvidia.so`; `start.sh` discovers
+  them only for `WEBOTS_HEADLESS_MODE=nvidia` or GPU-backed `auto`. For a
+  non-standard driver layout, set
+  `ROBONIX_NVIDIA_XORG_DRIVER` and `ROBONIX_NVIDIA_GLX_SERVER` to the two
+  regular files before starting the simulator.
 
 ## Layout
 
@@ -91,6 +123,7 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `start.sh` | User-facing launcher. `bash start.sh`. |
 | `compose.yaml` | Single `sim` service: Webots + eaios_webots + bind-mounts of `../primitives` and `../services` into the container at `/robonix_pkgs`. |
 | `compose.gpu.yaml` | Optional NVIDIA GPU passthrough (auto-merged by `start.sh`). |
+| `compose.nvidia-xorg.yaml` | NVIDIA Xorg server modules, merged only for the `nvidia` or GPU-backed `auto` headless backend. |
 | `compose.stream.yaml` | Optional browser-streaming mode — headless Xorg, Webots `--stream`, and the bandwidth-optimized browser endpoint. Merged when `ROBONIX_SIM_STREAM=1`. |
 | `bridge/Dockerfile` | Humble + Webots `.deb` + Python deps used by docker-exec'd robonix drivers. |
 | `bridge/entrypoint.sh` | Launch Webots and its browser-stream helpers, then `wait` so the container stays alive. Picks display backend per `WEBOTS_HEADLESS_MODE`. |
@@ -98,7 +131,7 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `bridge/webots_stream_proxy.py` | Forward the live W3D stream while dropping unused robot-window camera payloads. |
 | `bridge/streaming_healthcheck.py` | Verify that both browser-stream helpers are alive and reachable. |
 | `bridge/update-webots-seed.sh` | Maintainer tool that exports an updated office cache for publication in `syswonder/robonix-assets`. |
-| `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
+| `ros_ws/src/eaios_webots` | ROS 2 launch, Lite/full adapter URDFs, deterministic world conversion, and Webots worlds. |
 
 ## Headless / browser-streaming mode
 
@@ -165,6 +198,20 @@ Backend selection (env on the sim container):
 | `auto` (default in stream) | NVIDIA Xorg `:48` on the GPU with most free memory; falls back to Xvfb if `/dev/nvidia0` is absent |
 | `nvidia` | force NVIDIA Xorg `:48` (fails fast if no GPU) |
 | `xvfb` | software llvmpipe on `:99` — slow but needs no GPU |
+
+Confirm that stream mode is actually using NVIDIA rather than the Xvfb
+fallback:
+
+```bash
+docker exec robonix_tiago_sim bash -lc \
+  'DISPLAY=${ROBONIX_SIM_XDISPLAY:-:48} glxinfo -B | grep -E "OpenGL vendor|OpenGL renderer"'
+nvidia-smi
+```
+
+The renderer must contain `NVIDIA`, and `nvidia-smi` should list Xorg and
+Webots. If Compose reports that an Xorg module source is not a regular file,
+remove any stale directory at that source path and run `start.sh` again; the
+launcher now refuses to create such directories.
 
 `:48` sits well outside the host's normal X allocator range
 (`:0..:12` for physical sessions, `:1001..:1099` for xrdp), so the X

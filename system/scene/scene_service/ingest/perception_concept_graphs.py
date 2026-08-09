@@ -377,39 +377,33 @@ class ConceptGraphsDetector:
         rgb_fetcher_msg: Callable[[], Optional[Any]],
         depth_fetcher_msg: Callable[[], Optional[Any]],
         camera_info_fetcher: Callable[[], Optional[_CamIntrinsics]],
-        chassis_pose_fn: Callable[[], Optional[tuple[float, float, float, float]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         registry: ObjectRegistry,
-        # Returns the current world frame id (whatever the localizer
-        # is publishing in `header.frame_id`). Defaults to "map" when
-        # the SelfTracker hasn't seen a pose yet.
+        # Returns the current world frame id from the active localizer.
+        # An empty result means spatial projection is not ready.
         world_frame_fn: Optional[Callable[[], str]] = None,
+        robot_base_frame_fn: Optional[Callable[[], str]] = None,
         period_s: float = 0.6,
+        pose_max_age_s: float = 2.0,
         confidence_threshold: float = 0.30,
-        camera_height_m: float = 1.1,
         max_detections: int = 30,
         yolo_weights_path: Optional[str] = None,
         sam_weights_path: Optional[str] = None,
         clip_model_name: Optional[str] = None,
         clip_pretrained: Optional[str] = None,
         cfg_overrides: Optional[dict] = None,
-        # `hub` exposes tf2 lookups (lookup_transform_4x4). When
-        # provided, the camera→map transform is taken from /tf
-        # directly instead of composing chassis_pose with a
-        # hardcoded camera mount — this matters once SLAM corrects
-        # map→odom and the chassis_pose drifts out of map frame.
+        # `hub` exposes the Atlas-selected ROS2 contract slots used to
+        # compose the camera-to-world transform.
         hub: Any = None,
-        camera_frame: str = "camera_optical_frame",
+        camera_frame: str = "",
     ) -> None:
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
         self._cam_info = camera_info_fetcher
-        self._chassis = chassis_pose_fn
         self._on_dets = on_detections
         self._registry = registry
         self._period_s = period_s
         self._conf_thresh = confidence_threshold
-        self._cam_z = camera_height_m
         self._max_dets = max_detections
         self._yolo_weights = yolo_weights_path
         self._sam_weights = sam_weights_path
@@ -417,7 +411,9 @@ class ConceptGraphsDetector:
         self._clip_pretrained = clip_pretrained
         self._hub = hub
         self._camera_frame = camera_frame
-        self._world_frame_fn = world_frame_fn or (lambda: "map")
+        self._world_frame_fn = world_frame_fn or (lambda: "")
+        self._robot_base_frame_fn = robot_base_frame_fn or (lambda: "")
+        self._pose_max_age_s = max(0.0, float(pose_max_age_s))
 
         self._yolo: Any = None
         self._sam: Any = None
@@ -837,7 +833,7 @@ class ConceptGraphsDetector:
 
         # Resize masks to depth resolution if needed (MobileSAM masks
         # come back at the input resolution, which matches RGB; depth
-        # may differ. Webots both 640x480 so this is a no-op there).
+        # may differ; equal-sized streams make this a no-op).
         h_d, w_d = depth.shape[:2]
         h_m, w_m = masks.shape[1], masks.shape[2]
         if (h_m, w_m) != (h_d, w_d):
@@ -894,7 +890,19 @@ class ConceptGraphsDetector:
             [0,    K.fy, K.cy],
             [0,    0,    1.0],
         ], dtype=np.float32)
-        trans_pose = self._build_camera_to_map_transform()
+        world_frame = str(self._world_frame_fn() or "").strip()
+        trans_pose = self._build_camera_to_map_transform(
+            expected_world_frame=world_frame,
+        )
+        if trans_pose is None or not world_frame:
+            if not getattr(self, "_spatial_not_ready_logged", False):
+                log.warning(
+                    "camera pose/extrinsics unavailable; withholding spatial "
+                    "detections until contracts or header-derived TF are ready"
+                )
+                self._spatial_not_ready_logged = True
+            return
+        self._spatial_not_ready_logged = False
         try:
             obj_pcds_and_bboxes = self._cg["detections_to_obj_pcd_and_bbox"](
                 depth_array=depth.astype(np.float32),
@@ -1576,13 +1584,13 @@ class ConceptGraphsDetector:
         return out
 
     # ── Camera-to-world transform ───────────────────────────────────
-    def _build_camera_to_map_transform(self):
+    def _build_camera_to_map_transform(self, *, expected_world_frame: str = ""):
         """4x4 homogeneous transform mapping camera-optical points
         into the world frame published by the active localizer.
 
-        Three paths, in order of preference:
+        Compose Atlas-resolved contracts:
 
-          1. **Atlas-resolved contracts (preferred).** Compose
+          1. Compose
              `T(world ← base) ⊕ T(base ← camera_optical)` from the
              two slots:
                - `service/map/pose` (or `service/map/odom`) — robot
@@ -1592,62 +1600,33 @@ class ConceptGraphsDetector:
              No tf2 involvement; both legs are visible to atlas, so
              `rbnx caps`/`rbnx channels` see every dependency.
 
-          2. **tf2 fallback.** When the camera primitive hasn't
-             declared `extrinsics` yet (legacy primitives that still
-             use static_transform_publisher only), look up the camera
-             frame against the world frame the localizer is
-             advertising. World frame name comes from the pose stream's
-             `header.frame_id`, never a hardcoded constant.
-
-          3. **Naive fallback.** No pose stream and no tf either —
-             compose chassis_pose with a yaw-only rotation and a
-             configured camera height. Useful only for bring-up before
-             SLAM is wired; emits a debug-level warning.
+        Missing pose/extrinsics remain unavailable. Scene never substitutes
+        a TF side channel, zero pose, fixed camera axis, or guessed mount.
         """
         import numpy as np
 
-        # Path 1: contracts.
-        T_pose = self._slot_pose_4x4()
+        expected_world_frame = str(
+            expected_world_frame or self._world_frame_fn() or ""
+        ).strip()
+        T_pose = self._slot_pose_4x4(
+            expected_world_frame=expected_world_frame,
+        )
         T_ext = self._slot_extrinsics_4x4()
         if T_pose is not None and T_ext is not None:
             return (T_pose @ T_ext).astype(np.float32)
+        return None
 
-        # Path 2: tf2 fallback. Prefer the world frame the localizer
-        # is publishing; only fall back to "map" when we have nothing
-        # at all to go on.
-        if self._hub is not None:
-            world_frame = self._world_frame_fn() or "map"
-            T = self._hub.lookup_transform_4x4(self._camera_frame, world_frame)
-            if T is not None:
-                return T.astype(np.float32)
-
-        # Path 3: naive composition (bring-up only).
-        chassis = self._chassis()
-        rx, ry, _, ryaw = chassis if chassis is not None else (0.0, 0.0, 0.0, 0.0)
-        R_cb = np.array([
-            [0,  0,  1],
-            [-1, 0,  0],
-            [0, -1,  0],
-        ], dtype=np.float32)
-        t_cb = np.array([0.0, 0.0, self._cam_z], dtype=np.float32)
-        T_cb = np.eye(4, dtype=np.float32)
-        T_cb[:3, :3] = R_cb
-        T_cb[:3, 3] = t_cb
-        c, s = math.cos(ryaw), math.sin(ryaw)
-        T_bm = np.array([
-            [c, -s, 0, rx],
-            [s,  c, 0, ry],
-            [0,  0, 1, 0.0],
-            [0,  0, 0, 1.0],
-        ], dtype=np.float32)
-        return T_bm @ T_cb
-
-    def _slot_pose_4x4(self):
+    def _slot_pose_4x4(self, *, expected_world_frame: str = ""):
         """Read the latest pose from the `pose` (preferred) or `odom`
-        slot and return a 4×4 `T(world ← base_link)` matrix, or None
-        if neither slot has a sample yet."""
-        import numpy as np
+        slot and return a 4×4 `T(world ← base)` matrix. Frame endpoints
+        and receipt age must match live Scene/Soma state."""
         if self._hub is None:
+            return None
+        expected_world = str(
+            expected_world_frame or self._world_frame_fn() or ""
+        ).strip()
+        expected_base = str(self._robot_base_frame_fn() or "").strip()
+        if not expected_world or not expected_base:
             return None
         for kind in ("pose", "odom"):
             if not self._hub.has(kind):
@@ -1655,7 +1634,25 @@ class ConceptGraphsDetector:
             msg, stamp_unix, _count = self._hub.latest(kind)
             if msg is None or stamp_unix <= 0:
                 continue
-            p = msg.pose.pose if hasattr(msg, "pose") and hasattr(msg.pose, "pose") else msg.pose
+            if (
+                self._pose_max_age_s > 0.0
+                and time.time() - stamp_unix > self._pose_max_age_s
+            ):
+                continue
+            world_frame = str(
+                getattr(getattr(msg, "header", None), "frame_id", "") or ""
+            ).strip()
+            if world_frame != expected_world:
+                continue
+            if kind == "odom":
+                child_frame = str(getattr(msg, "child_frame_id", "") or "").strip()
+                if child_frame != expected_base:
+                    continue
+            p = (
+                msg.pose.pose
+                if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
+                else msg.pose
+            )
             q = p.orientation
             return _quat_xyz_to_matrix(
                 float(q.x), float(q.y), float(q.z), float(q.w),
@@ -1666,13 +1663,30 @@ class ConceptGraphsDetector:
     def _slot_extrinsics_4x4(self):
         """Read the static camera-mount transform (TransformStamped
         from `primitive/camera/extrinsics`) and return a 4×4
-        `T(base_link ← camera_optical)` matrix, or None if the camera
-        primitive hasn't declared the contract."""
-        import numpy as np
+        `T(base ← camera)` matrix only when both endpoints match the
+        active Soma base and RGB stream."""
         if self._hub is None or not self._hub.has("camera_extrinsics"):
             return None
         msg, stamp_unix, _count = self._hub.latest("camera_extrinsics")
         if msg is None or stamp_unix <= 0:
+            return None
+        parent_frame = str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).strip()
+        child_frame = str(getattr(msg, "child_frame_id", "") or "").strip()
+        expected_base = str(self._robot_base_frame_fn() or "").strip()
+        expected_camera = str(self._camera_frame or "").strip()
+        if not expected_camera:
+            rgb_msg = self._rgb_msg()
+            expected_camera = str(
+                getattr(getattr(rgb_msg, "header", None), "frame_id", "") or ""
+            ).strip()
+        if (
+            not expected_base
+            or not expected_camera
+            or parent_frame != expected_base
+            or child_frame != expected_camera
+        ):
             return None
         t = msg.transform.translation
         q = msg.transform.rotation
@@ -1825,6 +1839,12 @@ class ConceptGraphsDetector:
         live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
             wf = self._world_frame_fn()
+            if not wf:
+                log.warning(
+                    "withholding ConceptGraphs snapshot because the world frame "
+                    "is unknown"
+                )
+                return
             # oids touched this tick (bound / adopted / inserted). Used to (a)
             # stop two detections claiming the same orphan and (b) spare a
             # touched record from the eviction sweep below.
@@ -2094,7 +2114,7 @@ def _yaw_from_pca_xy(xy) -> float:
 def _image_msg_to_bgr(msg: Any) -> Optional[Any]:
     """sensor_msgs/Image (rgb8 / bgr8 / rgba8 / bgra8 / mono8 / jpeg) → numpy BGR.
 
-    Webots emits bgra8 (4-channel); leaving that out of the supported
+    Some cameras emit bgra8 (4-channel); leaving that out of the supported
     set silently dropped every frame. Both rgba8 and bgra8 paths here.
     """
     try:

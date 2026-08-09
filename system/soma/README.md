@@ -6,10 +6,12 @@ to other Robonix components over gRPC. `rbnx boot` reads the same
 Soma spawns them through `rbnx start` in two stages (see
 `docs/soma_two_stage_bringup.md`).
 
-Soma v2 does not render or interpret a self-description. Pilot calls
-`robonix/system/soma/get_yaml` to receive the original YAML string, and other
-services call `robonix/system/soma/get_urdf` to receive the corresponding URDF
-XML string.
+Soma preserves the self-description as raw YAML and URDF for consumers. It
+also interprets the existing `robot.components` tree when normalizing a
+`robonix/primitive/health/stream` frame into `SomaHealthSnapshot`; this keeps
+health component paths and kinds aligned with the robot description. A fresh
+health-primitive frame takes precedence; if its TTL expires, Soma continues
+publishing the ROS runtime-state fallback.
 
 ## Config
 
@@ -55,11 +57,6 @@ serves gRPC on `listen`. Skill packages are held until `rbnx boot` writes
 `stage2\n` into the pipe on `$ROBONIX_SOMA_STAGE_FD` (stage 2). Soma stops
 every package it launched on SIGINT/SIGTERM.
 
-For every package, Soma passes the deployment entry's `name` through
-`RBNX_INSTANCE_NAME` and waits only for that exact Atlas provider id. Package
-instance names must be non-empty, whitespace-normalized, unique, and not
-already live before spawn.
-
 `--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`);
 package stdout/stderr is written through scribe under `$SCRIBE_LOG_DIR` or
 `./logs`.
@@ -75,14 +72,36 @@ string robot_id
 string yaml_text
 ```
 
-`robonix/system/soma/get_urdf` returns the loaded raw URDF XML:
+`robonix/system/soma/get_urdf` returns the loaded raw URDF XML and, on request,
+the files referenced by URDF-local relative mesh or texture paths:
 
 ```srv
 string robot_id  # empty = default robot
+bool include_assets
 ---
 string robot_id
 string urdf_xml
+UrdfAsset[] assets
 ```
+
+Absolute browser URLs and `package://` references are not attached. Relative
+resources must resolve below the directory containing the URDF. Soma indexes
+these paths at startup and reads the files only for
+`get_urdf(include_assets=true)`, so a missing mesh does not prevent non-rendering
+deployments from starting.
+
+`robonix/system/soma/footprint` returns the active robot's 2D collision
+polygon, base frame, inscribed radius, and circumscribed radius. Generic
+services such as Scene and Navigation consume this contract instead of
+carrying robot-model dimensions of their own.
+
+`robonix/system/soma/get_health` and `robonix/system/soma/health` expose the
+latest normalized hardware state. Health primitive reading names use stable
+Soma paths such as `body/base/left_wheel`; optional controls append
+`/driver_temp`, `/enabled`, `/communication_ok`, `/online`, or `/error`.
+Top-level `HealthState` power fields are attached to the component whose
+`type` is `battery`. Hardware topology comes only from `robot.components`;
+Soma does not infer deployment-specific joints or devices.
 
 An empty request `robot_id` selects `default_robot`. If no `default_robot` is
 configured and exactly one robot is loaded, Soma selects that only robot.
@@ -149,7 +168,68 @@ description:
 | `root_link` | string | yes | Root link of this composite URDF. |
 | `model_name` | string | no | Human-readable or simulator-facing model name. |
 
-Soma preserves the original URDF XML. `get_urdf()` returns that raw XML text.
+Soma preserves the original URDF XML. `get_urdf()` returns that raw XML text
+and can include its URDF-local resources for clients that need to render the
+visual geometry.
+
+#### URDF resource path convention
+
+Robot descriptions intended for Soma and Vitals must use URDF-local relative
+paths for Mesh and texture resources. A recommended deployment layout is:
+
+```text
+robot-description/
+├── soma.yaml
+└── model/
+    ├── robot.urdf
+    ├── meshes/       # prepared locally; normally not tracked by Git
+    │   ├── stl/
+    │   └── dae/
+    └── textures/     # prepared locally; normally not tracked by Git
+```
+
+The `filename` value is resolved from the directory containing the URDF, not
+from the repository root, current working directory, or `soma.yaml` directory:
+
+```xml
+<mesh filename="meshes/stl/base_link.stl"/>
+<mesh filename="meshes/dae/arm/link_1.dae"/>
+<texture filename="textures/body.png"/>
+```
+
+For a portable Soma-to-Client rendering path, every resource reference must:
+
+- use `/` as the path separator;
+- be relative to the URDF directory and remain below that directory;
+- preserve enough of the upstream directory structure to avoid filename
+  collisions;
+- match the local filename exactly, including case;
+- point to a readable file before a client requests `include_assets=true`.
+
+Parent traversal such as `../meshes/link.stl` and symlinks that resolve outside
+the URDF directory are rejected. Absolute filesystem paths and `package://`,
+`file://`, `http://`, `https://`, or `data:` references are not attached to the
+`get_urdf` response and therefore must not be used when the Client is expected
+to render only from Soma-provided resources.
+
+Large binary Mesh and texture files should be prepared locally instead of
+being committed to the Robonix repository. Each robot example that relies on
+external resources should keep these text files in Git:
+
+- the URDF containing the stable relative references;
+- a README with the official source repository, exact tag or commit, license,
+  and upstream-to-local path mapping;
+- a download or generation command;
+- a manifest of expected resource paths and checksums when available;
+- `.gitignore` entries covering the locally prepared binary directories.
+
+For example, if an official checkout contains
+`piper/meshes/dae/link1.dae`, an example may place it at
+`model/meshes/dae/link1.dae`; a URDF stored at `model/robot.urdf` must then use
+`filename="meshes/dae/link1.dae"`. Soma validates the relative reference at
+startup, reads the file when `get_urdf(include_assets=true)` is called, and the
+Client serves it through its same-origin URDF resource endpoint. The Client
+does not clone model repositories or repair incorrect URDF paths.
 
 ### Robot
 
@@ -217,7 +297,7 @@ components:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `id` | string | yes | Component id, unique within this Soma YAML file. |
-| `type` | string | yes | Component type. Common values include `mobile_base`, `body_part`, `lidar_2d`, `rgb_camera`, `rgbd_camera`, and `audio_io`; custom values are allowed. |
+| `type` | string | yes | Component type. Common values include `mobile_base`, `wheel`, `battery`, `body_part`, `lidar_2d`, `rgb_camera`, `rgbd_camera`, and `audio_io`; custom values are allowed. |
 | `urdf_link` | string | no | URDF link represented by this component. |
 | `urdf_joint` | string | no | URDF joint represented by this component. |
 | `exports` | array | yes | Provider-grouped capabilities attached to this component. Use `[]` when none are attached. |

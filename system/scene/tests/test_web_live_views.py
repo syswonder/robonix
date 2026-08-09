@@ -198,7 +198,10 @@ def test_occupancy_generation_guard_rejects_late_success_and_error_callbacks():
         subprocess.run([node], input=program, text=True, check=True)
 
 
-@pytest.mark.parametrize("html_name", ["_INDEX_HTML", "_USER_HTML", "_INDEX_CAM_HTML"])
+@pytest.mark.parametrize(
+    "html_name",
+    ["_INDEX_HTML", "_USER_HTML", "_INDEX_CAM_HTML", "_INDEX_3D_HTML"],
+)
 def test_live_view_inline_javascript_is_valid(html_name):
     """Parse each changed inline script with the host JavaScript engine."""
     node = shutil.which("node")
@@ -206,5 +209,10 @@ def test_live_view_inline_javascript_is_valid(html_name):
         pytest.skip("node is not installed")
     web = _web_module()
     html = getattr(web, html_name)
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    subprocess.run([node, "--check"], input=script, text=True, check=True)
+    if html_name == "_INDEX_3D_HTML":
+        script = html.split('<script type="module">', 1)[1].split("</script>", 1)[0]
+        args = [node, "--input-type=module", "--check"]
+    else:
+        script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+        args = [node, "--check"]
+    subprocess.run(args, input=script, text=True, check=True)

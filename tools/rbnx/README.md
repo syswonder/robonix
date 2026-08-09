@@ -44,6 +44,25 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 Run `rbnx <cmd> --help` for full flags.
 
+## Built-in system components
+
+`rbnx boot` launches each declared built-in component in dependency order:
+Atlas, Executor, Soma, Pilot, Vitals, then Liaison. Their `system.<name>`
+manifest blocks are translated into CLI flags and also passed intact through
+`--config-json`. Components not present in the manifest are not started, except
+that Soma is added automatically when the deployment contains primitives or
+skills.
+
+For example, this enables Vitals without a separate terminal or global
+`RUST_LOG` setting:
+
+```yaml
+system:
+  vitals:
+    listen: 127.0.0.1:50093
+    log: info
+```
+
 ## Environment
 
 - `ROBONIX_ATLAS` — atlas endpoint, default `127.0.0.1:50051`.

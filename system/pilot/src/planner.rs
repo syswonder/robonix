@@ -2017,7 +2017,7 @@ Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every 
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
-Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
+Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
 Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call. task_update.goal must exactly copy Current user interaction. Use status=done only when its success criterion is verified and its relevant tree is no longer running.
 "#;

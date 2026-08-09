@@ -5,9 +5,9 @@
 // Stage 1 (`spawn_primitives`, called at soma startup, BEFORE soma
 // advertises its gRPC service to atlas):
 //   For each `primitive:` entry in the deployment manifest:
-//     1. snapshot atlas's current provider set
+//     1. snapshot the expected provider's current endpoint fingerprint
 //     2. spawn `rbnx start -p <pkg>` as a child process
-//     3. wait for the new provider to register on atlas
+//     3. wait for that provider to register or take over its old endpoint
 //     4. Driver(CMD_INIT, config_json)
 //     5. Driver(CMD_ACTIVATE, config_json) — primitives drive sensors
 //        / actuators that must be live before any skill or pilot
@@ -42,7 +42,7 @@ use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_cli::launch::{
     CMD_ACTIVATE, CMD_INIT, PackageRuntimeRecord, call_driver_cmd, shutdown_package_runtime,
-    snapshot_provider_ids, wait_for_registration_core,
+    snapshot_provider_registration, wait_for_registration_core,
 };
 use robonix_cli::process::ProcessManager;
 use robonix_scribe::{info, warn};
@@ -171,10 +171,10 @@ impl PackageLauncher {
 
         let command = self.command_line(target);
 
-        // Snapshot before spawn so wait_for_registration_core can
-        // tell us which new provider is OUR child (not some
-        // pre-existing one whose driver replied to a polling tick).
-        let before = match snapshot_provider_ids(atlas).await {
+        // Snapshot the manifest-expected id before spawn so the wait can
+        // distinguish either a new registration or a same-id endpoint
+        // takeover from an unchanged stale Atlas record.
+        let before = match snapshot_provider_registration(atlas, &target.name).await {
             Ok(s) => s,
             Err(e) => {
                 return PackageStartupStatus::SpawnFailed {
@@ -208,7 +208,7 @@ impl PackageLauncher {
         // early-exit detection rbnx uses for soma itself (deploy.rs).
         let who = format!("{}/{}", target.kind, target.name);
         let outcome = tokio::select! {
-            result = wait_for_registration_core(atlas, &before, &target.name, &who) => match result {
+            result = wait_for_registration_core(atlas, &before, &who) => match result {
                 Ok(o) => o,
                 Err(e) => {
                     self.reap(pid).await;

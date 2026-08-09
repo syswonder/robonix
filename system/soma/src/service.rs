@@ -11,11 +11,13 @@ use crate::pb::geometry_msgs::Point;
 use crate::pb::soma::{
     ActuatorState, ComponentStatus, GetFootprintRequest, GetFootprintResponse, GetHealthRequest,
     GetHealthResponse, GetUrdfRequest, GetUrdfResponse, GetYamlRequest, GetYamlResponse, Metric,
-    Scalar, SomaHealthSnapshot, StreamHealthRequest,
+    Scalar, SomaHealthSnapshot, StreamHealthRequest, UrdfAsset,
 };
 use crate::runtime_state::RuntimeStateStore;
 use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -24,19 +26,28 @@ use tonic::{Request, Response, Status};
 pub struct SomaService {
     body: Arc<SomaBody>,
     runtime: RuntimeStateStore,
-    latest_snapshot: Arc<RwLock<Option<SomaHealthSnapshot>>>,
+    snapshot_state: Arc<RwLock<SnapshotState>>,
     snapshot_tx: broadcast::Sender<SomaHealthSnapshot>,
+    next_seq: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotState {
+    latest: Option<SomaHealthSnapshot>,
+    primitive_valid_until: Option<Instant>,
 }
 
 impl SomaService {
+    /// Initialize runtime fallback state and the broadcast channel for health clients.
     pub fn new(body: Arc<SomaBody>) -> Self {
         let runtime = RuntimeStateStore::new(body.grippers.clone());
         let (snapshot_tx, _) = broadcast::channel(16);
         Self {
             body,
             runtime,
-            latest_snapshot: Arc::default(),
+            snapshot_state: Arc::default(),
             snapshot_tx,
+            next_seq: AtomicU64::new(1),
         }
     }
 
@@ -44,10 +55,37 @@ impl SomaService {
         self.runtime.clone()
     }
 
-    pub async fn publish_runtime_snapshot(&self, seq: u64) {
-        let snapshot = self.to_health_snapshot(seq).await;
-        *self.latest_snapshot.write().await = Some(snapshot.clone());
+    /// Publish the ROS-derived fallback unless a health primitive lease is active.
+    pub async fn publish_runtime_snapshot(&self) {
+        let mut snapshot = self.to_health_snapshot(0).await;
+        let mut state = self.snapshot_state.write().await;
+        if state
+            .primitive_valid_until
+            .is_some_and(|deadline| deadline > Instant::now())
+        {
+            return;
+        }
+        snapshot.seq = self.next_sequence();
+        state.latest = Some(snapshot.clone());
+        state.primitive_valid_until = None;
+        drop(state);
         let _ = self.snapshot_tx.send(snapshot);
+    }
+
+    /// Publish a health-primitive snapshot and suppress fallback until its TTL expires.
+    pub async fn publish_primitive_snapshot(&self, mut snapshot: SomaHealthSnapshot) {
+        let ttl = Duration::from_millis(u64::from(snapshot.ttl_ms.max(1)));
+        snapshot.seq = self.next_sequence();
+        snapshot.soma_ts_ns = unix_time_ns();
+        let mut state = self.snapshot_state.write().await;
+        state.latest = Some(snapshot.clone());
+        state.primitive_valid_until = Some(Instant::now() + ttl);
+        drop(state);
+        let _ = self.snapshot_tx.send(snapshot);
+    }
+
+    fn next_sequence(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     fn map_lookup_error(error: StoreError) -> Status {
@@ -57,6 +95,7 @@ impl SomaService {
         }
     }
 
+    /// Project the latest ROS runtime samples into the Soma health wire model.
     async fn to_health_snapshot(&self, seq: u64) -> SomaHealthSnapshot {
         const HEALTH_OK: u32 = 0;
         const HEALTH_STALE: u32 = 3;
@@ -242,6 +281,7 @@ fn metric(component_id: &str, name: &str, value: f64, unit: &str, quality: u32) 
     }
 }
 
+/// Build one runtime-derived component with explicit online and health semantics.
 fn component(
     id: &str,
     parent_id: &str,
@@ -274,7 +314,7 @@ impl RobonixSystemSomaGetHealth for SomaService {
         _request: Request<GetHealthRequest>,
     ) -> Result<Response<GetHealthResponse>, Status> {
         Ok(Response::new(GetHealthResponse {
-            snapshot: self.latest_snapshot.read().await.clone(),
+            snapshot: self.snapshot_state.read().await.latest.clone(),
         }))
     }
 }
@@ -283,15 +323,16 @@ impl RobonixSystemSomaGetHealth for SomaService {
 impl RobonixSystemSomaHealth for SomaService {
     type StreamHealthStream = ReceiverStream<Result<SomaHealthSnapshot, Status>>;
 
+    /// Send the latest snapshot first, then forward updates until the client disconnects.
     async fn stream_health(
         &self,
         _request: Request<StreamHealthRequest>,
     ) -> Result<Response<Self::StreamHealthStream>, Status> {
         let mut input = self.snapshot_tx.subscribe();
-        let latest = self.latest_snapshot.clone();
+        let state = Arc::clone(&self.snapshot_state);
         let (output, receiver) = tokio::sync::mpsc::channel(16);
         tokio::spawn(async move {
-            if let Some(snapshot) = latest.read().await.clone()
+            if let Some(snapshot) = state.read().await.latest.clone()
                 && output.send(Ok(snapshot)).await.is_err()
             {
                 return;
@@ -312,8 +353,18 @@ impl RobonixSystemSomaHealth for SomaService {
     }
 }
 
+/// Return the current Unix timestamp in nanoseconds, saturating at the wire limit.
+fn unix_time_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64
+}
+
 #[tonic::async_trait]
 impl RobonixSystemSomaGetYaml for SomaService {
+    /// Resolve the requested robot and return its original Soma YAML document.
     async fn get_yaml(
         &self,
         request: Request<GetYamlRequest>,
@@ -332,6 +383,7 @@ impl RobonixSystemSomaGetYaml for SomaService {
 
 #[tonic::async_trait]
 impl RobonixSystemSomaGetUrdf for SomaService {
+    /// Return URDF XML and materialize validated local assets only when requested.
     async fn get_urdf(
         &self,
         request: Request<GetUrdfRequest>,
@@ -341,15 +393,32 @@ impl RobonixSystemSomaGetUrdf for SomaService {
             .body
             .resolve(&req.robot_id)
             .map_err(Self::map_lookup_error)?;
+        let assets = if req.include_assets {
+            let body = Arc::clone(&self.body);
+            tokio::task::spawn_blocking(move || body.read_urdf_assets())
+                .await
+                .map_err(|error| Status::internal(format!("join URDF asset reader: {error}")))?
+                .map_err(|error| Status::failed_precondition(error.to_string()))?
+                .into_iter()
+                .map(|asset| UrdfAsset {
+                    path: asset.path,
+                    data: asset.data,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Response::new(GetUrdfResponse {
             robot_id: body.robot_id.clone(),
             urdf_xml: body.urdf_xml.clone(),
+            assets,
         }))
     }
 }
 
 #[tonic::async_trait]
 impl RobonixSystemSomaFootprint for SomaService {
+    /// Return the configured footprint while preserving its declared base frame.
     async fn get_footprint(
         &self,
         _request: Request<GetFootprintRequest>,
@@ -413,12 +482,14 @@ mod tests {
         let response = service
             .get_urdf(Request::new(GetUrdfRequest {
                 robot_id: "".into(),
+                include_assets: false,
             }))
             .await
             .expect("get urdf")
             .into_inner();
         assert_eq!(response.robot_id, "test_ci_robot");
         assert!(response.urdf_xml.contains("<robot name=\"test_ci_robot\">"));
+        assert!(response.assets.is_empty());
     }
 
     #[tokio::test]
@@ -439,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn health_snapshot_is_explicit_when_no_samples_exist() {
         let service = SomaService::new(fixture_body());
-        service.publish_runtime_snapshot(1).await;
+        service.publish_runtime_snapshot().await;
         let response = service
             .get_health(Request::new(GetHealthRequest {}))
             .await
@@ -448,6 +519,39 @@ mod tests {
         let snapshot = response.snapshot.expect("snapshot");
         assert_eq!(snapshot.body_id, "test_ci_robot");
         assert_eq!(snapshot.seq, 1);
+    }
+
+    /// Primitive data suppresses fallback only for the advertised lease.
+    #[tokio::test]
+    async fn primitive_snapshot_wins_until_its_ttl_expires() {
+        let service = SomaService::new(fixture_body());
+        let mut primitive = service.to_health_snapshot(0).await;
+        primitive.ttl_ms = 20;
+        primitive.components[0].detail = "primitive".into();
+        service.publish_primitive_snapshot(primitive).await;
+        service.publish_runtime_snapshot().await;
+
+        let active = service
+            .get_health(Request::new(GetHealthRequest {}))
+            .await
+            .expect("get primitive health")
+            .into_inner()
+            .snapshot
+            .expect("primitive snapshot");
+        assert_eq!(active.seq, 1);
+        assert_eq!(active.components[0].detail, "primitive");
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        service.publish_runtime_snapshot().await;
+        let fallback = service
+            .get_health(Request::new(GetHealthRequest {}))
+            .await
+            .expect("get fallback health")
+            .into_inner()
+            .snapshot
+            .expect("fallback snapshot");
+        assert_eq!(fallback.seq, 2);
+        assert_ne!(fallback.components[0].detail, "primitive");
     }
 
     #[tokio::test]
@@ -503,6 +607,7 @@ mod tests {
         let urdf = urdf_client
             .get_urdf(GetUrdfRequest {
                 robot_id: "test_ci_robot".into(),
+                include_assets: false,
             })
             .await
             .expect("get urdf")

@@ -29,6 +29,7 @@ target
 stress_test
 .robonix
 rust/debug
+rust/provider/
 .artifacts/
 rbnx-boot
 tmp*

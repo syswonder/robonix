@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+__pycache__/
+*.pyc
+logs/
+rbnx-build/

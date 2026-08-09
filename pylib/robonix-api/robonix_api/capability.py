@@ -114,6 +114,17 @@ def _resolve_provider_id(default_id: str) -> str:
     return instance_id
 
 
+def _mcp_loopback_allowed_hosts(bind_host: str) -> list[str]:
+    """Return exact/wildcard Host values accepted by a loopback MCP server."""
+
+    if not ipaddress.ip_address(bind_host).is_loopback:
+        return []
+    hosts = [bind_host, f"{bind_host}:*"]
+    if bind_host == "127.0.0.1":
+        hosts.extend(["localhost", "localhost:*"])
+    return hosts
+
+
 # ── _ProviderBase ───────────────────────────────────────────────────────────
 
 
@@ -121,7 +132,7 @@ class _ProviderBase:
     """Internal base for Primitive / Service / Skill. NOT exported.
 
     Args:
-        id:        stable provider id (e.g. "webots_tiago_camera_front").
+        id:        stable provider id (e.g. "front_camera").
                    Convention: matches `name:` in package_manifest.yaml.
         namespace: primary contract grouping for this provider, e.g.
                    "robonix/primitive/camera". Domain contracts normally
@@ -426,8 +437,10 @@ class _ProviderBase:
         return RosBackend.get().wait_for_topic(topic, cls, timeout_s)
 
     def resolve_host_ip(self, target_ip: str) -> str | None:
-        """`ip route get <target>` -> src field. Used by drivers (e.g.
-        mid360) that need to bake the host's IP into a vendor config."""
+        """Return the source address selected by `ip route get <target>`.
+
+        Some vendor drivers require that address in their generated config.
+        """
         import subprocess
 
         try:
@@ -581,12 +594,17 @@ class _ProviderBase:
         # Preserve cross-host compatibility for wildcard/LAN binds. A
         # loopback-only deployment is also reachable from a local browser, so
         # keep the MCP SDK's Host-header/DNS-rebinding guard enabled there.
+        # The SDK defaults allowed_hosts to an empty list when callers provide
+        # explicit transport settings, which otherwise rejects every Atlas MCP
+        # request with HTTP 421. Allow only this loopback endpoint (with its
+        # dynamically allocated port) and the equivalent localhost spelling.
         protect_loopback = ipaddress.ip_address(self._bind_host).is_loopback
         self._mcp_app = FastMCP(
             self.id,
             host=self._bind_host,
             transport_security=TransportSecuritySettings(
-                enable_dns_rebinding_protection=protect_loopback
+                enable_dns_rebinding_protection=protect_loopback,
+                allowed_hosts=_mcp_loopback_allowed_hosts(self._bind_host),
             ),
         )
 
@@ -901,10 +919,9 @@ class _ProviderBase:
 
 class Primitive(_ProviderBase):
     """A hardware / data-source driver CapabilityProvider.
-    e.g. tiago_camera, mid360_lidar, ranger CAN chassis.
 
         primitive_cam = Primitive(
-            id="webots_tiago_camera_front",
+            id="front_camera",
             namespace="robonix/primitive/camera",
         )
     """
