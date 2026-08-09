@@ -16,6 +16,8 @@ use crate::pb::soma::{
 use crate::runtime_state::RuntimeStateStore;
 use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -24,19 +26,31 @@ use tonic::{Request, Response, Status};
 pub struct SomaService {
     body: Arc<SomaBody>,
     runtime: RuntimeStateStore,
-    latest_snapshot: Arc<RwLock<Option<SomaHealthSnapshot>>>,
+    snapshot_state: Arc<RwLock<SnapshotState>>,
     snapshot_tx: broadcast::Sender<SomaHealthSnapshot>,
+    next_seq: AtomicU64,
+}
+
+/// Latest published snapshot plus the lease that keeps a health primitive's
+/// reading authoritative. While `primitive_valid_until` is in the future the
+/// ROS-derived fallback stays silent, so the two publishers cannot interleave.
+#[derive(Debug, Default)]
+struct SnapshotState {
+    latest: Option<SomaHealthSnapshot>,
+    primitive_valid_until: Option<Instant>,
 }
 
 impl SomaService {
+    /// Initialize runtime fallback state and the broadcast channel for health clients.
     pub fn new(body: Arc<SomaBody>) -> Self {
         let runtime = RuntimeStateStore::new(body.grippers.clone());
         let (snapshot_tx, _) = broadcast::channel(16);
         Self {
             body,
             runtime,
-            latest_snapshot: Arc::default(),
+            snapshot_state: Arc::default(),
             snapshot_tx,
+            next_seq: AtomicU64::new(1),
         }
     }
 
@@ -44,10 +58,37 @@ impl SomaService {
         self.runtime.clone()
     }
 
-    pub async fn publish_runtime_snapshot(&self, seq: u64) {
-        let snapshot = self.to_health_snapshot(seq).await;
-        *self.latest_snapshot.write().await = Some(snapshot.clone());
+    /// Publish the ROS-derived fallback unless a health primitive lease is active.
+    pub async fn publish_runtime_snapshot(&self) {
+        let mut snapshot = self.to_health_snapshot(0).await;
+        let mut state = self.snapshot_state.write().await;
+        if state
+            .primitive_valid_until
+            .is_some_and(|deadline| deadline > Instant::now())
+        {
+            return;
+        }
+        snapshot.seq = self.next_sequence();
+        state.latest = Some(snapshot.clone());
+        state.primitive_valid_until = None;
+        drop(state);
         let _ = self.snapshot_tx.send(snapshot);
+    }
+
+    /// Publish a health-primitive snapshot and suppress fallback until its TTL expires.
+    pub async fn publish_primitive_snapshot(&self, mut snapshot: SomaHealthSnapshot) {
+        let ttl = Duration::from_millis(u64::from(snapshot.ttl_ms.max(1)));
+        snapshot.seq = self.next_sequence();
+        snapshot.soma_ts_ns = unix_time_ns();
+        let mut state = self.snapshot_state.write().await;
+        state.latest = Some(snapshot.clone());
+        state.primitive_valid_until = Some(Instant::now() + ttl);
+        drop(state);
+        let _ = self.snapshot_tx.send(snapshot);
+    }
+
+    fn next_sequence(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     fn map_lookup_error(error: StoreError) -> Status {
@@ -274,7 +315,7 @@ impl RobonixSystemSomaGetHealth for SomaService {
         _request: Request<GetHealthRequest>,
     ) -> Result<Response<GetHealthResponse>, Status> {
         Ok(Response::new(GetHealthResponse {
-            snapshot: self.latest_snapshot.read().await.clone(),
+            snapshot: self.snapshot_state.read().await.latest.clone(),
         }))
     }
 }
@@ -288,10 +329,10 @@ impl RobonixSystemSomaHealth for SomaService {
         _request: Request<StreamHealthRequest>,
     ) -> Result<Response<Self::StreamHealthStream>, Status> {
         let mut input = self.snapshot_tx.subscribe();
-        let latest = self.latest_snapshot.clone();
+        let latest = Arc::clone(&self.snapshot_state);
         let (output, receiver) = tokio::sync::mpsc::channel(16);
         tokio::spawn(async move {
-            if let Some(snapshot) = latest.read().await.clone()
+            if let Some(snapshot) = latest.read().await.latest.clone()
                 && output.send(Ok(snapshot)).await.is_err()
             {
                 return;
@@ -388,6 +429,14 @@ impl RobonixSystemSomaFootprint for SomaService {
     }
 }
 
+fn unix_time_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn health_snapshot_is_explicit_when_no_samples_exist() {
         let service = SomaService::new(fixture_body());
-        service.publish_runtime_snapshot(1).await;
+        service.publish_runtime_snapshot().await;
         let response = service
             .get_health(Request::new(GetHealthRequest {}))
             .await
@@ -472,6 +521,39 @@ mod tests {
             .expect("body component");
         assert!(body.parent_id.is_empty());
         assert!(body.detail.contains("no chassis odometry sample"));
+    }
+
+    /// Primitive data suppresses fallback only for the advertised lease.
+    #[tokio::test]
+    async fn primitive_snapshot_wins_until_its_ttl_expires() {
+        let service = SomaService::new(fixture_body());
+        let mut primitive = service.to_health_snapshot(0).await;
+        primitive.ttl_ms = 20;
+        primitive.components[0].detail = "primitive".into();
+        service.publish_primitive_snapshot(primitive).await;
+        service.publish_runtime_snapshot().await;
+
+        let active = service
+            .get_health(Request::new(GetHealthRequest {}))
+            .await
+            .expect("get primitive health")
+            .into_inner()
+            .snapshot
+            .expect("primitive snapshot");
+        assert_eq!(active.seq, 1);
+        assert_eq!(active.components[0].detail, "primitive");
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        service.publish_runtime_snapshot().await;
+        let fallback = service
+            .get_health(Request::new(GetHealthRequest {}))
+            .await
+            .expect("get fallback health")
+            .into_inner()
+            .snapshot
+            .expect("fallback snapshot");
+        assert_eq!(fallback.seq, 2);
+        assert_ne!(fallback.components[0].detail, "primitive");
     }
 
     #[tokio::test]

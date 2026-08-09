@@ -265,13 +265,15 @@ async fn main() -> Result<()> {
     let svc = Arc::new(SomaService::new(Arc::clone(&body)));
     let runtime_state = svc.runtime();
     let snapshot_service = Arc::clone(&svc);
+    // Claimed before the body API task takes ownership of `svc`; the health
+    // collector only starts once soma is ACTIVE, further down.
+    let health_body = Arc::clone(&body);
+    let health_service = Arc::clone(&svc);
     let snapshot_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
-        let mut seq = 0_u64;
         loop {
             tick.tick().await;
-            seq += 1;
-            snapshot_service.publish_runtime_snapshot(seq).await;
+            snapshot_service.publish_runtime_snapshot().await;
         }
     });
     let (body_shutdown_tx, body_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -433,6 +435,24 @@ async fn main() -> Result<()> {
         .await
         .context("activate Soma lifecycle")?;
     drop(startup_driver);
+    {
+        // Started only after ACTIVE, so Atlas discovery already sees the
+        // primitives brought up in stage 1. A collector that starts earlier
+        // finds none and stays on the runtime-state fallback for the whole
+        // session.
+        let health_atlas = atlas.clone();
+        tokio::spawn(async move {
+            if let Err(error) = robonix_soma::health::start_health_collector(
+                health_atlas,
+                health_body,
+                health_service,
+            )
+            .await
+            {
+                warn!("[soma-health] collector failed: {error:#}");
+            }
+        });
+    }
     let runtime_dir = log_dir.join("soma-runtime");
     let runtime_monitor = match robonix_soma::runtime_monitor::start(
         &mut atlas,
