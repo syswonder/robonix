@@ -404,6 +404,16 @@ jobs:
             [ -e "$target" ] || continue
             sudo -n chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null || true
             rm -rf -- "$target"
+            # Containers in this suite run as root and leave root-owned
+            # evidence behind (the Soma runtime bind mount, driver logs).
+            # Runners without passwordless sudo cannot chown that back, which
+            # jams every later run at this step. Docker is a hard dependency of
+            # the suite, so reclaim ownership through a throwaway container.
+            if [ -e "$target" ]; then
+              docker run --rm -v "$target":/reclaim busybox \
+                chown -R "$(id -u):$(id -g)" /reclaim >/dev/null 2>&1 || true
+              rm -rf -- "$target"
+            fi
             if [ -e "$target" ]; then
               echo "::error::could not remove stale generated evidence: $target"
               exit 1

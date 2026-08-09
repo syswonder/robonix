@@ -61,6 +61,7 @@ const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
 const GET_FOOTPRINT_TOML: &str = "capabilities/system/soma/footprint.v1.toml";
 const GET_HEALTH_TOML: &str = "capabilities/system/soma/get_health.v1.toml";
 const HEALTH_TOML: &str = "capabilities/system/soma/health.v1.toml";
+const MAX_URDF_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const SHARED_DRIVER_CONTRACT: &str = "robonix/lifecycle/driver";
 const CMD_INIT: u32 = 0;
 const CMD_ACTIVATE: u32 = 1;
@@ -281,7 +282,10 @@ async fn main() -> Result<()> {
         tonic::transport::Server::builder()
             .add_service(RobonixLifecycleDriverServer::new(body_lifecycle))
             .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(&svc)))
-            .add_service(RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&svc)))
+            .add_service(
+                RobonixSystemSomaGetUrdfServer::from_arc(Arc::clone(&svc))
+                    .max_encoding_message_size(MAX_URDF_RESPONSE_BYTES),
+            )
             .add_service(RobonixSystemSomaFootprintServer::from_arc(Arc::clone(&svc)))
             .add_service(RobonixSystemSomaGetHealthServer::from_arc(Arc::clone(&svc)))
             .add_service(RobonixSystemSomaHealthServer::from_arc(svc))
