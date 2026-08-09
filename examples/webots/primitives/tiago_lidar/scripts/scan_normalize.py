@@ -54,9 +54,10 @@ class Normalizer(Node):
             out.angle_increment = msg.angle_increment
             out.ranges = msg.ranges
             out.intensities = msg.intensities
-        # A Webots range image is sampled at one simulation timestamp. Preserve
-        # that contract exactly: inventing per-ray timing makes RTAB-Map apply
-        # motion compensation to a scan that did not move during acquisition.
+        # Webots renders the whole range image at one simulation timestamp.
+        # Keep that instantaneous-scan contract. Inventing a per-ray time and
+        # moving the stamp backwards associates the scan with an older odom
+        # pose, which duplicates walls whenever the robot rotates.
         out.scan_time = msg.scan_time
         out.time_increment = msg.time_increment
         out.range_min = msg.range_min

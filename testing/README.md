@@ -39,7 +39,7 @@ planning boundary.
 | `scenarios/cap/*.yaml` | single-capability tests. |
 | `scenarios/flow/*.yaml` | multi-step task flows, incl. fault injection + recovery. |
 | `run.py` | runs cap + flow scenarios; writes `logs/<family>.<name>.jsonl`; asserts each RTDL leaf's args/results, fault recovery, and final status; prints coverage. |
-| `run_interfaces.py` | direct atlas/pilot/audio RPC checks; writes `logs/iface.*`. |
+| `run_interfaces.py` | direct Atlas, Pilot, Executor plan-control, and audio RPC checks; writes `logs/iface.*`. |
 | `report.py` | renders `testing/report/index.html`, Markdown summary, embedded logs, and optional LLM-assisted analysis. |
 | `build_report_from_artifacts.py` | canonical report builder used by both direct Webots workflow runs and ChatOps Pages publishing. |
 | `collect_diagnostic_context.py` | collects bounded PR metadata/diff plus relevant logs for failure/success analysis; it does not upload the whole repository. |
@@ -49,8 +49,9 @@ planning boundary.
 
 Execution order after boot:
 
-1. `testing/run_interfaces.py` checks direct APIs: atlas discovery, pilot task
-   submission, and audio gRPC through ALSA `null` devices.
+1. `testing/run_interfaces.py` checks direct APIs: Atlas discovery, Pilot task
+   submission, Executor out-of-band plan control, and audio gRPC through ALSA
+   `null` devices.
 2. `testing/run.py` runs every YAML scenario under `scenarios/cap/` and
    `scenarios/flow/`.
 3. The workflow uploads per-scenario JSONL event streams, boot logs, provider
@@ -223,6 +224,14 @@ python3 testing/run.py --server "$ROBONIX_ATLAS" \
   --timeout 900 \
   --summary-json /tmp/robonix-local-summary.json
 ```
+
+Interface proto discovery defaults to the Webots deployment at
+`examples/webots`. For another booted deployment, set
+`ROBONIX_DEPLOYMENT_DIR` to its directory (absolute, or relative to
+`GITHUB_WORKSPACE`). The harness resolves the selected manifest's audio package
+under `<deployment>/rbnx-boot/cache/<repository>/rbnx-build/codegen/proto_gen`
+first, while retaining the historical in-tree `primitives/audio_driver`
+layouts as compatibility fallbacks.
 
 For a targeted live run:
 

@@ -2,7 +2,9 @@
 RGBD/CreateOccupancyGrid: true
 Grid/RangeMax: 6.0
 Grid/CellSize: 0.05
-Grid/RayTracing: true # when set to false, ghost points will exist on map - wheatfox 2026.7.19
+# Keep depth-only obstacles (for example table tops above the planar lidar)
+# occupied when later lidar rays pass underneath them.
+Grid/RayTracing: false
 Grid/3D: false
 Grid/NormalsSegmentation: false
 Grid/MaxObstacleHeight: 1.0

@@ -210,7 +210,7 @@ def build_image_relation_user_text(legend: list[tuple[int, str]]) -> str:
 def parse_image_relations(
     raw: dict, box_to_oid: dict[int, str]
 ) -> list[SceneGraphEdge]:
-    """Turn the VLM's ``{"edges": [...]}`` into validated ``SceneGraphEdge``s.
+    """Turn the VLM's ``{"edges": [...]}`` into validated graph edges.
 
     Drops edges whose box numbers are unknown, self-edges, duplicates of an
     already-seen ``(source, target, relation)``, and relations outside

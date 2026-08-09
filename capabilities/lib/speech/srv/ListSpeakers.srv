@@ -1,4 +1,4 @@
-# robonix/system/speech/list_speakers — enumerate every audio/speaker
+# robonix/service/speech/list_speakers — enumerate every audio/speaker
 # primitive registered in atlas, so a caller can choose a `target` for
 # speak. `namespace_prefix` optionally filters by provider namespace.
 # `speakers_json` is a JSON array of {provider_id, namespace, description}.

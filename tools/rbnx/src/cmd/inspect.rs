@@ -32,7 +32,7 @@ fn state_name(s: i32) -> &'static str {
     }
 }
 
-/// Color the [STATE] tag the same way every printer does it. Picked to
+/// Color the `[STATE]` tag the same way every printer does it. Picked to
 /// match the boot-log feel: green=running healthy, yellow=came up but
 /// nothing's driving it yet, red=problem, dim=quiescent.
 fn state_tag(s: i32) -> colored::ColoredString {

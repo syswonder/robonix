@@ -1,5 +1,5 @@
 # Voiceprint identification (one-shot)
-# abstract_interface_id: robonix/system/speech/voiceprint
+# Contract: robonix/service/voiceprint/identify
 uint8[] audio_data
 string  encoding         # e.g. "pcm_s16le"
 uint32  sample_rate_hz   # e.g. 16000

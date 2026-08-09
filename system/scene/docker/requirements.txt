@@ -20,9 +20,10 @@
 scipy>=1.11
 mcp
 fastmcp
-grpcio
-grpcio-tools
-protobuf
+# Runtime versions validated by scripts/run_python_codegen.sh. The protobuf
+# compiler is intentionally absent from the Scene runtime.
+grpcio==1.80.0
+protobuf==6.33.6
 uvicorn
 httpx
 Pillow

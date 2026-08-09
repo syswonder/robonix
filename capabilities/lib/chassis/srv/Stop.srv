@@ -1,4 +1,4 @@
-# robonix/primitive/base/stop — synchronous stop (RPC)
+# Legacy unregistered stop IDL. No contract TOML references this file.
 ---
 bool success
 string message

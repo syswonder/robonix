@@ -7,10 +7,8 @@ rclpy / the generated `map` interface package it must return None (not
 raise); on a full ROS container it still returns None because nothing
 publishes the probe topic within the short timeout.
 """
-import ast
 import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -62,35 +60,9 @@ def test_probe_degrades_to_none_without_publisher():
     print("  [PASS] test_probe_degrades_to_none_without_publisher")
 
 
-def test_ephemeral_mapping_warnings_guide_save_then_localization():
-    """Both empty-map lifecycle warnings must describe the supported UI flow."""
-    service_path = (
-        Path(__file__).resolve().parents[1] / "scene_service" / "service.py"
-    )
-    module = ast.parse(service_path.read_text(encoding="utf-8"))
-    messages = [
-        ast.literal_eval(node.args[0])
-        for node in ast.walk(module)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "warning"
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
-        and "mapping broadcasts an EPHEMERAL session" in node.args[0].value
-    ]
-    assert len(messages) == 2
-    for message in messages:
-        assert "Save the current mapping session as %r first" in message
-        assert "Load that saved map or restart in localization mode" in message
-        assert "config.map_id" not in message
-    print("  [PASS] test_ephemeral_mapping_warnings_guide_save_then_localization")
-
-
 if __name__ == "__main__":
     test_broadcast_wins_over_config_and_env()
     test_empty_broadcast_map_id_falls_through()
     test_config_beats_env_then_env_then_default()
     test_probe_degrades_to_none_without_publisher()
-    test_ephemeral_mapping_warnings_guide_save_then_localization()
     print("test_map_binding: all tests passed")

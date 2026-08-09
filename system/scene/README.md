@@ -43,7 +43,7 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 
 1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the live RGB frame. Class list is a 55-entry indoor-office vocabulary; override at runtime via `SCENE_OPEN_VOCAB_CLASSES=cup,chair,...`.
 2. **Segment.** MobileSAM, prompted with each YOLO bbox, produces a per-detection mask.
-3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract. There is no hardcoded-default fallback: guessing `K` silently rescales and misplaces every point, so the detector waits when no usable sample is wired. The world transform composes the active `service/map/pose` (or declared odometry) with `primitive/camera/extrinsics`. Scene never substitutes a tf2 side channel, zero pose, fixed camera axis/height, or literal frame names.
+3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract — the real per-deployment camera. There is no hardcoded-default fallback: guessing `K` scales every point by `fx/fy` and silently misplaces objects, so when no usable intrinsics are wired the detector *waits* (logs `waiting for camera intrinsics`) instead. The world transform comes from the robot's TF tree first: Scene asks for `T(world ← selected_camera_optical)` so the full URDF/static chain and SLAM's `map → odom` correction stay intact. Only when that TF lookup is unavailable does the compatibility path compose `T(world ← body)` from `service/map/pose` (or odom) with `T(body ← camera_optical)` from `primitive/camera/extrinsics`. The selected pose source determines `body`; the extrinsics parent must match that same frame. The world frame name is whatever `header.frame_id` the localizer publishes — never a hardcoded `"map"` once a sample exists.
 4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + 3D-AABB IoU drives the concept-graphs merge pipeline: `compute_spatial_similarities` + `compute_visual_similarities` + `aggregate_similarities` + `merge_detections_to_objects`. Three hard gates filter the agg_sim matrix:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
    * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
@@ -182,6 +182,33 @@ contract list in `scene_service/service.py` (`_SCENE_CONTRACTS`), asks Atlas for
 providers that implement those contracts, connects to their ROS 2 `topic_out`
 interfaces, and subscribes only to what the deployment actually exposes.
 
+For a robot with more than one camera, pin Scene to one RGB-D provider in the
+deployment manifest:
+
+```yaml
+system:
+  scene:
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      camera_provider_id: front_rgbd_camera
+      web_port: 50107
+```
+
+The value is the camera package entry's `name` (and therefore its Atlas
+provider id). Scene resolves `rgb`, `depth`, `intrinsics`, and `extrinsics`
+from that same provider so streams and calibration from different cameras are
+never mixed. The selected provider must expose both `camera/rgb` and
+`camera/depth` for RGB-D perception. Omitting `camera_provider_id` preserves
+the legacy auto-discovery behaviour for single-camera deployments.
+
+Scene supports lifecycle initialization, activation, and clean shutdown.
+`CMD_DEACTIVATE` is not yet a pause operation: Scene rejects it as deferred and
+remains `ACTIVE`, because its ROS subscriptions, perception workers, and Web UI
+cannot currently be paused atomically. Use `CMD_SHUTDOWN` to stop Scene. A
+successful shutdown reply is sent only after perception, ROS, graph/background
+tasks, the Web UI serving task/socket, and the object store have all closed, so
+an immediate restart can rebind the same web port.
+
 The default RMW is Zenoh (`RMW_IMPLEMENTATION=rmw_zenoh_cpp`). For single-host
 deployments the default local router/session is used; advanced deployments can
 override it with `ROBONIX_ZENOH_ROUTER`, `ROBONIX_ZENOH_MODE`, and
@@ -195,7 +222,37 @@ Useful input contracts include:
 * `robonix/primitive/camera/intrinsics` (`sensor_msgs/CameraInfo`)
 * `robonix/primitive/camera/extrinsics` (`geometry_msgs/TransformStamped`)
 * `robonix/service/map/pose` (`geometry_msgs/PoseWithCovarianceStamped`)
+* `robonix/service/map/odom` (`nav_msgs/Odometry`, compatibility fallback)
 * `robonix/service/map/occupancy_grid` (`nav_msgs/OccupancyGrid`)
+
+Scene's robot marker and self context come primarily from
+`robonix/service/map/pose`, not from the camera and not from raw chassis odom.
+The mapping/localization provider must publish a globally corrected
+`PoseWithCovarianceStamped` for the configured robot body (`base_link` by
+default); Scene adopts its
+`header.frame_id` as the world frame. `service/map/odom` and TF2 are
+not equivalent pose sources: TF is authoritative, corrected pose is the first
+contract fallback, and raw odometry is the final contract fallback. Metric
+RGB-D projection resolves the selected camera
+frame directly through TF first. Only when that lookup is unavailable does
+Scene compose the pose with `primitive/camera/extrinsics`. In that fallback
+message, `header.frame_id` must be the expected robot body frame (`base_link`
+by default), `child_frame_id` must equal the selected camera optical frame, and
+`transform` is `T(parent ← child)`: it
+converts points from the camera optical frame into the parent frame. Scene
+rejects missing or mismatched frame ids instead of composing incompatible
+frames. Deployments with a complete URDF and TF tree should not publish a
+second transform with the opposite direction.
+
+For robots whose body frame is not `base_link`, set `base_frame` under
+`system.scene.config` (or `SCENE_BASE_FRAME`). This is an assertion about the
+body represented by the fallback pose and the required parent of camera
+extrinsics. If odometry is selected, its non-empty `child_frame_id` must match
+the assertion or that sample is rejected. When `base_frame` is omitted, a
+preferred `PoseWithCovarianceStamped` represents `base_link`; an odometry-only
+fallback uses that selected message's own `child_frame_id` (then `base_link` if
+the field is empty). An unselected odometry sample never changes the frame used
+for a preferred pose sample.
 
 If your camera frame is not the deployment default, override it when starting scene:
 
@@ -280,8 +337,6 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
 | `SCENE_MAP_BINDING_WAIT_S` | `3.0` | how long the startup probe waits for the lifecycle contract to appear on atlas before falling back to static binding; `0` disables the probe |
 | `SCENE_ANNOTATIONS_DIR` | `/data/robonix/scene_annotations` | per-map JSON files holding user annotations (rooms / POIs); host-mounted like the object DB |
-| `SCENE_MAP_META_DIR` | sibling `scene_maps/` of the annotations dir | epoch sidecar files pairing each saved map with the object-snapshot partition written at its Save (see "Map library") |
-| `SCENE_RESTORE_ON_START` | `false` | LEGACY mode: bind the startup map id, restore its objects at boot, and let the scene-graph builder persist continuously. Default off — a boot starts a fresh live session and objects are only persisted by an explicit Save |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
 
 ## Object memory (Save/Load snapshots)
@@ -299,20 +354,10 @@ file/process from `system/memory`'s memsearch DB — and lives under the
 host-mounted `/data/robonix`, which also makes the scene-graph JSON caches
 survive boots.
 
-`SCENE_RESTORE_ON_START=true` selects the LEGACY mode instead: the registry
-warm-restores the startup binding's partition at boot and the scene-graph
-builder persists continuously under it. This mode assumes the map frame never
-changes across those boots — the operator owns that guarantee. Don't mix it
-with map-UI Saves: a Save purges the bare partition the legacy restore reads
-(its rows move into the Save's snapshot), so the next legacy boot restores
-nothing until the builder repopulates.
-
-An object's pose is only meaningful in the exact `map` frame it was observed
-in, so persistence is partitioned by **snapshot**, not merely by map name:
-every Save writes into a fresh partition and restore loads exactly the
-partition saved with the loaded artifact — two builds of a same-named map can
-never mix. The same `object_id` may exist in several snapshots without
-colliding.
+Persistence is partitioned by the map binding: an object's pose is only
+meaningful in the `map` frame of the SLAM map it was observed on, so restore
+loads exactly the current map's objects and never mixes two maps. The same
+`object_id` may exist on different maps without colliding.
 
 The binding itself (`scene_service/map_binding.py`) is learned at startup with
 this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
@@ -321,17 +366,11 @@ this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
 `"default"`. The broadcast needs the generated `map` interface package
 (`rbnx codegen --ros2` → colcon overlay, built by `scripts/build.sh`, sourced
 by the container entrypoint); without it scene falls back to static binding
-with a warning. At runtime scene WATCHES the broadcast and reacts to a frame
-epoch change: a `generation` bump on the bound map (mapping reset / re-init
-under scene) **flushes the derived objects** from the registry — their stored
-map-frame coordinates are no longer anchored, and re-observation rebuilds them
-in the new frame — and flags room annotations stale for user confirmation
-(user assets are never deleted automatically). A broadcast naming a different
-map (loaded outside scene's map UI) also flushes stale objects, but scene
-cannot restore the new map's semantic state from there — the log tells the
-operator to Load it in the map UI (or restart scene). A Load performed through
-the map UI updates the same live binding the watcher tracks, so it never
-registers as drift.
+with a warning. At runtime scene only WATCHES the broadcast: if mapping's
+identity or `generation` (bumped when the map origin may have changed: reset /
+mapping-mode session start) drifts from the startup binding, scene logs a
+warning and keeps its binding — reacting (flush + re-anchor) is the planned
+lifecycle linkage (P3).
 
 ## User annotations (rooms / POIs)
 
@@ -369,44 +408,6 @@ as breaking.** The full annotation list also rides along in `GET /api/state`
 (field `annotations`, next to `map_binding`) so map pages get everything in
 one poll. There is deliberately no atlas/MCP surface yet — exposing rooms to
 Pilot (scene-graph `in_room` edges) is a planned follow-up.
-
-## Map library (Save / Load / Delete)
-
-The `/user` page's map panel drives a scene-owned facade over the map
-capabilities (`POST /api/maps/{save,load,delete}`, `GET /api/maps`,
-`POST /api/maps/pose_estimate`): mapping keeps the spatial artifact, scene
-keeps the matching semantic state, and the facade moves both together so "a
-map" means geometry + objects + rooms as one unit.
-
-**Epoch rule** — the invariant behind every path here: *objects are only ever
-restored from the snapshot written together with the loaded artifact.* Each
-Save allocates a fresh object partition (`<map_id>__s<seq>`), writes the live
-registry into it, commits a sidecar file (`SCENE_MAP_META_DIR`) pointing at
-it only after the write verifies complete, and then purges the previous
-snapshot. Each Load reads the sidecar and restores exactly that partition. A
-map without a sidecar (saved before this mechanism, or a foreign DB) restores
-**no objects** — response field `semantic_snapshot` says so — because rows of
-unknown epoch may anchor to a map frame that no longer exists (the off-map
-"ghost object" bug). Re-save the map to create its snapshot.
-
-Save refuses (409) three epoch hazards rather than corrupting state silently:
-updating an existing map's semantics **from a still-running mapping session**
-(the artifact froze at the original Save while the live frame kept drifting —
-load it in localization mode instead, or delete and re-save), saving onto
-a map **whose annotations this session never loaded** (the carry would
-overwrite previously saved rooms; load first), and saving **while scene's
-semantic state may not match the map mapping runs** — after a Load that did
-not complete, or after mapping switched maps outside the facade — until a
-Load reports success (the 409 detail starts with `save blocked:`). A Save
-whose object snapshot fails to commit returns 502 with
-`partial: "spatial_saved_object_snapshot_failed"`: the sidecar still points
-at the previous snapshot, and the detail names the recovery (retry, or for a
-fresh mapping-session save: delete and save anew). Load is transactional on
-the occupancy grid AND the snapshot: scene rebinds rooms/objects only after
-observing a fresh grid from the loaded map, a registry-flush or
-snapshot-restore failure aborts the load (502) with the previous binding and
-annotation partition kept, and Delete removes the artifact, the annotation
-file, the sidecar, and every object partition of the map.
 
 ## Capabilities exposed
 

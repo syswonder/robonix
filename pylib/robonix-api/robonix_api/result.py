@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Lifecycle handler return type.
+"""Return types for lifecycle handlers.
 
-Every `@<provider>.on_init / on_activate / on_deactivate / on_shutdown`
-handler MUST return one of `Ok` / `Err` / `Deferred`. Only `on_init`
-receives `cfg: dict` (the CMD_INIT config_json, JSON-decoded); the
-other three take no args. Don't `raise` — the framework will catch
-and convert raises into `Err(repr(exc))` defensively but logs a
-warning telling you to use `Err(...)` explicitly instead.
+Every ``on_init``, ``on_activate``, ``on_deactivate``, and ``on_shutdown``
+handler returns one of the following values:
 
-  Ok()                 — handler succeeded; framework advances state.
-  Err("...")           — handler failed; provider goes to ERROR.
-  Deferred("...")      — handler can't proceed yet; provider stays in
-                         current state. v0.1 reports the reason to the
-                         operator and moves on (no deferred queue).
+* :class:`Ok`: the handler succeeded and the framework advances state.
+* :class:`Err`: the handler failed and the provider enters ``ERROR``.
+* :class:`Deferred`: the handler cannot proceed and the provider remains in
+  its current state. Version 0.1 reports the reason but has no deferred queue.
+
+Only ``on_init`` receives the decoded ``cfg`` dictionary. Raising an exception
+is converted defensively to :class:`Err`, but returning :class:`Err` explicitly
+produces clearer diagnostics.
 """
 from __future__ import annotations
 

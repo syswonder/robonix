@@ -56,13 +56,24 @@ pub async fn execute(file: PathBuf) -> Result<()> {
         ),
     );
 
-    teardown::teardown(Some(&state.atlas_endpoint), &state.components).await;
+    let boot_id = (!state.boot_id.is_empty()).then_some(state.boot_id.as_str());
+    let complete =
+        teardown::teardown(Some(&state.atlas_endpoint), &state.components, boot_id).await;
+    if !complete {
+        anyhow::bail!(
+            "shutdown refused one or more stale/mismatched process groups; preserving {}",
+            state_path.display()
+        );
+    }
 
     // Best-effort: also signal the boot process itself (which is probably
     // already dead because we just killed all its children, but if the
     // user ran `rbnx boot` in the foreground and `rbnx shutdown` from
     // another shell, this lets boot exit its signal-wait loop cleanly).
-    if state.boot_pid != 0 && state.boot_pid != std::process::id() {
+    let boot_identity_matches = state.boot_start_time_ticks.is_none_or(|expected| {
+        robonix_cli::launch::proc_start_time_ticks(state.boot_pid) == Some(expected)
+    });
+    if state.boot_pid != 0 && state.boot_pid != std::process::id() && boot_identity_matches {
         let pid = nix::unistd::Pid::from_raw(state.boot_pid as i32);
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
     }

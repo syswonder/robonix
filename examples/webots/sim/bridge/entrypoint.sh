@@ -349,6 +349,23 @@ case "${WEBOTS_HEADLESS_MODE:-host}" in
   *) echo "[entrypoint] unknown WEBOTS_HEADLESS_MODE=$WEBOTS_HEADLESS_MODE"; exit 2 ;;
 esac
 
+if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
+  # Serve a per-container copy so parallel runs can substitute their mapped
+  # public WebSocket port without mutating the image or sharing state.
+  public_stream_port="${ROBONIX_SIM_STREAM_PUBLIC_PORT:-1234}"
+  case "$public_stream_port" in
+    *[!0-9]*|'') echo "[entrypoint] invalid ROBONIX_SIM_STREAM_PUBLIC_PORT=$public_stream_port" >&2; exit 2 ;;
+  esac
+  viewer_dir=/tmp/robonix-streaming-viewer
+  rm -rf "$viewer_dir"
+  cp -a /usr/local/webots/resources/web/streaming_viewer "$viewer_dir"
+  sed -i "s/__ROBONIX_STREAM_PORT__/$public_stream_port/g" "$viewer_dir/index.html"
+  (cd "$viewer_dir" \
+     && python3 -m http.server 8080 --bind 0.0.0.0) \
+       >/tmp/viewer-http.log 2>&1 &
+  echo "[entrypoint] viewer HTTP on :8080  ws public port :$public_stream_port"
+fi
+
 start_zenoh_router
 prepare_office_webots_seed
 prepare_full_webots_assets

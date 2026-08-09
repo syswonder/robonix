@@ -59,7 +59,10 @@ def main() -> int:
                 })
             subscriptions.append(node.create_subscription(Odometry, topic, on_odom, qos(source)))
 
-    emit({"kind": "warning", "message": f"runtime reader subscribed to {len(subscriptions)} source(s)"})
+    if not subscriptions:
+        emit({"kind": "warning", "message": "runtime reader created no subscriptions"})
+        return 3
+    emit({"kind": "ready", "subscriptions": len(subscriptions)})
     try:
         rclpy.spin(node)
     finally:

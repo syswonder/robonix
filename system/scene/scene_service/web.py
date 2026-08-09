@@ -1221,7 +1221,13 @@ def make_app(*, registry: ObjectRegistry,
             # recreate the mixed-epoch state this ordering exists to
             # prevent.
             try:
-                async with registry.lock():
+                registry_lock = getattr(registry, "lock", None)
+                if callable(registry_lock):
+                    async with registry_lock():
+                        flushed = registry.clear_objects()
+                else:
+                    # Minimal registry adapters used by embedded callers may
+                    # already serialize access and expose only clear_objects.
                     flushed = registry.clear_objects()
                 if flushed:
                     out["objects_flushed"] = flushed
@@ -3140,17 +3146,43 @@ function draw() {
         ctx.fillText(hoverObj.cls, px + 8, py);
     }
 
-    // robot marker (small arrow, subtle)
+    // Robot marker: fixed-size, high-contrast body plus a long directional
+    // nose. Keeping it in screen pixels makes the pose readable at every map
+    // zoom level, including over dark occupied cells and pale free space.
     const robot = state.robot;
     if (robot) {
         const [rx, ry] = w2p(robot.x, robot.y);
         const yaw = robot.yaw || 0;
-        ctx.strokeStyle = '#7aa7ff'; ctx.fillStyle = '#7aa7ff'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(rx, ry, 5, 0, Math.PI * 2); ctx.stroke();
+        const robotMarkerNose = 24;
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
         ctx.beginPath();
-        ctx.moveTo(rx, ry);
-        ctx.lineTo(rx + Math.cos(yaw) * 14, ry - Math.sin(yaw) * 14);
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(7, 10, 16, 0.92)';
+        ctx.fill();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#ffffff';
         ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(robotMarkerNose, 0);
+        ctx.lineTo(-7, -10);
+        ctx.lineTo(-3, 0);
+        ctx.lineTo(-7, 10);
+        ctx.closePath();
+        ctx.fillStyle = '#ff5a1f';
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(0, 0, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.restore();
     }
 
     // draft polygon (draw mode)

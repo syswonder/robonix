@@ -1,22 +1,16 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Thin Python wrapper over the generated atlas_pb2 stubs.
+"""Thin Python wrapper over the generated Atlas protobuf stubs.
 
-Public surface — what `from robonix_api import ATLAS` exposes:
-    Registration         register_primitive / register_service / register_skill
-                         unregister  /  heartbeat
-    Capability binding   declare_capability
-    Discovery            query / query_primitives / query_services / query_skills
-                         find_capability / find_unique_capability
-    Channels             connect_capability / disconnect_capability
-    Contracts            query_contract / list_contracts
-    Debug                inspect
+``from robonix_api import ATLAS`` exposes the following groups:
 
-Privileged operations (`SetLifecycleState`, in particular) are NOT exposed
-here — they're framework-internal and live in `_lifecycle_internal.py`.
-A regular `from robonix_api import ATLAS` cannot reach them.
+* registration, unregistration, and heartbeat operations;
+* capability declaration, discovery, and channel connection;
+* contract queries; and
+* runtime inspection.
 
-Returns dataclasses from `robonix_api.atlas_types`; raw protobuf never
-leaves this module.
+Privileged operations such as ``SetLifecycleState`` remain framework-internal
+in ``_lifecycle_internal.py``. Public methods return dataclasses from
+``robonix_api.atlas_types``; raw protobuf messages do not leave this module.
 """
 from __future__ import annotations
 
@@ -383,8 +377,11 @@ class _Atlas:
         namespace_prefix: str = "",
     ) -> list[Capability]:
         """Flat consumer-facing list of Capabilities matching the filters.
-        Walks Query() and flattens each provider's `capabilities[]`. Each
-        returned `Capability` already carries provider_id / provider_kind."""
+        Walks Query() and flattens each provider's matching
+        `capabilities[]`. Atlas returns whole provider records when any one of
+        their capabilities matches, so the client must apply the capability
+        filters again while flattening. Each returned `Capability` already
+        carries provider_id / provider_kind."""
         providers = self.query(
             kind=provider_kind,
             id=provider_id,
@@ -392,9 +389,17 @@ class _Atlas:
             namespace_prefix=namespace_prefix,
             transport=transport,
         )
+        requested_transport = _resolve_transport(transport)
         out: list[Capability] = []
         for p in providers:
             for c in p.capabilities:
+                if contract_id and c.contract_id != contract_id:
+                    continue
+                if (
+                    requested_transport != Transport.UNSPECIFIED
+                    and c.transport != requested_transport
+                ):
+                    continue
                 out.append(c)
         return out
 

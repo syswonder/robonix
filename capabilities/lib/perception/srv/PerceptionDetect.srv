@@ -1,4 +1,4 @@
-# robonix/service/perception/detect — detection / scene understanding on one image.
+# Legacy unregistered detection IDL. No contract TOML references this file.
 sensor_msgs/Image image
 ---
 std_msgs/String results

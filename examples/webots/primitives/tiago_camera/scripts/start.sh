@@ -7,6 +7,9 @@ set -euo pipefail
 # Sim container name — overridable via ROBONIX_SIM_CONTAINER for isolated
 # CI / parallel deploys. Default keeps single-deploy behaviour.
 SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+WEBOTS_SCRIPTS="$(cd "$(dirname "$0")/../../../scripts" && pwd)"
+# shellcheck source=../../../scripts/container_network.sh
+source "$WEBOTS_SCRIPTS/container_network.sh"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
   echo "[tiago_camera] error: sim container '$SIM_CT' is not running."
@@ -61,10 +64,18 @@ resolve_advertise_host() {
 }
 
 ADVERTISE_HOST="$(resolve_advertise_host)"
+ATLAS_ENDPOINT="$(resolve_container_atlas_endpoint "$SIM_CT")"
+ATLAS_HOST="${ATLAS_ENDPOINT%:*}"
+NO_PROXY_VALUE="$(append_no_proxy_hosts "${NO_PROXY:-${no_proxy:-localhost,127.0.0.1}}" "$ATLAS_HOST" "$ADVERTISE_HOST")"
+no_proxy_value="$(append_no_proxy_hosts "${no_proxy:-${NO_PROXY:-localhost,127.0.0.1}}" "$ATLAS_HOST" "$ADVERTISE_HOST")"
 
 exec docker exec \
-  -e ROBONIX_ATLAS="${ROBONIX_SIM_ATLAS:-${ROBONIX_ATLAS:-127.0.0.1:50051}}" \
+  -e ROBONIX_ATLAS="$ATLAS_ENDPOINT" \
+  -e ROBONIX_DRIVER_CONTRACT_ID="${ROBONIX_DRIVER_CONTRACT_ID-robonix/lifecycle/driver}" \
+  -e ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK="${ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK:-}" \
   -e ROBONIX_ADVERTISE_HOST="$ADVERTISE_HOST" \
+  -e NO_PROXY="$NO_PROXY_VALUE" \
+  -e no_proxy="$no_proxy_value" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_RGB_TOPIC="${TIAGO_RGB_TOPIC:-/head_front_camera/rgb/image_raw}" \
   -e TIAGO_DEPTH_TOPIC="${TIAGO_DEPTH_TOPIC:-/head_front_camera/depth_registered/image_raw}" \
@@ -76,8 +87,6 @@ exec docker exec \
   bash -lc 'set -eo pipefail
             set +u
             source /opt/ros/humble/setup.bash >/dev/null
-            OVL=/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/ros2_idl/install/setup.bash
-            [ -f "$OVL" ] && source "$OVL" >/dev/null || true
             cd /robonix_pkgs/primitives/tiago_camera
             LOG=/tmp/tiago_camera_driver.log
             : > "$LOG"
