@@ -814,6 +814,12 @@ jobs:
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
           source ./nvidia_host.sh
           robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+          # sim/start.sh creates the Soma runtime bind-mount source before
+          # compose runs; CI drives compose directly, so it has to do the same.
+          # Docker would otherwise create the whole rbnx-boot/logs path as root,
+          # and every provider that writes <name>.log into it dies with an empty
+          # log and no diagnostic.
+          mkdir -p ../rbnx-boot/logs/soma-runtime
           docker compose -p "$ROBONIX_SIM_PROJECT" \
             -f compose.yaml \
             -f compose.gpu.yaml \
