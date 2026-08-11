@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: MulanPSL-2.0
-
 import os
 import launch
 from launch import LaunchDescription
@@ -13,7 +11,6 @@ from webots_ros2_driver.wait_for_controller_connection import WaitForControllerC
 
 
 def generate_launch_description():
-    """Launch the selected Webots world and bridge its ROS control nodes."""
     package_dir = get_package_share_directory('eaios_webots')
     
     robot_arg = DeclareLaunchArgument(
@@ -37,15 +34,11 @@ def generate_launch_description():
         'resource', # Assuming URDF files are in the 'resource' folder
         robot_urdf_file
     ])
-    generated_world = os.environ.get('ROBONIX_WEBOTS_WORLD_PATH')
-    if generated_world:
-        world_description_path = generated_world
-    else:
-        world_description_path = PathJoinSubstitution([
-            package_dir,
-            'worlds', # Assuming world files are in the 'worlds' folder
-            world_wbt_file
-        ])
+    world_description_path = PathJoinSubstitution([
+        package_dir,
+        'worlds', # Assuming world files are in the 'worlds' folder
+        world_wbt_file
+    ])
 
     print(f"using robot_path:{robot_description_path}")
     print(f"using world_path:{world_description_path}")
@@ -92,14 +85,6 @@ def generate_launch_description():
         }],
     )
 
-    footprint_publisher = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        output='screen',
-        arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'base_footprint'],
-    )
-
-
     use_twist_stamped = 'ROS_DISTRO' in os.environ and (os.environ['ROS_DISTRO'] in ['rolling', 'jazzy', 'kilted'])
     if use_twist_stamped:
         mappings = [('/diffdrive_controller/cmd_vel', '/cmd_vel'), ('/diffdrive_controller/odom', '/odom')]
@@ -135,7 +120,6 @@ def generate_launch_description():
         webots,
         webots._supervisor,
         robot_state_publisher, # Ensure robot_state_publisher starts before my_robot_driver if my_robot_driver depends on it.
-        footprint_publisher,
         my_robot_driver,
         waiting_nodes,
         launch.actions.RegisterEventHandler(
