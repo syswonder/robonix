@@ -35,7 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -88,9 +88,62 @@ const DEFAULT_RECORD_SECONDS: u32 = 10;
 const VAD_SPEECH_RMS: f32 = 500.0;
 const VAD_END_SILENCE_SECS: f32 = 1.2;
 const VAD_NO_SPEECH_TIMEOUT_SECS: u64 = 5;
+/// How often the mic pump re-checks its finish flag while waiting for audio.
+const FINISH_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DEFAULT_ASR_LANGUAGE: &str = "";
 const DEFAULT_AUDIO_ENCODING: &str = "pcm_s16le";
 const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
+
+/// Sessions whose mic pump is currently running, keyed by session id.
+///
+/// The silence-VAD above ends a turn on its own under normal conditions, but
+/// continuous background noise can keep chunks above `VAD_SPEECH_RMS` so the
+/// utterance never ends and the speaker is stuck until the record-seconds
+/// ceiling expires. `finish_capture` flips the flag stored here; the pump
+/// observes it on its next chunk and breaks out of the loop exactly the way
+/// the VAD path does — dropping the ASR request sender, which makes the
+/// backend flush its final transcript so the turn continues down the normal
+/// submission path. Deliberately not an abort: the audio already spoken is
+/// kept and submitted.
+///
+/// Entries are inserted when a pump starts and removed when it returns, so a
+/// finish request for an already-finished turn reports `ok=false` rather than
+/// resurrecting a dead session.
+static ACTIVE_CAPTURES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Request that the in-flight capture for `session_id` stop recording and
+/// submit what has been recognized so far. Returns false when no capture is
+/// registered under that id — the turn already ended on its own, which is a
+/// benign race rather than an error.
+pub fn finish_capture(session_id: &str) -> bool {
+    let guard = match ACTIVE_CAPTURES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match guard.get(session_id) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Deregisters the session when the pump finishes, whatever the reason. Held
+/// by `stream_capture_and_recognize` so an early return cannot leak a stale
+/// id that would make a later `finish_capture` claim success against a
+/// session that is no longer recording.
+struct CaptureRegistration(String);
+
+impl Drop for CaptureRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = ACTIVE_CAPTURES.lock() {
+            guard.remove(&self.0);
+        }
+    }
+}
 
 struct AbortOnDrop(tokio::task::AbortHandle);
 
@@ -660,6 +713,19 @@ async fn stream_capture_and_recognize(
     let detected_rate_pump = Arc::clone(&detected_rate);
     let _language_owned = language.to_string();
 
+    // Publish this capture so `robonix/system/liaison/voice/finish` can end
+    // it early; the guard deregisters it however this function returns.
+    let finish_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut guard = match ACTIVE_CAPTURES.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(session_id.to_string(), Arc::clone(&finish_flag));
+    }
+    let _capture_registration = CaptureRegistration(session_id.to_string());
+    let finish_flag_pump = Arc::clone(&finish_flag);
+
     // Mic pump — drains the mic gRPC stream into the asr_req sender,
     // accumulates raw PCM, runs silence-VAD on each chunk, stops on
     // (whichever first):
@@ -667,6 +733,7 @@ async fn stream_capture_and_recognize(
     //   2. mic stream EOF / error
     //   3. silence-VAD end-of-utterance (after speech then quiet)
     //   4. outer task drops asr_req_rx (server already returned FINAL)
+    //   5. an explicit finish request (see ACTIVE_CAPTURES)
     let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
         // [profile] mic transfer: t_pump=request start; first-chunk latency is
@@ -681,6 +748,12 @@ async fn stream_capture_and_recognize(
         let mut silence_secs: f32 = 0.0;
         let mut first_chunk = true;
         loop {
+            if finish_flag_pump.load(Ordering::Relaxed) {
+                info!(
+                    "voice: capture finished on request ({n_chunks} chunks, {audio_s:.2}s audio)"
+                );
+                break;
+            }
             let active_deadline = if has_spoken {
                 deadline
             } else {
@@ -689,8 +762,13 @@ async fn stream_capture_and_recognize(
             if tokio::time::Instant::now() >= active_deadline {
                 break;
             }
+            // Cap each wait so the finish flag above is polled on a fixed
+            // cadence. Without this the loop would sit blocked on the next
+            // mic chunk, and a source that stalls without closing its stream
+            // would swallow the finish request until the deadline expired.
             let remaining = active_deadline - tokio::time::Instant::now();
-            match tokio::time::timeout(remaining, mic_stream.message()).await {
+            let wait = remaining.min(FINISH_POLL_INTERVAL);
+            match tokio::time::timeout(wait, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
                     if !logged_first {
                         info!(
@@ -733,7 +811,10 @@ async fn stream_capture_and_recognize(
                 }
                 Ok(Ok(None)) => break,
                 Ok(Err(_)) => break,
-                Err(_) => break,
+                // Poll tick, not necessarily the deadline: the loop head
+                // re-checks both the finish flag and `active_deadline`, so
+                // an expired deadline still terminates on the next pass.
+                Err(_) => continue,
             }
         }
         let wall = t_pump.elapsed().as_millis();
