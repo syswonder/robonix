@@ -23,8 +23,10 @@
 #   tencent_tts_voice_type: int — default 1001
 #   tencent_tts_region: str — default ap-guangzhou
 #   tencent_tts_model_type: int — default 1
-#   tencent_tts_sample_rate: int — default 16000
-#   tencent_tts_codec: str — default pcm
+#   tencent_tts_sample_rate: int — required 16000
+#   tencent_tts_codec: str — required pcm
+#   tencent_tts_max_chars: int — default 140; accepted 1..150
+#   tencent_tts_max_total_chars: int — default 5000; accepted 1..6000
 #   tencent_tts_primary_language: int — optional 1=Chinese, 2=English;
 #       omit for automatic Chinese/English selection per utterance
 #   log:               str   — log level (default: info)
