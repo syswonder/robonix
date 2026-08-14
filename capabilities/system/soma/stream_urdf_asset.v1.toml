@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+[contract]
+id      = "robonix/system/soma/stream_urdf_asset"
+version = "1"
+kind    = "service"
+idl     = "soma/srv/StreamUrdfAsset.srv"
+description = "Stream one URDF render resource in bounded chunks."
+
+[mode]
+type = "rpc_server_stream"
