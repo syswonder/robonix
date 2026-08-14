@@ -1,0 +1,10 @@
+# Provider streams `sensor_msgs/Imu`; gRPC `Stream(Empty) returns (stream Imu)`.
+[contract]
+id      = "robonix/primitive/imu/imu"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/Imu.msg"
+description = "Continuous inertial measurement stream from an IMU primitive."
+
+[mode]
+type = "topic_out"

@@ -1,0 +1,11 @@
+# List scene graph edges, optionally filtered by relation type.
+# Pass empty relation string to get all edges.
+[contract]
+id      = "robonix/system/scene/list_relations"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/ListRelations.srv"
+description = "List scene graph relations, optionally filtered by relation type."
+
+[mode]
+type = "rpc"

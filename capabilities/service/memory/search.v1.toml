@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/service/memory/search"
+version = "1"
+kind    = "service"
+idl     = "memory/srv/Search.srv"
+description = "Search long-term memory for entries relevant to a query."
+
+[mode]
+type = "rpc"

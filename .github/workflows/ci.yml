@@ -1,63 +1,74 @@
-# Robonix CI — all build/check logic lives in rust/Makefile (make ci-rust / make ci-full)
+# Robonix CI — fmt, clippy, build, tests (unit + system)
 name: CI
 
 on:
   push:
-    branches: [main, dev/**]
+    branches: [main, dev, dev-next, dev/**]
   pull_request:
-    branches: [main, dev/**]
+    branches: [main, dev, dev-next, dev/**]
+
+# Least privilege: every job here only reads the checked-out tree.
+permissions:
+  contents: read
 
 env:
-  RUST_DIR: rust
+  CARGO_TERM_COLOR: always
 
 jobs:
-  rust:
-    name: Rust (make ci-rust)
+  runtime-portability:
+    name: Generic runtime portability audit
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - name: Reject deployment-specific core fallbacks
+        run: python3 scripts/check_runtime_portability.py
+
+  webots-streaming-smoke:
+    name: Webots streaming smoke test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install streaming test dependency
+        run: python3 -m pip install "websockets>=14,<17"
+      - name: Test custom ports and helper readiness
+        run: python3 examples/webots/sim/tests/test_streaming.py
+      - name: Test Webots report infrastructure failures
+        run: python3 -m unittest discover -s testing -p 'test_*.py' -v
+
+  check:
+    name: Rust (fmt + clippy + build + tests)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
-      - name: make ci-rust
-        run: cd ${{ env.RUST_DIR }} && make ci-rust
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
 
-  full:
-    name: Full (make ci-full)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
 
-      - name: Install ROS2 Humble
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y locales
-          sudo locale-gen en_US en_US.UTF-8
-          sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-          export LANG=en_US.UTF-8
-          sudo apt-get install -y curl gnupg2 lsb-release
-          sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y ros-humble-ros-base python3-pip
+      - name: cargo clippy (lib + bins + tests)
+        run: cargo clippy --workspace --tests -- -D warnings
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: cargo build
+        run: cargo build --workspace
 
-      - name: Install colcon
-        run: |
-          source /opt/ros/humble/setup.bash
-          pip3 install --user colcon-common-extensions
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.local/bin:$PATH"
-          which colcon
+      # Unit tests: per-crate #[cfg(test)] mods (atlas registry, pilot helpers, …).
+      # System tests: robonix-atlas/tests/end_to_end.rs spawns Atlas on an
+      # ephemeral port and drives it through the SDK — exercises RegisterNode /
+      # DeclareInterface / QueryNodes / NegotiateChannel end-to-end.
+      - name: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets
 
-      - name: make ci-full
-        run: |
-          source /opt/ros/humble/setup.bash
-          cd ${{ env.RUST_DIR }} && make ci-full
-        env:
-          PYTHON3_EXECUTABLE: /usr/bin/python3
+      - name: Webots LaserScan normalization regression
+        run: python3 examples/webots/primitives/tiago_lidar/tests/test_scan_normalize.py

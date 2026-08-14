@@ -1,6 +1,0 @@
-# QueryPrimitive service (robonix spec)
-string name                    # Standard primitive name
-string filter                  # JSON: filter by metadata (e.g., {"resolution":">=720p"}, {"index":0}). Empty string means no filter
----
-robonix_sdk/PrimitiveInstance[] instances
-

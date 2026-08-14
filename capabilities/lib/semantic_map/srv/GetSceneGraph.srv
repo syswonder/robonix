@@ -1,0 +1,7 @@
+# robonix/system/scene/get_scene_graph — return the current scene graph
+# snapshot with all stable nodes and their inferred relations.
+---
+SceneGraphNode[] nodes
+SceneGraphEdge[] edges
+SceneAnnotation[] annotations
+float64 updated_at

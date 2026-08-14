@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix system service: voiceprint (ECAPA-TDNN speaker identification).
+#
+# uv-managed: `uv sync` (called from scripts/build.sh) materialises the
+# local rbnx-build/venv/ from this file + the workspace uv.lock.
+
+[project]
+name = "robonix-system-voiceprint"
+version = "0.1.0"
+description = "Robonix Voiceprint Service — ECAPA-TDNN speaker identification."
+requires-python = ">=3.10"
+dependencies = [
+    # robonix_api is the framework — Service / Ok / Err / lifecycle gRPC.
+    # Sourced from the in-repo workspace (pylib/robonix-api) via the
+    # [tool.uv.sources] table below. Without this dep the runtime dies
+    # immediately with `ModuleNotFoundError: No module named 'robonix_api'`
+    # — uv has no reason to materialise robonix-api into the venv unless
+    # it is declared here.
+    "robonix-api",
+    # Jetson installs this wheel without dependencies in build.sh so
+    # SpeechBrain cannot pull an incompatible PyPI CUDA/Torch stack.
+    "speechbrain==1.1.0; platform_machine != 'aarch64'",
+    "torch>=2.0; platform_machine != 'aarch64'",
+    "torchaudio>=2.0; platform_machine != 'aarch64'",
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=4.24",
+    "numpy>=1.24,<2",
+    "soundfile>=0.12",
+    "huggingface-hub>=0.20",
+    # Non-Torch SpeechBrain runtime dependencies are explicit because the
+    # aarch64 wheel is installed with --no-deps against JetPack Torch.
+    "hyperpyyaml>=1.2.0",
+    "joblib>=0.14.1",
+    "packaging>=20",
+    "scipy>=1.4.1",
+    "sentencepiece>=0.1.91",
+    "tqdm>=4.42.0",
+    # ModelScope supplies the ECAPA-TDNN weights (speechbrain/spkrec-ecapa-voxceleb).
+    # We fetch from ModelScope instead of HuggingFace because hf_hub's metadata
+    # HEAD can't follow hf-mirror.com's cross-host redirect in some runner environments. See
+    # engine.py:_resolve_source and scripts/build.sh.
+    "modelscope>=1.9",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+robonix-api = { workspace = true }

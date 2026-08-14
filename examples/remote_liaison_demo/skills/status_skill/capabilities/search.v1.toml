@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/skill/status_skill/search"
+version = "1"
+kind    = "skill"
+idl     = "memory/srv/Search.srv"
+
+[mode]
+type = "rpc"

@@ -93,8 +93,18 @@ The script will automatically use values from `.env` if no command-line argument
 
 ## Notes
 
-- The Docker image includes ROS2 Humble, Rust, and all necessary dependencies
+- The Docker image includes ROS2 Humble, Rust, and gRPC Python tooling
 - GPU support is enabled if NVIDIA drivers are available on the host
 - The container uses host networking for ROS2 communication
 - X11 forwarding is set up for GUI applications
+
+## gRPC and ROS 2
+
+- gRPC: `grpcio-tools`, `python3-grpcio`, protobuf tooling as needed.
+- Default `RMW_IMPLEMENTATION=rmw_zenoh_cpp` (override if required).
+
+```bash
+export ROBONIX_META_GRPC_ENDPOINT=192.168.1.10:50051
+./run.sh -b
+```
 

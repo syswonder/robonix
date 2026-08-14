@@ -1,0 +1,26 @@
+urdf:
+  path: ./test_ci.urdf
+  root_link: base_link
+  model_name: test_ci_robot
+
+robot:
+  id: test_ci_robot
+  display_name: "Test CI robot"
+  family: test_fixture
+  root_part: base
+  footprint:
+    base_frame: base_link
+    points:
+      - [0.2, 0.1]
+      - [0.2, -0.1]
+      - [-0.2, -0.1]
+      - [-0.2, 0.1]
+
+description:
+  summary: "Soma v2 test fixture robot."
+  can_do:
+    - "Provide a minimal body package for Soma service tests."
+  cannot_do:
+    - "Control real hardware."
+  notes:
+    - "This file is intentionally small so tests can assert raw YAML passthrough."

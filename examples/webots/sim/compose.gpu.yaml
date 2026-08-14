@@ -1,0 +1,21 @@
+# Optional merge: pass NVIDIA GPU into the stack (needs nvidia-container-toolkit on the host).
+# Usage from this directory:
+#   docker compose -f compose.yaml -f compose.gpu.yaml up --build
+#
+# If you do not use NVIDIA, skip this file; Intel/AMD may still use /dev/dri from compose.yaml.
+
+services:
+  sim:
+    environment:
+      # PRIME render-offload: prefer the passed-in dGPU for GL. On Optimus
+      # laptops Webots/rviz otherwise fall to the iGPU. Export =0 to opt out.
+      __NV_PRIME_RENDER_OFFLOAD: "${__NV_PRIME_RENDER_OFFLOAD:-1}"
+      __GLX_VENDOR_LIBRARY_NAME: "${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
+      __VK_LAYER_NV_optimus: "${__VK_LAYER_NV_optimus:-NVIDIA_only}"  # Vulkan apps -> dGPU too
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ROBONIX_GPU_ID:-0}"]
+              capabilities: [gpu]

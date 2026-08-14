@@ -1,0 +1,12 @@
+# Return a single object's scene graph node, its direct relations,
+# and nearby objects sorted by distance. Useful for Pilot to reason
+# about one object's spatial context without fetching the full graph.
+[contract]
+id      = "robonix/system/scene/get_object_context"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/GetObjectContext.srv"
+description = "Return one scene object's node, relations, and nearby context."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,12 @@
+# robonix/service/map/save_map — snapshot the current SLAM map to disk (RPC).
+# Persists the provider's current spatial map under a stable map_id. Backends
+# may use RTAB-Map, occupancy-grid files, or another representation internally;
+# callers must treat the artifact as opaque and address it only by map_id.
+# Reuse the same map_id with scene's semantic map so spatial and semantic state
+# stays aligned.
+string map_id      # stable id; sanitized to a filesystem-safe directory name
+string note        # optional human note recorded in meta.yaml (may be empty)
+---
+bool ok
+string map_id          # sanitized id actually written
+string detail          # human-readable status / error

@@ -1,0 +1,32 @@
+# Static camera intrinsics (pinhole K + image size). The camera
+# primitive declares this so downstream consumers (scene's depth
+# back-projection, any 3D reconstruction) get the *real* per-deployment
+# intrinsics instead of guessing.
+#
+# Why this is a contract and not a hardcoded default:
+#   Depth back-projection scales every 3D point by fx/fy and offsets it
+#   by cx/cy. A consumer that assumes one camera's intrinsics and is fed
+#   another camera's depth at a different resolution or FOV places objects at systematically
+#   wrong map positions — silently, with no crash. Routing K through
+#   atlas means the consumer asks for `primitive/camera/intrinsics` and
+#   gets the geometry of whichever camera is actually wired in.
+#
+# Payload: sensor_msgs/CameraInfo — `k` is the 3x3 row-major intrinsic
+# matrix (`k[0]=fx`, `k[2]=cx`, `k[4]=fy`, `k[5]=cy`); `width`/`height`
+# are the image dimensions the matrix is calibrated for. These describe
+# the same optical frame as `primitive/camera/extrinsics` publishes
+# (i.e. the camera the RGB/depth streams come from).
+#
+# Cadence: TRANSIENT_LOCAL + RELIABLE (latched). Intrinsics are static
+# within a deployment; publishers should send once at startup and on any
+# re-calibration event. Late subscribers (scene started after the
+# camera) are guaranteed to receive the cached value.
+[contract]
+id      = "robonix/primitive/camera/intrinsics"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/CameraInfo.msg"
+description = "Camera calibration and image geometry used for projection and 3D reconstruction."
+
+[mode]
+type = "topic_out"

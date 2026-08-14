@@ -1,0 +1,16 @@
+# ── Generic scene ────────────────────────────────────────────────
+scipy>=1.11
+mcp
+fastmcp
+grpcio
+grpcio-tools
+protobuf
+pymilvus[milvus_lite]!=2.6.10,>=2.5.0
+uvicorn
+httpx
+Pillow
+PyYAML
+
+setuptools==69.5.1
+wheel
+packaging

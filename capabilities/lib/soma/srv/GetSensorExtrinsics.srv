@@ -1,0 +1,13 @@
+# Get every sensor's static mount transform (read from URDF). Replaces
+# the per-primitive `primitive/<area>/extrinsics` contract pattern with
+# a single source of truth — the body description package owns the
+# kinematic chain, primitives just publish their data streams.
+#
+# Filter via `sensor_kind` to narrow the response (empty = all):
+#   ""        → every sensor in the URDF
+#   "camera"  → just RGBD / mono cameras
+#   "lidar"   → just 2D / 3D lidars
+#   "imu"     → just imus
+string sensor_kind  # filter; empty = all
+---
+soma/SensorExtrinsic[] sensors

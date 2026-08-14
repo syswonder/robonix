@@ -1,0 +1,7 @@
+# robonix/service/navigation/navigate/cancel — request cancellation of a
+# navigation goal (RPC). Empty `run_id` cancels the current active
+# goal.
+string run_id
+---
+bool accepted
+string detail

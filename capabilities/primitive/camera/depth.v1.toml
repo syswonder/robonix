@@ -1,0 +1,10 @@
+# Same wire type as RGB; encoding differs (deployment metadata).
+[contract]
+id      = "robonix/primitive/camera/depth"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/Image.msg"
+description = "Continuous depth image stream from a camera primitive."
+
+[mode]
+type = "topic_out"

@@ -1,0 +1,11 @@
+# Return the current scene graph snapshot — all stable nodes with
+# captions and their LLM-inferred spatial relations.
+[contract]
+id      = "robonix/system/scene/get_scene_graph"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/GetSceneGraph.srv"
+description = "Return the current scene graph snapshot."
+
+[mode]
+type = "rpc"

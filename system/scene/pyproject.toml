@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix system service: scene — current-state semantic + geometric
+# map of the robot's environment, exposed as MCP tools for Pilot.
+#
+# uv-managed: `uv sync` (called from scripts/build.sh) materialises a
+# local rbnx-build/venv/ from this file + uv.lock. No requirements.txt.
+#
+# Why these deps:
+#   numpy / scipy   — vectorised pose math + Hungarian assignment in
+#                     state/data_assoc.py.
+#   open3d          — plane segmentation in geom/plane_extract.py.
+#                     Optional at import time so the rest of scene
+#                     still boots when open3d isn't installed (CI).
+#   mcp / fastmcp   — MCP tool server (same as system/memory).
+#   grpcio*         — atlas client (RegisterCapability + DeclareInterface
+#                     + ConnectCapability + heartbeat).
+#   httpx / Pillow  — VLM-based detection: RGB → JSON detection list
+#                     via the same OpenAI-compatible endpoint pilot uses.
+#                     Pillow only needed to decode camera/snapshot's
+#                     base64 JPEG before re-encoding for the API.
+#   robonix-api      — @mcp_contract decorator (auto-derives JSON schema
+#                     from codegen-typed handlers, mirrors memory).
+[project]
+name = "robonix-system-scene"
+version = "0.1.0"
+description = "Scene MCP server — semantic + geometric live map of the robot's environment."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26,<2",
+    "scipy>=1.11",
+    # open3d has no cp313 wheel (as of 0.19); gate on python_version so
+    # the venv resolves cleanly on hosts running 3.13. plane_extract
+    # already no-ops without it, so missing it is graceful.
+    "open3d>=0.18; platform_machine == 'x86_64' and python_version < '3.13'",
+    "mcp",
+    "fastmcp",
+    "grpcio",
+    "grpcio-tools",
+    "protobuf",
+    "uvicorn",
+    "httpx",
+    "Pillow",
+    "PyYAML",
+    # Object persistence (warm restore). Embedded milvus-lite in a scene-owned
+    # objects.db; same DB tech as system/memory but a separate file/process.
+    # 2.6.10 excluded (broken upsert); system/memory pulls pymilvus
+    # transitively (via memsearch), without an explicit pin.
+    "pymilvus!=2.6.10,>=2.5.0",
+    "robonix-api",
+]
+
+# This package is the service itself; `uv sync` only needs to install
+# dependencies into a venv, not build/install scene_service as a wheel.
+[tool.uv]
+package = false
+
+# Resolved through the workspace at the repo root (see /pyproject.toml).
+[tool.uv.sources]
+robonix-api = { workspace = true }

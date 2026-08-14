@@ -1,0 +1,35 @@
+# Scene MCP server — Jetson + NATIVE host-ROS2 deployment target.
+#
+#   build → RBNX_BUILD_TARGET=jetson-native scripts/build.sh: no docker.
+#           Creates rbnx-build/venv (--system-site-packages) and pip-installs
+#           only the light pure-python deps; torch / torchvision / ultralytics /
+#           open3d come from the host JetPack stack (see the scene README
+#           "Jetson native prerequisites" for how to install them).
+#   start → ROBONIX_SCENE_FORCE=native scripts/start.sh → start_native.sh:
+#           runs scene_service on the host python, sharing the host RMW so it
+#           sees the live camera/pointcloud topics the other host nodes publish.
+#
+# Use this on a Jetson whose host already has ROS 2 Humble + a CUDA-enabled
+# python (the common JetPack setup). For a self-contained image instead, use
+# package_manifest.jetson-docker.yaml.
+manifestVersion: 1
+
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Scene — semantic + geometric live map (Jetson + native host-ROS2 target).
+  license: MulanPSL-2.0
+
+build: RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
+start: ROBONIX_SCENE_FORCE=native bash scripts/start.sh
+
+capabilities:
+  - name: robonix/system/scene/list_objects
+  - name: robonix/system/scene/get_robot_context
+  - name: robonix/system/scene/list_regions
+  - name: robonix/system/scene/goal_near
+  - name: robonix/system/scene/goal_room
+  - name: robonix/system/scene/get_scene_graph
+  - name: robonix/system/scene/get_object_context
+  - name: robonix/system/scene/list_relations

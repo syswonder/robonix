@@ -1,0 +1,11 @@
+# ASR one-shot recognition
+# abstract_interface_id: robonix/system/speech/asr
+# Caller sends raw audio bytes; service returns a transcript string.
+uint8[] audio_data
+string encoding       # e.g. "pcm_s16le", "opus", "mp3"
+uint32 sample_rate_hz # e.g. 16000
+string language       # BCP-47, e.g. "zh-CN", "en-US", "" = auto-detect
+---
+string text           # recognised transcript (empty if silent / error)
+float32 confidence    # 0.0 – 1.0; 0.0 if unavailable
+string error          # non-empty on failure

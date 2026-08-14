@@ -1,0 +1,35 @@
+[package]
+name = "robonix-pilot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Pilot: VLM-driven reasoning, planning, and session management"
+
+[[bin]]
+name = "robonix-pilot"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+robonix-scribe.workspace = true
+uuid.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+async-openai = { workspace = true, features = ["chat-completion"] }
+reqwest.workspace = true
+futures-util = "0.3"
+robonix-atlas = { path = "../atlas" }
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

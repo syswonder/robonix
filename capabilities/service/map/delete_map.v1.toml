@@ -1,0 +1,11 @@
+# Permanently delete a saved map by id (rtabmap.db + preview artifacts on disk).
+# ROS IDL: `lib/map/srv/DeleteMap.srv` (map_id -> ok + detail).
+[contract]
+id      = "robonix/service/map/delete_map"
+version = "1"
+kind    = "service"
+idl     = "map/srv/DeleteMap.srv"
+description = "Delete a saved map and its persisted artifacts by map id."
+
+[mode]
+type = "rpc"

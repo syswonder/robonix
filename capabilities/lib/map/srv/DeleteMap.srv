@@ -1,0 +1,9 @@
+# robonix/service/map/delete_map — permanently delete a saved map by id (RPC).
+# Removes {MAPPING_MAPS_DIR}/<map_id>/ (rtabmap.db + preview artifacts) from
+# disk. Does NOT affect the live running map unless <map_id> is the one
+# currently loaded. Irreversible — back up first if unsure.
+string map_id      # id of the saved map to delete
+---
+bool ok
+string map_id      # sanitized id acted on
+string detail

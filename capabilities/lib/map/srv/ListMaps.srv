@@ -1,0 +1,9 @@
+# robonix/service/map/list_maps — list saved maps available for load/delete.
+# maps_json is a UTF-8 JSON array so the contract can remain flat while map
+# library metadata evolves. Current entries include map_id, has_spatial_artifact,
+# spatial_ok, artifact_size, has_preview, updated, and meta. Provider artifacts
+# are opaque; callers must load/delete them by map_id rather than by path.
+---
+bool ok
+string detail
+string maps_json

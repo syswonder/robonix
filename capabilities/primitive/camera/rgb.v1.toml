@@ -1,0 +1,10 @@
+# gRPC: `Stream(Empty) returns (stream sensor_msgs/Image)`.
+[contract]
+id      = "robonix/primitive/camera/rgb"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/Image.msg"
+description = "Continuous RGB image stream from a camera primitive."
+
+[mode]
+type = "topic_out"

@@ -1,0 +1,54 @@
+# Robonix voiceprint service — ECAPA-TDNN one-shot speaker identification.
+# Three atlas-registered capabilities (all gRPC, all on the same listener):
+#
+#   robonix/service/voiceprint/identify         — Identify(audio) → user_id
+#       Consumed by Liaison's voice gating path; LLM-visible only
+#       indirectly via the user_id stamped on each Task.
+#
+#   robonix/service/voiceprint/enroll  — Enroll(audio,id,name) → ok
+#       Admin RPC. Used by `rbnx chat`'s Ctrl+U user-management modal
+#       to register a new speaker from a freshly captured sample.
+#
+#   robonix/service/voiceprint/list    — ListEnrolled() → json
+#       Admin RPC. Returns the (user_id, user_name) catalog so the chat
+#       client can hydrate its user list on modal open.
+#
+# Service id is `voiceprint` under the `robonix/service/voiceprint`
+# namespace; multiple Service instances can coexist in the same
+# namespace.
+#
+# Runtime config consumed via environment:
+#   VOICEPRINT_PORT        — gRPC listen port (default 50092)
+#   VOICEPRINT_BIND_ADDR   — gRPC bind address (default 0.0.0.0)
+#   VOICEPRINT_DATA_DIR    — where enrolled.json lives
+#   VOICEPRINT_THRESHOLD   — cosine-similarity gate (default 0.25)
+#   VOICEPRINT_DEVICE      — cuda:0 | cpu (auto-detected)
+
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.voiceprint_service
+  version: 0.1.0
+  vendor: robonix
+  description: Voiceprint service (ECAPA-TDNN speaker identification) under robonix/service/voiceprint.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  # Runtime must not require `uv` on PATH. build.sh owns dependency sync and
+  # creates rbnx-build/venv; start only activates that sealed environment.
+  export VIRTUAL_ENV="$(pwd)/rbnx-build/venv"
+  export PATH="$VIRTUAL_ENV/bin:$PATH"
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  exec "$VIRTUAL_ENV/bin/python" -m voiceprint_service.service
+
+stop: |
+  pkill -TERM -f "[p]ython -m voiceprint_service.service|[p]ython3 -m voiceprint_service.service|[v]oiceprint_service.service" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython -m voiceprint_service.service|[p]ython3 -m voiceprint_service.service|[v]oiceprint_service.service" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/service/voiceprint/identify
+  - name: robonix/service/voiceprint/enroll
+  - name: robonix/service/voiceprint/list

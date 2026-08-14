@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Build command: run the package's build.script
+
+use anyhow::{Context, Result};
+use robonix_cli::manifest;
+use robonix_cli::output;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const RBNX_BUILD_DIR: &str = "rbnx-build";
+const RBNX_BUILT_STAMP: &str = "rbnx-build/.rbnx-built";
+
+pub fn build_stamp_path(package_root: &Path) -> PathBuf {
+    package_root.join(RBNX_BUILT_STAMP)
+}
+
+fn run_build_shell(package_root: &Path, body: &str, clean: bool) -> Result<()> {
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(body);
+    cmd.current_dir(package_root);
+    cmd.env("RBNX_PACKAGE_ROOT", package_root.as_os_str());
+    if clean {
+        cmd.env("RBNX_BUILD_CLEAN", "1");
+    }
+    let status = cmd.status().with_context(|| {
+        format!(
+            "Failed to run build shell body in {}",
+            package_root.display()
+        )
+    })?;
+    if !status.success() {
+        anyhow::bail!("Build exited with status {:?}", status.code());
+    }
+    Ok(())
+}
+
+fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) -> Result<()> {
+    let _summary = manifest.validate_and_summarize()?;
+    let build_body = manifest.build.trim();
+    output::action(
+        "Building",
+        &format!("{} via manifest.build", manifest.package.name),
+    );
+    run_build_shell(package_root, build_body, clean)?;
+    fs::create_dir_all(package_root.join(RBNX_BUILD_DIR))?;
+    fs::write(build_stamp_path(package_root), "").with_context(|| {
+        format!(
+            "Failed to write {}",
+            build_stamp_path(package_root).display()
+        )
+    })?;
+    output::success(&format!(
+        "Package '{}' build finished",
+        manifest.package.name
+    ));
+    Ok(())
+}
+
+/// Build the package at `path`. `manifest_override` selects a non-default
+/// package manifest file (deploy `manifest:` field) so a per-target variant
+/// builds its own Dockerfile / native path; `None` uses package_manifest.yaml.
+pub fn build_local_package(
+    path: &Path,
+    clean: bool,
+    manifest_override: Option<&str>,
+) -> Result<()> {
+    let package_root = path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
+    let detected = manifest::detect_and_load(&package_root, manifest_override)?;
+    build_local(&package_root, &detected.manifest, clean)
+}
+
+pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
+    let package_root = path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
+    output::action(
+        "Building",
+        &format!("local package at {}", package_root.display()),
+    );
+    build_local_package(&package_root, clean, None)?;
+    Ok(())
+}

@@ -1,0 +1,10 @@
+# ROS IDL: `lib/pilot/srv/SubmitTask.srv`. Stream element type is **only** in this TOML.
+[contract]
+id      = "robonix/system/pilot"
+version = "1"
+kind    = "service"
+idl     = "pilot/srv/SubmitTask.srv"
+description = "Submit a task to Pilot and stream planning events."
+
+[mode]
+type = "rpc_server_stream"

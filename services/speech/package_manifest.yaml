@@ -1,0 +1,68 @@
+# Robonix speech service — ASR/TTS + Dialog manager. The default backend is
+# local (Whisper one-shot + FunASR streaming + Edge TTS); `speech_backend:
+# tencent` switches ASR/TTS to Tencent Cloud APIs. Declares 5 data-plane gRPC contracts
+# and a driver lifecycle contract so `rbnx boot` ships the boot
+# manifest's `system: speech: {...}` block as Driver(CMD_INIT, config_json).
+#
+# Config schema consumed by the on_init handler (see speech_service.service):
+#   speech_backend:    str   — local | tencent (default: local)
+#   disable_whisper:   bool  — skip Whisper backend entirely (asr returns UNAVAILABLE)
+#   asr_model:         str   — Whisper model id / path (default: openai/whisper-large-v3)
+#   asr_device:        str   — cuda | cpu (default: cuda)
+#   asr_chunk_length:  float — Whisper long-form chunk seconds (default: 30.0)
+#   asr_batch_size:    int   — Whisper batch (default: 4)
+#   funasr_model:      str   — FunASR model id (default: paraformer-zh-streaming)
+#   funasr_device:     str   — auto | cuda | cpu (default: auto — try GPU then fall back to CPU on OOM)
+#   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
+#   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
+#   default_speaker_provider_id: str — provider id used by speech/speak when
+#       its request target is empty; explicit request target overrides this
+#   tencent_asr_appid: str   — Tencent Cloud ASR AppID (secret id/key stay in env)
+#   tencent_asr_engine: str  — default 16k_zh
+#   tencent_asr_host: str    — default asr.cloud.tencent.com
+#   tencent_tts_voice_type: int — default 1001
+#   tencent_tts_region: str — default ap-guangzhou
+#   tencent_tts_model_type: int — default 1
+#   tencent_tts_sample_rate: int — default 16000
+#   tencent_tts_codec: str — default pcm
+#   tencent_tts_primary_language: int — optional 1=Chinese, 2=English;
+#       omit for automatic Chinese/English selection per utterance
+#   log:               str   — log level (default: info)
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.speech_service
+  version: 0.1.0
+  vendor: robonix
+  description: Voice interaction service (ASR + TTS + Dialog) under robonix/service/speech.
+  license: MulanPSL-2.0
+
+# Atlas runtime provider_id — `rbnx boot`'s wait-for-cap loop matches this
+# verbatim against the cap registered by speech_service.service. Distinct
+# from `package.name` (the deployment identity).
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  # Don't redirect stdout/stderr — `rbnx boot` already captures both
+  # into rbnx-boot/logs/system_speech.log. A second redirect here would
+  # split the log in half and leave the boot-side log empty, which is
+  # exactly what bit us debugging the FunASR loader.
+  exec rbnx-build/venv/bin/python -m speech_service.service
+
+stop: |
+  pkill -TERM -f "[p]ython -m speech_service.service|[p]ython3 -m speech_service.service|[s]peech_service.service" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython -m speech_service.service|[p]ython3 -m speech_service.service|[s]peech_service.service" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/service/speech/driver
+  - name: robonix/service/speech/asr
+  - name: robonix/service/speech/asr_stream
+  - name: robonix/service/speech/wake_word
+  - name: robonix/service/speech/tts
+  - name: robonix/service/speech/tts_stream
+  - name: robonix/service/speech/dialog
+  - name: robonix/service/speech/list_speakers
+  - name: robonix/service/speech/speak

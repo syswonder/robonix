@@ -1,0 +1,42 @@
+[package]
+name = "robonix-atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Atlas: control-plane registry for capability instances and their interface endpoints"
+
+[[bin]]
+name = "robonix-atlas"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+robonix-scribe.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+prost.workspace = true
+tonic-prost.workspace = true
+uuid.workspace = true
+# Reuse the codegen crate's .msg/.srv parser for IDL field-level
+# introspection. Atlas only links against the parser submodule (no
+# code generation at runtime).
+robonix-codegen.workspace = true
+
+[build-dependencies]
+protoc-bin-vendored.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+# NOTE: robonix-codegen build-dependency REMOVED (robonix-codegen RIDL codegen removed from server build)
+
+[dev-dependencies]
+# robonix-sdk dev-dep removed — Node-* wire schema retired and the SDK
+# is being replaced by a generated robonix-proto crate (task #31).
+# End-to-end tests will be rewritten against the new Atlas API there.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde_json.workspace = true

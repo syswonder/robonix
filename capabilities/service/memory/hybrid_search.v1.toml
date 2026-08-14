@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/service/memory/hybrid_search"
+version = "1"
+kind    = "service"
+idl     = "memgraph/srv/Search.srv"
+
+[mode]
+type = "rpc"

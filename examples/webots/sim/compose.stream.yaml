@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+#
+# Optional merge: turn the sim container into a headless, browser-streamable
+# Webots instance — useful for servers with no physical display, multi-user
+# RDP boxes, or any case where SSH X-forwarding to a laptop is too slow.
+#
+# Usage from this directory:
+#   source ./nvidia_host.sh
+#   robonix_select_nvidia_gpu "${ROBONIX_GPU_ID:-}"
+#   robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+#   docker compose -f compose.yaml -f compose.gpu.yaml \
+#     -f compose.nvidia-xorg.yaml -f compose.stream.yaml up --build
+# or set `ROBONIX_SIM_STREAM=1` before `bash start.sh` and the launcher
+# will merge this file automatically (plus print the access URLs).
+#
+# Backends are picked by WEBOTS_HEADLESS_MODE (in entrypoint.sh):
+#   nvidia  start NVIDIA-backed Xorg :48 on the GPU with most free memory
+#   xvfb    start Xvfb :99 (software llvmpipe — slow but no GPU needed)
+#   auto    nvidia if /dev/nvidia0 present, else xvfb (default here)
+#
+# Display :48 sits outside the host's normal X allocator range
+# (:0..:12 physical / :1001..:1099 xrdp), so the X socket that leaks
+# into the bind-mounted /tmp/.X11-unix will not collide with any host
+# user's session.
+services:
+  sim:
+    ports:
+      # Identity mappings are used for bridge networking. With the default
+      # host network they are ignored, so the helpers also bind these exact
+      # runtime-configured ports inside the container.
+      - "${ROBONIX_SIM_STREAM_PORT:-1235}:${ROBONIX_SIM_STREAM_PORT:-1235}"
+      - "${ROBONIX_SIM_VIEWER_PORT:-8080}:${ROBONIX_SIM_VIEWER_PORT:-8080}"
+    environment:
+      WEBOTS_HEADLESS_MODE: "${WEBOTS_HEADLESS_MODE:-auto}"
+      WEBOTS_STREAM: "1"
+      WEBOTS_FILTER_HOST: "0.0.0.0"
+      WEBOTS_FILTER_PORT: "${ROBONIX_SIM_STREAM_PORT:-1235}"
+      WEBOTS_FILTER_UPSTREAM: "ws://127.0.0.1:1234"
+      WEBOTS_VIEWER_HOST: "0.0.0.0"
+      WEBOTS_VIEWER_PORT: "${ROBONIX_SIM_VIEWER_PORT:-8080}"
+      WEBOTS_PUBLIC_STREAM_PORT: "${ROBONIX_SIM_STREAM_PORT:-1235}"
+      WEBOTS_RAW_STREAM_HTTP: "http://127.0.0.1:1234"
+      # NVIDIA Container Toolkit needs `graphics` + `display` (on top of
+      # the default `utility,compute`) to inject the Xorg-side .so files.
+      NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"

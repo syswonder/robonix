@@ -1,0 +1,22 @@
+# Robonix CI — docs check: code and in-repo docs must be English.
+# (The developer manual under docs/ is exempt.)
+name: Docs Check
+
+on:
+  push:
+    branches: [main, dev, dev-next, dev/**]
+  pull_request:
+    branches: [main, dev, dev-next, dev/**]
+
+# Least privilege: every job here only reads the checked-out tree.
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: Docs check (English-only)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run docs check
+        run: bash scripts/check-docs.sh

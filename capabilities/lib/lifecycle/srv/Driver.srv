@@ -1,0 +1,11 @@
+uint8 CMD_INIT       = 0
+uint8 CMD_ACTIVATE   = 1
+uint8 CMD_DEACTIVATE = 2
+uint8 CMD_SHUTDOWN   = 3
+
+uint8  command
+string config_json
+---
+bool   ok
+string state
+string error

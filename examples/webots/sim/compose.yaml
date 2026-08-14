@@ -1,0 +1,123 @@
+# Webots sim container — runs Webots + eaios_webots controller. Holds
+# the ROS2 / DDS / TF graph that all robonix drivers subscribe to.
+#
+# robonix drivers (chassis / camera / lidar primitive packages, plus
+# tiago_nav2 service) are NOT in this compose file. They get
+# `docker exec`'d into THIS container by `rbnx boot` once it's up.
+#
+# Bring it up first:
+#   bash sim/start.sh         # auto-detects GPU and merges compose.gpu.yaml
+# Then in another terminal:
+#   rbnx boot
+#
+# GUI: host must set DISPLAY and allow X11 (e.g. `xhost +local:docker`).
+# Performance: default Docker /dev/shm is 64MB — Qt/Webots thrash; we
+# bump it to 2GB.
+name: ${ROBONIX_SIM_PROJECT:-robonix_tiago_sim}
+
+services:
+  sim:
+    container_name: ${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}
+    build:
+      context: ./
+      dockerfile: bridge/Dockerfile
+      args:
+        ROS_BASE_IMAGE: "${ROBONIX_SIM_ROS_BASE_IMAGE:-robonix-osrf-ros:humble-desktop-full}"
+    # Network namespace — overridable via ROBONIX_SIM_NETWORK so a CI / parallel
+    # sim runs on its OWN bridge network (own localhost, own ports) instead of
+    # sharing the host's, which lets two sims coexist without colliding on the
+    # webots stream port (1234, not CLI-overridable in this webots build). The
+    # compose `ports:` mapping in compose.stream.yaml only takes effect under
+    # bridge. Default `host` keeps single-deploy DDS/SHM behaviour unchanged.
+    network_mode: "${ROBONIX_SIM_NETWORK:-host}"
+    # ipc_mode=host is load-bearing for FastRTPS data transfer:
+    # FastRTPS keys SHM transport by /dev/shm. Other robonix containers
+    # (scene, mapping) also pass --ipc=host; without matching here sim's
+    # publishers and their subscribers live in disjoint /dev/shm
+    # namespaces and topics never propagate.
+    # IPC namespace is overridable via ROBONIX_SIM_IPC so a CI / parallel sim
+    # gets its OWN namespace (`private`) — webots' extern-controller IPC is keyed
+    # by a fixed port (1234), so two `ipc: host` sims collide on it. Default
+    # `host` is load-bearing for single-deploy FastRTPS SHM with sibling
+    # containers (scene/mapping); a private-IPC sim still works over DDS/UDP.
+    ipc: "${ROBONIX_SIM_IPC:-host}"
+    # Critical for Webots/Qt: avoid 64MB default shm (MIT-SHM / IPC).
+    shm_size: "2gb"
+    # Keep the container alive after entrypoint's `wait` so `docker exec`
+    # from rbnx-driven driver packages can land inside it.
+    stdin_open: true
+    tty: true
+    environment:
+      # Webots checks USER/USERNAME for its IPC path (/tmp/webots/$USER/...).
+      USER: "root"
+      DISPLAY: "${DISPLAY:-:0}"
+      # SSH/Moba X11 forwarding (DISPLAY=localhost:N) needs the host cookie
+      # inside the container; bind-mount via ROBONIX_HOST_XAUTH (set in start.sh).
+      XAUTHORITY: /root/.Xauthority
+      QT_X11_NO_MITSHM: "1"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROBONIX_WEBOTS_WORLD: "${ROBONIX_WEBOTS_WORLD:-office.wbt}"
+      ROBONIX_TIAGO_VARIANT: "${ROBONIX_TIAGO_VARIANT:-lite}"
+      ROBONIX_WEBOTS_ROBOT: "${ROBONIX_WEBOTS_ROBOT:-}"
+      # Headless render backend (host|nvidia|xvfb|auto) + display number,
+      # forwarded so a deploy can pick GPU-backed offscreen rendering WITHOUT
+      # the browser stream (compose.stream.yaml). Lets a CI run render on its
+      # own Xorg display (ROBONIX_SIM_XDISPLAY) without binding the stream port.
+      WEBOTS_HEADLESS_MODE: "${WEBOTS_HEADLESS_MODE:-host}"
+      ROBONIX_SIM_XDISPLAY: "${ROBONIX_SIM_XDISPLAY:-:48}"
+      WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
+      RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+      # The office seed is fetched once from robonix-assets through the default
+      # GitHub mirror and retained in the named cache volume. Set the mirror to
+      # an empty value to opt into direct GitHub access.
+      ROBONIX_WEBOTS_SEED_URL: "${ROBONIX_WEBOTS_SEED_URL:-}"
+      ROBONIX_WEBOTS_SEED_MIRROR: "${ROBONIX_WEBOTS_SEED_MIRROR-https://ghfast.top/}"
+      # Optional full offline Webots asset library. Default is off. Set
+      # ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS=1
+      # before sim/start.sh to download Cyberbotics' assets-R2025a.zip into the
+      # persistent Webots cache volume, via ghfast.top by default.
+      ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS: "${ROBONIX_WEBOTS_DOWNLOAD_ALL_ASSETS:-0}"
+      ROBONIX_WEBOTS_ASSETS_VERSION: "${ROBONIX_WEBOTS_ASSETS_VERSION:-R2025a}"
+      ROBONIX_WEBOTS_ASSETS_URL: "${ROBONIX_WEBOTS_ASSETS_URL:-}"
+      ROBONIX_WEBOTS_ASSETS_MIRROR: "${ROBONIX_WEBOTS_ASSETS_MIRROR:-https://ghfast.top/}"
+      # Match docker/run.sh so Webots can use host GL stack when GPU is wired in.
+      # compose.gpu.yaml's device_ids request scopes the container to the GPU
+      # selected by start.sh; do not independently widen visibility here.
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-graphics,utility,compute}"
+      # Webots fetches proto/texture assets from raw.githubusercontent.com on first use.
+      # Pass host proxies through if set (Qt Network / curl both honor these):
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      ALL_PROXY: "${ALL_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1}"
+      http_proxy: "${http_proxy:-${HTTP_PROXY:-}}"
+      https_proxy: "${https_proxy:-${HTTPS_PROXY:-}}"
+      all_proxy: "${all_proxy:-${ALL_PROXY:-}}"
+      no_proxy: "${no_proxy:-localhost,127.0.0.1}"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # X11 auth cookie (required for ssh -Y / MoTTY etc.; optional for some :0 setups)
+      - ${ROBONIX_HOST_XAUTH:-${XAUTHORITY:-${HOME}/.Xauthority}}:/root/.Xauthority:ro
+      # Intel/AMD Mesa DRI (same as docker/run.sh -v /dev/dri)
+      - /dev/dri:/dev/dri:rw
+      # Persist Webots asset cache (proto + textures) across container re-creates.
+      # First run downloads into this volume; subsequent runs are offline-fast.
+      - webots_cache:/root/.cache/Cyberbotics
+      - webots_local:/root/.local/share/Cyberbotics
+      # Bind-mount sibling robonix package dirs so `docker exec` can
+      # find driver code without rebuilding the image. Each driver
+      # package is reachable at `/robonix_pkgs/<class>/<pkg_name>/`.
+      # `pylib/robonix-api/` carries the @mcp_contract decorator that
+      # turns codegen IO classes into proper FastMCP tools; drivers
+      # walk up sys.path to find it inside the container.
+      - ../primitives:/robonix_pkgs/primitives:rw
+      - ../services:/robonix_pkgs/services:rw
+      - ../../../pylib:/robonix_pkgs/pylib:ro
+
+volumes:
+  webots_cache:
+    # Webots assets are immutable cache data. CI can point this at a
+    # pre-warmed runner-local volume so each isolated compose project does not
+    # start with an empty asset cache and block on raw.githubusercontent.com.
+    name: ${ROBONIX_WEBOTS_CACHE_VOLUME:-robonix_tiago_sim_webots_cache}
+  webots_local:

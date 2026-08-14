@@ -1,0 +1,11 @@
+# Select a driver-defined quadruped body posture. Implementations document the
+# supported posture names and reject names unsupported by their hardware.
+[contract]
+id      = "robonix/primitive/quadruped/posture"
+version = "1"
+kind    = "primitive"
+idl     = "quadruped/srv/SetPosture.srv"
+description = "Set a quadruped to a named body posture."
+
+[mode]
+type = "rpc"

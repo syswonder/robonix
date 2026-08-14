@@ -1,0 +1,7 @@
+# Start a voice dialog session.
+# Returns initial dialog state; events are streamed via the Dialog contract.
+string language
+bool   enable_vad
+audio/msg/AudioConfig audio_config
+---
+speech/msg/DialogEvent event

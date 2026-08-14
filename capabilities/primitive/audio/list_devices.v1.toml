@@ -1,0 +1,26 @@
+# Enumerate the OS-level audio devices the cap's driver internally
+# multiplexes. The "device" here is NOT a robonix cap — it's a
+# driver-internal handle (ALSA "hw:X,Y", CoreAudio numeric index,
+# PulseAudio sink name, etc.), exposed for diagnostics and user
+# selection in caps that already have an internal "many physical
+# devices behind one logical handle" structure.
+#
+# Primitive = robonix-level identity (`com.robonix.primitive.audio.alsa`).
+# Audio device = the specific bit of hardware that one primitive routes to.
+# These are different concepts. The 1-package = 1-primitive = 1-id rule
+# is unchanged; this contract is just a way for a multi-device
+# driver to surface its internal routing table.
+#
+# OPTIONAL: only impls that genuinely multiplex (alsa, coreaudio bridge,
+# pulse) need to register this. Impls with a single fixed device do
+# not register the contract at all — clients fall back to "use whatever
+# the cap is currently driving."
+[contract]
+id      = "robonix/primitive/audio/list_devices"
+version = "1"
+kind    = "primitive"
+idl     = "audio/srv/ListAudioDevices.srv"
+description = "List audio input and output devices visible to the audio primitive."
+
+[mode]
+type = "rpc"

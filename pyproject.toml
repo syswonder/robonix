@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix uv workspace root.
+#
+# This file alone makes the repo a uv workspace: every member listed in
+# `[tool.uv.workspace].members` shares one resolution / one uv.lock,
+# while each package keeps its own per-package venv (under
+# rbnx-build/venv/).
+#
+# Why workspace + per-package venv (not a shared root venv):
+#   * Robonix Python packages have conflicting / heavy deps
+#     (memsearch[onnx], audio's PyAudio, future VLA's torch, …).
+#     A shared venv would block on the worst-of versions.
+#   * Workspace gives consistent dep resolution and lets every member
+#     reference shared in-repo libs as `{ workspace = true }` without
+#     hard-coding `../../pylib/...` relative paths everywhere.
+#
+# Adding a new Python package:
+#   1. Drop it under system/, examples/packages/, or wherever fits.
+#   2. Make sure it has its own pyproject.toml.
+#   3. Either it matches an existing glob below, or add it to `members`.
+#   4. Reference shared libs in that package's pyproject:
+#         [project]
+#         dependencies = ["robonix-api"]
+#         [tool.uv.sources]
+#         robonix-api = { workspace = true }
+#   5. Run `uv sync` (typically via that package's scripts/build.sh).
+
+[project]
+name = "robonix"
+version = "0.0.0"
+description = "Robonix monorepo (Rust crates + Python packages + system services)."
+requires-python = ">=3.10"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "pylib/*",        # shared Python libs (robonix-api, …)
+    "system/scene",   # only Python-implemented system component today
+    "services/*",     # reference services (memsearch, speech, voiceprint, …)
+]

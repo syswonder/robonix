@@ -1,0 +1,15 @@
+# Get the robot's 2D footprint polygon in the base frame. Used by
+# nav2_wrapper for costmap inflation, by simple_nav for the inscribed
+# radius, by collision-monitor services for anti-bump checks. Closed
+# polygon — first point is NOT repeated as last; consumers close it
+# themselves.
+#
+# The deployment declares the collision polygon in `soma.yaml`. Soma
+# validates it at startup and derives the inscribed/circumscribed radii
+# from the same points, so every consumer observes one authoritative
+# navigation envelope.
+---
+geometry_msgs/Point[] points    # boundary-ordered vertices in `base_frame`, z=0
+string base_frame               # kinematic frame in which `points` are expressed
+float64 inscribed_radius_m      # largest disc fitting inside the polygon
+float64 circumscribed_radius_m  # smallest disc enclosing the polygon

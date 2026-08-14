@@ -1,0 +1,11 @@
+# Find a navigation-safe pose inside a registered room annotation.
+# Returns map-frame (x, y, yaw); pass to navigation/navigate after.
+[contract]
+id      = "robonix/system/scene/goal_room"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/GoalRoom.srv"
+description = "Resolve a room annotation to a navigation-safe pose inside its polygon. Use this for named rooms or regions before navigation/navigate."
+
+[mode]
+type = "rpc"

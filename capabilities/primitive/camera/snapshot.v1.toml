@@ -1,0 +1,11 @@
+# Single-frame image acquisition (on-demand snapshot).
+# Complements robonix/primitive/camera/rgb (continuous stream).
+[contract]
+id      = "robonix/primitive/camera/snapshot"
+version = "1"
+kind    = "primitive"
+idl     = "camera/srv/GetCameraImage.srv"
+description = "Capture one RGB image frame on demand."
+
+[mode]
+type = "rpc"

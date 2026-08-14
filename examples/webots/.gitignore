@@ -1,0 +1,19 @@
+# Auto-generated protobuf Python stubs + MCP dataclasses.
+# Each package regenerates these at build time via scripts/build.sh.
+proto_gen/
+robonix_mcp_types/
+*/proto_compat/
+# Per-package build artifacts
+*/rbnx-build/
+# uv virtual environments
+*/.venv/
+
+*.egg-info/
+rbnx-*
+
+# Webots cache archives belong in syswonder/robonix-assets Releases.
+sim/bridge/webots_assets_seed.tar.gz
+sim/bridge/webots-office-seed-*.tar.gz
+
+# Generated texture resources are prepared from pinned official sources.
+sim/ros_ws/src/eaios_webots/resource/textures/

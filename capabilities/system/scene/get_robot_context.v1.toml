@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/scene/get_robot_context"
+version = "1"
+kind = "service"
+idl = "semantic_map/srv/GetRobotContext.srv"
+description = "Return the robot pose, containing room and areas, and nearby objects as one current Scene snapshot."
+
+[mode]
+type = "rpc"

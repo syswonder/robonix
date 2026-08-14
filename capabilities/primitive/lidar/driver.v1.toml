@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/lidar/driver"
+version = "1"
+kind    = "primitive"
+idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for lidar primitive providers."
+
+[mode]
+type = "rpc"

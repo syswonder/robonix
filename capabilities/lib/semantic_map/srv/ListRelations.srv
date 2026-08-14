@@ -1,0 +1,5 @@
+# robonix/system/scene/list_relations — list scene graph edges,
+# optionally filtered by relation type. Pass empty string for all.
+string relation
+---
+SceneGraphEdge[] edges

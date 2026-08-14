@@ -1,0 +1,215 @@
+manifestVersion: 1
+name: robonix-webots-example-deploy
+
+# Default Webots boot starts a fresh live SLAM session. The map/room UI
+# names and persists that session when the operator clicks Save; clicking
+# Load later switches mapping to localization mode and binds scene objects +
+# room annotations to the selected saved map. Do not set SCENE_MAP_ID here: a
+# static default would make a first run look like a loaded map.
+
+# boot in sequence: system -> soma+scene -> execution -> interaction
+system:
+  # basic layer
+  atlas:
+    listen: 0.0.0.0:50051
+    log: info
+  soma:
+    # Empty when boot is invoked directly, so rbnx falls back to ./soma.yaml.
+    # examples/webots/boot.sh sets this to soma.full.yaml for the full model.
+    robot_yaml: ${ROBONIX_SOMA_ROBOT_YAML}
+  # soma+scene layer
+  scene:
+    log: info
+    camera_frame: head_front_camera_rgb_optical_frame
+  # execution layer
+  executor:
+    listen: 127.0.0.1:50061
+    log: info
+  # interaction layer
+  pilot:
+    listen: 127.0.0.1:50071
+    log: debug
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+      api_format: openai
+  # health monitoring layer
+  vitals:
+    listen: 127.0.0.1:50093
+    log: info
+  liaison:
+    listen: 0.0.0.0:50081
+    log: info
+    # Disabled until the operator enables it from robonix-client. The client
+    # then supplies its persisted input/output provider selection; no client
+    # address is stored in this deployment.
+    handsfree_enabled: false
+
+# after booted all the system components, start the devices (primitives)
+# the robonix boot "device tree"
+primitive:
+  - name: tiago_chassis
+    path: ./primitives/tiago_chassis
+    config:
+      # example place holders
+      can_port: /dev/can0
+      odom_frame: odom
+      base_frame: base_link
+  - name: tiago_camera
+    path: ./primitives/tiago_camera
+    config:
+      # example place holders
+      serial_no: 1234567890
+      fps: 30
+      width: 640
+      height: 480
+      # Webots Tiago head camera calibration for the intrinsics contract.
+      # The simulator does not publish CameraInfo, so the camera primitive
+      # publishes this deployment-provided K on /tiago/camera/intrinsics.
+      fx: 554.0
+      fy: 554.0
+      cx: 320.0
+      cy: 240.0
+      frame_id: head_front_camera_rgb_optical_frame
+      # First-RGB-frame wait at INIT. Webots under a CPU-starved boot (all
+      # drivers initialising at once) can take well over a minute to deliver
+      # the first frame — lidar alone routinely needs ~70s — so the default
+      # 60s is too tight here. Match the lidar tolerance with headroom.
+      sentinel_timeout_s: 150
+  - name: tiago_lidar
+    path: ./primitives/tiago_lidar
+    config:
+      # example place holders
+      update_rate: 10
+      frame_id: lidar
+  # Deterministic simulated hardware telemetry consumed by Soma and Vitals.
+  # Keep scenario=normal for the current demo; the field is reserved as the
+  # stable entry point for future fault-injection profiles.
+  - name: tiago_health
+    path: ./primitives/tiago_health
+    config:
+      # Empty means lite; boot.sh sets full alongside soma.full.yaml.
+      variant: ${ROBONIX_TIAGO_VARIANT}
+      scenario: normal
+      interval_s: 0.5
+      battery_percent: 82.0
+      voltage: 24.8
+      remaining_s: 10800
+  # ── audio mic/speaker source ─────────────────────────────────────────────
+  # Local ALSA provider. It remains available for robot-local audio.
+  - name: audio_driver
+    path: ./primitives/audio_driver
+    config: {}
+  # Reverse bridge for a robonix-client audio route. It advertises its
+  # endpoint through Atlas and waits for the client to connect, so neither
+  # this manifest nor Liaison stores a client IP.
+  - name: audio_client_bridge
+    path: ./primitives/audio_client_bridge
+    config:
+      transport: reverse
+      listen_port: 60002
+
+# after booted all the primitives, start the services
+service:
+  # ── Memory services (two parallel backends) ──────────────────────────
+  # Memgraph (Scribe Mem) — structured CKG memory (BM25 + Embedding).
+  # Contracts: robonix/service/memory/{remember,hybrid_search,promote}
+  # Embedding: all-MiniLM-L6-v2 (d=384), BM25 + Cosine hybrid retrieval.
+  - name: memgraph
+    path: ../../services/memory
+    config:
+      backend: memgraph
+
+  # memsearch — default reference long-term-memory service for the
+  # agent. Lives at services/memsearch in the robonix tree; pilot
+  # queries it for relevant past context when planning.
+  - name: memory
+    path: ${ROBONIX_SOURCE_PATH}/services/memsearch
+    config:
+      backend: sqlite
+
+  # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
+  # liaison's voice loop connects to. The selected audio provider is supplied
+  # by the client for F2, voice steer, and hands-free turns.
+  # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
+  - name: speech
+    path: ${ROBONIX_SOURCE_PATH}/services/speech
+    config:
+      disable_whisper: true
+      funasr_device: cuda
+      tts_voice: zh-CN-XiaoxiaoNeural
+      # CI and headless Webots have no connected reverse-audio client. Keep
+      # the bridge available, but send default speech to the local provider.
+      default_speaker_provider_id: audio_driver
+
+  # voiceprint — ECAPA-TDNN speaker identification. Provides
+  # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
+  # stamps each Task with the identified user_id, and `rbnx chat`'s user
+  # modal enrolls/lists speakers. Config is env-driven (port 50092,
+  # threshold 0.25, device auto) so the manifest block stays empty.
+  - name: voiceprint
+    path: ${ROBONIX_SOURCE_PATH}/services/voiceprint
+    config: {}
+
+  # Mapping publishes the occupancy, point cloud, pose, and map-management
+  # contracts consumed by Navigation and Scene.
+  - name: mapping
+    url: https://github.com/syswonder/service-map-rbnx
+    branch: main
+    config:
+      use_sim_time: true
+      # Fuse planar lidar and registered depth into the 2-D occupancy grid.
+      occupancy_sources: [lidar, depth]
+      # RTAB-Map also consumes RGB-D and the chassis odometry for SLAM.
+      rtabmap_inputs: [lidar, rgbd, odom]
+      params_file: config/rtabmap_params.yaml
+      sensor_providers:
+        lidar2d: tiago_lidar
+        rgb: tiago_camera
+        depth: tiago_camera
+        odom: tiago_chassis
+
+  # nav2_wrapper_rbnx IS the navigation service for this deploy.
+  #
+  # Wraps a standard Nav2 stack. Discovers its inputs through atlas — /map
+  # (mapping/occupancy_grid), /odom (chassis/odom), /scan (lidar/lidar) —
+  # and drives /cmd_vel via Nav2's navigate_to_pose action. Runs in the
+  # `robonix-nav2` docker image (built by `rbnx build`, so the host needs
+  # no ROS2). The complete simulator configuration is deployment-owned under
+  # config/. Listed after
+  # mapping (its /map provider); on_init returns Deferred until mapping is
+  # up, so order is a convenience, not a hard requirement.
+  - name: nav2
+    url: https://github.com/syswonder/service-navigation-rbnx
+    branch: main
+    config:
+      params_file: config/nav2_params.yaml
+      use_sim_time: true
+      action_wait_s: 240.0
+      # Keep startup behavior at the controller's existing 0.26 m/s ceiling;
+      # runtime speed commands can then adjust it in 20-point increments.
+      dynamic_speed:
+        max_linear_speed_mps: 0.26
+        default_percentage: 100
+        step_percentage: 20
+        min_percentage: 20
+      # The simulation goal checker enters at 0.25 m. Keep the terminal
+      # rotation guard inside that boundary so path-alignment turns are not
+      # mistaken for a stuck final-yaw correction.
+      guard_terminal_xy_m: 0.20
+      provider_ids:
+        map: mapping
+        odom: tiago_chassis
+        scan: tiago_lidar
+
+# after booted all the services, register the skills (but don't activate them now)
+skill:
+  # explore_rbnx — autonomous frontier exploration.
+  - name: explore
+    url: https://github.com/syswonder/skill-explore-rbnx
+    branch: main
+    config:
+      # example place holders
+      explore_mode: frontier
+      timeout_s: 600

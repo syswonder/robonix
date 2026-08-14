@@ -1,0 +1,11 @@
+# Request cancellation of a navigation goal.
+# Async cancel contract for `robonix/service/navigation/navigate`.
+[contract]
+id      = "robonix/service/navigation/navigate/cancel"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/CancelNavigation.srv"
+description = "Cancel a previously accepted navigation run."
+
+[mode]
+type = "rpc"

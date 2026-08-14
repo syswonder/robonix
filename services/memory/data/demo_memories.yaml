@@ -1,0 +1,170 @@
+# Scribe Mem — hand-crafted demo memory dataset.
+# Demo 1 (object spatiotemporal backtracking) + Demo 2 (task history backtracking)
+#   + failure lessons + composite queries.
+#
+# Scene coverage:   kitchen, living_room, workshop, outdoor
+# Task coverage:    fetch, build, explore
+# Action coverage:  grasp, place, navigate, craft, observe
+# Outcome coverage: success, failure (lesson)
+
+memories:
+  # ═══ Day 1: Kitchen fetch tasks ═══
+  - session_id: "sess-day1"
+    plan_id: "plan-fetch-1"
+    level: Info
+    tag: exec
+    msg: "robot grasped the red cup from the kitchen counter with the right gripper"
+    scene_type: kitchen
+    action_type: grasp
+    task_type: fetch
+    success: true
+    difficulty: easy
+    objects:
+      - [scene.obj.cup_001, "red cup", 1.0, 2.0, 0.8]
+    parent: null
+
+  - session_id: "sess-day1"
+    plan_id: "plan-fetch-2"
+    level: Info
+    tag: exec
+    msg: "robot placed the blue cup on the living room coffee table carefully"
+    scene_type: living_room
+    action_type: place
+    task_type: fetch
+    success: true
+    difficulty: easy
+    objects:
+      - [scene.obj.cup_002, "blue cup", 3.0, 4.0, 0.5]
+    parent: null
+
+  - session_id: "sess-day1"
+    plan_id: "plan-fetch-3"
+    level: Error
+    tag: exec
+    msg: "robot failed to grasp the slippery glass on the kitchen sink — right gripper slipped off the surface"
+    scene_type: kitchen
+    action_type: grasp
+    task_type: fetch
+    success: false
+    difficulty: hard
+    objects:
+      - [scene.obj.glass_001, "glass", 1.2, 2.3, 1.0]
+    parent: null
+
+  # ═══ Day 1: Navigation ═══
+  - session_id: "sess-day1"
+    plan_id: "plan-nav-1"
+    level: Info
+    tag: nav
+    msg: "navigated from the living room through the hallway to the kitchen successfully"
+    scene_type: kitchen
+    action_type: navigate
+    task_type: explore
+    success: true
+    difficulty: easy
+    objects: []
+    parent: null
+
+  # ═══ Day 2: Outdoor exploration ═══
+  - session_id: "sess-day2"
+    plan_id: "plan-nav-2"
+    level: Warn
+    tag: nav
+    msg: "navigated to the outdoor garden — encountered an unexpected obstacle at the doorway but navigated around it"
+    scene_type: outdoor
+    action_type: navigate
+    task_type: explore
+    success: true
+    difficulty: medium
+    objects:
+      - [scene.obj.door_001, "door", 5.0, 0.0, 0.0]
+    parent: null
+
+  # ═══ Day 2: Workshop crafting ═══
+  - session_id: "sess-day2"
+    plan_id: "plan-craft-1"
+    level: Info
+    tag: exec
+    msg: "crafted a wooden plank from 4 logs at the crafting table in the workshop"
+    scene_type: workshop
+    action_type: craft
+    task_type: build
+    success: true
+    difficulty: medium
+    objects:
+      - [scene.obj.plank_001, "wooden plank", 7.0, 8.0, 1.0]
+    parent: null
+
+  - session_id: "sess-day2"
+    plan_id: "plan-craft-2"
+    level: Info
+    tag: exec
+    msg: "crafted a stone axe from 3 stones and 2 sticks in the workshop"
+    scene_type: workshop
+    action_type: craft
+    task_type: build
+    success: true
+    difficulty: hard
+    objects:
+      - [scene.obj.axe_001, "stone axe", 7.1, 8.1, 1.0]
+    parent: null
+
+  # ═══ Day 3: Living room observation ═══
+  - session_id: "sess-day3"
+    plan_id: "plan-obs-1"
+    level: Info
+    tag: camera
+    msg: "observed and scanned the living room comprehensively — detected sofa, television, and coffee table"
+    scene_type: living_room
+    action_type: observe
+    task_type: explore
+    success: true
+    difficulty: easy
+    objects:
+      - [scene.obj.sofa_001, "sofa", 3.0, 4.0, 0.0]
+      - [scene.obj.tv_001, "television", 3.5, 2.0, 1.5]
+      - [scene.obj.table_001, "coffee table", 3.0, 3.0, 0.5]
+    parent: null
+
+  # ═══ Day 3: Failure lesson ═══
+  - session_id: "sess-day3"
+    plan_id: "plan-fetch-4"
+    level: Error
+    tag: exec
+    msg: "robot attempted to grasp the heavy boulder in the outdoor area — exceeded payload capacity of 5kg, task aborted safely"
+    scene_type: outdoor
+    action_type: grasp
+    task_type: fetch
+    success: false
+    difficulty: hard
+    objects:
+      - [scene.obj.boulder_001, "boulder", 9.0, 9.0, 0.0]
+    parent: null
+
+  # ═══ Day 3: Fetch with parent chain ═══
+  - session_id: "sess-day3"
+    plan_id: "plan-fetch-5"
+    level: Info
+    tag: exec
+    msg: "navigated to the kitchen to prepare for a fetch task"
+    scene_type: kitchen
+    action_type: navigate
+    task_type: fetch
+    success: true
+    difficulty: easy
+    objects: []
+    parent: null
+
+  - session_id: "sess-day3"
+    plan_id: "plan-fetch-5"
+    level: Info
+    tag: exec
+    msg: "grasped the green cup on the kitchen counter after navigating there"
+    scene_type: kitchen
+    action_type: grasp
+    task_type: fetch
+    success: true
+    difficulty: easy
+    objects:
+      - [scene.obj.cup_003, "green cup", 1.0, 2.0, 0.8]
+    parent: null  # Will be linked to the navigate node via parent_node_id in import

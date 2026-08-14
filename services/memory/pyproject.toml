@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix system service: Memgraph (Scribe Mem) — structured CKG memory provider.
+#
+# uv-managed: `uv sync` (called from scripts/build.sh) materialises a
+# local .build/venv/ from this file + uv.lock. No requirements.txt.
+
+[project]
+name = "robonix-memgraph"
+version = "0.1.0"
+description = "Memgraph MCP server — structured CKG memory (Scribe Mem, parallel to memsearch)."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "mcp",
+    "fastmcp",
+    "grpcio>=1.81.1",
+    "grpcio-tools>=1.81.1",
+    "protobuf",
+    "uvicorn",
+    "robonix-api",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+]
+
+# sentence-transformers is optional — install manually or via:
+#   pip install sentence-transformers
+# The service falls back to deterministic hash embeddings when unavailable.
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+robonix-api = { workspace = true }

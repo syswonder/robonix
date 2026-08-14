@@ -1,0 +1,45 @@
+# Audio primitive — host-side ALSA driver.
+# Owns:
+#   robonix/primitive/audio/mic      → MCP / gRPC server-stream AudioChunk
+#   robonix/primitive/audio/speaker  → MCP / gRPC client-stream AudioChunk
+#   robonix/primitive/audio/driver   → gRPC LifecycleDriver(INIT/UP/DOWN/SHUTDOWN)
+#
+# Runs on the HOST (not the sim container) since arecord / aplay want a
+# real ALSA device. `rbnx boot` calls Driver(CMD_INIT) after register;
+# init does the ALSA scan + spawns per-device subprocess wrappers.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.audio_driver
+  version: 0.1.0
+  vendor: robonix
+  description: Audio driver (mic capture + speaker playback) for robonix/primitive/audio contracts
+  license: MulanPSL-2.0
+
+# atlas provider_id this package will register at runtime — distinct from
+# `package.name` (which is the deployment identity). The `.alsa` suffix
+# distinguishes this from `audio_client_bridge` so both can co-exist in
+# atlas; the provider_id picker in rbnx chat then has a real choice. Both
+# implementations register the same `robonix/primitive/audio/*`
+# contracts, so consumers (liaison voice path, scene optional audio)
+# don't care which one liaison picked.
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+# 1 package = 1 cap. Multi-device routing lives
+# inside the cap via the optional list_devices/select_device contracts —
+# ALSA naturally has many "hw:X,Y" devices behind one driver, so we
+# expose the routing table. These are driver-internal devices, not
+# robonix caps.
+stop: |
+  pkill -TERM -f "[p]ython3 -m audio_driver.main" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython3 -m audio_driver.main" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/primitive/audio/mic
+  - name: robonix/primitive/audio/speaker
+  - name: robonix/primitive/audio/driver
+  - name: robonix/primitive/audio/list_devices
+  - name: robonix/primitive/audio/select_device

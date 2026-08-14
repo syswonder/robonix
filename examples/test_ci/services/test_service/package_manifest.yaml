@@ -1,0 +1,19 @@
+manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: bash scripts/start.sh
+
+package:
+  name: robonix.service.test_service
+  version: 0.0.1
+  description: Test service fixture.
+  tags: [service, test]
+  maintainers:
+    - Test Maintainer <test@example.com>
+  license: Apache-2.0
+
+capabilities: []
+
+depends:
+  - name: robonix.service.test_pkg_remote

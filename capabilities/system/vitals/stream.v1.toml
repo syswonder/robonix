@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/system/vitals/stream"
+version = "1"
+kind    = "service"
+idl     = "vitals/srv/StreamVitals.srv"
+
+[mode]
+type = "rpc_server_stream"

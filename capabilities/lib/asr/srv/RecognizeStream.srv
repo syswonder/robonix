@@ -1,0 +1,6 @@
+# ASR streaming recognition (bidirectional stream).
+# Client streams AsrAudioChunk; server streams RecognizeStreamEvent.
+# Request/Response sections are the per-message stream element types.
+asr/AsrAudioChunk chunk
+---
+asr/RecognizeStreamEvent event

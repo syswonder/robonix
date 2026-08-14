@@ -1,0 +1,6 @@
+# robonix/service/memory/compact — summarize / compact long-term memory (unary RPC).
+# Used by memsearch (LLM summarization). The memgraph backend uses
+# robonix/service/memory/promote with structured JSON-over-String.
+std_msgs/Empty trigger
+---
+std_msgs/String summary

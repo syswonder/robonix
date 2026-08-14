@@ -1,0 +1,6 @@
+# robonix/service/memory/save — persist a fact or preference (unary RPC).
+# DEPRECATED in favour of `remember` (ScribeMem structured memory).
+# Kept for backward-compat with memsearch-based deployments.
+std_msgs/String content
+---
+std_msgs/String confirmation

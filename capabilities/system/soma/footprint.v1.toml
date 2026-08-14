@@ -1,0 +1,15 @@
+# 2D collision footprint polygon in the response's declared `base_frame`.
+# Navigation and spatial-planning consumers query
+# this at startup to configure its costmap (inscribed_radius +
+# inflation_radius), simple_nav for its A* inflation tail, anti-bump
+# checks for chassis primitives. The deployment declares the polygon in
+# `soma.yaml`; Soma validates it and derives both radii from those points.
+[contract]
+id      = "robonix/system/soma/footprint"
+version = "1"
+kind    = "service"
+idl     = "soma/srv/GetFootprint.srv"
+description = "Return the robot 2D collision footprint in the base frame."
+
+[mode]
+type = "rpc"

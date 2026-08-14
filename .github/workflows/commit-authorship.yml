@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+name: Commit Authorship
+
+on:
+  push:
+    branches: [main, dev, dev-next, dev/**]
+  pull_request:
+    branches: [main, dev, dev-next, dev/**]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  authorship:
+    name: Human authorship policy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test commit authorship checker
+        run: python3 -m unittest scripts/tests/test_check_commit_authorship.py
+
+      - name: Check commits introduced by this change
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          WORKFLOW_HEAD_SHA: ${{ github.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              base="$PR_BASE_SHA"
+              head="$PR_HEAD_SHA"
+              ;;
+            merge_group)
+              base="$MERGE_BASE_SHA"
+              head="$MERGE_HEAD_SHA"
+              ;;
+            *)
+              base="$PUSH_BASE_SHA"
+              head="$WORKFLOW_HEAD_SHA"
+              ;;
+          esac
+
+          python3 scripts/check_commit_authorship.py \
+            --base "$base" \
+            --head "$head"

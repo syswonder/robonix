@@ -1,0 +1,11 @@
+# TTS one-shot synthesis
+# abstract_interface_id: robonix/system/speech/tts
+string text           # text to synthesize
+string language       # BCP-47, e.g. "zh-CN", "" = default
+string voice          # voice ID, "" = default
+float32 speed         # 1.0 = normal; < 1.0 = slower; > 1.0 = faster
+---
+uint8[] audio_data    # synthesized audio (format specified in encoding)
+string encoding       # e.g. "pcm_s16le", "mp3"
+uint32 sample_rate_hz
+string error          # non-empty on failure

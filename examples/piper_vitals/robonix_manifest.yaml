@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+manifestVersion: 1
+name: robonix-piper-vitals-demo
+
+system:
+  atlas:
+    listen: 0.0.0.0:50051
+    log: info
+  executor:
+    listen: 127.0.0.1:50061
+    log: info
+  soma:
+    robot_yaml: ./soma.yaml
+    log: info
+  pilot:
+    listen: 127.0.0.1:50071
+    log: info
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+      api_format: openai
+  vitals:
+    listen: 127.0.0.1:50093
+    log: info
+
+primitive:
+  - name: piper_health
+    path: ./primitives/piper_health
+    config:
+      scenario: normal
+      interval_s: 0.5
+      voltage: 24.0
+      control_file: ../../.runtime/piper_health.json

@@ -1,0 +1,6 @@
+# robonix/system/scene/list_objects — return every object the scene
+# registry currently believes exists. Room entries remain for v1
+# compatibility; new callers should use ListRegions for full room geometry.
+---
+Object[] objects
+float64 stamp_unix

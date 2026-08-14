@@ -1,0 +1,16 @@
+# SLAM-corrected map-frame pose. The mapping service exports this so
+# downstream consumers (scene self-tracker, nav, explore) get a
+# loop-closure-corrected pose instead of relying on raw chassis odom
+# (which drifts over time). This is the single canonical map-frame
+# pose contract — chassis primitives only declare odom-frame data
+# (primitive/chassis/odom); world-frame localisation lives here in
+# the mapping service.
+[contract]
+id      = "robonix/service/map/pose"
+version = "1"
+kind    = "service"
+idl     = "common_interfaces/geometry_msgs/msg/PoseWithCovarianceStamped.msg"
+description = "Canonical map-frame robot pose produced by localization or SLAM."
+
+[mode]
+type = "topic_out"

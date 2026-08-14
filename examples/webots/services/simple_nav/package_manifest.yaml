@@ -1,0 +1,32 @@
+# simple_nav — minimal navigation service for the webots demo.
+# Goto + lidar avoidance, no full Nav2. Runs INSIDE the webots sim
+# container via docker-exec (same pattern as primitive drivers) so
+# it can use the sim's ROS Humble + rclpy without an extra image.
+#
+# Capabilities (all over MCP, std_msgs/String JSON envelopes):
+#   robonix/service/navigation/navigate  → start a goto (target_x, target_y)
+#   robonix/service/navigation/navigate/status  → query current goal status
+#   robonix/service/navigation/navigate/cancel  → cancel the active goal
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.simple_nav
+  version: 0.1.0
+  vendor: robonix
+  description: Lightweight goto-with-avoidance nav service for webots tiago.
+  license: MulanPSL-2.0
+
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+stop: |
+  SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+  docker exec "$SIM_CT" pkill -TERM -f "[s]imple_nav.atlas_bridge" 2>/dev/null || true
+  sleep 1
+  docker exec "$SIM_CT" pkill -KILL -f "[s]imple_nav.atlas_bridge" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/service/navigation/navigate
+  - name: robonix/service/navigation/navigate/status
+  - name: robonix/service/navigation/navigate/cancel

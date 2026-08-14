@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+#
+# Optional merge for an NVIDIA-backed Xorg server inside the container.
+# start.sh adds this only for WEBOTS_HEADLESS_MODE=nvidia or GPU-backed auto.
+
+services:
+  sim:
+    privileged: ${ROBONIX_SIM_PRIVILEGED:-false}
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-graphics,display,utility,compute}"
+    volumes:
+      - type: bind
+        source: "${ROBONIX_NVIDIA_XORG_DRIVER:?run start.sh or set ROBONIX_NVIDIA_XORG_DRIVER}"
+        target: /usr/lib/xorg/modules/drivers/nvidia_drv.so
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${ROBONIX_NVIDIA_GLX_SERVER:?run start.sh or set ROBONIX_NVIDIA_GLX_SERVER}"
+        target: /usr/lib/xorg/modules/extensions/libglxserver_nvidia.so
+        read_only: true
+        bind:
+          create_host_path: false

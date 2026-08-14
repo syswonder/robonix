@@ -19,6 +19,7 @@ frames_*
 __export__.py
 skill/__init__.py
 *.log
+images/demo_01_readme*.gif
 
 tmp/
 test_performance
@@ -28,3 +29,42 @@ target
 stress_test
 .robonix
 rust/debug
+rust/provider/
+.artifacts/
+rbnx-boot
+tmp*
+.libero/
+
+# memory service
+agent_milvus.db*
+agent_memory/
+
+# python venv
+venv/
+.venv/
+
+# rbnx build
+rbnx-build/
+
+# rbnx deploy
+rbnx-deploy/
+
+# trae IDE
+.trae/
+target
+
+.cursor/
+
+# Claude Code local configuration.
+.claude/
+
+rbnx-boot
+
+# generated PDFs (developer guide etc.) — keep .md only
+*.pdf
+
+env.sh
+
+develop_specs/
+
+*.egg-info/

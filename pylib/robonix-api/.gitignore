@@ -1,0 +1,9 @@
+# setuptools build artefacts (uv generates these on `pip install -e .`).
+*.egg-info/
+build/
+dist/
+__pycache__/
+
+# Generated at sdist build time by scripts/build_dist.sh — atlas_pb2*.py
+# is the wire stub baked into the wheel for pip-installed users.
+robonix_api/_generated/

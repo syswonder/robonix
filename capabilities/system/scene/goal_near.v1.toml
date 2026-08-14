@@ -1,0 +1,11 @@
+# Find a navigation-safe approach pose near a registered scene object.
+# Returns map-frame (x, y, yaw); pass to navigation/navigate after.
+[contract]
+id      = "robonix/system/scene/goal_near"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/GoalNear.srv"
+description = "Compute a navigation-safe approach pose near a known physical scene object. Room annotations are not accepted; use robonix/system/scene/goal_room for rooms or named regions."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,15 @@
+# robonix/service/map/load_map — switch SLAM onto a previously-saved map (RPC).
+# Loads <map_id>'s opaque spatial artifact and, in localization mode, freezes
+# map growth so the robot relocalizes against the saved map and the map frame
+# becomes stable across runs (scene keys its objects to that frame). With
+# has_initial_pose set, the pose guess below is seeded before relocalizing so
+# convergence is fast and unambiguous in repetitive spaces.
+string map_id      # which saved map to load (must already exist on disk)
+string mode        # "localization" (default) | "mapping" (resume building it)
+bool has_initial_pose   # true → use x/y/theta below as the starting guess
+float64 x          # initial pose guess, map frame, meters
+float64 y          # initial pose guess, map frame, meters
+float64 theta      # initial yaw, map frame, radians
+---
+bool ok
+string detail      # human-readable status / error

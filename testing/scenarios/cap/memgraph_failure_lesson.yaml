@@ -1,0 +1,65 @@
+# Exercise memgraph hybrid_search with success=false filter — failure lesson retrieval.
+name: memgraph_failure_lesson
+task: "ci-test: write a success and a failure, then retrieve only the failure lesson"
+steps:
+  # ═══ Step 1: write a success + a failure, then search for failures ═══
+  - content: Writing success and failure memories, then searching for failures only.
+    rtdl_description: memgraph remember (success+error) + hybrid_search (failure filter)
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: memgraph_failure_search
+      children:
+        # 1a — successful kitchen fetch
+        - op: do
+          id: remember_success
+          cap: memgraph.memory_remember
+          args:
+            data: |
+              {"session_id":"ci-sess-fail","plan_id":"ci-plan-s",
+               "log_record":{"ts":0,"level":"Info","tag":"ci-test",
+               "msg":"robot successfully grasped the red cup from the kitchen counter"}}
+          description: persist a successful kitchen fetch
+          expect:
+            contract: robonix/service/memory/remember
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: '"node_id":\s*\d+'}
+        # 1b — failed kitchen fetch (lesson)
+        - op: do
+          id: remember_failure
+          cap: memgraph.memory_remember
+          args:
+            data: |
+              {"session_id":"ci-sess-fail","plan_id":"ci-plan-f",
+               "log_record":{"ts":0,"level":"Error","tag":"ci-test",
+               "msg":"robot failed to grasp the slippery glass on the kitchen sink — gripper slipped"}}
+          description: persist a failure lesson
+          expect:
+            contract: robonix/service/memory/remember
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: '"node_id":\s*\d+'}
+        # 1c — hybrid_search filtered to failures only
+        - op: do
+          id: hybrid_search_failures
+          cap: memgraph.memory_hybrid_search
+          args:
+            data: |
+              {"query":"kitchen grasp","tags":{"success":false},"top_k":5}
+          description: search for failure lessons only
+          expect:
+            contract: robonix/service/memory/hybrid_search
+            success: true
+            output:
+              checks:
+                - select: $.data
+                  assert: {op: regex, value: 'slippery'}
+                - select: $.data
+                  assert: {op: regex, value: '"success":\s*false'}
+  - content: Failure lesson verified.
+    status: done

@@ -1,0 +1,11 @@
+# Liaison's voice push-to-talk entry — orchestrates mic → ASR → voiceprint
+# → Pilot → optional TTS → speaker; client streams VoiceEvent back.
+[contract]
+id      = "robonix/system/liaison/voice"
+version = "1"
+kind    = "service"
+idl     = "liaison/srv/StartVoiceSession.srv"
+description = "Run a voice interaction session through Liaison."
+
+[mode]
+type = "rpc_server_stream"

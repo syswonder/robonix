@@ -1,0 +1,11 @@
+# Synthesize text and play it on a chosen audio/speaker primitive.
+# MCP tool — lets Pilot / RTDL make the robot announce things aloud.
+[contract]
+id      = "robonix/service/speech/speak"
+version = "1"
+kind    = "service"
+idl     = "speech/srv/Speak.srv"
+description = "Speak text aloud through a selected audio output target."
+
+[mode]
+type = "rpc"

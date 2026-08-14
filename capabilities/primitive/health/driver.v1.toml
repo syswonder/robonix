@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/primitive/health/driver"
+version = "1"
+kind    = "primitive"
+idl     = "lifecycle/srv/Driver.srv"
+
+[mode]
+type = "rpc"

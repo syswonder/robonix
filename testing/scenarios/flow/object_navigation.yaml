@@ -1,0 +1,112 @@
+# Object-based navigation composition against the live sim:
+# explore briefly, list real scene objects, compute a safe approach pose for a
+# detected object, then pass that pose to navigation.
+name: object_navigation
+task: "ci-flow: explore, choose a detected object, and navigate near it"
+expect_final_done: true
+steps:
+  - time_s: 0.0
+    status: in_progress
+    rtdl_description: explore before object navigation
+    rtdl:
+      op: sequence
+      id: explore_before_navigation
+      children:
+        - op: do
+          id: start_explore
+          cap: explore.explore_explore
+          args: {area_hint: "ci local room", timeout_s: 8.0, max_speed_m_s: 0.1}
+          description: run a bounded exploration pass
+          expect:
+            contract: robonix/skill/explore/explore
+            success: false
+            args: {area_hint: "ci local room", timeout_s: 8.0, max_speed_m_s: 0.1}
+            output:
+              error_regex: 'hit 8\.0s ceiling'
+  - time_s: 45.0
+    status: in_progress
+    retry_delay_s: 3.0
+    rtdl_description: list scene objects during explored state
+    rtdl:
+      op: sequence
+      id: select_scene_object
+      children:
+        - op: do
+          id: list_scene_objects
+          cap: scene.scene_list_objects
+          args: {}
+          description: return the current scene object registry
+          expect:
+            contract: robonix/system/scene/list_objects
+            success: true
+            output:
+              checks:
+                - select: $.objects
+                  assert: {op: min_length, value: 1}
+                - select: $.objects[]
+                  where:
+                    all:
+                      - {path: $.label, op: ne, value: robot}
+                      - {path: $.id, op: starts_with, value: scene.object.}
+                  assert: {op: exists}
+            capture:
+              object_id:
+                select: $.objects[]
+                where:
+                  all:
+                    - {path: $.label, op: ne, value: robot}
+                    - {path: $.id, op: starts_with, value: scene.object.}
+                path: $.id
+  - status: in_progress
+    rtdl_description: resolve detected object approach pose
+    rtdl:
+      op: sequence
+      id: resolve_approach_pose
+      children:
+        - op: do
+          id: goal_near_object
+          cap: scene.scene_goal_near
+          args:
+            object_id: {var: object_id}
+          description: compute an approach pose near the selected real object
+          expect:
+            contract: robonix/system/scene/goal_near
+            success: true
+            output:
+              json: {reachable: true}
+              text_regex: 'approach pose for'
+            capture:
+              nav_x: {select: "$", path: $.x, transform: float}
+              nav_y: {select: "$", path: $.y, transform: float}
+              nav_yaw: {select: "$", path: $.yaw, transform: float}
+  - status: in_progress
+    rtdl_description: navigate to object approach pose
+    rtdl:
+      op: sequence
+      id: navigate_to_object
+      children:
+        - op: do
+          id: navigate_object_goal
+          cap: nav2.navigation_navigate
+          args:
+            goal:
+              header:
+                stamp: {sec: 0, nanosec: 0}
+                frame_id: map
+              pose:
+                position:
+                  x: {var: nav_x}
+                  y: {var: nav_y}
+                  z: 0.0
+                orientation:
+                  x: 0.0
+                  y: 0.0
+                  z: {var: nav_yaw, transform: sin_half}
+                  w: {var: nav_yaw, transform: cos_half}
+          description: send the object-derived approach pose to navigation
+          expect:
+            contract: robonix/service/navigation/navigate
+            success: true
+            output:
+              json: {state: SUCCEEDED}
+  - status: done

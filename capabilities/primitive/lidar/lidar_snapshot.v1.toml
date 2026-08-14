@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/lidar/snapshot"
+version = "1"
+kind    = "primitive"
+idl     = "lidar/srv/GetLaserScan.srv"
+description = "Capture one 2D laser scan on demand."
+
+[mode]
+type = "rpc"

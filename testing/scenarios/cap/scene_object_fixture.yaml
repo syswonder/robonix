@@ -1,0 +1,33 @@
+# Exercise real scene object recognition/output from the live Webots run.
+name: scene_object_fixture
+task: "ci-test: list the detected scene objects"
+steps:
+  - time_s: 45.0
+    retry_delay_s: 3.0
+    content: Listing scene objects.
+    rtdl_description: scene list objects
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: scene_objects_step
+      children:
+        - op: do
+          id: list_scene_objects
+          cap: scene.scene_list_objects
+          args: {}
+          description: return the current scene object registry
+          expect:
+            contract: robonix/system/scene/list_objects
+            success: true
+            output:
+              checks:
+                - select: $.objects
+                  assert: {op: min_length, value: 1}
+                - select: $.objects[]
+                  where:
+                    all:
+                      - {path: $.label, op: ne, value: robot}
+                      - {path: $.id, op: starts_with, value: scene.object.}
+                  assert: {op: exists}
+  - content: Scene objects listed.
+    status: done

@@ -1,0 +1,11 @@
+# On-demand depth image snapshot (single frame).
+# Complements robonix/primitive/camera/depth (continuous stream).
+[contract]
+id      = "robonix/primitive/camera/depth_snapshot"
+version = "1"
+kind    = "primitive"
+idl     = "camera/srv/GetCameraImage.srv"
+description = "Capture one depth image frame on demand."
+
+[mode]
+type = "rpc"

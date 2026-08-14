@@ -1,0 +1,6 @@
+# robonix/service/memory/search — semantic search over long-term memory (unary RPC).
+# Used by memsearch (milvus-lite). The memgraph backend uses
+# robonix/service/memory/hybrid_search with structured JSON-over-String.
+std_msgs/String query
+---
+std_msgs/String results

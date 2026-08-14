@@ -1,0 +1,13 @@
+# Lifecycle interface every navigation service implementation MUST declare.
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
+# AFTER all primitives have finished init (services may depend on
+# primitive data streams).
+[contract]
+id      = "robonix/service/navigation/driver"
+version = "1"
+kind    = "service"
+idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for navigation service providers."
+
+[mode]
+type = "rpc"

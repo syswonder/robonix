@@ -1,0 +1,18 @@
+manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: bash scripts/start.sh
+
+package:
+  name: robonix.primitive.test_primitive
+  version: 0.0.1
+  description: Test primitive fixture.
+  tags: [primitive, test]
+  maintainers:
+    - Test Maintainer <test@example.com>
+  license: Apache-2.0
+
+capabilities: []
+
+depends: []

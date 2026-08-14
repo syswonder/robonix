@@ -1,0 +1,54 @@
+# Memsearch MCP server — agent long-term memory.
+# Control plane: robonix/service/memory/{save,search,compact}.
+# Exposes MCP tools only; no robonix_contracts gRPC servicer.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.memsearch_service
+  version: 0.1.0
+  vendor: robonix
+  description: Memsearch MCP server — fact/preference memory for the agent.
+  license: MulanPSL-2.0
+
+# Atlas provider_id (matched verbatim by rbnx-boot). Distinct from package.name.
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  mkdir -p rbnx-build/data
+
+  # Self-heal stale milvus locks. memsearch embeds milvus_lite, which
+  # holds a shared lock on `agent_milvus.db` for the lifetime of the
+  # python process. If a previous `rbnx boot` run died without atlas
+  # SIGKILL'ing the entire process group (e.g. when the boot was
+  # cancelled while memsearch was importing a slow native lib, or when
+  # killpg failed to reach a milvus child that escaped the pgid),
+  # the stale memsearch + milvus pair stays alive and the next boot
+  # sees `Open local milvus failed`. Detect via `fuser` and SIGKILL
+  # before the new memsearch tries to open the file.
+  DB_FILE="$(pwd)/agent_milvus.db"
+  if [ -e "$DB_FILE" ] && command -v fuser >/dev/null 2>&1; then
+    HOLDERS=$(fuser "$DB_FILE" 2>/dev/null | tr -d ' ' || true)
+    if [ -n "$HOLDERS" ]; then
+      echo "[memsearch/start] stale milvus lock on $DB_FILE — killing $HOLDERS" >&2
+      # shellcheck disable=SC2086
+      kill -9 $HOLDERS 2>/dev/null || true
+      # Give the kernel a tick to drop fd / release flock.
+      sleep 1
+    fi
+  fi
+
+  # FastMCP internal logs are verbose — redirect to keep rbnx log clean.
+  exec rbnx-build/venv/bin/python -m memsearch_service.service \
+       > rbnx-build/data/memsearch.log 2>&1
+
+stop: |
+  pkill -TERM -f "[p]ython -m memsearch_service.service|[p]ython3 -m memsearch_service.service|[m]emsearch_service.service" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "[p]ython -m memsearch_service.service|[p]ython3 -m memsearch_service.service|[m]emsearch_service.service" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/service/memory/save
+  - name: robonix/service/memory/search
+  - name: robonix/service/memory/compact

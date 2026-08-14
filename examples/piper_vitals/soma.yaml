@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+urdf:
+  path: ./model/piper_with_gripper.urdf
+  root_link: base_link
+  model_name: piper_with_gripper
+
+robot:
+  id: piper_with_gripper
+  display_name: "AgileX Piper with parallel gripper"
+  family: manipulator
+  root_part: arm
+  exports:
+    - provider_id: piper_health
+      capabilities:
+        - { path: robonix/primitive/health/state, description: "Read the current Piper demonstration health state." }
+        - { path: robonix/primitive/health/stream, description: "Stream Piper demonstration health into Soma." }
+  components:
+    - id: arm
+      display_name: "Piper arm"
+      type: arm
+      urdf_link: base_link
+      components:
+        - id: joint_1
+          display_name: "Joint 1"
+          type: joint
+          urdf_joint: joint1
+          exports: []
+        - id: joint_2
+          display_name: "Joint 2"
+          type: joint
+          urdf_joint: joint2
+          exports: []
+        - id: joint_3
+          display_name: "Joint 3"
+          type: joint
+          urdf_joint: joint3
+          exports: []
+        - id: joint_4
+          display_name: "Joint 4"
+          type: joint
+          urdf_joint: joint4
+          exports: []
+        - id: joint_5
+          display_name: "Joint 5"
+          type: joint
+          urdf_joint: joint5
+          exports: []
+        - id: joint_6
+          display_name: "Joint 6"
+          type: joint
+          urdf_joint: joint6
+          exports: []
+        - id: gripper
+          display_name: "Parallel gripper"
+          type: gripper
+          urdf_link: gripper_base
+          exports: []
+          components:
+            - id: actuator
+              display_name: "Gripper actuator"
+              type: joint
+              urdf_joint: gripper
+              exports: []
+
+description:
+  summary: "A static Piper and parallel-gripper body model with controllable demonstration health telemetry."
+  can_do:
+    - "Render the official Piper visual model in the Robonix Client Vitals page."
+    - "Show body, arm, joint, and gripper health through Soma and Vitals."
+    - "Inject and recover selected joint or gripper faults for demonstrations."
+  cannot_do:
+    - "Move or simulate the arm."
+    - "Control physical Piper hardware."
+    - "Report real sensor values; the health primitive is a controllable demonstration source."
+  notes:
+    - "Executor and Pilot run so Vitals can monitor their software module health."
+    - "Liaison and all other interaction, perception, audio, and simulation packages are intentionally absent."

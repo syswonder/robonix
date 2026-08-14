@@ -1,0 +1,25 @@
+# Tiago lidar driver — primitive package.
+# One device = one package. Exposes the planar lidar:
+#   robonix/primitive/lidar/snapshot  → lidar_snapshot(Empty) → LaserScan
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_lidar
+  version: 0.1.0
+  vendor: robonix
+  description: Tiago lidar driver — 2D scan snapshot over Webots ROS2.
+  license: MulanPSL-2.0
+
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+stop: |
+  SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+  docker exec "$SIM_CT" pkill -TERM -f "[l]idar_driver|[s]can_normalize" 2>/dev/null || true
+  sleep 1
+  docker exec "$SIM_CT" pkill -KILL -f "[l]idar_driver|[s]can_normalize" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/primitive/lidar/snapshot
+  - name: robonix/primitive/lidar/driver

@@ -1,0 +1,12 @@
+# Continuous ROS 2 topic stream of current per-finger positions. Publishes
+# FingerState (FingerValue[] fingers; value = current normalized position
+# [0,1]) at driver-native rate. The finger-level counterpart to state_joint;
+# the driver reports whatever (finger, type) pairs it maps.
+[contract]
+id      = "robonix/primitive/hand/state_finger"
+version = "1"
+kind    = "primitive"
+idl     = "hand/msg/FingerState.msg"
+
+[mode]
+type = "topic_out"

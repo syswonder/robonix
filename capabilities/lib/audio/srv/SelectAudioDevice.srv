@@ -1,0 +1,15 @@
+# robonix/primitive/audio/select_device — pin a specific device for
+# subsequent mic / speaker streams from this cap. The impl is free to
+# reopen its sounddevice / ALSA / WS handle synchronously or lazily
+# (next stream call). Empty `id` resets to the OS default.
+#
+# Errors:
+#   ok=false + error="unknown id"           — id not in ListAudioDevices
+#   ok=false + error="device busy"          — currently streaming, can't switch
+#   ok=false + error="kind mismatch"        — id is input but kind=output etc.
+
+string kind     # "input" | "output"
+string id       # AudioDevice.id from ListAudioDevices, or "" for default
+---
+bool ok
+string error

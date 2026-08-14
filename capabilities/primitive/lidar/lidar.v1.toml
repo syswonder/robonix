@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/lidar/lidar"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/LaserScan.msg"
+description = "Continuous 2D laser scan stream from a lidar primitive."
+
+[mode]
+type = "topic_out"

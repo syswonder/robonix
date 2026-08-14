@@ -1,0 +1,3 @@
+# robonix/primitive/lidar/lidar_snapshot — on-demand single LaserScan.
+---
+sensor_msgs/LaserScan scan

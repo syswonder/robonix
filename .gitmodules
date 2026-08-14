@@ -1,9 +1,9 @@
-[submodule "ros2-client"]
-	path = rust/lib/ros2-client
-	url = https://github.com/enkerewpo/ros2-client
 [submodule "rcl_interfaces"]
-	path = rust/lib/rcl_interfaces
+	path = capabilities/lib/rcl_interfaces
 	url = https://github.com/enkerewpo/rcl_interfaces
 [submodule "common_interfaces"]
-	path = rust/lib/common_interfaces
+	path = capabilities/lib/common_interfaces
 	url = https://github.com/enkerewpo/common_interfaces
+[submodule "docs"]
+	path = docs
+	url = https://github.com/syswonder/robonix-book

@@ -1,0 +1,39 @@
+# Tiago camera driver — primitive package.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_camera
+  version: 0.1.0
+  vendor: wheatfox <wheatfox17@icloud.com>
+  description: Tiago camera driver — RGB + depth head camera over Webots ROS2.
+  license: MulanPSL-2.0
+
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+stop: |
+  SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+  docker exec "$SIM_CT" pkill -TERM -f "[c]amera_driver|[s]tatic_transform_publisher.*head_front_camera" 2>/dev/null || true
+  sleep 1
+  docker exec "$SIM_CT" pkill -KILL -f "[c]amera_driver|[s]tatic_transform_publisher.*head_front_camera" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/primitive/camera/snapshot
+  - name: robonix/primitive/camera/depth_snapshot
+  - name: robonix/primitive/camera/driver
+  # ROS2 streams (data plane). Topic names are runtime-resolved
+  # through atlas — consumers (scene 3D fusion, mapping RGBD ingest)
+  # discover them via QueryCapabilities, they never read the topic
+  # strings declared in the driver source.
+  - name: robonix/primitive/camera/rgb
+  - name: robonix/primitive/camera/depth
+  # Static `base_link → camera_optical` transform. Latched (TRANSIENT_LOCAL)
+  # so late subscribers receive the cached value. Lets scene compose
+  # T(world ← camera_optical) = service/map/pose ⊕ camera/extrinsics
+  # without touching tf2 at all.
+  - name: robonix/primitive/camera/extrinsics
+  # Static pinhole intrinsics (sensor_msgs/CameraInfo, latched). Lets
+  # scene back-project depth with the real camera's K instead of a
+  # hardcoded default — see capabilities/primitive/camera/intrinsics.v1.toml.
+  - name: robonix/primitive/camera/intrinsics

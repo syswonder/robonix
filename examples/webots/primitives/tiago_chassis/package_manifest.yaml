@@ -1,0 +1,46 @@
+# Tiago chassis driver — primitive package.
+# One device = one package. This driver exposes the robot base/chassis:
+#   robonix/primitive/chassis/move      → gRPC ExecuteMoveCommand(MoveCommand) → String
+#   robonix/primitive/chassis/odom      → ROS2 topic_out (nav_msgs/Odometry, /odom)
+#   robonix/primitive/chassis/twist_in  → ROS2 topic_in (geometry_msgs/Twist, /cmd_vel)
+#   robonix/primitive/chassis/driver    → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
+#
+# `*/driver` is the lifecycle interface every primitive should declare —
+# `rbnx boot` calls Driver(CMD_INIT) after RegisterCapability, waits for
+# ok=true, only then proceeds to next package. Skipping it means the boot
+# silently passes through this package and tools may be exposed before
+# the underlying sim is actually ready.
+#
+# Runs inside the sim container (started by examples/webots/sim/start.sh)
+# so it shares the same DDS graph as Webots; publishes to /cmd_vel.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_chassis
+  version: 0.1.0
+  vendor: robonix
+  description: Tiago chassis driver — pose readout + velocity control over Webots ROS2.
+  license: MulanPSL-2.0
+
+# Atlas provider_id (matched verbatim by rbnx-boot).
+
+# Codegen the proto stubs + MCP dataclasses into rbnx-build/codegen/.
+# scripts/build.sh just wraps `rbnx codegen --mcp`; the venv pattern from
+# system/memory is unnecessary here because the driver runs inside the
+# sim container which already has rclpy + numpy + Pillow + fastmcp.
+build: bash scripts/build.sh
+
+# Start: docker-exec into the pre-running sim container. See scripts/start.sh.
+start: bash scripts/start.sh
+
+stop: |
+  SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+  docker exec "$SIM_CT" pkill -TERM -f "[p]ython3 -m chassis_driver.driver" 2>/dev/null || true
+  sleep 1
+  docker exec "$SIM_CT" pkill -KILL -f "[p]ython3 -m chassis_driver.driver" 2>/dev/null || true
+
+capabilities:
+  - name: robonix/primitive/chassis/move
+  - name: robonix/primitive/chassis/odom
+  - name: robonix/primitive/chassis/twist_in
+  - name: robonix/primitive/chassis/driver

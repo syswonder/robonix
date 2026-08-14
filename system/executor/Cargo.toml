@@ -1,0 +1,35 @@
+[package]
+name = "robonix-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Executor: tool-call dispatch runtime (builtin / MCP / gRPC)"
+
+[[bin]]
+name = "robonix-executor"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+prost.workspace = true
+tonic-prost.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+robonix-scribe.workspace = true
+uuid.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+robonix-atlas = { path = "../atlas" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["signal", "process"] }
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

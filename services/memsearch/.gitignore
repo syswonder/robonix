@@ -1,0 +1,19 @@
+# All generated artefacts (uv venv, codegen output, runtime data) live
+# under rbnx-build/.
+rbnx-build/
+
+# Legacy default codegen output paths (kept ignored so older trees don't
+# leak generated stuff into git after a `rbnx codegen` run that doesn't
+# pass --out-dir).
+proto_gen/
+robonix_mcp_types/
+
+# Runtime artefacts that older builds wrote at package root before the
+# rbnx-build/data/ relocation. Modern builds put these under rbnx-build/.
+.agent_milvus.db.lock
+agent_milvus.db
+agent_memory/
+memsearch.log
+
+# uv lockfile is committed; ignore the local cache only.
+.uv-cache/
