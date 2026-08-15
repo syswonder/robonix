@@ -9,16 +9,18 @@ reverse-depend on a service-layer perception package. The detector
 calls the same OpenAI-compatible endpoint that pilot already uses
 (VLM_BASE_URL / VLM_API_KEY / VLM_MODEL), so no new credentials.
 
-v1 keeps the implementation simple: small prompt, JSON-only response,
-no streaming, no caching. Failures are logged and the perception loop
-keeps running on the next tick.
+The polling loop keeps a perceptual fingerprint of the last successful frame,
+so a cached camera image or low-level JPEG noise does not spend another model
+call. Failures retry with bounded exponential backoff.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -29,6 +31,12 @@ import httpx
 
 from ..state.data_assoc import Detection
 from ..state.object_registry import BBox3D, Pose3D
+from ..vision_cache import (
+    FrameFingerprint,
+    InferenceCounters,
+    fingerprint_jpeg,
+    frames_equivalent,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,17 +93,21 @@ class VLMObjectDetector:
     def __init__(
         self,
         *,
-        rgb_fetcher: Callable[[], Optional[bytes]],
+        rgb_fetcher: Callable[[], Optional[bytes | tuple[bytes, float]]],
         camera_to_world_fn: Callable[[], Optional[tuple[object, str]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         period_s: float = 3.0,
         intrinsics: Optional[_CamIntrinsics] = None,
         intrinsics_fn: Optional[Callable[[], Optional[_CamIntrinsics]]] = None,
+        frame_change_threshold: Optional[float] = None,
+        failure_backoff_base_s: Optional[float] = None,
+        failure_backoff_max_s: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        # `rgb_fetcher` returns the latest JPEG bytes (or None when no
-        # frame has arrived yet). When ROS subscribers are the source,
-        # the hub hands us a sensor_msgs/Image whose `data` is raw RGB;
-        # service.py's adapter turns that into JPEG before calling us.
+        """Configure frame polling, inference caching, and bounded retries."""
+        # `rgb_fetcher` returns the latest JPEG bytes and, when available, its
+        # source timestamp. service.py's adapter converts ROS Image data and
+        # includes the timestamp so a frozen stream cannot refresh objects.
         self.rgb_fetcher = rgb_fetcher
         self.camera_to_world_fn = camera_to_world_fn
         self.on_detections = on_detections
@@ -106,6 +118,44 @@ class VLMObjectDetector:
         self._missing_transform_logged = False
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
+        self._clock = clock
+        threshold = (
+            frame_change_threshold
+            if frame_change_threshold is not None
+            else self._env_float("SCENE_VLM_FRAME_CHANGE_THRESHOLD", 0.04)
+        )
+        self.frame_change_threshold = (
+            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.04
+        )
+        default_backoff_base = max(period_s, 5.0) if math.isfinite(period_s) else 5.0
+        backoff_base = (
+            failure_backoff_base_s
+            if failure_backoff_base_s is not None
+            else self._env_float(
+                "SCENE_VLM_FAILURE_BACKOFF_BASE_SEC", default_backoff_base
+            )
+        )
+        self.failure_backoff_base_s = (
+            max(0.0, backoff_base)
+            if math.isfinite(backoff_base)
+            else default_backoff_base
+        )
+        backoff_max = (
+            failure_backoff_max_s
+            if failure_backoff_max_s is not None
+            else self._env_float("SCENE_VLM_FAILURE_BACKOFF_MAX_SEC", 60.0)
+        )
+        self.failure_backoff_max_s = (
+            max(self.failure_backoff_base_s, backoff_max)
+            if math.isfinite(backoff_max)
+            else max(self.failure_backoff_base_s, 60.0)
+        )
+        self._last_success_frame: Optional[FrameFingerprint] = None
+        self._last_success_detections: Optional[list[dict]] = None
+        self._last_success_stamp: Optional[float] = None
+        self._failure_streak = 0
+        self._retry_at = 0.0
+        self._stats = InferenceCounters()
 
         # Pull VLM creds from env at construction so failures are
         # visible at startup rather than first tick.
@@ -120,6 +170,17 @@ class VLMObjectDetector:
         self.reasoning_effort = os.environ.get("VLM_REASONING_EFFORT", "").strip()
         if not self.api_key:
             log.warning("[scene-vlm] VLM_API_KEY not set; perception will be inert")
+
+    @staticmethod
+    def _env_float(key: str, default: float) -> float:
+        try:
+            return float(os.environ.get(key, str(default)))
+        except ValueError:
+            return default
+
+    @property
+    def inference_counts(self) -> dict[str, int]:
+        return self._stats.as_dict()
 
     async def start(self) -> None:
         if self._task is not None:
@@ -150,25 +211,108 @@ class VLMObjectDetector:
                 pass
 
     async def _tick(self) -> None:
-        # `rgb_fetcher` is a sync callable returning JPEG bytes (or
-        # None). Synchronous because the ROS subscriber side caches
-        # the latest frame in a thread-safe slot — no awaiting needed.
-        jpeg_bytes = self.rgb_fetcher()
+        """Process one frame, reusing results or delaying failed retries.
+
+        Cache hits from newly delivered frames still reproject and publish
+        prior detections so the object registry stays fresh.
+        """
+        # The ROS subscriber caches its latest frame in a thread-safe slot, so
+        # this fetch is synchronous. Tests and legacy callers may omit stamps.
+        sample = self.rgb_fetcher()
+        if sample is None:
+            return
+        if isinstance(sample, tuple):
+            jpeg_bytes, source_stamp = sample
+        else:
+            jpeg_bytes, source_stamp = sample, None
         if not jpeg_bytes:
             return
-        jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
-        detections_json = await self._call_vlm(jpeg_b64)
-        if not detections_json:
+        frame = fingerprint_jpeg(jpeg_bytes)
+        if frames_equivalent(
+            frame,
+            self._last_success_frame,
+            threshold=self.frame_change_threshold,
+        ):
+            self._record_skip("unchanged-frame")
+            if self._last_success_detections is not None and (
+                source_stamp is None or source_stamp != self._last_success_stamp
+            ):
+                await self._publish_detections(self._last_success_detections)
+                self._last_success_stamp = source_stamp
             return
-        detections = self._project_to_world(detections_json)
+
+        now = self._clock()
+        retrying = self._failure_streak > 0
+        if retrying and now < self._retry_at:
+            self._record_skip("failure-backoff")
+            return
+        if retrying:
+            self._stats.retried += 1
+
+        jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+        try:
+            detections_json = await self._call_vlm(jpeg_b64)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[scene-vlm] VLM call failed: %s: %s", type(e).__name__, e)
+            self._record_failure(self._clock())
+            return
+        if detections_json is None:
+            self._record_failure(self._clock())
+            return
+
+        self._last_success_frame = frame
+        self._last_success_detections = copy.deepcopy(detections_json)
+        self._last_success_stamp = source_stamp
+        self._clear_failure()
+        self._stats.processed += 1
+        self._log_stats(logging.INFO, "processed")
+        await self._publish_detections(detections_json)
+
+    async def _publish_detections(self, raw: list[dict]) -> None:
+        """Reproject cached model output and refresh the live object registry."""
+        detections = self._project_to_world(raw)
         if detections:
             await self.on_detections(detections)
 
-    async def _call_vlm(self, jpeg_b64: str) -> list[dict]:
+    def _record_skip(self, reason: str) -> None:
+        self._stats.skipped += 1
+        level = logging.INFO if self._stats.skipped % 25 == 0 else logging.DEBUG
+        self._log_stats(level, reason)
+
+    def _record_failure(self, now: float) -> None:
+        """Schedule endpoint-wide backoff after an attempted inference fails."""
+        self._failure_streak += 1
+        exponent = min(self._failure_streak - 1, 10)
+        delay = min(
+            self.failure_backoff_max_s,
+            self.failure_backoff_base_s * (2 ** exponent),
+        )
+        self._retry_at = now + delay
+        self._stats.failed += 1
+        self._log_stats(logging.WARNING, f"failed; retry_in={delay:.1f}s")
+
+    def _clear_failure(self) -> None:
+        self._failure_streak = 0
+        self._retry_at = 0.0
+
+    def _log_stats(self, level: int, reason: str) -> None:
+        """Expose cumulative inference decisions in the Scene logs."""
+        log.log(
+            level,
+            "[scene-vlm] inference stats: processed=%d skipped=%d "
+            "retried=%d failed=%d reason=%s",
+            self._stats.processed,
+            self._stats.skipped,
+            self._stats.retried,
+            self._stats.failed,
+            reason,
+        )
+
+    async def _call_vlm(self, jpeg_b64: str) -> Optional[list[dict]]:
         """One OpenAI-compatible chat-completions call with image input.
         Returns the parsed `detections` list (possibly empty)."""
         if not self.base_url or not self.api_key:
-            return []
+            return None
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -194,21 +338,25 @@ class VLMObjectDetector:
             r = await client.post(url, json=body, headers=headers)
             if r.status_code >= 400:
                 log.warning("[scene-vlm] VLM HTTP %d: %s", r.status_code, r.text[:200])
-                return []
+                return None
             data = r.json()
             try:
                 text = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError):
-                return []
+                return None
         # Strip markdown fences if the model added them despite the prompt.
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
         try:
             obj = json.loads(text)
         except json.JSONDecodeError:
             log.debug("[scene-vlm] non-JSON response: %s", text[:200])
-            return []
-        dets = obj.get("detections", []) if isinstance(obj, dict) else []
-        return dets if isinstance(dets, list) else []
+            return None
+        if not isinstance(obj, dict) or "detections" not in obj:
+            return None
+        dets = obj["detections"]
+        if not isinstance(dets, list) or any(not isinstance(item, dict) for item in dets):
+            return None
+        return dets
 
     def _project_to_world(self, raw: list[dict]) -> list[Detection]:
         """Project image detections through deployment-provided geometry.

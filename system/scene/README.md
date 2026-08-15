@@ -273,6 +273,9 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_OBJECT_TTL_SEC` | `30` | how long a soft-evicted (`missing`) object is kept so a re-detection can re-bind its id + observation_count before it is hard-pruned; decouples object identity from per-tick uuid churn |
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
+| `SCENE_VLM_FRAME_CHANGE_THRESHOLD` / `SCENE_GRAPH_IMAGE_CHANGE_THRESHOLD` | `0.04` / `0.04` | normalized low-resolution RGB RMS threshold used to treat JPEG artefacts and sensor noise as an unchanged frame; lower values trigger inference on smaller visual changes |
+| `SCENE_VLM_FAILURE_BACKOFF_BASE_SEC` / `SCENE_VLM_FAILURE_BACKOFF_MAX_SEC` | `max(detect period, 5)` / `60` | bounded exponential retry window for visual-tier detection failures |
+| `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_BASE_SEC` / `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_MAX_SEC` | `30` / `300` | bounded exponential retry window for whole-scene image-relation failures |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 | `SCENE_WEB_HOST` | `0.0.0.0` | Web UI bind host; set `127.0.0.1` on a robot/control workstation to keep the operator surface local-only. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | enable the object snapshot DB backing the map UI's Save/Load (boot warm-restore only under `SCENE_RESTORE_ON_START`) |

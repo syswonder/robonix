@@ -680,11 +680,13 @@ async def _start_ros_ingest(
             "Configure a depth topic to get metric-accurate poses."
         )
 
-        def _rgb_jpeg() -> Optional[bytes]:
+        def _rgb_jpeg() -> Optional[tuple[bytes, float]]:
+            """Return the latest encoded frame with its source timestamp."""
             msg, stamp, _ = hub.latest("rgb")
             if msg is None or stamp == 0.0:
                 return None
-            return _image_msg_to_jpeg(msg)
+            jpeg = _image_msg_to_jpeg(msg)
+            return (jpeg, stamp) if jpeg is not None else None
 
         # Resolve the contract K at projection time because CameraInfo often
         # arrives after the service starts. Fall back only to the same explicit

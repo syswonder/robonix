@@ -284,7 +284,8 @@ class SceneGraphBuilder:
         """Run the image-grounded relation pass when the perception detector
         provides a camera frame bundle. Returns the round's edges (possibly
         empty = "ran, no relations"), or None to signal "not run" so the caller
-        falls back to the text path. Never raises — failures degrade to None."""
+        falls back to the text path. Expected model failures/backoff are empty
+        rounds; unexpected exceptions are logged and degrade to None."""
         if self.image_inferer is None or self.perception is None:
             return None
         get_bundle = getattr(self.perception, "latest_frame_bundle", None)
