@@ -114,6 +114,21 @@ class CommitAuthorshipTests(unittest.TestCase):
         )
         self.assertEqual(violations, [])
 
+    def test_spaced_agent_name_is_allowed(self):
+        violations = MODULE.inspect_record(
+            record(
+                message="fix: disclose assistance\n\n"
+                "Assisted-by: Claude Code:claude-opus-5 clang-tidy"
+            )
+        )
+        self.assertEqual(violations, [])
+
+    def test_missing_model_after_colon_is_rejected(self):
+        violations = MODULE.inspect_record(
+            record(message="fix: disclose assistance\n\nAssisted-by: Codex:")
+        )
+        self.assertTrue(any("invalid Assisted-by trailer" in item for item in violations))
+
     def test_email_style_assisted_by_is_rejected(self):
         violations = MODULE.inspect_record(
             record(message="fix: disclose assistance\n\nAssisted-by: Codex <bot@example.com>")

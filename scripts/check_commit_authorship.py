@@ -108,13 +108,19 @@ def is_prohibited_identity(name: str, email: str) -> bool:
 
 
 def validate_assisted_by(value: str) -> str | None:
-    """Validate Robonix ``Assisted-by: AGENT:MODEL [TOOLS...]`` syntax."""
+    """Validate Robonix ``Assisted-by: AGENT:MODEL [TOOLS...]`` syntax.
+
+    The agent name may contain spaces (``Claude Code:claude-opus-5``), so the
+    value splits at the first colon rather than the first space: everything
+    before the colon is the agent, the next whitespace-delimited token is the
+    model, and any remaining tokens name analysis tools.
+    """
 
     if "<" in value or ">" in value:
         return "Assisted-by identifies a tool, so it must not use a person/email form"
 
-    agent_model, _separator, _tools = value.partition(" ")
-    agent, colon, model = agent_model.partition(":")
+    agent, colon, rest = value.partition(":")
+    model = rest.split()[0] if rest.split() else ""
     if not colon or not agent.strip() or not model.strip():
         return "expected Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL ...]"
     return None
