@@ -92,7 +92,7 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 # Bump the set deliberately, in its own commit.
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     python3 -m pip install --no-cache-dir \
-    "grpcio==1.83.0" "protobuf==6.33.6" "mcp==2.0.0" "fastmcp==3.4.7" \
+    "grpcio==1.83.0" "protobuf==6.33.6" "mcp==1.29.0" "fastmcp==3.4.7" \
     numpy Pillow "uvicorn==0.52.3" "httpx==0.28.1" "websockets==16.1.1"
 
 ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
