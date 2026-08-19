@@ -87,10 +87,13 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 # (get_topological_weights, fixed in pip 22.1) on dependency cycles. fastmcp
 # 3.4.7 introduced such a cycle via fastmcp-slim -> py-key-value-aio ->
 # keyring, so the stock pip must be upgraded before the real install.
+# Exact pins: this image exists for CI, and an open range here means any
+# upstream release can break every run overnight, as fastmcp 3.4.7 did.
+# Bump the set deliberately, in its own commit.
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     python3 -m pip install --no-cache-dir \
-    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx \
-    "websockets>=14,<17"
+    "grpcio==1.83.0" "protobuf==6.33.6" "mcp==2.0.0" "fastmcp==3.4.7" \
+    numpy Pillow "uvicorn==0.52.3" "httpx==0.28.1" "websockets==16.1.1"
 
 ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
