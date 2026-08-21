@@ -648,7 +648,16 @@ def _start_scene_hook_server() -> None:
             log.debug("scene_hook: %s", fmt % args)
 
     port = int(os.environ.get("SCENE_HOOK_PORT", "37798"))
-    server = HTTPServer(("0.0.0.0", port), _HookHandler)
+    try:
+        server = HTTPServer(("0.0.0.0", port), _HookHandler)
+    except OSError as e:
+        # A stale sibling process (e.g. one killed without cleanup) can still
+        # hold this port. The Hook endpoint is a best-effort side channel, not
+        # part of the MCP capability surface (remember/hybrid_search/promote)
+        # — losing it must not crash the whole service.
+        log.warning("scene_hook: could not bind 0.0.0.0:%d (%s); "
+                    "Scene Hook POST endpoint disabled for this run", port, e)
+        return
     thread = threading.Thread(target=server.serve_forever, name="scene-hook", daemon=True)
     thread.start()
     log.info("scene_hook: HTTP endpoint on 0.0.0.0:%d", port)
