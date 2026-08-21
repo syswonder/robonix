@@ -399,16 +399,6 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     )
 
 
-def _polygon_area(points) -> float:
-    polygon = [(float(x), float(y)) for x, y in (points or [])]
-    if len(polygon) < 3:
-        return 0.0
-    return abs(sum(
-        x0 * y1 - x1 * y0
-        for (x0, y0), (x1, y1) in zip(polygon, polygon[1:] + polygon[:1])
-    )) * 0.5
-
-
 def _annotation_to_region(a: "Annotation") -> Region:
     points_xy: list[float] = []
     for point in a.points or []:

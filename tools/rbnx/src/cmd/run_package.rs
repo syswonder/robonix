@@ -623,7 +623,6 @@ pub async fn execute_start(
     let expected_driver_contract = manifest.selected_lifecycle_driver_contract()?.to_string();
     let allow_shared_driver_upgrade = explicit_driver_contract
         .is_some_and(|contract| contract != manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT);
-    let has_driver_capability = true;
     let deploy_managed = std::env::var_os("RBNX_DEPLOY_MANAGED").is_some();
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
 
@@ -678,7 +677,7 @@ pub async fn execute_start(
         }
         .to_string(),
     );
-    if has_explicit_config && should_drive_standalone_init(has_driver_capability, deploy_managed) {
+    if has_explicit_config && !deploy_managed {
         output::sub_step("Config: will deliver via Driver(CMD_INIT) post-register");
     } else if has_explicit_config && deploy_managed {
         output::sub_step("Config: deployment owner will deliver Driver(CMD_INIT)");
@@ -732,27 +731,26 @@ pub async fn execute_start(
     // failures are fatal: treating them as an empty set could select an
     // unrelated pre-existing provider and deliver this package's config to it.
     // `rbnx boot` sets RBNX_DEPLOY_MANAGED and owns this sequence itself.
-    let standalone_lifecycle =
-        if should_drive_standalone_init(has_driver_capability, deploy_managed) {
-            let json = materialized_cfg_json
-                .expect("start config materialization always returns a JSON object");
-            let normalized = normalize_atlas_endpoint(&endpoint);
-            let mut atlas = AtlasClient::connect(&normalized).await.with_context(|| {
-                format!("connect Atlas at {normalized} before standalone spawn")
-            })?;
-            let before_snapshot = snapshot_provider_ids(&mut atlas)
-                .await
-                .context("standalone pre-spawn Atlas snapshot")?;
-            Some((
-                atlas,
-                before_snapshot,
-                json,
-                expected_driver_contract.clone(),
-                allow_shared_driver_upgrade,
-            ))
-        } else {
-            None
-        };
+    let standalone_lifecycle = if !deploy_managed {
+        let json = materialized_cfg_json
+            .expect("start config materialization always returns a JSON object");
+        let normalized = normalize_atlas_endpoint(&endpoint);
+        let mut atlas = AtlasClient::connect(&normalized)
+            .await
+            .with_context(|| format!("connect Atlas at {normalized} before standalone spawn"))?;
+        let before_snapshot = snapshot_provider_ids(&mut atlas)
+            .await
+            .context("standalone pre-spawn Atlas snapshot")?;
+        Some((
+            atlas,
+            before_snapshot,
+            json,
+            expected_driver_contract.clone(),
+            allow_shared_driver_upgrade,
+        ))
+    } else {
+        None
+    };
 
     // Scribe tag = the per-INSTANCE provider id, never the package name. A
     // single package (one `package.name`) can be deployed as N instances, each
@@ -883,10 +881,6 @@ fn generated_pythonpath_export(package_root: &Path) -> String {
         "export PYTHONPATH={}:${{PYTHONPATH:-}}",
         shell_escape(&joined)
     )
-}
-
-fn should_drive_standalone_init(has_driver_capability: bool, deploy_managed: bool) -> bool {
-    has_driver_capability && !deploy_managed
 }
 
 fn normalize_atlas_endpoint(endpoint: &str) -> String {
@@ -1076,14 +1070,6 @@ mod tests {
     fn start_without_config_still_materializes_empty_init_config() {
         let config = build_start_config_json(None, &[]).unwrap();
         assert_eq!(config.as_deref(), Some("{}"));
-    }
-
-    #[test]
-    fn standalone_driver_start_owns_init_but_deploy_managed_start_does_not() {
-        assert!(should_drive_standalone_init(true, false));
-        assert!(!should_drive_standalone_init(true, true));
-        assert!(!should_drive_standalone_init(false, false));
-        assert!(!should_drive_standalone_init(false, true));
     }
 
     #[test]

@@ -49,7 +49,6 @@ from .ingest.ros_subscribers import (
     SubscribersHub,
     TopicSpec,
 )
-from .map_meta import MapMetaStore
 from .lifecycle_runtime import (
     SceneLifecycleRuntime,
     close_scene_runtime_resources,

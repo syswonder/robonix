@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Callable
+from typing import Callable
 
 from .result import Deferred, Err, Ok, Result
 
@@ -73,11 +73,6 @@ def generated_grpc_metadata(service_base: str, method: str) -> tuple[str, str]:
     """
     service_name = f"robonix.contracts.{service_base}"
     return service_name, f"/{service_name}/{method}"
-
-
-def driver_pascal_for_namespace(namespace: str) -> str:
-    """`primitive/lidar` → `PrimitiveLidarDriver` (the driver Pascal name)."""
-    return contract_id_to_pascal(f"{namespace.strip('/')}/driver")
 
 
 def lifecycle_contract_for_module(
@@ -475,17 +470,3 @@ def parse_cfg(request) -> dict:
     except json.JSONDecodeError as e:
         raise ValueError(f"bad config_json: {e}") from e
     return v if isinstance(v, dict) else {}
-
-
-def coerce_response(response_cls, ret) -> Any:
-    """Allow handlers to return the response_cls directly OR a dict like
-    {ok, state, error}. Capability's ready/error/deferred helpers return dicts."""
-    if ret is None:
-        return response_cls(ok=True, state="ready", error="")
-    if isinstance(ret, dict):
-        return response_cls(
-            ok=bool(ret.get("ok", True)),
-            state=str(ret.get("state", "ready")),
-            error=str(ret.get("error", "")),
-        )
-    return ret  # already a response message

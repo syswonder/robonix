@@ -26,28 +26,6 @@ fi
 RAW_TOPIC="${TIAGO_SCAN_RAW_TOPIC:-/scanner}"
 OUT_TOPIC="${TIAGO_SCAN_TOPIC:-/scanner_normalized}"
 
-# Cross-host wiring for an isolated (bridge-network) sim — see tiago_chassis
-# start.sh for the rationale. Host-network sim containers do not have a bridge
-# IP, so fall back to localhost unless Docker returns a valid bridge IPv4.
-resolve_advertise_host() {
-  if [ -n "${ROBONIX_ADVERTISE_HOST:-}" ]; then
-    printf '%s\n' "$ROBONIX_ADVERTISE_HOST"
-    return
-  fi
-  local network_mode inspected
-  network_mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$SIM_CT" 2>/dev/null || true)"
-  if [ "$network_mode" = "host" ]; then
-    printf '%s\n' "127.0.0.1"
-    return
-  fi
-  inspected="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIM_CT" 2>/dev/null || true)"
-  if [[ "$inspected" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    printf '%s\n' "$inspected"
-    return
-  fi
-  printf '%s\n' "127.0.0.1"
-}
-
 ADVERTISE_HOST="$(resolve_advertise_host)"
 ATLAS_ENDPOINT="$(resolve_container_atlas_endpoint "$SIM_CT")"
 ATLAS_HOST="${ATLAS_ENDPOINT%:*}"
