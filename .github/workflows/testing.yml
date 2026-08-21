@@ -1130,6 +1130,7 @@ jobs:
             --mapping-container "${ROBONIX_MAPPING_CONTAINER:-robonix_mapping}" \
             --maps-dir "$MAPPING_MAPS_DIR" \
             --sim-container "$ROBONIX_SIM_CONTAINER" \
+            --export-preview "$RUNNER_TEMP/sim-logs/slam-map.png" \
             --delete-after \
             --timeout 420 | tee "$RUNNER_TEMP/sim-logs/scene-map-persistence.txt"
 
@@ -1535,9 +1536,15 @@ jobs:
               json.dump({k: v for k, v in metadata.items() if v}, f, indent=2, sort_keys=True)
               f.write("\n")
           PY
+          # URL-less here: the inline image comes from the report job, which
+          # knows whether the report site publishes for this event.
+          map_preview_args=()
+          [ -f "$RUNNER_TEMP/sim-logs/slam-map.png" ] && \
+            map_preview_args=(--map-preview "$RUNNER_TEMP/sim-logs/slam-map.png")
           python3 "$GITHUB_WORKSPACE/testing/report.py" \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" \
             --out-dir "$GITHUB_WORKSPACE/testing/report" \
+            "${map_preview_args[@]}" \
             --metadata-json "$RUNNER_TEMP/report-metadata.json" \
             --log-root "testing/logs=$GITHUB_WORKSPACE/testing/logs" \
             --log-root "boot_logs=$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs" \
@@ -1661,6 +1668,13 @@ jobs:
       REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
       REPORT_TEST_REF: ${{ inputs.ref || github.ref }}
       REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
+      # Must mirror PUBLISH_REPORT_SITE in the publish_report job: the map
+      # image URL only resolves when the report site actually publishes.
+      REPORT_SITE_PUBLISHED: >-
+        ${{ inputs.authorized == true ||
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'workflow_call' }}
     steps:
       - name: Checkout trusted report generator
         uses: actions/checkout@v4
@@ -1693,10 +1707,15 @@ jobs:
           if [ "${ENABLE_LLM_ANALYSIS:-false}" = "true" ]; then
             llm_args+=(--llm)
           fi
+          map_url_args=()
+          if [ "${REPORT_SITE_PUBLISHED:-false}" = "true" ]; then
+            map_url_args+=(--map-preview-url "https://ci-reports.robonix.ai/reports/runs/${GITHUB_RUN_ID}/slam-map.png")
+          fi
           python3 testing/build_report_from_artifacts.py \
             --artifact-root dl \
             --out-dir report \
             --repo . \
+            "${map_url_args[@]}" \
             "${llm_args[@]}" \
             --metadata "report_id=${GITHUB_RUN_ID}" \
             --metadata "run_url=${run_url}" \

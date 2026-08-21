@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -120,6 +121,15 @@ print(json.dumps(res, ensure_ascii=False))
     )
 
 
+def export_preview(container: str, map_id: str, maps_dir: str, dest: Path,
+                   timeout: float = 60.0) -> None:
+    """Copy the saved map's occupancy.png out of the mapping container."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src = f"{container}:{maps_dir}/{map_id}/occupancy.png"
+    subprocess.run(["docker", "cp", src, str(dest)], check=True, timeout=timeout)
+    print(f"exported_preview {dest} bytes={dest.stat().st_size}")
+
+
 def live_map(container: str, timeout: float) -> dict[str, Any]:
     code = r"""
 import json, time
@@ -206,6 +216,8 @@ def main() -> int:
     ap.add_argument("--skip-save", action="store_true")
     ap.add_argument("--skip-load", action="store_true")
     ap.add_argument("--delete-after", action="store_true")
+    ap.add_argument("--export-preview", type=Path,
+                    help="host path to copy the saved map occupancy.png to (best-effort)")
     args = ap.parse_args()
 
     scene = args.scene_url.rstrip("/")
@@ -243,6 +255,15 @@ def main() -> int:
     check("artifact_nodes_nontrivial", int(counts.get("Node") or 0) >= args.min_nodes,
           str(counts), results)
     check("preview_exists", bool(artifact.get("preview_exists")), str(artifact.get("files")), results)
+
+    if args.export_preview and artifact.get("preview_exists"):
+        # Best-effort: the preview only feeds the CI report and run summary,
+        # so a failed export logs a warning instead of failing verification.
+        try:
+            export_preview(args.mapping_container, args.map_id, args.maps_dir,
+                           args.export_preview)
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARN export_preview failed: {exc}")
 
     live = None
     if not args.skip_load:

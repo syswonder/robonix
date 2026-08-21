@@ -80,6 +80,7 @@ def main() -> int:
     ap.add_argument("--max-log-bytes", type=int, default=524288)
     ap.add_argument("--max-total-log-bytes", type=int, default=12582912)
     ap.add_argument("--llm", action="store_true", help="attempt LLM analysis when DEEPSEEK_API_KEY is present")
+    ap.add_argument("--map-preview-url", default="", help="absolute URL where the published report site serves slam-map.png")
     args = ap.parse_args()
 
     here = Path(__file__).resolve().parent
@@ -167,6 +168,11 @@ def main() -> int:
         report_cmd.extend(["--metadata-json", str(meta_json)])
     report_cmd.extend(log_roots)
     report_cmd.extend(log_files)
+    map_preview = _find_file(artifact_root, "slam-map.png")
+    if map_preview:
+        report_cmd.extend(["--map-preview", str(map_preview)])
+        if args.map_preview_url:
+            report_cmd.extend(["--map-preview-url", args.map_preview_url])
     _run(report_cmd)
     return 0
 
