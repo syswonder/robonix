@@ -1707,15 +1707,13 @@ jobs:
           if [ "${ENABLE_LLM_ANALYSIS:-false}" = "true" ]; then
             llm_args+=(--llm)
           fi
-          map_url_args=()
           if [ "${REPORT_SITE_PUBLISHED:-false}" = "true" ]; then
-            map_url_args+=(--map-preview-url "https://ci-reports.robonix.ai/reports/runs/${GITHUB_RUN_ID}/slam-map.png")
+            export ROBONIX_REPORT_MAP_URL="https://ci-reports.robonix.ai/reports/runs/${GITHUB_RUN_ID}/slam-map.png"
           fi
           python3 testing/build_report_from_artifacts.py \
             --artifact-root dl \
             --out-dir report \
             --repo . \
-            "${map_url_args[@]}" \
             "${llm_args[@]}" \
             --metadata "report_id=${GITHUB_RUN_ID}" \
             --metadata "run_url=${run_url}" \

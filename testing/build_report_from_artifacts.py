@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -80,7 +81,6 @@ def main() -> int:
     ap.add_argument("--max-log-bytes", type=int, default=524288)
     ap.add_argument("--max-total-log-bytes", type=int, default=12582912)
     ap.add_argument("--llm", action="store_true", help="attempt LLM analysis when DEEPSEEK_API_KEY is present")
-    ap.add_argument("--map-preview-url", default="", help="absolute URL where the published report site serves slam-map.png")
     args = ap.parse_args()
 
     here = Path(__file__).resolve().parent
@@ -171,8 +171,10 @@ def main() -> int:
     map_preview = _find_file(artifact_root, "slam-map.png")
     if map_preview:
         report_cmd.extend(["--map-preview", str(map_preview)])
-        if args.map_preview_url:
-            report_cmd.extend(["--map-preview-url", args.map_preview_url])
+        # Set by the workflow only when the report site publishes this run.
+        map_url = os.environ.get("ROBONIX_REPORT_MAP_URL", "")
+        if map_url:
+            report_cmd.extend(["--map-preview-url", map_url])
     _run(report_cmd)
     return 0
 
