@@ -3279,11 +3279,16 @@ async function loadMaps() {
     } catch (e) { toast('list maps failed: ' + e); }
 }
 async function mapRequest(path, body) {
+    // Generous abort: a spatial save can take minutes, but a wedged backend
+    // must still surface as a failure rather than lock the editor forever.
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 300000);
     try {
         const response = await fetch(path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
+            signal: abort.signal,
         });
         const out = await response.json().catch(() => null);
         if (!response.ok || !out || out.ok === false) {
@@ -3296,11 +3301,40 @@ async function mapRequest(path, body) {
         await refresh();
         return { ok: true, out, detail: out.detail || '' };
     } catch (error) {
-        return { ok: false, out: null, detail: `request failed: ${error}` };
+        const detail = abort.signal.aborted
+            ? 'request timed out after 300 s; the backend may still be working — refresh the map list before retrying'
+            : `request failed: ${error}`;
+        return { ok: false, out: null, detail };
+    } finally {
+        clearTimeout(timer);
     }
 }
+function rejectWhileBusy() {
+    // Buttons are disabled while busy, but keyboard focus / re-renders can
+    // still deliver clicks; answer them with feedback instead of silence.
+    if (!mapBusy) return false;
+    toast('another map operation is still running');
+    return true;
+}
+function failMapOperation(verb, id, error, retry) {
+    // Unlocks the editor when an operation throws. Without it the modal stays
+    // on 'Working...' with every control disabled and Esc blocked.
+    setMapStatus(`${verb} ${id} failed: ${error}`, 'err');
+    finishMapOperation({
+        ok: false,
+        title: `${verb} failed`,
+        message: 'Unexpected error; the editor has been unlocked.',
+        detail: String(error),
+        retry,
+    });
+}
+async function withMapBusy(label, run) {
+    // Locks the editor for the duration of `run`, always releasing it.
+    setMapBusy(true, label);
+    try { return await run(); } finally { setMapBusy(false); }
+}
 async function saveCurrentMap() {
-    if (mapBusy) return;
+    if (rejectWhileBusy()) return;
     const id = preferredMapId();
     document.getElementById('map-id').value = id;
     selectedMapId = id; renderMaps();
@@ -3317,6 +3351,7 @@ async function saveCurrentMap() {
             ? ['Validate existing spatial artifact', 'Persist rooms and Scene objects', 'Verify reusable map entry']
             : ['Snapshot the live spatial map', 'Persist rooms and Scene objects', 'Verify artifact and preview'],
     });
+    try {
     const result = await mapRequest('/api/maps/save', { map_id: id, note: 'saved from scene user page' });
     if (result.ok) {
         const out = result.out;
@@ -3348,9 +3383,12 @@ async function saveCurrentMap() {
             retry: saveCurrentMap,
         });
     }
+    } catch (error) {
+        failMapOperation('Save', id, error, saveCurrentMap);
+    }
 }
 async function loadSelectedMap(id) {
-    if (mapBusy) return;
+    if (rejectWhileBusy()) return;
     selectedMapId = id;
     document.getElementById('map-id').value = id;
     renderMaps();
@@ -3361,6 +3399,7 @@ async function loadSelectedMap(id) {
         status: `Loading ${id}; switching Mapping to localization mode...`,
         steps: ['Validate saved spatial artifact', 'Switch Mapping to localization mode', 'Wait for a fresh occupancy grid', 'Restore rooms and Scene objects'],
     });
+    try {
     const result = await mapRequest('/api/maps/load', { map_id: id, mode: 'localization' });
     setMapItemStatus(id, '');
     if (result.ok) {
@@ -3390,14 +3429,17 @@ async function loadSelectedMap(id) {
             retry: () => loadSelectedMap(id),
         });
     }
+    } catch (error) {
+        setMapItemStatus(id, '');
+        failMapOperation('Load', id, error, () => loadSelectedMap(id));
+    }
 }
 async function deleteSelectedMap(id) {
-    if (mapBusy) return;
+    if (rejectWhileBusy()) return;
     if (!(await askConfirm('Delete map', `Delete map “${id}”?`))) return;
     setMapItemStatus(id, 'deleting...');
-    setMapBusy(true, `Deleting map ${id}...`);
-    const out = await api('POST', '/api/maps/delete', { map_id: id });
-    setMapBusy(false);
+    const out = await withMapBusy(`Deleting map ${id}...`,
+        () => api('POST', '/api/maps/delete', { map_id: id }));
     if (out) { setMapStatus(`Deleted ${id}.`, 'ok'); toast('deleted map ' + id); await loadMaps(); }
     else { setMapItemStatus(id, ''); setMapStatus(`Delete ${id} failed.`, 'err'); }
 }
@@ -3419,10 +3461,10 @@ async function sendPoseEstimate(world) {
     if (mapBusy || !world) return;
     setPoseEstimateMode(false);
     const x = world[0], y = world[1], theta = 0.0;
-    setMapBusy(true, `Publishing pose estimate (${x.toFixed(2)}, ${y.toFixed(2)}, ${theta.toFixed(2)})...`);
     toast(`pose estimate: ${x.toFixed(2)}, ${y.toFixed(2)}`);
-    const out = await api('POST', '/api/maps/pose_estimate', { x, y, theta });
-    setMapBusy(false);
+    const out = await withMapBusy(
+        `Publishing pose estimate (${x.toFixed(2)}, ${y.toFixed(2)}, ${theta.toFixed(2)})...`,
+        () => api('POST', '/api/maps/pose_estimate', { x, y, theta }));
     if (out) {
         const msg = `${out.detail || 'Pose estimate sent.'}` +
             (out.delta_before ? ` · before ${poseDeltaText(out.delta_before)}` : '') +
