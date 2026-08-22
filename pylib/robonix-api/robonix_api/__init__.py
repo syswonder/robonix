@@ -15,8 +15,6 @@ The API has two layers:
 
 Example::
 
-    from robonix_api import Primitive, Ok, Deferred
-
     from robonix_api import ATLAS, Primitive, Ok, Err, Deferred
 
     camera = Primitive(

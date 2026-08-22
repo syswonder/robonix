@@ -34,7 +34,8 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
     PackageRuntimeRecord, ProviderRegistrationSnapshot, RegistrationOutcome,
-    resolve_runtime_driver_contract, snapshot_provider_ids, terminate_process_group,
+    contract_id_to_service_name, resolve_runtime_driver_contract, snapshot_provider_ids,
+    terminate_process_group,
 };
 use robonix_cli::output;
 use serde::Deserialize;
@@ -1469,10 +1470,8 @@ pub async fn execute(
         let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
 
         if !skip_system {
-            let builtin_names: &[&str] =
-                &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
             for (key, value) in &deploy.system {
-                if builtin_names.contains(&key.as_str()) {
+                if is_builtin_system(key) {
                     continue;
                 }
                 let pkg_dir = match config.robonix_source_path.as_ref() {
@@ -1884,12 +1883,7 @@ fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> 
         .get(serde_yaml::Value::String("listen".into()))?
         .as_str()?;
     let trimmed = s.trim();
-    if trimmed.is_empty()
-        || !matches!(
-            name,
-            "atlas" | "executor" | "pilot" | "liaison" | "soma" | "vitals"
-        )
-    {
+    if trimmed.is_empty() || !is_builtin_system(name) {
         return None;
     }
     Some(trimmed.to_string())
@@ -2701,32 +2695,6 @@ async fn call_driver_cmd(
     Ok(r.state)
 }
 
-/// Mirrors `robonix_codegen::contract_gen::contract_id_to_service_name`.
-/// Uniform PascalCase: `robonix/primitive/chassis/driver` →
-/// `RobonixPrimitiveChassisDriver`. No prefix stripping. Full gRPC
-/// service path: `/robonix.contracts.<this>/Driver`.
-fn contract_id_to_service_name(id: &str) -> String {
-    id.split('/')
-        .filter(|x| !x.is_empty())
-        .map(|seg| {
-            seg.split('_')
-                .filter(|p| !p.is_empty())
-                .map(|p| {
-                    let mut c = p.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect::<String>()
-}
-
-/// Poll atlas until a provider NOT in `before` appears. Returns the new
-/// `provider_id` plus every distinct lifecycle Driver observed after the
-/// declaration settle window. The caller verifies this list before sending
-/// config or lifecycle commands.
 /// Strip the leading `<component>_` from the boot-log pkg_label.
 /// `system_memory` → `memory`; `primitive_tiago_chassis` → `tiago_chassis`.
 /// Keeps boot-output columns narrow (the section header above already
@@ -2737,6 +2705,10 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
         .unwrap_or(pkg_label)
 }
 
+/// Poll atlas until a provider NOT in `before` appears. Returns the new
+/// `provider_id` plus every distinct lifecycle Driver observed after the
+/// declaration settle window. The caller verifies this list before sending
+/// config or lifecycle commands.
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
     before: &ProviderRegistrationSnapshot,
