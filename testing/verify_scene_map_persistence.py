@@ -130,47 +130,23 @@ rclpy.init()
 node = rclpy.create_node("verify_scene_map_persistence")
 box = {}
 def wall_shape(data, w, h):
-    # Clean walls are a few thin runs; ghost points smear into one thick
-    # blob plus many tiny fragments.
-    occ = {(i % w, i // w) for i, v in enumerate(data) if v > 50}
-    if not occ:
-        return {"occ_components": 0, "occ_largest_share": 0.0, "occ_fragments": 0, "occ_thick_share": 0.0}
-    seen, sizes = set(), []
-    for start in occ:
-        if start in seen:
-            continue
-        seen.add(start); stack, size = [start], 0
-        while stack:
-            x, y = stack.pop(); size += 1
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    q = (x + dx, y + dy)
-                    if q in occ and q not in seen:
-                        seen.add(q); stack.append(q)
-        sizes.append(size)
-    thick = sum(1 for (x, y) in occ
-                if sum(((x+dx, y+dy) in occ) for dx in (-1,0,1) for dy in (-1,0,1)) - 1 >= 4)
-    return {
-        "occ_components": len(sizes),
-        "occ_largest_share": round(max(sizes) / len(occ), 3),
-        "occ_fragments": sum(1 for s in sizes if s <= 3),
-        "occ_thick_share": round(thick / len(occ), 3),
-    }
-def cb(msg):
-    data = list(msg.data)
-    box["msg"] = {
-        "width": msg.info.width,
-        "height": msg.info.height,
-        "resolution": msg.info.resolution,
-        "known": sum(1 for v in data if v >= 0),
-        "occupied": sum(1 for v in data if v > 50),
-        "free": sum(1 for v in data if v == 0),
-        "unknown": sum(1 for v in data if v < 0),
-        "frame_id": msg.header.frame_id,
-        "origin_x": msg.info.origin.position.x,
-        "origin_y": msg.info.origin.position.y,
-    }
-    box["msg"].update(wall_shape(data, msg.info.width, msg.info.height))
+    # Filatov et al., "2D SLAM Quality Evaluation Methods" (FRUCT 2017): three
+    # no-ground-truth metrics. Blur and misalignment inflate the occupied
+    # proportion while destroying corners and closed rooms.
+    import numpy as np, cv2
+    g = np.array(data, dtype=np.int16).reshape(h, w)
+    occ = (g > 50).astype(np.uint8)
+    n_occ = int(occ.sum())
+    out = {"occ_proportion": round(n_occ / max(1, int((g <= 50).sum())), 4)}
+    corners = cv2.goodFeaturesToTrack(occ * 255, maxCorners=100000,
+                                      qualityLevel=0.01, minDistance=3)
+    out["corners"] = 0 if corners is None else int(len(corners))
+    num, labels = cv2.connectedComponents((occ == 0).astype(np.uint8), connectivity=4)
+    edge = set(labels[0]) | set(labels[-1]) | set(labels[:, 0]) | set(labels[:, -1])
+    out["enclosed_areas"] = sum(1 for i in range(1, num)
+                                if i not in edge and int((labels == i).sum()) >= 4)
+    return out
+
 qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                  reliability=ReliabilityPolicy.RELIABLE,
                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -231,8 +207,8 @@ def main() -> int:
     ap.add_argument("--min-known-cells", type=int, default=1)
     ap.add_argument("--min-free-cells", type=int, default=0,
                     help="gate on cleared free space; 0 disables the check")
-    ap.add_argument("--max-occ-fragments", type=int, default=0,
-                    help="gate on tiny ghost fragments; 0 disables the check")
+    ap.add_argument("--min-enclosed-areas", type=int, default=0,
+                    help="gate on rooms the walls actually close; 0 disables the check")
     ap.add_argument("--origin-tolerance", type=float, default=0.05)
     ap.add_argument("--timeout", type=float, default=420.0)
     ap.add_argument("--skip-save", action="store_true")
@@ -300,15 +276,15 @@ def main() -> int:
         print("live_map", json.dumps(live, ensure_ascii=False, sort_keys=True))
         check("live_map_known_cells", int(live.get("known") or 0) >= args.min_known_cells,
               str(live), results)
-        shape = (f"free={live.get('free')} components={live.get('occ_components')} "
-                 f"largest_share={live.get('occ_largest_share')} "
-                 f"fragments={live.get('occ_fragments')} thick={live.get('occ_thick_share')}")
+        shape = (f"free={live.get('free')} occ_proportion={live.get('occ_proportion')} "
+                 f"corners={live.get('corners')} enclosed_areas={live.get('enclosed_areas')}")
         print("map_quality", shape)
         if args.min_free_cells:
             check("map_free_space", int(live.get("free") or 0) >= args.min_free_cells,
                   shape, results)
-        if args.max_occ_fragments:
-            check("map_wall_fragments", int(live.get("occ_fragments") or 0) <= args.max_occ_fragments,
+        if args.min_enclosed_areas:
+            check("map_enclosed_areas",
+                  int(live.get("enclosed_areas") or 0) >= args.min_enclosed_areas,
                   shape, results)
 
     meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
