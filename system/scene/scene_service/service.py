@@ -1441,10 +1441,12 @@ async def _run_active(config: dict) -> None:
         log.warning(
             "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
             "while scene binds %r from %s — objects stored under this id "
-            "won't re-anchor across boots; set mapping's config.map_id to "
-            "match",
+            "won't re-anchor across boots; Save the current mapping session "
+            "as %r first, then Load that saved map or restart in "
+            "localization mode",
             binding.map_id,
             binding.source,
+            binding.map_id,
         )
 
     obj_store = None
