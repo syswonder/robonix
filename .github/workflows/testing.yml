@@ -1120,6 +1120,9 @@ jobs:
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
 
       - name: Verify scene map persistence
+        # A failed suite is exactly when the saved map matters most, so this
+        # runs even then; it still fails the job on its own checks.
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
