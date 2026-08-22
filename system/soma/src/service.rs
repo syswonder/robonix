@@ -98,6 +98,7 @@ impl SomaService {
         }
     }
 
+    /// Project the latest ROS runtime samples into the Soma health wire model.
     async fn to_health_snapshot(&self, seq: u64) -> SomaHealthSnapshot {
         const HEALTH_OK: u32 = 0;
         const HEALTH_STALE: u32 = 3;
@@ -266,6 +267,7 @@ impl SomaService {
     }
 }
 
+/// Wrap a raw reading as a wire Scalar carrying its unit and quality flag.
 fn scalar(value: f64, unit: &str, quality: u32) -> Scalar {
     Scalar {
         value,
@@ -274,6 +276,7 @@ fn scalar(value: f64, unit: &str, quality: u32) -> Scalar {
     }
 }
 
+/// Build one named metric for a component from a single scalar reading.
 fn metric(component_id: &str, name: &str, value: f64, unit: &str, quality: u32) -> Metric {
     Metric {
         component_id: component_id.into(),
@@ -429,6 +432,7 @@ impl RobonixSystemSomaFootprint for SomaService {
     }
 }
 
+/// Return the current Unix timestamp in nanoseconds, saturating at the wire limit.
 fn unix_time_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
