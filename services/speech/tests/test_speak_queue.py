@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
+import asyncio
 import base64
 import os
 import threading
@@ -41,8 +42,8 @@ class SpeakerQueueTest(unittest.TestCase):
             second.release()
 
 
-class SpeakTencentTest(unittest.TestCase):
-    def _run_speak(self, text):
+class SpeakTencentTest(unittest.IsolatedAsyncioTestCase):
+    async def _run_speak(self, text):
         """Run speech/speak through Tencent TTS and capture provider/playback data."""
         provider_payloads = []
         played_frames = []
@@ -87,17 +88,17 @@ class SpeakTencentTest(unittest.TestCase):
                     return_value=speaker_stub,
                 ),
             ):
-                response = speak(SimpleNamespace(text=text, target="test-speaker"))
+                response = await speak(SimpleNamespace(text=text, target="test-speaker"))
 
         speaker_channel.__enter__.assert_called_once_with()
         speaker_channel.__exit__.assert_called_once()
 
         return provider_payloads, played_frames, response
 
-    def test_speak_plays_every_long_text_segment_in_order(self):
+    async def test_speak_plays_every_long_text_segment_in_order(self):
         """speech/speak forwards complete PCM joined from safe Tencent requests."""
         text = _HAN_CHAR * 244
-        provider_payloads, played_frames, response = self._run_speak(text)
+        provider_payloads, played_frames, response = await self._run_speak(text)
 
         sent = [payload["Text"] for payload in provider_payloads]
         self.assertEqual([len(segment) for segment in sent], [140, 104])
@@ -107,10 +108,10 @@ class SpeakTencentTest(unittest.TestCase):
         )
         self.assertTrue(response.ok)
 
-    def test_speak_keeps_short_text_single_request_behavior(self):
+    async def test_speak_keeps_short_text_single_request_behavior(self):
         """speech/speak still sends a short utterance once and plays it fully."""
         text = _SHORT_CJK_TEXT
-        provider_payloads, played_frames, response = self._run_speak(text)
+        provider_payloads, played_frames, response = await self._run_speak(text)
 
         self.assertEqual([payload["Text"] for payload in provider_payloads], [text])
         self.assertEqual(
@@ -118,6 +119,71 @@ class SpeakTencentTest(unittest.TestCase):
             b"\x00\x00" * len(text),
         )
         self.assertTrue(response.ok)
+
+    async def test_speak_cancellation_stops_after_first_segment(self):
+        """Cancelled MCP speak must not request later Tencent segments or play."""
+        text = _HAN_CHAR * 244
+        first_started = threading.Event()
+        release_first = threading.Event()
+        provider_payloads = []
+
+        def provider_response(payload):
+            provider_payloads.append(payload)
+            if len(provider_payloads) == 1:
+                first_started.set()
+                self.assertTrue(release_first.wait(2.0))
+            pcm = b"\x00\x00" * len(payload["Text"])
+            return {"Audio": base64.b64encode(pcm).decode("ascii")}
+
+        played_frames = []
+        speaker_stub = Mock()
+        speaker_stub.Speaker.side_effect = lambda frames: played_frames.extend(
+            list(frames)
+        )
+        speaker_channel = MagicMock()
+        capability = SimpleNamespace(provider_id="test-speaker")
+        connection = nullcontext(SimpleNamespace(endpoint="test-endpoint"))
+        environment = {
+            "TENCENTCLOUD_SECRET_ID": "test-id",
+            "TENCENTCLOUD_SECRET_KEY": "test-key",
+            "TENCENT_TTS_MAX_CHARS": "140",
+        }
+
+        with patch.dict(os.environ, environment, clear=True):
+            backend = TencentTTSBackend()
+            backend._post_json = provider_response
+            with (
+                patch.object(
+                    service_module.ATLAS, "find_capability", return_value=[capability]
+                ),
+                patch.object(service_module._tts_servicer, "tts_backend", backend),
+                patch.object(
+                    service_module.speech, "connect_capability", return_value=connection
+                ),
+                patch.object(
+                    service_module.grpc,
+                    "insecure_channel",
+                    return_value=speaker_channel,
+                ),
+                patch.object(
+                    service_module.contracts_grpc,
+                    "RobonixPrimitiveAudioSpeakerStub",
+                    return_value=speaker_stub,
+                ),
+            ):
+                task = asyncio.create_task(
+                    speak(SimpleNamespace(text=text, target="test-speaker"))
+                )
+                self.assertTrue(await asyncio.to_thread(first_started.wait, 2.0))
+                task.cancel()
+                release_first.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertEqual(len(provider_payloads), 1)
+        self.assertEqual(provider_payloads[0]["Text"], _HAN_CHAR * 140)
+        speaker_stub.Speaker.assert_not_called()
+        self.assertEqual(played_frames, [])
 
 
 if __name__ == "__main__":

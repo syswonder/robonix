@@ -7,9 +7,15 @@ from unittest.mock import Mock, patch
 from speech_service.tencent_cloud import (
     TencentRealtimeASRBackend,
     TencentTTSBackend,
+    _TTS_MAX_SEGMENTS,
+    _hard_split_tts_text,
     _split_tts_text,
 )
 from speech_service.tts_errors import TTSInputError
+from speech_service.tts_runtime import (
+    bind_tts_request_active,
+    reset_tts_request_active,
+)
 
 _BASE_ENV = {
     "TENCENTCLOUD_SECRET_ID": "test-id",
@@ -265,6 +271,81 @@ class TencentTTSChunkingTest(unittest.IsolatedAsyncioTestCase):
             await self.backend.synthesize(_HAN_A * 41)
         self.assertEqual(payloads, [])
 
+    async def test_dense_sentence_punctuation_stays_within_request_budget(self):
+        """Valid long text must not be rejected for inefficient natural splits."""
+        # Reviewer fixture: naive sentence cuts previously alternated 140/2 and
+        # produced 70 segments, tripping _TTS_MAX_SEGMENTS even though length
+        # is under 5000 and a hard budget split needs only 36 requests.
+        text = ("a" * 141 + ".") * 35
+        self.assertLessEqual(len(text), 5_000)
+        natural = _split_tts_text(text, 140)
+        hard = _hard_split_tts_text(text, 140)
+        self.assertLessEqual(len(natural), _TTS_MAX_SEGMENTS)
+        self.assertLessEqual(len(hard), _TTS_MAX_SEGMENTS)
+        self.assertEqual("".join(natural), text)
+        self.assertEqual("".join(hard), text)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TENCENTCLOUD_SECRET_ID": "test-id",
+                "TENCENTCLOUD_SECRET_KEY": "test-key",
+                "TENCENT_TTS_MAX_CHARS": "140",
+                "TENCENT_TTS_MAX_TOTAL_CHARS": "5000",
+            },
+            clear=True,
+        ):
+            backend = TencentTTSBackend()
+        payloads = []
+
+        def echo(payload):
+            payloads.append(payload)
+            return {
+                "Audio": base64.b64encode(_fake_pcm(payload["Text"])).decode("ascii")
+            }
+
+        backend._post_json = echo
+        audio = await backend.synthesize(text)
+        sent = [payload["Text"] for payload in payloads]
+        self.assertEqual("".join(sent), text)
+        self.assertLessEqual(len(sent), _TTS_MAX_SEGMENTS)
+        self.assertEqual(audio, b"".join(_fake_pcm(part) for part in sent))
+
+    async def test_request_budget_falls_back_to_hard_split(self):
+        """If natural splits exceed the cap, reuse a bounded hard split."""
+        text = _HAN_A * 50
+        with patch.dict(os.environ, _BASE_ENV, clear=True):
+            backend = TencentTTSBackend()
+        backend.max_text_chars = 10
+        bloated = [text[i : i + 1] for i in range(len(text))]
+        self.assertGreater(len(bloated), _TTS_MAX_SEGMENTS)
+        with patch(
+            "speech_service.tencent_cloud._split_tts_text", return_value=bloated
+        ):
+            segments = backend._segments_for_provider(text)
+        self.assertEqual(segments, _hard_split_tts_text(text, 10))
+        self.assertLessEqual(len(segments), _TTS_MAX_SEGMENTS)
+        self.assertEqual("".join(segments), text)
+
+    async def test_cancellation_stops_before_later_stream_segments(self):
+        """Streaming honors the same liveness gate as one-shot synthesis."""
+        payloads = self._install_echo_response()
+        active = True
+
+        def is_active():
+            return active
+
+        token = bind_tts_request_active(is_active)
+        try:
+            stream = self.backend.synthesize_stream(_HAN_A * 21)
+            self.assertEqual(await anext(stream), _fake_pcm(_HAN_A * 10))
+            active = False
+            with self.assertRaisesRegex(RuntimeError, r"cancelled before segment 2/3"):
+                await anext(stream)
+        finally:
+            reset_tts_request_active(token)
+        self.assertEqual([payload["Text"] for payload in payloads], [_HAN_A * 10])
+
     async def test_pcm_limits_bound_one_shot_and_segment_memory(self):
         """Reject unexpectedly large decoded audio before it grows unbounded."""
         payloads = self._install_echo_response()
@@ -335,6 +416,18 @@ class TencentTTSTextSplitterTest(unittest.TestCase):
     def test_rejects_non_positive_limit(self):
         with self.assertRaisesRegex(ValueError, "greater than zero"):
             _split_tts_text("text", 0)
+
+    def test_ignores_tiny_follow_up_sentence_fragments_on_long_remainder(self):
+        """Avoid 140/2 alternation when a later hard cut stays within budget."""
+        text = ("a" * 141 + ".") * 35
+        segments = _split_tts_text(text, 140)
+        self.assertEqual("".join(segments), text)
+        self.assertLessEqual(len(segments), _TTS_MAX_SEGMENTS)
+        self.assertTrue(all(len(segment) <= 140 for segment in segments))
+        # The previous bug emitted a two-character leftover after nearly every
+        # hard cut (~70 segments). Keep that explosion from returning.
+        tiny = [segment for segment in segments if len(segment) <= 2]
+        self.assertLessEqual(len(tiny), 1)
 
 
 class TencentTTSConfigTest(unittest.TestCase):

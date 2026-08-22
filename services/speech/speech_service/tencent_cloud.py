@@ -64,17 +64,64 @@ def _require_env(*names: str) -> str:
     raise RuntimeError(f"missing Tencent Cloud credential env: {joined}")
 
 
+def _has_tts_content(text: str) -> bool:
+    """Return whether text contains something beyond punctuation/spacing."""
+    return any(unicodedata.category(char)[0] not in {"P", "Z", "C"} for char in text)
+
+
+def _attach_trailing_separators(remaining: str, split_at: int, max_chars: int) -> int:
+    """Keep trailing punctuation with speakable text after a candidate cut."""
+    # A hard cut immediately before trailing punctuation would create a
+    # punctuation-only provider request (for example 140 Han characters
+    # followed by an ideographic full stop). Move enough preceding text
+    # to keep both requests meaningful without exceeding the limit.
+    tail = remaining[split_at:]
+    while tail and len(tail) < max_chars and not _has_tts_content(tail):
+        split_at -= 1
+        tail = remaining[split_at:]
+    return split_at
+
+
+def _hard_split_tts_text(text: str, max_chars: int) -> list[str]:
+    """Split only on the character budget, preserving every input character."""
+    if len(text) <= max_chars:
+        return [text]
+
+    segments: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        split_at = _attach_trailing_separators(remaining, max_chars, max_chars)
+        if split_at <= 0:
+            split_at = max_chars
+        segments.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining:
+        segments.append(remaining)
+    return segments
+
+
 def _split_tts_text(text: str, max_chars: int) -> list[str]:
     """Split text into provider-safe chunks without dropping any characters.
 
     Prefer the last sentence boundary within each limit-sized window, then a
     comma or whitespace, and finally the hard boundary. Short input is returned
     unchanged so the existing single-request behavior remains intact.
+
+    Natural boundaries that leave only a tiny head fragment are ignored when
+    more than one additional full window remains; otherwise dense punctuation
+    near a previous hard cut can alternate short/long segments and exhaust the
+    request budget on otherwise valid input.
     """
     if max_chars <= 0:
         raise ValueError("Tencent TTS max chars must be greater than zero")
     if len(text) <= max_chars:
         return [text]
+
+    # Ignore early natural breaks that carve off a tiny head while a large
+    # remainder still needs multiple requests. A quarter-window floor keeps
+    # ordinary sentence splits (for example "Hello!") while rejecting the
+    # 2-character leftovers that inflate ("a"*141+".")*N into 2N segments.
+    min_natural_chars = max(1, max_chars // 4)
 
     segments: list[str] = []
     remaining = text
@@ -85,33 +132,35 @@ def _split_tts_text(text: str, max_chars: int) -> list[str]:
         )
         if split_at and not _has_tts_content(window[:split_at]):
             split_at = 0
+        if (
+            split_at
+            and split_at < min_natural_chars
+            and len(remaining) - split_at >= max_chars
+        ):
+            split_at = 0
         if split_at == 0:
             split_at = (
                 max((window.rfind(mark) for mark in _TTS_CLAUSE_BREAKS), default=-1) + 1
             )
         if split_at and not _has_tts_content(window[:split_at]):
             split_at = 0
+        if (
+            split_at
+            and split_at < min_natural_chars
+            and len(remaining) - split_at >= max_chars
+        ):
+            split_at = 0
         if split_at == 0:
             split_at = max_chars
 
-        # A hard cut immediately before trailing punctuation would create a
-        # punctuation-only provider request (for example 140 Han characters
-        # followed by an ideographic full stop). Move enough preceding text
-        # to keep both requests meaningful without exceeding the limit.
-        tail = remaining[split_at:]
-        while tail and len(tail) < max_chars and not _has_tts_content(tail):
-            split_at -= 1
-            tail = remaining[split_at:]
+        split_at = _attach_trailing_separators(remaining, split_at, max_chars)
+        if split_at <= 0:
+            split_at = max_chars
         segments.append(remaining[:split_at])
         remaining = remaining[split_at:]
     if remaining:
         segments.append(remaining)
     return segments
-
-
-def _has_tts_content(text: str) -> bool:
-    """Return whether text contains something beyond punctuation/spacing."""
-    return any(unicodedata.category(char)[0] not in {"P", "Z", "C"} for char in text)
 
 
 @dataclass(frozen=True)
@@ -409,11 +458,7 @@ class TencentTTSBackend:
         audio = []
         audio_size = 0
         for index, segment in enumerate(segments, start=1):
-            if not tts_request_is_active():
-                raise RuntimeError(
-                    f"Tencent TTS synthesis cancelled before segment "
-                    f"{index}/{len(segments)}"
-                )
+            self._ensure_tts_request_active(index, len(segments))
             segment_audio = await self._synthesize_segment(
                 segment,
                 voice,
@@ -495,6 +540,7 @@ class TencentTTSBackend:
         segments = self._segments_for_provider(text)
         primary_language = self._primary_language_for_text(text)
         for index, segment in enumerate(segments, start=1):
+            self._ensure_tts_request_active(index, len(segments))
             data = await self._synthesize_segment(
                 segment,
                 voice,
@@ -505,6 +551,14 @@ class TencentTTSBackend:
             )
             for offset in range(0, len(data), 4096):
                 yield data[offset : offset + 4096]
+
+    @staticmethod
+    def _ensure_tts_request_active(index: int, total: int) -> None:
+        """Stop paid fan-out when the bound transport/request is no longer live."""
+        if not tts_request_is_active():
+            raise RuntimeError(
+                f"Tencent TTS synthesis cancelled before segment {index}/{total}"
+            )
 
     def _segments_for_provider(self, text: str) -> list[str]:
         """Validate and split text without dropping provider-visible input."""
@@ -518,6 +572,11 @@ class TencentTTSBackend:
                 f"maximum of {self.max_total_text_chars} characters"
             )
         segments = _split_tts_text(text, self.max_text_chars)
+        if len(segments) > _TTS_MAX_SEGMENTS:
+            # Natural punctuation can carve tiny follow-up fragments (for
+            # example 140/2 alternating cuts) that exceed the request cap even
+            # when a plain budget split fits. Prefer the bounded split then.
+            segments = _hard_split_tts_text(text, self.max_text_chars)
         if len(segments) > _TTS_MAX_SEGMENTS:
             raise TTSInputError(
                 f"Tencent TTS text requires {len(segments)} requests; "

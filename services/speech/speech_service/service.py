@@ -1276,7 +1276,7 @@ def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
 
 
 @speech.mcp("robonix/service/speech/speak")
-def speak(req: Speak_Request) -> Speak_Response:
+async def speak(req: Speak_Request) -> Speak_Response:
     """Synthesize `text` to speech and play it out loud on a speaker. `target`
     is the speaker primitive's provider_id (from list_speakers). When it is
     empty, the configured default_speaker_provider_id is used; without a
@@ -1301,42 +1301,92 @@ def speak(req: Speak_Request) -> Speak_Response:
     speaker_lock = _speaker_lock(cap.provider_id)
     if speaker_lock.locked():
         log.info("speech/speak queued for busy speaker %s", cap.provider_id)
-    with speaker_lock:
+
+    # Poll so a busy speaker only suspends this await, and so cancellation
+    # cannot race a blocking acquire that would otherwise leak the lock.
+    while not speaker_lock.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    try:
         tts_backend = _tts_servicer.tts_backend
         if tts_backend is None:
-            log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
+            log.warning(
+                "speech/speak called before Driver(INIT) installed a TTS "
+                "backend; using direct Edge TTS fallback"
+            )
         if tts_backend is None and _speak_tts is None:
             _speak_tts = EdgeTTSBackend()
         if tts_backend is None:
             tts_backend = _speak_tts
-        # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
-        # would error ("loop already running"). Synthesize on a worker thread
-        # that owns its own loop.
-        import asyncio
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
+
+        # FastMCP's async shim awaits this coroutine. Keep synthesis on a
+        # worker thread (backends may call asyncio.run) and bind a liveness
+        # flag so multi-segment Tencent fan-out stops after cancellation.
+        active = threading.Event()
+        active.set()
+
+        def is_active() -> bool:
+            return active.is_set()
+
+        def _synthesize() -> bytes:
+            token = bind_tts_request_active(is_active)
+            try:
+                return asyncio.run(tts_backend.synthesize(text))
+            finally:
+                reset_tts_request_active(token)
+
+        loop = asyncio.get_running_loop()
+        synth_future = loop.run_in_executor(None, _synthesize)
+        try:
+            pcm = await synth_future
+        except asyncio.CancelledError:
+            active.clear()
+            try:
+                await synth_future
+            except Exception as exc:
+                log.info("speech/speak synthesis stopped after cancel: %s", exc)
+            raise
+
         if not pcm:
             raise RuntimeError("TTS backend returned no PCM audio")
-        log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
+        log.info(
+            "speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text)
+        )
 
-        with (
-            speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch,
-            grpc.insecure_channel(ch.endpoint) as speaker_channel,
-        ):
-            stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(speaker_channel)
+        def _play() -> None:
+            with (
+                speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch,
+                grpc.insecure_channel(ch.endpoint) as speaker_channel,
+            ):
+                stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(speaker_channel)
 
-            def frames():
-                frame_bytes = 9600 * 2  # 600 ms s16le frames
-                seq = 0
-                for i in range(0, len(pcm), frame_bytes):
-                    seq += 1
-                    yield audio_pb2.AudioChunk(
-                        data=pcm[i:i + frame_bytes], timestamp_ns=0,
-                        sequence=seq, duration_s=0.0,
-                    )
+                def frames():
+                    frame_bytes = 9600 * 2  # 600 ms s16le frames
+                    seq = 0
+                    for i in range(0, len(pcm), frame_bytes):
+                        if not active.is_set():
+                            return
+                        seq += 1
+                        yield audio_pb2.AudioChunk(
+                            data=pcm[i : i + frame_bytes],
+                            timestamp_ns=0,
+                            sequence=seq,
+                            duration_s=0.0,
+                        )
 
-            stub.Speaker(frames())
+                stub.Speaker(frames())
+
+        play_future = loop.run_in_executor(None, _play)
+        try:
+            await play_future
+        except asyncio.CancelledError:
+            active.clear()
+            try:
+                await play_future
+            except Exception as exc:
+                log.info("speech/speak playback stopped after cancel: %s", exc)
+            raise
+    finally:
+        speaker_lock.release()
 
     return Speak_Response(ok=True, detail=f"spoke {len(text)} chars on {cap.provider_id}")
 
