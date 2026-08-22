@@ -147,6 +147,22 @@ def wall_shape(data, w, h):
                                 if i not in edge and int((labels == i).sum()) >= 4)
     return out
 
+def cb(msg):
+    data = list(msg.data)
+    box["msg"] = {
+        "width": msg.info.width,
+        "height": msg.info.height,
+        "resolution": msg.info.resolution,
+        "known": sum(1 for v in data if v >= 0),
+        "occupied": sum(1 for v in data if v > 50),
+        "free": sum(1 for v in data if v == 0),
+        "unknown": sum(1 for v in data if v < 0),
+        "frame_id": msg.header.frame_id,
+        "origin_x": msg.info.origin.position.x,
+        "origin_y": msg.info.origin.position.y,
+    }
+    box["msg"].update(wall_shape(data, msg.info.width, msg.info.height))
+
 qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                  reliability=ReliabilityPolicy.RELIABLE,
                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
