@@ -1,0 +1,29 @@
+# Verify Scene object dropout against a real, removable Webots fixture.
+name: scene_object_dropout
+task: "ci-test: verify scene object dropout and stable re-identification"
+steps:
+  - time_s: 0.0
+    content: Verifying a removable Webots object.
+    rtdl_description: spawn, remove, re-observe, and expire a Webots fixture
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: scene_object_dropout_step
+      children:
+        - op: do
+          id: verify_scene_object_dropout
+          cap: executor.builtin_run_command
+          args:
+            command: 'python3 "$(rbnx path root)/testing/verify_scene_object_dropout.py"'
+          description: run the live Webots Scene object lifecycle verifier
+          expect:
+            contract: robonix/system/executor/builtin/run_command
+            success: true
+            args:
+              command: 'python3 "$(rbnx path root)/testing/verify_scene_object_dropout.py"'
+            output:
+              json:
+                ok: true
+                reappeared_same_id: true
+  - content: Scene dropout and stable re-identification verified.
+    status: done

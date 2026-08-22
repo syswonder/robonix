@@ -237,23 +237,57 @@ def _leaf_results_from_messages(messages: list[dict]) -> list[dict]:
         elif isinstance(content, list):
             parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
     leaves: list[dict] = []
-    seen: set[int] = set()
+    seen: set[tuple[str, str]] = set()
+
+    def append_leaf(leaf: dict, container: dict) -> None:
+        # `_walk_json` visits both `{call_id, leaf_result: {...}}` and the
+        # nested leaf dict. Without de-duplication the same completed call is
+        # counted twice, so a scenario with repeated contracts can skip its
+        # next real step. Prefer the executor's stable call id. Older payloads
+        # without one fall back to the canonical leaf content, which also
+        # removes replayed copies of the same historical result.
+        call_id = container.get("call_id") or leaf.get("call_id")
+        if call_id is not None and str(call_id):
+            key = ("call_id", str(call_id))
+        else:
+            key = (
+                "leaf",
+                json.dumps(
+                    leaf,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            )
+        if key in seen:
+            return
+        seen.add(key)
+        leaves.append(leaf)
+
+    def collect(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                collect(item)
+            return
+        if not isinstance(node, dict):
+            return
+        leaf = node.get("leaf_result")
+        if isinstance(leaf, dict):
+            append_leaf(leaf, node)
+            # The nested dict is the same result, not a second call. Continue
+            # through siblings only in case the envelope also carries results.
+            for key, value in node.items():
+                if key != "leaf_result":
+                    collect(value)
+            return
+        if {"contract_id", "success", "output"}.issubset(node.keys()):
+            append_leaf(node, node)
+            return
+        for value in node.values():
+            collect(value)
+
     for value in _json_values_from_text("\n".join(parts)):
-        for node in _walk_json(value):
-            if not isinstance(node, dict):
-                continue
-            leaf = node.get("leaf_result")
-            if isinstance(leaf, dict):
-                candidate = leaf
-            elif {"contract_id", "success", "output"}.issubset(node.keys()):
-                candidate = node
-            else:
-                continue
-            marker = id(candidate)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            leaves.append(candidate)
+        collect(value)
     return leaves
 
 

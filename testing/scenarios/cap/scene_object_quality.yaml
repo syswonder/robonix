@@ -1,0 +1,35 @@
+# Gate live Scene objects on map bounds and checked-in Webots ground truth.
+name: scene_object_quality
+task: "ci-test: verify live scene object spatial quality"
+steps:
+  - time_s: 0.0
+    content: Checking Scene object quality.
+    rtdl_description: validate label, center, 3D box, cloud, stability, and admission
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: scene_object_quality_step
+      children:
+        - op: do
+          id: verify_scene_object_quality
+          cap: executor.builtin_run_command
+          args:
+            command: 'python3 "$(rbnx path root)/testing/verify_scene_object_quality.py"'
+          description: check the live Scene registry against the occupancy map
+          expect:
+            contract: robonix/system/executor/builtin/run_command
+            success: true
+            args:
+              command: 'python3 "$(rbnx path root)/testing/verify_scene_object_quality.py"'
+            output:
+              json:
+                ok: true
+                off_map_count: 0
+                invalid_bbox_count: 0
+                background_label_count: 0
+                ground_truth_metrics:
+                  ok: true
+                  label_accuracy: 1.0
+                  stable_id_count: 1
+  - content: Scene spatial object quality verified.
+    status: done
