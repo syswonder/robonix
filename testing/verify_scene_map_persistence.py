@@ -129,6 +129,33 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 rclpy.init()
 node = rclpy.create_node("verify_scene_map_persistence")
 box = {}
+def wall_shape(data, w, h):
+    # Clean walls are a few thin runs; ghost points smear into one thick
+    # blob plus many tiny fragments.
+    occ = {(i % w, i // w) for i, v in enumerate(data) if v > 50}
+    if not occ:
+        return {"occ_components": 0, "occ_largest_share": 0.0, "occ_fragments": 0, "occ_thick_share": 0.0}
+    seen, sizes = set(), []
+    for start in occ:
+        if start in seen:
+            continue
+        seen.add(start); stack, size = [start], 0
+        while stack:
+            x, y = stack.pop(); size += 1
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    q = (x + dx, y + dy)
+                    if q in occ and q not in seen:
+                        seen.add(q); stack.append(q)
+        sizes.append(size)
+    thick = sum(1 for (x, y) in occ
+                if sum(((x+dx, y+dy) in occ) for dx in (-1,0,1) for dy in (-1,0,1)) - 1 >= 4)
+    return {
+        "occ_components": len(sizes),
+        "occ_largest_share": round(max(sizes) / len(occ), 3),
+        "occ_fragments": sum(1 for s in sizes if s <= 3),
+        "occ_thick_share": round(thick / len(occ), 3),
+    }
 def cb(msg):
     data = list(msg.data)
     box["msg"] = {
@@ -143,6 +170,7 @@ def cb(msg):
         "origin_x": msg.info.origin.position.x,
         "origin_y": msg.info.origin.position.y,
     }
+    box["msg"].update(wall_shape(data, msg.info.width, msg.info.height))
 qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                  reliability=ReliabilityPolicy.RELIABLE,
                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -201,6 +229,10 @@ def main() -> int:
     ap.add_argument("--min-artifact-bytes", type=int, default=1_000_000)
     ap.add_argument("--min-nodes", type=int, default=1)
     ap.add_argument("--min-known-cells", type=int, default=1)
+    ap.add_argument("--min-free-cells", type=int, default=0,
+                    help="gate on cleared free space; 0 disables the check")
+    ap.add_argument("--max-occ-fragments", type=int, default=0,
+                    help="gate on tiny ghost fragments; 0 disables the check")
     ap.add_argument("--origin-tolerance", type=float, default=0.05)
     ap.add_argument("--timeout", type=float, default=420.0)
     ap.add_argument("--skip-save", action="store_true")
@@ -268,6 +300,16 @@ def main() -> int:
         print("live_map", json.dumps(live, ensure_ascii=False, sort_keys=True))
         check("live_map_known_cells", int(live.get("known") or 0) >= args.min_known_cells,
               str(live), results)
+        shape = (f"free={live.get('free')} components={live.get('occ_components')} "
+                 f"largest_share={live.get('occ_largest_share')} "
+                 f"fragments={live.get('occ_fragments')} thick={live.get('occ_thick_share')}")
+        print("map_quality", shape)
+        if args.min_free_cells:
+            check("map_free_space", int(live.get("free") or 0) >= args.min_free_cells,
+                  shape, results)
+        if args.max_occ_fragments:
+            check("map_wall_fragments", int(live.get("occ_fragments") or 0) <= args.max_occ_fragments,
+                  shape, results)
 
     meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
     expected_w = int(meta.get("width") or artifact.get("preview_width") or 0)

@@ -1,0 +1,23 @@
+# Drive a long enough explore that the saved map can be judged on quality.
+name: map_quality
+task: "ci-test: explore long enough to build a judgeable occupancy map"
+steps:
+  - time_s: 130.0
+    status: in_progress
+    rtdl_description: long explore for map coverage
+    rtdl:
+      op: sequence
+      id: long_explore_step
+      children:
+        - op: do
+          id: long_explore
+          cap: explore.explore_explore
+          args: {area_hint: "ci local room", timeout_s: 120.0, max_speed_m_s: 0.3}
+          description: explore until the ceiling to cover the room
+          expect:
+            contract: robonix/skill/explore/explore
+            success: false
+            args: {area_hint: "ci local room", timeout_s: 120.0, max_speed_m_s: 0.3}
+            output:
+              error_regex: 'hit 120\.0s ceiling'
+  - status: done
