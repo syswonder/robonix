@@ -1,0 +1,143 @@
+Solid {
+  translation 2.10 -5.65 0
+  rotation 0 0 1 0
+  name "scene_dropout_fixture_chair"
+  children [
+    Transform {
+      translation 0 0 0.50
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.05 0.20 0.80
+            roughness 0.45
+          }
+          geometry Box {
+            size 0.62 0.58 0.12
+          }
+        }
+      ]
+    }
+    Transform {
+      translation 0 0.25 0.90
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.05 0.20 0.80
+            roughness 0.45
+          }
+          geometry Box {
+            size 0.62 0.10 0.72
+          }
+        }
+      ]
+    }
+    Transform {
+      translation 0.24 0.21 0.24
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.04 0.04 0.05
+            roughness 0.70
+          }
+          geometry Box {
+            size 0.07 0.07 0.48
+          }
+        }
+      ]
+    }
+    Transform {
+      translation -0.24 0.21 0.24
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.04 0.04 0.05
+            roughness 0.70
+          }
+          geometry Box {
+            size 0.07 0.07 0.48
+          }
+        }
+      ]
+    }
+    Transform {
+      translation 0.24 -0.21 0.24
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.04 0.04 0.05
+            roughness 0.70
+          }
+          geometry Box {
+            size 0.07 0.07 0.48
+          }
+        }
+      ]
+    }
+    Transform {
+      translation -0.24 -0.21 0.24
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.04 0.04 0.05
+            roughness 0.70
+          }
+          geometry Box {
+            size 0.07 0.07 0.48
+          }
+        }
+      ]
+    }
+  ]
+  boundingObject Group {
+    children [
+      Transform {
+        translation 0 0 0.50
+        children [
+          Box {
+            size 0.62 0.58 0.12
+          }
+        ]
+      }
+      Transform {
+        translation 0 0.25 0.90
+        children [
+          Box {
+            size 0.62 0.10 0.72
+          }
+        ]
+      }
+      Transform {
+        translation 0.24 0.21 0.24
+        children [
+          Box {
+            size 0.07 0.07 0.48
+          }
+        ]
+      }
+      Transform {
+        translation -0.24 0.21 0.24
+        children [
+          Box {
+            size 0.07 0.07 0.48
+          }
+        ]
+      }
+      Transform {
+        translation 0.24 -0.21 0.24
+        children [
+          Box {
+            size 0.07 0.07 0.48
+          }
+        ]
+      }
+      Transform {
+        translation -0.24 -0.21 0.24
+        children [
+          Box {
+            size 0.07 0.07 0.48
+          }
+        ]
+      }
+    ]
+  }
+}

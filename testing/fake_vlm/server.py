@@ -237,23 +237,57 @@ def _leaf_results_from_messages(messages: list[dict]) -> list[dict]:
         elif isinstance(content, list):
             parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
     leaves: list[dict] = []
-    seen: set[int] = set()
+    seen: set[tuple[str, str]] = set()
+
+    def append_leaf(leaf: dict, container: dict) -> None:
+        # `_walk_json` visits both `{call_id, leaf_result: {...}}` and the
+        # nested leaf dict. Without de-duplication the same completed call is
+        # counted twice, so a scenario with repeated contracts can skip its
+        # next real step. Prefer the executor's stable call id. Older payloads
+        # without one fall back to the canonical leaf content, which also
+        # removes replayed copies of the same historical result.
+        call_id = container.get("call_id") or leaf.get("call_id")
+        if call_id is not None and str(call_id):
+            key = ("call_id", str(call_id))
+        else:
+            key = (
+                "leaf",
+                json.dumps(
+                    leaf,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            )
+        if key in seen:
+            return
+        seen.add(key)
+        leaves.append(leaf)
+
+    def collect(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                collect(item)
+            return
+        if not isinstance(node, dict):
+            return
+        leaf = node.get("leaf_result")
+        if isinstance(leaf, dict):
+            append_leaf(leaf, node)
+            # The nested dict is the same result, not a second call. Continue
+            # through siblings only in case the envelope also carries results.
+            for key, value in node.items():
+                if key != "leaf_result":
+                    collect(value)
+            return
+        if {"contract_id", "success", "output"}.issubset(node.keys()):
+            append_leaf(node, node)
+            return
+        for value in node.values():
+            collect(value)
+
     for value in _json_values_from_text("\n".join(parts)):
-        for node in _walk_json(value):
-            if not isinstance(node, dict):
-                continue
-            leaf = node.get("leaf_result")
-            if isinstance(leaf, dict):
-                candidate = leaf
-            elif {"contract_id", "success", "output"}.issubset(node.keys()):
-                candidate = node
-            else:
-                continue
-            marker = id(candidate)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            leaves.append(candidate)
+        collect(value)
     return leaves
 
 
@@ -687,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.pending_steps.pop(name, None)
                 envelope = terminal_envelope("scripted steps complete")
 
-        self._stream_envelope(req, envelope)
+        self._stream_envelope(req.get("model", "fake-vlm"), envelope)
 
     def _all_user_text(self, messages: list[dict]) -> str:
         parts: list[str] = []
@@ -719,23 +753,10 @@ class Handler(BaseHTTPRequestHandler):
         self._emit(f"scenario {scenario['name']!r} round {round_index}: timeline sleep {delay:.3f}s")
         time.sleep(delay)
 
-    def _stream_envelope(self, request: dict, envelope: dict):
-        model = request.get("model", "fake-vlm")
+    def _stream_envelope(self, model: str, envelope: dict):
         payload = json.dumps(envelope, ensure_ascii=False)
         created = int(time.time())
         base = {"id": "fake-cmpl", "object": "chat.completion.chunk", "created": created, "model": model}
-        messages = request.get("messages", [])
-        prompt_bytes = sum(
-            len(message.get("content", "").encode())
-            for message in messages
-            if isinstance(message.get("content"), str)
-        )
-        prompt_tokens = max(1, math.ceil(prompt_bytes / 4))
-        completion_tokens = max(1, math.ceil(len(payload.encode()) / 4))
-        self._emit(
-            f"prompt bytes={prompt_bytes} estimated_tokens={prompt_tokens} "
-            f"messages={len(messages)}"
-        )
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -749,16 +770,6 @@ class Handler(BaseHTTPRequestHandler):
 
         chunk({"role": "assistant", "content": payload}, None)
         chunk({}, "stop")
-        if request.get("stream_options", {}).get("include_usage"):
-            usage = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-                "prompt_tokens_details": {"cached_tokens": 0},
-            }
-            obj = dict(base, choices=[], usage=usage)
-            self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
-            self.wfile.flush()
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 

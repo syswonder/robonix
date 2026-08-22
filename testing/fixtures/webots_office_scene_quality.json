@@ -1,0 +1,104 @@
+{
+  "schema_version": 2,
+  "world": "examples/webots/sim/ros_ws/src/eaios_webots/worlds/office.wbt",
+  "map_ground_z_world_m": 0.0,
+  "robot": {
+    "node_type": "TiagoLite",
+    "name": "my_robot"
+  },
+  "target": {
+    "node_type": "PottedTree",
+    "name": "potted tree(2)",
+    "label": "potted_plant",
+    "bbox_size_m": [0.3, 0.3, 1.3],
+    "association_radius_m": 0.75,
+    "dimension_source": "https://github.com/cyberbotics/webots/blob/c6793d8f7230a311c4bc2a3101d9f1a8bc0aa01b/projects/objects/plants/protos/PottedTree.proto"
+  },
+  "targets": [
+    {
+      "node_type": "Table",
+      "name": "table(1)",
+      "label": "table",
+      "bbox_size_field": "size",
+      "bbox_center_offset_m": [0.0, 0.0, 0.37],
+      "association_radius_m": 0.3,
+      "dimension_source": "explicit Table.size field in office.wbt"
+    },
+    {
+      "node_type": "Monitor",
+      "name": "monitor(1)",
+      "label": "monitor",
+      "bbox_size_m": [0.13594834, 0.46901633, 0.34921083],
+      "bbox_center_offset_m": [0.01053075, 0.0, 0.17409917],
+      "association_radius_m": 0.3,
+      "dimension_source": "https://github.com/cyberbotics/webots/blob/c6793d8f7230a311c4bc2a3101d9f1a8bc0aa01b/projects/objects/computers/protos/Monitor.proto",
+      "dimension_basis": "R2025a compound bounding-object envelope and local center offset at default scale"
+    },
+    {
+      "node_type": "Keyboard",
+      "name": "keyboard(1)",
+      "label": "keyboard",
+      "bbox_size_m": [0.13432679, 0.41001573, 0.01003296],
+      "bbox_center_offset_m": [0.0, 0.0, 0.0],
+      "association_radius_m": 0.2,
+      "dimension_source": "https://github.com/cyberbotics/webots/blob/c6793d8f7230a311c4bc2a3101d9f1a8bc0aa01b/projects/objects/computers/protos/Keyboard.proto",
+      "dimension_basis": "R2025a Box bounding object envelope and local center after its local axis rotation"
+    },
+    {
+      "node_type": "OfficeChair",
+      "name": "office chair(2)",
+      "label": "chair",
+      "bbox_size_m": [0.56, 0.55, 0.99],
+      "bbox_center_offset_m": [0.0, 0.0, 0.495],
+      "association_radius_m": 0.45,
+      "dimension_source": "https://github.com/cyberbotics/webots/blob/c6793d8f7230a311c4bc2a3101d9f1a8bc0aa01b/projects/objects/chairs/protos/OfficeChair.proto",
+      "dimension_basis": "R2025a compound bounding-object envelope rounded outward to centimeters"
+    },
+    {
+      "node_type": "Cabinet",
+      "name": "cabinet(1)",
+      "label": "cabinet",
+      "bbox_size_m": [0.5, 1.04, 0.39],
+      "bbox_center_offset_m": [0.25, 0.0, 0.195],
+      "association_radius_m": 0.45,
+      "dimension_source": "https://github.com/cyberbotics/webots/blob/c6793d8f7230a311c4bc2a3101d9f1a8bc0aa01b/projects/objects/cabinet/protos/Cabinet.proto",
+      "dimension_basis": "R2025a formula applied to office.wbt depth/default, columnsWidths, rowsHeights, and outerThickness fields"
+    },
+    {
+      "node_type": "PottedTree",
+      "name": "potted tree(2)",
+      "label": "potted_plant",
+      "bbox_size_m": [0.6, 0.6, 1.341],
+      "bbox_center_offset_m": [0.0, 0.0, 0.6755],
+      "evaluate_yaw": false,
+      "association_radius_m": 0.75,
+      "dimension_source": "https://github.com/cyberbotics/webots/blob/c6793d8f7230a311c4bc2a3101d9f1a8bc0aa01b/projects/objects/plants/protos/PottedTree.proto",
+      "dimension_basis": "R2025a compound pot, trunk, and crown bounding-object envelope"
+    }
+  ],
+  "sampling": {
+    "sample_count": 8,
+    "interval_s": 1.0
+  },
+  "thresholds": {
+    "min_target_recall": 0.875,
+    "min_label_accuracy": 1.0,
+    "max_stable_ids": 1,
+    "max_median_center_xy_error_m": 0.2,
+    "max_center_xy_drift_m": 0.15,
+    "max_median_center_z_error_m": 0.45,
+    "min_median_bbox_iou_3d": 0.15,
+    "point_margin_m": 0.1,
+    "min_median_point_inlier_fraction": 0.65,
+    "min_median_point_count": 20,
+    "min_navigation_grade_fraction": 1.0
+  },
+  "scene_thresholds": {
+    "min_target_recall": 1.0,
+    "min_label_accuracy": 1.0,
+    "max_duplicate_count": 0,
+    "max_median_center_error_m": 0.25,
+    "max_median_size_relative_error": 0.5,
+    "max_median_yaw_error_rad": 0.52
+  }
+}

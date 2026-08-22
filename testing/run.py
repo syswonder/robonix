@@ -640,6 +640,7 @@ def main() -> int:
                 f"# --- stderr ---\n{stderr}\n"
             )
             calls = collect_calls(events)
+            leaves = collect_leaf_results(events)
             results.append({
                 "name": name,
                 "family": family,
@@ -649,7 +650,7 @@ def main() -> int:
                 "failures": failures,
                 "log": log_path.name,
                 "rtdl_steps": summarize_rtdl_steps(scenario),
-                "observed_rounds": summarize_plan_rounds(events),
+                "observed_rounds": summarize_observed_rounds(scenario, calls, leaves),
             })
             failed.append(name)
             continue
