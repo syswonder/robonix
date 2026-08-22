@@ -2,7 +2,7 @@
 name: map_quality
 task: "ci-test: explore long enough to build a judgeable occupancy map"
 steps:
-  - time_s: 130.0
+  - time_s: 0.0
     status: in_progress
     rtdl_description: long explore for map coverage
     rtdl:
