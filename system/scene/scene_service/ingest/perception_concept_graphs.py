@@ -1914,8 +1914,13 @@ class ConceptGraphsDetector:
                     # Update in place. Preserve oid + first_seen. The count is
                     # registry-owned (one per tick seen) so it survives a uuid
                     # swap instead of resetting to the CG object's num_detections.
-                    existing.pose = pose
-                    existing.bbox = bbox
+                    # An operator-corrected pose/bbox outranks perception: the
+                    # CG cloud still sits where the model last saw the object,
+                    # so writing its geometry back would silently undo the
+                    # human's edit on the next tick. Liveness still refreshes.
+                    if not existing.attributes.get("operator_geometry"):
+                        existing.pose = pose
+                        existing.bbox = bbox
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
                     existing.last_seen = now
                     existing.missing = False
@@ -1959,6 +1964,14 @@ class ConceptGraphsDetector:
                     continue
                 cg_uuid = obj.attributes.get("cg_uuid")
                 if cg_uuid is None or cg_uuid not in live_uuids:
+                    # A human-corrected record stays visible even when
+                    # concept-graphs culls its cloud: release the binding so
+                    # the uuid can be reused, but never soft-evict the edit.
+                    if obj.attributes.get("operator_geometry"):
+                        if cg_uuid is not None:
+                            self._uuid_to_oid.pop(cg_uuid, None)
+                            obj.attributes.pop("cg_uuid", None)
+                        continue
                     doomed.append(obj)
                     if cg_uuid is not None:
                         self._uuid_to_oid.pop(cg_uuid, None)
@@ -1972,6 +1985,60 @@ class ConceptGraphsDetector:
             for obj in doomed:
                 self._registry.soft_evict(obj)
             self._registry.prune_expired(now, self._object_ttl_s)
+
+    # ── operator mutation hooks ─────────────────────────────────────────
+    # Called by ObjectMutationCoordinator (asyncio thread). The CG map is
+    # owned by the worker tick under `_inference_lock`, so both hooks do
+    # their MapObjectList surgery on a thread while holding that lock.
+    # Registry-side deletion is the coordinator's job; these only stop the
+    # perception layer from re-projecting the deleted state next tick.
+
+    async def delete_object(self, object_id: str) -> None:
+        """Drop the CG map entries whose uuid is bound to `object_id`.
+
+        Without this, the next projection tick re-binds the surviving CG
+        object and resurrects the record the operator just deleted. If
+        the physical object is later re-observed it re-enters as a fresh
+        detection — the contract deletes a record, not a fact."""
+        uuids = [u for u, oid in getattr(self, "_uuid_to_oid", {}).items()
+                 if oid == object_id]
+        for u in uuids:
+            self._uuid_to_oid.pop(u, None)
+        if not uuids:
+            return
+
+        def _drop() -> None:
+            with self._inference_lock:
+                if self._map_objects is None:
+                    return
+                gone = set(uuids)
+                if self._cg is not None:
+                    retained = self._cg["MapObjectList"]()
+                else:
+                    retained = []
+                for obj in self._map_objects:
+                    if str(obj.get("id", "") or "") not in gone:
+                        retained.append(obj)
+                self._map_objects = retained
+
+        await asyncio.to_thread(_drop)
+
+    async def reset_derived_state(self) -> None:
+        """Empty the CG map and uuid bindings (flush). Re-detections
+        rebuild the map from scratch on subsequent ticks."""
+        if hasattr(self, "_uuid_to_oid"):
+            self._uuid_to_oid.clear()
+
+        def _reset() -> None:
+            with self._inference_lock:
+                if self._map_objects is None:
+                    return
+                if self._cg is not None:
+                    self._map_objects = self._cg["MapObjectList"]()
+                else:
+                    self._map_objects = []
+
+        await asyncio.to_thread(_reset)
 
     def _rebind_restored(self, cls: str, pose: Pose3D) -> Optional[SceneObject]:
         """Nearest warm-restored, not-yet-rebound object of class `cls` whose
