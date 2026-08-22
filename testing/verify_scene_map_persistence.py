@@ -103,6 +103,14 @@ if os.path.isfile(db):
     res["artifact_size"] = os.path.getsize(db)
     con = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=30.0)
     res["quick_check"] = con.execute("PRAGMA quick_check").fetchone()[0]
+    # Link.type: 0 neighbour, 1 global loop closure, 2 local-space,
+    # 3 local-time, 6 neighbour-merged. Only-neighbour means nothing ever
+    # corrected the odometry chain, which is what leaves walls doubled.
+    try:
+        res["link_types"] = {str(t): n for t, n in con.execute(
+            "SELECT type, COUNT(*) FROM Link GROUP BY type").fetchall()}
+    except sqlite3.Error as exc:
+        res["link_types"] = "error:" + str(exc)
     counts = {}
     for table in ["Node", "Data", "Link", "Word"]:
         try:
