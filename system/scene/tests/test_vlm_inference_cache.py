@@ -16,8 +16,12 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scene_service.ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
-from scene_service.scene_graph.image_relations import ImageRelationInferer
+from scene_service.scene_graph.image_relations import (
+    ImageRelationInferer,
+    ImageRelationResult,
+)
 from scene_service.scene_graph.types import SceneGraphNode
+from scene_service.vision_cache import fingerprint_jpeg, frames_equivalent
 
 
 def _scene_rgb() -> np.ndarray:
@@ -29,6 +33,15 @@ def _scene_rgb() -> np.ndarray:
     ).astype(np.uint8)
     image[35:85, 55:110] = (220, 40, 30)
     return image
+
+
+def _large_scene_rgb() -> np.ndarray:
+    """Build a 640x480 frame matching the reviewer's small-object scenario."""
+    yy, xx = np.indices((480, 640))
+    return np.stack(
+        ((xx * 2) % 256, (yy * 2) % 256, (xx + yy) % 256),
+        axis=-1,
+    ).astype(np.uint8)
 
 
 def _jpeg(image: np.ndarray, quality: int = 90) -> bytes:
@@ -56,7 +69,7 @@ def _detector(frame_holder, **kwargs) -> VLMObjectDetector:
         rgb_fetcher=lambda: frame_holder["jpeg"],
         camera_to_world_fn=lambda: None,
         on_detections=_ignore,
-        frame_change_threshold=0.04,
+        frame_change_threshold=0.01,
         **kwargs,
     )
 
@@ -64,7 +77,7 @@ def _detector(frame_holder, **kwargs) -> VLMObjectDetector:
 def test_detection_cache_ignores_identical_compressed_and_noisy_frames(caplog):
     """Equivalent frames spend one model call despite encoding differences."""
     caplog.set_level(logging.DEBUG, logger="scene_service.ingest.perception_vlm")
-    image = _scene_rgb()
+    image = _large_scene_rgb()
     holder = {"jpeg": _jpeg(image, quality=95)}
     detector = _detector(holder)
     calls = []
@@ -103,7 +116,7 @@ def test_detection_cache_ignores_identical_compressed_and_noisy_frames(caplog):
 
 def test_detection_cache_invalidates_on_meaningful_change_and_resolution():
     """A local object change and a resolution change both invalidate cache."""
-    image = _scene_rgb()
+    image = _large_scene_rgb()
     holder = {"jpeg": _jpeg(image)}
     detector = _detector(holder)
     calls = []
@@ -118,7 +131,7 @@ def test_detection_cache_invalidates_on_meaningful_change_and_resolution():
         """Process the original frame followed by a changed scene."""
         await detector._tick()
         changed = image.copy()
-        changed[48:72, 68:92] = (10, 240, 20)
+        changed[220:260, 300:340] = (255, 255, 255)
         holder["jpeg"] = _jpeg(changed)
         await detector._tick()
         holder["jpeg"] = _jpeg(np.repeat(np.repeat(changed, 2, axis=0), 2, axis=1))
@@ -129,9 +142,44 @@ def test_detection_cache_invalidates_on_meaningful_change_and_resolution():
     assert detector.inference_counts["processed"] == 3
 
 
-def test_detection_cache_reprojects_and_refreshes_objects_without_model_call():
-    """Only newly delivered cache hits refresh registry observations."""
+def test_block_metric_separates_noise_from_small_local_objects():
+    """Default block RMS ignores artefacts but detects 16-40px local changes."""
+    image = _large_scene_rgb()
+    reference = fingerprint_jpeg(_jpeg(image, quality=88))
+
+    for quality in (60, 40):
+        candidate = fingerprint_jpeg(_jpeg(image, quality=quality))
+        assert frames_equivalent(reference, candidate, threshold=0.01)
+
+    noisy = np.clip(
+        image.astype(np.float32) + np.random.default_rng(9).normal(0, 10, image.shape),
+        0,
+        255,
+    ).astype(np.uint8)
+    assert frames_equivalent(
+        reference,
+        fingerprint_jpeg(_jpeg(noisy, quality=88)),
+        threshold=0.01,
+    )
+
+    for size in (16, 24, 32, 40):
+        changed = image.copy()
+        changed[200 : 200 + size, 280 : 280 + size] = np.clip(
+            changed[200 : 200 + size, 280 : 280 + size].astype(np.int16) + 40,
+            0,
+            255,
+        ).astype(np.uint8)
+        assert not frames_equivalent(
+            reference,
+            fingerprint_jpeg(_jpeg(changed, quality=88)),
+            threshold=0.01,
+        ), f"{size}px local object change must invalidate the cache"
+
+
+def test_detection_cache_age_applies_only_to_newly_delivered_frames():
+    """Fresh deliveries refresh/cache-expire; a frozen delivery never does."""
     holder = {"sample": (_jpeg(_scene_rgb()), 1.0)}
+    now = {"value": 0.0}
     published = []
 
     async def capture(detections):
@@ -149,6 +197,8 @@ def test_detection_cache_reprojects_and_refreshes_objects_without_model_call():
             cx=80.0,
             cy=60.0,
         ),
+        cache_max_age_s=120.0,
+        clock=lambda: now["value"],
     )
     calls = []
 
@@ -166,17 +216,62 @@ def test_detection_cache_reprojects_and_refreshes_objects_without_model_call():
     detector._call_vlm = fake_call
 
     async def exercise():
-        """Repeat a frozen source timestamp, then deliver the same pixels anew."""
+        """Exercise cache refresh, frozen input, then bounded expiry."""
         await detector._tick()
+        now["value"] = 10.0
         await detector._tick()
         holder["sample"] = (holder["sample"][0], 2.0)
+        await detector._tick()
+        now["value"] = 130.0
+        await detector._tick()  # frozen delivery: no refresh or expiry call
+        holder["sample"] = (holder["sample"][0], 3.0)
+        await detector._tick()  # new delivery after max age: fresh inference
+
+    _run(exercise())
+    assert len(calls) == 2
+    assert len(published) == 3
+    assert published[0][0].pose.frame_id == "map"
+    assert published[1][0].pose.frame_id == "map"
+
+
+def test_cached_detection_retries_publication_without_another_model_call():
+    """Temporary missing geometry retries cached projection on a frozen frame."""
+    holder = {"sample": (_jpeg(_scene_rgb()), 1)}
+    transform = {"value": None}
+    published = []
+    detector = VLMObjectDetector(
+        rgb_fetcher=lambda: holder["sample"],
+        camera_to_world_fn=lambda: transform["value"],
+        on_detections=lambda detections: _capture(published, detections),
+        intrinsics=_CamIntrinsics(160, 120, 100.0, 100.0, 80.0, 60.0),
+    )
+    calls = []
+
+    async def fake_call(jpeg_b64):
+        calls.append(jpeg_b64)
+        return [
+            {
+                "cls": "cup",
+                "bbox_2d": [70, 50, 90, 70],
+                "approximate_depth_m": 2.0,
+            }
+        ]
+
+    detector._call_vlm = fake_call
+
+    async def exercise():
+        """Infer without geometry, then publish from cache once it appears."""
+        await detector._tick()
+        transform["value"] = (np.eye(4), "map")
         await detector._tick()
 
     _run(exercise())
     assert len(calls) == 1
-    assert len(published) == 2
-    assert published[0][0].pose.frame_id == "map"
-    assert published[1][0].pose.frame_id == "map"
+    assert len(published) == 1
+
+
+async def _capture(target, detections) -> None:
+    target.append(detections)
 
 
 def test_detection_failures_use_endpoint_backoff_with_bounded_growth():
@@ -232,7 +327,7 @@ def test_detection_failures_use_endpoint_backoff_with_bounded_growth():
 
 
 def test_detection_response_requires_a_detections_list():
-    """Malformed model JSON fails while an explicit empty list succeeds."""
+    """Malformed top-level JSON fails while bad list items are filtered."""
     detector = _detector({"jpeg": _jpeg(_scene_rgb())})
     detector.base_url = "https://example.invalid"
     detector.api_key = "test"
@@ -256,8 +351,10 @@ def test_detection_response_requires_a_detections_list():
             return _Response()
 
     async def exercise():
-        """Read malformed and valid-empty responses through the real parser."""
+        """Read malformed, mixed, and valid-empty responses through the parser."""
         assert await detector._call_vlm("jpeg") is None
+        response["content"] = '{"detections": [{"cls": "cup"}, "bad-item", 7]}'
+        assert await detector._call_vlm("jpeg") == [{"cls": "cup"}]
         response["content"] = '{"detections": []}'
         assert await detector._call_vlm("jpeg") == []
 
@@ -302,6 +399,20 @@ class _RelationClient:
         return self.response
 
 
+def test_cache_configuration_defaults_are_wired():
+    """Constructor defaults retain the reviewed threshold and expiry bounds."""
+    with patch.dict(os.environ, {}, clear=True):
+        detector = VLMObjectDetector(
+            rgb_fetcher=lambda: None,
+            camera_to_world_fn=lambda: None,
+            on_detections=_ignore,
+        )
+        relation_inferer = ImageRelationInferer(_RelationClient())
+    assert detector.frame_change_threshold == 0.01
+    assert detector.cache_max_age_s == 120.0
+    assert relation_inferer.frame_change_threshold == 0.01
+
+
 def _nodes() -> list[SceneGraphNode]:
     """Return two visible objects with stable ids, geometry, and captions."""
     return [
@@ -337,7 +448,7 @@ def test_relation_cache_reuses_input_and_invalidates_scene_changes(caplog):
     """Reuse stable relation input and invalidate each meaningful component."""
     caplog.set_level(logging.DEBUG, logger="scene_service.scene_graph.image_relations")
     client = _RelationClient()
-    inferer = ImageRelationInferer(client, frame_change_threshold=0.04)
+    inferer = ImageRelationInferer(client, frame_change_threshold=0.01)
     nodes = _nodes()
     frame = _scene_rgb()[..., ::-1].copy()  # relation bundle is BGR
     bundle = (frame, _K(), np.eye(4))
@@ -345,12 +456,29 @@ def test_relation_cache_reuses_input_and_invalidates_scene_changes(caplog):
     async def exercise():
         """Vary order, noise, geometry, image, camera, then prompt input."""
         first = await inferer.infer(nodes, bundle)
-        second = await inferer.infer(list(reversed(nodes)), bundle)
-        assert first and second and second[0].method == "cached"
+        assert first
+        refreshed_at = first.edges[0].updated_at + 10.0
+        with patch(
+            "scene_service.scene_graph.image_relations.time.time",
+            return_value=refreshed_at,
+        ):
+            second = await inferer.infer(list(reversed(nodes)), bundle)
+        assert second
+        assert first.outcome == "processed" and second.outcome == "cached"
+        assert second.edges[0].method == "cached"
+        assert second.edges[0].updated_at == refreshed_at
+        assert second.edges[0].stale_rounds == 0
+
+        jittered_camera = np.eye(4)
+        jittered_camera[0, 3] = 0.004
+        jittered = await inferer.infer(nodes, (frame, _K(), jittered_camera))
+        assert jittered and jittered.outcome == "cached"
+        assert client.calls == 1
 
         noisy = np.clip(frame.astype(np.int16) + 1, 0, 255).astype(np.uint8)
         third = await inferer.infer(nodes, (noisy, _K(), np.eye(4)))
-        assert third and third[0].method == "cached"
+        assert third and third.outcome == "cached"
+        assert third.edges[0].method == "cached"
 
         nodes[0].bbox_center = (-0.35, 0.0, 2.0)
         await inferer.infer(nodes, bundle)  # visible geometry changed
@@ -381,8 +509,8 @@ def test_relation_cache_reuses_input_and_invalidates_scene_changes(caplog):
 
     assert client.calls == 6
     assert inferer.inference_counts["processed"] == 6
-    assert inferer.inference_counts["skipped"] == 2
-    assert "processed=6 skipped=2 retried=0 failed=0" in caplog.text
+    assert inferer.inference_counts["skipped"] == 3
+    assert "processed=6 skipped=3 retried=0 failed=0" in caplog.text
 
 
 def test_relation_cache_reuses_an_explicit_empty_result():
@@ -393,8 +521,12 @@ def test_relation_cache_reuses_an_explicit_empty_result():
 
     async def exercise():
         """Run one valid-empty inference and then reuse it."""
-        assert await inferer.infer(_nodes(), bundle) == []
-        assert await inferer.infer(_nodes(), bundle) == []
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "processed"
+        )
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "cached"
+        )
 
     with patch(
         "scene_service.scene_graph.image_relations.annotate_frame",
@@ -405,6 +537,43 @@ def test_relation_cache_reuses_an_explicit_empty_result():
     assert client.calls == 1
     assert inferer.inference_counts["processed"] == 1
     assert inferer.inference_counts["skipped"] == 1
+
+
+def test_filtered_relation_entries_are_successful_and_cacheable():
+    """Out-of-vocabulary and malformed entries do not imitate endpoint failure."""
+    client = _RelationClient(
+        response={
+            "edges": [
+                {"source": 1, "target": 2, "relation": "near"},
+                "bad-item",
+            ]
+        }
+    )
+    inferer = ImageRelationInferer(client)
+    bundle = (_scene_rgb()[..., ::-1].copy(), _K(), np.eye(4))
+
+    async def exercise():
+        """Process a filtered-empty response and reuse its empty result."""
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "processed"
+        )
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "cached"
+        )
+
+    with patch(
+        "scene_service.scene_graph.image_relations.annotate_frame",
+        return_value="ZmFrZS1qcGVn",
+    ):
+        _run(exercise())
+
+    assert client.calls == 1
+    assert inferer.inference_counts == {
+        "processed": 1,
+        "skipped": 1,
+        "retried": 0,
+        "failed": 0,
+    }
 
 
 def test_relation_failure_backoff_is_global_and_bounded():
@@ -421,26 +590,44 @@ def test_relation_failure_backoff_is_global_and_bounded():
 
     async def exercise():
         """Advance through base, doubled, and capped relation retry intervals."""
-        assert await inferer.infer(_nodes(), bundle) == []
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "failed"
+        )
         now["value"] = 2.0
-        assert await inferer.infer(_nodes(), bundle) == []
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "backoff"
+        )
         changed = bundle[0].copy()
         changed[10:100, 20:140] = (20, 240, 10)
         changed_bundle = (changed, _K(), np.eye(4))
         now["value"] = 10.0
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "failed"
+        )
         now["value"] = 29.9
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "backoff"
+        )
         now["value"] = 30.0
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "failed"
+        )
         now["value"] = 54.9
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "backoff"
+        )
         now["value"] = 55.0
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "failed"
+        )
         now["value"] = 79.9
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "backoff"
+        )
         now["value"] = 80.0
-        assert await inferer.infer(_nodes(), changed_bundle) == []
+        assert await inferer.infer(_nodes(), changed_bundle) == ImageRelationResult(
+            (), "failed"
+        )
 
     with patch(
         "scene_service.scene_graph.image_relations.annotate_frame",
@@ -466,11 +653,17 @@ def test_relation_malformed_response_retries_then_caches_empty_result():
 
     async def exercise():
         """Reject malformed JSON, recover at deadline, then hit the cache."""
-        assert await inferer.infer(_nodes(), bundle) == []
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "failed"
+        )
         now["value"] = 5.0
         client.response = {"edges": []}
-        assert await inferer.infer(_nodes(), bundle) == []
-        assert await inferer.infer(_nodes(), bundle) == []
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "processed"
+        )
+        assert await inferer.infer(_nodes(), bundle) == ImageRelationResult(
+            (), "cached"
+        )
 
     with patch(
         "scene_service.scene_graph.image_relations.annotate_frame",
@@ -487,6 +680,34 @@ def test_relation_malformed_response_retries_then_caches_empty_result():
     }
 
 
+def test_relation_top_level_failures_are_classified_consistently():
+    """Transport and invalid top-level edge shapes are endpoint failures."""
+    bundle = (_scene_rgb()[..., ::-1].copy(), _K(), np.eye(4))
+
+    class _RaisingClient(_RelationClient):
+        async def chat_json(self, *_args, **_kwargs):
+            raise RuntimeError("offline")
+
+    async def exercise():
+        """Check each invalid response with a fresh backoff state."""
+        clients = [_RelationClient() for _ in range(4)]
+        for client, response in zip(
+            clients,
+            (None, [], {"edges": {}}, {"other": []}),
+        ):
+            client.response = response
+            result = await ImageRelationInferer(client).infer(_nodes(), bundle)
+            assert result == ImageRelationResult((), "failed")
+        result = await ImageRelationInferer(_RaisingClient()).infer(_nodes(), bundle)
+        assert result == ImageRelationResult((), "failed")
+
+    with patch(
+        "scene_service.scene_graph.image_relations.annotate_frame",
+        return_value="ZmFrZS1qcGVn",
+    ):
+        _run(exercise())
+
+
 def test_relation_failure_does_not_fan_out_to_text_fallback():
     """A failed whole-scene call must not trigger many per-pair calls."""
     from scene_service.scene_graph.builder import SceneGraphBuilder
@@ -497,11 +718,49 @@ def test_relation_failure_does_not_fan_out_to_text_fallback():
 
     class _FailedInferer:
         async def infer(self, _nodes_arg, _bundle):
-            return []
+            return ImageRelationResult((), "failed")
 
     builder = object.__new__(SceneGraphBuilder)
     builder.perception = _Perception()
     builder.image_inferer = _FailedInferer()
 
     result = _run(builder._maybe_image_edges(_nodes()))
-    assert result == [], "failed image pass must suppress per-pair text calls"
+    assert result == ImageRelationResult((), "failed")
+
+    class _RaisingInferer:
+        async def infer(self, _nodes_arg, _bundle):
+            raise RuntimeError("unexpected")
+
+    builder.image_inferer = _RaisingInferer()
+    result = _run(builder._maybe_image_edges(_nodes()))
+    assert result == ImageRelationResult((), "failed")
+
+
+def test_relation_backoff_preserves_live_edges_without_aging_them():
+    """A no-call backoff round preserves live prior edge age and removes departures."""
+    from scene_service.scene_graph.builder import SceneGraphBuilder
+    from scene_service.scene_graph.types import SceneGraphEdge
+
+    live = SceneGraphEdge("cup", "table", "on_top_of", stale_rounds=2)
+    departed = SceneGraphEdge("cup", "gone", "attached_to", stale_rounds=1)
+
+    class _Store:
+        def get_semantic_edges(self):
+            return [live, departed]
+
+    builder = object.__new__(SceneGraphBuilder)
+    builder.store = _Store()
+
+    edges, confirmed = builder._accept_image_result(
+        ImageRelationResult((), "backoff"),
+        {"cup", "table"},
+    )
+    assert edges == [live]
+    assert live.stale_rounds == 2
+    assert confirmed == {("cup", "table")}
+
+    failed_edges, failed_confirmed = builder._accept_image_result(
+        ImageRelationResult((), "failed"),
+        {"cup", "table"},
+    )
+    assert failed_edges == [] and failed_confirmed == set()

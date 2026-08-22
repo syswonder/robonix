@@ -93,21 +93,22 @@ class VLMObjectDetector:
     def __init__(
         self,
         *,
-        rgb_fetcher: Callable[[], Optional[bytes | tuple[bytes, float]]],
+        rgb_fetcher: Callable[[], Optional[bytes | tuple[bytes, int | float]]],
         camera_to_world_fn: Callable[[], Optional[tuple[object, str]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         period_s: float = 3.0,
         intrinsics: Optional[_CamIntrinsics] = None,
         intrinsics_fn: Optional[Callable[[], Optional[_CamIntrinsics]]] = None,
         frame_change_threshold: Optional[float] = None,
+        cache_max_age_s: Optional[float] = None,
         failure_backoff_base_s: Optional[float] = None,
         failure_backoff_max_s: Optional[float] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Configure frame polling, inference caching, and bounded retries."""
         # `rgb_fetcher` returns the latest JPEG bytes and, when available, its
-        # source timestamp. service.py's adapter converts ROS Image data and
-        # includes the timestamp so a frozen stream cannot refresh objects.
+        # delivery count. service.py includes that count so a frozen stream
+        # cannot refresh objects or spend a cache-expiry inference.
         self.rgb_fetcher = rgb_fetcher
         self.camera_to_world_fn = camera_to_world_fn
         self.on_detections = on_detections
@@ -122,10 +123,18 @@ class VLMObjectDetector:
         threshold = (
             frame_change_threshold
             if frame_change_threshold is not None
-            else self._env_float("SCENE_VLM_FRAME_CHANGE_THRESHOLD", 0.04)
+            else self._env_float("SCENE_VLM_FRAME_CHANGE_THRESHOLD", 0.01)
         )
         self.frame_change_threshold = (
-            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.04
+            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.01
+        )
+        cache_max_age = (
+            cache_max_age_s
+            if cache_max_age_s is not None
+            else self._env_float("SCENE_VLM_CACHE_MAX_AGE_SEC", 120.0)
+        )
+        self.cache_max_age_s = (
+            max(0.0, cache_max_age) if math.isfinite(cache_max_age) else 120.0
         )
         default_backoff_base = max(period_s, 5.0) if math.isfinite(period_s) else 5.0
         backoff_base = (
@@ -152,7 +161,9 @@ class VLMObjectDetector:
         )
         self._last_success_frame: Optional[FrameFingerprint] = None
         self._last_success_detections: Optional[list[dict]] = None
-        self._last_success_stamp: Optional[float] = None
+        self._last_seen_delivery_count: Optional[int | float] = None
+        self._last_published_delivery_count: Optional[int | float] = None
+        self._last_success_at = 0.0
         self._failure_streak = 0
         self._retry_at = 0.0
         self._stats = InferenceCounters()
@@ -217,31 +228,45 @@ class VLMObjectDetector:
         prior detections so the object registry stays fresh.
         """
         # The ROS subscriber caches its latest frame in a thread-safe slot, so
-        # this fetch is synchronous. Tests and legacy callers may omit stamps.
+        # this fetch is synchronous. Tests and legacy callers may omit counts.
         sample = self.rgb_fetcher()
         if sample is None:
             return
         if isinstance(sample, tuple):
-            jpeg_bytes, source_stamp = sample
+            jpeg_bytes, delivery_count = sample
         else:
-            jpeg_bytes, source_stamp = sample, None
+            jpeg_bytes, delivery_count = sample, None
         if not jpeg_bytes:
             return
+        now = self._clock()
         frame = fingerprint_jpeg(jpeg_bytes)
-        if frames_equivalent(
+        unchanged = frames_equivalent(
             frame,
             self._last_success_frame,
             threshold=self.frame_change_threshold,
-        ):
+        )
+        same_delivery = (
+            delivery_count is not None
+            and delivery_count == self._last_seen_delivery_count
+        )
+        cache_fresh = (
+            self.cache_max_age_s > 0.0
+            and now - self._last_success_at < self.cache_max_age_s
+        )
+        if unchanged and (same_delivery or cache_fresh):
             self._record_skip("unchanged-frame")
+            self._last_seen_delivery_count = delivery_count
             if self._last_success_detections is not None and (
-                source_stamp is None or source_stamp != self._last_success_stamp
+                delivery_count is None
+                or delivery_count != self._last_published_delivery_count
             ):
-                await self._publish_detections(self._last_success_detections)
-                self._last_success_stamp = source_stamp
+                published = await self._publish_detections(
+                    self._last_success_detections
+                )
+                if published:
+                    self._last_published_delivery_count = delivery_count
             return
 
-        now = self._clock()
         retrying = self._failure_streak > 0
         if retrying and now < self._retry_at:
             self._record_skip("failure-backoff")
@@ -262,17 +287,27 @@ class VLMObjectDetector:
 
         self._last_success_frame = frame
         self._last_success_detections = copy.deepcopy(detections_json)
-        self._last_success_stamp = source_stamp
+        self._last_seen_delivery_count = delivery_count
+        self._last_success_at = self._clock()
         self._clear_failure()
         self._stats.processed += 1
         self._log_stats(logging.INFO, "processed")
-        await self._publish_detections(detections_json)
+        published = await self._publish_detections(detections_json)
+        if published:
+            self._last_published_delivery_count = delivery_count
 
-    async def _publish_detections(self, raw: list[dict]) -> None:
-        """Reproject cached model output and refresh the live object registry."""
+    async def _publish_detections(self, raw: list[dict]) -> bool:
+        """Reproject cached output, returning whether this delivery is consumed.
+
+        Non-empty model output that cannot yet be projected remains pending so
+        a later tick can retry local publication without another model call.
+        """
         detections = self._project_to_world(raw)
+        if raw and not detections:
+            return False
         if detections:
             await self.on_detections(detections)
+        return True
 
     def _record_skip(self, reason: str) -> None:
         self._stats.skipped += 1
@@ -354,9 +389,15 @@ class VLMObjectDetector:
         if not isinstance(obj, dict) or "detections" not in obj:
             return None
         dets = obj["detections"]
-        if not isinstance(dets, list) or any(not isinstance(item, dict) for item in dets):
+        if not isinstance(dets, list):
             return None
-        return dets
+        valid = [item for item in dets if isinstance(item, dict)]
+        if len(valid) != len(dets):
+            log.debug(
+                "[scene-vlm] dropped %d malformed detection item(s)",
+                len(dets) - len(valid),
+            )
+        return valid
 
     def _project_to_world(self, raw: list[dict]) -> list[Detection]:
         """Project image detections through deployment-provided geometry.

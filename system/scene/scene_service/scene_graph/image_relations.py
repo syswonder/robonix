@@ -21,7 +21,8 @@ import logging
 import math
 import os
 import time
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 
@@ -262,6 +263,51 @@ def parse_image_relations(
 
 # ── orchestration ──────────────────────────────────────────────────────────
 
+ImageRelationOutcome = Literal["processed", "cached", "failed", "backoff"]
+
+
+def _all_close(left: tuple, right: tuple, tolerance: float) -> bool:
+    return len(left) == len(right) and all(
+        abs(a - b) <= tolerance for a, b in zip(left, right)
+    )
+
+
+@dataclass(frozen=True)
+class _VisibleObjectSignature:
+    """Stable relation inputs for one projected visible object."""
+
+    object_id: str
+    label: str
+    rect: tuple[int, int, int, int]
+    center: tuple[float, float, float]
+    extent: tuple[float, float, float]
+    yaw: float
+
+
+@dataclass(frozen=True)
+class _RelationInputSignature:
+    """Typed whole-scene relation input compared with explicit tolerances."""
+
+    visible: tuple[_VisibleObjectSignature, ...]
+    intrinsics: tuple[int, int, float, float, float, float]
+    camera_transform: tuple[float, ...]
+    user_message: str
+    model: str
+    max_dim: int
+
+
+@dataclass(frozen=True)
+class ImageRelationResult:
+    """Atomic relation result with the inference decision that produced it."""
+
+    edges: tuple[SceneGraphEdge, ...]
+    outcome: ImageRelationOutcome
+
+    def __post_init__(self) -> None:
+        if self.outcome in ("failed", "backoff") and self.edges:
+            raise ValueError(f"{self.outcome} relation result cannot contain edges")
+
+
 class ImageRelationInferer:
     """Whole-scene image-grounded relation pass: project → annotate → one VLM
     call → parse. Successful results are reused while the visible scene input
@@ -289,10 +335,10 @@ class ImageRelationInferer:
         threshold = (
             frame_change_threshold
             if frame_change_threshold is not None
-            else self._env_float("SCENE_GRAPH_IMAGE_CHANGE_THRESHOLD", 0.04)
+            else self._env_float("SCENE_GRAPH_IMAGE_CHANGE_THRESHOLD", 0.01)
         )
         self.frame_change_threshold = (
-            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.04
+            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.01
         )
         backoff_base = (
             failure_backoff_base_s
@@ -317,7 +363,7 @@ class ImageRelationInferer:
             else max(self.failure_backoff_base_s, 300.0)
         )
         self._clock = clock
-        self._last_success_signature: Optional[tuple] = None
+        self._last_success_signature: Optional[_RelationInputSignature] = None
         self._last_success_frame: Optional[FrameFingerprint] = None
         self._last_success_edges: Optional[list[SceneGraphEdge]] = None
         self._failure_streak = 0
@@ -339,12 +385,11 @@ class ImageRelationInferer:
         self,
         nodes: list[SceneGraphNode],
         bundle: tuple[np.ndarray, Any, np.ndarray],
-    ) -> Optional[list[SceneGraphEdge]]:
-        """Return this round's relation edges or None when it cannot run.
+    ) -> Optional[ImageRelationResult]:
+        """Return this round's typed relation result or None when it cannot run.
 
-        Model failure and backoff return an empty round so the builder does not
-        fan one visual failure out into many text calls; edge hysteresis keeps
-        prior relations. A successful empty edge list is cached as authoritative.
+        Failure and backoff remain distinct so the builder advances hysteresis
+        only after a real failed call. A successful empty edge list is cached.
         """
         if not self.llm_client.available:
             return None
@@ -354,7 +399,7 @@ class ImageRelationInferer:
         boxes: list[tuple[int, tuple[int, int, int, int]]] = []
         legend: list[tuple[int, str]] = []
         box_to_oid: dict[int, str] = {}
-        visible_signature: list[tuple] = []
+        visible_signature: list[_VisibleObjectSignature] = []
         next_id = 1
         for node in sorted(nodes, key=lambda item: item.object_id):
             rect = project_box(
@@ -367,37 +412,42 @@ class ImageRelationInferer:
             label = node.caption or node.label
             legend.append((next_id, label))
             box_to_oid[next_id] = node.object_id
-            visible_signature.append((
-                node.object_id,
-                label,
-                tuple(round(value / 4.0) for value in rect),
-                tuple(round(float(v), 2) for v in node.bbox_center),
-                tuple(round(float(v), 2) for v in node.bbox_extent),
-                round(float(node.yaw), 2),
+            visible_signature.append(_VisibleObjectSignature(
+                object_id=node.object_id,
+                label=label,
+                rect=rect,
+                center=(
+                    float(node.bbox_center[0]),
+                    float(node.bbox_center[1]),
+                    float(node.bbox_center[2]),
+                ),
+                extent=(
+                    float(node.bbox_extent[0]),
+                    float(node.bbox_extent[1]),
+                    float(node.bbox_extent[2]),
+                ),
+                yaw=float(node.yaw),
             ))
             next_id += 1
 
         if len(box_to_oid) < 2:
             return None
 
-        camera_signature = (
-            (
-                int(K.width), int(K.height),
-                round(float(K.fx), 2), round(float(K.fy), 2),
-                round(float(K.cx), 2), round(float(K.cy), 2),
-            ),
-            tuple(
-                round(float(value), 3)
-                for value in np.asarray(T_cam_map, dtype=np.float64).reshape(-1)
-            ),
+        intrinsics_signature = (
+            int(K.width), int(K.height),
+            float(K.fx), float(K.fy), float(K.cx), float(K.cy),
         )
         user_message = build_image_relation_user_text(legend)
-        signature = (
-            tuple(visible_signature),
-            camera_signature,
-            user_message,
-            str(getattr(self.llm_client, "model", "")),
-            self.max_dim,
+        signature = _RelationInputSignature(
+            visible=tuple(visible_signature),
+            intrinsics=intrinsics_signature,
+            camera_transform=tuple(
+                float(value)
+                for value in np.asarray(T_cam_map, dtype=np.float64).reshape(-1)
+            ),
+            user_message=user_message,
+            model=str(getattr(self.llm_client, "model", "")),
+            max_dim=self.max_dim,
         )
         frame = fingerprint_bgr(rgb_bgr)
         if self._same_input(
@@ -408,15 +458,18 @@ class ImageRelationInferer:
         ) and self._last_success_edges is not None:
             self._record_skip("unchanged-input")
             edges = copy.deepcopy(self._last_success_edges)
+            now_unix = time.time()
             for edge in edges:
                 edge.method = "cached"
-            return edges
+                edge.updated_at = now_unix
+                edge.stale_rounds = 0
+            return ImageRelationResult(tuple(edges), "cached")
 
         now = self._clock()
         retrying = self._failure_streak > 0
         if retrying and now < self._retry_at:
             self._record_skip("failure-backoff")
-            return []
+            return ImageRelationResult((), "backoff")
 
         image_b64 = annotate_frame(rgb_bgr, boxes, max_dim=self.max_dim)
         if image_b64 is None:
@@ -437,32 +490,62 @@ class ImageRelationInferer:
         raw_edges = raw.get("edges") if isinstance(raw, dict) else None
         if not isinstance(raw_edges, list):
             self._record_failure(self._clock())
-            return []
+            return ImageRelationResult((), "failed")
         edges = parse_image_relations(raw, box_to_oid)
-        if raw_edges and not edges:
-            self._record_failure(self._clock())
-            return []
         self._last_success_signature = signature
         self._last_success_frame = frame
         self._last_success_edges = copy.deepcopy(edges)
         self._clear_failure()
         self._stats.processed += 1
         self._log_stats(logging.INFO, "processed")
-        return edges
+        return ImageRelationResult(tuple(edges), "processed")
 
     def _same_input(
         self,
-        signature: tuple,
+        signature: _RelationInputSignature,
         frame: FrameFingerprint,
-        previous_signature: Optional[tuple],
+        previous_signature: Optional[_RelationInputSignature],
         previous_frame: Optional[FrameFingerprint],
     ) -> bool:
         """Compare stable scene metadata together with its camera pixels."""
-        return signature == previous_signature and frames_equivalent(
+        return self._signatures_equivalent(signature, previous_signature) and frames_equivalent(
             frame,
             previous_frame,
             threshold=self.frame_change_threshold,
         )
+
+    @staticmethod
+    def _signatures_equivalent(
+        current: _RelationInputSignature,
+        previous: Optional[_RelationInputSignature],
+    ) -> bool:
+        """Ignore sensor-level geometry jitter but invalidate meaningful input changes."""
+        if previous is None:
+            return False
+        if (
+            current.user_message != previous.user_message
+            or current.model != previous.model
+            or current.max_dim != previous.max_dim
+            or current.intrinsics[:2] != previous.intrinsics[:2]
+            or len(current.visible) != len(previous.visible)
+        ):
+            return False
+        if not _all_close(current.intrinsics[2:], previous.intrinsics[2:], 0.01):
+            return False
+        if not _all_close(current.camera_transform, previous.camera_transform, 0.01):
+            return False
+        for left, right in zip(current.visible, previous.visible):
+            if left.object_id != right.object_id or left.label != right.label:
+                return False
+            if any(abs(a - b) > 4 for a, b in zip(left.rect, right.rect)):
+                return False
+            if not _all_close(left.center, right.center, 0.02):
+                return False
+            if not _all_close(left.extent, right.extent, 0.02):
+                return False
+            if abs(left.yaw - right.yaw) > 0.02:
+                return False
+        return True
 
     def _record_skip(self, reason: str) -> None:
         self._stats.skipped += 1

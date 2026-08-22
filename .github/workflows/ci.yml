@@ -53,7 +53,10 @@ jobs:
       - name: Test Scene VLM duplicate-call suppression
         run: >-
           python3 -m pytest -q
+          system/scene/tests/test_scene_graph.py
           system/scene/tests/test_vlm_inference_cache.py
+          system/scene/tests/test_perception_vlm_geometry.py
+          system/scene/tests/test_image_relations.py
 
   check:
     name: Rust (fmt + clippy + build + tests)
