@@ -139,6 +139,7 @@ service:
       speech_backend: ${SPEECH_BACKEND}
       disable_whisper: true
       funasr_device: cuda
+      tts_voice: zh-CN-XiaoxiaoNeural
       default_speaker_provider_id: audio_driver
       tencent_asr_appid: ${TENCENT_ASR_APPID}
       tencent_tts_voice_type: 502003
