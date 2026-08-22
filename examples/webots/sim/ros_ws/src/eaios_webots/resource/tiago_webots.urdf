@@ -1253,6 +1253,7 @@
         <frameName>head_front_camera_depth_optical_frame</frameName>
       </ros>
     </device>
+    <plugin type="eaios_webots.my_robot_driver.MyRobotDriver" />
     <plugin type="webots_ros2_control::Ros2Control" />
   </webots>
   <ros2_control name="WebotsControl" type="system">
