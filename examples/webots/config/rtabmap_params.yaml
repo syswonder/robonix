@@ -2,23 +2,19 @@
 RGBD/CreateOccupancyGrid: true
 Grid/RangeMax: 6.0
 Grid/CellSize: 0.05
-Grid/RayTracing: true # false leaves ghost points - wheatfox 2026.7.19
+Grid/RayTracing: true # when set to false, ghost points will exist on map - wheatfox 2026.7.19
 Grid/3D: false
 Grid/NormalsSegmentation: false
 Grid/MaxObstacleHeight: 1.0
 Grid/MaxGroundHeight: 0.1
-# Webots odometry is simulated and essentially exact, so there is no drift
-# for ICP to correct - it only mis-registers on repetitive walls and yanks
-# poses, which is what duplicates walls. Vis stays for global relocalization.
-Reg/Strategy: 0
+Reg/Strategy: 1
 Reg/Force3DoF: true
 Optimizer/Strategy: 1
-RGBD/NeighborLinkRefining: false
-RGBD/ProximityBySpace: false
-RGBD/OptimizeMaxError: 3.0
-RGBD/AngularUpdate: 0.03
-RGBD/LinearUpdate: 0.03
-Mem/NotLinkedNodesKept: true
+RGBD/NeighborLinkRefining: true
+RGBD/ProximityBySpace: true
+RGBD/AngularUpdate: 0.05
+RGBD/LinearUpdate: 0.05
+Mem/NotLinkedNodesKept: false
 Vis/MinInliers: 12
 Rtabmap/DetectionRate: 5.0
 Icp/MaxCorrespondenceDistance: 0.2
