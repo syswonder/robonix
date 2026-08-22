@@ -1,23 +1,65 @@
-# Drive a long enough explore that the saved map can be judged on quality.
+# Drive a fixed closed loop so map quality is comparable between runs.
+#
+# Frontier exploration takes a different path every run, which moved the
+# quality metrics more than any parameter change did. A scripted rectangle
+# returns to the start, so odometry drift has to be closed by the SLAM graph
+# and the same walls are seen twice.
 name: map_quality
-task: "ci-test: explore long enough to build a judgeable occupancy map"
+task: "ci-test: drive a fixed loop so the saved map can be compared between runs"
 steps:
   - time_s: 0.0
     status: in_progress
-    rtdl_description: long explore for map coverage
+    rtdl_description: drive a closed rectangle
     rtdl:
       op: sequence
-      id: long_explore_step
+      id: map_quality_loop
       children:
         - op: do
-          id: long_explore
-          cap: explore.explore_explore
-          args: {area_hint: "ci local room", timeout_s: 120.0, max_speed_m_s: 0.3}
-          description: explore until the ceiling to cover the room
-          expect:
-            contract: robonix/skill/explore/explore
-            success: false
-            args: {area_hint: "ci local room", timeout_s: 120.0, max_speed_m_s: 0.3}
-            output:
-              error_regex: 'hit 120\.0s ceiling'
+          id: leg1
+          cap: tiago_chassis.chassis_move
+          args: {forward_m: 1.5}
+          description: first leg
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {forward_m: 1.5}}
+        - op: do
+          id: turn1
+          cap: tiago_chassis.chassis_move
+          args: {rotate_deg: 90.0}
+          description: first corner
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {rotate_deg: 90.0}}
+        - op: do
+          id: leg2
+          cap: tiago_chassis.chassis_move
+          args: {forward_m: 1.5}
+          description: second leg
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {forward_m: 1.5}}
+        - op: do
+          id: turn2
+          cap: tiago_chassis.chassis_move
+          args: {rotate_deg: 90.0}
+          description: second corner
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {rotate_deg: 90.0}}
+        - op: do
+          id: leg3
+          cap: tiago_chassis.chassis_move
+          args: {forward_m: 1.5}
+          description: third leg
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {forward_m: 1.5}}
+        - op: do
+          id: turn3
+          cap: tiago_chassis.chassis_move
+          args: {rotate_deg: 90.0}
+          description: third corner
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {rotate_deg: 90.0}}
+        - op: do
+          id: leg4
+          cap: tiago_chassis.chassis_move
+          args: {forward_m: 1.5}
+          description: closing leg back to the start
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {forward_m: 1.5}}
+        - op: do
+          id: turn4
+          cap: tiago_chassis.chassis_move
+          args: {rotate_deg: 90.0}
+          description: face the original heading
+          expect: {contract: robonix/primitive/chassis/move, success: true, args: {rotate_deg: 90.0}}
   - status: done
