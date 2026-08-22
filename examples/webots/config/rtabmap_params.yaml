@@ -1,7 +1,5 @@
 # Webots Tiago RTAB-Map parameters. This file is owned by this deployment.
-# Depth builds the grid on demand here; per-node grid caching stacks every
-# node's local grid into the radial smear. Save/load is validated by CI.
-RGBD/CreateOccupancyGrid: false
+RGBD/CreateOccupancyGrid: true
 Grid/RangeMax: 6.0
 Grid/CellSize: 0.05
 Grid/RayTracing: true # false leaves ghost points - wheatfox 2026.7.19
