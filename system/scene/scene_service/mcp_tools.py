@@ -21,7 +21,12 @@ import time
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
+from typing import TYPE_CHECKING
+
 from .state import ObjectRegistry, SceneObject
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .object_mutations import ObjectMutationCoordinator
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
 from .geometry import point_in_polygon, polygon_centroid
@@ -45,8 +50,16 @@ from semantic_map_mcp import (  # type: ignore
     GetRobotContext_Response,
     GetSceneGraph_Request,
     GetSceneGraph_Response,
+    DeleteObject_Request,
+    DeleteObject_Response,
+    FlushObjects_Request,
+    FlushObjects_Response,
     ListObjects_Request,
     ListObjects_Response,
+    UpdateObjectGeometry_Request,
+    UpdateObjectGeometry_Response,
+    UpdateObjectLabel_Request,
+    UpdateObjectLabel_Response,
     ListRegions_Request,
     ListRegions_Response,
     ListRelations_Request,
@@ -69,6 +82,7 @@ _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
+_OBJECT_MUTATIONS: "ObjectMutationCoordinator | None" = None
 _ROBOT_GEOMETRY: RobotGeometryState | None = None
 
 # Scene Hook: when list_objects detects visible objects, automatically
@@ -251,6 +265,15 @@ def attach_annotation_store(store: "AnnotationStore | None") -> None:
     _ANNO_STORE = store
 
 
+def attach_object_mutations(
+    coordinator: "ObjectMutationCoordinator | None",
+) -> None:
+    """Wire the epoch-checked mutation coordinator; the correction tools
+    are unavailable (and say so) until service startup provides one."""
+    global _OBJECT_MUTATIONS
+    _OBJECT_MUTATIONS = coordinator
+
+
 # ── conversions: SceneObject → IDL Object ──────────────────────────────────
 
 def _to_idl(o: SceneObject) -> Object:
@@ -377,7 +400,11 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     Contract: robonix/system/scene/list_objects."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
-    objs, _surfs = await _REGISTRY.snapshot()
+    if _OBJECT_MUTATIONS is not None:
+        objs, map_id, generation = await _OBJECT_MUTATIONS.snapshot_objects()
+    else:
+        objs, _surfs = await _REGISTRY.snapshot()
+        map_id, generation = "", -1
     visible = [o for o in objs.values() if not o.missing]
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
@@ -396,6 +423,101 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     return ListObjects_Response(
         objects=objects,
         stamp_unix=time.time(),
+        map_id=map_id,
+        generation=generation,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/update_object_label")
+async def update_object_label(
+    req: UpdateObjectLabel_Request,
+) -> UpdateObjectLabel_Response:
+    """Apply a sticky operator label correction to one derived object."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_label(
+        object_id=req.object_id,
+        label=req.label,
+        clear_override=req.clear_override,
+        expected_map_id=req.expected_map_id,
+        expected_generation=req.expected_generation,
+        persist_to_snapshot=req.persist_to_snapshot,
+    )
+    return UpdateObjectLabel_Response(
+        object=_to_idl(obj),
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/update_object_geometry")
+async def update_object_geometry(
+    req: UpdateObjectGeometry_Request,
+) -> UpdateObjectGeometry_Response:
+    """Replace one derived object's pose/bbox with a non-nav operator value."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_geometry(
+        object_id=req.object_id,
+        x=req.x,
+        y=req.y,
+        z=req.z,
+        yaw=req.yaw,
+        size_x=req.size_x,
+        size_y=req.size_y,
+        size_z=req.size_z,
+        frame_id=req.frame_id,
+        expected_map_id=req.expected_map_id,
+        expected_generation=req.expected_generation,
+        persist_to_snapshot=req.persist_to_snapshot,
+    )
+    return UpdateObjectGeometry_Response(
+        object=_to_idl(obj),
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/delete_object")
+async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
+    """Delete one incorrect derived object from the asserted map epoch."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    deleted_id, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.delete_object(
+            object_id=req.object_id,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+        )
+    )
+    return DeleteObject_Response(
+        deleted_id=deleted_id,
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/flush_objects")
+async def flush_objects(req: FlushObjects_Request) -> FlushObjects_Response:
+    """Clear all derived objects while preserving robot and annotations."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    deleted_count, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.flush_objects(
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+        )
+    )
+    return FlushObjects_Response(
+        deleted_count=deleted_count,
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
     )
 
 

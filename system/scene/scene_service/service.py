@@ -1537,6 +1537,10 @@ async def _run() -> None:
         mcp_tools.get_scene_graph,
         mcp_tools.get_object_context,
         mcp_tools.list_relations,
+        mcp_tools.update_object_label,
+        mcp_tools.update_object_geometry,
+        mcp_tools.delete_object,
+        mcp_tools.flush_objects,
     ):
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
@@ -1552,7 +1556,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 8 MCP tools at %s", scene.mcp_endpoint)
+    log.info("scene declared 12 MCP tools at %s", scene.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -1687,6 +1691,24 @@ async def _run() -> None:
     # table + robot pose. Lives in the same asyncio loop as the rest
     # of scene so registry reads are local. Set `web_port: 0` in the
     # deploy-manifest scene block to disable. SCENE_WEB_PORT and
+    # ── Operator corrections ─────────────────────────────────────────
+    # The coordinator is the single writer for derived-object mutations:
+    # it revalidates the map epoch, keeps registry/perception/graph-cache
+    # coherent, and owns snapshot persistence with rollback.
+    from .object_mutations import ObjectMutationCoordinator
+
+    object_mutations = ObjectMutationCoordinator(
+        registry=registry,
+        detector=perception,
+        scene_graph_store=sg_store,
+        live_binding=live_binding,
+        ops_lock=map_ops_lock,
+        semantic_hold=semantic_hold,
+        object_store=obj_store,
+        map_meta=map_meta,
+    )
+    mcp_tools.attach_object_mutations(object_mutations)
+
     # SCENE_WEB_HOST are environment fallbacks; an explicit Scene config file
     # can set web_host: 127.0.0.1 to keep this operator surface local-only.
     web_port = int(
