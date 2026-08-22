@@ -1,0 +1,26 @@
+# Delete one derived Scene object by stable id.
+# The robot self-object and user-authored annotations are not accepted.
+
+# Stable Scene object id, exactly as returned by ListObjects. Not a label.
+string object_id
+# Map epoch the caller last observed, from the ListObjects response. Scene
+# rejects the call if the live binding has moved since — the operator would
+# otherwise be deleting from a map they are no longer looking at. Re-read
+# ListObjects and retry. This is a staleness check, not an authorization one.
+string expected_map_id
+# Generation from the same ListObjects response; -1 when the active mapping
+# provider exposes no generation. Must match exactly, including -1.
+int64 expected_generation
+# false: delete from the live runtime only, so a reload restores the object.
+# true: also delete the row from the saved map's semantic snapshot, making it
+# permanent. Requires the map to have been saved; fails otherwise.
+bool persist_to_snapshot
+---
+# Echo of the id that was deleted.
+string deleted_id
+# Epoch the delete actually applied under; equals the expected_* inputs.
+string map_id
+int64 generation
+# Whether the snapshot row was removed. Only ever true when the request asked
+# for it; a runtime-only delete reports false rather than failing.
+bool persisted

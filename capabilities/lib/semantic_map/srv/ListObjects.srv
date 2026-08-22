@@ -2,5 +2,14 @@
 # registry currently believes exists. Room entries remain for v1
 # compatibility; new callers should use ListRegions for full room geometry.
 ---
+# Every object Scene currently believes exists, robot self-object included.
 Object[] objects
+# Wall-clock time this snapshot was taken, seconds since the Unix epoch.
 float64 stamp_unix
+# Map epoch this snapshot belongs to. Pass it back verbatim as expected_map_id
+# on any correction call so Scene can reject an edit aimed at a stale map.
+string map_id
+# Generation counter of the same epoch, advanced whenever the map binding
+# changes. Pass it back verbatim as expected_generation.
+# -1 means the active mapping provider does not expose a generation.
+int64 generation
