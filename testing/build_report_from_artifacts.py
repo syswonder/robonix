@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -167,6 +168,13 @@ def main() -> int:
         report_cmd.extend(["--metadata-json", str(meta_json)])
     report_cmd.extend(log_roots)
     report_cmd.extend(log_files)
+    map_preview = _find_file(artifact_root, "slam-map.png")
+    if map_preview:
+        report_cmd.extend(["--map-preview", str(map_preview)])
+        # Set by the workflow only when the report site publishes this run.
+        map_url = os.environ.get("ROBONIX_REPORT_MAP_URL", "")
+        if map_url:
+            report_cmd.extend(["--map-preview-url", map_url])
     _run(report_cmd)
     return 0
 

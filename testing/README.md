@@ -70,6 +70,9 @@ by a push, PR event, manual dispatch, or `@robonix-ci test`:
    LLM-assisted analysis. It is uploaded with the raw logs.
 3. Pages report: `@robonix-ci test` republishes the same report through the
    trusted CI bot workflow and links it from the PR status comment.
+4. SLAM map preview: the map-persistence step exports the saved map's
+   `occupancy.png` as `slam-map.png`. It ships with the report artifact and,
+   on published runs, renders inline in the job summary via the report site.
 4. Raw logs: scenario JSONL streams, provider logs, sim stdout, ROS logs,
    final caps, fake VLM log, boot log, and remote provider provenance.
 
