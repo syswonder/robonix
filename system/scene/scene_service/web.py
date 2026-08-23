@@ -1221,7 +1221,13 @@ def make_app(*, registry: ObjectRegistry,
             # recreate the mixed-epoch state this ordering exists to
             # prevent.
             try:
-                async with registry.lock():
+                registry_lock = getattr(registry, "lock", None)
+                if callable(registry_lock):
+                    async with registry_lock():
+                        flushed = registry.clear_objects()
+                else:
+                    # Minimal registry adapters used by embedded callers may
+                    # already serialize access and expose only clear_objects.
                     flushed = registry.clear_objects()
                 if flushed:
                     out["objects_flushed"] = flushed
@@ -3140,17 +3146,43 @@ function draw() {
         ctx.fillText(hoverObj.cls, px + 8, py);
     }
 
-    // robot marker (small arrow, subtle)
+    // Robot marker: fixed-size, high-contrast body plus a long directional
+    // nose. Keeping it in screen pixels makes the pose readable at every map
+    // zoom level, including over dark occupied cells and pale free space.
     const robot = state.robot;
     if (robot) {
         const [rx, ry] = w2p(robot.x, robot.y);
         const yaw = robot.yaw || 0;
-        ctx.strokeStyle = '#7aa7ff'; ctx.fillStyle = '#7aa7ff'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(rx, ry, 5, 0, Math.PI * 2); ctx.stroke();
+        const robotMarkerNose = 24;
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
         ctx.beginPath();
-        ctx.moveTo(rx, ry);
-        ctx.lineTo(rx + Math.cos(yaw) * 14, ry - Math.sin(yaw) * 14);
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(7, 10, 16, 0.92)';
+        ctx.fill();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#ffffff';
         ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(robotMarkerNose, 0);
+        ctx.lineTo(-7, -10);
+        ctx.lineTo(-3, 0);
+        ctx.lineTo(-7, 10);
+        ctx.closePath();
+        ctx.fillStyle = '#ff5a1f';
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(0, 0, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.restore();
     }
 
     // draft polygon (draw mode)
@@ -3247,11 +3279,16 @@ async function loadMaps() {
     } catch (e) { toast('list maps failed: ' + e); }
 }
 async function mapRequest(path, body) {
+    // Generous abort: a spatial save can take minutes, but a wedged backend
+    // must still surface as a failure rather than lock the editor forever.
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 300000);
     try {
         const response = await fetch(path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
+            signal: abort.signal,
         });
         const out = await response.json().catch(() => null);
         if (!response.ok || !out || out.ok === false) {
@@ -3264,11 +3301,40 @@ async function mapRequest(path, body) {
         await refresh();
         return { ok: true, out, detail: out.detail || '' };
     } catch (error) {
-        return { ok: false, out: null, detail: `request failed: ${error}` };
+        const detail = abort.signal.aborted
+            ? 'request timed out after 300 s; the backend may still be working — refresh the map list before retrying'
+            : `request failed: ${error}`;
+        return { ok: false, out: null, detail };
+    } finally {
+        clearTimeout(timer);
     }
 }
+function rejectWhileBusy() {
+    // Buttons are disabled while busy, but keyboard focus / re-renders can
+    // still deliver clicks; answer them with feedback instead of silence.
+    if (!mapBusy) return false;
+    toast('another map operation is still running');
+    return true;
+}
+function failMapOperation(verb, id, error, retry) {
+    // Unlocks the editor when an operation throws. Without it the modal stays
+    // on 'Working...' with every control disabled and Esc blocked.
+    setMapStatus(`${verb} ${id} failed: ${error}`, 'err');
+    finishMapOperation({
+        ok: false,
+        title: `${verb} failed`,
+        message: 'Unexpected error; the editor has been unlocked.',
+        detail: String(error),
+        retry,
+    });
+}
+async function withMapBusy(label, run) {
+    // Locks the editor for the duration of `run`, always releasing it.
+    setMapBusy(true, label);
+    try { return await run(); } finally { setMapBusy(false); }
+}
 async function saveCurrentMap() {
-    if (mapBusy) return;
+    if (rejectWhileBusy()) return;
     const id = preferredMapId();
     document.getElementById('map-id').value = id;
     selectedMapId = id; renderMaps();
@@ -3285,6 +3351,7 @@ async function saveCurrentMap() {
             ? ['Validate existing spatial artifact', 'Persist rooms and Scene objects', 'Verify reusable map entry']
             : ['Snapshot the live spatial map', 'Persist rooms and Scene objects', 'Verify artifact and preview'],
     });
+    try {
     const result = await mapRequest('/api/maps/save', { map_id: id, note: 'saved from scene user page' });
     if (result.ok) {
         const out = result.out;
@@ -3316,9 +3383,12 @@ async function saveCurrentMap() {
             retry: saveCurrentMap,
         });
     }
+    } catch (error) {
+        failMapOperation('Save', id, error, saveCurrentMap);
+    }
 }
 async function loadSelectedMap(id) {
-    if (mapBusy) return;
+    if (rejectWhileBusy()) return;
     selectedMapId = id;
     document.getElementById('map-id').value = id;
     renderMaps();
@@ -3329,6 +3399,7 @@ async function loadSelectedMap(id) {
         status: `Loading ${id}; switching Mapping to localization mode...`,
         steps: ['Validate saved spatial artifact', 'Switch Mapping to localization mode', 'Wait for a fresh occupancy grid', 'Restore rooms and Scene objects'],
     });
+    try {
     const result = await mapRequest('/api/maps/load', { map_id: id, mode: 'localization' });
     setMapItemStatus(id, '');
     if (result.ok) {
@@ -3358,14 +3429,17 @@ async function loadSelectedMap(id) {
             retry: () => loadSelectedMap(id),
         });
     }
+    } catch (error) {
+        setMapItemStatus(id, '');
+        failMapOperation('Load', id, error, () => loadSelectedMap(id));
+    }
 }
 async function deleteSelectedMap(id) {
-    if (mapBusy) return;
+    if (rejectWhileBusy()) return;
     if (!(await askConfirm('Delete map', `Delete map “${id}”?`))) return;
     setMapItemStatus(id, 'deleting...');
-    setMapBusy(true, `Deleting map ${id}...`);
-    const out = await api('POST', '/api/maps/delete', { map_id: id });
-    setMapBusy(false);
+    const out = await withMapBusy(`Deleting map ${id}...`,
+        () => api('POST', '/api/maps/delete', { map_id: id }));
     if (out) { setMapStatus(`Deleted ${id}.`, 'ok'); toast('deleted map ' + id); await loadMaps(); }
     else { setMapItemStatus(id, ''); setMapStatus(`Delete ${id} failed.`, 'err'); }
 }
@@ -3387,10 +3461,10 @@ async function sendPoseEstimate(world) {
     if (mapBusy || !world) return;
     setPoseEstimateMode(false);
     const x = world[0], y = world[1], theta = 0.0;
-    setMapBusy(true, `Publishing pose estimate (${x.toFixed(2)}, ${y.toFixed(2)}, ${theta.toFixed(2)})...`);
     toast(`pose estimate: ${x.toFixed(2)}, ${y.toFixed(2)}`);
-    const out = await api('POST', '/api/maps/pose_estimate', { x, y, theta });
-    setMapBusy(false);
+    const out = await withMapBusy(
+        `Publishing pose estimate (${x.toFixed(2)}, ${y.toFixed(2)}, ${theta.toFixed(2)})...`,
+        () => api('POST', '/api/maps/pose_estimate', { x, y, theta }));
     if (out) {
         const msg = `${out.detail || 'Pose estimate sent.'}` +
             (out.delta_before ? ` · before ${poseDeltaText(out.delta_before)}` : '') +

@@ -107,7 +107,8 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
             .with_context(|| format!("failed to write {sub}/.gitkeep"))?;
     }
 
-    // package_manifest.yaml — capabilities default to empty.
+    // package_manifest.yaml — Driver omission canonically selects the shared
+    // lifecycle contract, so authors only list domain capabilities here.
     let manifest = package_manifest(&package_name, ns_kind);
     std::fs::write(pkg_dir.join("package_manifest.yaml"), manifest)
         .context("failed to write package_manifest.yaml")?;
@@ -254,6 +255,11 @@ mod tests {
                 .and_then(|value| value.as_sequence())
                 .is_some()
         );
+        let capabilities = root
+            .get("capabilities")
+            .and_then(|value| value.as_sequence())
+            .unwrap();
+        assert!(capabilities.is_empty());
         assert!(
             root.get("depends")
                 .and_then(|value| value.as_sequence())

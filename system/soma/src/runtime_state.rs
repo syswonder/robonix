@@ -45,6 +45,7 @@ pub struct OdomSample {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum MonitorEvent {
+    Ready { subscriptions: usize },
     JointState(JointSample),
     Odom(OdomSample),
     Warning { message: String },
@@ -98,6 +99,9 @@ impl RuntimeStateStore {
         let event: MonitorEvent = serde_json::from_str(line)?;
         let mut state = self.inner.write().await;
         match event {
+            MonitorEvent::Ready { subscriptions } => {
+                let _ = subscriptions;
+            }
             MonitorEvent::JointState(sample) => {
                 state.arms.insert(sample.provider_id.clone(), sample);
             }

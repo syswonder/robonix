@@ -1,10 +1,12 @@
-# Lifecycle interface every arm primitive implementation must declare.
+# Legacy namespace-specific lifecycle contract. Existing manifests remain
+# supported; new packages omit Driver and automatically use the shared one.
+# A package must not declare both lifecycle contracts.
 [contract]
 id = "robonix/primitive/arm/driver"
 version = "1"
 kind = "primitive"
 idl = "lifecycle/srv/Driver.srv"
-description = "Lifecycle control interface for arm primitive providers."
+description = "Legacy-compatible lifecycle interface for arm primitive providers."
 
 [mode]
 type = "rpc"

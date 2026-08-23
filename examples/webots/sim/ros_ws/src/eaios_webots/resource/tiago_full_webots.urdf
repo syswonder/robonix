@@ -1637,7 +1637,9 @@
   </link>
   <!-- frames of the depth sensor -->
   <joint name="head_front_camera_depth_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0.0 0.025 0.0" />
+    <!-- Co-located with the colour frame: the simulated range finder now
+         shares the camera's pose so depth_registered really is registered. -->
+    <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
     <parent link="head_front_camera_color_frame" />
     <child link="head_front_camera_depth_frame" />
   </joint>

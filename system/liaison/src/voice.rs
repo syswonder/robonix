@@ -1288,9 +1288,10 @@ fn pcm_rms_s16le(data: &[u8]) -> f32 {
     if n == 0 {
         return 0.0;
     }
-    let sum_sq: f64 = data
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f64)
+    let (chunks, _) = data.as_chunks::<2>();
+    let sum_sq: f64 = chunks
+        .iter()
+        .map(|b| i16::from_le_bytes(*b) as f64)
         .map(|s| s * s)
         .sum();
     (sum_sq / n as f64).sqrt() as f32

@@ -37,6 +37,7 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/chairs/protos/OfficeChair.proto"
 
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/pal_robotics/tiago_lite/protos/TiagoLite.proto"
+EXTERNPROTO "../protos/AstraRegistered.proto"
 WorldInfo {
   info [
     "An office break room, surrounded by office desks."
@@ -1185,6 +1186,12 @@ OfficeChair {
   name "office chair(5)"
 }
 TiagoLite {
+  cameraSlot [
+    AstraRegistered {
+      translation -0.028 -0.035 -0.009
+      rotation 1 0 0 -1.5708
+    }
+  ]
   translation -0.0749918 0.26011 0.0887153
   rotation -0.006363227570975 -0.002646197037686 -0.999976253206104 0.78447116344273
   name "my_robot"

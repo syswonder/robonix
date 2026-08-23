@@ -23,6 +23,7 @@ import sys
 import traceback
 from datetime import date
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 
@@ -100,10 +101,8 @@ def _log_environment() -> None:
 log.info("phase 1/4: importing robonix_api + memsearch backend")
 try:
     from memsearch_service.onnx_compat import configure_onnxruntime  # noqa: E402
-    configure_onnxruntime()
-    from robonix_api import Service, Ok, Err, Deferred  # noqa: E402,F401
+    from robonix_api import Service, Ok, Err  # noqa: E402
     from std_msgs_mcp import Empty, String  # noqa: E402
-    from memsearch import MemSearch  # noqa: E402
 except Exception:
     log.error("import failed — see the stack trace below")
     log.error("common causes:")
@@ -117,54 +116,63 @@ except Exception:
     raise
 
 
-# ── 2. Service object + paths. Paths are resolved to absolute form so the
-# log makes the actual disk location obvious; relative paths are a common
-# source of "where did the index go?" confusion.
+# ── 2. Service object + lifecycle-owned backend state.
 memory = Service(id="memory", namespace="robonix/service/memory")
-
-MEMORY_DIR = str(Path(os.environ.get("AGENT_MEMORY_DIR", "./agent_memory")).resolve())
-MILVUS_URI = os.environ.get("AGENT_MILVUS_URI", "./agent_milvus.db")
-# Resolve only filesystem-style milvus URIs (skip remote `host:port` forms).
-if "/" in MILVUS_URI or MILVUS_URI.endswith(".db"):
-    MILVUS_URI = str(Path(MILVUS_URI).resolve())
-
-
 _log_environment()
-log.info("phase 2/4: resolved paths")
-log.info("  memory_dir = %s%s", MEMORY_DIR,
-         "" if Path(MEMORY_DIR).exists() else "  (will be created)")
-log.info("  milvus_uri = %s", MILVUS_URI)
+log.info("phase 2/4: registering MCP tools + awaiting Driver(CMD_INIT)")
+
+mem: Any | None = None
+MEMORY_DIR: str | None = None
+MILVUS_URI: str | None = None
+_APPLIED_CONFIG: tuple[str, str, int] | None = None
 
 
-# ── 3. Backend construction. This is where most user-reported "startup
-# fails" issues actually originate (milvus-lite native binary, embedding
-# model download, write permission on milvus_uri parent). Capture the
-# failure with enough context for someone reading the log to act.
-log.info("phase 3/4: constructing MemSearch (embedding=onnx, milvus_lite)")
-log.info("  (first run downloads the ONNX embedding model from HuggingFace — "
-         "this can take >60s on a cold/slow network and is the usual cause of "
-         "a boot register-timeout; pre-stage the model or raise the timeout)")
-try:
-    mem = MemSearch(
-        paths=[MEMORY_DIR],
-        embedding_provider="onnx",
-        milvus_uri=MILVUS_URI,
+def _nonempty_string(cfg: dict, key: str, env_key: str, default: str) -> str:
+    """Resolve one string config value with an environment compatibility fallback."""
+    value = cfg[key] if key in cfg else os.environ.get(env_key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+    return value.strip()
+
+
+def _resolve_milvus_uri(value: str) -> str:
+    """Resolve filesystem stores while preserving remote Milvus endpoints."""
+    if "://" in value:
+        return value
+    if ":" in value and "/" not in value and not value.endswith(".db"):
+        return value
+    return str(Path(value).expanduser().resolve())
+
+
+def _resolve_config(cfg: dict) -> tuple[str, str, int]:
+    """Normalize Driver config; explicit config wins over legacy environment values."""
+    memory_dir = str(
+        Path(
+            _nonempty_string(cfg, "memory_dir", "AGENT_MEMORY_DIR", "./agent_memory")
+        )
+        .expanduser()
+        .resolve()
     )
-except Exception as e:
-    log.error("MemSearch construction failed: %s: %s", type(e).__name__, e)
-    log.error("common causes:")
-    log.error("  - milvus_lite cannot create / open %s "
-              "(check parent dir exists and is writable)", MILVUS_URI)
-    log.error("  - onnxruntime wheel incompatible "
-              "(arch=%s python=%s.%s — try `pip install onnxruntime` in the venv)",
-              platform.machine(), *sys.version_info[:2])
-    log.error("  - embedding model download blocked "
-              "(first run needs network egress for HuggingFace; set HF_ENDPOINT "
-              "or pre-stage models if behind a firewall)")
-    log.error("traceback:\n%s", traceback.format_exc())
-    raise
+    milvus_uri = _resolve_milvus_uri(
+        _nonempty_string(cfg, "milvus_uri", "AGENT_MILVUS_URI", "./agent_milvus.db")
+    )
+    raw_threads = cfg.get(
+        "onnx_threads", os.environ.get("MEMSEARCH_ONNX_THREADS", "1")
+    )
+    try:
+        onnx_threads = int(raw_threads)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("onnx_threads must be an integer") from exc
+    if onnx_threads < 1:
+        raise ValueError("onnx_threads must be at least 1")
+    return memory_dir, milvus_uri, onnx_threads
 
-log.info("phase 4/4: registering MCP tools + awaiting Driver(CMD_INIT)")
+
+def _require_backend() -> Any:
+    """Return the lifecycle-initialized backend or fail without hidden lazy init."""
+    if mem is None:
+        raise RuntimeError("memory backend is not initialized")
+    return mem
 
 
 @memory.mcp("robonix/service/memory/search")
@@ -176,7 +184,7 @@ async def search(msg: String) -> String:
     log.info("search (%d chars)", len(msg.data))
     log.debug("search query: %r", msg.data[:80])
     try:
-        results = await mem.search(msg.data, top_k=2)
+        results = await _require_backend().search(msg.data, top_k=2)
     except Exception as e:
         log.warning("search failed (returning empty): %s: %s", type(e).__name__, e)
         return String(data="No relevant memories found (search unavailable).")
@@ -190,13 +198,16 @@ async def search(msg: String) -> String:
 async def save(msg: String) -> String:
     """Save an important fact, user preference, or decision to long-term memory.
     Contract: robonix/service/memory/save."""
+    backend = _require_backend()
+    if MEMORY_DIR is None:
+        raise RuntimeError("memory directory is not initialized")
     p = Path(MEMORY_DIR) / f"{date.today()}_notes.md"
     log.info("save → %s (%d chars)", p, len(msg.data))
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
         f.write(f"\n{msg.data}\n")
     try:
-        await mem.index()
+        await backend.index()
     except Exception as e:
         log.warning("re-index after save failed: %s: %s", type(e).__name__, e)
     return String(data="Memory saved and indexed.")
@@ -220,7 +231,7 @@ async def compact(msg: Empty) -> String:
         return String(data="compact: no LLM credentials available. "
                            "Set VLM_API_KEY in the deploy manifest's system.memory env block.")
     try:
-        summary_path = await mem.compact(
+        summary_path = await _require_backend().compact(
             llm_provider="openai", model=model,
             base_url=base_url, api_key=api_key,
         )
@@ -236,20 +247,53 @@ async def compact(msg: Empty) -> String:
 
 
 @memory.on_init
-def init(cfg):
-    """Boot-time index of the corpus. Empty corpus is fine — index() returns
-    quickly with no docs. Don't fail Init on indexing errors; search/save
-    handlers degrade gracefully."""
-    _ = cfg
-    log.info("on_init: building initial index from %s", MEMORY_DIR)
+def init(cfg: dict):
+    """Build and index the configured backend before the provider can activate."""
+    global mem, MEMORY_DIR, MILVUS_URI, _APPLIED_CONFIG
     try:
-        asyncio.run(mem.index())
+        resolved = _resolve_config(cfg)
+        if mem is not None:
+            if resolved == _APPLIED_CONFIG:
+                log.info("on_init: already initialized with the same configuration")
+                return Ok()
+            return Err("memory is already initialized with different configuration")
+
+        memory_dir, milvus_uri, onnx_threads = resolved
+        Path(memory_dir).mkdir(parents=True, exist_ok=True)
+        if "://" not in milvus_uri and not (
+            ":" in milvus_uri and "/" not in milvus_uri and not milvus_uri.endswith(".db")
+        ):
+            Path(milvus_uri).parent.mkdir(parents=True, exist_ok=True)
+
+        os.environ["MEMSEARCH_ONNX_THREADS"] = str(onnx_threads)
+        configure_onnxruntime()
+        from memsearch import MemSearch  # noqa: PLC0415
+
+        log.info("phase 3/4: constructing MemSearch (embedding=onnx, milvus_lite)")
+        log.info("  memory_dir = %s", memory_dir)
+        log.info("  milvus_uri = %s", milvus_uri)
+        backend = MemSearch(
+            paths=[memory_dir],
+            embedding_provider="onnx",
+            milvus_uri=milvus_uri,
+        )
+        log.info("phase 4/4: building initial index")
+        asyncio.run(backend.index())
+
+        mem = backend
+        MEMORY_DIR = memory_dir
+        MILVUS_URI = milvus_uri
+        _APPLIED_CONFIG = resolved
         log.info("on_init: index built")
-    except Exception as e:
-        # Empty corpus or transient I/O — degrade rather than crash boot.
-        log.warning("on_init: initial index failed (empty corpus?): %s: %s",
-                    type(e).__name__, e)
-    return Ok()
+        return Ok()
+    except Exception as exc:
+        mem = None
+        MEMORY_DIR = None
+        MILVUS_URI = None
+        _APPLIED_CONFIG = None
+        log.error("on_init failed: %s: %s", type(exc).__name__, exc)
+        log.error("traceback:\n%s", traceback.format_exc())
+        return Err(f"memory init failed: {type(exc).__name__}: {exc}")
 
 
 def main() -> int:

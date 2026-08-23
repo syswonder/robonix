@@ -150,11 +150,20 @@ fn render_contracts(
 }
 
 fn md_table_cell(value: &str) -> String {
+    // Escapes `|`/newlines for markdown tables and `{`/`}`/`<` so the page
+    // also compiles as MDX (Docusaurus): a bare `{...}` in a contract
+    // description would otherwise be parsed as a JSX expression.
     let trimmed = value.trim();
     if trimmed.is_empty() {
         "-".to_string()
     } else {
-        trimmed.replace('|', "\\|").replace('\n', "<br>")
+        trimmed
+            .replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace('{', "\\{")
+            .replace('}', "\\}")
+            .replace('<', "\\<")
+            .replace('\n', "<br/>")
     }
 }
 fn render_idl(idl: &[IdlFile], banner: &str) -> String {

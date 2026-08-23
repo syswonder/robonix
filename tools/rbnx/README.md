@@ -68,8 +68,41 @@ system:
 - `ROBONIX_ATLAS` — atlas endpoint, default `127.0.0.1:50051`.
 - `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
   to pilot at boot.
-- `RBNX_CONFIG_FILE` — explicit path to a config file (overrides
-  `~/.robonix/config.yaml`).
+
+Package instance settings belong in the deployment manifest's nested
+`config:` mapping. `rbnx boot` serializes that mapping and sends it to the
+provider through `Driver(CMD_INIT)`; it does not create a second package
+configuration file.
+
+Each primitive, service, or skill entry's `name` is its Atlas provider id and
+must be non-empty, whitespace-normalized, and unique across those package
+sections. `rbnx boot` passes that
+identity to the package as `RBNX_INSTANCE_NAME`; the Python SDK uses it for
+registration, capability declaration, heartbeat, and lifecycle state while
+preserving the package's source-level id for standalone `rbnx start`. Startup
+waits only for a fresh registration of that exact id, so unrelated providers
+that register concurrently cannot receive the instance's lifecycle config. If
+that id is already live in Atlas before spawn, startup fails rather than taking
+over the existing provider.
+
+Package authors normally omit Driver from `capabilities`; rbnx and current
+codegen automatically select and register `robonix/lifecycle/driver`. Explicit
+shared selection is accepted, and one explicitly selected namespace Driver
+remains compatible when it exactly matches `<provider namespace>/driver`. A
+legacy manifest may use a current shared runtime Driver while it is migrated;
+the reverse shared-to-legacy substitution is rejected. At runtime every
+provider must expose exactly one lifecycle Driver; missing, mismatched,
+unrelated, and dual registrations all fail startup before config is delivered.
+
+The compatibility handshake is fail-closed. For an omitted Driver, rbnx
+exports `ROBONIX_DRIVER_CONTRACT_ID=robonix/lifecycle/driver` and clears the
+compatibility marker. For an explicit legacy Driver, rbnx exports that exact ID
+plus `ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`; despite its historical
+name, the marker permits only legacy-manifest to shared-runtime migration. The
+SDK uses a complete legacy service pair when present, or a complete shared pair
+when the legacy pair is wholly absent. Partial stubs, zero or multiple runtime
+Drivers, unrelated IDs, and shared-to-legacy fallback all fail startup, so
+config is never silently lost and no provider is promoted without a Driver.
 
 Each primitive, service, and skill entry's `name` is its deploy-time Atlas
 provider id. `rbnx boot` passes it as `RBNX_INSTANCE_NAME`; the SDK uses that

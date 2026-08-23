@@ -3,7 +3,7 @@
 // `robonix_manifest.yaml`. (`rbnx boot` is a back-compat alias.)
 //
 // Conventions:
-//   - Built-in `system:` Rust binaries are launched with
+//   - `system:` Rust binaries (atlas / pilot / executor) are launched with
 //     CLI arguments translated from the manifest block (`--listen`,
 //     `--log`, `--vlm-*`, …). No env-var translation, no YAML config files.
 //   - Package entries (`primitive` / `service`) are launched serially:
@@ -12,8 +12,11 @@
 //     `ok=true`. Only after every primitive's driver returns ok do we move
 //     on to `service:` (which can depend on primitive data being ready).
 //     The package's `config:` block is JSON-encoded and delivered ONLY via
-//     Driver(CMD_INIT)'s config_json field. The provider process never sees a
-//     config file or env var — that's the v0.1 layering invariant.
+//     Driver(CMD_INIT)'s config_json field. Omitting Driver is the canonical
+//     way to select the shared lifecycle service. An exact legacy manifest may
+//     use a current shared runtime Driver while it is migrated. A provider
+//     without exactly one lifecycle Driver fails startup.
+//     The provider process never sees a config file or env var.
 //   - `skill:` entries are spawned identically to `service:` — they
 //     need a long-lived process for their MCP tools to be registered
 //     on atlas. The semantic difference (skill = atomic intent
@@ -29,10 +32,14 @@
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
-use robonix_cli::launch::PackageRuntimeRecord;
+use robonix_cli::launch::{
+    PackageRuntimeRecord, ProviderRegistrationSnapshot, RegistrationOutcome,
+    contract_id_to_service_name, resolve_runtime_driver_contract, snapshot_provider_ids,
+    terminate_process_group,
+};
 use robonix_cli::output;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -42,6 +49,7 @@ use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal};
 use tonic::Request;
 use tonic::transport::Endpoint;
+use uuid::Uuid;
 
 use robonix_scribe as scribe;
 
@@ -56,24 +64,22 @@ const CMD_ACTIVATE: u32 = 1;
 const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 const CMD_SHUTDOWN: u32 = 3;
+// How long to wait for a freshly spawned package to register its driver
+// capability with atlas before giving up.
+const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 // Default Driver(CMD_INIT) deadline. Webots CI can override this with
 // ROBONIX_DRIVER_INIT_TIMEOUT_S for real stacks whose lifecycle bringup may
 // exceed 90s on a cold self-hosted runner.
 const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
-const BUILTIN_SYSTEM_BINARIES: &[(&str, &str)] = &[
-    ("atlas", "robonix-atlas"),
-    ("executor", "robonix-executor"),
-    ("soma", "robonix-soma"),
-    ("pilot", "robonix-pilot"),
-    ("vitals", "robonix-vitals"),
-    ("liaison", "robonix-liaison"),
-];
+
+/// Single source of truth for which `system:` keys are shipped binaries
+/// rather than packages under `<robonix_source>/system/<key>/`.
+pub(super) const SYSTEM_BUILTINS: &[&str] =
+    &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
 
 pub(super) fn is_builtin_system(name: &str) -> bool {
-    BUILTIN_SYSTEM_BINARIES
-        .iter()
-        .any(|(builtin, _)| *builtin == name)
+    SYSTEM_BUILTINS.contains(&name)
 }
 
 fn driver_init_timeout() -> Duration {
@@ -121,8 +127,9 @@ struct PackageEntry {
     /// branch at clone time. Ignored when `path` is used.
     #[serde(default)]
     branch: Option<String>,
-    /// Opaque config block; serialised to JSON and handed to the package's
-    /// `start` body as `RBNX_CAP_CONFIG_JSON`.
+    /// Opaque config block; serialised to JSON and delivered through
+    /// Driver(CMD_INIT). Startup fails if the provider does not declare its
+    /// selected shared or exact compatible legacy lifecycle Driver.
     #[serde(default)]
     config: serde_yaml::Value,
     /// Optional package-manifest filename override. A package may ship
@@ -178,7 +185,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boot_prerequisites_build_non_builtin_system_packages() {
+    fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -189,6 +196,7 @@ mod tests {
         ));
         let scene = temp.join("system/scene");
         std::fs::create_dir_all(&scene).expect("scene package directory");
+        std::fs::create_dir_all(temp.join("system/vitals")).expect("vitals builtin directory");
         std::fs::write(
             scene.join("package_manifest.yaml"),
             r#"manifestVersion: 1
@@ -205,7 +213,10 @@ stop: "true"
         .expect("test package manifest");
 
         let deploy = DeployManifest {
-            system: HashMap::from([("scene".to_string(), serde_yaml::Value::Null)]),
+            system: HashMap::from([
+                ("scene".to_string(), serde_yaml::Value::Null),
+                ("vitals".to_string(), serde_yaml::Value::Null),
+            ]),
             ..Default::default()
         };
         let manifest_dir = temp.join("deployment");
@@ -245,41 +256,99 @@ stop: "true"
         assert_eq!(manifest_arg, Some(selected.to_string_lossy().as_ref()));
     }
 
-    /// Verify that Vitals receives typed flags and its complete manifest block.
     #[test]
-    fn vitals_manifest_is_translated_to_builtin_args() {
+    fn vitals_receives_typed_manifest_fields() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
-listen: 127.0.0.1:50093
-id: webots-vitals
-thresholds_path: /tmp/vitals-thresholds.yaml
+listen: 0.0.0.0:50093
+provider_id: vitals
+thresholds_path: config/vitals.yaml
 soma_endpoint: 127.0.0.1:50091
-log: debug
-expected_modules:
-  - module_id: executor
-    policy: required
 "#,
         )
-        .expect("parse vitals manifest block");
-
+        .unwrap();
         let args = system_cli_args("vitals", Some(&cfg), Some("0.0.0.0:50051"));
-        let value_for = |flag: &str| {
-            args.windows(2)
-                .find(|pair| pair[0] == flag)
-                .map(|pair| pair[1].as_str())
-        };
 
-        assert_eq!(value_for("--listen"), Some("127.0.0.1:50093"));
-        assert_eq!(value_for("--atlas"), Some("0.0.0.0:50051"));
-        assert_eq!(value_for("--id"), Some("webots-vitals"));
+        for expected in [
+            ["--listen", "0.0.0.0:50093"],
+            ["--atlas", "0.0.0.0:50051"],
+            ["--id", "vitals"],
+            ["--thresholds-path", "config/vitals.yaml"],
+            ["--soma-endpoint", "127.0.0.1:50091"],
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == expected[0] && pair[1] == expected[1]),
+                "missing {:?} in {:?}",
+                expected,
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn provider_failure_ignores_later_shutdown_noise() {
+        let path = std::env::temp_dir().join(format!(
+            "rbnx-provider-failure-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"level\":\"info\",\"msg\":\"ready -- awaiting Driver(CMD_INIT)\"}\n",
+                "{\"level\":\"info\",\"msg\":\"[ranger_chassis] state REGISTERED -> ERROR (CAN setup failed: sudo password required)\"}\n",
+                "{\"level\":\"info\",\"msg\":\"shutdown hook completed\"}\n",
+            ),
+        )
+        .unwrap();
+
         assert_eq!(
-            value_for("--thresholds-path"),
-            Some("/tmp/vitals-thresholds.yaml")
+            read_provider_failure(&path).as_deref(),
+            Some("CAN setup failed: sudo password required")
         );
-        assert_eq!(value_for("--soma-endpoint"), Some("127.0.0.1:50091"));
-        assert_eq!(value_for("--log"), Some("debug"));
-        let config_json = value_for("--config-json").expect("complete manifest JSON");
-        assert!(config_json.contains("expected_modules"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_failure_accepts_error_level_records() {
+        let path = std::env::temp_dir().join(format!(
+            "rbnx-provider-error-level-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "{\"level\":\"error\",\"msg\":\"camera device disconnected\"}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_provider_failure(&path).as_deref(),
+            Some("camera device disconnected")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_exit_summary_uses_last_structured_message() {
+        let path = std::env::temp_dir().join(format!(
+            "rbnx-provider-exit-summary-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"level\":\"info\",\"msg\":\"Traceback (most recent call last):\"}\n",
+                "{\"level\":\"info\",\"msg\":\"ImportError: generated contract is missing\"}\n",
+                "{\"level\":\"info\",\"msg\":\"Error: scene process exited with status 1\"}\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_provider_exit_summary(&path).as_deref(),
+            Some("Error: scene process exited with status 1")
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -348,9 +417,10 @@ fn check_prerequisites(
     // otherwise `rbnx start` performs the build after spawn and the provider
     // registration timeout can kill a legitimate first build (Scene model
     // downloads are a common example).
+
     if let Some(source_root) = robonix_source_path {
         for name in deploy.system.keys() {
-            if is_builtin_system(name) {
+            if is_builtin_system(name.as_str()) {
                 continue;
             }
             let pkg_path = source_root.join("system").join(name);
@@ -547,6 +617,12 @@ struct Spawned {
     pgid: u32,
     provider_id: Option<String>,
     driver_contract: Option<String>,
+    /// Lifecycle contract selected by this package's exact manifest. Builtin
+    /// system processes are not package-managed and leave this unset.
+    expected_driver_contract: Option<String>,
+    /// True only for an explicit legacy selection, permitting a current shared
+    /// runtime Driver while the manifest is migrated.
+    allow_shared_driver_upgrade: bool,
     config_json: Option<String>,
     package_dir: Option<PathBuf>,
     stop: Option<String>,
@@ -623,6 +699,8 @@ async fn spawn_system_binary(
         pgid: pid,
         provider_id: None,
         driver_contract: None,
+        expected_driver_contract: None,
+        allow_shared_driver_upgrade: false,
         config_json: None,
         package_dir: None,
         stop: None,
@@ -769,6 +847,8 @@ async fn spawn_soma_binary(
             pgid: pid,
             provider_id: None,
             driver_contract: None,
+            expected_driver_contract: None,
+            allow_shared_driver_upgrade: false,
             config_json: None,
             package_dir: None,
             stop: None,
@@ -825,6 +905,19 @@ async fn spawn_package(
     let package_manifest =
         robonix_cli::manifest::detect_and_load(&pkg_path, entry.manifest.as_deref())
             .with_context(|| format!("load package manifest for {}", pkg_path.display()))?;
+    package_manifest.manifest.validate_and_summarize()?;
+    let explicit_driver_contract = package_manifest
+        .manifest
+        .explicit_lifecycle_driver_contract()?;
+    let allow_shared_driver_upgrade = explicit_driver_contract.is_some_and(|contract| {
+        contract != robonix_cli::manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT
+    });
+    let expected_driver_contract = Some(
+        package_manifest
+            .manifest
+            .selected_lifecycle_driver_contract()?
+            .to_string(),
+    );
     let stop = package_manifest.manifest.stop.trim().to_string();
     let stop = if stop.is_empty() { None } else { Some(stop) };
     // Scribe tag + log-file stem = the provider_id (`entry.name`) verbatim.
@@ -939,6 +1032,8 @@ async fn spawn_package(
         pgid: pid,
         provider_id: None,
         driver_contract: None,
+        expected_driver_contract,
+        allow_shared_driver_upgrade,
         config_json: None,
         package_dir: Some(pkg_path),
         stop,
@@ -970,6 +1065,12 @@ pub async fn execute(
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
     let root = prepare_manifest(root, config.robonix_source_path.as_deref())
         .with_context(|| format!("failed to prepare {}", manifest_path.display()))?;
+    robonix_cli::manifest::validate_deployment_instance_names(&root).with_context(|| {
+        format!(
+            "invalid deployment identities in {}",
+            manifest_path.display()
+        )
+    })?;
     let mut deploy: DeployManifest = serde_yaml::from_value(root)
         .with_context(|| format!("failed to decode {}", manifest_path.display()))?;
     // Banner + boot header FIRST, so the logo/version and what we're booting
@@ -1058,6 +1159,12 @@ pub async fn execute(
 
     let mut children: Vec<Spawned> = Vec::new();
     let state_path = teardown::state_path(&manifest_dir);
+    let boot_id = Uuid::new_v4().to_string();
+    // Every wrapper and provider inherits this marker. Persisted teardown
+    // verifies it against /proc before signalling a PGID, preventing stale
+    // state from killing an unrelated process after PID reuse.
+    unsafe { std::env::set_var("RBNX_BOOT_ID", &boot_id) };
+    let boot_start_time_ticks = robonix_cli::launch::proc_start_time_ticks(std::process::id());
     let started_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1070,6 +1177,24 @@ pub async fn execute(
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1:50051")
         .to_string();
+    teardown::write_state(
+        &state_path,
+        &teardown::BootState {
+            manifest_path: manifest_path.display().to_string(),
+            boot_pid: std::process::id(),
+            boot_start_time_ticks,
+            boot_id: boot_id.clone(),
+            started_at_ms,
+            atlas_endpoint: atlas_endpoint.clone(),
+            components: Vec::new(),
+        },
+    )?;
+    super::boot_watchdog::spawn(
+        &state_path,
+        std::process::id(),
+        boot_start_time_ticks,
+        &boot_id,
+    )?;
     let spawn_env = PackageSpawnEnv {
         log_dir: &log_dir,
         cache_root: &cache_root,
@@ -1120,6 +1245,13 @@ pub async fn execute(
                 .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            let soma_listen = deploy
+                .system
+                .get("soma")
+                .and_then(|v| v.as_mapping())
+                .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
+                .and_then(|v| v.as_str())
+                .map(|s| s.replacen("0.0.0.0", "127.0.0.1", 1));
             // Atlas's contract registry walks every dir in
             // --capabilities at startup. We seed it with:
             //   1. <robonix_source>/capabilities — the global tree
@@ -1152,12 +1284,27 @@ pub async fn execute(
             } else {
                 Some(atlas_caps_roots.join(","))
             };
-            for (name, bin) in BUILTIN_SYSTEM_BINARIES {
+            let bin_map: &[(&str, &str)] = &[
+                ("atlas", "robonix-atlas"),
+                ("executor", "robonix-executor"),
+                ("soma", "robonix-soma"),
+                ("vitals", "robonix-vitals"),
+                ("pilot", "robonix-pilot"),
+                ("liaison", "robonix-liaison"),
+            ];
+            for (name, bin) in bin_map {
                 if !deploy.system.contains_key(*name) {
                     continue;
                 }
                 let mut args =
                     system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
+                if *name == "vitals"
+                    && !args.iter().any(|arg| arg == "--soma-endpoint")
+                    && let Some(endpoint) = soma_listen.as_ref()
+                {
+                    args.push("--soma-endpoint".into());
+                    args.push(endpoint.clone());
+                }
                 if *name == "atlas"
                     && !args.iter().any(|a| a == "--capabilities")
                     && let Some(p) = atlas_caps_default.as_ref()
@@ -1221,8 +1368,10 @@ pub async fn execute(
                 if *name == "soma" {
                     if !deploy.primitive.is_empty() {
                         output::boot_section("primitive");
-                        for entry in &deploy.primitive {
-                            output::boot_note(&entry.name, "delegated to soma stage 1");
+                        if output::boot_verbose() {
+                            for entry in &deploy.primitive {
+                                output::boot_wait(&entry.name, "waiting for registration");
+                            }
                         }
                     }
                     let mut stage1_atlas = AtlasClient::connect_with_retry(
@@ -1232,7 +1381,7 @@ pub async fn execute(
                     )
                     .await
                     .with_context(|| {
-                        format!("connect to atlas at '{atlas_endpoint}' for soma stage 1 wait")
+                        format!("connect to atlas at '{atlas_endpoint}' for primitive readiness")
                     })?;
                     // We just pushed the soma `Spawned` above; grab a
                     // mutable borrow on its Child so the stage-1 waiter
@@ -1246,7 +1395,11 @@ pub async fn execute(
                         .child;
                     wait_for_soma_stage1(
                         &mut stage1_atlas,
-                        deploy.primitive.len(),
+                        &deploy
+                            .primitive
+                            .iter()
+                            .map(|entry| entry.name.clone())
+                            .collect::<Vec<_>>(),
                         soma_child,
                         &log_dir,
                     )
@@ -1271,15 +1424,17 @@ pub async fn execute(
                     // for-loop finishes. Otherwise (e.g. an atlas-executor-
                     // soma-only deploy) skip the header — dangling section
                     // titles with nothing under them are worse than none.
-                    let builtin_after_soma = BUILTIN_SYSTEM_BINARIES
+                    let builtin_after_soma = bin_map
                         .iter()
                         .skip_while(|(n, _)| *n != "soma")
                         .skip(1) // drop soma itself
                         .any(|(n, _)| deploy.system.contains_key(*n));
-                    let has_non_builtin_system =
-                        deploy.system.keys().any(|name| !is_builtin_system(name));
+                    let has_non_builtin_system = deploy
+                        .system
+                        .keys()
+                        .any(|k| !bin_map.iter().any(|(n, _)| n == k));
                     if builtin_after_soma || has_non_builtin_system {
-                        output::boot_section("system service");
+                        output::boot_section("system");
                     }
                 }
             }
@@ -1333,13 +1488,16 @@ pub async fn execute(
                     output::boot_skip(key, "not on disk");
                     continue;
                 }
+                let (manifest_override, runtime_config) =
+                    robonix_cli::manifest::split_system_package_config(value)
+                        .with_context(|| format!("parse system/{key} package selector"))?;
                 let entry = PackageEntry {
                     name: key.clone(),
                     path: Some(pkg_dir.to_string_lossy().into_owned()),
                     url: None,
                     branch: None,
-                    config: value.clone(),
-                    manifest: None,
+                    config: runtime_config,
+                    manifest: manifest_override,
                 };
                 match spawn_and_init("system", &entry, &spawn_env, &mut atlas).await {
                     Ok(sp) => {
@@ -1407,12 +1565,28 @@ pub async fn execute(
         // two-stage bring-up vocabulary just to read boot output.
         if deploy.system.contains_key("soma") && !skip_system {
             output::boot_section("skill");
+            if output::boot_verbose() {
+                for entry in &deploy.skill {
+                    output::boot_wait(&entry.name, "waiting for registration");
+                }
+            }
             if let Err(e) = write_stage2_trigger(&mut soma_stage_writer) {
                 failures.push((
                     "system".to_string(),
                     "soma".to_string(),
-                    format!("write stage 2 trigger: {e:#}"),
+                    format!("start skill packages: {e:#}"),
                 ));
+            } else if let Err(e) = wait_for_soma_skills(
+                &mut atlas,
+                &deploy
+                    .skill
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            {
+                failures.push(("skill".to_string(), "soma".to_string(), format!("{e:#}")));
             }
         }
         Ok(failures)
@@ -1452,7 +1626,13 @@ pub async fn execute(
             &children,
         );
         let providers = component_records(&children);
-        teardown::teardown(Some(&atlas_endpoint), &providers).await;
+        let complete = teardown::teardown(Some(&atlas_endpoint), &providers, Some(&boot_id)).await;
+        if !complete {
+            anyhow::bail!(
+                "interrupted boot left identity-mismatched process groups; preserving {}",
+                state_path.display()
+            );
+        }
         for sp in &mut children {
             let _ = sp.child.wait().await;
         }
@@ -1475,8 +1655,16 @@ pub async fn execute(
                 &children,
             );
             let providers = component_records(&children);
-            teardown::teardown(Some(&atlas_endpoint), &providers).await;
-            let _ = std::fs::remove_file(&state_path);
+            let complete =
+                teardown::teardown(Some(&atlas_endpoint), &providers, Some(&boot_id)).await;
+            if complete {
+                let _ = std::fs::remove_file(&state_path);
+            } else {
+                return Err(e.context(format!(
+                    "cleanup refused identity-mismatched process groups; preserving {}",
+                    state_path.display()
+                )));
+            }
             return Err(e);
         }
     };
@@ -1503,7 +1691,18 @@ pub async fn execute(
         children.len(),
         log_dir.display()
     ));
-    scribe::info("bootstrap", "all components up — waiting for signal");
+    if failures.is_empty() {
+        scribe::info("bootstrap", "all components up — waiting for signal");
+    } else {
+        scribe::info(
+            "bootstrap",
+            &format!(
+                "{} component(s) up, {} package(s) failed — waiting for signal",
+                children.len(),
+                failures.len()
+            ),
+        );
+    }
     output::sub_step("Ctrl-C to tear down (or run `rbnx shutdown` from another shell).");
 
     // Wait for SIGINT / SIGTERM (reusing the streams installed before
@@ -1521,7 +1720,13 @@ pub async fn execute(
         ),
     );
     let providers = component_records(&children);
-    teardown::teardown(Some(&atlas_endpoint), &providers).await;
+    let complete = teardown::teardown(Some(&atlas_endpoint), &providers, Some(&boot_id)).await;
+    if !complete {
+        anyhow::bail!(
+            "shutdown refused identity-mismatched process groups; preserving {}",
+            state_path.display()
+        );
+    }
     // Best-effort wait so we get clean "exited" lines in our own log.
     for sp in &mut children {
         let _ = sp.child.wait().await;
@@ -1557,6 +1762,8 @@ fn persist_state(
     let state = teardown::BootState {
         manifest_path: manifest_path.display().to_string(),
         boot_pid: std::process::id(),
+        boot_start_time_ticks: robonix_cli::launch::proc_start_time_ticks(std::process::id()),
+        boot_id: std::env::var("RBNX_BOOT_ID").unwrap_or_default(),
         started_at_ms,
         atlas_endpoint: atlas_endpoint.to_string(),
         components: component_records(children),
@@ -1821,9 +2028,10 @@ fn system_cli_args(
                 "--atlas",
                 s("atlas").or_else(|| atlas_listen.map(str::to_string)),
             );
-            push_pair(&mut out, "--id", s("id"));
+            push_pair(&mut out, "--id", s("provider_id").or_else(|| s("id")));
             push_pair(&mut out, "--thresholds-path", s("thresholds_path"));
             push_pair(&mut out, "--soma-endpoint", s("soma_endpoint"));
+            push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--log", s("log"));
         }
         _ => {}
@@ -1831,67 +2039,60 @@ fn system_cli_args(
     out
 }
 
-/// Spawn one primitive / service package and wait for it to register
-/// at least one capability with atlas. If the new provider has a `*/driver`
-/// gRPC capability, also drive Driver(CMD_INIT) and pass the entry's
-/// `config:` as `config_json`. Packages that don't declare a driver
-/// (e.g. system packages or new packages that just
-/// don't need init-time wiring) are deployed as-is once their first provider
-/// appears in atlas.
+/// Spawn one package and wait for its provider to register with Atlas.
+///
+/// The selected shared or explicit legacy Driver is verified before
+/// INIT/ACTIVATE and receives the entry's config. Omission and explicit shared
+/// selections stay shared-only; only an exact namespace legacy selection may
+/// accept an upgraded shared runtime Driver.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
     spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
 ) -> Result<Spawned> {
-    let before = robonix_cli::launch::snapshot_provider_registration(atlas, &entry.name)
+    let before = snapshot_provider_ids(atlas)
         .await
         .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?;
 
     let mut sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
 
-    // One package = one provider. After spawn, the new provider_id is whatever
-    // atlas saw register that wasn't in `before`.
+    // One package = one provider. Atlas may reuse a stable provider id on
+    // takeover, so registration_id (not id alone) correlates this spawn.
 
-    // Once the wrapper is up, every error path below must SIGKILL the
+    // Once the wrapper is up, every error path below must terminate the
     // PGID before bailing — otherwise `?` returns the spawned process to
     // a dead Spawned (which itself has no killing Drop), the caller's
     // teardown loop never sees it (`children.push(sp)` only runs after
     // this fn succeeds), and the orphan keeps holding whatever the
     // package opened (e.g. memsearch's milvus DB lock, executor's gRPC
-    // port, …). Reaping here keeps boot recoverable: a fresh `rbnx boot`
-    // immediately after a failed one finds a clean process table.
+    // port, …). Give the provider's SIGTERM handler time to run
+    // `on_shutdown` before SIGKILL fallback; providers may own ROS children
+    // in their own process groups that only the handler knows about.
     let pgid = sp.pgid;
-    let reap = || {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(pgid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-    };
 
-    let (provider_id, driver_contract) = match wait_for_registration(
+    let registration = match wait_for_registration(
         atlas,
         &before,
         &entry.name,
         &pkg_label,
         component,
         spawn_env.log_dir,
+        &mut sp.child,
     )
     .await
     {
         Ok(v) => v,
         Err(e) => {
-            reap();
+            terminate_process_group(pgid, Duration::from_secs(8)).await;
             return Err(e);
         }
     };
-
-    // Spec: the provider_id this process registers (Python's
-    // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
-    // for this entry. Mismatch is a deploy bug — surfacing it here
-    // beats letting downstream consumers fail with cryptic
-    // "no provider for X" errors.
+    let provider_id = registration.provider_id.clone();
+    // The exact-id waiter makes this an internal invariant. Keep the check as
+    // defense in depth so a future launcher refactor cannot deliver config to
+    // a provider other than the manifest instance.
     if provider_id != entry.name {
         let log_file = log_path(spawn_env.log_dir, &pkg_label);
         output::boot_fail(
@@ -1904,36 +2105,50 @@ async fn spawn_and_init(
                 log_file.display()
             ),
         );
-        reap();
+        terminate_process_group(pgid, Duration::from_secs(8)).await;
         anyhow::bail!(
-            "[{component}/{pkg_label}] provider_id mismatch: manifest name='{}' vs Capability(id='{}')",
+            "[{component}/{pkg_label}] deployment identity invariant failed: manifest name='{}' vs Capability(id='{}')",
             entry.name,
             provider_id,
         );
     }
 
-    let Some(driver_contract) = driver_contract else {
-        // No driver contract — system providers auto-promote to ACTIVE on
-        // their own once gRPC + MCP are listening. We don't drive INIT
-        // / ACTIVATE for them.
-        sp.provider_id = Some(provider_id);
-        output::boot_ok(short_label(&pkg_label, component), "ACTIVE  (no driver)");
-        return Ok(sp);
+    sp.provider_id = Some(provider_id.clone());
+    let expected_driver_contract = sp
+        .expected_driver_contract
+        .as_deref()
+        .expect("package spawns always carry a lifecycle selection");
+    let driver_contract = match resolve_runtime_driver_contract(
+        &provider_id,
+        &registration.provider_namespace,
+        expected_driver_contract,
+        &registration.driver_contracts,
+        sp.allow_shared_driver_upgrade,
+    ) {
+        Ok(contract) => contract,
+        Err(error) => {
+            let log_file = log_path(spawn_env.log_dir, &pkg_label);
+            output::boot_fail(
+                short_label(&pkg_label, component),
+                &format!("{error}; log {}", log_file.display()),
+            );
+            terminate_process_group(pgid, Duration::from_secs(8)).await;
+            return Err(error).with_context(|| format!("[{component}/{pkg_label}] lifecycle"));
+        }
     };
 
-    let config_json = match serde_json::to_string(&entry.config).with_context(|| {
+    if driver_contract != expected_driver_contract {
+        output::warning(&format!(
+            "provider '{provider_id}' publishes shared lifecycle Driver '{driver_contract}' for legacy manifest selection '{expected_driver_contract}'; remove the legacy Driver declaration to finish migration"
+        ));
+    }
+
+    let config_json = serde_json::to_string(&entry.config).with_context(|| {
         format!(
             "[{component}/{pkg_label}] serialize config for deployment instance '{}'",
             entry.name
         )
-    }) {
-        Ok(value) => value,
-        Err(error) => {
-            reap();
-            return Err(error);
-        }
-    };
-    sp.provider_id = Some(provider_id.clone());
+    })?;
     sp.driver_contract = Some(driver_contract.clone());
     sp.config_json = Some(config_json.clone());
 
@@ -1955,7 +2170,7 @@ async fn spawn_and_init(
     {
         Ok(v) => v,
         Err(e) => {
-            reap();
+            terminate_process_group(pgid, Duration::from_secs(8)).await;
             return Err(e);
         }
     };
@@ -1990,7 +2205,7 @@ async fn spawn_and_init(
     {
         Ok(v) => v,
         Err(e) => {
-            reap();
+            terminate_process_group(pgid, Duration::from_secs(8)).await;
             return Err(e);
         }
     };
@@ -2043,7 +2258,7 @@ where
 
 async fn wait_for_soma_stage1(
     atlas: &mut AtlasClient,
-    primitive_count: usize,
+    primitive_names: &[String],
     soma_child: &mut Child,
     log_dir: &Path,
 ) -> Result<()> {
@@ -2055,22 +2270,28 @@ async fn wait_for_soma_stage1(
     let started = Instant::now();
     let deadline = started + SOMA_STAGE1_TIMEOUT;
     let mut frame: usize = 0;
+    let mut observed_states: HashMap<String, i32> = HashMap::new();
+    let mut active_primitives: HashSet<String> = HashSet::new();
+    let mut reported_failures: HashSet<String> = HashSet::new();
     if output::boot_verbose() {
-        output::boot_wait("soma stage 1", "waiting for primitive readiness");
+        output::boot_wait("primitive", "waiting for Soma-managed providers");
     }
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
-        let detail = if primitive_count == 0 {
+        let detail = if primitive_names.is_empty() {
             format!("waiting for Soma gRPC readiness… {elapsed_s:>4.1}s")
         } else {
-            format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
+            format!(
+                "starting {} primitive package(s)… {elapsed_s:>4.1}s",
+                primitive_names.len()
+            )
         };
         if output::boot_verbose() {
             if frame > 0 && frame.is_multiple_of(50) {
-                output::boot_note("soma stage 1", &detail);
+                output::boot_note("primitive", &detail);
             }
         } else {
-            output::boot_progress("soma stage 1", &detail, frame);
+            output::boot_progress("primitive", &detail, frame);
         }
         // Check every tick whether soma is still alive. If it exited
         // (typically: `missing robot_yaml`, `read Soma config`, port
@@ -2080,10 +2301,43 @@ async fn wait_for_soma_stage1(
         // and blocks CI. try_wait is non-blocking; Ok(Some(_)) means
         // the child has been reaped and the OS-level status is known.
         if let Ok(Some(status)) = soma_child.try_wait() {
+            let mut provider_failures = Vec::new();
+            for name in primitive_names {
+                let log_file = log_dir.join(format!("{name}.log"));
+                if let Some(cause) = read_provider_failure(&log_file) {
+                    if reported_failures.insert(name.clone()) {
+                        output::boot_fail(
+                            name,
+                            &format!("ERROR; {cause}; log {}", log_file.display()),
+                        );
+                    }
+                    provider_failures.push((name, cause, log_file));
+                }
+            }
+            if !provider_failures.is_empty() {
+                let names = provider_failures
+                    .iter()
+                    .map(|(name, _, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let logs = provider_failures
+                    .iter()
+                    .map(|(_, _, path)| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                output::boot_fail(
+                    "primitive",
+                    &format!("soma exited after provider failure(s): {names}"),
+                );
+                anyhow::bail!(
+                    "Soma exited with {status:?} after provider failure(s): {names}; logs: {logs}"
+                );
+            }
+
             let log_file = log_dir.join("soma.log");
             let tail = read_log_tail(&log_file, 20);
             output::boot_fail(
-                "soma stage 1",
+                "primitive",
                 &format!(
                     "soma exited before becoming ACTIVE (status={status:?}); see {}",
                     log_file.display()
@@ -2095,45 +2349,142 @@ async fn wait_for_soma_stage1(
                 format!("\n--- soma.log tail ---\n{tail}\n--- end ---")
             };
             anyhow::bail!(
-                "soma exited with {status:?} before stage 1 became ACTIVE; \
+                "soma exited with {status:?} before primitive readiness; \
                  log: {}{hint}",
                 log_file.display()
             );
         }
         if frame.is_multiple_of(POLLS_PER_TICK) {
+            for name in primitive_names {
+                let providers = atlas
+                    .query_capabilities(name, "", atlas_pb::Transport::Unspecified)
+                    .await
+                    .with_context(|| format!("poll primitive '{name}' during Soma bring-up"))?;
+                let Some(provider) = providers.into_iter().find(|provider| provider.id == *name)
+                else {
+                    continue;
+                };
+                let previous = observed_states.insert(name.clone(), provider.state);
+                if previous != Some(provider.state) {
+                    let state = lifecycle_state_label(provider.state);
+                    if provider.state == atlas_pb::LifecycleState::StateActive as i32 {
+                        output::boot_ok(name, "ACTIVE");
+                        active_primitives.insert(name.clone());
+                    } else if provider.state == atlas_pb::LifecycleState::StateError as i32 {
+                        let log_file = log_dir.join(format!("{name}.log"));
+                        let detail = read_provider_failure(&log_file).map_or_else(
+                            || format!("ERROR; log {}", log_file.display()),
+                            |cause| format!("ERROR; {cause}; log {}", log_file.display()),
+                        );
+                        output::boot_fail(name, &detail);
+                        reported_failures.insert(name.clone());
+                    } else if output::boot_verbose() {
+                        output::boot_note(name, state);
+                    }
+                }
+            }
             let providers = atlas
                 .query_capabilities("soma", SOMA_GET_YAML_CONTRACT, atlas_pb::Transport::Grpc)
                 .await
-                .context("wait for soma stage 1 readiness")?;
+                .context("wait for Soma primitive readiness")?;
             if let Some(soma) = providers.into_iter().find(|p| p.id == "soma")
                 && soma.state == atlas_pb::LifecycleState::StateActive as i32
                 && soma_grpc_ready(atlas, SOMA_GET_YAML_CONTRACT).await
             {
-                let ready_detail = if primitive_count == 0 {
-                    "Soma gRPC ready".to_string()
-                } else {
-                    format!("{primitive_count} primitive package(s) handled by soma")
-                };
-                output::boot_ok("soma stage 1", &ready_detail);
+                for name in primitive_names {
+                    if !active_primitives.contains(name) {
+                        output::boot_ok(name, "ACTIVE");
+                    }
+                }
                 return Ok(());
             }
         }
         if Instant::now() >= deadline {
             output::boot_fail(
-                "soma stage 1",
+                "primitive",
                 &format!(
                     "timeout after {:?}; service bring-up needs primitives ACTIVE first",
                     SOMA_STAGE1_TIMEOUT
                 ),
             );
             anyhow::bail!(
-                "soma stage 1 did not become ACTIVE within {:?}; refusing to start service packages before primitives are ready",
+                "Soma primitive bring-up did not become ready within {:?}; refusing to start service packages before primitives are ready",
                 SOMA_STAGE1_TIMEOUT
             );
         }
         tokio::time::sleep(SPINNER_TICK).await;
         frame = frame.wrapping_add(1);
     }
+}
+
+fn lifecycle_state_label(state: i32) -> &'static str {
+    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
+        "REGISTERED"
+    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
+        "INACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
+        "ACTIVE"
+    } else if state == atlas_pb::LifecycleState::StateError as i32 {
+        "ERROR"
+    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
+        "TERMINATED"
+    } else {
+        "STARTING"
+    }
+}
+
+async fn wait_for_soma_skills(atlas: &mut AtlasClient, skill_names: &[String]) -> Result<()> {
+    const TIMEOUT: Duration = Duration::from_secs(180);
+    if skill_names.is_empty() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + TIMEOUT;
+    let mut observed_states: HashMap<String, i32> = HashMap::new();
+    let mut ready: HashSet<String> = HashSet::new();
+    while Instant::now() < deadline {
+        for name in skill_names {
+            let providers = atlas
+                .query_capabilities(name, "", atlas_pb::Transport::Unspecified)
+                .await
+                .with_context(|| format!("poll skill '{name}' during soma bring-up"))?;
+            let Some(provider) = providers.into_iter().find(|provider| provider.id == *name) else {
+                continue;
+            };
+            if observed_states.insert(name.clone(), provider.state) != Some(provider.state) {
+                let state = lifecycle_state_label(provider.state);
+                if provider.state == atlas_pb::LifecycleState::StateInactive as i32
+                    || provider.state == atlas_pb::LifecycleState::StateActive as i32
+                {
+                    output::boot_ok(name, state);
+                    ready.insert(name.clone());
+                } else if provider.state == atlas_pb::LifecycleState::StateError as i32 {
+                    output::boot_fail(name, "ERROR; see soma.log and provider log");
+                    anyhow::bail!("skill '{name}' entered ERROR during Soma bring-up");
+                } else if output::boot_verbose() {
+                    output::boot_note(name, state);
+                }
+            }
+        }
+        if ready.len() == skill_names.len() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let pending = skill_names
+        .iter()
+        .filter(|name| !ready.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in &pending {
+        output::boot_fail(
+            name,
+            "registration/INIT timeout; see soma.log and provider log",
+        );
+    }
+    anyhow::bail!(
+        "Soma skill bring-up timed out after {TIMEOUT:?}: {}",
+        pending.join(", ")
+    )
 }
 
 /// Read the last `max_lines` lines of a file for embedding into an
@@ -2150,6 +2501,55 @@ fn read_log_tail(path: &Path, max_lines: usize) -> String {
     let lines: Vec<&str> = contents.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].join("\n")
+}
+
+/// Return the provider's actual lifecycle failure rather than whichever
+/// shutdown record happened to be written last. Scribe records are JSONL;
+/// providers commonly report lifecycle transitions at info level, so prefer
+/// `-> ERROR (...)` messages before falling back to an error-level record.
+fn read_provider_failure(path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut error_level_fallback = None;
+    for line in contents.lines().rev() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = record.get("msg").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if let Some((_, cause)) = message.split_once(" -> ERROR (") {
+            return Some(cause.strip_suffix(')').unwrap_or(cause).to_string());
+        }
+        if error_level_fallback.is_none()
+            && record.get("level").and_then(|value| value.as_str()) == Some("error")
+        {
+            error_level_fallback = Some(message.to_string());
+        }
+    }
+    error_level_fallback
+}
+
+/// Summarize a package that exited before Atlas registration. Providers often
+/// forward Python tracebacks through Scribe at info level, so the lifecycle-
+/// specific parser above may intentionally return None. In that case the last
+/// structured message is the most useful single-line cause for boot output.
+fn read_provider_exit_summary(path: &Path) -> Option<String> {
+    if let Some(cause) = read_provider_failure(path) {
+        return Some(cause);
+    }
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines().rev() {
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(message) = record.get("msg").and_then(|value| value.as_str())
+            && !message.trim().is_empty()
+        {
+            return Some(message.trim().to_string());
+        }
+        if !line.trim().is_empty() {
+            return Some(line.trim().to_string());
+        }
+    }
+    None
 }
 
 async fn soma_grpc_ready(atlas: &mut AtlasClient, contract_id: &str) -> bool {
@@ -2193,8 +2593,8 @@ fn write_stage2_trigger(writer: &mut Option<std::fs::File>) -> Result<()> {
     use std::io::Write;
     let Some(mut w) = writer.take() else {
         output::boot_skip(
-            "soma",
-            "stage 2 trigger skipped: no stage-fd writer (soma not spawned by this rbnx)",
+            "skill",
+            "start skipped: no trigger writer (Soma was not spawned by this rbnx)",
         );
         return Ok(());
     };
@@ -2205,7 +2605,6 @@ fn write_stage2_trigger(writer: &mut Option<std::fs::File>) -> Result<()> {
     // the bytes hit the pipe. Actual delivery (soma reads the line,
     // spawns skills, and their MCP tools/caps register) is verified
     // downstream by the boot-poll cap-wait loop, not here.
-    output::boot_ok("soma", "stage 2 trigger written");
     Ok(())
 }
 
@@ -2296,32 +2695,6 @@ async fn call_driver_cmd(
     Ok(r.state)
 }
 
-/// Mirrors `robonix_codegen::contract_gen::contract_id_to_service_name`.
-/// Uniform PascalCase: `robonix/primitive/chassis/driver` →
-/// `RobonixPrimitiveChassisDriver`. No prefix stripping. Full gRPC
-/// service path: `/robonix.contracts.<this>/Driver`.
-fn contract_id_to_service_name(id: &str) -> String {
-    id.split('/')
-        .filter(|x| !x.is_empty())
-        .map(|seg| {
-            seg.split('_')
-                .filter(|p| !p.is_empty())
-                .map(|p| {
-                    let mut c = p.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect::<String>()
-}
-
-/// Poll atlas until a provider NOT in `before` appears. Returns the new
-/// `provider_id` plus an optional `driver_contract_id` if the new provider
-/// declared a `*/driver` gRPC capability (signal to the caller that
-/// Driver(CMD_INIT) lifecycle should run).
 /// Strip the leading `<component>_` from the boot-log pkg_label.
 /// `system_memory` → `memory`; `primitive_tiago_chassis` → `tiago_chassis`.
 /// Keeps boot-output columns narrow (the section header above already
@@ -2332,56 +2705,192 @@ fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
         .unwrap_or(pkg_label)
 }
 
+/// Poll atlas until a provider NOT in `before` appears. Returns the new
+/// `provider_id` plus every distinct lifecycle Driver observed after the
+/// declaration settle window. The caller verifies this list before sending
+/// config or lifecycle commands.
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
-    before: &robonix_cli::launch::ProviderRegistrationSnapshot,
+    before: &ProviderRegistrationSnapshot,
     expected_provider_id: &str,
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
-) -> Result<(String, Option<String>)> {
+    child: &mut Child,
+) -> Result<RegistrationOutcome> {
+    if before.contains_key(expected_provider_id) {
+        anyhow::bail!(
+            "[{component}/{pkg_label}] deployment instance '{expected_provider_id}' \
+             was already registered before spawn"
+        );
+    }
+
+    // Wait for this manifest instance's exact id with a fresh registration
+    // generation. Unrelated providers can register concurrently and must not
+    // receive this instance's lifecycle config.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
+    const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
+    let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
-    let who = format!("{component}/{pkg_label}");
-    let registration = robonix_cli::launch::wait_for_registration_core(atlas, before, &who);
-    tokio::pin!(registration);
     if output::boot_verbose() {
         output::boot_wait(display_label, "registering with atlas");
     }
     loop {
-        tokio::select! {
-            result = &mut registration => {
-                match result {
-                    Ok(outcome) => {
-                        debug_assert_eq!(outcome.provider_id, expected_provider_id);
-                        return Ok((outcome.provider_id, outcome.driver_contract));
-                    }
-                    Err(error) => {
-                        let log_file = log_path(log_dir, pkg_label);
-                        output::boot_fail(
-                            display_label,
-                            &format!("registration failed — see {}", log_file.display()),
-                        );
-                        return Err(error).with_context(|| {
-                            format!("[{who}] registration failed. Log: {}", log_file.display())
-                        });
-                    }
-                }
+        let elapsed_s = started.elapsed().as_secs_f32();
+        let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
+        if output::boot_verbose() {
+            if frame > 0 && frame.is_multiple_of(50) {
+                output::boot_note(display_label, &detail);
             }
-            _ = tokio::time::sleep(SPINNER_TICK) => {
-                let elapsed_s = started.elapsed().as_secs_f32();
-                let detail = format!("registering with atlas… {elapsed_s:>4.1}s");
-                if output::boot_verbose() {
-                    if frame > 0 && frame.is_multiple_of(50) {
-                        output::boot_note(display_label, &detail);
-                    }
-                } else {
-                    output::boot_progress(display_label, &detail, frame);
-                }
-                frame = frame.wrapping_add(1);
+        } else {
+            output::boot_progress(display_label, &detail, frame);
+        }
+        // A package wrapper that exits before registering can never recover.
+        // Detect it on every spinner tick instead of waiting out the full
+        // registration timeout and then continuing with a misleading generic
+        // timeout. The caller still terminates the package PGID so any child
+        // processes left behind by a failed start hook are reaped.
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let log_file = log_path(log_dir, pkg_label);
+                let cause = read_provider_exit_summary(&log_file)
+                    .unwrap_or_else(|| "no diagnostic message in provider log".to_string());
+                output::boot_fail(
+                    display_label,
+                    &format!(
+                        "start process exited ({status}); {cause}; log {}",
+                        log_file.display()
+                    ),
+                );
+                anyhow::bail!(
+                    "[{component}/{pkg_label}] start process exited ({status}) before Atlas registration: {cause}. Log: {}",
+                    log_file.display()
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                anyhow::bail!(
+                    "[{component}/{pkg_label}] inspect start process while waiting for Atlas registration: {error}"
+                );
             }
         }
+        if frame.is_multiple_of(POLLS_PER_TICK as usize) {
+            let providers = atlas
+                .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+                .await
+                .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
+            let matched = providers.iter().find(|provider| {
+                robonix_cli::launch::is_expected_provider_registration(
+                    provider,
+                    before,
+                    expected_provider_id,
+                )
+            });
+            if let Some(first) = matched {
+                let provider_id = first.id.clone();
+                let registration_id = first.registration_id.clone();
+                // RegisterPrimitive/Service/Skill and DeclareCapability are
+                // two separate RPCs from the package side — Register lands
+                // first, declares follow within a few hundred ms. Give it
+                // up to a 1 s settle window so we don't false-fire a missing
+                // Driver error on a fast poll. Capped by the outer
+                // `deadline` so we never exceed user-facing timeout.
+                let settle_until = Instant::now()
+                    .checked_add(Duration::from_millis(1000))
+                    .map(|t| t.min(deadline))
+                    .unwrap_or(deadline);
+                let mut current: atlas_pb::CapabilityProvider = (*first).clone();
+                // Consume the complete settle window so a package that
+                // declares both shared and legacy Drivers cannot hide the
+                // second declaration behind the first successful poll.
+                loop {
+                    if Instant::now() >= settle_until {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let providers = atlas
+                        .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
+                        .await
+                        .with_context(|| format!("[{component}/{pkg_label}] re-poll for driver"))?;
+                    match providers.into_iter().find(|p| p.id == provider_id) {
+                        Some(p) if p.registration_id == registration_id => current = p,
+                        Some(p) => {
+                            let log_file = log_path(log_dir, pkg_label);
+                            output::boot_fail(
+                                display_label,
+                                &format!(
+                                    "provider '{provider_id}' registration changed during settle — see {}",
+                                    log_file.display(),
+                                ),
+                            );
+                            anyhow::bail!(
+                                "[{component}/{pkg_label}] provider '{provider_id}' registration changed during settle ('{registration_id}' -> '{}'). Log: {}",
+                                p.registration_id,
+                                log_file.display(),
+                            );
+                        }
+                        None => {
+                            // Provider vanished between the original match
+                            // and now (crashed mid-settle, atlas evicted,
+                            // heartbeat lapsed). Report loudly so downstream
+                            // boot logic cannot march on against a dead process.
+                            let log_file = log_path(log_dir, pkg_label);
+                            output::boot_fail(
+                                display_label,
+                                &format!(
+                                    "provider '{provider_id}' disappeared during settle — see {}",
+                                    log_file.display()
+                                ),
+                            );
+                            anyhow::bail!(
+                                "[{component}/{pkg_label}] provider '{provider_id}' \
+                                 unregistered during settle window. Log: {}",
+                                log_file.display()
+                            );
+                        }
+                    }
+                }
+                let mut driver_contracts = current
+                    .capabilities
+                    .iter()
+                    .filter(|capability| {
+                        capability.transport == atlas_pb::Transport::Grpc as i32
+                            && capability.contract_id.ends_with("/driver")
+                    })
+                    .map(|capability| capability.contract_id.clone())
+                    .collect::<Vec<_>>();
+                driver_contracts.sort();
+                driver_contracts.dedup();
+                return Ok(RegistrationOutcome {
+                    provider_id,
+                    provider_kind: current.kind,
+                    provider_namespace: current.namespace,
+                    registration_id: current.registration_id,
+                    driver_contracts,
+                });
+            }
+        }
+        if Instant::now() >= deadline {
+            let log_file = log_path(log_dir, pkg_label);
+            output::boot_fail(
+                display_label,
+                &format!(
+                    "registration timeout after {:?}; expected instance '{}' — see {}",
+                    DRIVER_REGISTER_TIMEOUT,
+                    expected_provider_id,
+                    log_file.display()
+                ),
+            );
+            anyhow::bail!(
+                "[{component}/{pkg_label}] timed out after {:?} — package never registered expected deployment instance '{}' with atlas. Log: {}",
+                DRIVER_REGISTER_TIMEOUT,
+                expected_provider_id,
+                log_file.display()
+            );
+        }
+        tokio::time::sleep(SPINNER_TICK).await;
+        frame = frame.wrapping_add(1);
     }
 }

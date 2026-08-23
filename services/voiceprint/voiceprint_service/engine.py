@@ -4,8 +4,8 @@
 Wraps SpeechBrain's ``SpeakerRecognition`` recipe (model
 ``speechbrain/spkrec-ecapa-voxceleb``) to produce a 192-dimension speaker
 embedding from either a file path or a raw PCM byte buffer. The model is
-fetched on first use; ``scripts/build.sh`` pre-warms the cache during the
-package build so runtime startup never reaches out to HuggingFace.
+resolved through ModelScope; ``scripts/build.sh`` pre-warms its cache during
+the package build so normal runtime startup does not need a network download.
 """
 from __future__ import annotations
 
@@ -105,6 +105,14 @@ class EcapaTdnnEngine:
         audio_tensor = self._decode(pcm_bytes, encoding or "pcm_s16le", sample_rate or 16000)
         emb = self.model.encode_batch(audio_tensor.unsqueeze(0).to(self.device))
         return emb.cpu().numpy().flatten()
+
+    def close(self) -> None:
+        """Release model references and return unused CUDA cache to Torch."""
+        if hasattr(self, "model"):
+            del self.model
+        if self.device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        log.info("ECAPA-TDNN released from %s", self.device)
 
     # -- helpers -----------------------------------------------------------
 

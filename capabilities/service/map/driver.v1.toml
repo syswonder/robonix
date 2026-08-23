@@ -1,5 +1,6 @@
-# Lifecycle interface every map service implementation MUST declare
-# (semantic map / occupancy grid / etc.).
+# Legacy namespace-specific lifecycle contract for map services. Existing
+# manifests remain supported; new packages omit Driver and use shared automatically.
+# A package must not declare both lifecycle contracts.
 # `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
 # AFTER all primitives have finished init.
 [contract]
@@ -7,7 +8,7 @@ id      = "robonix/service/map/driver"
 version = "1"
 kind    = "service"
 idl     = "lifecycle/srv/Driver.srv"
-description = "Lifecycle control interface for map service providers."
+description = "Legacy-compatible lifecycle interface for map service providers."
 
 [mode]
 type = "rpc"

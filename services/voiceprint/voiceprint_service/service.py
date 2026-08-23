@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Voiceprint gRPC service entry point (atlas-codegen flavour).
+"""Voiceprint gRPC service entry point.
 
-Replaces the original bespoke-proto implementation (system/voiceprint/proto/
-voiceprint.proto + voiceprint_pb2) with the standard robonix v0.1 flow:
+The package follows the standard Robonix capability and codegen flow:
 
-  1. capabilities/system/speech/voiceprint{,_enroll,_list}.v1.toml declares
-     the contract ids + IDL paths.
-  2. rbnx codegen materialises generated stubs into
+  1. ``capabilities/service/voiceprint/*.v1.toml`` declares the lifecycle and
+     Voiceprint contract IDs; ``capabilities/lib/voiceprint/srv/*.srv`` defines
+     their request and response messages.
+  2. ``rbnx codegen`` materialises generated stubs into
      rbnx-build/codegen/proto_gen/robonix_contracts{,_pb2,_pb2_grpc}.py
-     (one big proto bundle, three gRPC services).
+     and the per-IDL Voiceprint modules.
   3. This file imports those generated stubs, subclasses each Servicer
      base, and `attach_grpc_servicer`s them onto a single
-     robonix_api.Service. Atlas registration + Driver(CMD_INIT) +
-     heartbeat all run through Service.run() — no hand-rolled
-     grpc.server() any more.
+     ``robonix_api.Service``. Atlas registration, Driver(CMD_INIT), and
+     heartbeat all run through ``Service.run()``.
 
-Three RPCs land on the same listener under the same atlas Service:
+Four Voiceprint RPCs land on the same listener under one Atlas Service:
 
   * robonix/service/voiceprint/identify           — Identify(...)
       Frozen v0.1 capability surface; Liaison's voice path resolves it
@@ -26,6 +25,8 @@ Three RPCs land on the same listener under the same atlas Service:
       sample. Mutates enrolled.json on success.
   * robonix/service/voiceprint/list      — ListEnrolled(...)
       Read-only catalog; chat hydrates the user list with this on open.
+  * robonix/service/voiceprint/delete    — DeleteEnrolled(...)
+      Idempotently removes one enrolled speaker.
 
 State storage is unchanged: a single JSON file (`<data_dir>/enrolled.json`)
 mapping `user_id -> {"name": str, "embedding": [float, ...]}`. No schema
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from pathlib import Path
@@ -51,15 +53,24 @@ import numpy as np
 # rbnx-build/codegen/proto_gen/ and put on sys.path by robonix_api at
 # import time. Stub class names follow PascalCase of the contract_id
 # segments (see tools/codegen/src/contract_gen.rs).
-import robonix_contracts_pb2 as pb  # type: ignore[import-not-found]
-import robonix_contracts_pb2_grpc as pb_grpc  # type: ignore[import-not-found]
-# Voiceprint contract messages live under the per-IDL `robonix.voiceprint`
-# proto package (Identify_*, Enroll_*, ListEnrolled_*). They are NOT
-# remangled into `robonix_contracts_pb2.RobonixServiceSpeech*` — that
-# only mangles SERVICE names. Use the voiceprint_pb2 namespace for the
-# request/response dataclasses.
-import voiceprint_pb2 as vp  # type: ignore[import-not-found]
-from voiceprint_mcp import ListEnrolled_Request, ListEnrolled_Response  # type: ignore[import-not-found]
+try:
+    import robonix_contracts_pb2 as pb  # type: ignore[import-not-found]
+    import robonix_contracts_pb2_grpc as pb_grpc  # type: ignore[import-not-found]
+    # Voiceprint contract messages live under the per-IDL `robonix.voiceprint`
+    # proto package (Identify_*, Enroll_*, ListEnrolled_*). They are NOT
+    # remangled into `robonix_contracts_pb2.RobonixServiceSpeech*` — that
+    # only mangles SERVICE names. Use the voiceprint_pb2 namespace for the
+    # request/response dataclasses.
+    import voiceprint_pb2 as vp  # type: ignore[import-not-found]
+    from voiceprint_mcp import (  # type: ignore[import-not-found]
+        ListEnrolled_Request,
+        ListEnrolled_Response,
+    )
+except Exception as exc:  # noqa: BLE001 - generated modules raise version-specific exceptions
+    raise RuntimeError(
+        "Voiceprint generated modules are missing or incompatible; rebuild "
+        "this package or its containing deployment before starting it."
+    ) from exc
 from robonix_api import Service, Ok, Err, scribe_logger  # noqa: E402
 
 from voiceprint_service.engine import EcapaTdnnEngine
@@ -79,22 +90,25 @@ def _data_dir() -> Path:
     return Path(os.environ.get("VOICEPRINT_DATA_DIR", str(_DEFAULT_DATA_DIR)))
 
 
-def _threshold() -> float:
-    raw = os.environ.get("VOICEPRINT_THRESHOLD")
-    if raw is None:
-        return _DEFAULT_THRESHOLD
+def _validate_threshold(raw: object) -> float:
+    """Return a finite cosine threshold in the supported [0, 1] range."""
     try:
-        return float(raw)
-    except ValueError:
-        log.warning(
-            "Invalid VOICEPRINT_THRESHOLD=%r; falling back to %.2f",
-            raw, _DEFAULT_THRESHOLD,
-        )
-        return _DEFAULT_THRESHOLD
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("threshold must be a finite number in [0, 1]") from exc
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError("threshold must be a finite number in [0, 1]")
+    return value
+
+
+def _threshold() -> float:
+    return _validate_threshold(
+        os.environ.get("VOICEPRINT_THRESHOLD", _DEFAULT_THRESHOLD),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Enrolled-speaker database (JSON-backed, unchanged from PR #47)
+# Enrolled-speaker database (JSON-backed)
 # ---------------------------------------------------------------------------
 
 
@@ -104,35 +118,27 @@ class EnrolledDB:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.data: dict[str, dict] = {}
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self) -> None:
-        if self.path.is_file():
-            with self.path.open("r", encoding="utf-8") as fh:
-                self.data = json.load(fh)
-            log.info("Loaded %d enrolled users from %s", len(self.data), self.path)
-        else:
-            self.data = {}
+        with self._lock:
+            if self.path.is_file():
+                with self.path.open("r", encoding="utf-8") as fh:
+                    self.data = json.load(fh)
+                log.info("Loaded %d enrolled users from %s", len(self.data), self.path)
+            else:
+                self.data = {}
 
-    def _save(self) -> None:
+    def _save_locked(self) -> None:
+        """Persist the current snapshot; caller must hold ``self._lock``."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(self.data, fh, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
 
-    def enroll(self, user_id: str, user_name: str, embedding: np.ndarray) -> None:
-        self.data[user_id] = {
-            "name": user_name,
-            "embedding": [float(x) for x in embedding.tolist()],
-        }
-        self._save()
-        log.info(
-            "Enrolled %s (%s); embedding_dim=%d",
-            user_id, user_name, len(embedding),
-        )
-
-    def identify(self, query_emb: np.ndarray, threshold: float):
+    def _identify_locked(self, query_emb: np.ndarray, threshold: float):
         best_id, best_name, best_score = "", "", -1.0
         q = np.asarray(query_emb, dtype=np.float32)
         q_norm = float(np.linalg.norm(q)) or 1.0
@@ -144,63 +150,185 @@ class EnrolledDB:
                 best_id, best_name, best_score = uid, entry.get("name", ""), score
         return best_id, best_name, best_score, best_score >= threshold
 
+    def enroll(self, user_id: str, user_name: str, embedding: np.ndarray) -> None:
+        """Persist an unconditional enrollment, rolling back on write failure."""
+        with self._lock:
+            missing = object()
+            previous = self.data.get(user_id, missing)
+            self.data[user_id] = {
+                "name": user_name,
+                "embedding": [float(x) for x in embedding.tolist()],
+            }
+            try:
+                self._save_locked()
+            except Exception:
+                if previous is missing:
+                    del self.data[user_id]
+                else:
+                    self.data[user_id] = previous
+                raise
+            log.info(
+                "Enrolled %s (%s); embedding_dim=%d",
+                user_id, user_name, len(embedding),
+            )
+
+    def enroll_unique(
+        self,
+        user_id: str,
+        user_name: str,
+        embedding: np.ndarray,
+        threshold: float,
+    ) -> tuple[bool, str]:
+        """Atomically reject duplicates, mutate the snapshot, and persist it."""
+        with self._lock:
+            if user_id in self.data:
+                existing = self.data[user_id].get("name", "")
+                return (
+                    False,
+                    f"user_id '{user_id}' already enrolled as '{existing}'; "
+                    "delete it first if you want to re-enrol",
+                )
+
+            if user_name:
+                duplicate_id = next(
+                    (
+                        uid
+                        for uid, entry in self.data.items()
+                        if entry.get("name", "") == user_name
+                    ),
+                    None,
+                )
+                if duplicate_id is not None:
+                    return (
+                        False,
+                        f"name '{user_name}' already enrolled as user_id "
+                        f"'{duplicate_id}'; delete it first if you want to re-enrol",
+                    )
+
+            if self.data:
+                best_id, best_name, best_score, is_match = self._identify_locked(
+                    embedding,
+                    threshold,
+                )
+                if is_match:
+                    return (
+                        False,
+                        f"voice already enrolled as '{best_name}' "
+                        f"(user_id={best_id}, cos={best_score:.3f} ≥ "
+                        f"{threshold:.2f}); delete it first if you want to re-enrol",
+                    )
+
+            self.data[user_id] = {
+                "name": user_name,
+                "embedding": [float(x) for x in embedding.tolist()],
+            }
+            try:
+                self._save_locked()
+            except Exception:
+                del self.data[user_id]
+                raise
+            log.info(
+                "Enrolled %s (%s); embedding_dim=%d",
+                user_id, user_name, len(embedding),
+            )
+            return True, ""
+
+    def identify(self, query_emb: np.ndarray, threshold: float):
+        with self._lock:
+            return self._identify_locked(query_emb, threshold)
+
     def list_users(self) -> list[tuple[str, str]]:
-        return [(uid, entry.get("name", "")) for uid, entry in self.data.items()]
+        with self._lock:
+            return [(uid, entry.get("name", "")) for uid, entry in self.data.items()]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self.data)
 
     def delete(self, user_id: str) -> bool:
         # Idempotent — returning True on an absent user_id matches what
         # callers want (delete-then-re-enrol flows shouldn't error if a
-        # stale id was already gone). Only the actual disk write is
-        # gated on `existed` to avoid spurious enrolled.json rewrites.
-        existed = user_id in self.data
-        if existed:
-            del self.data[user_id]
-            self._save()
-            log.info("Deleted enrolled user %s", user_id)
-        else:
-            log.info("Delete: user %s not enrolled — no-op", user_id)
+        # stale id was already gone). Only an existing row triggers a disk
+        # write, avoiding spurious enrolled.json rewrites.
+        with self._lock:
+            if user_id in self.data:
+                existing = self.data[user_id]
+                del self.data[user_id]
+                try:
+                    self._save_locked()
+                except Exception:
+                    self.data[user_id] = existing
+                    raise
+                log.info("Deleted enrolled user %s", user_id)
+            else:
+                log.info("Delete: user %s not enrolled — no-op", user_id)
         return True
 
 
 # ---------------------------------------------------------------------------
-# Module-level singletons populated in on_init. None until Driver(CMD_INIT).
+# Module-level state populated by lifecycle hooks.
 # ---------------------------------------------------------------------------
 
 _engine: EcapaTdnnEngine | None = None
 _db: EnrolledDB | None = None
 _threshold_value: float = _DEFAULT_THRESHOLD
-_init_lock = threading.Lock()
+_configured_device: str | None = None
+_applied_config: tuple[Path, float, str | None] | None = None
+_runtime_lock = threading.RLock()
 
 
-def _ensure_ready(cfg: dict | None = None) -> bool:
-    """Initialise the model and enrolled DB once.
+def _configure(cfg: dict) -> None:
+    """Validate config and open the enrollment DB without loading the model."""
+    global _db, _threshold_value, _configured_device, _applied_config
+    threshold_raw = (
+        cfg["threshold"]
+        if "threshold" in cfg
+        else os.environ.get("VOICEPRINT_THRESHOLD", _DEFAULT_THRESHOLD)
+    )
+    threshold = _validate_threshold(threshold_raw)
+    data_dir = Path(cfg.get("data_dir", str(_data_dir())))
+    device_raw = (
+        cfg["device"]
+        if "device" in cfg
+        else os.environ.get("VOICEPRINT_DEVICE")
+    )
+    if device_raw is None:
+        device = None
+    elif not isinstance(device_raw, str) or not device_raw.strip():
+        raise ValueError("device must be a non-empty string or null")
+    else:
+        device = device_raw.strip()
+    resolved = (data_dir, threshold, device)
 
-    The voiceprint package exposes no driver contract in the current
-    manifest, so Service.run() marks it ACTIVE without invoking on_init.
-    Enroll/Identify still need the ECAPA model; lazy init keeps the service
-    usable without changing the public contract surface.
-    """
-    global _engine, _db, _threshold_value
-    if _engine is not None and _db is not None:
-        return True
-    with _init_lock:
-        if _engine is not None and _db is not None:
-            return True
-        try:
-            cfg = cfg or {}
-            data_dir = Path(cfg.get("data_dir", str(_data_dir())))
-            data_dir.mkdir(parents=True, exist_ok=True)
-            _threshold_value = float(cfg.get("threshold", _threshold()))
-            _engine = EcapaTdnnEngine(device=cfg.get("device"))
-            _db = EnrolledDB(data_dir / "enrolled.json")
-            log.info(
-                "voiceprint init complete: data_dir=%s threshold=%.2f enrolled=%d",
-                data_dir, _threshold_value, len(_db.data),
-            )
-            return True
-        except Exception:  # noqa: BLE001
-            log.exception("voiceprint init failed")
-            return False
+    with _runtime_lock:
+        if _db is not None:
+            if resolved == _applied_config:
+                log.info("voiceprint init: already configured")
+                return
+            raise RuntimeError("voiceprint is already initialized with different configuration")
+
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db = EnrolledDB(data_dir / "enrolled.json")
+        _db = db
+        _threshold_value = threshold
+        _configured_device = device
+        _applied_config = resolved
+        log.info(
+            "voiceprint init complete: data_dir=%s threshold=%.2f enrolled=%d",
+            data_dir,
+            threshold,
+            len(db),
+        )
+
+
+def _release_engine() -> None:
+    """Detach and close the current model while no inference is running."""
+    global _engine
+    with _runtime_lock:
+        engine = _engine
+        _engine = None
+        if engine is not None:
+            engine.close()
 
 
 # ---------------------------------------------------------------------------
@@ -216,19 +344,28 @@ class _IdentifyServicer(pb_grpc.RobonixServiceVoiceprintIdentifyServicer):
     """robonix/service/voiceprint/identify — Identify(audio) → (user_id, confidence)."""
 
     def Identify(self, request, context):  # noqa: N802 (gRPC method)
-        _ensure_ready()
-        if _engine is None or _db is None:
-            return vp.Identify_Response(
-                user_id="", user_name="", confidence=0.0, is_known=False,
-                error="voiceprint engine not initialised (Driver(CMD_INIT) not received yet)",
-            )
         try:
-            emb = _engine.extract_from_pcm(
-                request.audio_data,
-                request.encoding or "pcm_s16le",
-                request.sample_rate_hz or 16000,
-            )
-            uid, name, score, is_known = _db.identify(emb, _threshold_value)
+            with _runtime_lock:
+                engine = _engine
+                db = _db
+                threshold = _threshold_value
+                if engine is None or db is None:
+                    return vp.Identify_Response(
+                        user_id="",
+                        user_name="",
+                        confidence=0.0,
+                        is_known=False,
+                        error=(
+                            "voiceprint engine not active "
+                            "(Driver(CMD_ACTIVATE) not received yet)"
+                        ),
+                    )
+                emb = engine.extract_from_pcm(
+                    request.audio_data,
+                    request.encoding or "pcm_s16le",
+                    request.sample_rate_hz or 16000,
+                )
+            uid, name, score, is_known = db.identify(emb, threshold)
             log.info(
                 "Identify: best=%s (%s) score=%.4f is_known=%s",
                 uid, name, score, is_known,
@@ -249,66 +386,40 @@ class _EnrollServicer(pb_grpc.RobonixServiceVoiceprintEnrollServicer):
     """robonix/service/voiceprint/enroll — Enroll(audio + user_id + user_name)."""
 
     def Enroll(self, request, context):  # noqa: N802
-        _ensure_ready()
-        if _engine is None or _db is None:
-            return vp.Enroll_Response(
-                success=False, error="engine not initialised",
-            )
         if not request.user_id or not request.audio_data:
             return vp.Enroll_Response(
                 success=False, error="user_id and audio_data are required",
             )
-        # Dup-detect by user_id OR by display name. The chat UI can pick
-        # a fresh timestamp-suffixed user_id for non-ASCII names, so the
-        # name collision matters too — operators kept re-enrolling the
-        # same person under timestamped ids and ended up with N copies
-        # of the same speaker fighting for cosine score.
-        if request.user_id in _db.data:
-            existing = _db.data[request.user_id].get("name", "")
-            return vp.Enroll_Response(
-                success=False,
-                error=f"user_id '{request.user_id}' already enrolled "
-                      f"as '{existing}'; delete it first if you want to re-enrol",
-            )
-        if request.user_name:
-            dup = next(
-                (uid for uid, e in _db.data.items()
-                 if e.get("name", "") == request.user_name),
-                None,
-            )
-            if dup is not None:
-                return vp.Enroll_Response(
-                    success=False,
-                    error=f"name '{request.user_name}' already enrolled "
-                          f"as user_id '{dup}'; delete it first if you want to re-enrol",
-                )
         try:
-            emb = _engine.extract_from_pcm(
-                request.audio_data,
-                request.encoding or "pcm_s16le",
-                request.sample_rate_hz or 16000,
-            )
-            # Voice-similarity dup check: the new sample's embedding is
-            # compared against every enrolled embedding; if cosine ≥
-            # threshold, the speaker is already enrolled under another
-            # id/name. Without this guard the operator can pile multiple
-            # "rows" of the same person under different display names,
-            # and Identify ends up flipping between them. Threshold
-            # matches the Identify gate so behaviour is consistent.
-            if _db.data:
-                best_id, best_name, best_score, is_match = _db.identify(
-                    emb, _threshold_value,
-                )
-                if is_match:
+            with _runtime_lock:
+                engine = _engine
+                db = _db
+                threshold = _threshold_value
+                if engine is None or db is None:
                     return vp.Enroll_Response(
                         success=False,
-                        error=f"voice already enrolled as '{best_name}' "
-                              f"(user_id={best_id}, cos={best_score:.3f} ≥ "
-                              f"{_threshold_value:.2f}); delete it first if "
-                              f"you want to re-enrol",
+                        error=(
+                            "voiceprint engine not active "
+                            "(Driver(CMD_ACTIVATE) not received yet)"
+                        ),
                     )
-            _db.enroll(request.user_id, request.user_name, emb)
-            return vp.Enroll_Response(success=True, error="")
+                emb = engine.extract_from_pcm(
+                    request.audio_data,
+                    request.encoding or "pcm_s16le",
+                    request.sample_rate_hz or 16000,
+                )
+
+            # ID, display-name, and voice duplicate checks must share the
+            # database lock with mutation + persistence. Otherwise two
+            # concurrent requests can both pass the checks and overwrite the
+            # same temporary file or persist duplicate speakers.
+            success, error = db.enroll_unique(
+                request.user_id,
+                request.user_name,
+                emb,
+                threshold,
+            )
+            return vp.Enroll_Response(success=success, error=error)
         except Exception as exc:  # noqa: BLE001
             log.exception("Enroll failed")
             return vp.Enroll_Response(success=False, error=str(exc))
@@ -318,7 +429,6 @@ class _DeleteServicer(pb_grpc.RobonixServiceVoiceprintDeleteServicer):
     """robonix/service/voiceprint/delete — DeleteEnrolled(user_id)."""
 
     def DeleteEnrolled(self, request, context):  # noqa: N802
-        _ensure_ready()
         if _db is None:
             return vp.DeleteEnrolled_Response(
                 success=False, error="db not initialised",
@@ -339,7 +449,6 @@ class _ListServicer(pb_grpc.RobonixServiceVoiceprintListServicer):
     """robonix/service/voiceprint/list — ListEnrolled() → JSON catalog."""
 
     def ListEnrolled(self, request, context):  # noqa: N802
-        _ensure_ready()
         if _db is None:
             return vp.ListEnrolled_Response(
                 users_json="[]", count=0, error="db not initialised",
@@ -396,12 +505,55 @@ def list_enrolled(req: ListEnrolled_Request) -> ListEnrolled_Response:
 
 @voiceprint.on_init
 def init(cfg: dict):
-    """Load the ECAPA-TDNN model + the enrolled DB. Slow (model load can
-    take 10-30s the first time on Jetson Orin), but happens once at
-    Driver(CMD_INIT). Subsequent Identify/Enroll calls are fast."""
-    if _ensure_ready(cfg):
+    """Validate config and open the enrollment DB without hot model resources."""
+    try:
+        _configure(cfg)
         return Ok()
-    return Err("voiceprint init failed")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("voiceprint init failed")
+        return Err(f"voiceprint init failed: {type(exc).__name__}: {exc}")
+
+
+@voiceprint.on_activate
+def activate():
+    """Load the ECAPA-TDNN model when the provider becomes active."""
+    global _engine
+    with _runtime_lock:
+        if _db is None or _applied_config is None:
+            return Err("voiceprint has not been initialized")
+        if _engine is not None:
+            return Ok()
+        try:
+            _engine = EcapaTdnnEngine(device=_configured_device)
+            log.info("voiceprint activation complete")
+            return Ok()
+        except Exception as exc:  # noqa: BLE001
+            _engine = None
+            log.exception("voiceprint activation failed")
+            return Err(f"voiceprint activation failed: {type(exc).__name__}: {exc}")
+
+
+@voiceprint.on_deactivate
+def deactivate():
+    """Release the hot model while retaining config and enrollment state."""
+    try:
+        _release_engine()
+        log.info("voiceprint deactivation complete")
+        return Ok()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("voiceprint deactivation failed")
+        return Err(f"voiceprint deactivation failed: {type(exc).__name__}: {exc}")
+
+
+@voiceprint.on_shutdown
+def shutdown():
+    """Release the model on direct shutdown as well as normal deactivation."""
+    try:
+        _release_engine()
+        return Ok()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("voiceprint shutdown cleanup failed")
+        return Err(f"voiceprint shutdown failed: {type(exc).__name__}: {exc}")
 
 
 def main() -> int:

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from scene_service import goal_planner
 from scene_service.goal_planner import object_goal, room_goal, room_yaw_candidates
 from scene_service.robot_geometry import RobotFootprint
 
@@ -65,6 +66,33 @@ def test_room_goal_rotates_asymmetric_go2_footprint_to_fit_corridor():
     assert result is not None
     _, _, yaw = result
     assert abs(abs(yaw) - math.pi / 2.0) < 1e-9
+
+
+def test_room_goal_stops_after_first_centroid_safe_pose(monkeypatch):
+    """A large free room must not trigger exhaustive footprint checks."""
+    grid = _grid(width=220, height=220, resolution=0.05)
+    room = [(-1.0, -1.0), (9.0, -1.0), (9.0, 9.0), (-1.0, 9.0)]
+    footprint_checks = 0
+    original = goal_planner._footprint_clear
+
+    def counted_footprint_clear(*args, **kwargs):
+        """Count collision checks while preserving the production result."""
+        nonlocal footprint_checks
+        footprint_checks += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(goal_planner, "_footprint_clear", counted_footprint_clear)
+    result = room_goal(
+        grid,
+        room,
+        _footprint(0.3, 0.2),
+        yaw_candidates=room_yaw_candidates(room),
+    )
+
+    assert result is not None
+    x, y, _yaw = result
+    assert math.hypot(x - 4.0, y - 4.0) <= grid.info.resolution
+    assert footprint_checks == 1
 
 
 def test_object_goal_uses_complete_polygon():

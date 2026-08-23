@@ -3,13 +3,11 @@
 #   robonix/primitive/chassis/move      → gRPC ExecuteMoveCommand(MoveCommand) → String
 #   robonix/primitive/chassis/odom      → ROS2 topic_out (nav_msgs/Odometry, /odom)
 #   robonix/primitive/chassis/twist_in  → ROS2 topic_in (geometry_msgs/Twist, /cmd_vel)
-#   robonix/primitive/chassis/driver    → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
+#   robonix/lifecycle/driver            → gRPC Driver(INIT/ACTIVATE/...), auto-selected
 #
-# `*/driver` is the lifecycle interface every primitive should declare —
+# The shared Driver is selected automatically when omitted —
 # `rbnx boot` calls Driver(CMD_INIT) after RegisterCapability, waits for
-# ok=true, only then proceeds to next package. Skipping it means the boot
-# silently passes through this package and tools may be exposed before
-# the underlying sim is actually ready.
+# ok=true, only then proceeds to the next package.
 #
 # Runs inside the sim container (started by examples/webots/sim/start.sh)
 # so it shares the same DDS graph as Webots; publishes to /cmd_vel.
@@ -43,4 +41,3 @@ capabilities:
   - name: robonix/primitive/chassis/move
   - name: robonix/primitive/chassis/odom
   - name: robonix/primitive/chassis/twist_in
-  - name: robonix/primitive/chassis/driver

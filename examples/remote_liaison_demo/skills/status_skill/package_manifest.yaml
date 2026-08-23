@@ -11,7 +11,5 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 capabilities:
-  - name: robonix/skill/status_skill/driver
-    path: capabilities/driver.v1.toml
   - name: robonix/skill/status_skill/search
     path: capabilities/search.v1.toml

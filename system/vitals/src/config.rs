@@ -15,7 +15,7 @@ pub const VITALS_NAMESPACE: &str = "robonix/system/vitals";
 /// Default Atlas control-plane endpoint.
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 /// Default Vitals gRPC listen address.
-pub const DEFAULT_LISTEN: &str = "127.0.0.1:50091";
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:50093";
 /// Default mock Soma gRPC listen address.
 pub const DEFAULT_MOCK_SOMA_LISTEN: &str = "127.0.0.1:50092";
 /// Default mock Soma stream update interval in milliseconds.
@@ -127,6 +127,11 @@ pub struct VitalsConfig {
     about = "Robonix Vitals — health monitoring: power state, component health, threshold alerts"
 )]
 pub struct Args {
+    /// Full system manifest block forwarded by rbnx. Typed flags below remain
+    /// authoritative; accepting this keeps the standard builtin interface.
+    #[arg(long, hide = true)]
+    pub config_json: Option<String>,
+
     /// Atlas control-plane endpoint.
     #[arg(long, env = "ROBONIX_ATLAS_ENDPOINT")]
     pub atlas: Option<String>,
@@ -194,10 +199,6 @@ pub struct Args {
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
-
-    /// The `system.vitals` manifest block serialized to JSON by rbnx.
-    #[arg(long)]
-    pub config_json: Option<String>,
 
     /// Log filter (env_logger syntax; e.g. `info`, `robonix_vitals=debug`).
     /// Default: `robonix_vitals=info`. Falls back to `RUST_LOG` if unset.

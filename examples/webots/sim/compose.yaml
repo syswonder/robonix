@@ -67,6 +67,11 @@ services:
       ROBONIX_SIM_XDISPLAY: "${ROBONIX_SIM_XDISPLAY:-:48}"
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
       RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+      # Package sources and generated stubs are bind-mounted from the host.
+      # Do not leave root-owned __pycache__ directories there when drivers run
+      # through docker exec; those files otherwise make the next clean build
+      # fail with EACCES.
+      PYTHONDONTWRITEBYTECODE: "1"
       # The office seed is fetched once from robonix-assets through the default
       # GitHub mirror and retained in the named cache volume. Set the mirror to
       # an empty value to opt into direct GitHub access.
@@ -112,6 +117,9 @@ services:
       # walk up sys.path to find it inside the container.
       - ../primitives:/robonix_pkgs/primitives:rw
       - ../services:/robonix_pkgs/services:rw
+      # Soma runs on the host but its ROS 2 runtime reader runs in this
+      # container, where rclpy and the simulator topic graph live.
+      - ../rbnx-boot/logs/soma-runtime:/robonix_runtime/soma:rw
       - ../../../pylib:/robonix_pkgs/pylib:ro
 
 volumes:

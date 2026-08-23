@@ -1,0 +1,12 @@
+# Legacy namespace-specific lifecycle contract for memory services. Existing
+# manifests remain supported; new packages omit Driver and use shared automatically.
+# A package must not declare both lifecycle contracts.
+[contract]
+id = "robonix/service/memory/driver"
+version = "1"
+kind = "service"
+idl = "lifecycle/srv/Driver.srv"
+description = "Legacy-compatible lifecycle interface for memory service providers."
+
+[mode]
+type = "rpc"
