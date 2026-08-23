@@ -58,6 +58,26 @@ class InfrastructureReportTests(unittest.TestCase):
                 markdown_path.read_text(encoding="utf-8"),
             )
 
+    def test_markdown_embeds_map_preview_when_present(self):
+        summary = {"total": 1, "passed": 1, "failed": 0, "scenarios": []}
+        url = "https://ci-reports.example/reports/runs/1/slam-map.png"
+        with tempfile.TemporaryDirectory() as raw_dir:
+            markdown_path = Path(raw_dir) / "summary.md"
+
+            write_markdown(summary, {}, markdown_path,
+                           map_preview=True, map_preview_url=url)
+            text = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("### SLAM map", text)
+            self.assertIn(f"]({url})", text)
+
+            write_markdown(summary, {}, markdown_path, map_preview=True)
+            self.assertIn("`slam-map.png` in the report artifact",
+                          markdown_path.read_text(encoding="utf-8"))
+
+            write_markdown(summary, {}, markdown_path)
+            self.assertNotIn("SLAM map",
+                             markdown_path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

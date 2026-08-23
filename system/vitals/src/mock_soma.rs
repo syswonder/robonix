@@ -9,6 +9,7 @@
 // via the appropriate SDK and merges it into the generated SomaHealthSnapshot,
 // replacing synthetic actuator data for matching joints.
 
+use crate::pb::contracts::robonix_lifecycle_driver_server::RobonixLifecycleDriverServer;
 use crate::pb::contracts::robonix_system_soma_get_health_server::{
     RobonixSystemSomaGetHealth, RobonixSystemSomaGetHealthServer,
 };
@@ -21,6 +22,10 @@ use crate::pb::soma::{
     StreamHealthRequest,
 };
 use crate::subprocess::SubprocessHandle;
+use crate::{
+    CMD_ACTIVATE, CMD_INIT, SHARED_DRIVER_CONTRACT, SystemLifecycleDriver, call_startup_driver,
+    connect_startup_driver, startup_driver_endpoint, wait_for_driver_shutdown,
+};
 use anyhow::{Context, Result};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -316,6 +321,21 @@ pub async fn run_mock_soma(
     atlas
         .declare_capability(
             provider_id,
+            SHARED_DRIVER_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/lifecycle/driver.v1.toml",
+                "robonix.contracts.RobonixLifecycleDriver",
+                "/robonix.contracts.RobonixLifecycleDriver/Driver",
+            ),
+        )
+        .await
+        .context("declare mock Soma shared lifecycle Driver")?;
+    let lifecycle = SystemLifecycleDriver::new(atlas.clone(), provider_id.to_string());
+    atlas
+        .declare_capability(
+            provider_id,
             "robonix/system/soma/get_health",
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -339,14 +359,6 @@ pub async fn run_mock_soma(
             ),
         )
         .await?;
-    if let Err(e) = atlas
-        .set_lifecycle_state(provider_id, atlas_pb::LifecycleState::StateActive, "")
-        .await
-    {
-        log::warn!("[mock_soma] SetLifecycleState(ACTIVE) failed: {e:#}");
-    }
-    spawn_heartbeat(atlas.clone(), provider_id.to_string());
-
     // Optionally spawn a hardware bridge subprocess for real arm data.
     let arm_bridge: Option<Arc<ArmBridgeEnum>> = match &arm_config {
         MockArmConfig::Piper {
@@ -402,42 +414,82 @@ pub async fn run_mock_soma(
         MockArmConfig::Synthetic => None,
     };
 
+    let bridge_active = arm_bridge.is_some();
+    let service = MockSomaService::new(scenario, interval, arm_bridge);
+    let server_shutdown = lifecycle.subscribe_shutdown();
+    let server_lifecycle = lifecycle.clone();
+    let mut server_task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(RobonixLifecycleDriverServer::new(server_lifecycle))
+            .add_service(RobonixSystemSomaGetHealthServer::new(service.clone()))
+            .add_service(RobonixSystemSomaHealthServer::new(service))
+            .serve_with_shutdown(listen_addr, wait_for_driver_shutdown(server_shutdown))
+            .await
+    });
+    let startup_endpoint = startup_driver_endpoint(listen_addr);
+    let mut startup_driver = tokio::select! {
+        client = connect_startup_driver(&startup_endpoint) => client?,
+        result = &mut server_task => {
+            result.context("join mock Soma gRPC server")?
+                .context("mock Soma gRPC server failed before readiness")?;
+            anyhow::bail!("mock Soma gRPC server stopped before readiness");
+        }
+    };
+    call_startup_driver(&mut startup_driver, CMD_INIT)
+        .await
+        .context("initialize mock Soma lifecycle")?;
+    call_startup_driver(&mut startup_driver, CMD_ACTIVATE)
+        .await
+        .context("activate mock Soma lifecycle")?;
+    drop(startup_driver);
+    spawn_heartbeat(
+        atlas.clone(),
+        provider_id.to_string(),
+        lifecycle.subscribe_shutdown(),
+    );
+
     log::info!(
         "[mock_soma] scenario={} interval_ms={} listening on {} arm={} bridge={}",
         scenario.as_str(),
         interval.as_millis(),
         listen_addr,
         arm_config.label(),
-        arm_bridge.is_some()
+        bridge_active
     );
     eprintln!(
         "mock Soma ready on {listen_addr} scenario={} interval_ms={} arm={} bridge={}",
         scenario.as_str(),
         interval.as_millis(),
         arm_config.label(),
-        arm_bridge.is_some()
+        bridge_active,
     );
 
-    let service = MockSomaService::new(scenario, interval, arm_bridge);
-
-    tonic::transport::Server::builder()
-        .add_service(RobonixSystemSomaGetHealthServer::new(service.clone()))
-        .add_service(RobonixSystemSomaHealthServer::new(service))
-        .serve(listen_addr)
+    server_task
         .await
+        .context("join mock Soma gRPC server")?
         .context("mock Soma gRPC server failed")?;
 
     Ok(())
 }
 
-fn spawn_heartbeat(mut atlas: AtlasClient, provider_id: String) {
+fn spawn_heartbeat(
+    mut atlas: AtlasClient,
+    provider_id: String,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(20));
         tick.tick().await;
+        let shutdown = wait_for_driver_shutdown(shutdown);
+        tokio::pin!(shutdown);
         loop {
-            tick.tick().await;
-            if let Err(e) = atlas.heartbeat(&provider_id).await {
-                log::warn!("[mock_soma] heartbeat failed: {e:#}");
+            tokio::select! {
+                _ = &mut shutdown => break,
+                _ = tick.tick() => {
+                    if let Err(e) = atlas.heartbeat(&provider_id).await {
+                        log::warn!("[mock_soma] heartbeat failed: {e:#}");
+                    }
+                }
             }
         }
     });
@@ -897,6 +949,107 @@ fn _health_ok() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CMD_SHUTDOWN;
+    use crate::pb::contracts::robonix_lifecycle_driver_client::RobonixLifecycleDriverClient;
+    use crate::pb::lifecycle::DriverRequest;
+    use robonix_atlas::service::{AtlasRegistry, serve_atlas};
+
+    fn reserve_address() -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        listener.local_addr().expect("reserved address")
+    }
+
+    /// Exercise the actual mock-Soma startup path, then require Driver
+    /// SHUTDOWN to publish TERMINATED and finish its tonic server task.
+    #[tokio::test]
+    async fn mock_soma_driver_shutdown_stops_server() {
+        let atlas_addr = reserve_address();
+        let registry = Arc::new(AtlasRegistry::default());
+        let atlas_server = tokio::spawn(serve_atlas(Arc::clone(&registry), atlas_addr));
+        let atlas_endpoint = format!("http://{atlas_addr}");
+        let mut atlas =
+            AtlasClient::connect_with_retry(&atlas_endpoint, 50, Duration::from_millis(10))
+                .await
+                .expect("connect test Atlas");
+        let driver_addr = reserve_address();
+        let provider_id = "mock-soma-driver-shutdown";
+        let mock_atlas_endpoint = atlas_endpoint.clone();
+        let mut mock_task = tokio::spawn(async move {
+            run_mock_soma(
+                &mock_atlas_endpoint,
+                provider_id,
+                &driver_addr.to_string(),
+                "normal",
+                10,
+                MockArmConfig::Synthetic,
+            )
+            .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let active = atlas
+                .query(
+                    atlas_pb::Kind::Service,
+                    provider_id,
+                    "",
+                    "",
+                    atlas_pb::Transport::Unspecified,
+                )
+                .await
+                .ok()
+                .and_then(|providers| providers.into_iter().next())
+                .is_some_and(|provider| {
+                    provider.state == atlas_pb::LifecycleState::StateActive as i32
+                });
+            if active {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "mock Soma did not become ACTIVE"
+            );
+            assert!(!mock_task.is_finished(), "mock Soma stopped before ACTIVE");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut driver = RobonixLifecycleDriverClient::connect(format!("http://{driver_addr}"))
+            .await
+            .expect("connect mock Soma Driver");
+        let shutdown = driver
+            .driver(DriverRequest {
+                command: CMD_SHUTDOWN,
+                config_json: String::new(),
+            })
+            .await
+            .expect("mock Soma Driver SHUTDOWN")
+            .into_inner();
+        assert!(shutdown.ok, "{}", shutdown.error);
+        assert_eq!(shutdown.state, "terminated");
+        tokio::time::timeout(Duration::from_secs(2), &mut mock_task)
+            .await
+            .expect("mock Soma server did not stop after SHUTDOWN")
+            .expect("join mock Soma task")
+            .expect("mock Soma task failed");
+
+        let provider = atlas
+            .query(
+                atlas_pb::Kind::Service,
+                provider_id,
+                "",
+                "",
+                atlas_pb::Transport::Unspecified,
+            )
+            .await
+            .expect("query mock Soma")
+            .pop()
+            .expect("mock Soma Provider");
+        assert_eq!(
+            provider.state,
+            atlas_pb::LifecycleState::StateTerminated as i32
+        );
+        atlas_server.abort();
+    }
 
     #[test]
     fn scenario_parse_known_variants() {

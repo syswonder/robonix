@@ -51,6 +51,7 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/create_wall/protos/CreateWall.proto"
 
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/pal_robotics/tiago_lite/protos/TiagoLite.proto"
+EXTERNPROTO "../protos/AstraRegistered.proto"
 WorldInfo {
   info [
     "Sample of how the indoor objects can be placed"
@@ -554,6 +555,12 @@ CreateWall {
   rotation 0 0 1 -1.5707953071795862
 }
 TiagoLite {
+  cameraSlot [
+    AstraRegistered {
+      translation -0.028 -0.035 -0.009
+      rotation 1 0 0 -1.5708
+    }
+  ]
   translation -2.57927 -3.29453 0.22739
   rotation -0.9843313820149971 -0.0013805505357860357 0.17632306843026418 0.0053525
   name "my_robot"

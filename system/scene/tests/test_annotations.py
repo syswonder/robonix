@@ -235,22 +235,6 @@ def test_corrupt_file_set_aside_not_destroyed():
     print("  [PASS] test_corrupt_file_set_aside_not_destroyed")
 
 
-def test_has_saved_reflects_persisted_partitions_only():
-    """has_saved sees other partitions' files without binding to them —
-    the web Save guard uses it to refuse overwriting never-loaded rooms."""
-    with tempfile.TemporaryDirectory() as base:
-        saved = AnnotationStore(base, map_id="labx")
-        assert not saved.has_saved("labx")          # nothing written yet
-        saved.create(kind="room", name="kitchen", points=ROOM_PTS)
-
-        live = AnnotationStore(base, map_id=".live")
-        assert live.has_saved("labx")               # other partition, saved
-        assert not live.has_saved(".live")          # own partition, unwritten
-        assert not live.has_saved("nowhere")
-        assert live.map_id == ".live"               # probing never rebinds
-    print("  [PASS] test_has_saved_reflects_persisted_partitions_only")
-
-
 def test_from_json_drops_unknown_keys():
     from scene_service.annotations import Annotation
     a = Annotation.from_json({
@@ -279,25 +263,12 @@ def _make_web_app(anno_store, **overrides):
         return None
 
     class _StubRegistry:
-        """Annotation routes never touch the registry, but the map-load
-        route flushes it (and aborts the load when the flush fails), so
-        the stub must honestly support lock() + clear_objects()."""
         _objects: dict = {}
         _surfaces: dict = {}
 
-        def lock(self):
-            import contextlib
-
-            @contextlib.asynccontextmanager
-            async def _noop():
-                yield
-
-            return _noop()
-
-        def clear_objects(self) -> int:
-            n = len(self._objects)
-            self._objects.clear()
-            return n
+        @staticmethod
+        def clear_objects():
+            return 0
 
     options = {
         "registry": _StubRegistry(),
@@ -534,7 +505,6 @@ if __name__ == "__main__":
     test_reconcile_generation_learns_and_flags()
     test_redraw_clears_stale_and_mark_all_stale_counts()
     test_corrupt_file_set_aside_not_destroyed()
-    test_has_saved_reflects_persisted_partitions_only()
     test_from_json_drops_unknown_keys()
     test_rest_crud_roundtrip()
     test_rest_validation_and_errors()

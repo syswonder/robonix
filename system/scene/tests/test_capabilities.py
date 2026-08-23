@@ -21,6 +21,7 @@ _mod = importlib.util.module_from_spec(_spec)
 sys.modules["scene_capabilities"] = _mod
 _spec.loader.exec_module(_mod)
 plan_perception = _mod.plan_perception
+provider_for_kind = _mod.provider_for_kind
 
 
 class _FakeHub:
@@ -84,6 +85,15 @@ def test_summary_is_self_describing():
     print("  [PASS] test_summary_is_self_describing")
 
 
+def test_rgbd_camera_provider_is_bound_as_one_group():
+    provider = "front_rgbd"
+    for kind in ("rgb", "depth", "intrinsics", "camera_extrinsics"):
+        assert provider_for_kind(kind, provider) == provider
+    for kind in ("pose", "odom", "occupancy_grid", "lidar3d"):
+        assert provider_for_kind(kind, provider) == ""
+    print("  [PASS] test_rgbd_camera_provider_is_bound_as_one_group")
+
+
 if __name__ == "__main__":
     print("Running capability-probe unit tests...\n")
     test_metric_tier_full()
@@ -91,4 +101,5 @@ if __name__ == "__main__":
     test_visual_tier()
     test_geometric_tier()
     test_summary_is_self_describing()
+    test_rgbd_camera_provider_is_bound_as_one_group()
     print("\nAll tests passed!")

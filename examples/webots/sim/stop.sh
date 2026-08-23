@@ -52,6 +52,15 @@ echo "[sim/stop] killing host-side rviz2 wrapper (docker exec into sim)..."
 pkill -9 -f "start_rviz.sh|rviz2 -d /tmp/rviz2_default.rviz" 2>/dev/null || true
 
 echo "[sim/stop] killing in-container drivers + sim-side GUIs..."
+# Container names must match what start.sh/compose.yaml actually created.
+# CI runs give every container a per-run prefix so concurrent runs and
+# interactive users coexist on the shared box; hardcoding the defaults here
+# tore down someone else's stack and leaked our own.
+SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+MAPPING_CT="${ROBONIX_MAPPING_CONTAINER:-robonix_mapping}"
+SCENE_CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
+EXPLORE_CT="${ROBONIX_EXPLORE_CONTAINER:-robonix_explore}"
+
 # Match the actual driver module names spawned by rbnx boot:
 #   camera_driver.driver, chassis_driver.driver, lidar_driver.driver,
 #   simple_nav.atlas_bridge.
@@ -59,7 +68,7 @@ echo "[sim/stop] killing in-container drivers + sim-side GUIs..."
 # wrappers — the python inside the sim container survives and holds
 # its gRPC port (50212/50122/...), making the next boot fail with
 # "address already in use".
-docker exec robonix_tiago_sim sh -c \
+docker exec "$SIM_CT" sh -c \
   'pkill -9 -f "_driver\\.driver|simple_nav\\.atlas_bridge|nav2_bringup|memsearch_service|rviz2 -d" 2>/dev/null || true' \
   2>/dev/null || true
 
@@ -69,7 +78,7 @@ echo "[sim/stop] removing per-package containers (mapping/scene/explore)..."
 # or boot crashed, the containers leak and the next boot hits a name
 # collision. Force-remove so the next start is clean. This also takes
 # rtabmap_viz with it (it's a child of the mapping container).
-for ct in robonix_mapping robonix_scene robonix_explore; do
+for ct in "$MAPPING_CT" "$SCENE_CT" "$EXPLORE_CT"; do
     docker rm -f "$ct" >/dev/null 2>&1 || true
 done
 

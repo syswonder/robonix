@@ -404,6 +404,16 @@ jobs:
             [ -e "$target" ] || continue
             sudo -n chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null || true
             rm -rf -- "$target"
+            # Containers in this suite run as root and leave root-owned
+            # evidence behind (the Soma runtime bind mount, driver logs).
+            # Runners without passwordless sudo cannot chown that back, which
+            # jams every later run at this step. Docker is a hard dependency of
+            # the suite, so reclaim ownership through a throwaway container.
+            if [ -e "$target" ]; then
+              docker run --rm -v "$target":/reclaim busybox \
+                chown -R "$(id -u):$(id -g)" /reclaim >/dev/null 2>&1 || true
+              rm -rf -- "$target"
+            fi
             if [ -e "$target" ]; then
               echo "::error::could not remove stale generated evidence: $target"
               exit 1
@@ -804,6 +814,12 @@ jobs:
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
           source ./nvidia_host.sh
           robonix_resolve_nvidia_xorg_modules "$ROBONIX_GPU_ID"
+          # sim/start.sh creates the Soma runtime bind-mount source before
+          # compose runs; CI drives compose directly, so it has to do the same.
+          # Docker would otherwise create the whole rbnx-boot/logs path as root,
+          # and every provider that writes <name>.log into it dies with an empty
+          # log and no diagnostic.
+          mkdir -p ../rbnx-boot/logs/soma-runtime
           docker compose -p "$ROBONIX_SIM_PROJECT" \
             -f compose.yaml \
             -f compose.gpu.yaml \
@@ -1103,7 +1119,50 @@ jobs:
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
 
+      - name: Drive a fixed mapping loop
+        # Chassis motion is a gRPC contract and the executor only dispatches
+        # MCP, so this drives cmd_vel directly. A scripted rectangle returns to
+        # its start, which makes the saved map comparable between runs and
+        # forces the SLAM graph to close a loop.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS'
+          source /opt/ros/humble/setup.bash
+          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+          python3 - <<'PY'
+          import math, time
+          import rclpy
+          from geometry_msgs.msg import Twist
+          rclpy.init()
+          node = rclpy.create_node("ci_mapping_loop")
+          pub = node.create_publisher(Twist, "/cmd_vel", 10)
+          time.sleep(2.0)
+
+          def drive(lin, ang, seconds):
+              msg = Twist()
+              msg.linear.x, msg.angular.z = lin, ang
+              end = time.time() + seconds
+              while time.time() < end:
+                  pub.publish(msg)
+                  rclpy.spin_once(node, timeout_sec=0.05)
+              pub.publish(Twist())
+              for _ in range(5):
+                  rclpy.spin_once(node, timeout_sec=0.02)
+
+          for corner in range(4):
+              drive(0.25, 0.0, 6.0)          # 1.5 m leg
+              drive(0.0, 0.5, math.pi / 1.0) # 90 deg turn
+              print(f"corner {corner + 1}/4 done", flush=True)
+          node.destroy_node(); rclpy.shutdown()
+          PY
+          EOS
+
       - name: Verify scene map persistence
+        # A failed suite is exactly when the saved map matters most, so this
+        # runs even then; it still fails the job on its own checks.
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
@@ -1114,6 +1173,7 @@ jobs:
             --mapping-container "${ROBONIX_MAPPING_CONTAINER:-robonix_mapping}" \
             --maps-dir "$MAPPING_MAPS_DIR" \
             --sim-container "$ROBONIX_SIM_CONTAINER" \
+            --export-preview "$RUNNER_TEMP/sim-logs/slam-map.png" \
             --delete-after \
             --timeout 420 | tee "$RUNNER_TEMP/sim-logs/scene-map-persistence.txt"
 
@@ -1519,9 +1579,15 @@ jobs:
               json.dump({k: v for k, v in metadata.items() if v}, f, indent=2, sort_keys=True)
               f.write("\n")
           PY
+          # URL-less here: the inline image comes from the report job, which
+          # knows whether the report site publishes for this event.
+          map_preview_args=()
+          [ -f "$RUNNER_TEMP/sim-logs/slam-map.png" ] && \
+            map_preview_args=(--map-preview "$RUNNER_TEMP/sim-logs/slam-map.png")
           python3 "$GITHUB_WORKSPACE/testing/report.py" \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" \
             --out-dir "$GITHUB_WORKSPACE/testing/report" \
+            "${map_preview_args[@]}" \
             --metadata-json "$RUNNER_TEMP/report-metadata.json" \
             --log-root "testing/logs=$GITHUB_WORKSPACE/testing/logs" \
             --log-root "boot_logs=$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs" \
@@ -1645,6 +1711,13 @@ jobs:
       REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
       REPORT_TEST_REF: ${{ inputs.ref || github.ref }}
       REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
+      # Must mirror PUBLISH_REPORT_SITE in the publish_report job: the map
+      # image URL only resolves when the report site actually publishes.
+      REPORT_SITE_PUBLISHED: >-
+        ${{ inputs.authorized == true ||
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'workflow_call' }}
     steps:
       - name: Checkout trusted report generator
         uses: actions/checkout@v4
@@ -1676,6 +1749,9 @@ jobs:
           llm_args=()
           if [ "${ENABLE_LLM_ANALYSIS:-false}" = "true" ]; then
             llm_args+=(--llm)
+          fi
+          if [ "${REPORT_SITE_PUBLISHED:-false}" = "true" ]; then
+            export ROBONIX_REPORT_MAP_URL="https://ci-reports.robonix.ai/reports/runs/${GITHUB_RUN_ID}/slam-map.png"
           fi
           python3 testing/build_report_from_artifacts.py \
             --artifact-root dl \

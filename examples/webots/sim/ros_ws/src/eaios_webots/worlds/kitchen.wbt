@@ -40,6 +40,7 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/kitchen/breakfast/protos/CerealBox.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/kitchen/breakfast/protos/BiscuitBox.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/pal_robotics/tiago_lite/protos/TiagoLite.proto"
+EXTERNPROTO "../protos/AstraRegistered.proto"
 
 WorldInfo {
 }
@@ -824,6 +825,12 @@ BiscuitBox {
   rotation 0 0 1 -0.262068
 }
 TiagoLite {
+  cameraSlot [
+    AstraRegistered {
+      translation -0.028 -0.035 -0.009
+      rotation 1 0 0 -1.5708
+    }
+  ]
   translation 0.69666 -0.706893 0.273798
   rotation -0.006363227570975 -0.002646197037686 -0.999976253206104 0.78447116344273
   name "my_robot"

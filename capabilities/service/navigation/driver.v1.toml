@@ -1,4 +1,6 @@
-# Lifecycle interface every navigation service implementation MUST declare.
+# Legacy namespace-specific lifecycle contract for navigation services.
+# Existing manifests remain supported; new packages omit Driver and use the
+# shared contract automatically. A package must not declare both contracts.
 # `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
 # AFTER all primitives have finished init (services may depend on
 # primitive data streams).
@@ -7,7 +9,7 @@ id      = "robonix/service/navigation/driver"
 version = "1"
 kind    = "service"
 idl     = "lifecycle/srv/Driver.srv"
-description = "Lifecycle control interface for navigation service providers."
+description = "Legacy-compatible lifecycle interface for navigation service providers."
 
 [mode]
 type = "rpc"

@@ -14,7 +14,7 @@
 // always reach the same teardown helper.
 
 use anyhow::{Context, Result};
-use robonix_cli::launch::{PackageRuntimeRecord, shutdown_package_runtime};
+use robonix_cli::launch::{PackageRuntimeRecord, shutdown_package_runtime_checked};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,6 +23,10 @@ use std::time::Duration;
 pub struct BootState {
     pub manifest_path: String,
     pub boot_pid: u32,
+    #[serde(default)]
+    pub boot_start_time_ticks: Option<u64>,
+    #[serde(default)]
+    pub boot_id: String,
     pub started_at_ms: u64,
     pub atlas_endpoint: String,
     pub components: Vec<ComponentRecord>,
@@ -41,7 +45,10 @@ pub fn write_state(path: &Path, state: &BootState) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
+    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&temp, text).with_context(|| format!("write {}", temp.display()))?;
+    std::fs::rename(&temp, path)
+        .with_context(|| format!("replace {} with {}", path.display(), temp.display()))?;
     Ok(())
 }
 
@@ -54,13 +61,21 @@ pub fn read_state(path: &Path) -> Result<BootState> {
 
 /// Stop each component with the canonical runtime order. Idempotent: missing
 /// providers, stop hooks, or PGIDs are treated as best-effort shutdown noise.
-pub async fn teardown(atlas_endpoint: Option<&str>, components: &[ComponentRecord]) {
+pub async fn teardown(
+    atlas_endpoint: Option<&str>,
+    components: &[ComponentRecord],
+    boot_id: Option<&str>,
+) -> bool {
+    let mut complete = true;
     // Reverse order so services/skills/primitives die before pilot/atlas.
     for c in components.iter().rev() {
         robonix_cli::output::sub_step(&format!(
             "[shutdown] {} stopping (pid={}, pgid={})",
             c.name, c.pid, c.pgid
         ));
-        shutdown_package_runtime(atlas_endpoint, c, Duration::from_secs(30)).await;
+        complete &=
+            shutdown_package_runtime_checked(atlas_endpoint, c, Duration::from_secs(30), boot_id)
+                .await;
     }
+    complete
 }

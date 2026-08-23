@@ -926,3 +926,38 @@ pub fn format_resolve_error(
     msg.push_str("\n  hint: ensure the .msg file exists (e.g. <include>/common_interfaces/std_msgs/msg/Float64.msg)");
     msg
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_idl_tree_resolves_ros_action_interfaces() -> Result<()> {
+        let include = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../capabilities/lib")
+            .canonicalize()?;
+        let mut resolver = MsgResolver::new(&[include])?;
+        let mut skipped = 0;
+
+        resolver.resolve_all_in_index(false, &mut skipped)?;
+        resolver.resolve_all_srv(false, &mut skipped)?;
+
+        assert_eq!(skipped, 0, "the canonical IDL tree must resolve completely");
+        assert!(
+            resolver
+                .cache
+                .contains_key(&("unique_identifier_msgs".to_string(), "UUID".to_string()))
+        );
+        assert!(
+            resolver
+                .cache
+                .contains_key(&("action_msgs".to_string(), "GoalStatusArray".to_string()))
+        );
+        assert!(
+            resolver
+                .srv_cache
+                .contains_key(&("action_msgs".to_string(), "CancelGoal".to_string()))
+        );
+        Ok(())
+    }
+}

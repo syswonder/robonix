@@ -508,6 +508,19 @@ impl ProcessManager {
         false
     }
 
+    /// Return whether `start_process` has inserted the in-memory runtime
+    /// record, without re-validating the child's current command line.
+    ///
+    /// This is a narrow spawn-synchronization primitive for callers that run
+    /// lifecycle supervision alongside `start_process`. A valid package start
+    /// body may `exec` into Docker or another launcher immediately, so the
+    /// stricter persisted-record identity check used by [`Self::is_running`]
+    /// is intentionally not appropriate during this short hand-off window.
+    pub fn has_process_record(&self, std_name: &str, package_type: &str) -> bool {
+        let key = format!("{}::{}", package_type, std_name);
+        self.processes.lock().unwrap().contains_key(&key)
+    }
+
     /// Kill a process group (more efficient than killing individual processes)
     #[cfg(unix)]
     fn kill_process_tree(&self, pid: u32) -> Result<()> {

@@ -64,6 +64,20 @@ class OfflineBuildContractTests(unittest.TestCase):
         (scene / "docker" / "_weights").mkdir(parents=True)
         (root / "scripts").mkdir(parents=True)
         shutil.copy2(SCENE_ROOT / "scripts" / "build.sh", scene / "scripts")
+        # The production build delegates exact-version Python generation to
+        # this helper. These tests mock rbnx itself, so use a lightweight
+        # fixture helper that preserves the delegation boundary without
+        # creating a real uv environment.
+        codegen_helper = scene / "scripts" / "run_python_codegen.sh"
+        codegen_helper.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "pkg=\"$1\"\n"
+            "shift\n"
+            "rbnx codegen -p \"$pkg\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        codegen_helper.chmod(0o755)
         shutil.copy2(
             REPO_ROOT / "scripts" / "docker_base_image.sh", root / "scripts"
         )

@@ -1,0 +1,65 @@
+#VRML_SIM R2025a utf8
+# Astra RGB-D camera with the range finder moved onto the colour camera.
+#
+# The stock Astra puts them 26 mm apart, but the driver advertises the depth
+# stream as `depth_registered` and RTAB-Map reprojects it with the colour
+# camera_info. That parallax is about 12 px at 1 m, which left every visual
+# loop closure with zero inliers. Both devices already share a field of view
+# and resolution, so co-locating them makes the registration claim true.
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/MattePaint.proto"
+
+PROTO AstraRegistered [
+  field SFVec3f    translation   0 0 0
+  field SFRotation rotation      0 0 1 0
+  field SFString   name          "Astra"
+  field SFFloat    colorNoise    0.0
+  field SFFloat    rangeNoise    0.0
+]
+{
+  Solid {
+    translation IS translation
+    rotation IS rotation
+    children [
+      Shape {
+        appearance MattePaint {
+          baseColor 0.000000 0.000000 0.000000
+        }
+        geometry Mesh {
+          url "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/orbbec/meshes/astra.obj"
+        }
+      }
+      Camera {
+        translation 0.027000 0.011000 0.034000
+        name %<= '"' + fields.name.value + ' rgb"' >%
+        fieldOfView 1.04
+        width 640
+        height 480
+        noise IS colorNoise
+      }
+      RangeFinder {
+        translation 0.027000 0.011000 0.034000
+        name %<= '"' + fields.name.value + ' depth"' >%
+        fieldOfView 1.04
+        width 640
+        height 480
+        minRange 0.6
+        maxRange 8
+        noise IS rangeNoise
+      }
+    ]
+    name IS name
+    boundingObject Pose {
+      translation 0.006000 0.000000 0.034000
+      children [
+        Box {
+          size 0.040000 0.165000 0.029000
+        }
+      ]
+    }
+    physics Physics {
+      density -1
+      mass 0.300000
+    }
+  }
+}

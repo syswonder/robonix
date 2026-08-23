@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use robonix_cli::Config;
 
 mod ask;
+pub(crate) mod boot_watchdog;
 mod build;
 mod chat;
 mod check_remotes;
@@ -69,11 +70,9 @@ pub enum Commands {
         /// Registry endpoint (default: 127.0.0.1:50051)
         #[arg(long)]
         endpoint: Option<String>,
-        /// Per-instance config file (JSON or YAML). Materialized into
-        /// `RBNX_CONFIG_FILE` for the start body. Same shape as the per-
-        /// package `config:` block under a deploy `robonix_manifest.yaml`
-        /// — `rbnx boot` writes one of these per package and re-execs
-        /// `rbnx start --config <file>` internally.
+        /// Per-instance config file (JSON or YAML). Decoded and delivered to
+        /// the provider through Driver(CMD_INIT). It has the same shape as a
+        /// package's nested `config:` block in `robonix_manifest.yaml`.
         #[arg(short = 'c', long)]
         config: Option<PathBuf>,
         /// Inline config overrides. Repeatable, dotted-path keys, e.g.
@@ -118,6 +117,18 @@ pub enum Commands {
         /// like a Linux/FreeBSD kernel boot log or Android logcat.
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// Internal detached cleanup process for one `rbnx boot` invocation.
+    #[command(name = "__watch-boot", hide = true)]
+    WatchBoot {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        boot_pid: u32,
+        #[arg(long)]
+        boot_start_time_ticks: Option<u64>,
+        #[arg(long)]
+        boot_id: String,
     },
     /// Update remote (`url:`) providers to their latest upstream commit
     ///
@@ -170,7 +181,7 @@ pub enum Commands {
     /// still functional.
     #[command(hide = true)]
     Install {
-        /// Install from GitHub (e.g. user/repo or https://github.com/user/repo)
+        /// Install from GitHub (e.g. user/repo or <https://github.com/user/repo>)
         #[arg(long)]
         github: Option<String>,
         /// Install from local path
@@ -431,6 +442,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             no_update_check,
             verbose,
         } => deploy::execute(config, file, log_dir, skip_system, no_update_check, verbose).await,
+        Commands::WatchBoot {
+            state,
+            boot_pid,
+            boot_start_time_ticks,
+            boot_id,
+        } => boot_watchdog::execute(state, boot_pid, boot_start_time_ticks, boot_id).await,
         Commands::Update { path, file } => update::execute(config, path, file).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {

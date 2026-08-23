@@ -31,6 +31,7 @@ data_files = [
 
     ('share/' + package_name + '/launch', glob('launch/*.py')),
     ('share/' + package_name + '/worlds', glob('worlds/*.wbt')),
+    ('share/' + package_name + '/protos', glob('protos/*.proto')),
 
     ('share/' + package_name + '/resource', [
         'resource/tiago_webots.urdf',

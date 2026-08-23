@@ -141,7 +141,10 @@ This policy applies to commits submitted on or after July 20, 2026.
 
   ```text
   Assisted-by: Codex:gpt-5.6 clang-tidy
+  Assisted-by: Claude Code:claude-opus-5
   ```
+
+  The agent name may contain spaces; the value is split at the first colon.
 
   `AGENT_NAME` identifies the tool or agent, `MODEL_VERSION` identifies the
   model, and optional trailing names identify specialized analysis tools. Do
