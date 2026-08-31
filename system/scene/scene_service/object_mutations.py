@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import math
 from typing import Any
 
 from .state import BBox3D, ObjectRegistry, Pose3D, SceneObject
+
+log = logging.getLogger("scene.object_mutations")
 
 
 class ObjectMutationCoordinator:
@@ -40,12 +43,20 @@ class ObjectMutationCoordinator:
         generation = self.live_binding.get("generation")
         return map_id, -1 if generation is None else int(generation)
 
-    async def snapshot_objects(self) -> tuple[dict, str, int]:
+    def generation_supported(self) -> bool:
+        """Whether the live mapping binding exposes a real generation counter.
+
+        When it does not, the epoch check compares map_id alone and no longer
+        orders two edits racing inside one map. Callers are told rather than
+        left to infer it from the -1 sentinel."""
+        return self.live_binding.get("generation") is not None
+
+    async def snapshot_objects(self) -> tuple[dict, str, int, bool]:
         """Return registry objects and their epoch under the map-ops lock."""
         async with self.ops_lock:
             objects, _surfaces = await self.registry.snapshot()
             map_id, generation = self.current_epoch()
-            return objects, map_id, generation
+            return objects, map_id, generation, self.generation_supported()
 
     def _assert_epoch(self, map_id: str, generation: int) -> tuple[str, int]:
         current_map_id, current_generation = self.current_epoch()
@@ -63,6 +74,19 @@ class ObjectMutationCoordinator:
                 f"{hold_reason}; finish or retry the map operation first"
             )
         return current_map_id, current_generation
+
+    @staticmethod
+    def _record_note(obj: SceneObject, note: str) -> None:
+        """Store the caller's reason alongside the correction it explains.
+
+        Operator corrections outrank perception and never expire, so the
+        record has to be able to say why it exists. An empty note clears any
+        earlier one rather than leaving a stale reason attached to a new edit."""
+        text = str(note or "").strip()[:512]
+        if text:
+            obj.attributes["operator_note"] = text
+        else:
+            obj.attributes.pop("operator_note", None)
 
     def _invalidate_graph(self, object_id: str) -> None:
         """Drop only the caption/relation cache entries touching one
@@ -124,14 +148,18 @@ class ObjectMutationCoordinator:
         expected_map_id: str,
         expected_generation: int,
         persist_to_snapshot: bool,
+        note: str = "",
     ) -> tuple[SceneObject, bool, str, int]:
         # Operator labels are stored verbatim. Canonicalizing here silently
         # rewrote corrections ("desk" became "table") — the human said desk,
         # the record shows desk.
         normalized = str(label or "").strip()
-        if not clear_override and (
-            not normalized or len(normalized) > 128
-        ):
+        # Length is checked in both modes. `label` is ignored when the caller
+        # clears the override, but accepting an unbounded string there just
+        # because it will be dropped invites a caller to believe it was used.
+        if len(normalized) > 128:
+            raise ValueError("label must not exceed 128 characters")
+        if not clear_override and not normalized:
             raise ValueError("label must contain 1 to 128 characters")
         async with self.ops_lock:
             map_id, generation = self._assert_epoch(
@@ -173,6 +201,7 @@ class ObjectMutationCoordinator:
                     updated = self.registry.clear_object_label_override(
                         object_id
                     )
+                    self._record_note(updated, "")
             else:
                 if update_detector is not None:
                     await update_detector(object_id, normalized)
@@ -181,6 +210,7 @@ class ObjectMutationCoordinator:
                         object_id,
                         normalized,
                     )
+                    self._record_note(updated, note)
 
             persisted = False
             if partition is not None:
@@ -219,6 +249,7 @@ class ObjectMutationCoordinator:
         expected_map_id: str,
         expected_generation: int,
         persist_to_snapshot: bool,
+        note: str = "",
     ) -> tuple[SceneObject, bool, str, int]:
         values = tuple(
             float(value)
@@ -292,6 +323,7 @@ class ObjectMutationCoordinator:
                         requested_frame,
                     ),
                 )
+                self._record_note(updated, note)
 
             persisted = False
             if partition is not None:
@@ -325,6 +357,7 @@ class ObjectMutationCoordinator:
         expected_map_id: str,
         expected_generation: int,
         persist_to_snapshot: bool,
+        note: str = "",
     ) -> tuple[str, bool, str, int]:
         async with self.ops_lock:
             map_id, generation = self._assert_epoch(
@@ -376,6 +409,11 @@ class ObjectMutationCoordinator:
                     )
                 ) from exc
             self._invalidate_graph(object_id)
+            if str(note or "").strip():
+                log.info(
+                    "operator deleted %s (persisted=%s): %s",
+                    object_id, persisted, str(note).strip()[:512],
+                )
             return object_id, persisted, map_id, generation
 
     async def flush_objects(
@@ -384,6 +422,7 @@ class ObjectMutationCoordinator:
         expected_map_id: str,
         expected_generation: int,
         persist_to_snapshot: bool,
+        note: str = "",
     ) -> tuple[int, bool, str, int]:
         async with self.ops_lock:
             map_id, generation = self._assert_epoch(
@@ -431,4 +470,9 @@ class ObjectMutationCoordinator:
                     )
                 ) from exc
             self.scene_graph_store.clear_derived_state()
+            if str(note or "").strip():
+                log.info(
+                    "operator flushed %d objects (persisted=%s): %s",
+                    deleted_count, persisted, str(note).strip()[:512],
+                )
             return deleted_count, persisted, map_id, generation

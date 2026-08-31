@@ -277,6 +277,12 @@ def attach_object_mutations(
 # ── conversions: SceneObject → IDL Object ──────────────────────────────────
 
 def _to_idl(o: SceneObject) -> Object:
+    """Project a registry record onto the wire type.
+
+    Extents and frame come from the record's own box as well as its pose:
+    UpdateObjectGeometry validates the caller's frame against both, so a
+    caller resending what it read here has to be able to see both."""
+    frame = str(o.pose.frame_id or o.bbox.frame_id or "")
     return Object(
         id=o.object_id,
         label=o.cls,
@@ -284,6 +290,11 @@ def _to_idl(o: SceneObject) -> Object:
         y=float(o.pose.y),
         z=float(o.pose.z),
         yaw=float(o.pose.yaw),
+        size_x=float(o.bbox.size_x),
+        size_y=float(o.bbox.size_y),
+        size_z=float(o.bbox.size_z),
+        frame_id=frame,
+        observation_count=max(0, int(o.observation_count)),
         last_seen_unix=float(o.last_seen),
     )
 
@@ -298,6 +309,8 @@ def _annotation_centroid(a: "Annotation") -> tuple[float, float]:
 
 def _annotation_to_object(a: "Annotation") -> Object:
     x, y = _annotation_centroid(a)
+    # Annotations are polygons, not boxes: extents stay zero and the frame
+    # stays empty rather than inventing a metric box the store does not hold.
     return Object(
         id=_annotation_object_id(a),
         label=str(a.name or a.kind),
@@ -305,6 +318,11 @@ def _annotation_to_object(a: "Annotation") -> Object:
         y=float(y),
         z=0.0,
         yaw=float(a.theta or 0.0),
+        size_x=0.0,
+        size_y=0.0,
+        size_z=0.0,
+        frame_id="",
+        observation_count=0,
         last_seen_unix=float(a.updated_at or 0.0),
     )
 
@@ -401,10 +419,15 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
     if _OBJECT_MUTATIONS is not None:
-        objs, map_id, generation = await _OBJECT_MUTATIONS.snapshot_objects()
+        (
+            objs,
+            map_id,
+            generation,
+            generation_supported,
+        ) = await _OBJECT_MUTATIONS.snapshot_objects()
     else:
         objs, _surfs = await _REGISTRY.snapshot()
-        map_id, generation = "", -1
+        map_id, generation, generation_supported = "", -1, False
     visible = [o for o in objs.values() if not o.missing]
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
@@ -425,6 +448,7 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
         stamp_unix=time.time(),
         map_id=map_id,
         generation=generation,
+        generation_supported=generation_supported,
     )
 
 
@@ -442,6 +466,7 @@ async def update_object_label(
         expected_map_id=req.expected_map_id,
         expected_generation=req.expected_generation,
         persist_to_snapshot=req.persist_to_snapshot,
+        note=req.note,
     )
     return UpdateObjectLabel_Response(
         object=_to_idl(obj),
@@ -471,6 +496,7 @@ async def update_object_geometry(
         expected_map_id=req.expected_map_id,
         expected_generation=req.expected_generation,
         persist_to_snapshot=req.persist_to_snapshot,
+        note=req.note,
     )
     return UpdateObjectGeometry_Response(
         object=_to_idl(obj),
@@ -491,6 +517,7 @@ async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
             expected_map_id=req.expected_map_id,
             expected_generation=req.expected_generation,
             persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
         )
     )
     return DeleteObject_Response(
@@ -511,6 +538,7 @@ async def flush_objects(req: FlushObjects_Request) -> FlushObjects_Response:
             expected_map_id=req.expected_map_id,
             expected_generation=req.expected_generation,
             persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
         )
     )
     return FlushObjects_Response(
@@ -974,6 +1002,11 @@ async def get_object_context(req: GetObjectContext_Request) -> GetObjectContext_
             id=n.object_id, label=n.label,
             x=float(n.bbox_center[0]), y=float(n.bbox_center[1]),
             z=float(n.bbox_center[2]),
+            size_x=float(n.bbox_extent[0]),
+            size_y=float(n.bbox_extent[1]),
+            size_z=float(n.bbox_extent[2]),
+            frame_id="",
+            observation_count=max(0, int(n.observation_count)),
             last_seen_unix=float(n.last_seen or 0.0),
         )
         for _, n in nearby[:5]

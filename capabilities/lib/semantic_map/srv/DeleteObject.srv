@@ -15,6 +15,10 @@ int64 expected_generation
 # true: also delete the row from the saved map's semantic snapshot, making it
 # permanent. Requires the map to have been saved; fails otherwise.
 bool persist_to_snapshot
+# Optional free-text record of why this correction was made, stored with the
+# object's provenance. Operator corrections outrank perception and are exempt
+# from expiry, so an unexplained one is hard to review later. Empty is allowed.
+string note
 ---
 # Echo of the id that was deleted.
 string deleted_id

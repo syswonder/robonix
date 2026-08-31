@@ -13,3 +13,8 @@ string map_id
 # changes. Pass it back verbatim as expected_generation.
 # -1 means the active mapping provider does not expose a generation.
 int64 generation
+# Whether `generation` is a real counter. When false the epoch check degrades
+# to comparing map_id alone, so two edits racing inside one map are no longer
+# ordered against each other. Callers that care about that race must read this
+# rather than infer it from generation == -1.
+bool generation_supported
