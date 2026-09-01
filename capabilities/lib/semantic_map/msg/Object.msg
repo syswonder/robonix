@@ -19,13 +19,18 @@ float64 yaw
 float64 size_x
 float64 size_y
 float64 size_z
-# World frame that x/y/z/yaw and the extents are expressed in. Empty when
-# the entry has no metric frame. UpdateObjectGeometry rejects a frame that
-# differs from the object's own, so the caller has to be able to read it.
+# World frame that x/y/z/yaw and the extents are expressed in.
+# UpdateObjectGeometry rejects a frame that differs from the object's own,
+# so the caller has to be able to read it here. Empty means the producer did
+# not record a frame, not that the coordinates are frameless: scene-graph
+# derived entries carry map-frame coordinates but no frame string, so an
+# edit built from one of those is rejected rather than applied blind.
 string frame_id
 # Observations fused into this object so far. It advances on every
 # perception update, so a caller that read an object and then edits it can
 # tell whether perception moved underneath it. Zero for entries the
-# registry did not derive from perception.
-uint64 observation_count
+# registry did not derive from perception. int32 rather than an unsigned
+# type to match SceneGraphNode.observation_count, which is the same
+# quantity under the same name and is already published.
+int32 observation_count
 float64 last_seen_unix

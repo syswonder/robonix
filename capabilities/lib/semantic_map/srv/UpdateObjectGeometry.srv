@@ -34,6 +34,8 @@ bool persist_to_snapshot
 # Optional free-text record of why this correction was made, stored with the
 # object's provenance. Operator corrections outrank perception and are exempt
 # from expiry, so an unexplained one is hard to review later. Empty is allowed.
+# Leading and trailing whitespace is stripped and the stored text is capped at
+# 512 characters; anything beyond that is dropped rather than rejected.
 string note
 ---
 # The object as it now stands, with the geometry and provenance applied.
