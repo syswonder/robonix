@@ -214,6 +214,63 @@ pub async fn execute_build(
 /// "fetch → build" be a controlled offline step the user can run
 /// when they have network / time, then `rbnx boot` is a fast,
 /// online-optional bring-up.
+/// `git clone --depth 1` with bounded retries.
+///
+/// Clones the repo into `dest`, retrying transient failures. Between attempts
+/// it removes any partial checkout git left behind, because git refuses to
+/// clone into a non-empty directory and a half-written tree would otherwise
+/// turn one flaky network moment into a permanent failure.
+///
+/// Retries exist because a deployment build clones several remotes over
+/// several minutes, and any one of them dying takes the whole build with it.
+/// On a runner whose only route to GitHub is a proxy that drops for stretches
+/// at a time, a single `GnuTLS, handshake failed` mid-build was enough to fail
+/// a run whose next attempt seconds later would have succeeded.
+///
+/// The last attempt's exit status is what the error reports. Returns `Err`
+/// only after every attempt has failed, or if git could not be spawned at all
+/// — a missing git binary is not transient, so that is not retried.
+pub(super) fn git_clone_with_retry(
+    url: &str,
+    branch: Option<&str>,
+    dest: &std::path::Path,
+) -> Result<()> {
+    const ATTEMPTS: u32 = 3;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let mut last_code: Option<i32> = None;
+    for attempt in 1..=ATTEMPTS {
+        if dest.exists() {
+            // A failed clone can leave a partial tree; git will not clone into
+            // it, so the retry would fail for a different reason than the one
+            // we are retrying.
+            let _ = std::fs::remove_dir_all(dest);
+        }
+        let mut clone = std::process::Command::new("git");
+        clone.arg("clone").arg("--depth").arg("1");
+        if let Some(b) = branch {
+            clone.arg("--branch").arg(b);
+        }
+        clone.arg(url).arg(dest);
+        let status = clone
+            .status()
+            .with_context(|| format!("git clone {url} failed to spawn"))?;
+        if status.success() {
+            return Ok(());
+        }
+        last_code = status.code();
+        if attempt < ATTEMPTS {
+            output::warning(&format!(
+                "git clone {url} failed (attempt {attempt}/{ATTEMPTS}); \
+                 retrying in {}s",
+                BACKOFF.as_secs()
+            ));
+            std::thread::sleep(BACKOFF);
+        }
+    }
+    anyhow::bail!("git clone {url} exited with {last_code:?} after {ATTEMPTS} attempts")
+}
+
 fn build_deploy_manifest(
     manifest_path: &Path,
     config: &Config,
@@ -351,18 +408,7 @@ fn build_deploy_manifest(
         for r in &to_clone {
             let (url, branch) = r.url_to_clone.as_ref().unwrap();
             output::sub_step(&format!("git clone {url} -> {}", r.pkg_dir.display()));
-            let mut clone = std::process::Command::new("git");
-            clone.arg("clone").arg("--depth").arg("1");
-            if let Some(b) = branch {
-                clone.arg("--branch").arg(b);
-            }
-            clone.arg(url).arg(&r.pkg_dir);
-            let status = clone
-                .status()
-                .with_context(|| format!("git clone {url} failed to spawn"))?;
-            if !status.success() {
-                anyhow::bail!("git clone {url} exited with {:?}", status.code());
-            }
+            git_clone_with_retry(url, branch.as_deref(), &r.pkg_dir)?;
         }
     }
 
@@ -1039,6 +1085,35 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A failing clone must exhaust its attempts, name the exit status, and
+    /// leave no partial checkout behind. The stale directory seeded here
+    /// stands in for the tree a network-interrupted clone leaves: without the
+    /// cleanup between attempts, git refuses to clone into a non-empty
+    /// directory and every retry fails for the wrong reason.
+    ///
+    /// The URL is a local path that does not exist, so git fails immediately
+    /// and the test needs no network.
+    #[test]
+    fn git_clone_with_retry_cleans_partial_checkouts_and_reports_the_last_status() {
+        let root = temp_root("clone-retry");
+        let dest = root.join("pkg");
+        fs::create_dir_all(&dest).expect("dest");
+        fs::write(dest.join("leftover.txt"), b"partial clone").expect("seed leftover");
+
+        let missing = root.join("no-such-repo.git");
+        let err = git_clone_with_retry(&missing.to_string_lossy(), None, &dest)
+            .expect_err("clone of a nonexistent repo must fail");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("after 3 attempts"), "unexpected error: {msg}");
+        assert!(
+            !dest.exists(),
+            "a failed clone must not leave a partial checkout at {}",
+            dest.display()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
