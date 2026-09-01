@@ -1,0 +1,10 @@
+# Clear all derived objects while preserving the robot and map annotations.
+[contract]
+id      = "robonix/system/scene/flush_objects"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/FlushObjects.srv"
+description = "Clear every derived Scene object in the caller-asserted map epoch."
+
+[mode]
+type = "rpc"

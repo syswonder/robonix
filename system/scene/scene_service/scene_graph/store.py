@@ -182,6 +182,43 @@ class SceneGraphStore:
             del self._relation_cache[k]
         self._relation_cache[self._relation_key(a, b, hint, semantic_only)] = edge
 
+    def invalidate_object(self, object_id: str) -> int:
+        """Drop the caption and relation cache entries that mention one
+        object. This is the mutation-path invalidation: an operator edit
+        changes one object, so only that object's caption and the pairs
+        it participates in can be stale. Wiping both caches wholesale on
+        every edit (and flushing them to disk) would throw away hundreds
+        of unrelated LLM answers per keystroke. Returns entries dropped;
+        callers decide when a disk flush is worth it."""
+        oid = str(object_id)
+        dropped = 0
+        caption_prefix = f"{oid}:"
+        for key in [k for k in self._caption_cache if k.startswith(caption_prefix)]:
+            del self._caption_cache[key]
+            dropped += 1
+        endpoint = f"{oid}__"
+        infix = f"__{oid}__"
+        for key in [
+            k for k in self._relation_cache
+            if k.startswith(endpoint) or infix in k
+        ]:
+            del self._relation_cache[key]
+            dropped += 1
+        return dropped
+
+    def clear_derived_state(self) -> None:
+        """Clear every object-derived live slice and persistent cache.
+        Flush-scale operations only; single-object edits should use
+        invalidate_object instead."""
+        self._nodes.clear()
+        self._geometric_edges.clear()
+        self._semantic_edges.clear()
+        self._geometric_updated_at = 0.0
+        self._semantic_updated_at = 0.0
+        self._caption_cache.clear()
+        self._relation_cache.clear()
+        self.flush_caches()
+
     def prune_relations(self, live_object_ids: set[str]) -> int:
         """Drop cached edges with an endpoint no longer in the registry.
         Returns how many were evicted. Complements put_cached_relation's

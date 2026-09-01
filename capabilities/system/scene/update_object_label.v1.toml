@@ -1,0 +1,10 @@
+# Correct the semantic label of one derived object without changing geometry.
+[contract]
+id      = "robonix/system/scene/update_object_label"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/UpdateObjectLabel.srv"
+description = "Correct one derived Scene object's label in the caller-asserted map epoch."
+
+[mode]
+type = "rpc"
