@@ -530,6 +530,17 @@ jobs:
           # developer workstation, so CI must not mutate ~/.gitconfig.
           git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
           : > "$git_config"
+          # The runner service inherited HTTP_PROXY=127.0.0.1:9981 from a
+          # macOS-forwarding config that was disabled on 2026-08-10. The
+          # listener is still up but forwards nothing, so every clone since has
+          # died with `GnuTLS, handshake failed` — an error that names TLS and
+          # hides the fact that the proxy is a dead end. Drop the inherited
+          # values for this job so the routing decided below is the one that
+          # applies.
+          for stale in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+            printf '%s=\n' "$stale" >> "$GITHUB_ENV"
+          done
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
           if timeout 15s git ls-remote --exit-code \
               "https://ghfast.top/https://github.com/syswonder/robonix.git" \
               HEAD >/dev/null 2>&1; then
