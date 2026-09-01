@@ -548,10 +548,22 @@ jobs:
               url."https://ghfast.top/https://github.com/".insteadOf \
               "https://github.com/"
             echo "Using ghfast.top for GitHub clones"
-          elif timeout 5s bash -c '</dev/tcp/127.0.0.1/7897' 2>/dev/null &&
-               timeout 20s git -c 'http.https://github.com/.proxy=http://127.0.0.1:7897' \
-                 ls-remote --exit-code "https://github.com/syswonder/robonix.git" \
-                 HEAD >/dev/null 2>&1; then
+          elif proxy_ok=0
+               # Clash on this runner drops out for stretches at a time. Both
+               # other routes are hard-blocked here — a direct clone and
+               # ghfast.top both come back "Connection reset by peer" — so the
+               # proxy is the only way out and a single failed probe is worth
+               # waiting on rather than treating as absent.
+               for attempt in 1 2 3 4 5 6; do
+                 if timeout 20s git -c 'http.https://github.com/.proxy=http://127.0.0.1:7897' \
+                      ls-remote --exit-code "https://github.com/syswonder/robonix.git" \
+                      HEAD >/dev/null 2>&1; then
+                   proxy_ok=1; break
+                 fi
+                 echo "Clash probe $attempt/6 failed; retrying in 10s"
+                 sleep 10
+               done
+               [ "$proxy_ok" = 1 ]; then
             git config --file "$git_config" \
               'http.https://github.com/.proxy' \
               'http://127.0.0.1:7897'
