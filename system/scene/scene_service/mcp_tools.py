@@ -797,15 +797,10 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
     The result never falls outside the room polygon.
     Contract: robonix/system/scene/goal_room.
     """
-    footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
-    if footprint is None:
-        return GoalRoom_Response(
-            reachable=False,
-            x=0.0,
-            y=0.0,
-            yaw=0.0,
-            reason="Soma footprint unavailable — robot geometry is not ready",
-        )
+    # The footprint is read further down, right before it is used. Checking it
+    # here as well made robot readiness preempt every check on the request
+    # itself, so a stale or unknown room came back as "robot geometry is not
+    # ready" and the caller had no idea which of the two was actually wrong.
     room, ambiguous = _resolve_room_target(req.room_id)
     if ambiguous:
         candidates = ", ".join(

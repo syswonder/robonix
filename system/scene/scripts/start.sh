@@ -113,6 +113,11 @@ mkdir -p rbnx-build/data
 SCENE_HOST_DATA_DIR="${SCENE_DATA_DIR:-$(pwd)/rbnx-build/data/robonix}"
 mkdir -p "$SCENE_HOST_DATA_DIR"
 
+# Every optional argument array below is expanded as ${ARR[@]+"${ARR[@]}"}.
+# bash 3.2, still the default on macOS, treats "${ARR[@]}" on an empty array as
+# an unbound variable under set -u and aborts the script; bash 4.4+ does not.
+# start.sh was dying there before it could launch the service container, which
+# is why the runtime-protobuf contract test only ever saw the codegen run.
 declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
@@ -158,7 +163,7 @@ if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
     # passed it EMPTY when unset on the host — which tells CUDA "no GPUs" and
     # disabled the GPU even though --gpus all had mounted it (torch.cuda → False
     # while nvidia-smi still worked). Omitting it lets all mounted GPUs show.
-    if [[ ${#GPU_ARGS[@]} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    if [[ ${#GPU_ARGS[@]:-0} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
         GPU_ARGS+=(-e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
     fi
 fi
@@ -168,7 +173,7 @@ exec docker run --rm \
     --entrypoint /scene/docker/entrypoint.sh \
     --network host \
     --ipc=host \
-    "${GPU_ARGS[@]}" \
+    ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
     -e ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-0.0.0.0}" \
     -e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}" \
@@ -206,15 +211,15 @@ exec docker run --rm \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
-    "${MAP_ID_ARGS[@]}" \
+    ${MAP_ID_ARGS[@]+"${MAP_ID_ARGS[@]}"} \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     -e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}" \
-    "${ZENOH_ARGS[@]}" \
+    ${ZENOH_ARGS[@]+"${ZENOH_ARGS[@]}"} \
     -v "$(pwd)":/scene \
     -v "$PKG/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/proto_gen:ro" \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
-    "${EXTRA_MOUNTS[@]}" \
+    ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
     "$IMG"
