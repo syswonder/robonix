@@ -675,6 +675,48 @@ def main() -> int:
                                     evidence.consistent_depth_fraction,
                                 )
                                 diagnostics["last_reason"] = evidence.reason
+                                # Which depths the projection expected, and
+                                # what the camera actually returned there. A
+                                # count of zero consistent pixels says the
+                                # test failed but not whether the object was
+                                # occluded, the depth frame was empty, or the
+                                # projection put the object at the wrong
+                                # range — three failures that need three
+                                # different fixes.
+                                if evidence.depth_interval_m is not None:
+                                    diagnostics["last_depth_interval_m"] = [
+                                        round(float(evidence.depth_interval_m[0]), 3),
+                                        round(float(evidence.depth_interval_m[1]), 3),
+                                    ]
+                                if evidence.projected_area_px > int(
+                                    diagnostics.get("_depth_sample_area_px") or 0
+                                ):
+                                    finite = depth[np.isfinite(depth)]
+                                    diagnostics["_depth_sample_area_px"] = (
+                                        evidence.projected_area_px
+                                    )
+                                    diagnostics["depth_frame_stats_m"] = {
+                                        "finite_fraction": round(
+                                            float(finite.size)
+                                            / float(max(depth.size, 1)),
+                                            4,
+                                        ),
+                                        "min": (
+                                            round(float(finite.min()), 3)
+                                            if finite.size
+                                            else None
+                                        ),
+                                        "median": (
+                                            round(float(np.median(finite)), 3)
+                                            if finite.size
+                                            else None
+                                        ),
+                                        "max": (
+                                            round(float(finite.max()), 3)
+                                            if finite.size
+                                            else None
+                                        ),
+                                    }
                                 if not evidence.visible:
                                     continue
                                 visible_counts[identity] += 1
