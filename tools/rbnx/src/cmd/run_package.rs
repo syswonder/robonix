@@ -240,10 +240,13 @@ pub(super) fn git_clone_with_retry(
 
     let mut last_code: Option<i32> = None;
     for attempt in 1..=ATTEMPTS {
-        if dest.exists() {
+        if attempt > 1 && dest.exists() {
             // A failed clone can leave a partial tree; git will not clone into
             // it, so the retry would fail for a different reason than the one
-            // we are retrying.
+            // we are retrying. Only ever remove what a previous *attempt of
+            // this call* created — every caller already guarantees the
+            // destination is absent, and a helper that deletes whatever it
+            // finds there would be a trap for the next one that does not.
             let _ = std::fs::remove_dir_all(dest);
         }
         let mut clone = std::process::Command::new("git");
