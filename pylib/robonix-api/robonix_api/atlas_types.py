@@ -4,6 +4,7 @@
 Keeps the rest of robonix_api free of raw protobuf access. Frozen +
 slotted to keep the runtime cost negligible.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ class Kind(IntEnum):
     """Closed set of CapabilityProvider kinds. Internal: developers
     interact with the concrete `Primitive` / `Service` / `Skill`
     classes, not with this enum directly."""
+
     UNSPECIFIED = 0
     PRIMITIVE = 1
     SERVICE = 2
@@ -94,6 +96,8 @@ class CapabilityProvider:
     last_heartbeat_ms: int = 0
     state: LifecycleState = LifecycleState.UNSPECIFIED
     state_detail: str = ""
+    # Opaque nonce replaced on each successful Atlas Register generation.
+    registration_id: str = ""
     capabilities: tuple[Capability, ...] = ()
 
 
@@ -149,6 +153,7 @@ class Channel:
 # Kept out of the dataclass bodies so atlas_types.py has no proto import
 # dependency at module-load time.
 
+
 def from_pb_field_spec(pb_f) -> FieldSpec:
     return FieldSpec(
         name=pb_f.name,
@@ -159,7 +164,9 @@ def from_pb_field_spec(pb_f) -> FieldSpec:
     )
 
 
-def from_pb_params(transport: Transport, pb_params) -> GrpcParams | Ros2Params | McpParams | None:
+def from_pb_params(
+    transport: Transport, pb_params
+) -> GrpcParams | Ros2Params | McpParams | None:
     if pb_params is None:
         return None
     if transport == Transport.GRPC and pb_params.HasField("grpc"):
@@ -204,6 +211,7 @@ def from_pb_provider(pb_rec) -> CapabilityProvider:
         last_heartbeat_ms=int(pb_rec.last_heartbeat_ms),
         state=LifecycleState(pb_rec.state),
         state_detail=pb_rec.state_detail,
+        registration_id=getattr(pb_rec, "registration_id", ""),
         capabilities=tuple(from_pb_capability(c) for c in pb_rec.capabilities),
     )
 
@@ -220,6 +228,10 @@ def from_pb_contract(pb_c) -> ContractDescriptor:
         description=pb_c.description,
         cross_namespace=getattr(pb_c, "cross_namespace", False),
         msg_fields=tuple(from_pb_field_spec(f) for f in pb_c.msg_fields),
-        srv_request_fields=tuple(from_pb_field_spec(f) for f in pb_c.srv_request_fields),
-        srv_response_fields=tuple(from_pb_field_spec(f) for f in pb_c.srv_response_fields),
+        srv_request_fields=tuple(
+            from_pb_field_spec(f) for f in pb_c.srv_request_fields
+        ),
+        srv_response_fields=tuple(
+            from_pb_field_spec(f) for f in pb_c.srv_response_fields
+        ),
     )

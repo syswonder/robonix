@@ -1,4 +1,6 @@
-# Lifecycle interface for the speech service.
+# Legacy namespace-specific lifecycle contract for speech services. Existing
+# manifests remain supported; new packages omit Driver and use shared automatically.
+# A package must not declare both lifecycle contracts.
 # `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
 # AFTER the speech process has registered with atlas. The cfg dict is
 # read inside speech_service.service.init(cfg) and gates which ASR/TTS
@@ -8,7 +10,7 @@ id      = "robonix/service/speech/driver"
 version = "1"
 kind    = "service"
 idl     = "lifecycle/srv/Driver.srv"
-description = "Lifecycle control interface for speech service providers."
+description = "Legacy-compatible lifecycle interface for speech service providers."
 
 [mode]
 type = "rpc"

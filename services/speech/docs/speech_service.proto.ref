@@ -4,7 +4,7 @@
 // Architecture position: robonix/service/speech (service layer)
 //   - Receives audio from lower-layer primitive drivers (e.g. audio_driver)
 //   - Auto-adapts any input sample_rate / channels / encoding to 16kHz mono s16le
-//   - Outputs synthesized audio (MP3) for downstream playback
+//   - Outputs 16 kHz mono pcm_s16le audio for downstream playback
 //
 // Self-contained: all message types are inlined (no external proto imports).
 // Build: scripts/build.sh generates *_pb2.py / *_pb2_grpc.py into proto_gen/
@@ -99,9 +99,9 @@ message SynthesizeRequest {
 }
 
 message SynthesizeResponse {
-  bytes audio_data = 1;      // synthesized audio (MP3 format)
-  string encoding = 2;       // always "mp3" for Edge TTS
-  uint32 sample_rate_hz = 3; // always 24000 for Edge TTS
+  bytes audio_data = 1;      // synthesized 16-bit PCM audio
+  string encoding = 2;       // "pcm_s16le"
+  uint32 sample_rate_hz = 3; // 16000
   string error = 4;          // non-empty on failure
 }
 
@@ -115,19 +115,19 @@ message SynthesizeStreamRequest {
 }
 
 message SynthesizeStreamResponse {
-  bytes audio_data = 1;      // one MP3 audio chunk
-  string encoding = 2;       // "mp3"
-  uint32 sample_rate_hz = 3; // 24000
+  bytes audio_data = 1;      // one 16-bit PCM audio chunk
+  string encoding = 2;       // "pcm_s16le"
+  uint32 sample_rate_hz = 3; // 16000
   bool is_final = 4;         // true on last chunk (audio_data empty)
 }
 
 // TTS service: two synthesis modes.
 service SpeechTts {
-  // Unary: send text, get complete MP3 audio.
-  // Backend: Edge TTS (Microsoft Cognitive Services, free tier).
+  // Unary: send text, get complete PCM audio.
+  // Backend: configured local or cloud TTS implementation.
   rpc Synthesize (SynthesizeRequest) returns (SynthesizeResponse);
 
-  // Server streaming: send text, receive MP3 chunks as they're generated.
+  // Server streaming: send text, receive PCM chunks as they're generated.
   rpc SynthesizeStream (SynthesizeStreamRequest) returns (stream SynthesizeStreamResponse);
 }
 

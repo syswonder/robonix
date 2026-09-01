@@ -21,4 +21,4 @@ stop: |
 capabilities:
   - name: robonix/primitive/health/state
   - name: robonix/primitive/health/stream
-  - name: robonix/primitive/health/driver
+  - name: robonix/lifecycle/driver

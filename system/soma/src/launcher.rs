@@ -5,9 +5,9 @@
 // Stage 1 (`spawn_primitives`, called at soma startup, BEFORE soma
 // advertises its gRPC service to atlas):
 //   For each `primitive:` entry in the deployment manifest:
-//     1. snapshot the expected provider's current endpoint fingerprint
+//     1. snapshot atlas's current provider set
 //     2. spawn `rbnx start -p <pkg>` as a child process
-//     3. wait for that provider to register or take over its old endpoint
+//     3. wait for the new provider to register on atlas
 //     4. Driver(CMD_INIT, config_json)
 //     5. Driver(CMD_ACTIVATE, config_json) — primitives drive sensors
 //        / actuators that must be live before any skill or pilot
@@ -34,15 +34,18 @@
 //
 // All the lifecycle plumbing (`wait_for_registration_core`,
 // `call_driver_cmd`, the timeouts) is reused from `robonix_cli::launch`
-// so soma and rbnx CAN'T drift on FSM semantics.
+// so soma and rbnx CAN'T drift on FSM semantics. Omitted Driver is the
+// canonical shared selection. Only an exact legacy manifest may use a current
+// shared runtime Driver; a provider without exactly one Driver fails startup.
 
 use crate::deployment::{Deployment, PackageKind, PackageLaunchTarget};
 use crate::report::{PackageStartupCheck, PackageStartupStatus, StartupReport};
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_cli::launch::{
-    CMD_ACTIVATE, CMD_INIT, PackageRuntimeRecord, call_driver_cmd, shutdown_package_runtime,
-    snapshot_provider_registration, wait_for_registration_core,
+    CMD_ACTIVATE, CMD_INIT, PackageRuntimeRecord, call_driver_cmd, resolve_runtime_driver_contract,
+    shutdown_package_runtime, snapshot_provider_ids, terminate_process_group,
+    wait_for_registration_core,
 };
 use robonix_cli::process::ProcessManager;
 use robonix_scribe::{info, warn};
@@ -170,11 +173,35 @@ impl PackageLauncher {
         }
 
         let command = self.command_line(target);
+        let (expected_driver_contract, allow_shared_driver_upgrade) =
+            match robonix_cli::manifest::load_from_path(&target.package_manifest_path).and_then(
+                |manifest| {
+                    manifest.validate_and_summarize()?;
+                    let allow_upgrade =
+                        manifest
+                            .explicit_lifecycle_driver_contract()?
+                            .is_some_and(|contract| {
+                                contract != robonix_cli::manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT
+                            });
+                    Ok((
+                        manifest.selected_lifecycle_driver_contract()?.to_string(),
+                        allow_upgrade,
+                    ))
+                },
+            ) {
+                Ok(contract) => contract,
+                Err(error) => {
+                    return PackageStartupStatus::SpawnFailed {
+                        command,
+                        error: format!("selected package manifest: {error:#}"),
+                    };
+                }
+            };
 
-        // Snapshot the manifest-expected id before spawn so the wait can
-        // distinguish either a new registration or a same-id endpoint
-        // takeover from an unchanged stale Atlas record.
-        let before = match snapshot_provider_registration(atlas, &target.name).await {
+        // Snapshot the expected instance's registration generation before
+        // spawn. Other providers may register concurrently; the shared waiter
+        // ignores them and only accepts target.name with a new generation.
+        let before = match snapshot_provider_ids(atlas).await {
             Ok(s) => s,
             Err(e) => {
                 return PackageStartupStatus::SpawnFailed {
@@ -208,7 +235,7 @@ impl PackageLauncher {
         // early-exit detection rbnx uses for soma itself (deploy.rs).
         let who = format!("{}/{}", target.kind, target.name);
         let outcome = tokio::select! {
-            result = wait_for_registration_core(atlas, &before, &who) => match result {
+            result = wait_for_registration_core(atlas, &before, &target.name, &who) => match result {
                 Ok(o) => o,
                 Err(e) => {
                     self.reap(pid).await;
@@ -238,26 +265,36 @@ impl PackageLauncher {
                 ),
             };
         }
-        let Some(driver_contract) = outcome.driver_contract else {
-            // No driver contract = system-style auto-promotion. We
-            // don't expect this for primitives or skills, but mirror
-            // rbnx's "treat as ACTIVE" behaviour so a misclassified
-            // entry doesn't bring boot down.
-            if let Some(record) = self.children.iter_mut().find(|record| record.pid == pid) {
-                record.provider_id = Some(outcome.provider_id.clone());
+        let driver_contract = match resolve_runtime_driver_contract(
+            &outcome.provider_id,
+            &outcome.provider_namespace,
+            &expected_driver_contract,
+            &outcome.driver_contracts,
+            allow_shared_driver_upgrade,
+        ) {
+            Ok(contract) => contract,
+            Err(error) => {
+                self.reap(pid).await;
+                return PackageStartupStatus::SpawnFailed {
+                    command,
+                    error: format!("lifecycle: {error:#}"),
+                };
             }
-            warn!("{who}: registered without a */driver capability — skipping INIT/ACTIVATE",);
-            return PackageStartupStatus::Spawned { command };
         };
+        if driver_contract != expected_driver_contract {
+            warn!(
+                "{who}: provider publishes shared lifecycle Driver '{driver_contract}' for legacy manifest selection '{expected_driver_contract}'; remove the legacy Driver declaration to finish migration"
+            );
+        }
 
         let config_json = match serde_json::to_string(&target.config) {
-            Ok(value) => value,
+            Ok(config_json) => config_json,
             Err(error) => {
                 self.reap(pid).await;
                 return PackageStartupStatus::SpawnFailed {
                     command,
                     error: format!(
-                        "{who}: serialize config for deployment instance '{}': {error}",
+                        "serialize config for deployment instance '{}': {error}",
                         target.name
                     ),
                 };
@@ -431,21 +468,11 @@ impl PackageLauncher {
         }
     }
 
-    /// SIGKILL the package's process group. Called when a bring-up
-    /// step after spawn fails (registration timeout, INIT/ACTIVATE
-    /// error) so we don't leave orphaned children holding e.g.
-    /// device locks or gRPC ports. Quiet best-effort — if the
-    /// process already exited, killpg returns ESRCH and we move on.
+    /// Stop a failed package without bypassing provider cleanup.  Providers
+    /// install SIGTERM handlers that run `on_shutdown`; an immediate SIGKILL
+    /// leaves independently-sessioned ROS children behind under PID 1.
     async fn reap(&self, pid: u32) {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-        // Yield once so the kernel has a chance to deliver the
-        // signal before the caller's report-building runs. Not
-        // strictly required — the next atlas poll will still see
-        // the provider drop out — but keeps timings tidy in tests.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        terminate_process_group(pid, Duration::from_secs(8)).await;
     }
 
     /// Stop all packages launched by soma and abort their
@@ -546,5 +573,41 @@ mod tests {
                 .expect("launcher");
 
         assert_eq!(launcher.provider_soma_endpoint(), "127.0.0.1:50091");
+    }
+
+    #[tokio::test]
+    async fn failed_package_reap_runs_sigterm_cleanup_before_exit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marker = tmp.path().join("sigterm-cleanup-ran");
+        let launcher = PackageLauncher::new(
+            tmp.path().join("logs"),
+            "127.0.0.1:50051",
+            "127.0.0.1:50091",
+        )
+        .expect("launcher");
+        let mut child = TokioCommand::new("bash");
+        child
+            .arg("-c")
+            .arg(concat!(
+                "trap 'printf cleaned > \"$MARKER\"; exit 0' TERM; ",
+                "while :; do sleep 0.1; done"
+            ))
+            .env("MARKER", &marker)
+            .process_group(0);
+        let mut child = child.spawn().expect("spawn cleanup probe");
+        let pid = child.id().expect("probe pid");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        launcher.reap(pid).await;
+        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("probe exit timeout")
+            .expect("wait probe");
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("cleanup marker"),
+            "cleaned"
+        );
     }
 }

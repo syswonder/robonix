@@ -56,9 +56,8 @@ pub struct PackageLaunchTarget {
     /// right start path runs for THIS deployment target.
     pub manifest_override: Option<String>,
     /// Opaque config block from the manifest, raw serde value. Pushed
-    /// to the package via Driver(CMD_INIT, config_json) — never written
-    /// as a config file, never exported as an env var. Matches the
-    /// v0.1 layering invariant in rbnx deploy.rs.
+    /// to the package via its required Driver(CMD_INIT, config_json) — never
+    /// written as a config file and never exported as an env var.
     pub config: serde_yaml::Value,
 }
 

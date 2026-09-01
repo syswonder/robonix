@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Scene graph store — holds the live graph and manages caches.
+"""Live scene graph and persistent caption/relation caches.
 
-The graph has two writers at different rates, each owning a disjoint
-slice (single-threaded asyncio ⇒ no lock needed):
-  * the fast geometric loop owns ``_nodes`` + ``_geometric_edges`` (~3 Hz)
-    — deterministic contact/containment relations, available immediately;
-  * the LLM builder owns ``_semantic_edges`` (~30 s) — the residual that
-    geometry could not decide (ambiguous nesting + semantic relations).
-``get_snapshot()`` composes them on read for MCP / web consumers.
+Two single-threaded asyncio writers own disjoint slices:
+
+* the geometric loop updates nodes and deterministic geometric edges; and
+* the model builder updates semantic edges that geometry cannot decide.
+
+``get_snapshot()`` combines both slices for MCP and web consumers.
 
 Cache persistence uses simple JSON files so the system can survive
 restarts without re-calling the LLM for every object pair. Only the

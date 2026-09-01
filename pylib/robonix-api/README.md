@@ -52,10 +52,26 @@ robonix-api and Atlas emit a visible warning unless the contract TOML marks it
 as `cross_namespace = true`. The warning is diagnostic and never blocks boot,
 discovery, or calls.
 
-Existing package-local `*/driver` contracts remain supported. A later
-framework migration will provide one built-in lifecycle contract so new
-packages do not need to copy a driver TOML; that migration will retain the
-current form as a compatibility path.
+Current codegen provides the shared `robonix/lifecycle/driver` contract, and
+package authors normally omit Driver from the manifest: rbnx and robonix-api
+select/register shared automatically. Explicit shared selection remains valid,
+and an explicitly selected exact `<namespace>/driver` remains compatible. A
+legacy manifest may use current shared runtime stubs while it is migrated, but
+a shared selection never downgrades to legacy. Every provider must expose
+exactly one lifecycle Driver; zero, multiple, unrelated, and partial generated
+services fail with rebuild/migration guidance instead of promoting the provider
+to `ACTIVE`. An omitted lifecycle *handler* is different: it logs a warning and
+completes that transition as an `Ok` no-op, so the Driver can still walk the
+provider through `REGISTERED → INACTIVE → ACTIVE`.
+
+Managed omission and explicit shared selection request
+`robonix/lifecycle/driver` with the compatibility marker cleared. An explicit
+exact legacy selection sets `ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK=1`;
+despite its historical name, the marker permits only a legacy manifest whose
+legacy generated service pair is wholly absent to use the complete shared
+pair. If the selected pair is partial, neither permitted pair exists, or Driver
+declaration fails, startup is fatal. Direct launches with no selection use
+shared only; direct exact-legacy launches use legacy when that service exists.
 
 ## What's in the box
 

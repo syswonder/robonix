@@ -1,5 +1,6 @@
 # Tiago lidar driver — primitive package.
-# One device = one package. Exposes the planar lidar:
+# One device = one package. Exposes the planar lidar stream and snapshot:
+#   robonix/primitive/lidar/lidar     → ROS 2 LaserScan topic
 #   robonix/primitive/lidar/snapshot  → lidar_snapshot(Empty) → LaserScan
 manifestVersion: 1
 
@@ -21,5 +22,5 @@ stop: |
   docker exec "$SIM_CT" pkill -KILL -f "[l]idar_driver|[s]can_normalize" 2>/dev/null || true
 
 capabilities:
+  - name: robonix/primitive/lidar/lidar
   - name: robonix/primitive/lidar/snapshot
-  - name: robonix/primitive/lidar/driver

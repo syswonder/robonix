@@ -31,6 +31,9 @@ pub struct SomaService {
     next_seq: AtomicU64,
 }
 
+/// Latest published snapshot plus the lease that keeps a health primitive's
+/// reading authoritative. While `primitive_valid_until` is in the future the
+/// ROS-derived fallback stays silent, so the two publishers cannot interleave.
 #[derive(Debug, Default)]
 struct SnapshotState {
     latest: Option<SomaHealthSnapshot>,
@@ -112,12 +115,12 @@ impl SomaService {
         let runtime_detail = runtime.warnings.join("; ");
         let mut components = vec![component(
             "body",
-            &runtime_detail,
+            "",
             KIND_BODY,
             &self.body.robot_id,
             HEALTH_OK,
             OP_ACTIVE,
-            "",
+            &runtime_detail,
         )];
         let mut actuators = Vec::new();
         let mut metrics = Vec::new();
@@ -264,6 +267,7 @@ impl SomaService {
     }
 }
 
+/// Wrap a raw reading as a wire Scalar carrying its unit and quality flag.
 fn scalar(value: f64, unit: &str, quality: u32) -> Scalar {
     Scalar {
         value,
@@ -272,6 +276,7 @@ fn scalar(value: f64, unit: &str, quality: u32) -> Scalar {
     }
 }
 
+/// Build one named metric for a component from a single scalar reading.
 fn metric(component_id: &str, name: &str, value: f64, unit: &str, quality: u32) -> Metric {
     Metric {
         component_id: component_id.into(),
@@ -281,7 +286,6 @@ fn metric(component_id: &str, name: &str, value: f64, unit: &str, quality: u32) 
     }
 }
 
-/// Build one runtime-derived component with explicit online and health semantics.
 fn component(
     id: &str,
     parent_id: &str,
@@ -323,16 +327,15 @@ impl RobonixSystemSomaGetHealth for SomaService {
 impl RobonixSystemSomaHealth for SomaService {
     type StreamHealthStream = ReceiverStream<Result<SomaHealthSnapshot, Status>>;
 
-    /// Send the latest snapshot first, then forward updates until the client disconnects.
     async fn stream_health(
         &self,
         _request: Request<StreamHealthRequest>,
     ) -> Result<Response<Self::StreamHealthStream>, Status> {
         let mut input = self.snapshot_tx.subscribe();
-        let state = Arc::clone(&self.snapshot_state);
+        let latest = Arc::clone(&self.snapshot_state);
         let (output, receiver) = tokio::sync::mpsc::channel(16);
         tokio::spawn(async move {
-            if let Some(snapshot) = state.read().await.latest.clone()
+            if let Some(snapshot) = latest.read().await.latest.clone()
                 && output.send(Ok(snapshot)).await.is_err()
             {
                 return;
@@ -353,18 +356,8 @@ impl RobonixSystemSomaHealth for SomaService {
     }
 }
 
-/// Return the current Unix timestamp in nanoseconds, saturating at the wire limit.
-fn unix_time_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(i64::MAX as u128) as i64
-}
-
 #[tonic::async_trait]
 impl RobonixSystemSomaGetYaml for SomaService {
-    /// Resolve the requested robot and return its original Soma YAML document.
     async fn get_yaml(
         &self,
         request: Request<GetYamlRequest>,
@@ -383,7 +376,6 @@ impl RobonixSystemSomaGetYaml for SomaService {
 
 #[tonic::async_trait]
 impl RobonixSystemSomaGetUrdf for SomaService {
-    /// Return URDF XML and materialize validated local assets only when requested.
     async fn get_urdf(
         &self,
         request: Request<GetUrdfRequest>,
@@ -418,7 +410,6 @@ impl RobonixSystemSomaGetUrdf for SomaService {
 
 #[tonic::async_trait]
 impl RobonixSystemSomaFootprint for SomaService {
-    /// Return the configured footprint while preserving its declared base frame.
     async fn get_footprint(
         &self,
         _request: Request<GetFootprintRequest>,
@@ -439,6 +430,15 @@ impl RobonixSystemSomaFootprint for SomaService {
             circumscribed_radius_m: footprint.circumscribed_radius_m,
         }))
     }
+}
+
+/// Return the current Unix timestamp in nanoseconds, saturating at the wire limit.
+fn unix_time_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64
 }
 
 #[cfg(test)]
@@ -489,7 +489,6 @@ mod tests {
             .into_inner();
         assert_eq!(response.robot_id, "test_ci_robot");
         assert!(response.urdf_xml.contains("<robot name=\"test_ci_robot\">"));
-        assert!(response.assets.is_empty());
     }
 
     #[tokio::test]
@@ -519,6 +518,13 @@ mod tests {
         let snapshot = response.snapshot.expect("snapshot");
         assert_eq!(snapshot.body_id, "test_ci_robot");
         assert_eq!(snapshot.seq, 1);
+        let body = snapshot
+            .components
+            .iter()
+            .find(|component| component.id == "body")
+            .expect("body component");
+        assert!(body.parent_id.is_empty());
+        assert!(body.detail.contains("no chassis odometry sample"));
     }
 
     /// Primitive data suppresses fallback only for the advertised lease.

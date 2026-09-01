@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from typing import Iterator
@@ -24,7 +25,27 @@ from urllib.parse import quote, urlencode
 import requests
 from websockets.sync.client import connect
 
+from speech_service.tts_errors import TTSInputError
+from speech_service.tts_runtime import tts_request_is_active
+
 log = logging.getLogger(__name__)
+
+_TTS_DEFAULT_MAX_CHARS = 140
+_TTS_PROVIDER_MAX_CHARS = 150
+_TTS_DEFAULT_MAX_TOTAL_CHARS = 5_000
+_TTS_MAX_SEGMENTS = 40
+_TTS_MAX_TOTAL_CHARS = _TTS_PROVIDER_MAX_CHARS * _TTS_MAX_SEGMENTS
+_TTS_MAX_ONE_SHOT_PCM_BYTES = 4 * 1024 * 1024 - 64 * 1024
+_TTS_MAX_SEGMENT_PCM_BYTES = _TTS_MAX_ONE_SHOT_PCM_BYTES
+_TTS_MAX_TOTAL_PCM_BYTES = _TTS_MAX_ONE_SHOT_PCM_BYTES
+_TTS_SENTENCE_BREAKS = frozenset(
+    "\N{IDEOGRAPHIC FULL STOP}"
+    "\N{FULLWIDTH EXCLAMATION MARK}"
+    "\N{FULLWIDTH QUESTION MARK}"
+    "\N{FULLWIDTH SEMICOLON}"
+    ".!?;\n"
+)
+_TTS_CLAUSE_BREAKS = frozenset("\N{FULLWIDTH COMMA}, \t")
 
 
 def _env_first(*names: str, default: str = "") -> str:
@@ -41,6 +62,105 @@ def _require_env(*names: str) -> str:
         return value
     joined = " / ".join(names)
     raise RuntimeError(f"missing Tencent Cloud credential env: {joined}")
+
+
+def _has_tts_content(text: str) -> bool:
+    """Return whether text contains something beyond punctuation/spacing."""
+    return any(unicodedata.category(char)[0] not in {"P", "Z", "C"} for char in text)
+
+
+def _attach_trailing_separators(remaining: str, split_at: int, max_chars: int) -> int:
+    """Keep trailing punctuation with speakable text after a candidate cut."""
+    # A hard cut immediately before trailing punctuation would create a
+    # punctuation-only provider request (for example 140 Han characters
+    # followed by an ideographic full stop). Move enough preceding text
+    # to keep both requests meaningful without exceeding the limit.
+    tail = remaining[split_at:]
+    while tail and len(tail) < max_chars and not _has_tts_content(tail):
+        split_at -= 1
+        tail = remaining[split_at:]
+    return split_at
+
+
+def _hard_split_tts_text(text: str, max_chars: int) -> list[str]:
+    """Split only on the character budget, preserving every input character."""
+    if len(text) <= max_chars:
+        return [text]
+
+    segments: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        split_at = _attach_trailing_separators(remaining, max_chars, max_chars)
+        if split_at <= 0:
+            split_at = max_chars
+        segments.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining:
+        segments.append(remaining)
+    return segments
+
+
+def _split_tts_text(text: str, max_chars: int) -> list[str]:
+    """Split text into provider-safe chunks without dropping any characters.
+
+    Prefer the last sentence boundary within each limit-sized window, then a
+    comma or whitespace, and finally the hard boundary. Short input is returned
+    unchanged so the existing single-request behavior remains intact.
+
+    Natural boundaries that leave only a tiny head fragment are ignored when
+    more than one additional full window remains; otherwise dense punctuation
+    near a previous hard cut can alternate short/long segments and exhaust the
+    request budget on otherwise valid input.
+    """
+    if max_chars <= 0:
+        raise ValueError("Tencent TTS max chars must be greater than zero")
+    if len(text) <= max_chars:
+        return [text]
+
+    # Ignore early natural breaks that carve off a tiny head while a large
+    # remainder still needs multiple requests. A quarter-window floor keeps
+    # ordinary sentence splits (for example "Hello!") while rejecting the
+    # 2-character leftovers that inflate ("a"*141+".")*N into 2N segments.
+    min_natural_chars = max(1, max_chars // 4)
+
+    segments: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        window = remaining[:max_chars]
+        split_at = (
+            max((window.rfind(mark) for mark in _TTS_SENTENCE_BREAKS), default=-1) + 1
+        )
+        if split_at and not _has_tts_content(window[:split_at]):
+            split_at = 0
+        if (
+            split_at
+            and split_at < min_natural_chars
+            and len(remaining) - split_at >= max_chars
+        ):
+            split_at = 0
+        if split_at == 0:
+            split_at = (
+                max((window.rfind(mark) for mark in _TTS_CLAUSE_BREAKS), default=-1) + 1
+            )
+        if split_at and not _has_tts_content(window[:split_at]):
+            split_at = 0
+        if (
+            split_at
+            and split_at < min_natural_chars
+            and len(remaining) - split_at >= max_chars
+        ):
+            split_at = 0
+        if split_at == 0:
+            split_at = max_chars
+
+        split_at = _attach_trailing_separators(remaining, split_at, max_chars)
+        if split_at <= 0:
+            split_at = max_chars
+        segments.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining:
+        segments.append(remaining)
+    return segments
 
 
 @dataclass(frozen=True)
@@ -264,52 +384,215 @@ class TencentTTSBackend:
     action = "TextToVoice"
 
     def __init__(self):
+        """Load and validate the Tencent settings used by every TTS request."""
         self.secret_id = _require_env("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID")
         self.secret_key = _require_env("TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_KEY")
         self.region = os.environ.get("TENCENT_TTS_REGION", "ap-guangzhou")
         self.voice_type = int(os.environ.get("TENCENT_TTS_VOICE_TYPE", "1001"))
         self.model_type = int(os.environ.get("TENCENT_TTS_MODEL_TYPE", "1"))
         self.sample_rate = int(os.environ.get("TENCENT_TTS_SAMPLE_RATE", "16000"))
-        self.codec = os.environ.get("TENCENT_TTS_CODEC", "pcm")
-        self.primary_language = int(os.environ.get("TENCENT_TTS_PRIMARY_LANGUAGE", "1"))
+        if self.sample_rate != 16000:
+            raise ValueError(
+                "Tencent TTS requires TENCENT_TTS_SAMPLE_RATE=16000 for the "
+                "speech service and speaker PCM contract"
+            )
+        self.codec = os.environ.get("TENCENT_TTS_CODEC", "pcm").strip().lower()
+        if self.codec != "pcm":
+            raise ValueError(
+                "Tencent TTS requires TENCENT_TTS_CODEC=pcm for the speech "
+                "service pcm_s16le contract"
+            )
+        language_override = os.environ.get("TENCENT_TTS_PRIMARY_LANGUAGE", "").strip()
+        try:
+            self.primary_language = (
+                int(language_override) if language_override else None
+            )
+        except ValueError as exc:
+            raise ValueError("TENCENT_TTS_PRIMARY_LANGUAGE must be an integer") from exc
+        if self.primary_language not in {None, 1, 2}:
+            raise ValueError("TENCENT_TTS_PRIMARY_LANGUAGE must be 1 or 2")
+        try:
+            self.max_text_chars = int(
+                os.environ.get("TENCENT_TTS_MAX_CHARS", str(_TTS_DEFAULT_MAX_CHARS))
+            )
+        except ValueError as exc:
+            raise ValueError("TENCENT_TTS_MAX_CHARS must be an integer") from exc
+        if not 1 <= self.max_text_chars <= _TTS_PROVIDER_MAX_CHARS:
+            raise ValueError(
+                f"TENCENT_TTS_MAX_CHARS must be between 1 and {_TTS_PROVIDER_MAX_CHARS}"
+            )
+        try:
+            self.max_total_text_chars = int(
+                os.environ.get(
+                    "TENCENT_TTS_MAX_TOTAL_CHARS",
+                    str(_TTS_DEFAULT_MAX_TOTAL_CHARS),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("TENCENT_TTS_MAX_TOTAL_CHARS must be an integer") from exc
+        if not 1 <= self.max_total_text_chars <= _TTS_MAX_TOTAL_CHARS:
+            raise ValueError(
+                "TENCENT_TTS_MAX_TOTAL_CHARS must be between "
+                f"1 and {_TTS_MAX_TOTAL_CHARS}"
+            )
         log.info(
-            "Tencent TTS initialized (voice_type=%s, sample_rate=%s, codec=%s)",
+            "Tencent TTS initialized (voice_type=%s, sample_rate=%s, "
+            "codec=%s, max_chars=%s, max_total_chars=%s)",
             self.voice_type,
             self.sample_rate,
             self.codec,
+            self.max_text_chars,
+            self.max_total_text_chars,
         )
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
+        """Synthesize all safe text segments and concatenate their PCM audio."""
+        segments = self._segments_for_provider(text)
         primary_language = self._primary_language_for_text(text)
-        payload = {
-            "Text": text,
-            "SessionId": str(uuid.uuid4()),
-            "Volume": 0,
-            "Speed": self._speed_to_tencent(speed),
-            "ProjectId": 0,
-            "ModelType": self.model_type,
-            "VoiceType": int(voice) if voice else self.voice_type,
-            "PrimaryLanguage": primary_language,
-            "SampleRate": self.sample_rate,
-            "Codec": self.codec,
-            "EnableSubtitle": False,
-        }
-        log.info("Tencent TTS request: voice_type=%s primary_language=%s text_len=%s", payload["VoiceType"], primary_language, len(text or ""))
-        response = await asyncio.to_thread(self._post_json, payload)
-        audio_b64 = response.get("Audio", "")
-        if not audio_b64:
-            raise RuntimeError(f"Tencent TTS returned no audio: {response}")
-        return base64.b64decode(audio_b64)
+        if len(segments) > 1:
+            log.info(
+                "Tencent TTS split %d chars into %d requests",
+                len(text),
+                len(segments),
+            )
+        audio = []
+        audio_size = 0
+        for index, segment in enumerate(segments, start=1):
+            self._ensure_tts_request_active(index, len(segments))
+            segment_audio = await self._synthesize_segment(
+                segment,
+                voice,
+                speed,
+                primary_language=primary_language,
+                index=index,
+                total=len(segments),
+            )
+            audio_size += len(segment_audio)
+            if audio_size > _TTS_MAX_TOTAL_PCM_BYTES:
+                raise RuntimeError(
+                    "Tencent TTS synthesized PCM exceeds the one-shot safety "
+                    "limit; use streaming TTS for larger output"
+                )
+            audio.append(segment_audio)
+        return b"".join(audio)
+
+    async def _synthesize_segment(
+        self,
+        text: str,
+        voice: str,
+        speed: float,
+        *,
+        primary_language: int,
+        index: int,
+        total: int,
+    ) -> bytes:
+        """Send one bounded TextToVoice request and identify failures by segment."""
+        try:
+            payload = {
+                "Text": text,
+                "SessionId": str(uuid.uuid4()),
+                "Volume": 0,
+                "Speed": self._speed_to_tencent(speed),
+                "ProjectId": 0,
+                "ModelType": self.model_type,
+                "VoiceType": int(voice) if voice else self.voice_type,
+                "PrimaryLanguage": primary_language,
+                "SampleRate": self.sample_rate,
+                "Codec": self.codec,
+                "EnableSubtitle": False,
+            }
+            log.info(
+                "Tencent TTS request: segment=%d/%d voice_type=%s "
+                "primary_language=%s text_len=%s",
+                index,
+                total,
+                payload["VoiceType"],
+                primary_language,
+                len(text or ""),
+            )
+            response = await asyncio.to_thread(self._post_json, payload)
+            audio_b64 = response.get("Audio", "")
+            if not audio_b64:
+                raise RuntimeError(f"Tencent TTS returned no audio: {response}")
+            max_encoded_length = 4 * ((_TTS_MAX_SEGMENT_PCM_BYTES + 2) // 3)
+            if len(audio_b64) > max_encoded_length:
+                raise RuntimeError(
+                    "Tencent TTS encoded audio exceeds the segment safety limit"
+                )
+            audio = base64.b64decode(audio_b64, validate=True)
+            if not audio:
+                raise RuntimeError("Tencent TTS decoded to empty PCM audio")
+            if len(audio) % 2:
+                raise RuntimeError(
+                    f"Tencent TTS returned odd-length pcm_s16le audio: {len(audio)} bytes"
+                )
+            if len(audio) > _TTS_MAX_SEGMENT_PCM_BYTES:
+                raise RuntimeError("Tencent TTS segment PCM exceeds its safety limit")
+            return audio
+        except Exception as exc:
+            raise RuntimeError(
+                f"Tencent TTS segment {index}/{total} failed "
+                f"(text_len={len(text)}): {exc}"
+            ) from exc
 
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
-        data = await self.synthesize(text, voice, speed)
-        for i in range(0, len(data), 4096):
-            yield data[i : i + 4096]
+        """Synthesize and yield each safe segment before requesting the next one."""
+        segments = self._segments_for_provider(text)
+        primary_language = self._primary_language_for_text(text)
+        for index, segment in enumerate(segments, start=1):
+            self._ensure_tts_request_active(index, len(segments))
+            data = await self._synthesize_segment(
+                segment,
+                voice,
+                speed,
+                primary_language=primary_language,
+                index=index,
+                total=len(segments),
+            )
+            for offset in range(0, len(data), 4096):
+                yield data[offset : offset + 4096]
+
+    @staticmethod
+    def _ensure_tts_request_active(index: int, total: int) -> None:
+        """Stop paid fan-out when the bound transport/request is no longer live."""
+        if not tts_request_is_active():
+            raise RuntimeError(
+                f"Tencent TTS synthesis cancelled before segment {index}/{total}"
+            )
+
+    def _segments_for_provider(self, text: str) -> list[str]:
+        """Validate and split text without dropping provider-visible input."""
+        if not text:
+            raise TTSInputError("Tencent TTS text must not be empty")
+        if not _has_tts_content(text):
+            raise TTSInputError("Tencent TTS text must contain speakable content")
+        if len(text) > self.max_total_text_chars:
+            raise TTSInputError(
+                f"Tencent TTS text length {len(text)} exceeds the configured "
+                f"maximum of {self.max_total_text_chars} characters"
+            )
+        segments = _split_tts_text(text, self.max_text_chars)
+        if len(segments) > _TTS_MAX_SEGMENTS:
+            # Natural punctuation can carve tiny follow-up fragments (for
+            # example 140/2 alternating cuts) that exceed the request cap even
+            # when a plain budget split fits. Prefer the bounded split then.
+            segments = _hard_split_tts_text(text, self.max_text_chars)
+        if len(segments) > _TTS_MAX_SEGMENTS:
+            raise TTSInputError(
+                f"Tencent TTS text requires {len(segments)} requests; "
+                f"the safety limit is {_TTS_MAX_SEGMENTS}"
+            )
+        if any(not _has_tts_content(segment) for segment in segments):
+            raise TTSInputError(
+                "Tencent TTS text cannot be split without a punctuation- or "
+                "whitespace-only provider request; shorten consecutive separators"
+            )
+        return segments
 
     def _primary_language_for_text(self, text: str) -> int:
-        override = os.environ.get("TENCENT_TTS_PRIMARY_LANGUAGE", "").strip()
-        if override:
-            return int(override)
+        """Use the configured language or infer one once for the full utterance."""
+        if self.primary_language is not None:
+            return self.primary_language
         letters = sum(1 for ch in text if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
         cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
         # Tencent TextToVoice exposes 1=Chinese, 2=English. Use English only
@@ -334,22 +617,32 @@ class TencentTTSBackend:
         return min(6, round((speed - 1.0) * 2))
 
     def _post_json(self, payload: dict) -> dict:
+        """Post one signed request and retain Tencent's request ID on errors."""
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         timestamp = int(time.time())
         headers = self._headers(body, timestamp)
-        resp = requests.post(self.endpoint, data=body.encode("utf-8"), headers=headers, timeout=10)
+        resp = requests.post(
+            self.endpoint, data=body.encode("utf-8"), headers=headers, timeout=10
+        )
         resp.raise_for_status()
         data = resp.json()
         response = data.get("Response", {})
         if "Error" in response:
             err = response["Error"]
-            raise RuntimeError(f"Tencent TTS {err.get('Code')}: {err.get('Message')}")
+            request_id = response.get("RequestId", "")
+            request_suffix = f" (request_id={request_id})" if request_id else ""
+            raise RuntimeError(
+                f"Tencent TTS {err.get('Code')}: {err.get('Message')}{request_suffix}"
+            )
         return response
 
     def _headers(self, body: str, timestamp: int) -> dict:
+        """Build Tencent TC3-HMAC-SHA256 headers for one request body."""
         date = time.strftime("%Y-%m-%d", time.gmtime(timestamp))
         hashed_request_payload = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        canonical_headers = f"content-type:application/json; charset=utf-8\nhost:{self.host}\n"
+        canonical_headers = (
+            f"content-type:application/json; charset=utf-8\nhost:{self.host}\n"
+        )
         signed_headers = "content-type;host"
         canonical_request = "\n".join(
             [

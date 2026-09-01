@@ -48,6 +48,8 @@ Atlas discovery still runs before every planning round. When its LLM-visible pro
 
 Every request writes a `[pilot/prompt]` JSON log with text bytes and four-byte token estimates for the standing context, RTDL protocol, capability catalog, task, in-flight trees, Executor state, live embodiment, environment, history, and correction. Pilot supplies a random per-turn `prompt_cache_key`, with stable sections ordered before live state, so supporting providers can reuse the longest unchanged prefix without receiving a session identifier. Compatible providers also report exact prompt/completion tokens and cached prompt tokens through streaming usage; those totals are logged separately under the same prefix. The fake VLM's reported usage is explicitly a deterministic four-byte estimate, not a production tokenizer result. A provider that rejects a named optional cache/usage field with HTTP 400 or 422 is retried once without those fields; unrelated client errors are returned unchanged.
 
+Pilot's standing system prompt is built in `src/planner.rs`; it includes the runtime operating principles, including the rule that failed required capability calls stop autonomous physical task progress until the user confirms the next step.
+
 ## RTDL Planning Flow
 
 Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object:

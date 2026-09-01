@@ -1,37 +1,17 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""ConceptGraphs perception — the *real* one, not just the detection
-frontend.
+"""ConceptGraphs perception and persistent object-map integration.
 
-This module owns a persistent `conceptgraph.slam.slam_classes.MapObjectList`
-and runs the canonical concept-graphs merge pipeline every tick:
+Each tick runs the following pipeline:
 
-    YOLO-World detect (open-vocab via CLIP text encoder)
-        │
-        ▼
-    MobileSAM (bbox-prompted masks)
-        │
-        ▼
-    open_clip ViT-B-32 → per-detection 512-d image feature
-        │
-        ▼
-    detections_to_obj_pcd_and_bbox  (depth + masks + cam_K + trans_pose
-                                     → per-detection o3d.PointCloud +
-                                     OrientedBoundingBox in map frame)
-        │
-        ▼
-    compute_spatial_similarities  (3D pcd-overlap M×N matrix)
-    compute_visual_similarities   (CLIP cosine similarity M×N matrix)
-    aggregate_similarities        (sim_sum)
-        │
-        ▼
-    merge_detections_to_objects   (matched → merge_obj2_into_obj1
-                                   with EMA pose/extent + pcd union;
-                                   unmatched → new map object)
+* YOLO-World detects open-vocabulary objects.
+* MobileSAM creates bounding-box-prompted masks.
+* OpenCLIP produces one visual feature per detection.
+* Depth, masks, camera intrinsics, and pose produce map-frame point clouds.
+* Spatial and visual similarities associate detections with stored objects.
+* Matched detections update objects; unmatched detections create new objects.
 
-This is NOT the old "Hungarian on class+spatial" code that lived in
-scene/state/data_assoc.py. That path over-segmented heavily because it
-couldn't see visual features and treated cabinet/shelf as separate
-even when CLIP would say they're the same physical thing.
+This replaces the earlier class-and-distance-only association path, which
+could not use visual features and frequently over-segmented objects.
 
 The persistent `MapObjectList` is the source of truth. Every tick we
 project it back into scene's `ObjectRegistry` so the existing web UI /
@@ -659,6 +639,10 @@ class ConceptGraphsDetector:
         # compose the camera-to-world transform.
         hub: Any = None,
         camera_frame: str = "",
+        # Body frame asserted for the compatibility pose + extrinsics chain.
+        # It must match odometry.child_frame_id when odometry is selected.
+        # Soma's live footprint base frame is preferred when available.
+        base_frame: Optional[str] = None,
     ) -> None:
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
@@ -674,6 +658,7 @@ class ConceptGraphsDetector:
         self._clip_pretrained = clip_pretrained
         self._hub = hub
         self._camera_frame = camera_frame
+        self._base_frame = (base_frame or "").strip().lstrip("/")
         self._world_frame_fn = world_frame_fn or (lambda: "")
         self._robot_base_frame_fn = robot_base_frame_fn or (lambda: "")
         self._pose_max_age_s = max(0.0, float(pose_max_age_s))
@@ -1923,115 +1908,189 @@ class ConceptGraphsDetector:
         return out
 
     # ── Camera-to-world transform ───────────────────────────────────
+    def _selected_camera_frame(self) -> str:
+        """Return the configured or live RGB optical frame without guessing."""
+        configured = str(getattr(self, "_camera_frame", "") or "").strip().lstrip("/")
+        if configured:
+            return configured
+        rgb_msg = self._rgb_msg()
+        return str(
+            getattr(getattr(rgb_msg, "header", None), "frame_id", "") or ""
+        ).strip().lstrip("/")
+
+    def _selected_base_frame(self) -> str:
+        """Return Soma's live base frame, checked against explicit config."""
+        live_fn = getattr(self, "_robot_base_frame_fn", None)
+        live = str(live_fn() if live_fn is not None else "").strip().lstrip("/")
+        configured = str(getattr(self, "_base_frame", "") or "").strip().lstrip("/")
+        if live and configured and live != configured:
+            signature = (live, configured)
+            if getattr(self, "_invalid_configured_base_signature", None) != signature:
+                log.warning(
+                    "configured base_frame %r does not match Soma footprint frame %r",
+                    configured,
+                    live,
+                )
+                self._invalid_configured_base_signature = signature
+            return ""
+        return live or configured
+
     def _build_camera_to_map_transform(self, *, expected_world_frame: str = ""):
-        """4x4 homogeneous transform mapping camera-optical points
-        into the world frame published by the active localizer.
+        """Return a validated camera-to-world transform.
 
-        Compose Atlas-resolved contracts:
-
-          1. Compose
-             `T(world ← base) ⊕ T(base ← camera_optical)` from the
-             two slots:
-               - `service/map/pose` (or `service/map/odom`) — robot
-                 pose in world frame, supplied by mapping/AMCL/mocap.
-               - `primitive/camera/extrinsics` — static camera mount
-                 transform supplied by the camera primitive itself.
-             No tf2 involvement; both legs are visible to atlas, so
-             `rbnx caps`/`rbnx channels` see every dependency.
-
-        Missing pose/extrinsics remain unavailable. Scene never substitutes
-        a TF side channel, zero pose, fixed camera axis, or guessed mount.
+        dev-next keeps its TF-first experiment, but both TF endpoints must come
+        from the active camera and localizer. If TF is unavailable, the
+        Atlas-routed pose and camera-extrinsics contracts are composed only
+        when their world/body/camera frame chain is complete and current.
         """
         import numpy as np
 
-        expected_world_frame = str(
+        world_frame = str(
             expected_world_frame or self._world_frame_fn() or ""
-        ).strip()
-        T_pose = self._slot_pose_4x4(
-            expected_world_frame=expected_world_frame,
-        )
-        T_ext = self._slot_extrinsics_4x4()
-        if T_pose is not None and T_ext is not None:
-            return (T_pose @ T_ext).astype(np.float32)
-        return None
+        ).strip().lstrip("/")
+        camera_frame = self._selected_camera_frame()
+        if not world_frame or not camera_frame:
+            return None
 
-    def _slot_pose_4x4(self, *, expected_world_frame: str = ""):
-        """Read the latest pose from the `pose` (preferred) or `odom`
-        slot and return a 4×4 `T(world ← base)` matrix. Frame endpoints
-        and receipt age must match live Scene/Soma state."""
+        if self._hub is not None:
+            transform = self._hub.lookup_transform_4x4(
+                camera_frame,
+                world_frame,
+            )
+            if transform is not None:
+                return transform.astype(np.float32)
+
+        pose_transform = self._slot_pose_transform(
+            expected_world_frame=world_frame,
+        )
+        if pose_transform is None:
+            return None
+        pose_matrix, body_frame = pose_transform
+        extrinsics_matrix = self._slot_extrinsics_4x4(body_frame)
+        if extrinsics_matrix is None:
+            return None
+        return (pose_matrix @ extrinsics_matrix).astype(np.float32)
+
+    def _slot_pose_transform(self, *, expected_world_frame: str = ""):
+        """Return the body pose matrix and its validated frame endpoint."""
         if self._hub is None:
             return None
         expected_world = str(
             expected_world_frame or self._world_frame_fn() or ""
-        ).strip()
-        expected_base = str(self._robot_base_frame_fn() or "").strip()
-        if not expected_world or not expected_base:
+        ).strip().lstrip("/")
+        if not expected_world:
             return None
+        expected_base = self._selected_base_frame()
         for kind in ("pose", "odom"):
             if not self._hub.has(kind):
                 continue
             msg, stamp_unix, _count = self._hub.latest(kind)
             if msg is None or stamp_unix <= 0:
                 continue
-            if (
-                self._pose_max_age_s > 0.0
-                and time.time() - stamp_unix > self._pose_max_age_s
-            ):
+            max_age_s = float(getattr(self, "_pose_max_age_s", 0.0) or 0.0)
+            if max_age_s > 0.0 and time.time() - stamp_unix > max_age_s:
                 continue
             world_frame = str(
                 getattr(getattr(msg, "header", None), "frame_id", "") or ""
-            ).strip()
+            ).strip().lstrip("/")
             if world_frame != expected_world:
                 continue
-            if kind == "odom":
-                child_frame = str(getattr(msg, "child_frame_id", "") or "").strip()
-                if child_frame != expected_base:
-                    continue
-            p = (
+            body_frame = self._body_frame_for_pose_source(
+                kind,
+                msg,
+                expected_base=expected_base,
+            )
+            if body_frame is None:
+                continue
+            pose = (
                 msg.pose.pose
                 if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
                 else msg.pose
             )
-            q = p.orientation
-            return _quat_xyz_to_matrix(
-                float(q.x), float(q.y), float(q.z), float(q.w),
-                float(p.position.x), float(p.position.y), float(p.position.z),
+            quaternion = pose.orientation
+            return (
+                _quat_xyz_to_matrix(
+                    float(quaternion.x),
+                    float(quaternion.y),
+                    float(quaternion.z),
+                    float(quaternion.w),
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(pose.position.z),
+                ),
+                body_frame,
             )
         return None
 
-    def _slot_extrinsics_4x4(self):
-        """Read the static camera-mount transform (TransformStamped
-        from `primitive/camera/extrinsics`) and return a 4×4
-        `T(base ← camera)` matrix only when both endpoints match the
-        active Soma base and RGB stream."""
-        if self._hub is None or not self._hub.has("camera_extrinsics"):
+    def _body_frame_for_pose_source(
+        self,
+        kind: str,
+        msg,
+        *,
+        expected_base: str = "",
+    ) -> str | None:
+        """Resolve a body endpoint without a robot-model default."""
+        expected_base = str(expected_base or "").strip().lstrip("/")
+        if kind != "odom":
+            return expected_base or None
+        odom_child = str(getattr(msg, "child_frame_id", "") or "").strip().lstrip("/")
+        if not odom_child:
+            return None
+        if expected_base and odom_child != expected_base:
+            signature = (odom_child, expected_base)
+            if getattr(self, "_invalid_odom_body_signature", None) != signature:
+                log.warning(
+                    "ignoring odometry with child frame %r; active base frame is %r",
+                    odom_child,
+                    expected_base,
+                )
+                self._invalid_odom_body_signature = signature
+            return None
+        return expected_base or odom_child
+
+    def _slot_extrinsics_4x4(self, expected_parent: str | None = None):
+        """Return the camera mount only for the selected frame endpoints."""
+        expected_parent = str(
+            expected_parent or self._selected_base_frame() or ""
+        ).strip().lstrip("/")
+        expected_child = self._selected_camera_frame()
+        if (
+            self._hub is None
+            or not self._hub.has("camera_extrinsics")
+            or not expected_parent
+            or not expected_child
+        ):
             return None
         msg, stamp_unix, _count = self._hub.latest("camera_extrinsics")
         if msg is None or stamp_unix <= 0:
             return None
         parent_frame = str(
             getattr(getattr(msg, "header", None), "frame_id", "") or ""
-        ).strip()
-        child_frame = str(getattr(msg, "child_frame_id", "") or "").strip()
-        expected_base = str(self._robot_base_frame_fn() or "").strip()
-        expected_camera = str(self._camera_frame or "").strip()
-        if not expected_camera:
-            rgb_msg = self._rgb_msg()
-            expected_camera = str(
-                getattr(getattr(rgb_msg, "header", None), "frame_id", "") or ""
-            ).strip()
-        if (
-            not expected_base
-            or not expected_camera
-            or parent_frame != expected_base
-            or child_frame != expected_camera
-        ):
+        ).strip().lstrip("/")
+        child_frame = str(getattr(msg, "child_frame_id", "") or "").strip().lstrip("/")
+        if parent_frame != expected_parent or child_frame != expected_child:
+            signature = (parent_frame, child_frame, expected_parent, expected_child)
+            if getattr(self, "_invalid_extrinsics_signature", None) != signature:
+                log.warning(
+                    "ignoring camera extrinsics with frames %r ← %r; expected "
+                    "%r ← %r",
+                    parent_frame,
+                    child_frame,
+                    expected_parent,
+                    expected_child,
+                )
+                self._invalid_extrinsics_signature = signature
             return None
-        t = msg.transform.translation
-        q = msg.transform.rotation
+        translation = msg.transform.translation
+        quaternion = msg.transform.rotation
         return _quat_xyz_to_matrix(
-            float(q.x), float(q.y), float(q.z), float(q.w),
-            float(t.x), float(t.y), float(t.z),
+            float(quaternion.x),
+            float(quaternion.y),
+            float(quaternion.z),
+            float(quaternion.w),
+            float(translation.x),
+            float(translation.y),
+            float(translation.z),
         )
 
     # ── Project MapObjectList → ObjectRegistry ──────────────────────
@@ -2454,9 +2513,8 @@ def _quat_xyz_to_matrix(qx: float, qy: float, qz: float, qw: float,
                         tx: float, ty: float, tz: float):
     """Quaternion + translation → 4×4 homogeneous transform.
 
-    Used by the camera-to-world composer when building the transform
-    from atlas-resolved contract slots (pose + extrinsics) instead of
-    tf2 — a per-slot replacement for `lookup_transform_4x4`.
+    Used by the camera-to-world compatibility path when TF is unavailable
+    and Scene composes the pose and validated extrinsics contract slots.
     """
     import numpy as np
     n = qx * qx + qy * qy + qz * qz + qw * qw

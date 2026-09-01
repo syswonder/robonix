@@ -7,8 +7,8 @@
 #   - it shares the host DDS bus with whatever sim/robot container
 #     is publishing the camera, lidar, pose, and map topics declared through atlas.
 #
-# Soma adapter: scene's ingest layer reads `config.observations[]`
-# (passed in via RBNX_CONFIG_FILE by `rbnx boot`) to know which ROS2
+# Runtime config: scene's ingest layer reads `config.observations[]`
+# (passed through shared Driver(CMD_INIT) by `rbnx boot`) to know which ROS2
 # topics to subscribe to. Each entry pairs a logical kind ("rgb",
 # "depth", "lidar2d", "pose", "odom") with a topic name and ROS msg
 # class.

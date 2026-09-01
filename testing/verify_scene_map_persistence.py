@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -102,6 +103,14 @@ if os.path.isfile(db):
     res["artifact_size"] = os.path.getsize(db)
     con = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=30.0)
     res["quick_check"] = con.execute("PRAGMA quick_check").fetchone()[0]
+    # Link.type: 0 neighbour, 1 global loop closure, 2 local-space,
+    # 3 local-time, 6 neighbour-merged. Only-neighbour means nothing ever
+    # corrected the odometry chain, which is what leaves walls doubled.
+    try:
+        res["link_types"] = {str(t): n for t, n in con.execute(
+            "SELECT type, COUNT(*) FROM Link GROUP BY type").fetchall()}
+    except sqlite3.Error as exc:
+        res["link_types"] = "error:" + str(exc)
     counts = {}
     for table in ["Node", "Data", "Link", "Word"]:
         try:
@@ -120,6 +129,15 @@ print(json.dumps(res, ensure_ascii=False))
     )
 
 
+def export_preview(container: str, map_id: str, maps_dir: str, dest: Path,
+                   timeout: float = 60.0) -> None:
+    """Copy the saved map's occupancy.png out of the mapping container."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src = f"{container}:{maps_dir}/{map_id}/occupancy.png"
+    subprocess.run(["docker", "cp", src, str(dest)], check=True, timeout=timeout)
+    print(f"exported_preview {dest} bytes={dest.stat().st_size}")
+
+
 def live_map(container: str, timeout: float) -> dict[str, Any]:
     code = r"""
 import json, time
@@ -129,6 +147,24 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 rclpy.init()
 node = rclpy.create_node("verify_scene_map_persistence")
 box = {}
+def wall_shape(data, w, h):
+    # Filatov et al., "2D SLAM Quality Evaluation Methods" (FRUCT 2017): three
+    # no-ground-truth metrics. Blur and misalignment inflate the occupied
+    # proportion while destroying corners and closed rooms.
+    import numpy as np, cv2
+    g = np.array(data, dtype=np.int16).reshape(h, w)
+    occ = (g > 50).astype(np.uint8)
+    n_occ = int(occ.sum())
+    out = {"occ_proportion": round(n_occ / max(1, int((g <= 50).sum())), 4)}
+    corners = cv2.goodFeaturesToTrack(occ * 255, maxCorners=100000,
+                                      qualityLevel=0.01, minDistance=3)
+    out["corners"] = 0 if corners is None else int(len(corners))
+    num, labels = cv2.connectedComponents((occ == 0).astype(np.uint8), connectivity=4)
+    edge = set(labels[0]) | set(labels[-1]) | set(labels[:, 0]) | set(labels[:, -1])
+    out["enclosed_areas"] = sum(1 for i in range(1, num)
+                                if i not in edge and int((labels == i).sum()) >= 4)
+    return out
+
 def cb(msg):
     data = list(msg.data)
     box["msg"] = {
@@ -143,6 +179,8 @@ def cb(msg):
         "origin_x": msg.info.origin.position.x,
         "origin_y": msg.info.origin.position.y,
     }
+    box["msg"].update(wall_shape(data, msg.info.width, msg.info.height))
+
 qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                  reliability=ReliabilityPolicy.RELIABLE,
                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -201,11 +239,17 @@ def main() -> int:
     ap.add_argument("--min-artifact-bytes", type=int, default=1_000_000)
     ap.add_argument("--min-nodes", type=int, default=1)
     ap.add_argument("--min-known-cells", type=int, default=1)
+    ap.add_argument("--min-free-cells", type=int, default=0,
+                    help="gate on cleared free space; 0 disables the check")
+    ap.add_argument("--min-enclosed-areas", type=int, default=0,
+                    help="gate on rooms the walls actually close; 0 disables the check")
     ap.add_argument("--origin-tolerance", type=float, default=0.05)
     ap.add_argument("--timeout", type=float, default=420.0)
     ap.add_argument("--skip-save", action="store_true")
     ap.add_argument("--skip-load", action="store_true")
     ap.add_argument("--delete-after", action="store_true")
+    ap.add_argument("--export-preview", type=Path,
+                    help="host path to copy the saved map occupancy.png to (best-effort)")
     args = ap.parse_args()
 
     scene = args.scene_url.rstrip("/")
@@ -244,6 +288,15 @@ def main() -> int:
           str(counts), results)
     check("preview_exists", bool(artifact.get("preview_exists")), str(artifact.get("files")), results)
 
+    if args.export_preview and artifact.get("preview_exists"):
+        # Best-effort: the preview only feeds the CI report and run summary,
+        # so a failed export logs a warning instead of failing verification.
+        try:
+            export_preview(args.mapping_container, args.map_id, args.maps_dir,
+                           args.export_preview)
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARN export_preview failed: {exc}")
+
     live = None
     if not args.skip_load:
         load = http_json("POST", scene + "/api/maps/load",
@@ -268,6 +321,16 @@ def main() -> int:
         print("live_map", json.dumps(live, ensure_ascii=False, sort_keys=True))
         check("live_map_known_cells", int(live.get("known") or 0) >= args.min_known_cells,
               str(live), results)
+        shape = (f"free={live.get('free')} occ_proportion={live.get('occ_proportion')} "
+                 f"corners={live.get('corners')} enclosed_areas={live.get('enclosed_areas')}")
+        print("map_quality", shape)
+        if args.min_free_cells:
+            check("map_free_space", int(live.get("free") or 0) >= args.min_free_cells,
+                  shape, results)
+        if args.min_enclosed_areas:
+            check("map_enclosed_areas",
+                  int(live.get("enclosed_areas") or 0) >= args.min_enclosed_areas,
+                  shape, results)
 
     meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
     expected_w = int(meta.get("width") or artifact.get("preview_width") or 0)

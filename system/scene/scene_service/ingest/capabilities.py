@@ -21,9 +21,10 @@ detector happens to implement them:
 Tier selection depends only on which *camera* streams are wired. The
 intrinsics / pose / extrinsics slots are recorded for the startup log
 and grounding-quality note, but they do NOT gate the tier. Their absence
-degrades grounding rather than the tier: ConceptGraphs falls back to tf2
-for a missing pose contract, and it uses intrinsics from the live
-contract when available. Simulator deployments may opt in to a reviewed
+degrades grounding rather than the tier: ConceptGraphs uses the TF tree when
+available and falls back to pose + validated camera-extrinsics contracts. It
+uses intrinsics from the live contract when available. Simulator deployments
+may opt in to a reviewed
 `intrinsics_fallback`; otherwise a missing intrinsics contract still stalls
 object output instead of silently guessing K.
 """
@@ -34,6 +35,19 @@ from typing import Any, Literal, Optional
 
 Tier = Literal["metric", "visual", "geometric"]
 Detector = Optional[Literal["concept_graphs", "vlm"]]
+
+
+CAMERA_KINDS = frozenset({"rgb", "depth", "intrinsics", "camera_extrinsics"})
+
+
+def provider_for_kind(kind: str, camera_provider_id: str = "") -> str:
+    """Return the configured provider pin for a Scene input kind.
+
+    RGB, depth, intrinsics and extrinsics describe one physical RGB-D camera
+    and must therefore resolve from the same provider. Other inputs (mapping,
+    lidar, and so on) remain independently discoverable.
+    """
+    return camera_provider_id if kind in CAMERA_KINDS else ""
 
 
 @dataclass(frozen=True)
@@ -47,7 +61,7 @@ class PerceptionPlan:
     for the metric tier — "metric" when intrinsics + a pose contract are
     both wired, "degraded" when one is missing (ConceptGraphs then waits
     for intrinsics unless the deployment configured a reviewed fallback,
-    and/or falls back to tf2 pose); it is "n/a" off the metric tier. It
+    and/or relies on TF); it is "n/a" off the metric tier. It
     reflects wiring at startup, not live data arrival — the detector's own
     logs are authoritative on whether K actually landed or fallback K was used."""
 

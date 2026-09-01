@@ -217,7 +217,8 @@ pub fn boot_skip(name: &str, detail: &str) {
 /// (cache hit, fetched a remote package, …). Neither up nor skipped.
 pub fn boot_note(name: &str, detail: &str) {
     println!(
-        "{} {}  {:<width$}  {}",
+        "{}{} {}  {:<width$}  {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "[ →  ]".cyan(),
         name,
@@ -245,7 +246,8 @@ pub fn boot_update_avail(name: &str, detail: &str) {
 /// `[  ssss.mmm] [....] name              detail` — component is starting.
 pub fn boot_wait(name: &str, detail: &str) {
     println!(
-        "{} {}  {:<width$}  {}",
+        "{}{} {}  {:<width$}  {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "[....]".cyan(),
         name,
@@ -257,7 +259,8 @@ pub fn boot_wait(name: &str, detail: &str) {
 /// Group header above a run of boot lines. FreeBSD-rc-style ":: stage ::".
 pub fn boot_section(label: &str) {
     println!(
-        "\n{} {} {} {}",
+        "{}\n{} {} {} {}",
+        clear_progress_prefix(),
         boot_now().cyan(),
         "::".dimmed(),
         label.bold().yellow(),

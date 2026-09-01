@@ -4,7 +4,7 @@
 Architecture position: robonix/service/speech
   - Consumes the audio_driver primitive; consumed in turn by skills / pilot
   - Receives raw audio from audio_driver via gRPC, returns transcriptions
-  - Receives text from applications, returns synthesized audio (MP3)
+  - Receives text from applications, returns synthesized 16 kHz PCM audio
 
 Provides 5 RPCs across 5 gRPC service contracts (from robonix_contracts.proto):
 
@@ -15,10 +15,10 @@ Provides 5 RPCs across 5 gRPC service contracts (from robonix_contracts.proto):
     Stream(stream) -> stream   -- real-time chunk-by-chunk transcription
 
   SystemSpeechTts (Text-to-Speech -- one-shot):
-    Call(req) -> resp          -- returns complete MP3 audio
+    Call(req) -> resp          -- returns complete PCM audio
 
   SystemSpeechTtsStream (Streaming TTS):
-    Stream(req) -> stream      -- yields MP3 chunks as generated
+    Stream(req) -> stream      -- yields PCM chunks as generated
 
   SystemSpeechDialog (Voice Dialog Session):
     Stream(req) -> stream      -- managed session with state transitions
@@ -26,7 +26,7 @@ Provides 5 RPCs across 5 gRPC service contracts (from robonix_contracts.proto):
 Backend engines:
   - Whisper (transformers pipeline)  -- one-shot ASR, GPU FP16, high accuracy
   - FunASR Paraformer-zh-streaming   -- streaming ASR, 600ms granularity
-  - Edge TTS (Microsoft, free)       -- TTS synthesis, zh-CN-XiaoxiaoNeural
+  - Configured local/cloud backend   -- TTS synthesis, 16 kHz mono pcm_s16le
 
 Audio adaptation:
   The service auto-adapts any input format (sample_rate, channels, encoding)
@@ -69,6 +69,12 @@ import importlib
 from concurrent import futures
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Protocol
+
+from speech_service.tts_errors import TTSInputError
+from speech_service.tts_runtime import (
+    bind_tts_request_active,
+    reset_tts_request_active,
+)
 
 # Route all stdlib logging (this module + transitive deps) through Scribe so
 # `rbnx logs -t speech` sees everything and the package owns no log file or
@@ -912,14 +918,29 @@ class SpeechWakeWordServicer(SpeechWakeWordBase):
             return speech_pb2.DetectWakeWord_Response(error=str(exc))
 
 
+_TTS_CACHE_MAX_ENTRIES = 16
+_TTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _tts_response_metadata() -> tuple[str, int]:
+    """Read and validate TTS response metadata before backend work starts."""
+    encoding = os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le").strip()
+    if encoding != "pcm_s16le":
+        raise ValueError("SPEECH_TTS_OUTPUT_ENCODING must be pcm_s16le")
+    sample_rate_hz = int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000"))
+    if sample_rate_hz != 16000:
+        raise ValueError("SPEECH_TTS_OUTPUT_SAMPLE_RATE must be 16000")
+    return encoding, sample_rate_hz
+
+
 class SpeechTtsServicer(SpeechTtsBase):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
-    Delegates to EdgeTTSBackend for audio generation.
-    Output format: MP3 at 24kHz (fixed by Edge TTS).
+    Delegates to the configured TTS backend for audio generation.
+    Output format: 16 kHz mono pcm_s16le.
 
-    Note: Edge TTS uses asyncio internally, but gRPC servicers are sync.
-    Call uses asyncio.run().
+    TTS backends are asynchronous, but gRPC servicers are synchronous. Call
+    uses asyncio.run().
     """
 
     def __init__(self, tts_backend):
@@ -932,16 +953,29 @@ class SpeechTtsServicer(SpeechTtsBase):
             self.tts_backend = tts_backend
             self._cache.clear()
 
-    def _synthesize_cached(self, text: str, voice: str, speed: float) -> bytes:
+    def _synthesize_cached(
+        self, text: str, voice: str, speed: float, is_active=None
+    ) -> bytes:
+        """Return cached audio while bounding this servicer's TTS cache."""
         key = (text, voice, speed)
         with self._cache_lock:
             cached = self._cache.get(key)
         if cached is not None:
             return cached
-        audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
+        active_token = bind_tts_request_active(is_active)
+        try:
+            audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
+        finally:
+            reset_tts_request_active(active_token)
+        if len(audio_data) > _TTS_CACHE_MAX_BYTES:
+            return audio_data
         with self._cache_lock:
             self._cache[key] = audio_data
-            while len(self._cache) > 16:
+            while self._cache and (
+                len(self._cache) > _TTS_CACHE_MAX_ENTRIES
+                or sum(len(value) for value in self._cache.values())
+                > _TTS_CACHE_MAX_BYTES
+            ):
                 self._cache.pop(next(iter(self._cache)))
         return audio_data
 
@@ -959,7 +993,7 @@ class SpeechTtsServicer(SpeechTtsBase):
                 log.exception("TTS cache prewarm failed for %d-character prompt", len(text))
 
     def Synthesize(self, request, context):
-        """Handle one-shot TTS: receive text, return complete MP3 audio.
+        """Handle one-shot TTS: receive text, return complete PCM audio.
 
         Request fields (from tts.proto Synthesize_Request):
             text     -- text to synthesize
@@ -973,8 +1007,8 @@ class SpeechTtsServicer(SpeechTtsBase):
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
                 "TTS backend not available. "
-                "Edge TTS requires network access to Microsoft Cognitive Services. "
-                "Check network/model access or set SPEECH_BACKEND=mock for local mock testing."
+                "Check backend configuration and network access, or set "
+                "SPEECH_BACKEND=mock for local mock testing."
             )
             return tts_pb2.Synthesize_Response()
 
@@ -983,13 +1017,19 @@ class SpeechTtsServicer(SpeechTtsBase):
         speed = request.speed or 1.0
 
         try:
-            audio_data = self._synthesize_cached(text, voice, speed)
+            encoding, sample_rate_hz = _tts_response_metadata()
+            audio_data = self._synthesize_cached(
+                text, voice, speed, is_active=context.is_active
+            )
             return tts_pb2.Synthesize_Response(
                 audio_data=audio_data,
-                encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
-                sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
+                encoding=encoding,
+                sample_rate_hz=sample_rate_hz,
                 error="",
             )
+        except TTSInputError as e:
+            log.warning("TTS synthesize rejected invalid input: %s", e)
+            return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
         except Exception as e:
             log.exception("TTS synthesize failed")
             return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
@@ -999,21 +1039,21 @@ class SpeechTtsStreamServicer(SpeechTtsStreamBase):
     """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     text-to-speech synthesis.
 
-    Delegates to EdgeTTSBackend for audio generation.
-    Output format: MP3 at 24kHz (fixed by Edge TTS).
+    Delegates to the configured TTS backend for audio generation.
+    Output format: 16 kHz mono pcm_s16le.
 
     This is a server stream: unary request with text/voice/speed,
     streams back tts_pb2.SynthesizeAudioChunk messages.
 
-    Note: Edge TTS uses asyncio internally. A dedicated event loop is
-    created per call to avoid "cannot run from running loop" conflicts.
+    TTS backends are asynchronous. A dedicated event loop is created per call
+    to avoid "cannot run from running loop" conflicts.
     """
 
     def __init__(self, tts_backend):
         self.tts_backend = tts_backend
 
     def SynthesizeStream(self, request, context):
-        """Handle streaming TTS: receive text, yield MP3 audio chunks.
+        """Handle streaming TTS: receive text, yield PCM audio chunks.
 
         Request fields (from tts.proto SynthesizeStream_Request):
             text        -- text to synthesize
@@ -1028,7 +1068,7 @@ class SpeechTtsStreamServicer(SpeechTtsStreamBase):
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
                 "TTS backend not available. "
-                "Edge TTS requires network access to Microsoft Cognitive Services."
+                "Check backend configuration and network access."
             )
             return
 
@@ -1036,36 +1076,52 @@ class SpeechTtsStreamServicer(SpeechTtsStreamBase):
         voice = request.voice
         speed = request.speed or 1.0
 
+        loop = asyncio.new_event_loop()
+        async_gen = None
         try:
-            loop = asyncio.new_event_loop()
+            encoding, sample_rate_hz = _tts_response_metadata()
             async_gen = self.tts_backend.synthesize_stream(text, voice, speed)
             seq = 0
             while True:
                 try:
+                    if not context.is_active():
+                        return
                     chunk_data = loop.run_until_complete(async_gen.__anext__())
                     yield tts_pb2.SynthesizeAudioChunk(
                         chunk=audio_pb2.AudioChunk(
                             data=chunk_data,
                             sequence=seq,
                         ),
-                        encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
-                        sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
+                        encoding=encoding,
+                        sample_rate_hz=sample_rate_hz,
                         is_final=False,
                     )
                     seq += 1
                 except StopAsyncIteration:
                     yield tts_pb2.SynthesizeAudioChunk(
                         chunk=audio_pb2.AudioChunk(data=b""),
-                        encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
-                        sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
+                        encoding=encoding,
+                        sample_rate_hz=sample_rate_hz,
                         is_final=True,
                     )
                     break
-            loop.close()
+        except TTSInputError as e:
+            log.warning("TTS stream rejected invalid input: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
         except Exception as e:
             log.exception("TTS stream synthesize failed")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
+        finally:
+            try:
+                close_generator = getattr(async_gen, "aclose", None)
+                if close_generator is not None:
+                    loop.run_until_complete(close_generator())
+            except Exception:
+                log.exception("TTS stream generator cleanup failed")
+            finally:
+                loop.close()
 
 
 class SpeechDialogServicer(SpeechDialogBase):
@@ -1220,7 +1276,7 @@ def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
 
 
 @speech.mcp("robonix/service/speech/speak")
-def speak(req: Speak_Request) -> Speak_Response:
+async def speak(req: Speak_Request) -> Speak_Response:
     """Synthesize `text` to speech and play it out loud on a speaker. `target`
     is the speaker primitive's provider_id (from list_speakers). When it is
     empty, the configured default_speaker_provider_id is used; without a
@@ -1245,41 +1301,92 @@ def speak(req: Speak_Request) -> Speak_Response:
     speaker_lock = _speaker_lock(cap.provider_id)
     if speaker_lock.locked():
         log.info("speech/speak queued for busy speaker %s", cap.provider_id)
-    with speaker_lock:
+
+    # Poll so a busy speaker only suspends this await, and so cancellation
+    # cannot race a blocking acquire that would otherwise leak the lock.
+    while not speaker_lock.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    try:
         tts_backend = _tts_servicer.tts_backend
         if tts_backend is None:
-            log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
+            log.warning(
+                "speech/speak called before Driver(INIT) installed a TTS "
+                "backend; using direct Edge TTS fallback"
+            )
         if tts_backend is None and _speak_tts is None:
             _speak_tts = EdgeTTSBackend()
         if tts_backend is None:
             tts_backend = _speak_tts
-        # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
-        # would error ("loop already running"). Synthesize on a worker thread
-        # that owns its own loop.
-        import asyncio
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
+
+        # FastMCP's async shim awaits this coroutine. Keep synthesis on a
+        # worker thread (backends may call asyncio.run) and bind a liveness
+        # flag so multi-segment Tencent fan-out stops after cancellation.
+        active = threading.Event()
+        active.set()
+
+        def is_active() -> bool:
+            return active.is_set()
+
+        def _synthesize() -> bytes:
+            token = bind_tts_request_active(is_active)
+            try:
+                return asyncio.run(tts_backend.synthesize(text))
+            finally:
+                reset_tts_request_active(token)
+
+        loop = asyncio.get_running_loop()
+        synth_future = loop.run_in_executor(None, _synthesize)
+        try:
+            pcm = await synth_future
+        except asyncio.CancelledError:
+            active.clear()
+            try:
+                await synth_future
+            except Exception as exc:
+                log.info("speech/speak synthesis stopped after cancel: %s", exc)
+            raise
+
         if not pcm:
             raise RuntimeError("TTS backend returned no PCM audio")
-        log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
+        log.info(
+            "speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text)
+        )
 
-        with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
-            stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
-                grpc.insecure_channel(ch.endpoint)
-            )
+        def _play() -> None:
+            with (
+                speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch,
+                grpc.insecure_channel(ch.endpoint) as speaker_channel,
+            ):
+                stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(speaker_channel)
 
-            def frames():
-                frame_bytes = 9600 * 2  # 600 ms s16le frames
-                seq = 0
-                for i in range(0, len(pcm), frame_bytes):
-                    seq += 1
-                    yield audio_pb2.AudioChunk(
-                        data=pcm[i:i + frame_bytes], timestamp_ns=0,
-                        sequence=seq, duration_s=0.0,
-                    )
+                def frames():
+                    frame_bytes = 9600 * 2  # 600 ms s16le frames
+                    seq = 0
+                    for i in range(0, len(pcm), frame_bytes):
+                        if not active.is_set():
+                            return
+                        seq += 1
+                        yield audio_pb2.AudioChunk(
+                            data=pcm[i : i + frame_bytes],
+                            timestamp_ns=0,
+                            sequence=seq,
+                            duration_s=0.0,
+                        )
 
-            stub.Speaker(frames())
+                stub.Speaker(frames())
+
+        play_future = loop.run_in_executor(None, _play)
+        try:
+            await play_future
+        except asyncio.CancelledError:
+            active.clear()
+            try:
+                await play_future
+            except Exception as exc:
+                log.info("speech/speak playback stopped after cancel: %s", exc)
+            raise
+    finally:
+        speaker_lock.release()
 
     return Speak_Response(ok=True, detail=f"spoke {len(text)} chars on {cap.provider_id}")
 
@@ -1306,6 +1413,8 @@ _CFG_ENV_MAP = {
     "tencent_tts_model_type": "TENCENT_TTS_MODEL_TYPE",
     "tencent_tts_sample_rate": "TENCENT_TTS_SAMPLE_RATE",
     "tencent_tts_codec": "TENCENT_TTS_CODEC",
+    "tencent_tts_max_chars": "TENCENT_TTS_MAX_CHARS",
+    "tencent_tts_max_total_chars": "TENCENT_TTS_MAX_TOTAL_CHARS",
     "tencent_tts_primary_language": "TENCENT_TTS_PRIMARY_LANGUAGE",
     "speech_asr_backend_class": "SPEECH_ASR_BACKEND_CLASS",
     "speech_asr_stream_backend_class": "SPEECH_ASR_STREAM_BACKEND_CLASS",

@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 from ..state.object_registry import ObjectRegistry, SceneObject
 from .captioner import NodeCaptioner
-from .image_relations import ImageRelationInferer
+from .image_relations import ImageRelationInferer, ImageRelationResult
 from .relations import RelationInferer, generate_edge_candidates
 from .store import SceneGraphStore
 from .types import SceneGraphEdge, SceneGraphNode, SceneGraphSnapshot
@@ -206,10 +206,11 @@ class SceneGraphBuilder:
         confirmed_pairs: set[tuple[str, str]] = set()
 
         if self.cfg.relation_enabled and len(nodes) >= 2:
-            image_edges = await self._maybe_image_edges(nodes)
-            if image_edges is not None:
-                edges = image_edges
-                confirmed_pairs = {(e.source_id, e.target_id) for e in edges}
+            image_result = await self._maybe_image_edges(nodes)
+            if image_result is not None:
+                edges, confirmed_pairs = self._accept_image_result(
+                    image_result, registry_ids
+                )
             else:
                 edges, confirmed_pairs = await self._infer_text_edges(nodes)
 
@@ -278,13 +279,34 @@ class SceneGraphBuilder:
 
     # ── relation inference paths ─────────────────────────────────────────
 
+    def _accept_image_result(
+        self,
+        result: ImageRelationResult,
+        registry_ids: set[str],
+    ) -> tuple[list[SceneGraphEdge], set[tuple[str, str]]]:
+        """Apply one image decision without aging edges on a backoff-only round.
+
+        A real failed call returns no edges and therefore uses normal bounded
+        hysteresis. Backoff made no observation, so live prior edges are marked
+        confirmed for this rebuild while departed-object edges remain removed.
+        """
+        if result.outcome == "backoff":
+            edges = [
+                edge for edge in self.store.get_semantic_edges()
+                if edge.source_id in registry_ids and edge.target_id in registry_ids
+            ]
+        else:
+            edges = list(result.edges)
+        confirmed_pairs = {(edge.source_id, edge.target_id) for edge in edges}
+        return edges, confirmed_pairs
+
     async def _maybe_image_edges(
         self, nodes: list[SceneGraphNode]
-    ) -> Optional[list[SceneGraphEdge]]:
+    ) -> Optional[ImageRelationResult]:
         """Run the image-grounded relation pass when the perception detector
-        provides a camera frame bundle. Returns the round's edges (possibly
-        empty = "ran, no relations"), or None to signal "not run" so the caller
-        falls back to the text path. Never raises — failures degrade to None."""
+        provides a camera frame bundle. Returns its typed result, or None to
+        signal "not run" so the caller falls back to the text path. Unexpected
+        exceptions are logged and returned as failed image rounds."""
         if self.image_inferer is None or self.perception is None:
             return None
         get_bundle = getattr(self.perception, "latest_frame_bundle", None)
@@ -297,7 +319,7 @@ class SceneGraphBuilder:
             return await self.image_inferer.infer(nodes, bundle)
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-graph] image relation pass failed: %s", e)
-            return None
+            return ImageRelationResult((), "failed")
 
     async def _infer_text_edges(
         self, nodes: list[SceneGraphNode]

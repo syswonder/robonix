@@ -4275,7 +4275,6 @@ source = { virtual = "system/scene" }
 dependencies = [
     { name = "fastmcp" },
     { name = "grpcio" },
-    { name = "grpcio-tools" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "numpy" },
@@ -4293,14 +4292,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp" },
-    { name = "grpcio" },
-    { name = "grpcio-tools" },
+    { name = "grpcio", specifier = "==1.80.0" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "numpy", specifier = ">=1.26,<2" },
     { name = "open3d", marker = "python_full_version < '3.13' and platform_machine == 'x86_64'", specifier = ">=0.18" },
     { name = "pillow" },
-    { name = "protobuf" },
+    { name = "protobuf", specifier = "==6.33.6" },
     { name = "pymilvus", specifier = ">=2.5.0,!=2.6.10" },
     { name = "pyyaml" },
     { name = "robonix-api", editable = "pylib/robonix-api" },
