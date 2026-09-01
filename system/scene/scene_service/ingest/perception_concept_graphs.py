@@ -247,13 +247,22 @@ def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained):
     """Load YOLO-World, MobileSAM, and open_clip in one shot. Returns
     `(yolo, sam, clip_model, clip_preprocess, clip_tokenizer, device)`
     or `(None, ...)` if any piece is unavailable."""
-    yw = yolo_path or os.environ.get("SCENE_YOLO_WORLD_WEIGHTS",
-                                     _DEFAULT_YOLO_WORLD_WEIGHTS)
-    mp = sam_path or os.environ.get("SCENE_MOBILE_SAM_WEIGHTS",
-                                    _DEFAULT_MOBILE_SAM_WEIGHTS)
-    cm = clip_model_name or os.environ.get("SCENE_CLIP_MODEL", _DEFAULT_CLIP_MODEL)
-    cp = clip_pretrained or os.environ.get("SCENE_CLIP_PRETRAINED",
-                                           _DEFAULT_CLIP_PRETRAINED)
+    def _env_or(name: str, fallback: str) -> str:
+        """Return the env value, or `fallback` when it is unset or blank.
+
+        A container launcher that forwards every knob unconditionally passes
+        `-e NAME=` for the ones the operator did not set, so `os.environ.get`
+        returns an empty string rather than raising the default. Loading a
+        model named "" fails deep inside the library with an error that says
+        nothing about the env var, so treat blank as absent — matching how the
+        numeric override table below already behaves.
+        """
+        return (os.environ.get(name, "") or "").strip() or fallback
+
+    yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", _DEFAULT_YOLO_WORLD_WEIGHTS)
+    mp = sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", _DEFAULT_MOBILE_SAM_WEIGHTS)
+    cm = clip_model_name or _env_or("SCENE_CLIP_MODEL", _DEFAULT_CLIP_MODEL)
+    cp = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _DEFAULT_CLIP_PRETRAINED)
     if not os.path.isfile(yw):
         log.warning("YOLO-World weights not found at %s — perception disabled", yw)
         return (None,) * 6
