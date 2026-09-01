@@ -226,7 +226,11 @@ stop_one() {
     sim_pid=""
     return "$status"
 }
-trap 'stop_one || true' EXIT INT TERM
+# Capture before tearing down. Component logs used to be copied only
+# after a world scored, so every run that failed -- exactly the ones
+# whose logs explain the failure -- discarded them when the trap
+# stopped the deployment.
+trap 'capture_component_logs "${world_dir:-}" || true; stop_one || true' EXIT INT TERM
 
 wait_for_sim() {
     local log_file="$1"
@@ -294,7 +298,10 @@ wait_for_explore() {
 }
 
 capture_component_logs() {
-    local output_dir="$1"
+    # Called both on the success path and from the teardown trap, so it has to
+    # tolerate being invoked before the first world has a directory.
+    local output_dir="${1:-}"
+    [[ -n "$output_dir" && -d "$output_dir" ]] || return 0
     local component
     for component in explore nav2 mapping scene; do
         local source_log="$WEBOTS_DIR/rbnx-boot/logs/${component}.log"
