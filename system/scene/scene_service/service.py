@@ -758,6 +758,15 @@ async def _start_ros_ingest(
             # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
             # speech + perception together.
             period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            # Detector confidence floor. Every other perception knob has an
+            # override; this one did not, so the single threshold that decides
+            # whether a detection exists at all could only be changed by
+            # rebuilding. Upstream concept-graphs runs 0.2 against real
+            # imagery; low-texture synthetic scenes need the room to go lower
+            # still, and a cluttered deployment may want it higher.
+            confidence_threshold=float(
+                os.environ.get("SCENE_DETECT_CONFIDENCE", "") or 0.30
+            ),
             pose_max_age_s=pose_max_age_s,
             camera_frame=camera_frame,
             base_frame=configured_base_frame or None,
