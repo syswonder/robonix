@@ -8,6 +8,27 @@ import math
 from typing import Any
 
 
+def _onset_fraction(errors: list[float]) -> float:
+    """Where in the run the error first reaches half its final magnitude.
+
+    Returns a fraction of the sample sequence, or 1.0 when the error never
+    gets there. Distinguishes the two ways a localizer disagrees with truth:
+    a pose offset present from the first comparison returns ~0.0, while a
+    correction applied part-way through returns the point it landed. Summary
+    percentiles cannot tell those apart -- an early jump and a constant offset
+    both leave median, p95 and max nearly equal.
+    """
+    if not errors:
+        return 1.0
+    target = 0.5 * errors[-1]
+    if target <= 0.0:
+        return 1.0
+    for index, value in enumerate(errors):
+        if value >= target:
+            return round(index / len(errors), 6)
+    return 1.0
+
+
 def _wrapped_angle(value: float) -> float:
     return math.atan2(math.sin(float(value)), math.cos(float(value)))
 
@@ -176,12 +197,16 @@ class SynchronizedPoseAgreement:
                 6,
             ),
             "translation_error_m": {
+                "min": round(min(translation, default=0.0), 6),
+                "onset_fraction": _onset_fraction(translation),
                 "median": round(_percentile(translation, 0.50), 6),
                 "p95": round(_percentile(translation, 0.95), 6),
                 "max": round(max(translation, default=0.0), 6),
                 "final": round(translation[-1] if translation else 0.0, 6),
             },
             "yaw_error_rad": {
+                "min": round(min(yaw, default=0.0), 6),
+                "onset_fraction": _onset_fraction(yaw),
                 "median": round(_percentile(yaw, 0.50), 6),
                 "p95": round(_percentile(yaw, 0.95), 6),
                 "max": round(max(yaw, default=0.0), 6),
