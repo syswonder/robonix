@@ -1,0 +1,176 @@
+# Exercise the public Scene correction contracts without leaving the simulator
+# world model modified after the scenario.
+name: scene_object_management
+task: "ci-test: verify live scene object correction contracts"
+steps:
+  - time_s: 45.0
+    retry_delay_s: 3.0
+    content: Selecting one live derived object and its current map epoch.
+    rtdl_description: capture a live object and optimistic concurrency token
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: select_scene_object_for_correction
+      children:
+        - op: do
+          id: list_scene_objects_for_correction
+          cap: scene.scene_list_objects
+          args: {}
+          description: list current objects with the atomic map epoch
+          expect:
+            contract: robonix/system/scene/list_objects
+            success: true
+            output:
+              checks:
+                - select: $.objects[]
+                  where:
+                    all:
+                      - {path: $.label, op: ne, value: robot}
+                      - {path: $.id, op: starts_with, value: scene.object.}
+                  assert: {op: exists}
+                - select: $.map_id
+                  assert: {op: ne, value: ""}
+            capture:
+              object_id:
+                select: $.objects[]
+                where:
+                  all:
+                    - {path: $.label, op: ne, value: robot}
+                    - {path: $.id, op: starts_with, value: scene.object.}
+                path: $.id
+              scene_map_id: {select: "$", path: $.map_id}
+              scene_generation:
+                select: "$"
+                path: $.generation
+                transform: int
+  - content: Applying a temporary operator label.
+    rtdl_description: update one live object label in the asserted epoch
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: update_scene_object_label
+      children:
+        - op: do
+          id: apply_temporary_scene_label
+          cap: scene.scene_update_object_label
+          args:
+            object_id: {var: object_id}
+            label: ci_verified_object
+            clear_override: false
+            expected_map_id: {var: scene_map_id}
+            expected_generation: {var: scene_generation}
+            persist_to_snapshot: false
+          description: apply a runtime-only sticky label correction
+          expect:
+            contract: robonix/system/scene/update_object_label
+            success: true
+            output:
+              json:
+                object:
+                  label: ci_verified_object
+                persisted: false
+  - content: Confirming the corrected label is visible through list_objects.
+    rtdl_description: read back the temporary label
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: verify_scene_object_label
+      children:
+        - op: do
+          id: list_corrected_scene_object
+          cap: scene.scene_list_objects
+          args: {}
+          description: read the corrected object back through the public query
+          expect:
+            contract: robonix/system/scene/list_objects
+            success: true
+            output:
+              checks:
+                - select: $.objects[]
+                  where:
+                    all:
+                      - {path: $.id, op: eq, value: {var: object_id}}
+                      - {path: $.label, op: eq, value: ci_verified_object}
+                  assert: {op: exists}
+  - content: Removing the temporary override and restoring model ownership.
+    rtdl_description: clear the operator label override before safety checks
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: restore_scene_object_label
+      children:
+        - op: do
+          id: clear_temporary_scene_label
+          cap: scene.scene_update_object_label
+          args:
+            object_id: {var: object_id}
+            label: ""
+            clear_override: true
+            expected_map_id: {var: scene_map_id}
+            expected_generation: {var: scene_generation}
+            persist_to_snapshot: false
+          description: restore the saved pre-edit model label and provenance
+          expect:
+            contract: robonix/system/scene/update_object_label
+            success: true
+            output:
+              json:
+                persisted: false
+  - content: Verifying unsafe corrections fail closed without mutation.
+    rtdl_description: reject bad geometry, unknown ids, and stale epochs
+    status: in_progress
+    rtdl:
+      op: parallel
+      id: reject_unsafe_scene_object_mutations
+      children:
+        - op: do
+          id: reject_wrong_geometry_frame
+          cap: scene.scene_update_object_geometry
+          args:
+            object_id: {var: object_id}
+            x: 0.0
+            y: 0.0
+            z: 0.5
+            yaw: 0.0
+            size_x: 0.5
+            size_y: 0.5
+            size_z: 0.5
+            frame_id: __ci_wrong_frame__
+            expected_map_id: {var: scene_map_id}
+            expected_generation: {var: scene_generation}
+            persist_to_snapshot: false
+          description: reject geometry expressed in a foreign frame
+          expect:
+            contract: robonix/system/scene/update_object_geometry
+            success: false
+            output:
+              error_regex: 'geometry frame mismatch'
+        - op: do
+          id: reject_unknown_object_delete
+          cap: scene.scene_delete_object
+          args:
+            object_id: scene.object.__ci_unknown_999
+            expected_map_id: {var: scene_map_id}
+            expected_generation: {var: scene_generation}
+            persist_to_snapshot: false
+          description: reject deletion of an unknown stable id
+          expect:
+            contract: robonix/system/scene/delete_object
+            success: false
+            output:
+              error_regex: 'unknown Scene object'
+        - op: do
+          id: reject_stale_epoch_flush
+          cap: scene.scene_flush_objects
+          args:
+            expected_map_id: {var: scene_map_id}
+            expected_generation: -999999
+            persist_to_snapshot: false
+          description: reject a flush based on a stale map generation
+          expect:
+            contract: robonix/system/scene/flush_objects
+            success: false
+            output:
+              error_regex: 'Scene map epoch changed'
+  - content: Scene object correction contracts verified.
+    status: done
