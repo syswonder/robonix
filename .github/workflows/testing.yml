@@ -537,11 +537,22 @@ jobs:
               url."https://ghfast.top/https://github.com/".insteadOf \
               "https://github.com/"
             echo "Using ghfast.top for GitHub clones"
-          else
+          elif timeout 5s bash -c '</dev/tcp/127.0.0.1/7897' 2>/dev/null &&
+               timeout 20s git -c 'http.https://github.com/.proxy=http://127.0.0.1:7897' \
+                 ls-remote --exit-code "https://github.com/syswonder/robonix.git" \
+                 HEAD >/dev/null 2>&1; then
             git config --file "$git_config" \
               'http.https://github.com/.proxy' \
               'http://127.0.0.1:7897'
             echo "ghfast.top unavailable; using GitHub through Clash at 127.0.0.1:7897"
+          else
+            # Both routes are gone. Pointing git at a proxy that is not
+            # listening is worse than not setting one: every clone dies with a
+            # GnuTLS handshake failure against a closed port, which reads like
+            # a TLS problem rather than a missing proxy. Leave git alone and
+            # let it reach github.com directly; if that also fails the error
+            # will at least name the real cause.
+            echo "ghfast.top unavailable and no proxy on 127.0.0.1:7897; going direct"
           fi
           echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
