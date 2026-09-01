@@ -163,7 +163,7 @@ if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
     # passed it EMPTY when unset on the host — which tells CUDA "no GPUs" and
     # disabled the GPU even though --gpus all had mounted it (torch.cuda → False
     # while nvidia-smi still worked). Omitting it lets all mounted GPUs show.
-    if [[ ${#GPU_ARGS[@]:-0} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    if [[ ${#GPU_ARGS[@]} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
         GPU_ARGS+=(-e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
     fi
 fi
