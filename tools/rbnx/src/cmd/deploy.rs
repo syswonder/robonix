@@ -184,6 +184,51 @@ fn resolve_entry_path(
 mod tests {
     use super::*;
 
+    /// A manifest that omits `listen` still binds the component's compiled-in
+    /// default, so the pre-spawn port check must know that address. Before
+    /// this fallback existed, such a manifest skipped the check entirely and a
+    /// port conflict only surfaced as `Address already in use` inside the
+    /// spawned component's own log, long after boot reported earlier stages
+    /// OK.
+    #[test]
+    fn system_listen_falls_back_to_the_builtin_default_port() {
+        let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        assert_eq!(
+            system_listen("soma", Some(&empty)).as_deref(),
+            Some("127.0.0.1:50091")
+        );
+        // Absent section and blank value take the same path as an empty map.
+        assert_eq!(
+            system_listen("atlas", None).as_deref(),
+            Some("0.0.0.0:50051")
+        );
+        let blank: serde_yaml::Value = serde_yaml::from_str("listen: '  '").expect("yaml");
+        assert_eq!(
+            system_listen("pilot", Some(&blank)).as_deref(),
+            Some("127.0.0.1:50071")
+        );
+        // Every builtin needs an entry, else its manifests stay unchecked.
+        for name in SYSTEM_BUILTINS {
+            assert!(
+                system_listen(name, None).is_some(),
+                "builtin '{name}' has no default listen address"
+            );
+        }
+    }
+
+    /// An explicit `listen` still wins, and non-builtin entries stay unchecked
+    /// because we cannot predict what port they bind.
+    #[test]
+    fn system_listen_prefers_the_manifest_and_ignores_non_builtins() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str("listen: 127.0.0.1:50191").expect("yaml");
+        assert_eq!(
+            system_listen("soma", Some(&cfg)).as_deref(),
+            Some("127.0.0.1:50191")
+        );
+        assert_eq!(system_listen("scene", Some(&cfg)), None);
+        assert_eq!(system_listen("scene", None), None);
+    }
+
     #[test]
     fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
         let nonce = std::time::SystemTime::now()
@@ -1877,16 +1922,49 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
 /// Used by the pre-spawn port-availability check. Returns None for
 /// services we don't gate on (or whose listen field is absent — caller
 /// then doesn't pre-check).
+/// Each builtin's compiled-in default listen address, mirroring the
+/// `DEFAULT_LISTEN` const in that component's crate. A manifest that omits
+/// `listen` still binds one of these, so the pre-spawn port check needs them
+/// to have anything to probe.
+///
+/// Keep in sync with `system/<name>/src/config.rs` (liaison declares its
+/// default on the clap arg in `main.rs`). A stale entry only weakens the
+/// pre-check into the pre-existing behaviour — it never makes boot bind the
+/// wrong port, since the address actually used comes from the component.
+const SYSTEM_DEFAULT_LISTEN: &[(&str, &str)] = &[
+    ("atlas", "0.0.0.0:50051"),
+    ("executor", "127.0.0.1:50061"),
+    ("pilot", "127.0.0.1:50071"),
+    ("liaison", "127.0.0.1:50081"),
+    ("soma", "127.0.0.1:50091"),
+    ("vitals", "127.0.0.1:50093"),
+];
+
+/// The address `name` will bind: the manifest's `listen` when it sets one,
+/// otherwise the component's compiled-in default. Returns `None` for
+/// non-builtin entries, whose ports we cannot predict.
+///
+/// The default fallback matters: without it a manifest that never mentions
+/// `listen` skipped the port pre-check entirely, so a conflict surfaced as a
+/// bare `Address already in use` from inside the spawned component's own log
+/// — after boot had already reported the earlier stages OK.
 fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> {
-    let map = cfg?.as_mapping()?;
-    let s = map
-        .get(serde_yaml::Value::String("listen".into()))?
-        .as_str()?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() || !is_builtin_system(name) {
+    if !is_builtin_system(name) {
         return None;
     }
-    Some(trimmed.to_string())
+    let configured = cfg
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match configured {
+        Some(s) => Some(s.to_string()),
+        None => SYSTEM_DEFAULT_LISTEN
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, addr)| (*addr).to_string()),
+    }
 }
 
 /// Probe a host:port. Returns `Ok(())` when nothing is listening (we can

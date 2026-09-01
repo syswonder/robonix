@@ -5,6 +5,12 @@ system:
   atlas:
     listen: 0.0.0.0:50051
   soma:
+    # 50191, not the default 50091. The benchmark host also runs a long-lived
+    # deployment out of ~/robonix-lab/deploy whose soma holds 50091, so a
+    # benchmark boot died on "Address already in use" before Scene ever
+    # started. Scoring Scene must not require tearing down someone's running
+    # robot, so the evaluation deployment moves aside instead.
+    listen: 127.0.0.1:50191
     runtime_reader_command:
       - docker
       - exec
