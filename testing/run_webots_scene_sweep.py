@@ -675,47 +675,73 @@ def main() -> int:
                                     evidence.consistent_depth_fraction,
                                 )
                                 diagnostics["last_reason"] = evidence.reason
-                                # Which depths the projection expected, and
-                                # what the camera actually returned there. A
-                                # count of zero consistent pixels says the
-                                # test failed but not whether the object was
-                                # occluded, the depth frame was empty, or the
-                                # projection put the object at the wrong
-                                # range — three failures that need three
-                                # different fixes.
-                                if evidence.depth_interval_m is not None:
-                                    diagnostics["last_depth_interval_m"] = [
-                                        round(float(evidence.depth_interval_m[0]), 3),
-                                        round(float(evidence.depth_interval_m[1]), 3),
-                                    ]
+                                # Record the whole verdict from the frame where
+                                # the object projected largest -- its best
+                                # chance of being seen. Reason, expected depth
+                                # interval and observed depth must come from
+                                # one frame together: mixing the last frame's
+                                # reason with the run's best projected area
+                                # describes a frame that never happened, which
+                                # is how "18981 px" ended up labelled
+                                # "projected_area_too_small".
                                 if evidence.projected_area_px > int(
-                                    diagnostics.get("_depth_sample_area_px") or 0
+                                    diagnostics.get("best_frame_area_px") or 0
                                 ):
                                     finite = depth[np.isfinite(depth)]
-                                    diagnostics["_depth_sample_area_px"] = (
+                                    diagnostics["best_frame_area_px"] = (
                                         evidence.projected_area_px
                                     )
-                                    diagnostics["depth_frame_stats_m"] = {
-                                        "finite_fraction": round(
-                                            float(finite.size)
-                                            / float(max(depth.size, 1)),
-                                            4,
+                                    diagnostics["best_frame"] = {
+                                        "reason": evidence.reason,
+                                        "visible": bool(evidence.visible),
+                                        "clipped_fraction": round(
+                                            float(evidence.clipped_fraction), 4
                                         ),
-                                        "min": (
-                                            round(float(finite.min()), 3)
-                                            if finite.size
+                                        "consistent_depth_pixels": (
+                                            evidence.consistent_depth_pixels
+                                        ),
+                                        "consistent_depth_fraction": round(
+                                            float(evidence.consistent_depth_fraction), 4
+                                        ),
+                                        "required_depth_pixels": (
+                                            evidence.required_depth_pixels
+                                        ),
+                                        "expected_depth_interval_m": (
+                                            [
+                                                round(
+                                                    float(evidence.depth_interval_m[0]),
+                                                    3,
+                                                ),
+                                                round(
+                                                    float(evidence.depth_interval_m[1]),
+                                                    3,
+                                                ),
+                                            ]
+                                            if evidence.depth_interval_m is not None
                                             else None
                                         ),
-                                        "median": (
-                                            round(float(np.median(finite)), 3)
-                                            if finite.size
-                                            else None
-                                        ),
-                                        "max": (
-                                            round(float(finite.max()), 3)
-                                            if finite.size
-                                            else None
-                                        ),
+                                        "observed_depth_m": {
+                                            "finite_fraction": round(
+                                                float(finite.size)
+                                                / float(max(depth.size, 1)),
+                                                4,
+                                            ),
+                                            "min": (
+                                                round(float(finite.min()), 3)
+                                                if finite.size
+                                                else None
+                                            ),
+                                            "median": (
+                                                round(float(np.median(finite)), 3)
+                                                if finite.size
+                                                else None
+                                            ),
+                                            "max": (
+                                                round(float(finite.max()), 3)
+                                                if finite.size
+                                                else None
+                                            ),
+                                        },
                                     }
                                 if not evidence.visible:
                                     continue
