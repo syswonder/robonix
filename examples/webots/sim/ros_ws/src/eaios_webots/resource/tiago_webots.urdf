@@ -1256,6 +1256,11 @@
       </ros>
     </device>
     <plugin type="webots_ros2_control::Ros2Control" />
+    <!-- Evaluation reference only. The `<gazebo>` ground-truth odometry
+         plugin above is inert under Webots, which ignores `<gazebo>`
+         entirely, so this is what actually publishes the pose. Nothing
+         in navigation or mapping may consume it. -->
+    <plugin type="eaios_webots.ground_truth_odometry.GroundTruthOdometry" />
   </webots>
   <ros2_control name="WebotsControl" type="system">
     <hardware>
