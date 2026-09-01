@@ -61,8 +61,21 @@ class GroundTruthOdometry:
     its sensors to gain a diagnostic.
     """
 
+    #: Set before anything that can fail, so a plugin that dies during `init`
+    #: degrades to a no-op `step` instead of raising AttributeError on every
+    #: simulation step for the rest of the run.
+    _node = None
+    _publisher = None
+    _self_node = None
+
     def init(self, webots_node, properties):  # noqa: D102 - driver-called hook
         self._robot = webots_node.robot
+        # The driver does not initialise rclpy on behalf of Python plugins, and
+        # whether some other plugin got there first is not ours to assume:
+        # create_node without a context raises, and init on a live context
+        # raises too.
+        if not rclpy.ok():
+            rclpy.init(args=None)
         self._node = rclpy.create_node("webots_ground_truth_odometry")
         # Stamps must come from the same clock as every other topic in the
         # deployment, or consumers that synchronize by timestamp reject every
@@ -75,7 +88,6 @@ class GroundTruthOdometry:
         self._frame_id = properties.get("frameId", DEFAULT_FRAME_ID)
         self._child_frame_id = properties.get("childFrameId", DEFAULT_CHILD_FRAME_ID)
 
-        self._self_node = None
         get_self = getattr(self._robot, "getSelf", None)
         if get_self is not None:
             self._self_node = get_self()
@@ -94,9 +106,9 @@ class GroundTruthOdometry:
         )
 
     def step(self):  # noqa: D102 - driver-called hook
-        rclpy.spin_once(self._node, timeout_sec=0)
         if self._publisher is None:
             return
+        rclpy.spin_once(self._node, timeout_sec=0)
 
         position = self._self_node.getPosition()
         orientation = self._self_node.getOrientation()
