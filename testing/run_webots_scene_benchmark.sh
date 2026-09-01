@@ -160,6 +160,33 @@ fi
 mkdir -p "$RESULT_ROOT"
 printf '%s\n' "$RESULT_ROOT" >"$RESULT_ROOT/result-root.txt"
 
+# Seed the isolated ROBONIX_HOME. Every package spawned under it reads
+# `robonix_source_path` to resolve capability and IDL paths, and refuses to
+# start without it. The default home lives in /tmp, so a reboot -- or a first
+# run on a fresh machine -- leaves it absent or half-written by some earlier
+# rbnx invocation. That surfaced only as three primitives exiting "before
+# registering with atlas", several layers below the real cause.
+mkdir -p "$ROBONIX_HOME/packages"
+python3 - "$ROBONIX_HOME/config.yaml" "$ROBONIX_HOME/packages" "$REPO_ROOT" <<'SEED_PY'
+import pathlib
+import sys
+
+import yaml
+
+config_path = pathlib.Path(sys.argv[1])
+packages, source = sys.argv[2], sys.argv[3]
+config = {}
+if config_path.is_file():
+    loaded = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    if isinstance(loaded, dict):
+        config = loaded
+# Rewrite both keys: an existing home may point at a different checkout, and
+# scoring the tree we are running from is the whole point of the benchmark.
+config['package_storage_path'] = packages
+config['robonix_source_path'] = source
+config_path.write_text(yaml.safe_dump(config, sort_keys=True), encoding='utf-8')
+SEED_PY
+
 boot_pid=""
 sim_pid=""
 sweep_pid=""
