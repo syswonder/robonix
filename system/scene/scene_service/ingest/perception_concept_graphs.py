@@ -171,6 +171,11 @@ _CFG_DEFAULTS = {
     # Minimum 3D points after backprojection to keep a detection.
     # Filters thin/degenerate masks.
     "min_points_threshold": 50,
+    # Height of the floor in the world frame. The floor-noise gate below
+    # measures object height relative to this, so a dataset whose world
+    # origin is not on the floor (Replica: floor at z=-1.5 m) does not
+    # lose every piece of furniture. Env: SCENE_CG_FLOOR_Z_M.
+    "floor_z_m": 0.0,
     # Per-object pcd cap (downsample points if exceeded). Keeps
     # memory bounded as the same object is observed many times.
     "obj_pcd_max_points": 5000,
@@ -273,22 +278,23 @@ def _parse_merge_class_groups(raw: str) -> dict[str, str]:
 
 
 # ── Model loading ────────────────────────────────────────────────────────
+def _env_or(name: str, fallback: str) -> str:
+    """Return the env value, or `fallback` when it is unset or blank.
+
+    A container launcher that forwards every knob unconditionally passes
+    `-e NAME=` for the ones the operator did not set, so `os.environ.get`
+    returns an empty string rather than raising the default. Loading a
+    model named "" fails deep inside the library with an error that says
+    nothing about the env var, so treat blank as absent — matching how the
+    numeric override table in the detector already behaves.
+    """
+    return (os.environ.get(name, "") or "").strip() or fallback
+
+
 def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained):
     """Load YOLO-World, MobileSAM, and open_clip in one shot. Returns
     `(yolo, sam, clip_model, clip_preprocess, clip_tokenizer, device)`
     or `(None, ...)` if any piece is unavailable."""
-    def _env_or(name: str, fallback: str) -> str:
-        """Return the env value, or `fallback` when it is unset or blank.
-
-        A container launcher that forwards every knob unconditionally passes
-        `-e NAME=` for the ones the operator did not set, so `os.environ.get`
-        returns an empty string rather than raising the default. Loading a
-        model named "" fails deep inside the library with an error that says
-        nothing about the env var, so treat blank as absent — matching how the
-        numeric override table below already behaves.
-        """
-        return (os.environ.get(name, "") or "").strip() or fallback
-
     yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", _DEFAULT_YOLO_WORLD_WEIGHTS)
     mp = sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", _DEFAULT_MOBILE_SAM_WEIGHTS)
     cm = clip_model_name or _env_or("SCENE_CLIP_MODEL", _DEFAULT_CLIP_MODEL)
@@ -693,8 +699,11 @@ class ConceptGraphsDetector:
         self._max_dets = max_detections
         self._yolo_weights = yolo_weights_path
         self._sam_weights = sam_weights_path
-        self._clip_model_name = clip_model_name
-        self._clip_pretrained = clip_pretrained
+        # Resolve the CLIP identity here, the same way _try_load_models does, so the
+        # export records the encoder that actually produced the features rather than
+        # the constructor argument (None whenever the default or env value is used).
+        self._clip_model_name = clip_model_name or _env_or("SCENE_CLIP_MODEL", _DEFAULT_CLIP_MODEL)
+        self._clip_pretrained = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _DEFAULT_CLIP_PRETRAINED)
         self._hub = hub
         self._camera_frame = camera_frame
         self._base_frame = (base_frame or "").strip().lstrip("/")
@@ -730,6 +739,7 @@ class ConceptGraphsDetector:
             ("SCENE_CG_MERGE_THRESHOLD", "merge_threshold", float),
             ("SCENE_CG_VOXEL_SIZE", "downsample_voxel_size", float),
             ("SCENE_CG_MIN_POINTS", "min_points_threshold", int),
+            ("SCENE_CG_FLOOR_Z_M", "floor_z_m", float),
             ("SCENE_CG_OBJ_MIN_POINTS", "obj_min_points", int),
             ("SCENE_CG_OBJ_MAX_POINTS", "obj_pcd_max_points", int),
             ("SCENE_CG_MAX_MERGE_DIST_M", "max_merge_dist_m", float),
@@ -1241,8 +1251,9 @@ class ConceptGraphsDetector:
             try:
                 pts_chk = np.asarray(entry["pcd"].points)
                 if pts_chk.shape[0] >= 4:
-                    z_max = float(pts_chk[:, 2].max())
-                    z_p90 = float(np.percentile(pts_chk[:, 2], 90))
+                    floor_z = float(self.cfg["floor_z_m"])
+                    z_max = float(pts_chk[:, 2].max()) - floor_z
+                    z_p90 = float(np.percentile(pts_chk[:, 2], 90)) - floor_z
                     # Class-specific minimum height: a desk top sits
                     # ≥ 0.55 m above the floor, a chair seat ≥ 0.30 m,
                     # a cup on a table ≥ 0.50 m. If none of those hold
