@@ -95,6 +95,19 @@ _CFG_DEFAULTS = {
     "dbscan_remove_noise": True,
     "dbscan_eps": 0.10,                 # 10 cm cluster radius
     "dbscan_min_points": 10,
+    # Whether DBSCAN also runs on each detection's cloud before association,
+    # as concept-graphs does. Upstream gates it behind
+    # `dbscan_remove_noise and run_dbscan`, and every call site here disabled
+    # the second half, so the flag above only ever reached the periodic
+    # denoise pass over the accumulated map.
+    #
+    # Off by default because enabling it changes what association sees, not
+    # just what is stored: mask edges bleed depth onto whatever lies behind
+    # the object, and those points inflate the detection's bbox and drag its
+    # centroid before the merge decision is taken. Denoising first should
+    # help, but it costs a clustering pass per detection per tick, so measure
+    # before adopting it. Override with SCENE_CG_PER_DETECTION_DBSCAN=1.
+    "per_detection_dbscan": False,
     # Spatial similarity type. ali-dev exposes:
     #   'iou' / 'giou'                  — axis-aligned bbox IoU
     #   'iou_accurate' / 'giou_accurate' — oriented-bbox IoU
@@ -221,6 +234,22 @@ _CFG_DEFAULTS = {
     "same_class_merge_dist_m": 0.4,
     "same_class_merge_interval_ticks": 10,
 }
+
+
+def _as_bool(raw: str) -> bool:
+    """Parse an env flag, rejecting anything not clearly true or false.
+
+    The override table casts with int/float elsewhere and swallows ValueError,
+    leaving the default in place. Keep that contract rather than treating any
+    non-empty string as true: `SCENE_CG_PER_DETECTION_DBSCAN=maybe` should not
+    silently enable it.
+    """
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"not a boolean: {raw!r}")
 
 
 def _parse_merge_class_groups(raw: str) -> dict[str, str]:
@@ -709,6 +738,7 @@ class ConceptGraphsDetector:
             ("SCENE_CG_MERGE_OVERLAP_THRESH", "merge_overlap_thresh", float),
             ("SCENE_CG_MERGE_VISUAL_SIM_THRESH", "merge_visual_sim_thresh", float),
             ("SCENE_CG_SAME_CLASS_MERGE_DIST_M", "same_class_merge_dist_m", float),
+            ("SCENE_CG_PER_DETECTION_DBSCAN", "per_detection_dbscan", _as_bool),
         ):
             v = os.environ.get(env, "").strip()
             if v:
@@ -1174,7 +1204,7 @@ class ConceptGraphsDetector:
                 dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
                 dbscan_eps=self.cfg["dbscan_eps"],
                 dbscan_min_points=self.cfg["dbscan_min_points"],
-                run_dbscan=False,
+                run_dbscan=self.cfg["per_detection_dbscan"],
                 device=self._device,
             )
         except Exception as e:  # noqa: BLE001
@@ -1716,7 +1746,7 @@ class ConceptGraphsDetector:
                         dbscan_min_points=self.cfg["dbscan_min_points"],
                         spatial_sim_type=self.cfg["spatial_sim_type"],
                         device=self._device,
-                        run_dbscan=False,
+                        run_dbscan=self.cfg["per_detection_dbscan"],
                     )
                 except Exception as e:  # noqa: BLE001
                     log.debug("cross-class merge i=%d j=%d failed: %s", i, j, e)
@@ -1793,7 +1823,7 @@ class ConceptGraphsDetector:
                         dbscan_min_points=self.cfg["dbscan_min_points"],
                         spatial_sim_type=self.cfg["spatial_sim_type"],
                         device=self._device,
-                        run_dbscan=False,
+                        run_dbscan=self.cfg["per_detection_dbscan"],
                     )
                 except Exception as e:  # noqa: BLE001
                     log.debug("same-class merge i=%d j=%d failed: %s", i, j, e)
@@ -1893,7 +1923,7 @@ class ConceptGraphsDetector:
                             dbscan_min_points=self.cfg["dbscan_min_points"],
                             spatial_sim_type=self.cfg["spatial_sim_type"],
                             device=self._device,
-                            run_dbscan=False,
+                            run_dbscan=self.cfg["per_detection_dbscan"],
                         )
                     except Exception as e:  # noqa: BLE001
                         log.debug("merge_obj2_into_obj1 failed (i=%d,j=%d): %s", i, j, e)
