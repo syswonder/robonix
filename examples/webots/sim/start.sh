@@ -13,6 +13,11 @@
 # separately with `rbnx shutdown`.
 set -euo pipefail
 
+# Webots starts the Zenoh router used by the deployment. Keep the simulator,
+# RViz, and docker-exec'd providers on the same RMW even when the invoking
+# shell has a different ROS 2 implementation configured globally.
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+
 # Sim container / compose-project names — overridable via ROBONIX_SIM_CONTAINER
 # / ROBONIX_SIM_PROJECT so a CI / parallel deploy brings up its OWN isolated
 # Webots container instead of the shared default. Exported so the compose files
@@ -238,24 +243,33 @@ allow_x11_for_docker
 DC=(docker compose --project-name "$ROBONIX_SIM_PROJECT" "${CF[@]}")
 "${DC[@]}" up --build -d
 
-# Wait until ros2 inside the container has more than a handful of
-# topics — proxy for "webots controller has spawned the robot and is
-# publishing /scanner /odom /head_front_camera/* etc."
-echo "[sim/start] waiting for sim ros topics..."
+# Wait for actual sensor messages. `ros2 topic list` is not a readiness
+# signal: the ROS daemon can retain graph entries from an earlier deployment
+# after Webots restarts, and the old check also continued after its timeout.
+echo "[sim/start] waiting for live sim sensor data..."
+ros_ready=0
 for _ in $(seq 1 60); do
     if [[ "$(docker inspect -f '{{.State.Running}}' "$SIM_CT" 2>/dev/null || true)" != "true" ]]; then
         echo "[sim/start] error: simulation container exited during startup" >&2
         docker logs --tail 120 "$SIM_CT" 2>&1 || true
         exit 1
     fi
-    n=$(docker exec "$SIM_CT" bash -c \
-        'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | wc -l' 2>/dev/null || echo 0)
-    if [[ "${n:-0}" -gt 20 ]]; then
-        echo "[sim/start] ros up ($n topics)"
+    if docker exec "$SIM_CT" bash -lc \
+        'source /opt/ros/humble/setup.bash 2>/dev/null &&
+         timeout 4 ros2 topic echo --once /odom >/dev/null 2>&1 &&
+         timeout 4 ros2 topic echo --once /head_front_camera/rgb/image_raw >/dev/null 2>&1 &&
+         timeout 4 ros2 topic echo --once /scanner >/dev/null 2>&1'; then
+        ros_ready=1
+        echo "[sim/start] live odom, RGB, and lidar data received"
         break
     fi
     sleep 2
 done
+if [[ "$ros_ready" != "1" ]]; then
+    echo "[sim/start] error: no live odom/RGB/lidar data after simulator startup timeout" >&2
+    docker logs --tail 120 "$SIM_CT" 2>&1 || true
+    exit 1
+fi
 
 if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
   echo "[sim/start] waiting for browser-stream helpers..."

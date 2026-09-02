@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 set -euo pipefail
 
+# The Webots deployment uses the simulator-owned rmw_zenohd router. Force the
+# matching RMW here so a host-level CycloneDDS/Fast DDS setting cannot leak
+# into rbnx and its child providers.
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TIAGO_VARIANT="${ROBONIX_TIAGO_VARIANT:-lite}"
 RBNX_ARGS=()
