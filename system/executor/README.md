@@ -30,6 +30,26 @@ Important configuration:
 - `--id` / `ROBONIX_EXECUTOR_PROVIDER_ID`: provider id registered with Atlas. Defaults to `executor`.
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_executor=info`.
 
+Result verification rules live in the deployment manifest's `system.executor`
+block. A rule is optional; calls with no matching rule keep their original
+result.
+
+```yaml
+system:
+  executor:
+    verification:
+      - target_contract_id: robonix/service/navigation/navigate
+        target_provider_id: simple_nav  # optional provider-specific override
+        verifier_provider_id: scene_verifier
+        verifier_args:
+          scene_provider_id: scene
+```
+
+An exact `target_provider_id` + `target_contract_id` rule wins over a
+contract-only rule. Duplicate rules at the same specificity are rejected at
+startup. `verifier_args` must be a JSON/YAML object and is forwarded unchanged
+inside the verifier request.
+
 ## RTDL Execution
 
 Executor interprets `Plan.nodes` from `Plan.root_index`:
@@ -94,6 +114,22 @@ MCP handler requirements for async caps:
 
 Sync caps (no `<contract_id>/status` and `<contract_id>/cancel` pair) complete when the initial MCP call
 returns, as before.
+
+## Result verification
+
+After a configured capability reaches `SUCCEEDED`, Executor calls
+`robonix/service/verifier/verify` on the rule's `verifier_provider_id`. The
+request carries the original call id plus an opaque JSON payload containing the
+target provider, contract, RTDL node description, arguments, output, and the
+configured `verifier_args`.
+
+Verification is fail-closed and has a fixed 60-second timeout. `passed=true`
+preserves the original successful result. `passed=false` changes the original
+node to `FAILED` with `result verification failed: ...`; an unavailable,
+timed-out, or malformed verifier response changes it to `FAILED` with
+`result verification unavailable: ...`. Failed, cancelled, and timed-out
+target calls are never verified. Executor emits only one terminal node event,
+after verification has finished.
 
 ## Builtin capabilities
 

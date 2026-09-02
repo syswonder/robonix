@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/verifier/verify"
+version = "1"
+kind = "service"
+idl = "verifier/srv/Verify.srv"
+description = "Verify the result of one completed capability call."
+
+[mode]
+type = "rpc"
