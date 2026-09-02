@@ -122,6 +122,13 @@ declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
+# The ConceptGraphs export (SCENE_EXPORT_CG_PICKLE) is written inside the
+# container; mount the directory so the file lands on the host at the same
+# path the caller named.
+if [[ -n "${SCENE_EXPORT_CG_PICKLE:-}" ]]; then
+  mkdir -p "${SCENE_EXPORT_CG_PICKLE}"
+  EXTRA_MOUNTS+=(-v "${SCENE_EXPORT_CG_PICKLE}:${SCENE_EXPORT_CG_PICKLE}")
+fi
 
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
@@ -220,6 +227,10 @@ exec docker run --rm \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
+    -e SCENE_CAMERA_FRAME="${SCENE_CAMERA_FRAME:-}" \
+    -e SCENE_BASE_FRAME="${SCENE_BASE_FRAME:-}" \
+    -e SCENE_EXPORT_CG_PICKLE="${SCENE_EXPORT_CG_PICKLE:-}" \
+    -e SCENE_EXPORT_CG_EXP="${SCENE_EXPORT_CG_EXP:-}" \
     ${MAP_ID_ARGS[@]+"${MAP_ID_ARGS[@]}"} \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
