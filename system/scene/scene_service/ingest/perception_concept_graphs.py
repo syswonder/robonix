@@ -39,6 +39,7 @@ from typing import Any, Awaitable, Callable, Optional
 # with NameError. One module-level import is cheap and removes the
 # class of bug entirely.
 import numpy as np
+from .cg_export import export_from_env
 
 log = logging.getLogger("scene.ingest.cg")
 
@@ -807,6 +808,8 @@ class ConceptGraphsDetector:
         if self._task is not None:
             await self._task
             self._task = None
+        if self._map_objects is not None:
+            export_from_env(self._map_objects, self._clip_model_name, self._clip_pretrained)
 
     # ── Text embedding (shared CLIP) ─────────────────────────────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
@@ -1675,6 +1678,9 @@ class ConceptGraphsDetector:
                 log.warning("same-class proximity collapse failed: %s", e)
         if ran_any:
             self._project_to_registry()
+        # Optional snapshot in the layout the upstream Replica scorer reads.
+        # Inert unless SCENE_EXPORT_CG_PICKLE names a directory.
+        export_from_env(self._map_objects, self._clip_model_name, self._clip_pretrained)
 
     def _cross_class_geometric_collapse(self, objects):
         """Class-and-visual-agnostic merge pass. Folds together objects
