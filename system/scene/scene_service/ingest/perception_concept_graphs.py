@@ -229,6 +229,24 @@ _CFG_DEFAULTS = {
     # share visual features but get different YOLO-World labels.
     "merge_visual_sim_thresh": 0.65,
     "merge_text_sim_thresh": 0.0,        # we don't compute text feats
+    # ── Track backend (ThinkGraphs recipe, 2026) ───────────────────────
+    # association: "voxel_vote" scores a detection against each track by
+    # the share of its voxels that track has observed (S_geo) blended with
+    # the CLIP text similarity of the two labels (S_feat); "cg" keeps the
+    # upstream visual+IoU matching above. Tracks vote on their label with
+    # detection confidence, and the object's exported CLIP feature is the
+    # bank entry best aligned with the consensus label's text embedding
+    # rather than the running mean of every crop. The area gate keeps
+    # distant / occluded crops out of the bank.
+    "association": "voxel_vote",
+    "assoc_voxel_size_m": 0.04,
+    "assoc_geo_weight": 0.8,
+    "assoc_feat_weight": 0.2,
+    "assoc_threshold": 0.4,
+    "label_vote": True,
+    "feature_bank_size": 32,
+    "feature_area_ratio": 0.5,
+    "representative_by_text": True,
     # ── Class-agnostic geometric collapse ─────────────────────────────
     # When YOLO-World flickers between e.g. picture_frame / shelf /
     # cabinet for the same physical wall fixture, the same-class gate
@@ -781,6 +799,12 @@ class ConceptGraphsDetector:
             ("SCENE_CG_MERGE_VISUAL_SIM_THRESH", "merge_visual_sim_thresh", float),
             ("SCENE_CG_SAME_CLASS_MERGE_DIST_M", "same_class_merge_dist_m", float),
             ("SCENE_CG_PER_DETECTION_DBSCAN", "per_detection_dbscan", _as_bool),
+            ("SCENE_CG_ASSOCIATION", "association", str),
+            ("SCENE_CG_ASSOC_THRESHOLD", "assoc_threshold", float),
+            ("SCENE_CG_ASSOC_VOXEL_SIZE_M", "assoc_voxel_size_m", float),
+            ("SCENE_CG_LABEL_VOTE", "label_vote", _as_bool),
+            ("SCENE_CG_REPRESENTATIVE_BY_TEXT", "representative_by_text", _as_bool),
+            ("SCENE_CG_FEATURE_AREA_RATIO", "feature_area_ratio", float),
         ):
             v = os.environ.get(env, "").strip()
             if v:
@@ -793,6 +817,14 @@ class ConceptGraphsDetector:
         # here (not lazily) so _apply_snapshot is safe to call before the first
         # _project_to_registry tick — including from unit tests.
         self._uuid_to_oid: dict[str, str] = {}
+        # Per-track side tables keyed by the ConceptGraphs object uuid. They
+        # live outside the object dicts because upstream's merge routine
+        # rejects keys it does not know.
+        self._bank: dict[Any, list[tuple[Any, float]]] = {}      # (feat, area)
+        self._max_area: dict[Any, float] = {}
+        self._label_hist: dict[Any, dict[str, float]] = {}
+        self._vox: dict[Any, dict[tuple[int, int, int], int]] = {}
+        self._label_text_cache: dict[str, Any] = {}
         # How long a soft-evicted (missing) registry record is kept so a
         # re-detection can re-bind it before it is hard-pruned. Decouples
         # observation_count from concept-graphs uuid churn across ticks.
@@ -864,16 +896,25 @@ class ConceptGraphsDetector:
         if self._clip_model is None or self._clip_tokenizer is None or not texts:
             return None
         try:
-            import torch
-
-            with self._inference_lock, torch.no_grad():
-                tokens = self._clip_tokenizer(texts).to(self._device)
-                feats = self._clip_model.encode_text(tokens)
-                feats = feats / feats.norm(dim=-1, keepdim=True)
-                return feats.cpu().tolist()
+            with self._inference_lock:
+                return self._encode_text_nolock(texts)
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-cg] embed_text failed: %s", e)
             return None
+
+    def _encode_text_nolock(self, texts: list[str]) -> Optional[list[list[float]]]:
+        """Text encoding for callers that already hold `_inference_lock`
+        (the tick thread). `_inference_lock` is not re-entrant, so calling
+        `embed_text` from inside a tick would deadlock."""
+        if self._clip_model is None or self._clip_tokenizer is None or not texts:
+            return None
+        import torch
+
+        with torch.no_grad():
+            tokens = self._clip_tokenizer(texts).to(self._device)
+            feats = self._clip_model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            return feats.cpu().tolist()
 
     # ── External viz access ──────────────────────────────────────────
     # Web UI's `/3d` page calls into here every frame. Held under the
@@ -1340,6 +1381,9 @@ class ConceptGraphsDetector:
         if len(self._map_objects) == 0:
             for d in det_list:
                 self._map_objects.append(d)
+            for d in det_list:
+                self._record_observation(d["id"], d)
+                self._refresh_object(d)
             log.info("[scene-cg] init map with %d objects", len(self._map_objects))
         else:
             try:
@@ -1434,7 +1478,20 @@ class ConceptGraphsDetector:
                     log.debug("merge-gate skipped: %s", _e)
 
                 # Below threshold → unmatched → new object.
-                agg_sim[agg_sim < self.cfg["merge_threshold"]] = float("-inf")
+                if str(self.cfg["association"]) == "voxel_vote":
+                    agg_sim = self._voxel_vote_similarity(det_list).to(agg_sim.device)
+                    agg_sim[agg_sim < float(self.cfg["assoc_threshold"])] = float("-inf")
+                else:
+                    agg_sim[agg_sim < self.cfg["merge_threshold"]] = float("-inf")
+                # Remember which track each detection will merge into: the
+                # merge routine only returns the list, and the side tables
+                # (feature bank, label votes, voxel counts) need the target.
+                _best = agg_sim.max(dim=1)
+                target_ids = [
+                    self._map_objects[int(_best.indices[i])]["id"]
+                    if float(_best.values[i]) > float("-inf") else None
+                    for i in range(len(det_list))
+                ]
                 pre_n = len(self._map_objects)
                 self._map_objects = self._cg["merge_detections_to_objects"](
                     downsample_voxel_size=self.cfg["downsample_voxel_size"],
@@ -1450,6 +1507,21 @@ class ConceptGraphsDetector:
                     agg_sim=agg_sim,
                 )
                 added = len(self._map_objects) - pre_n
+                present = {o["id"] for o in self._map_objects}
+                fresh = iter(list(self._map_objects[pre_n:]))
+                for d, tid in zip(det_list, target_ids):
+                    if tid is None:
+                        # unmatched → upstream appended the detection itself
+                        # (same id) or a processed copy, in detection order
+                        if d["id"] in present:
+                            tid = d["id"]
+                        else:
+                            nobj = next(fresh, None)
+                            tid = nobj["id"] if nobj is not None else None
+                    if tid is not None:
+                        self._record_observation(tid, d)
+                for obj in self._map_objects:
+                    self._refresh_object(obj)
                 # Per-frame log is too noisy. Only log when (a) something
                 # changed (new/total delta) or (b) every Nth tick as a
                 # heartbeat. Otherwise INFO once for the first tick is
@@ -2181,6 +2253,160 @@ class ConceptGraphsDetector:
         )
 
     # ── Project MapObjectList → ObjectRegistry ──────────────────────
+    # ── track side tables: feature bank, label votes, voxel counts ──────
+    def _reconcile_side_tables(self) -> None:
+        """Drop side-table rows whose track no longer exists (removed by
+        denoise/filter or merged away by the overlap pass). A merged-away
+        track's history is lost; the survivor keeps its own. Cheap, so it
+        runs before every use rather than being hooked into each cleanup."""
+        if self._map_objects is None:
+            return
+        live = {o["id"] for o in self._map_objects}
+        for table in (self._bank, self._max_area, self._label_hist, self._vox):
+            for k in [k for k in table if k not in live]:
+                del table[k]
+
+    def _voxel_keys(self, pts) -> set:
+        import numpy as np
+        vs = float(self.cfg["assoc_voxel_size_m"])
+        if pts is None or len(pts) == 0:
+            return set()
+        ix = np.floor(np.asarray(pts, dtype=np.float64) / vs).astype(np.int64)
+        return set(map(tuple, ix.tolist()))
+
+    def _label_text_feat(self, label: str):
+        """CLIP text embedding of a label, cached; None when CLIP is off."""
+        key = (label or "").strip().lower()
+        if not key:
+            return None
+        feat = self._label_text_cache.get(key)
+        if feat is None:
+            try:
+                vecs = self._encode_text_nolock([key])   # tick thread holds the lock
+            except Exception as e:  # noqa: BLE001
+                log.debug("[scene-cg] label text encode failed: %s", e)
+                vecs = None
+            if not vecs:
+                return None
+            import numpy as np
+            feat = np.asarray(vecs[0], dtype=np.float32)
+            self._label_text_cache[key] = feat
+        return feat
+
+    def _record_observation(self, track_id, det: dict) -> None:
+        """Fold one detection into a track's side tables.
+
+        Label votes are weighted by detection confidence. The feature bank
+        only admits crops whose mask area is at least `feature_area_ratio`
+        of the largest area this track has shown (distant or occluded views
+        give poor embeddings). Voxel counts record which cells the track has
+        been observed in, for the voxel-vote association score.
+        """
+        import numpy as np
+        try:
+            conf = float(det["conf"][0]) if det.get("conf") else 0.5
+            label = str(det.get("class_name") or "").lower()
+            hist = self._label_hist.setdefault(track_id, {})
+            hist[label] = hist.get(label, 0.0) + conf
+            mask = det.get("mask", [None])[0]
+            area = float(mask.sum()) if mask is not None else 0.0
+            biggest = max(self._max_area.get(track_id, 0.0), area)
+            self._max_area[track_id] = biggest
+            if area >= float(self.cfg["feature_area_ratio"]) * biggest:
+                ft = det.get("clip_ft")
+                if ft is not None:
+                    v = np.asarray(ft.detach().cpu().numpy() if hasattr(ft, "detach") else ft, dtype=np.float32).ravel()
+                    n = float(np.linalg.norm(v))
+                    if n > 0:
+                        bank = self._bank.setdefault(track_id, [])
+                        bank.append((v / n, area))
+                        cap = int(self.cfg["feature_bank_size"])
+                        if len(bank) > cap:
+                            # keep the largest views; they are the least occluded
+                            bank.sort(key=lambda e: e[1], reverse=True)
+                            del bank[cap:]
+            vox = self._vox.setdefault(track_id, {})
+            for k in self._voxel_keys(np.asarray(det["pcd"].points)):
+                vox[k] = vox.get(k, 0) + 1
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene-cg] record_observation skipped: %s", e)
+
+    def _consensus_label(self, obj: dict) -> str:
+        hist = self._label_hist.get(obj["id"])
+        if not hist:
+            return str(obj.get("class_name") or "")
+        return max(hist.items(), key=lambda kv: kv[1])[0]
+
+    def _refresh_object(self, obj: dict) -> None:
+        """Apply label voting and text-guided feature selection to a track.
+
+        `class_name` becomes the confidence-weighted consensus label (what
+        the registry, the export and the scorer see). `clip_ft` becomes the
+        bank entry most aligned with the consensus label's text embedding;
+        when the bank is empty or CLIP text is unavailable the running mean
+        from upstream is left as is.
+        """
+        try:
+            import numpy as np
+            import torch
+            if self.cfg["label_vote"]:
+                label = self._consensus_label(obj)
+                if label:
+                    obj["class_name"] = label
+            if not self.cfg["representative_by_text"]:
+                return
+            bank = self._bank.get(obj["id"])
+            if not bank:
+                return
+            text = self._label_text_feat(str(obj.get("class_name") or ""))
+            feats = np.stack([b[0] for b in bank], axis=0)
+            if text is None:
+                # no text encoder: the largest view stands in
+                best = int(np.argmax([b[1] for b in bank]))
+            else:
+                best = int(np.argmax(feats @ text))
+            obj["clip_ft"] = torch.from_numpy(feats[best].copy()).float()
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene-cg] refresh_object skipped: %s", e)
+
+    def _voxel_vote_similarity(self, det_list):
+        """Detection × track score matrix for the voxel-vote association.
+
+        S_geo(det, track) = mean over the detection's voxels of the share of
+        observations in that voxel that belong to the track (0 for voxels no
+        track has seen). S_feat = cosine similarity of the CLIP text
+        embeddings of the detection label and the track's consensus label
+        (0.5 when text is unavailable). S = w_geo·S_geo + w_feat·S_feat.
+        """
+        import numpy as np
+        import torch
+        self._reconcile_side_tables()
+        objs = self._map_objects
+        n_obj = len(objs)
+        totals: dict[tuple, int] = {}
+        for o in objs:
+            for k, c in self._vox.get(o["id"], {}).items():
+                totals[k] = totals.get(k, 0) + c
+        w_geo = float(self.cfg["assoc_geo_weight"]); w_feat = float(self.cfg["assoc_feat_weight"])
+        S = np.zeros((len(det_list), n_obj), dtype=np.float32)
+        obj_text = [self._label_text_feat(self._consensus_label(o)) for o in objs]
+        for i, d in enumerate(det_list):
+            keys = list(self._voxel_keys(np.asarray(d["pcd"].points)))
+            seen = [k for k in keys if k in totals]
+            d_text = self._label_text_feat(str(d.get("class_name") or ""))
+            for j, o in enumerate(objs):
+                vox = self._vox.get(o["id"], {})
+                if seen:
+                    geo = float(np.mean([vox.get(k, 0) / totals[k] for k in seen])) * (len(seen) / max(1, len(keys)))
+                else:
+                    geo = 0.0
+                if d_text is not None and obj_text[j] is not None:
+                    feat = float(np.dot(d_text, obj_text[j]))
+                else:
+                    feat = 0.5
+                S[i, j] = w_geo * geo + w_feat * feat
+        return torch.from_numpy(S)
+
     def _project_to_registry(self) -> None:
         """Replace registry's perception-source objects with a snapshot
         of the current MapObjectList. Robot self-record is preserved.
@@ -2202,6 +2428,7 @@ class ConceptGraphsDetector:
         # across ticks. Initialised once in __init__/start.
         if not hasattr(self, "_uuid_to_oid"):
             self._uuid_to_oid = {}
+        self._reconcile_side_tables()
         snapshots = []
         for obj in self._map_objects:
             try:
