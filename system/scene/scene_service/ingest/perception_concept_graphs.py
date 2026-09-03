@@ -83,6 +83,26 @@ _DEFAULT_MOBILE_SAM_WEIGHTS = "/opt/models/mobile_sam.pt"
 _DEFAULT_CLIP_MODEL = "ViT-B-32"
 _DEFAULT_CLIP_PRETRAINED = "/opt/models/open_clip_pytorch_model.bin"
 
+# Model set per perception profile. `lite` is what the image bakes in;
+# `full` expects the paper-tier weights under /opt/models/full (the launcher
+# mounts SCENE_MODELS_DIR there). SCENE_YOLO_WORLD_WEIGHTS /
+# SCENE_MOBILE_SAM_WEIGHTS / SCENE_CLIP_MODEL / SCENE_CLIP_PRETRAINED still
+# override either set, so a deployment can mix and match.
+_PROFILE_MODELS: dict[str, dict[str, str]] = {
+    "lite": {
+        "yolo": _DEFAULT_YOLO_WORLD_WEIGHTS,
+        "sam": _DEFAULT_MOBILE_SAM_WEIGHTS,
+        "clip_model": _DEFAULT_CLIP_MODEL,
+        "clip_pretrained": _DEFAULT_CLIP_PRETRAINED,
+    },
+    "full": {
+        "yolo": _DEFAULT_YOLO_WORLD_WEIGHTS,
+        "sam": "/opt/models/full/sam_l.pt",
+        "clip_model": "ViT-H-14",
+        "clip_pretrained": "/opt/models/full/open_clip_vit_h14_laion2b_s32b_b79k.bin",
+    },
+}
+
 
 # ── Concept-graphs config knobs ──────────────────────────────────────────
 # These are the v0 defaults. They map to concept-graphs's own
@@ -291,19 +311,25 @@ def _env_or(name: str, fallback: str) -> str:
     return (os.environ.get(name, "") or "").strip() or fallback
 
 
-def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained):
-    """Load YOLO-World, MobileSAM, and open_clip in one shot. Returns
+def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained, profile="lite"):
+    """Load YOLO-World, a SAM variant, and open_clip in one shot. Returns
     `(yolo, sam, clip_model, clip_preprocess, clip_tokenizer, device)`
-    or `(None, ...)` if any piece is unavailable."""
-    yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", _DEFAULT_YOLO_WORLD_WEIGHTS)
-    mp = sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", _DEFAULT_MOBILE_SAM_WEIGHTS)
-    cm = clip_model_name or _env_or("SCENE_CLIP_MODEL", _DEFAULT_CLIP_MODEL)
-    cp = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _DEFAULT_CLIP_PRETRAINED)
+    or `(None, ...)` if any piece is unavailable. Explicit arguments win,
+    then the SCENE_* environment, then the profile's model set."""
+    models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
+    yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", models["yolo"])
+    mp = sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", models["sam"])
+    cm = clip_model_name or _env_or("SCENE_CLIP_MODEL", models["clip_model"])
+    cp = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", models["clip_pretrained"])
+    log.info("[scene-cg] profile=%s yolo=%s sam=%s clip=%s/%s", profile, yw, mp, cm, cp)
     if not os.path.isfile(yw):
         log.warning("YOLO-World weights not found at %s — perception disabled", yw)
         return (None,) * 6
     if not os.path.isfile(mp):
-        log.warning("MobileSAM weights not found at %s — perception disabled", mp)
+        log.warning(
+            "SAM weights not found at %s — perception disabled (profile=%s; the full "
+            "profile expects SCENE_MODELS_DIR mounted at /opt/models/full)", mp, profile,
+        )
         return (None,) * 6
     try:
         import torch
@@ -688,7 +714,11 @@ class ConceptGraphsDetector:
         # It must match odometry.child_frame_id when odometry is selected.
         # Soma's live footprint base frame is preferred when available.
         base_frame: Optional[str] = None,
+        # Perception profile (lite / full / annotate) chosen by the manifest;
+        # selects the default model set when no explicit path/env is given.
+        profile: str = "lite",
     ) -> None:
+        self._profile = profile
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
         self._cam_info = camera_info_fetcher
@@ -702,8 +732,9 @@ class ConceptGraphsDetector:
         # Resolve the CLIP identity here, the same way _try_load_models does, so the
         # export records the encoder that actually produced the features rather than
         # the constructor argument (None whenever the default or env value is used).
-        self._clip_model_name = clip_model_name or _env_or("SCENE_CLIP_MODEL", _DEFAULT_CLIP_MODEL)
-        self._clip_pretrained = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _DEFAULT_CLIP_PRETRAINED)
+        _models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
+        self._clip_model_name = clip_model_name or _env_or("SCENE_CLIP_MODEL", _models["clip_model"])
+        self._clip_pretrained = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _models["clip_pretrained"])
         self._hub = hub
         self._camera_frame = camera_frame
         self._base_frame = (base_frame or "").strip().lstrip("/")
@@ -792,7 +823,7 @@ class ConceptGraphsDetector:
         ) = await loop.run_in_executor(
             None, _try_load_models,
             self._yolo_weights, self._sam_weights,
-            self._clip_model_name, self._clip_pretrained,
+            self._clip_model_name, self._clip_pretrained, self._profile,
         )
         if self._yolo is None:
             log.warning("ConceptGraphsDetector skipped — models unavailable")

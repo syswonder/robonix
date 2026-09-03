@@ -129,6 +129,13 @@ if [[ -n "${SCENE_EXPORT_CG_PICKLE:-}" ]]; then
   mkdir -p "${SCENE_EXPORT_CG_PICKLE}"
   EXTRA_MOUNTS+=(-v "${SCENE_EXPORT_CG_PICKLE}:${SCENE_EXPORT_CG_PICKLE}")
 fi
+# The `full` perception profile needs weights the image does not bake in
+# (SAM-L, CLIP ViT-H-14). Point SCENE_MODELS_DIR at a host directory holding
+# them; it appears in the container as /opt/models/full.
+if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
+  [[ -d "${SCENE_MODELS_DIR}" ]] || { echo "[scene/start] SCENE_MODELS_DIR=${SCENE_MODELS_DIR} is not a directory" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
+fi
 
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
@@ -189,6 +196,7 @@ exec docker run --rm \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
     -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
+    -e SCENE_PROFILE="${SCENE_PROFILE:-}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
     -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \
     -e SCENE_CG_MIN_POINTS="${SCENE_CG_MIN_POINTS:-}" \
