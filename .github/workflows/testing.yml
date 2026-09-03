@@ -1253,7 +1253,8 @@ jobs:
           for i in $(seq 1 60); do
             if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.post-restart.txt" 2>&1 \
               && grep -q "robonix/service/navigation/navigate" "$RUNNER_TEMP/caps.post-restart.txt" \
-              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
+              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt" \
+              && grep -qE "^● explore \[(INACTIVE|ACTIVE)\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
               echo "post-restart atlas ready"
               break
             fi
