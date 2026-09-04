@@ -1028,8 +1028,12 @@ class WebotsSceneBenchmarkTests(unittest.TestCase):
             device.attrib["reference"]: device.findtext("ros/frameName")
             for device in root.findall("./webots/device")
         }
-        self.assertEqual(frame_by_device["Astra rgb"], "Astra rgb")
-        self.assertEqual(frame_by_device["Astra depth"], "Astra rgb")
+        # RGB and the registered depth must publish in ONE optical frame, and it
+        # has to be the frame the registration is expressed in (da97b9cc) —
+        # naming it after the Webots device put the cloud in the wrong frame.
+        optical = "head_front_camera_rgb_optical_frame"
+        self.assertEqual(frame_by_device["Astra rgb"], optical)
+        self.assertEqual(frame_by_device["Astra depth"], optical)
 
         camera_start = (
             ROOT / "examples/webots/primitives/tiago_camera/scripts/start.sh"
@@ -1042,10 +1046,22 @@ class WebotsSceneBenchmarkTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         soma = (ROOT / "examples/webots/soma.yaml").read_text(encoding="utf-8")
         sweep = (ROOT / "testing/run_webots_scene_sweep.py").read_text(encoding="utf-8")
-        self.assertNotIn("static_transform_publisher", camera_start)
-        for source in (camera_driver, camera_manifest, soma, sweep):
-            self.assertNotIn("robonix/primitive/camera/extrinsics", source)
-            self.assertNotIn("/tiago/camera/extrinsics", source)
+        # The Webots controller stamps images with the optical frame names while
+        # the URDF tree exposes the links as "Astra rgb" / "Astra depth", so the
+        # camera primitive bridges the two with identity static TFs. That
+        # compensation belongs to the primitive that owns the sensor — assert it
+        # is there, and that neither mapping nor scene carries a copy.
+        for link, frame in (("Astra rgb", "head_front_camera_rgb_optical_frame"),
+                            ("Astra depth", "head_front_camera_depth_optical_frame")):
+            self.assertIn(f"--frame-id '{link}' --child-frame-id {frame}", camera_start)
+        # The camera primitive owns `primitive/camera/extrinsics` and the
+        # deployment binds it, so the driver, its package manifest and soma.yaml
+        # all name it. The scoring harness must not: it reads poses through the
+        # capability surface like any other consumer, never from a camera topic.
+        self.assertNotIn("robonix/primitive/camera/extrinsics", sweep)
+        self.assertNotIn("/tiago/camera/extrinsics", sweep)
+        for owner in (camera_driver, camera_manifest, soma):
+            self.assertIn("camera/extrinsics", owner)
 
         benchmark = (
             ROOT / "testing/run_webots_scene_benchmark.sh"
@@ -1242,11 +1258,11 @@ class WebotsSceneBenchmarkTests(unittest.TestCase):
     def test_webots_window_rerank_uses_measured_pair_and_margin(self) -> None:
         import yaml
 
+        # Only manifests that actually carry the re-rank configuration are
+        # checked. The default deployment manifest leaves `scene: {}` and takes
+        # the package defaults, and the mapping-nav manifest this harness came
+        # from does not exist in this repository.
         expected = {
-            "examples/webots/robonix_manifest.yaml": (
-                [["window", "picture frame"]],
-                0.0,
-            ),
             "examples/webots/robonix_manifest.scene-eval.yaml": (
                 [
                     {
@@ -1264,7 +1280,9 @@ class WebotsSceneBenchmarkTests(unittest.TestCase):
                 ],
                 0.05,
             ),
-            "examples/webots/robonix_manifest.mapping-nav-eval.yaml": (
+            # The DualMap variant is a copy of the manifest above with the
+            # backend switched; the re-rank values must not drift between them.
+            "examples/webots/robonix_manifest.scene-eval.dualmap.yaml": (
                 [
                     {
                         "labels": ["window", "picture frame"],
@@ -1289,28 +1307,26 @@ class WebotsSceneBenchmarkTests(unittest.TestCase):
             self.assertEqual(rerank["groups"], groups)
             self.assertEqual(rerank["min_score"], 0.20)
             self.assertEqual(rerank["min_margin"], min_margin)
-            if relative != "examples/webots/robonix_manifest.yaml":
-                self.assertEqual(
-                    rerank["routes"]["cup"],
-                    {
-                        "labels": ["cup", "can"],
-                        "min_margin": 0.02,
-                    },
-                )
-                self.assertEqual(
-                    rerank["prompts"]["can"],
-                    [
-                        "a cylindrical metal food or drink can",
-                        "a sealed aluminum can on a table",
-                    ],
-                )
-            self.assertNotIn(
-                "confusable_class_groups",
-                scene["association"],
+            self.assertEqual(             rerank["routes"]["cup"],
+                {
+                    "labels": ["cup", "can"],
+                    "min_margin": 0.02,
+                },
+            )
+            self.assertEqual(
+                rerank["prompts"]["can"],
+                [
+                    "a cylindrical metal food or drink can",
+                    "a sealed aluminum can on a table",
+                ],
             )
             self.assertNotIn(
-                "allow_cross_class_merge",
-                scene["association"],
+            "confusable_class_groups",
+            scene["association"],
+            )
+            self.assertNotIn(
+            "allow_cross_class_merge",
+            scene["association"],
             )
 
     def test_visibility_scope_prevents_unseen_targets_becoming_false_negatives(
