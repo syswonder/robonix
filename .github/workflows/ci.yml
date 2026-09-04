@@ -35,8 +35,11 @@ jobs:
         run: python3 -m pip install "websockets>=14,<17"
       - name: Install Webots report test dependencies
         # test_webots_scene_benchmark exercises the occupancy grid and report
-        # renderer, which work on numpy arrays and PNG previews.
-        run: python3 -m pip install "numpy>=1.24,<3" "Pillow>=10,<12"
+        # renderer (numpy arrays, PNG previews, a KD-tree for the wall match)
+        # and reads the deployment manifests.
+        run: >-
+          python3 -m pip install
+          "numpy>=1.24,<3" "Pillow>=10,<12" "PyYAML>=6,<7" "scipy>=1.11,<2"
       - name: Test custom ports and helper readiness
         run: python3 examples/webots/sim/tests/test_streaming.py
       - name: Test Webots report infrastructure failures
