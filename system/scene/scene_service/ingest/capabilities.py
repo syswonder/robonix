@@ -72,6 +72,16 @@ DUALMAP_KEYS: frozenset[str] = frozenset({
     # run DualMap's own local-map merge (tracker matching of the map against
     # itself) every N mapped keyframes; 0 disables it
     "merge_every_keyframes",
+    # registry filters: tracks seen in fewer keyframes than min_observations
+    # (default 2) or, with stable_only, not yet marked stable by DualMap stay out
+    "stable_only", "min_observations",
+    # collapse tracks that occupy the same space with different class labels
+    # (dedup_overlap, 0 disables), and drop tracks lying on the floor plane
+    "dedup_overlap", "dedup_same_class", "min_extent_m", "floor_z_m",
+    # DualMap object lifecycle, sized for its dataset replay by default: how many
+    # observations make a track stable, how many recent frames count as active,
+    # and how many rounds an unstable track survives outside that window
+    "stable_num", "active_window_size", "max_pending_count",
 })
 
 

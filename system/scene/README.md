@@ -150,6 +150,35 @@ system:
           keyframe_rotation_deg: 3.0
           keyframe_time_s: 5.0
           merge_every_keyframes: 20   # DualMap's local-map self-merge cadence (0 = off)
+          min_observations: 1         # tracks seen in fewer keyframes stay out of the registry
+          stable_only: false          # additionally require DualMap's own stable flag
+          # DualMap associates observations within a class, so one object whose
+          # label flickers becomes several tracks in the same place. Objects
+          # overlapping an already-kept one by this fraction of their own volume
+          # are dropped, best-observed first (0 = off).
+          dedup_overlap: 0.3
+          # A detection with wrong depth is re-registered along the camera ray,
+          # smaller each time: one office run produced eleven "recycling bin"
+          # boxes from 0.27 m down to 0.02 m along a line. Same-class tracks
+          # whose bounding spheres meet (radius sum scaled by this) collapse
+          # into one, and anything whose longest side is under min_extent_m is
+          # not an object at all.
+          dedup_same_class: 1.0
+          min_extent_m: 0.08
+          # Height of the floor in the world frame; tracks whose points lie on
+          # it are depth noise, not objects (Replica's floor is at -1.5).
+          floor_z_m: 0.0
+          # DualMap's object lifecycle, passed through to its own config. The
+          # defaults (8 / 10 / 5) are sized for a dataset replay that maps every
+          # frame: a track needs stable_num observations to become stable, and
+          # one that leaves the active_window_size most recent frames without
+          # getting there is deleted after max_pending_count rounds. A robot
+          # mapping keyframes at walking pace sees each object a handful of
+          # times, so on a deployment these must match the observation rate or
+          # the map empties out behind the robot.
+          stable_num: 3
+          active_window_size: 40
+          max_pending_count: 20
 ```
 
 ```bash

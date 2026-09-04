@@ -11,13 +11,41 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+WEBOTS_DIR="$(cd .. && pwd -P)"
 
-echo "[sim/stop] killing host-side robonix processes (atlas / executor / soma / pilot / vitals / liaison / rbnx boot)..."
+# Kill only the processes that belong to THIS webots deployment. A plain
+# `pkill -f robonix-atlas` also took down every other Robonix stack on the
+# host (the lab deployment under ~/robonix-lab/deploy was killed by every
+# benchmark world and every CI run). A process is ours when its working
+# directory or command line is under this checkout's examples/webots, or an
+# ancestor's is (children of `rbnx boot` inherit the deployment cwd; python
+# services started from their package dir still descend from it).
+ours() {
+    local pid="$1" depth=0 cwd cmd
+    while [ -n "$pid" ] && [ "$pid" != 1 ] && [ "$depth" -lt 8 ]; do
+        cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        case "$cwd" in "$WEBOTS_DIR"*) return 0 ;; esac
+        case "$cmd" in *"$WEBOTS_DIR"*) return 0 ;; esac
+        pid="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+kill_ours() {
+    local pid
+    for pid in $(pgrep -f "$1" 2>/dev/null || true); do
+        [ "$pid" = "$$" ] && continue
+        if ours "$pid"; then kill -9 "$pid" 2>/dev/null || true; fi
+    done
+}
+
+echo "[sim/stop] killing host-side robonix processes of $WEBOTS_DIR (atlas / executor / soma / pilot / vitals / liaison / rbnx boot)..."
 # Every binary spawned by `rbnx boot`'s system: block must be listed here,
 # otherwise its TCP port leaks across boot cycles and the next boot fails
 # with `listen address ':50081' is taken`. Add new ones to deploy.rs's
 # system-bin table AND to this regex.
-pkill -9 -f "rbnx boot|rbnx deploy|rbnx start -p|robonix-atlas|robonix-executor|robonix-soma|robonix-pilot|robonix-vitals|robonix-liaison" 2>/dev/null || true
+kill_ours "rbnx boot|rbnx deploy|rbnx start -p|robonix-atlas|robonix-executor|robonix-soma|robonix-pilot|robonix-vitals|robonix-liaison"
 
 echo "[sim/stop] killing host-side python service zombies (speech / memsearch / scene / audio drivers / nav bridges)..."
 # Host-side packages spawn long-lived Python processes in their own
@@ -26,14 +54,14 @@ echo "[sim/stop] killing host-side python service zombies (speech / memsearch / 
 # and keeps its GPU memory + gRPC port. Speech_service is the worst
 # offender: every leaked instance pins ~1 GiB of CUDA on the FunASR
 # model and a stale TCP port that the next boot can't rebind.
-pkill -9 -f "speech_service\\.service" 2>/dev/null || true
-pkill -9 -f "memsearch_service\\.service" 2>/dev/null || true
-pkill -9 -f "scene_service\\.service" 2>/dev/null || true
-pkill -9 -f "audio_driver\\.main|audio_driver\\.node" 2>/dev/null || true
-pkill -9 -f "audio_client_bridge\\.main|audio_client_bridge\\.node" 2>/dev/null || true
-pkill -9 -f "voiceprint_service\\.service" 2>/dev/null || true
-pkill -9 -f "simple_nav\\.atlas_bridge" 2>/dev/null || true
-pkill -9 -f "mapping_service\\.service" 2>/dev/null || true
+kill_ours "speech_service\\.service"
+kill_ours "memsearch_service\\.service"
+kill_ours "scene_service\\.service"
+kill_ours "audio_driver\\.main|audio_driver\\.node"
+kill_ours "audio_client_bridge\\.main|audio_client_bridge\\.node"
+kill_ours "voiceprint_service\\.service"
+kill_ours "simple_nav\\.atlas_bridge"
+kill_ours "mapping_service\\.service"
 
 # Quick GPU memory check — visible signal that the kills actually
 # released CUDA. nvidia-smi may be absent on non-GPU hosts; that's fine.
@@ -49,7 +77,7 @@ echo "[sim/stop] killing host-side rviz2 wrapper (docker exec into sim)..."
 # that script does `docker exec robonix_tiago_sim ... rviz2`. Kill the
 # wrapper before the compose-down below so docker doesn't have to GC
 # a half-dead exec.
-pkill -9 -f "start_rviz.sh|rviz2 -d /tmp/rviz2_default.rviz" 2>/dev/null || true
+kill_ours "start_rviz.sh|rviz2 -d /tmp/rviz2_default.rviz"
 
 echo "[sim/stop] killing in-container drivers + sim-side GUIs..."
 # Container names must match what start.sh/compose.yaml actually created.

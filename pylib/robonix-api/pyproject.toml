@@ -26,7 +26,9 @@ classifiers = [
 dependencies = [
     "grpcio>=1.50",
     "protobuf>=4",
-    "mcp>=1.0",
+    # v1 API: mcp 2.x renamed FastMCP to MCPServer and changed the tool
+    # decorators, which capability.py and tool.py still use.
+    "mcp>=1.0,<2",
     "fastmcp>=3",
     "pyyaml>=6",
 ]
