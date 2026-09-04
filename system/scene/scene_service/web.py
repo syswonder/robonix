@@ -1647,7 +1647,7 @@ _COMBINED_HTML = r"""<!doctype html>
     <div class="panel" id="panel-3d">
       <div class="titlebar">
         <span class="badge">3D</span>
-        <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
+        <span class="desc">objects + relations · drag rotate · WASD fly · click pick</span>
         <button class="expand" title="expand">⛶</button>
       </div>
       <iframe src="/3d" loading="eager"></iframe>
@@ -2336,6 +2336,8 @@ _INDEX_3D_HTML = r"""<!doctype html>
       for (const [id, entry] of objectMeshes) {
         if (entry.data && entry.data.center) {
           posMap.set(id, entry.data.center);
+          // Edges name objects by registry id, meshes by backend uuid: index both.
+          if (entry.data.object_id) posMap.set(entry.data.object_id, entry.data.center);
         }
       }
 

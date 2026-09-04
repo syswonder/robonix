@@ -132,6 +132,12 @@ fi
 # The `full` perception profile needs weights the image does not bake in
 # (SAM-L, CLIP ViT-H-14). Point SCENE_MODELS_DIR at a host directory holding
 # them; it appears in the container as /opt/models/full.
+# DualMap backend: a host vocabulary file is mounted read-only at the same path so
+# SCENE_DUALMAP_CLASSES means the same thing inside the container.
+if [[ -n "${SCENE_DUALMAP_CLASSES:-}" ]]; then
+  [[ -f "${SCENE_DUALMAP_CLASSES}" ]] || { echo "[scene/start] SCENE_DUALMAP_CLASSES=${SCENE_DUALMAP_CLASSES} is not a file" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_CLASSES}:${SCENE_DUALMAP_CLASSES}:ro")
+fi
 if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
   [[ -d "${SCENE_MODELS_DIR}" ]] || { echo "[scene/start] SCENE_MODELS_DIR=${SCENE_MODELS_DIR} is not a directory" >&2; exit 2; }
   EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
@@ -197,6 +203,10 @@ exec docker run --rm \
     -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
     -e SCENE_PROFILE="${SCENE_PROFILE:-}" \
+    -e SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-}" \
+    -e SCENE_DUALMAP_CLASSES="${SCENE_DUALMAP_CLASSES:-}" \
+    -e SCENE_DUALMAP_ROOT="${SCENE_DUALMAP_ROOT:-}" \
+    -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
     -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \
     -e SCENE_CG_MIN_POINTS="${SCENE_CG_MIN_POINTS:-}" \

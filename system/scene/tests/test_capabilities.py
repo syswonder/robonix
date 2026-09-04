@@ -156,3 +156,24 @@ def test_perception_config_precedence_and_ignored_keys():
         else:
             raise AssertionError(f"accepted {bad}")
     print("  [PASS] test_perception_config_precedence_and_ignored_keys")
+
+
+def test_perception_backend_selection():
+    # manifest beats env; env beats default; a typo fails at boot; dualmap knobs pass through
+    from scene_service.ingest.capabilities import resolve_backend
+    cfg = perception_config({"perception": {"backend": "dualmap",
+                                            "dualmap": {"classes": ["chair", "table"], "keep_unknown": False}}},
+                            env={"SCENE_PERCEPTION_BACKEND": "concept_graphs"})
+    assert cfg.backend == "dualmap" and cfg.dualmap["classes"] == ["chair", "table"]
+    assert cfg.ignored_keys == ()
+    assert perception_config({}, env={"SCENE_PERCEPTION_BACKEND": "dualmap"}).backend == "dualmap"
+    assert perception_config({}, env={}).backend == "concept_graphs"
+    assert resolve_backend(" DualMap ") == "dualmap"
+    for bad in ({"perception": {"backend": "dual_map"}}, {"perception": {"dualmap": "chair"}}):
+        try:
+            perception_config(bad, env={})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad}")
+    print("  [PASS] test_perception_backend_selection")

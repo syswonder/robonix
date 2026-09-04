@@ -1020,8 +1020,12 @@ class ConceptGraphsDetector:
                     inst_color = [0.5, 0.5, 0.5]
                 else:
                     inst_color = [float(v) for v in inst_color]
+                uuid_str = str(obj.get("id", f"obj_{obj_idx}"))
                 out.append({
-                    "id": str(obj.get("id", f"obj_{obj_idx}")),
+                    "id": uuid_str,
+                    # Registry id of this track (scene.object.<cls>_NNN). Scene-graph
+                    # edges reference registry ids, so the 3D view needs it to draw them.
+                    "object_id": (live_uuids or {}).get(uuid_str),
                     "cls": obj.get("class_name", "object"),
                     "num_detections": int(obj.get("num_detections", 1)),
                     "n_points": int(obj.get("n_points", pts.shape[0])),

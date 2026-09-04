@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 Tier = Literal["metric", "visual", "geometric"]
-Detector = Optional[Literal["concept_graphs", "vlm"]]
+Detector = Optional[Literal["concept_graphs", "dualmap", "vlm"]]
 
 # Perception profile: the operator's statement of how much compute this
 # deployment gives Scene. It is orthogonal to the tier (which the wiring
@@ -51,6 +51,44 @@ Detector = Optional[Literal["concept_graphs", "vlm"]]
 Profile = Literal["lite", "full", "annotate"]
 PROFILES: tuple[str, ...] = ("lite", "full", "annotate")
 DEFAULT_PROFILE: Profile = "lite"
+
+# Perception backend: which open-vocabulary mapper implements the metric tier.
+#
+#   concept_graphs  Scene's ConceptGraphs-derived pipeline (the default)
+#   dualmap         DualMap (Eku127/DualMap): YOLO-World + FastSAM/MobileSAM +
+#                   MobileCLIP with a Bayesian class filter; online, ~4 GB VRAM
+Backend = Literal["concept_graphs", "dualmap"]
+BACKENDS: tuple[str, ...] = ("concept_graphs", "dualmap")
+DEFAULT_BACKEND: Backend = "concept_graphs"
+
+
+# Knobs accepted under `scene.config.perception.dualmap`; anything else is a typo
+# and fails at boot like the sibling keys.
+DUALMAP_KEYS: frozenset[str] = frozenset({
+    "classes", "keep_unknown", "use_fastsam", "device",
+    # keyframe gate: a frame is mapped only when the camera moved this much or
+    # this long has passed since the last mapped frame (DualMap's own rule)
+    "keyframe_translation_m", "keyframe_rotation_deg", "keyframe_time_s",
+    # run DualMap's own local-map merge (tracker matching of the map against
+    # itself) every N mapped keyframes; 0 disables it
+    "merge_every_keyframes",
+})
+
+
+def resolve_backend(value: Any) -> Backend:
+    """Validate a backend name from config/env; blank means the default.
+
+    Raises ValueError naming the accepted values so a manifest typo fails
+    at boot instead of silently running the default mapper.
+    """
+    name = str(value or "").strip().lower()
+    if not name:
+        return DEFAULT_BACKEND
+    if name not in BACKENDS:
+        raise ValueError(
+            f"unknown perception backend {value!r}; expected one of {', '.join(BACKENDS)}"
+        )
+    return name  # type: ignore[return-value]
 
 
 def resolve_profile(value: Any) -> Profile:
@@ -131,7 +169,9 @@ class PerceptionPlan:
         )
 
 
-def plan_perception(hub: Any, profile: Profile = DEFAULT_PROFILE) -> PerceptionPlan:
+def plan_perception(
+    hub: Any, profile: Profile = DEFAULT_PROFILE, backend: Backend = DEFAULT_BACKEND,
+) -> PerceptionPlan:
     """Probe `hub` for wired observation kinds and pick the perception tier.
 
     Pure with respect to the hub snapshot: reads `hub.has(kind)` only, no
@@ -157,7 +197,7 @@ def plan_perception(hub: Any, profile: Profile = DEFAULT_PROFILE) -> PerceptionP
         tier: Tier = "geometric"
         detector: Detector = None
     elif has_rgb and has_depth:
-        tier, detector = "metric", "concept_graphs"
+        tier, detector = "metric", backend
     elif has_rgb:
         tier, detector = "visual", "vlm"
     else:
@@ -176,7 +216,8 @@ def plan_perception(hub: Any, profile: Profile = DEFAULT_PROFILE) -> PerceptionP
 
 
 PERCEPTION_KEYS: frozenset[str] = frozenset({
-    "profile", "period_s", "confidence_threshold", "max_detections", "concept_graphs",
+    "profile", "backend", "period_s", "confidence_threshold", "max_detections",
+    "concept_graphs", "dualmap",
 })
 
 
@@ -189,10 +230,12 @@ class PerceptionConfig:
     """
 
     profile: Profile
+    backend: Backend = DEFAULT_BACKEND
     period_s: Optional[float] = None
     confidence_threshold: Optional[float] = None
     max_detections: Optional[int] = None
     concept_graphs: dict = field(default_factory=dict)
+    dualmap: dict = field(default_factory=dict)
     ignored_keys: tuple[str, ...] = ()
 
 
@@ -200,10 +243,12 @@ def perception_config(config: dict, env: Optional[dict] = None) -> PerceptionCon
     """Parse and validate `config["perception"]`.
 
     Precedence for the profile: manifest value, then `SCENE_PROFILE` in
-    `env` (the process environment by default), then `lite`. Numeric knobs
-    are coerced so a manifest typo fails at boot. `concept_graphs` must be
-    a mapping of detector knob overrides (same names as the SCENE_CG_*
-    environment table) and is passed through untouched.
+    `env` (the process environment by default), then `lite`; the backend
+    follows the same order with `SCENE_PERCEPTION_BACKEND` and defaults to
+    `concept_graphs`. Numeric knobs are coerced so a manifest typo fails at
+    boot. `concept_graphs` and `dualmap` must be mappings of backend knob
+    overrides (the former uses the SCENE_CG_* names) and are passed through
+    untouched to the backend that reads them.
     """
     env = os.environ if env is None else env
     raw = config.get("perception") or {}
@@ -212,6 +257,15 @@ def perception_config(config: dict, env: Optional[dict] = None) -> PerceptionCon
     cg = raw.get("concept_graphs") or {}
     if not isinstance(cg, dict):
         raise ValueError("scene.config.perception.concept_graphs must be a mapping")
+    dm = raw.get("dualmap") or {}
+    if not isinstance(dm, dict):
+        raise ValueError("scene.config.perception.dualmap must be a mapping")
+    unknown = sorted(k for k in dm if k not in DUALMAP_KEYS)
+    if unknown:
+        raise ValueError(
+            f"scene.config.perception.dualmap has unknown keys {unknown}; "
+            f"accepted: {', '.join(sorted(DUALMAP_KEYS))}"
+        )
 
     def _num(key: str, cast):
         value = raw.get(key)
@@ -224,9 +278,11 @@ def perception_config(config: dict, env: Optional[dict] = None) -> PerceptionCon
 
     return PerceptionConfig(
         profile=resolve_profile(raw.get("profile") or env.get("SCENE_PROFILE") or ""),
+        backend=resolve_backend(raw.get("backend") or env.get("SCENE_PERCEPTION_BACKEND") or ""),
         period_s=_num("period_s", float),
         confidence_threshold=_num("confidence_threshold", float),
         max_detections=_num("max_detections", int),
         concept_graphs=dict(cg),
+        dualmap=dict(dm),
         ignored_keys=tuple(sorted(k for k in raw if k not in PERCEPTION_KEYS)),
     )
