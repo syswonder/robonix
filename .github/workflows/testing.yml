@@ -530,6 +530,17 @@ jobs:
           # developer workstation, so CI must not mutate ~/.gitconfig.
           git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
           : > "$git_config"
+          # The runner service inherited HTTP_PROXY=127.0.0.1:9981 from a
+          # macOS-forwarding config that was disabled on 2026-08-10. The
+          # listener is still up but forwards nothing, so every clone since has
+          # died with `GnuTLS, handshake failed` — an error that names TLS and
+          # hides the fact that the proxy is a dead end. Drop the inherited
+          # values for this job so the routing decided below is the one that
+          # applies.
+          for stale in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+            printf '%s=\n' "$stale" >> "$GITHUB_ENV"
+          done
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
           if timeout 15s git ls-remote --exit-code \
               "https://ghfast.top/https://github.com/syswonder/robonix.git" \
               HEAD >/dev/null 2>&1; then
@@ -537,11 +548,34 @@ jobs:
               url."https://ghfast.top/https://github.com/".insteadOf \
               "https://github.com/"
             echo "Using ghfast.top for GitHub clones"
-          else
+          elif proxy_ok=0
+               # Clash on this runner drops out for stretches at a time. Both
+               # other routes are hard-blocked here — a direct clone and
+               # ghfast.top both come back "Connection reset by peer" — so the
+               # proxy is the only way out and a single failed probe is worth
+               # waiting on rather than treating as absent.
+               for attempt in 1 2 3 4 5 6; do
+                 if timeout 20s git -c 'http.https://github.com/.proxy=http://127.0.0.1:7897' \
+                      ls-remote --exit-code "https://github.com/syswonder/robonix.git" \
+                      HEAD >/dev/null 2>&1; then
+                   proxy_ok=1; break
+                 fi
+                 echo "Clash probe $attempt/6 failed; retrying in 10s"
+                 sleep 10
+               done
+               [ "$proxy_ok" = 1 ]; then
             git config --file "$git_config" \
               'http.https://github.com/.proxy' \
               'http://127.0.0.1:7897'
             echo "ghfast.top unavailable; using GitHub through Clash at 127.0.0.1:7897"
+          else
+            # Both routes are gone. Pointing git at a proxy that is not
+            # listening is worse than not setting one: every clone dies with a
+            # GnuTLS handshake failure against a closed port, which reads like
+            # a TLS problem rather than a missing proxy. Leave git alone and
+            # let it reach github.com directly; if that also fails the error
+            # will at least name the real cause.
+            echo "ghfast.top unavailable and no proxy on 127.0.0.1:7897; going direct"
           fi
           echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
@@ -1219,7 +1253,8 @@ jobs:
           for i in $(seq 1 60); do
             if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.post-restart.txt" 2>&1 \
               && grep -q "robonix/service/navigation/navigate" "$RUNNER_TEMP/caps.post-restart.txt" \
-              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
+              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt" \
+              && grep -qE "^● explore \[(INACTIVE|ACTIVE)\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
               echo "post-restart atlas ready"
               break
             fi
