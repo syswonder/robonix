@@ -186,6 +186,12 @@ def test_floor_height_comes_from_the_shared_setting():
     print("  [PASS] test_floor_height_comes_from_the_shared_setting")
 
 
+def test_global_map_is_opt_in():
+    assert _detector()._global_map is False
+    assert _detector(global_map=True)._global_map is True
+    print("  [PASS] test_global_map_is_opt_in")
+
+
 def test_global_objects_shape_like_local_ones():
     # A GlobalObject carries uid / class_id / pcd / bbox / clip_ft but none of
     # the local-map bookkeeping (max_prob, observed_num, is_stable), so the map
@@ -210,4 +216,5 @@ if __name__ == "__main__":
     test_tracks_lying_on_the_floor_are_dropped()
     test_lifecycle_overrides_reach_dualmaps_config()
     test_global_objects_shape_like_local_ones()
+    test_global_map_is_opt_in()
     test_floor_height_comes_from_the_shared_setting()

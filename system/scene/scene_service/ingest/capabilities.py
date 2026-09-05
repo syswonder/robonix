@@ -87,6 +87,10 @@ DUALMAP_KEYS: frozenset[str] = frozenset({
     # voxel therefore has to exceed the pose error between keyframes, or two
     # views of one object never overlap and every keyframe starts a new track.
     "downsample_voxel_size", "sim_threshold",
+    # run DualMap's global map too (navigation memory of low-mobility anchors;
+    # drops every other stable track once it leaves view). Off = the local-only
+    # mode DualMap's own Replica evaluation uses, which keeps every stable track
+    "global_map",
 })
 
 

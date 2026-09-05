@@ -138,10 +138,13 @@ system:
     config:
       perception:
         backend: dualmap
-        # Both halves of DualMap run: the local map associates observations
-        # within a class (geometry + CLIP), and a track that becomes stable is
-        # promoted to the global map, which merges across classes by top-down
-        # 2D box overlap. Scene exports the union of the two.
+        # DualMap's local ("concrete") map associates observations by geometry
+        # + CLIP and keeps every stable track; that is the mode its own Replica
+        # evaluation runs in and the default here. Its global ("abstract") map
+        # is a navigation memory: it keeps only low-mobility anchors, merged
+        # across classes by top-down 2D overlap, and drops every other stable
+        # track once it leaves view. Turn it on with global_map: true when the
+        # deployment wants that memory rather than an inventory.
         dualmap:
           # YOLO-World vocabulary for this deployment; omit for DualMap's general indoor list.
           classes: [chair, table, sofa, bed, door, window, lamp, tv, shelf, plant]

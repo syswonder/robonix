@@ -127,6 +127,15 @@ class DualMapDetector(ConceptGraphsDetector):
         # dropped every Replica object below the world origin.
         self._floor_z_override = self._dualmap_cfg.get("floor_z_m")
         self._promoted = 0        # local tracks handed to the global map
+        # DualMap's global ("abstract") map is a navigation memory: only tracks
+        # judged low-mobility (furniture) are promoted into it, and every other
+        # stable track is DROPPED from the local map once it leaves the active
+        # window. That is the right memory for "go to the table", and the wrong
+        # one for an inventory — on Replica it halved the object count and
+        # the segmentation score. DualMap's own Replica evaluation runs
+        # local-only (runner_dataset.yaml), which keeps every stable track; so
+        # does this backend unless a deployment asks for the global map.
+        self._global_map = bool(self._dualmap_cfg.get("global_map", False))
         # DualMap object-lifecycle overrides, passed straight through to its
         # config; only the keys a deployment has a reason to change are exposed.
         self._lifecycle_cfg = {k: int(self._dualmap_cfg[k]) for k in
@@ -244,7 +253,8 @@ class DualMapDetector(ConceptGraphsDetector):
             return False
 
         overrides = [
-            "use_rerun=false", "use_parallel=false", "run_local_mapping_only=false",
+            "use_rerun=false", "use_parallel=false",
+            f"run_local_mapping_only={str(not self._global_map).lower()}",
             "save_local_map=false", "save_global_map=false",
             "save_detection=false", "visualize_detection=false",
             "run_detection=true", f"output_path={out_dir}", f"device={device}",
@@ -279,7 +289,7 @@ class DualMapDetector(ConceptGraphsDetector):
             vis.set_use_rerun(False)
             self._dm = Detector(cfg)
             self._lm = LocalMapManager(cfg)
-            self._gm = GlobalMapManager(cfg)
+            self._gm = GlobalMapManager(cfg) if self._global_map else None
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-dualmap] DualMap init failed: %s", e, exc_info=True)
             return False
@@ -371,7 +381,7 @@ class DualMapDetector(ConceptGraphsDetector):
             # loses every promoted object with it.
             promoted = self._lm.get_global_observations()
             self._lm.clear_global_observations()
-            if promoted:
+            if promoted and self._gm is not None:
                 self._gm.process_observations(promoted)
                 self._promoted += len(promoted)
             self._keyframes += 1
@@ -404,8 +414,9 @@ class DualMapDetector(ConceptGraphsDetector):
         # committed to memory. Promotion keeps the uid (GlobalObject inherits it
         # from the observation), so an object does not change identity when it
         # crosses over.
-        tracks = (list(getattr(self._lm, "local_map", []) or [])
-                  + list(getattr(self._gm, "global_map", []) or []))
+        tracks = list(getattr(self._lm, "local_map", []) or [])
+        if self._gm is not None:
+            tracks += list(getattr(self._gm, "global_map", []) or [])
         for o in tracks:
             d = self._to_map_object(o, dropped)
             if d is None:
