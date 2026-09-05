@@ -138,6 +138,13 @@ if [[ -n "${SCENE_DUALMAP_CLASSES:-}" ]]; then
   [[ -f "${SCENE_DUALMAP_CLASSES}" ]] || { echo "[scene/start] SCENE_DUALMAP_CLASSES=${SCENE_DUALMAP_CLASSES} is not a file" >&2; exit 2; }
   EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_CLASSES}:${SCENE_DUALMAP_CLASSES}:ro")
 fi
+# A DualMap checkout other than the one baked into the image (a patched or
+# newer copy on the host) has to be visible inside the container at the same
+# path the adapter is told to use.
+if [[ -n "${SCENE_DUALMAP_ROOT:-}" ]]; then
+  [[ -d "${SCENE_DUALMAP_ROOT}/utils" ]] || { echo "[scene/start] SCENE_DUALMAP_ROOT=${SCENE_DUALMAP_ROOT} is not a DualMap checkout" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_ROOT}:${SCENE_DUALMAP_ROOT}:ro")
+fi
 if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
   [[ -d "${SCENE_MODELS_DIR}" ]] || { echo "[scene/start] SCENE_MODELS_DIR=${SCENE_MODELS_DIR} is not a directory" >&2; exit 2; }
   EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
