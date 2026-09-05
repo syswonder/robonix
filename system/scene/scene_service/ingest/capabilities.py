@@ -88,6 +88,10 @@ DUALMAP_KEYS: frozenset[str] = frozenset({
     # voxel therefore has to exceed the pose error between keyframes, or two
     # views of one object never overlap and every keyframe starts a new track.
     "downsample_voxel_size", "sim_threshold",
+    # DualMap's own local-map self-merge (merge_every_keyframes) joins two tracks
+    # whose point overlap exceeds merge_sim_threshold; its default of 0.9 assumes
+    # ground-truth poses and never fires under a robot's pose error
+    "merge_sim_threshold",
     # run DualMap's global map too (navigation memory of low-mobility anchors;
     # drops every other stable track once it leaves view). Off = the local-only
     # mode DualMap's own Replica evaluation uses, which keeps every stable track

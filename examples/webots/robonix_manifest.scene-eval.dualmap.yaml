@@ -54,6 +54,14 @@ system:
           # of one object never overlap and every keyframe started a new track
           # (54 of 57 objects had one observation). 5 cm covers that error.
           downsample_voxel_size: 0.05
+          # DualMap's own duplicate merge: two tracks whose point overlap exceeds
+          # merge_sim_threshold are joined every merge_every_keyframes. The
+          # default 0.9 never fired here (65 -> 65 in the log) for the same
+          # reason association failed — pose error — so it is relaxed and run
+          # more often. Keeping tracks alive (above) is what makes recall; this
+          # is what keeps the duplicates that come with it from piling up.
+          merge_sim_threshold: 0.3
+          merge_every_keyframes: 10
         confidence_threshold: 0.30
         max_detections: 30
         stationary_refinement:

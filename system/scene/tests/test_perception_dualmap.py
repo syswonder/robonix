@@ -161,9 +161,10 @@ def test_merged_objects_keep_the_dominant_uid():
 
 
 def test_lifecycle_overrides_reach_dualmaps_config():
-    d = _detector(stable_num=4, active_window_size=30, downsample_voxel_size=0.05)
+    d = _detector(stable_num=4, active_window_size=30, downsample_voxel_size=0.05,
+                  merge_sim_threshold=0.3)
     assert d._lifecycle_cfg == {"stable_num": 4, "active_window_size": 30,
-                                "downsample_voxel_size": 0.05}
+                                "downsample_voxel_size": 0.05, "merge_sim_threshold": 0.3}
     assert _detector()._lifecycle_cfg == {}       # unset: DualMap's own defaults
     print("  [PASS] test_lifecycle_overrides_reach_dualmaps_config")
 

@@ -151,7 +151,7 @@ class DualMapDetector(ConceptGraphsDetector):
         # point overlap at 2 cm, which assumes ground-truth poses; a robot whose
         # SLAM pose is off by 3-10 cm between keyframes never meets it.
         self._lifecycle_cfg.update({k: float(self._dualmap_cfg[k]) for k in
-                                    ("downsample_voxel_size", "sim_threshold")
+                                    ("downsample_voxel_size", "sim_threshold", "merge_sim_threshold")
                                     if self._dualmap_cfg.get(k) is not None})
         self._all_objects: list = []  # every track, for the Replica export
         self._classes_file: Optional[str] = None

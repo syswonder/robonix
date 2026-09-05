@@ -180,6 +180,10 @@ system:
           # downsample_voxel_size (0.02) of the track. The voxel must exceed
           # the SLAM pose error between keyframes or nothing ever associates.
           downsample_voxel_size: 0.05
+          # DualMap's own duplicate merge (every merge_every_keyframes) joins
+          # tracks whose point overlap exceeds merge_sim_threshold (0.9 by
+          # default — never fires under a robot's pose error).
+          merge_sim_threshold: 0.3
 ```
 
 ```bash
