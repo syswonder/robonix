@@ -138,6 +138,10 @@ system:
     config:
       perception:
         backend: dualmap
+        # Both halves of DualMap run: the local map associates observations
+        # within a class (geometry + CLIP), and a track that becomes stable is
+        # promoted to the global map, which merges across classes by top-down
+        # 2D box overlap. Scene exports the union of the two.
         dualmap:
           # YOLO-World vocabulary for this deployment; omit for DualMap's general indoor list.
           classes: [chair, table, sofa, bed, door, window, lamp, tv, shelf, plant]
@@ -152,19 +156,6 @@ system:
           merge_every_keyframes: 20   # DualMap's local-map self-merge cadence (0 = off)
           min_observations: 1         # tracks seen in fewer keyframes stay out of the registry
           stable_only: false          # additionally require DualMap's own stable flag
-          # DualMap associates observations within a class, so one object whose
-          # label flickers becomes several tracks in the same place. Objects
-          # overlapping an already-kept one by this fraction of their own volume
-          # are dropped, best-observed first (0 = off).
-          dedup_overlap: 0.3
-          # A detection with wrong depth is re-registered along the camera ray,
-          # smaller each time: one office run produced eleven "recycling bin"
-          # boxes from 0.27 m down to 0.02 m along a line. Same-class tracks
-          # whose bounding spheres meet (radius sum scaled by this) collapse
-          # into one, and anything whose longest side is under min_extent_m is
-          # not an object at all.
-          dedup_same_class: 1.0
-          min_extent_m: 0.08
           # Height of the floor in the world frame; tracks whose points lie on
           # it are depth noise, not objects (Replica's floor is at -1.5).
           floor_z_m: 0.0

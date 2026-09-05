@@ -86,6 +86,7 @@ class DualMapDetector(ConceptGraphsDetector):
         self._dm_root = os.environ.get("SCENE_DUALMAP_ROOT", "").strip() or _DEFAULT_ROOT
         self._dm: Any = None      # DualMap Detector
         self._lm: Any = None      # DualMap LocalMapManager
+        self._gm: Any = None      # DualMap GlobalMapManager
         self._dm_data_input: Any = None
         self._dm_names: list[str] = []
         self._map_objects = []
@@ -117,28 +118,11 @@ class DualMapDetector(ConceptGraphsDetector):
         # Tracks seen in fewer keyframes than this stay out of the registry (a
         # milder filter than stable_only: one-frame flickers never show up).
         self._min_observations = int(self._dualmap_cfg.get("min_observations", 1))
-        # DualMap associates observations within a class, so one physical object
-        # whose label flickers between YOLO-World classes becomes several tracks
-        # sitting on top of each other (a cabinet also reported as sofa, bathtub
-        # and chair). Nothing downstream can tell those apart from genuinely
-        # stacked objects, so they are collapsed here by 3D overlap, across
-        # classes, keeping the best-observed track. 0 disables it.
-        self._dedup_overlap = float(self._dualmap_cfg.get("dedup_overlap", 0.3))
-        # A detection whose depth is wrong follows the camera ray: the same
-        # object is re-registered further away and smaller every keyframe, which
-        # leaves a trail of same-class tracks that shrink along a line (one
-        # office run produced eleven "recycling bin" boxes from 0.27 m down to
-        # 0.02 m). They rarely overlap enough for the rule above, so tracks of
-        # the same class are collapsed when their bounding spheres meet; the
-        # factor scales that radius sum. 0 disables it.
-        self._dedup_same_class = float(self._dualmap_cfg.get("dedup_same_class", 1.0))
-        # The far end of such a trail is a box a few centimetres across, which
-        # no real object in a room is. Longest side, in metres.
-        self._min_extent_m = float(self._dualmap_cfg.get("min_extent_m", 0.08))
         # Height of the floor in the world frame, and the gate measured from it:
         # a track whose points all lie on (or under) the floor is depth noise,
         # not an object. The same rule guards the concept_graphs backend.
         self._floor_z_m = float(self._dualmap_cfg.get("floor_z_m", 0.0))
+        self._promoted = 0        # local tracks handed to the global map
         # DualMap object-lifecycle overrides, passed straight through to its
         # config; only the keys a deployment has a reason to change are exposed.
         self._lifecycle_cfg = {k: int(self._dualmap_cfg[k]) for k in
@@ -224,6 +208,7 @@ class DualMapDetector(ConceptGraphsDetector):
             import torch
             from hydra import compose, initialize_config_dir
             from hydra.core.global_hydra import GlobalHydra
+            from utils.global_map_manager import GlobalMapManager  # DualMap
             from utils.local_map_manager import LocalMapManager  # DualMap
             from utils.object_detector import Detector  # DualMap
             from utils.types import DataInput  # DualMap
@@ -249,8 +234,9 @@ class DualMapDetector(ConceptGraphsDetector):
             return False
 
         overrides = [
-            "use_rerun=false", "use_parallel=false", "run_local_mapping_only=true",
-            "save_local_map=false", "save_detection=false", "visualize_detection=false",
+            "use_rerun=false", "use_parallel=false", "run_local_mapping_only=false",
+            "save_local_map=false", "save_global_map=false",
+            "save_detection=false", "visualize_detection=false",
             "run_detection=true", f"output_path={out_dir}", f"device={device}",
             f"yolo.model_path={weights['yolo']}", f"sam.model_path={weights['sam']}",
             f"fastsam.model_path={weights['fastsam']}", f"clip.pretrained={weights['mobileclip']}",
@@ -283,6 +269,7 @@ class DualMapDetector(ConceptGraphsDetector):
             vis.set_use_rerun(False)
             self._dm = Detector(cfg)
             self._lm = LocalMapManager(cfg)
+            self._gm = GlobalMapManager(cfg)
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-dualmap] DualMap init failed: %s", e, exc_info=True)
             return False
@@ -365,10 +352,18 @@ class DualMapDetector(ConceptGraphsDetector):
             self._dm.update_data()
             self._lm.set_curr_idx(self._tick_idx)
             self._lm.process_observations(obs)
-            # Local-only mode: objects promoted towards the global map are
-            # not consumed by anyone here, so drop them to keep memory flat.
-            self._lm.get_global_observations()
+            # Both halves of DualMap. The local map associates observations
+            # within a class, using CLIP similarity as well as geometry; a track
+            # that becomes stable is promoted to the global map, which merges by
+            # top-down 2D box overlap ACROSS classes — that is what collapses one
+            # workstation reported as tv + speaker + desk into one object. Running
+            # only the local half (as this adapter first did) throws that away and
+            # loses every promoted object with it.
+            promoted = self._lm.get_global_observations()
             self._lm.clear_global_observations()
+            if promoted:
+                self._gm.process_observations(promoted)
+                self._promoted += len(promoted)
             self._keyframes += 1
             if self._merge_every > 0 and self._keyframes % self._merge_every == 0:
                 before = list(self._lm.local_map)
@@ -393,9 +388,15 @@ class DualMapDetector(ConceptGraphsDetector):
             return
         self._consecutive_failures = 0
         objects, all_objects, dropped = [], [], {"points": 0, "unknown": 0, "observations": 0,
-                                                 "unstable": 0, "floor": 0, "overlap": 0,
-                                                 "too_small": 0}
-        for o in list(getattr(self._lm, "local_map", []) or []):
+                                                 "unstable": 0, "floor": 0}
+        # A promoted object leaves the local map, so the scene is the union of
+        # both: what the robot is looking at now, and what it has already
+        # committed to memory. Promotion keeps the uid (GlobalObject inherits it
+        # from the observation), so an object does not change identity when it
+        # crosses over.
+        tracks = (list(getattr(self._lm, "local_map", []) or [])
+                  + list(getattr(self._gm, "global_map", []) or []))
+        for o in tracks:
             d = self._to_map_object(o, dropped)
             if d is None:
                 continue
@@ -407,18 +408,17 @@ class DualMapDetector(ConceptGraphsDetector):
                 dropped["unstable"] += 1
                 continue
             objects.append(d)
-        objects = self._suppress_overlaps(objects, dropped)
         self._map_objects = objects
         self._all_objects = all_objects
         n = len(objects)
         if n != self._last_lm_size or self._tick_idx % 25 == 0:
             log.info("[scene-dualmap] tick %d: %d observations, %d objects of %d tracks (%.2fs, %d frames skipped, "
                      "dropped: %d few-points %d unknown %d few-observations %d unstable "
-                     "%d on-floor %d too-small %d overlapping)",
+                     "%d on-floor, %d promoted)",
                      self._tick_idx, len(obs) if obs is not None else 0, n, len(self._lm.local_map),
                      time.monotonic() - t0, self._skipped_frames,
                      dropped["points"], dropped["unknown"], dropped["observations"], dropped["unstable"],
-                     dropped["floor"], dropped["too_small"], dropped["overlap"])
+                     dropped["floor"], self._promoted)
             self._last_lm_size = n
         self._tick_idx += 1
         self._project_to_registry()
@@ -549,18 +549,6 @@ class DualMapDetector(ConceptGraphsDetector):
                 bbox = pcd.get_axis_aligned_bounding_box()
             except Exception:  # noqa: BLE001
                 return None
-        # Size gate: the far end of a depth-smeared trail is a box a few
-        # centimetres across, which nothing in a room is. Longest side, so a
-        # thin object (a keyboard, a picture frame) still passes.
-        if self._min_extent_m > 0:
-            try:
-                extent = np.asarray(bbox.get_max_bound()) - np.asarray(bbox.get_min_bound())
-                if float(np.max(extent)) < self._min_extent_m:
-                    if dropped is not None:
-                        dropped["too_small"] += 1
-                    return None
-            except Exception:  # noqa: BLE001
-                pass
         conf = float(getattr(o, "max_prob", 0.0) or 0.0)
         uid = str(getattr(o, "uid", ""))
         clip_ft = getattr(o, "clip_ft", None)
@@ -576,103 +564,6 @@ class DualMapDetector(ConceptGraphsDetector):
             "clip_ft": np.asarray(clip_ft, dtype=np.float32) if clip_ft is not None else None,
             "stable": bool(getattr(o, "is_stable", True)),
         }
-
-    # ── export-time filters ───────────────────────────────────────────
-    @staticmethod
-    def _aabb(entry: dict) -> Optional[tuple]:
-        """(min_xyz, max_xyz) of a map entry's box, or None when unavailable."""
-        import numpy as np
-        bbox = entry.get("bbox")
-        try:
-            lo = np.asarray(bbox.get_min_bound(), dtype=float)
-            hi = np.asarray(bbox.get_max_bound(), dtype=float)
-        except Exception:  # noqa: BLE001
-            return None
-        if lo.shape != (3,) or hi.shape != (3,) or not np.all(hi >= lo):
-            return None
-        return lo, hi
-
-    @classmethod
-    def _overlap_ratio(cls, a: dict, b: dict) -> float:
-        """Intersection volume over the SMALLER box's volume.
-
-        Deliberately not IoU: the failure being removed is one object reported
-        several times with different labels and, often, very different extents
-        (a 0.2 m "sink" inside a 1.2 m "cabinet"). IoU is near zero there, while
-        containment is near one, which is exactly the case to collapse.
-        """
-        import numpy as np
-        ba, bb = cls._aabb(a), cls._aabb(b)
-        if ba is None or bb is None:
-            return 0.0
-        lo = np.maximum(ba[0], bb[0])
-        hi = np.minimum(ba[1], bb[1])
-        span = np.clip(hi - lo, 0.0, None)
-        inter = float(np.prod(span))
-        if inter <= 0.0:
-            return 0.0
-        vols = [float(np.prod(np.clip(x[1] - x[0], 1e-6, None))) for x in (ba, bb)]
-        return inter / min(vols)
-
-    @classmethod
-    def _spheres_meet(cls, a: dict, b: dict, factor: float) -> bool:
-        """Do the two entries' bounding spheres overlap (scaled by `factor`)?
-
-        Used only between entries of the same class, where the question is not
-        "is one inside the other" but "are these two the same thing registered
-        twice a little apart".
-        """
-        import numpy as np
-        ba, bb = cls._aabb(a), cls._aabb(b)
-        if ba is None or bb is None:
-            return False
-        ca, cb = (ba[0] + ba[1]) / 2.0, (bb[0] + bb[1]) / 2.0
-        ra = float(np.linalg.norm(ba[1] - ba[0])) / 2.0
-        rb = float(np.linalg.norm(bb[1] - bb[0])) / 2.0
-        return float(np.linalg.norm(ca - cb)) <= factor * (ra + rb)
-
-    def _duplicate_of(self, cand: dict, kept: dict) -> bool:
-        """Is `cand` the same physical object as an already-kept entry?
-
-        Two independent signatures: one box largely inside another whatever the
-        labels (a label that flickers forks the track), and two same-class boxes
-        whose bounding spheres meet (a depth-smeared trail of one object).
-        """
-        if self._dedup_overlap > 0 and self._overlap_ratio(cand, kept) >= self._dedup_overlap:
-            return True
-        return (self._dedup_same_class > 0
-                and cand["class_name"] == kept["class_name"]
-                and self._spheres_meet(cand, kept, self._dedup_same_class))
-
-    def _suppress_overlaps(self, objects: list[dict], dropped: Optional[dict] = None) -> list[dict]:
-        """Collapse tracks that occupy the same space, whatever their labels.
-
-        Objects are considered best-first (most keyframes, then most points, a
-        proxy for how well the track is supported) and one is dropped when it
-        overlaps an already-kept object by more than ``dedup_overlap`` of the
-        smaller box's volume. Returns the kept entries; ``dropped["overlap"]`` counts the rest.
-        Disabled when ``dedup_overlap`` is 0.
-        """
-        if (self._dedup_overlap <= 0 and self._dedup_same_class <= 0) or len(objects) < 2:
-            return objects
-        ranked = sorted(objects, key=lambda d: (d["num_detections"], d["n_points"]), reverse=True)
-        # Single-link clustering, not "compare against the survivors": a smear
-        # is a chain, where each copy only meets its neighbour, so a candidate
-        # is absorbed when it matches ANY member of a cluster — otherwise the
-        # far end of the chain outlives the copy that linked it.
-        clusters: list[list[dict]] = []
-        for cand in ranked:
-            for members in clusters:
-                if any(self._duplicate_of(cand, m) for m in members):
-                    members.append(cand)
-                    if dropped is not None:
-                        dropped["overlap"] += 1
-                    break
-            else:
-                clusters.append([cand])
-        # Preserve the local map's order so the registry sees stable ordering.
-        keep_ids = {id(members[0]) for members in clusters}
-        return [o for o in objects if id(o) in keep_ids]
 
     # ── text embedding (MobileCLIP shared with the detector) ──────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
