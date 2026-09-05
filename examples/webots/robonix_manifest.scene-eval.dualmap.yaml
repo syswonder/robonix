@@ -42,6 +42,12 @@ system:
           # and raising it to 20 stopped promotion altogether (0 promoted in
           # 180 s), which is where the cross-class merge happens.
           stable_num: 3
+          # Keep tracks around long enough to be re-observed: with the global
+          # map off these two no longer delay anything, they only decide how
+          # long an unseen track survives (10 / 5 deleted most objects before
+          # the robot came back to them).
+          active_window_size: 40
+          max_pending_count: 20
           # Association gates point overlap at downsample_voxel_size (2 cm by
           # default, which assumes ground-truth poses). This deployment's SLAM
           # pose is off by 3-7 cm (P95) between keyframes, so at 2 cm two views

@@ -159,8 +159,9 @@ system:
           merge_every_keyframes: 20   # DualMap's local-map self-merge cadence (0 = off)
           min_observations: 1         # tracks seen in fewer keyframes stay out of the registry
           stable_only: false          # additionally require DualMap's own stable flag
-          # Height of the floor in the world frame; tracks whose points lie on
-          # it are depth noise, not objects (Replica's floor is at -1.5).
+          # Optional floor gate: drop tracks whose points all lie within 5 cm
+          # of the floor. Off by default — it also drops rugs and carpets.
+          floor_gate: false
           floor_z_m: 0.0
           # DualMap's object lifecycle, passed through to its own config. A
           # track needs stable_num observations to become stable (default 8,

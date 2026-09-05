@@ -126,6 +126,12 @@ class DualMapDetector(ConceptGraphsDetector):
         # own floor (-1.51 m). A backend-private default of 0 here silently
         # dropped every Replica object below the world origin.
         self._floor_z_override = self._dualmap_cfg.get("floor_z_m")
+        # Off by default. On Replica the gate deleted every rug and carpet
+        # (2-5 cm above the floor) and took the rug class from 0.16 IoU to 0;
+        # the Webots "bed under the floor" it was written for is a depth error
+        # that association now absorbs. A deployment with real floor noise can
+        # turn it on.
+        self._floor_gate = bool(self._dualmap_cfg.get("floor_gate", False))
         self._promoted = 0        # local tracks handed to the global map
         # DualMap's global ("abstract") map is a navigation memory: only tracks
         # judged low-mobility (furniture) are promoted into it, and every other
@@ -557,8 +563,8 @@ class DualMapDetector(ConceptGraphsDetector):
         # real object has some height above the floor; measure it at the 90th
         # percentile so a few stray points below the plane do not save a track.
         try:
-            z = np.asarray(pcd.points, dtype=float)[:, 2]
-            if float(np.percentile(z, 90)) - self._floor_z_m < 0.05:
+            z = np.asarray(pcd.points, dtype=float)[:, 2] if self._floor_gate else None
+            if z is not None and float(np.percentile(z, 90)) - self._floor_z_m < 0.05:
                 if dropped is not None:
                     dropped["floor"] += 1
                 return None

@@ -75,8 +75,9 @@ DUALMAP_KEYS: frozenset[str] = frozenset({
     # registry filters: tracks seen in fewer keyframes than min_observations
     # (default 2) or, with stable_only, not yet marked stable by DualMap stay out
     "stable_only", "min_observations",
-    # drop tracks whose points lie on the floor plane (depth noise)
-    "floor_z_m",
+    # drop tracks whose points lie on the floor plane (depth noise); off by
+    # default because it also drops rugs and carpets
+    "floor_gate", "floor_z_m",
     # DualMap object lifecycle, sized for its dataset replay by default: how many
     # observations make a track stable, how many recent frames count as active,
     # and how many rounds an unstable track survives outside that window

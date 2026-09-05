@@ -108,7 +108,7 @@ def test_plan_routes_metric_tier_to_backend():
 
 def test_tracks_lying_on_the_floor_are_dropped():
     import numpy as np
-    d = _detector()
+    d = _detector(floor_gate=True)
     d._dm_names = ["bed"]
 
     def obj(z):
@@ -121,7 +121,7 @@ def test_tracks_lying_on_the_floor_are_dropped():
     assert d._to_map_object(obj(np.full(200, 0.02)), dropped) is None       # on the floor
     assert dropped["floor"] == 2
     assert d._to_map_object(obj(np.linspace(0.0, 0.8, 200)), dropped) is not None
-    raised = _detector(floor_z_m=-1.5)                                     # Replica: floor at -1.5
+    raised = _detector(floor_gate=True, floor_z_m=-1.5)                    # Replica: floor at -1.5
     raised._dm_names = d._dm_names
     assert raised._to_map_object(obj(np.full(200, -1.48)), dropped) is None
     assert raised._to_map_object(obj(np.linspace(-1.5, -0.7, 200)), dropped) is not None
@@ -173,17 +173,27 @@ def test_floor_height_comes_from_the_shared_setting():
     # perception setting; a backend-private default of 0 dropped every object
     # below the world origin as "floor noise".
     import numpy as np
-    d = _detector()
+    d = _detector(floor_gate=True)
     d._dm_names = ["chair"]
     d.cfg = {"floor_z_m": -1.51}
     assert d._floor_z_m == -1.51
     o = _obj("u", 0, n=200)
     o.pcd.points = [(0.0, 0.0, float(v)) for v in np.linspace(-1.5, -0.9, 200)]
     assert d._to_map_object(o) is not None            # a chair standing on that floor
-    explicit = _detector(floor_z_m=0.0)
+    explicit = _detector(floor_gate=True, floor_z_m=0.0)
     explicit.cfg = {"floor_z_m": -1.51}
     assert explicit._floor_z_m == 0.0                 # the backend's own value wins
     print("  [PASS] test_floor_height_comes_from_the_shared_setting")
+
+
+def test_floor_gate_is_off_unless_asked():
+    d = _detector()
+    d._dm_names = ["rug"]
+    o = _obj("u", 0, n=200)
+    o.pcd.points = [(0.0, 0.0, 0.02)] * 200        # a rug: 2 cm above the floor
+    assert d._to_map_object(o) is not None
+    assert _detector(floor_gate=True)._floor_gate is True
+    print("  [PASS] test_floor_gate_is_off_unless_asked")
 
 
 def test_global_map_is_opt_in():
@@ -217,4 +227,5 @@ if __name__ == "__main__":
     test_lifecycle_overrides_reach_dualmaps_config()
     test_global_objects_shape_like_local_ones()
     test_global_map_is_opt_in()
+    test_floor_gate_is_off_unless_asked()
     test_floor_height_comes_from_the_shared_setting()
