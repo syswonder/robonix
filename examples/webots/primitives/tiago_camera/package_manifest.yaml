@@ -21,17 +21,15 @@ stop: |
 capabilities:
   - name: robonix/primitive/camera/snapshot
   - name: robonix/primitive/camera/depth_snapshot
-  - name: robonix/primitive/camera/driver
   # ROS2 streams (data plane). Topic names are runtime-resolved
   # through atlas — consumers (scene 3D fusion, mapping RGBD ingest)
   # discover them via QueryCapabilities, they never read the topic
   # strings declared in the driver source.
   - name: robonix/primitive/camera/rgb
   - name: robonix/primitive/camera/depth
-  # Static `base_link → camera_optical` transform. Latched (TRANSIENT_LOCAL)
-  # so late subscribers receive the cached value. Lets scene compose
-  # T(world ← camera_optical) = service/map/pose ⊕ camera/extrinsics
-  # without touching tf2 at all.
+  # Compatibility `base_link → camera_optical` transform. Scene uses the
+  # complete TF tree first and composes pose + this latched transform only
+  # when that authoritative lookup is unavailable.
   - name: robonix/primitive/camera/extrinsics
   # Static pinhole intrinsics (sensor_msgs/CameraInfo, latched). Lets
   # scene back-project depth with the real camera's K instead of a

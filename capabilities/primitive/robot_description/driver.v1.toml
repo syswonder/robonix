@@ -1,9 +1,12 @@
+# Legacy namespace-specific lifecycle contract for robot-description providers.
+# Existing manifests remain supported; new packages omit Driver and use the
+# shared contract automatically. A package must not declare both contracts.
 [contract]
 id      = "robonix/primitive/robot_description/driver"
 version = "1"
 kind    = "primitive"
 idl     = "lifecycle/srv/Driver.srv"
-description = "Lifecycle control interface for robot-description primitive providers."
+description = "Legacy-compatible lifecycle interface for robot-description primitive providers."
 
 [mode]
 type = "rpc"

@@ -13,10 +13,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
-
 from scene_service.scene_graph.image_relations import (
     IMAGE_RELATION_VOCAB,
     ImageRelationInferer,
+    ImageRelationResult,
     annotate_frame,
     build_image_relation_user_text,
     parse_image_relations,
@@ -122,7 +122,6 @@ def test_annotate_frame():
 def test_chat_json_image_body():
     """chat_json builds multimodal user content when images= is passed."""
     import httpx
-
     from scene_service.scene_graph.llm_client import SceneGraphLLMClient
 
     captured: dict = {}
@@ -228,15 +227,19 @@ def test_builder_dispatch():
                     return (np.zeros((480, 640, 3), dtype=np.uint8), _K(), np.eye(4))
 
             class _FakeInf:
+                def __init__(self):
+                    self.result = ImageRelationResult(tuple(inj), "processed")
+
                 async def infer(self, nodes, bundle):
-                    return inj
+                    return self.result
 
             store = SceneGraphStore(cache_dir=tmpdir)
             builder = SceneGraphBuilder(
                 registry=registry, captioner=NodeCaptioner(),
                 relation_inferer=RelationInferer(client), store=store,
                 config=cfg, perception=_Perc())
-            builder.image_inferer = _FakeInf()
+            fake_inferer = _FakeInf()
+            builder.image_inferer = fake_inferer
             loop.run_until_complete(builder.rebuild_once())
             sem = store.get_semantic_edges()
             assert any(
@@ -244,6 +247,20 @@ def test_builder_dispatch():
                 and e.source_id == "scene.object.monitor_001"
                 for e in sem
             ), f"image-path edge expected in semantic slice, got {sem}"
+
+            # Backoff made no observation, so repeated no-call rounds preserve
+            # the established edge without consuming its stale-round budget.
+            fake_inferer.result = ImageRelationResult((), "backoff")
+            loop.run_until_complete(builder.rebuild_once())
+            loop.run_until_complete(builder.rebuild_once())
+            sem = store.get_semantic_edges()
+            assert len(sem) == 1 and sem[0].stale_rounds == 0
+
+            # A real attempted failure advances normal bounded hysteresis once.
+            fake_inferer.result = ImageRelationResult((), "failed")
+            loop.run_until_complete(builder.rebuild_once())
+            sem = store.get_semantic_edges()
+            assert len(sem) == 1 and sem[0].stale_rounds == 1
 
             # Text fallback: no perception → image pass returns None → text
             # path runs; with no LLM creds it yields no semantic edges.
@@ -307,7 +324,7 @@ def test_builder_transient_blip_preserves_graph():
 
             class _FakeInf:
                 async def infer(self, nodes, bundle):
-                    return inj
+                    return ImageRelationResult(tuple(inj), "processed")
 
             cfg = SceneGraphConfig()
             cfg.caption_enabled = False

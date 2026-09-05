@@ -13,8 +13,10 @@ dependencies = [
     "numpy>=1.26",
     "mcp",
     "fastmcp",
-    "grpcio>=1.81.1",
-    "grpcio-tools>=1.81.1",
+    # Must match the runtime grpcio the rest of the workspace pins, or
+    # RegisterService fails on a version skew.
+    "grpcio==1.80.0",
+    "grpcio-tools==1.80.0",
     "protobuf",
     "uvicorn",
     "robonix-api",

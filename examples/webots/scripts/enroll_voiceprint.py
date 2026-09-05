@@ -24,7 +24,6 @@ def _repo_root() -> Path:
 
 def _add_paths(repo: Path) -> None:
     sys.path.insert(0, str(repo / "pylib" / "robonix-api"))
-    sys.path.insert(0, str(repo / "examples" / "webots" / "primitives" / "audio_client_bridge" / "rbnx-build" / "codegen" / "proto_gen"))
     sys.path.insert(0, str(repo / "services" / "voiceprint" / "rbnx-build" / "codegen" / "proto_gen"))
 
 

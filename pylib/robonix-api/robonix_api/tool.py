@@ -134,10 +134,12 @@ def mcp_contract(
     (see executor/dispatch/mcp.rs `mcp_tool_name`). They must match; we
     enforce that by deriving from a single source.
 
-    Stashes the codegen IO classes + contract id on the original handler:
-        fn._robonix_input_cls
-        fn._robonix_output_cls
-        fn._robonix_contract_id
+    The decorator stores these attributes on the original handler:
+
+    * ``_robonix_input_cls``
+    * ``_robonix_output_cls``
+    * ``_robonix_contract_id``
+
     The provider framework picks these up via attribute reflection during run().
     """
     def decorator(user_fn: Callable[..., Any]) -> Callable[..., Any]:

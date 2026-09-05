@@ -41,3 +41,11 @@ def test_embedded_user_script_is_valid_javascript():
         handle.write(script)
         handle.flush()
         subprocess.run([node, "--check", handle.name], check=True)
+
+
+def test_robot_marker_is_high_contrast_and_directional():
+    html = _user_html()
+    assert "const robotMarkerNose = 24" in html
+    assert "ctx.rotate(-yaw)" in html
+    assert "ctx.strokeStyle = '#ffffff'" in html
+    assert "ctx.fillStyle = '#ff5a1f'" in html

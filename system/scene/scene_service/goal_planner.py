@@ -205,8 +205,12 @@ def _cells_nearest_to(
     origin_y: float,
     target_x: float,
     target_y: float,
-) -> Iterable[tuple[float, float, int, int]]:
-    """Yield grid cells in increasing distance from a target point."""
+) -> Iterable[tuple[float, float]]:
+    """Yield bounding-box cell centres in increasing distance from a target.
+
+    The priority flood only retains the explored frontier, so a safe pose near
+    the room centroid can be returned without sorting or testing the full room.
+    """
     start_gx = min(
         max(math.floor((target_x - origin_x) / resolution), min_gx),
         max_gx,
@@ -219,6 +223,7 @@ def _cells_nearest_to(
     visited: set[tuple[int, int]] = set()
 
     def push(gx: int, gy: int) -> None:
+        """Add one in-bounds cell to the distance-ordered frontier."""
         if not (min_gx <= gx <= max_gx and min_gy <= gy <= max_gy):
             return
         if (gx, gy) in visited:
@@ -232,7 +237,7 @@ def _cells_nearest_to(
     push(start_gx, start_gy)
     while pending:
         _distance_sq, x, y, gx, gy = heapq.heappop(pending)
-        yield x, y, gx, gy
+        yield x, y
         push(gx - 1, gy)
         push(gx + 1, gy)
         push(gx, gy - 1)
@@ -278,7 +283,7 @@ def room_goal(
         target_x=centroid_x,
         target_y=centroid_y,
     )
-    for x, y, _gx, _gy in cells:
+    for x, y in cells:
         for yaw in headings:
             candidate = transformed_footprint(footprint, x, y, yaw)
             if not polygon_inside_polygon(candidate, room):

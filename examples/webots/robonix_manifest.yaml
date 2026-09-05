@@ -6,6 +6,10 @@ name: robonix-webots-example-deploy
 # Load later switches mapping to localization mode and binds scene objects +
 # room annotations to the selected saved map. Do not set SCENE_MAP_ID here: a
 # static default would make a first run look like a loaded map.
+# Webots already owns robot_state_publisher and publishes /robot_description,
+# /tf, and /tf_static. Do not add robot-description-rbnx to this simulator
+# manifest; the generic primitive is for deployments without another URDF/TF
+# publisher.
 
 # boot in sequence: system -> soma+scene -> execution -> interaction
 system:
@@ -17,51 +21,45 @@ system:
     # Empty when boot is invoked directly, so rbnx falls back to ./soma.yaml.
     # examples/webots/boot.sh sets this to soma.full.yaml for the full model.
     robot_yaml: ${ROBONIX_SOMA_ROBOT_YAML}
+    # Webots keeps ROS 2 inside the simulator container. Soma still owns and
+    # exposes the state; only its private topic reader runs beside ROS 2.
+    runtime_reader_command:
+      - docker
+      - exec
+      - robonix_tiago_sim
+      - bash
+      - -lc
+      - source /opt/ros/humble/setup.bash && exec python3 -u /robonix_runtime/soma/soma_runtime_ros.py /robonix_runtime/soma/soma_runtime_sources.json
   # soma+scene layer
-  scene:
-    log: info
-    camera_frame: head_front_camera_rgb_optical_frame
+  scene: {}
   # execution layer
   executor:
-    listen: 127.0.0.1:50061
-    log: info
+    # robonix-client polls Executor for authoritative active RTDL plans.
+    # Bind externally on trusted LAN/Tailscale deployments.
+    listen: 0.0.0.0:50061
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071
-    log: debug
     vlm:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
-      api_format: openai
   # health monitoring layer
   vitals:
     listen: 127.0.0.1:50093
     log: info
   liaison:
     listen: 0.0.0.0:50081
-    log: info
-    # Disabled until the operator enables it from robonix-client. The client
-    # then supplies its persisted input/output provider selection; no client
-    # address is stored in this deployment.
-    handsfree_enabled: false
 
 # after booted all the system components, start the devices (primitives)
 # the robonix boot "device tree"
 primitive:
   - name: tiago_chassis
     path: ./primitives/tiago_chassis
-    config:
-      # example place holders
-      can_port: /dev/can0
-      odom_frame: odom
-      base_frame: base_link
+    config: {}
   - name: tiago_camera
     path: ./primitives/tiago_camera
     config:
-      # example place holders
-      serial_no: 1234567890
-      fps: 30
       width: 640
       height: 480
       # Webots Tiago head camera calibration for the intrinsics contract.
@@ -71,7 +69,6 @@ primitive:
       fy: 554.0
       cx: 320.0
       cy: 240.0
-      frame_id: head_front_camera_rgb_optical_frame
       # First-RGB-frame wait at INIT. Webots under a CPU-starved boot (all
       # drivers initialising at once) can take well over a minute to deliver
       # the first frame — lidar alone routinely needs ~70s — so the default
@@ -83,6 +80,7 @@ primitive:
       # example place holders
       update_rate: 10
       frame_id: lidar
+      sentinel_timeout_s: 150
   # Deterministic simulated hardware telemetry consumed by Soma and Vitals.
   # Keep scenario=normal for the current demo; the field is reserved as the
   # stable entry point for future fault-injection profiles.
@@ -99,16 +97,16 @@ primitive:
   # ── audio mic/speaker source ─────────────────────────────────────────────
   # Local ALSA provider. It remains available for robot-local audio.
   - name: audio_driver
-    path: ./primitives/audio_driver
+    url: https://github.com/syswonder/primitive-audio-driver-rbnx
+    branch: main
     config: {}
   # Reverse bridge for a robonix-client audio route. It advertises its
   # endpoint through Atlas and waits for the client to connect, so neither
   # this manifest nor Liaison stores a client IP.
   - name: audio_client_bridge
-    path: ./primitives/audio_client_bridge
-    config:
-      transport: reverse
-      listen_port: 60002
+    url: https://github.com/syswonder/primitive-audio-client-bridge-rbnx
+    branch: main
+    config: {}
 
 # after booted all the primitives, start the services
 service:
@@ -126,8 +124,7 @@ service:
   # queries it for relevant past context when planning.
   - name: memory
     path: ${ROBONIX_SOURCE_PATH}/services/memsearch
-    config:
-      backend: sqlite
+    config: {}
 
   # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
   # liaison's voice loop connects to. The selected audio provider is supplied
@@ -136,12 +133,15 @@ service:
   - name: speech
     path: ${ROBONIX_SOURCE_PATH}/services/speech
     config:
+      # Empty/unset SPEECH_BACKEND preserves the local backend. Set it to
+      # tencent before build+boot for the lightweight cloud path.
+      speech_backend: ${SPEECH_BACKEND}
       disable_whisper: true
       funasr_device: cuda
       tts_voice: zh-CN-XiaoxiaoNeural
-      # CI and headless Webots have no connected reverse-audio client. Keep
-      # the bridge available, but send default speech to the local provider.
       default_speaker_provider_id: audio_driver
+      tencent_asr_appid: ${TENCENT_ASR_APPID}
+      tencent_tts_voice_type: 502003
 
   # voiceprint — ECAPA-TDNN speaker identification. Provides
   # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
@@ -161,6 +161,7 @@ service:
       use_sim_time: true
       # Fuse planar lidar and registered depth into the 2-D occupancy grid.
       occupancy_sources: [lidar, depth]
+      # Complete simulator tuning is owned by this deployment repository.
       # RTAB-Map also consumes RGB-D and the chassis odometry for SLAM.
       rtabmap_inputs: [lidar, rgbd, odom]
       params_file: config/rtabmap_params.yaml
@@ -176,8 +177,8 @@ service:
   # (mapping/occupancy_grid), /odom (chassis/odom), /scan (lidar/lidar) —
   # and drives /cmd_vel via Nav2's navigate_to_pose action. Runs in the
   # `robonix-nav2` docker image (built by `rbnx build`, so the host needs
-  # no ROS2). The complete simulator configuration is deployment-owned under
-  # config/. Listed after
+  # no ROS2). The complete simulator Nav2 configuration is deployment-owned
+  # under config/. Listed after
   # mapping (its /map provider); on_init returns Deferred until mapping is
   # up, so order is a convenience, not a hard requirement.
   - name: nav2
@@ -209,7 +210,4 @@ skill:
   - name: explore
     url: https://github.com/syswonder/skill-explore-rbnx
     branch: main
-    config:
-      # example place holders
-      explore_mode: frontier
-      timeout_s: 600
+    config: {}

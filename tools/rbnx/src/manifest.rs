@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 /// is also accepted by [`detect_manifest_path`].
 pub const MANIFEST_FILE: &str = "package_manifest.yaml";
 pub const LEGACY_MANIFEST_FILE: &str = "robonix_manifest.yaml";
+pub const SHARED_LIFECYCLE_DRIVER_CONTRACT: &str = "robonix/lifecycle/driver";
 
 /// Cache directory name for a URL-backed deploy package.
 ///
@@ -74,7 +75,13 @@ pub fn prepare_deployment_manifest(
     Ok(root)
 }
 
-/// Validate Atlas provider identities owned by deployment package entries.
+/// Validate package instance identities in one deployment.
+///
+/// Every primitive, service, and skill entry ``name`` becomes an Atlas provider
+/// id. The ids must therefore be non-empty, whitespace-normalized, and unique
+/// across package sections. Built-in system processes resolve their provider
+/// ids through component-specific configuration and are checked against the
+/// live Atlas registry when package startup begins.
 pub fn validate_deployment_instance_names(root: &serde_yaml::Value) -> Result<()> {
     let mut seen = HashSet::new();
     let mut record = |name: &str, location: &str| -> Result<()> {
@@ -142,6 +149,65 @@ pub fn expand_deployment_env(s: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Split deployment-owned package fields from a non-builtin `system:`
+/// package's runtime configuration.
+///
+/// The canonical shape mirrors primitive/service/skill entries:
+/// `manifest:` selects the package manifest and nested `config:` is delivered
+/// through Driver(CMD_INIT). Historical system entries put config keys beside
+/// `manifest`; keep accepting those keys with a migration warning. If both
+/// forms are present, nested `config:` wins on duplicate keys so deployments
+/// can migrate incrementally without changing runtime values.
+pub fn split_system_package_config(
+    value: &serde_yaml::Value,
+) -> Result<(Option<String>, serde_yaml::Value)> {
+    let Some(source) = value.as_mapping() else {
+        return Ok((None, value.clone()));
+    };
+    let mut fields = source.clone();
+    let manifest_key = serde_yaml::Value::String("manifest".to_string());
+    let config_key = serde_yaml::Value::String("config".to_string());
+    let manifest = match fields.remove(&manifest_key) {
+        Some(raw_manifest) => Some(
+            raw_manifest
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("system package `manifest` must be a non-empty string")
+                })?
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    let nested = fields.remove(&config_key);
+    if nested.is_none() {
+        if !fields.is_empty() {
+            warn!(
+                "system package uses deprecated flat runtime config keys; move them under `config:` (flat keys remain supported for compatibility)"
+            );
+        }
+        return Ok((manifest, serde_yaml::Value::Mapping(fields)));
+    }
+
+    let nested = nested.expect("checked as present above");
+    let nested = match nested {
+        serde_yaml::Value::Null => serde_yaml::Mapping::new(),
+        serde_yaml::Value::Mapping(mapping) => mapping,
+        _ => anyhow::bail!("system package `config` must be a mapping"),
+    };
+    if !fields.is_empty() {
+        warn!(
+            "system package mixes deprecated flat runtime config keys with nested `config:`; nested values take precedence"
+        );
+    }
+    for (key, value) in nested {
+        fields.insert(key, value);
+    }
+    Ok((manifest, serde_yaml::Value::Mapping(fields)))
 }
 
 fn expand_deployment_yaml(value: &mut serde_yaml::Value) {
@@ -419,6 +485,37 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
 }
 
 impl Manifest {
+    /// Return the Driver written in `capabilities:`, if any.
+    pub fn explicit_lifecycle_driver_contract(&self) -> Result<Option<&str>> {
+        let drivers = self
+            .capabilities
+            .iter()
+            .filter(|capability| capability.name.ends_with("/driver"))
+            .map(|capability| capability.name.as_str())
+            .collect::<Vec<_>>();
+        if drivers.len() > 1 {
+            anyhow::bail!(
+                "package '{}' declares multiple lifecycle Driver contracts: {}; declare at most one shared or legacy Driver, never both",
+                self.package.name,
+                drivers.join(", ")
+            );
+        }
+        Ok(drivers.first().copied())
+    }
+
+    /// Resolve the lifecycle contract selected by this package manifest.
+    ///
+    /// Omission selects the shared Driver so every current provider has a
+    /// managed lifecycle. An explicitly declared legacy namespace Driver is
+    /// preserved exactly. Runtime launchers may select the exact legacy
+    /// namespace Driver when an older generated package lacks the shared
+    /// binding; if neither binding exists, startup fails.
+    pub fn selected_lifecycle_driver_contract(&self) -> Result<&str> {
+        Ok(self
+            .explicit_lifecycle_driver_contract()?
+            .unwrap_or(SHARED_LIFECYCLE_DRIVER_CONTRACT))
+    }
+
     pub fn validate_and_summarize(&self) -> Result<PackageSummary> {
         if self.manifest_version == 0 {
             anyhow::bail!("Invalid 'manifestVersion': must be >= 1");
@@ -444,6 +541,10 @@ impl Manifest {
                  split into multiple packages."
             );
         }
+
+        // Validate lifecycle selection in every package entry point (build,
+        // install, start and validate), before any provider is launched.
+        self.selected_lifecycle_driver_contract()?;
 
         if self.is_legacy {
             warn!(
@@ -494,41 +595,197 @@ capabilities: []
     }
 
     #[test]
-    fn deployment_instance_names_are_unique_across_sections() {
-        let valid: serde_yaml::Value =
-            serde_yaml::from_str("primitive:\n  - name: camera\nservice:\n  - name: navigation\n")
-                .unwrap();
-        validate_deployment_instance_names(&valid).unwrap();
+    fn system_package_manifest_is_separate_from_runtime_config() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+manifest: package_manifest.jetson-native.yaml
+config:
+  camera_provider_id: front_camera
+  web_port: 50107
+"#,
+        )
+        .unwrap();
 
-        let duplicate: serde_yaml::Value =
-            serde_yaml::from_str("primitive:\n  - name: camera\nskill:\n  - name: camera\n")
-                .unwrap();
-        assert!(
-            validate_deployment_instance_names(&duplicate)
-                .unwrap_err()
-                .to_string()
-                .contains("duplicate deployment instance name 'camera'")
+        let (manifest, config) = split_system_package_config(&value).unwrap();
+
+        assert_eq!(
+            manifest.as_deref(),
+            Some("package_manifest.jetson-native.yaml")
         );
+        assert_eq!(config["camera_provider_id"], "front_camera");
+        assert_eq!(config["web_port"], 50107);
+        assert!(config.get("manifest").is_none());
     }
 
     #[test]
-    fn deployment_instance_name_is_required_and_normalized() {
-        let missing: serde_yaml::Value =
-            serde_yaml::from_str("primitive:\n  - path: camera\n").unwrap();
-        assert!(
-            validate_deployment_instance_names(&missing)
-                .unwrap_err()
-                .to_string()
-                .contains("must declare a non-empty `name`")
+    fn legacy_system_package_config_is_unchanged() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+camera_provider_id: front_camera
+web_port: 50107
+"#,
+        )
+        .unwrap();
+
+        let (manifest, config) = split_system_package_config(&value).unwrap();
+
+        assert!(manifest.is_none());
+        assert_eq!(config, value);
+    }
+
+    #[test]
+    fn nested_system_config_wins_during_incremental_migration() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+manifest: package_manifest.jetson-native.yaml
+camera_provider_id: legacy_camera
+legacy_only: kept
+config:
+  camera_provider_id: front_camera
+  web_port: 50107
+"#,
+        )
+        .unwrap();
+
+        let (manifest, config) = split_system_package_config(&value).unwrap();
+
+        assert_eq!(
+            manifest.as_deref(),
+            Some("package_manifest.jetson-native.yaml")
+        );
+        assert_eq!(config["camera_provider_id"], "front_camera");
+        assert_eq!(config["legacy_only"], "kept");
+        assert_eq!(config["web_port"], 50107);
+        assert!(config.get("manifest").is_none());
+        assert!(config.get("config").is_none());
+    }
+
+    #[test]
+    fn system_package_config_rejects_non_mapping_values() {
+        let value: serde_yaml::Value = serde_yaml::from_str("config: front_camera\n").unwrap();
+        let error = split_system_package_config(&value).unwrap_err();
+        assert!(error.to_string().contains("`config` must be a mapping"));
+    }
+
+    #[test]
+    fn system_package_manifest_rejects_non_string_values() {
+        let value: serde_yaml::Value = serde_yaml::from_str("manifest: 42\n").unwrap();
+        let error = split_system_package_config(&value).unwrap_err();
+        assert!(error.to_string().contains("must be a non-empty string"));
+    }
+
+    #[test]
+    fn deployment_instance_names_are_unique_across_sections() {
+        let valid: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+system:
+  scene: {}
+primitive:
+  - name: front_camera
+    path: camera
+  - name: wrist_camera
+    path: camera
+service:
+  - name: navigation
+    path: navigation
+"#,
+        )
+        .unwrap();
+        validate_deployment_instance_names(&valid).unwrap();
+
+        let duplicate: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+system:
+  scene: {}
+primitive:
+  - name: scene
+    path: camera
+service:
+  - name: scene
+    path: scene
+"#,
+        )
+        .unwrap();
+        let error = validate_deployment_instance_names(&duplicate)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate deployment instance name 'scene'"));
+    }
+
+    #[test]
+    fn deployment_instance_names_reject_outer_whitespace() {
+        let manifest: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+primitive:
+  - name: " front_camera "
+    path: camera
+"#,
+        )
+        .unwrap();
+        let error = validate_deployment_instance_names(&manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must not contain leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn deployment_package_instance_name_is_required() {
+        let manifest: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+primitive:
+  - path: camera
+"#,
+        )
+        .unwrap();
+        let error = validate_deployment_instance_names(&manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("primitive[0] must declare a non-empty `name`"));
+    }
+
+    #[test]
+    fn lifecycle_driver_omission_selects_shared_and_explicit_legacy_is_preserved() {
+        let manifest_with = |capabilities: Vec<&str>| Manifest {
+            package: Package {
+                name: "test.package".to_string(),
+                ..Package::default()
+            },
+            capabilities: capabilities
+                .into_iter()
+                .map(|name| CapabilityRef {
+                    name: name.to_string(),
+                    path: None,
+                })
+                .collect(),
+            ..Manifest::default()
+        };
+
+        assert_eq!(
+            manifest_with(vec![])
+                .selected_lifecycle_driver_contract()
+                .unwrap(),
+            SHARED_LIFECYCLE_DRIVER_CONTRACT
+        );
+        assert_eq!(
+            manifest_with(vec![SHARED_LIFECYCLE_DRIVER_CONTRACT])
+                .selected_lifecycle_driver_contract()
+                .unwrap(),
+            SHARED_LIFECYCLE_DRIVER_CONTRACT
+        );
+        assert_eq!(
+            manifest_with(vec!["robonix/primitive/camera/driver"])
+                .selected_lifecycle_driver_contract()
+                .unwrap(),
+            "robonix/primitive/camera/driver"
         );
 
-        let padded: serde_yaml::Value =
-            serde_yaml::from_str("primitive:\n  - name: ' camera '\n").unwrap();
-        assert!(
-            validate_deployment_instance_names(&padded)
-                .unwrap_err()
-                .to_string()
-                .contains("must not contain leading or trailing whitespace")
-        );
+        let error = manifest_with(vec![
+            SHARED_LIFECYCLE_DRIVER_CONTRACT,
+            "robonix/primitive/camera/driver",
+        ])
+        .selected_lifecycle_driver_contract()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("never both"));
     }
 }

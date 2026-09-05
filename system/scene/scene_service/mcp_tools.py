@@ -21,7 +21,12 @@ import time
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
+from typing import TYPE_CHECKING
+
 from .state import ObjectRegistry, SceneObject
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .object_mutations import ObjectMutationCoordinator
 from .scene_graph.store import SceneGraphStore
 from .scene_graph.types import SceneGraphSnapshot
 from .geometry import point_in_polygon, polygon_centroid
@@ -45,8 +50,16 @@ from semantic_map_mcp import (  # type: ignore
     GetRobotContext_Response,
     GetSceneGraph_Request,
     GetSceneGraph_Response,
+    DeleteObject_Request,
+    DeleteObject_Response,
+    FlushObjects_Request,
+    FlushObjects_Response,
     ListObjects_Request,
     ListObjects_Response,
+    UpdateObjectGeometry_Request,
+    UpdateObjectGeometry_Response,
+    UpdateObjectLabel_Request,
+    UpdateObjectLabel_Response,
     ListRegions_Request,
     ListRegions_Response,
     ListRelations_Request,
@@ -69,6 +82,7 @@ _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
+_OBJECT_MUTATIONS: "ObjectMutationCoordinator | None" = None
 _ROBOT_GEOMETRY: RobotGeometryState | None = None
 
 # Scene Hook: when list_objects detects visible objects, automatically
@@ -251,9 +265,24 @@ def attach_annotation_store(store: "AnnotationStore | None") -> None:
     _ANNO_STORE = store
 
 
+def attach_object_mutations(
+    coordinator: "ObjectMutationCoordinator | None",
+) -> None:
+    """Wire the epoch-checked mutation coordinator; the correction tools
+    are unavailable (and say so) until service startup provides one."""
+    global _OBJECT_MUTATIONS
+    _OBJECT_MUTATIONS = coordinator
+
+
 # ── conversions: SceneObject → IDL Object ──────────────────────────────────
 
 def _to_idl(o: SceneObject) -> Object:
+    """Project a registry record onto the wire type.
+
+    Extents and frame come from the record's own box as well as its pose:
+    UpdateObjectGeometry validates the caller's frame against both, so a
+    caller resending what it read here has to be able to see both."""
+    frame = str(o.pose.frame_id or o.bbox.frame_id or "")
     return Object(
         id=o.object_id,
         label=o.cls,
@@ -261,6 +290,11 @@ def _to_idl(o: SceneObject) -> Object:
         y=float(o.pose.y),
         z=float(o.pose.z),
         yaw=float(o.pose.yaw),
+        size_x=float(o.bbox.size_x),
+        size_y=float(o.bbox.size_y),
+        size_z=float(o.bbox.size_z),
+        frame_id=frame,
+        observation_count=max(0, int(o.observation_count)),
         last_seen_unix=float(o.last_seen),
     )
 
@@ -275,6 +309,8 @@ def _annotation_centroid(a: "Annotation") -> tuple[float, float]:
 
 def _annotation_to_object(a: "Annotation") -> Object:
     x, y = _annotation_centroid(a)
+    # Annotations are polygons, not boxes: extents stay zero and the frame
+    # stays empty rather than inventing a metric box the store does not hold.
     return Object(
         id=_annotation_object_id(a),
         label=str(a.name or a.kind),
@@ -282,6 +318,11 @@ def _annotation_to_object(a: "Annotation") -> Object:
         y=float(y),
         z=0.0,
         yaw=float(a.theta or 0.0),
+        size_x=0.0,
+        size_y=0.0,
+        size_z=0.0,
+        frame_id="",
+        observation_count=0,
         last_seen_unix=float(a.updated_at or 0.0),
     )
 
@@ -377,7 +418,16 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     Contract: robonix/system/scene/list_objects."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
-    objs, _surfs = await _REGISTRY.snapshot()
+    if _OBJECT_MUTATIONS is not None:
+        (
+            objs,
+            map_id,
+            generation,
+            generation_supported,
+        ) = await _OBJECT_MUTATIONS.snapshot_objects()
+    else:
+        objs, _surfs = await _REGISTRY.snapshot()
+        map_id, generation, generation_supported = "", -1, False
     visible = [o for o in objs.values() if not o.missing]
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
@@ -396,6 +446,106 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
     return ListObjects_Response(
         objects=objects,
         stamp_unix=time.time(),
+        map_id=map_id,
+        generation=generation,
+        generation_supported=generation_supported,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/update_object_label")
+async def update_object_label(
+    req: UpdateObjectLabel_Request,
+) -> UpdateObjectLabel_Response:
+    """Apply a sticky operator label correction to one derived object."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_label(
+        object_id=req.object_id,
+        label=req.label,
+        clear_override=req.clear_override,
+        expected_map_id=req.expected_map_id,
+        expected_generation=req.expected_generation,
+        persist_to_snapshot=req.persist_to_snapshot,
+        note=req.note,
+    )
+    return UpdateObjectLabel_Response(
+        object=_to_idl(obj),
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/update_object_geometry")
+async def update_object_geometry(
+    req: UpdateObjectGeometry_Request,
+) -> UpdateObjectGeometry_Response:
+    """Replace one derived object's pose/bbox with a non-nav operator value."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_geometry(
+        object_id=req.object_id,
+        x=req.x,
+        y=req.y,
+        z=req.z,
+        yaw=req.yaw,
+        size_x=req.size_x,
+        size_y=req.size_y,
+        size_z=req.size_z,
+        frame_id=req.frame_id,
+        expected_map_id=req.expected_map_id,
+        expected_generation=req.expected_generation,
+        persist_to_snapshot=req.persist_to_snapshot,
+        note=req.note,
+    )
+    return UpdateObjectGeometry_Response(
+        object=_to_idl(obj),
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/delete_object")
+async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
+    """Delete one incorrect derived object from the asserted map epoch."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    deleted_id, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.delete_object(
+            object_id=req.object_id,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
+        )
+    )
+    return DeleteObject_Response(
+        deleted_id=deleted_id,
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/flush_objects")
+async def flush_objects(req: FlushObjects_Request) -> FlushObjects_Response:
+    """Clear all derived objects while preserving robot and annotations."""
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    deleted_count, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.flush_objects(
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
+        )
+    )
+    return FlushObjects_Response(
+        deleted_count=deleted_count,
+        map_id=map_id,
+        generation=generation,
+        persisted=persisted,
     )
 
 
@@ -522,10 +672,12 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     Room annotations are deliberately not accepted. Resolve those through
     goal_room so the returned pose is constrained to the room polygon.
 
-    `reachable=false` when:
-      - the object_id isn't in the registry, or
-      - mapping isn't running (no occupancy_grid yet), or
-      - no free cell exists within the search radius of the target on the grid.
+    ``reachable=false`` when:
+
+    * the object ID is not in the registry;
+    * mapping is not publishing an occupancy grid; or
+    * no free cell exists within the target search radius.
+
     Contract: robonix/system/scene/goal_near."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
@@ -645,6 +797,10 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
     The result never falls outside the room polygon.
     Contract: robonix/system/scene/goal_room.
     """
+    # The footprint is read further down, right before it is used. Checking it
+    # here as well made robot readiness preempt every check on the request
+    # itself, so a stale or unknown room came back as "robot geometry is not
+    # ready" and the caller had no idea which of the two was actually wrong.
     room, ambiguous = _resolve_room_target(req.room_id)
     if ambiguous:
         candidates = ", ".join(
@@ -852,6 +1008,11 @@ async def get_object_context(req: GetObjectContext_Request) -> GetObjectContext_
             id=n.object_id, label=n.label,
             x=float(n.bbox_center[0]), y=float(n.bbox_center[1]),
             z=float(n.bbox_center[2]),
+            size_x=float(n.bbox_extent[0]),
+            size_y=float(n.bbox_extent[1]),
+            size_z=float(n.bbox_extent[2]),
+            frame_id="",
+            observation_count=max(0, int(n.observation_count)),
             last_seen_unix=float(n.last_seen or 0.0),
         )
         for _, n in nearby[:5]

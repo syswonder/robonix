@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+#
+# Network bridge overlay. The simulator owns the rmw_zenohd router, while
+# Scene, Mapping, and Navigation run in host-network containers. Keep the
+# published router private to this host. The host-side `rbnx boot` MUST use
+# ROBONIX_ZENOH_ROUTER=tcp/127.0.0.1:<mapped-port>; bridge mode cannot rely on
+# rmw_zenoh_cpp's default discovery/session configuration.
+services:
+  sim:
+    ports:
+      - "127.0.0.1:${ROBONIX_SIM_ZENOH_PORT:-7447}:7447"

@@ -10,6 +10,8 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -875,6 +877,7 @@ def write_html(
     out: Path,
     inline_styles: list[Path] | None = None,
     inline_scripts: list[Path] | None = None,
+    map_preview: bool = False,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     total = int(summary.get("total", 0) or 0)
@@ -892,6 +895,19 @@ def write_html(
         '<div class="infrastructure-note"><strong>Infrastructure:</strong> '
         f"{html.escape(infrastructure_note)}</div>"
         if infrastructure_note
+        else ""
+    )
+    # slam-map.png is copied next to index.html by main(); reference it
+    # relatively so the section works both on the published site and in a
+    # downloaded artifact. Until now the map only reached summary.md, so the
+    # report page carried no image at all.
+    map_section = (
+        '<h2>SLAM Map</h2>'
+        '<p class="section-note">Occupancy grid saved by this run, rendered at the '
+        'map\'s own resolution.</p>'
+        '<div class="slam-map"><img src="slam-map.png" '
+        'alt="SLAM occupancy map produced by this run"></div>'
+        if map_preview
         else ""
     )
     generated_on = html.escape(_format_beijing_time(metadata.get("generated_on", "")))
@@ -1375,6 +1391,16 @@ def write_html(
       color: var(--muted);
       margin: 6px 0 10px;
     }}
+    .slam-map {{ margin: 12px 0 20px; }}
+    /* Scaled up with nearest-neighbour: the grid is only a couple hundred
+       pixels wide at its own resolution, and smoothing an occupancy grid
+       invents wall edges the map does not actually have. */
+    .slam-map img {{
+      width: min(560px, 100%);
+      image-rendering: pixelated;
+      border: 1px solid #d0d0d0;
+      background: #fff;
+    }}
     .infrastructure-note {{
       background: #fffbeb;
       border: 1px solid #fcd34d;
@@ -1403,6 +1429,7 @@ def write_html(
   </div>
   {infrastructure_section}
   {_llm_analysis_section(analysis)}
+  {map_section}
   <h2>Run Metadata</h2>
   {_metadata_table(metadata)}
   <h2>Test Environment</h2>
@@ -1648,7 +1675,11 @@ def write_html(
     out.write_text(body)
 
 
-def write_markdown(summary: dict, analysis: dict | None, out: Path) -> None:
+def write_markdown(summary: dict, analysis: dict | None, out: Path, *,
+                   map_preview: bool = False,
+                   map_preview_url: str | None = None) -> None:
+    # `map_preview` marks that slam-map.png sits next to this summary;
+    # `map_preview_url` is where the published report site will serve it.
     out.parent.mkdir(parents=True, exist_ok=True)
     total = int(summary.get("total", 0) or 0)
     passed = int(summary.get("passed", 0) or 0)
@@ -1679,6 +1710,10 @@ def write_markdown(summary: dict, analysis: dict | None, out: Path) -> None:
             f"| `{_status_label(bool(sc.get('passed')))}` | `{sc.get('family', '')}` | "
             f"`{sc.get('name', '')}` | {sc.get('rounds', '')} | {failures} |"
         )
+    if map_preview:
+        lines.extend(["", "### SLAM map", "",
+                      f"![SLAM occupancy map from this run]({map_preview_url})" if map_preview_url
+                      else "SLAM occupancy map: `slam-map.png` in the report artifact."])
     lines.extend(["", "HTML report with embedded log viewer: `testing/report/index.html` in the uploaded artifact."])
     out.write_text("\n".join(lines) + "\n")
 
@@ -1692,6 +1727,8 @@ def main() -> int:
     ap.add_argument("--metadata-json", action="append", type=Path, default=[], help="metadata JSON to merge")
     ap.add_argument("--metadata", action="append", default=[], help="key=value metadata to show in the report")
     ap.add_argument("--llm-analysis-json", type=Path, help="LLM-assisted diagnostic JSON to render")
+    ap.add_argument("--map-preview", type=Path, help="SLAM occupancy PNG to ship as slam-map.png next to the report")
+    ap.add_argument("--map-preview-url", default="", help="absolute URL where the published report site serves slam-map.png")
     ap.add_argument("--inline-style", action="append", type=Path, default=[], help="CSS file to embed directly into index.html")
     ap.add_argument("--inline-script", action="append", type=Path, default=[], help="JavaScript file to embed directly into index.html")
     ap.add_argument("--max-log-bytes", type=int, default=524288, help="per-log byte cap; 0 embeds complete files")
@@ -1715,8 +1752,19 @@ def main() -> int:
     write_metadata(metadata, args.out_dir / "metadata.json")
     inline_styles = list(args.inline_style) + _paths_from_env("ROBONIX_REPORT_INLINE_STYLES")
     inline_scripts = list(args.inline_script) + _paths_from_env("ROBONIX_REPORT_INLINE_SCRIPTS")
-    write_html(summary, logs, metadata, analysis, args.out_dir / "index.html", inline_styles, inline_scripts)
-    write_markdown(summary, analysis, args.out_dir / "summary.md")
+    # Copy the map before rendering: write_html needs to know whether
+    # slam-map.png is there to decide if the section exists at all.
+    map_preview = False
+    if args.map_preview and args.map_preview.is_file():
+        shutil.copyfile(args.map_preview, args.out_dir / "slam-map.png")
+        map_preview = True
+    elif args.map_preview:
+        print(f"WARN map preview not found, skipping: {args.map_preview}", file=sys.stderr)
+    write_html(summary, logs, metadata, analysis, args.out_dir / "index.html",
+               inline_styles, inline_scripts, map_preview=map_preview)
+    write_markdown(summary, analysis, args.out_dir / "summary.md",
+                   map_preview=map_preview,
+                   map_preview_url=args.map_preview_url or None)
     return 0
 
 

@@ -1,8 +1,12 @@
+# Legacy namespace-specific lifecycle contract for health providers. Existing
+# manifests remain supported; new packages omit Driver and use shared automatically.
+# A package must not declare both lifecycle contracts.
 [contract]
 id      = "robonix/primitive/health/driver"
 version = "1"
 kind    = "primitive"
 idl     = "lifecycle/srv/Driver.srv"
+description = "Legacy-compatible lifecycle interface for health primitive providers."
 
 [mode]
 type = "rpc"

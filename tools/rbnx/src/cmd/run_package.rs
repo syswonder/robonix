@@ -11,21 +11,50 @@ use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::Config;
+use robonix_cli::launch::{
+    CMD_ACTIVATE, CMD_INIT, ProviderRegistrationSnapshot, call_driver_cmd,
+    resolve_runtime_driver_contract, snapshot_provider_ids, wait_for_registration_core,
+};
 use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::process::ProcessManager;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-use tonic::Request;
-use tonic::transport::Endpoint;
-
-use crate::pb::lifecycle::{DriverRequest, DriverResponse};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Directory against which relative `-p` is resolved: **the pwd of the command invocation**.
 /// When `cargo run` runs from `robonix/rust`, the process cwd is not the user's shell cwd — wrappers
 /// should `export RBNX_INVOCATION_CWD="$(pwd)"` before `cd`+`cargo run`. If unset, `std::env::current_dir()` is used.
 pub(crate) const RBNX_INVOCATION_CWD: &str = "RBNX_INVOCATION_CWD";
+
+/// Return the migration warning emitted by `rbnx start` for a non-shared
+/// Driver declaration. Runtime registration later proves whether it is the
+/// provider's exact namespace legacy contract before accepting it.
+///
+/// The warning lives in `rbnx`, rather than in a language SDK, so native and
+/// non-Python providers receive the same guidance. Legacy contracts remain
+/// exact namespace legacy contracts remain supported; the warning only
+/// describes the incremental migration.
+fn lifecycle_driver_migration_warning(
+    package_name: &str,
+    explicit_driver_contract: Option<&str>,
+) -> Option<String> {
+    let Some(driver_contract) = explicit_driver_contract else {
+        // Omission is the canonical author-facing form: current codegen and
+        // the SDK automatically provide the shared lifecycle Driver.
+        return None;
+    };
+    if driver_contract == manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT {
+        return None;
+    }
+    Some(format!(
+        "package '{package_name}' declares non-shared lifecycle contract \
+         '{driver_contract}'; only the exact <provider namespace>/driver form \
+         is backward-compatible and may use a shared runtime Driver. Remove the \
+         legacy declaration to select '{}' automatically; do not declare both",
+        manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT,
+    ))
+}
 
 /// POSIX-shell single-quoted escape, used when we synthesise `export FOO=...`
 /// fragments to inject into a package's `start` body.
@@ -185,6 +214,66 @@ pub async fn execute_build(
 /// "fetch → build" be a controlled offline step the user can run
 /// when they have network / time, then `rbnx boot` is a fast,
 /// online-optional bring-up.
+/// `git clone --depth 1` with bounded retries.
+///
+/// Clones the repo into `dest`, retrying transient failures. Between attempts
+/// it removes any partial checkout git left behind, because git refuses to
+/// clone into a non-empty directory and a half-written tree would otherwise
+/// turn one flaky network moment into a permanent failure.
+///
+/// Retries exist because a deployment build clones several remotes over
+/// several minutes, and any one of them dying takes the whole build with it.
+/// On a runner whose only route to GitHub is a proxy that drops for stretches
+/// at a time, a single `GnuTLS, handshake failed` mid-build was enough to fail
+/// a run whose next attempt seconds later would have succeeded.
+///
+/// The last attempt's exit status is what the error reports. Returns `Err`
+/// only after every attempt has failed, or if git could not be spawned at all
+/// — a missing git binary is not transient, so that is not retried.
+pub(super) fn git_clone_with_retry(
+    url: &str,
+    branch: Option<&str>,
+    dest: &std::path::Path,
+) -> Result<()> {
+    const ATTEMPTS: u32 = 3;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let mut last_code: Option<i32> = None;
+    for attempt in 1..=ATTEMPTS {
+        if attempt > 1 && dest.exists() {
+            // A failed clone can leave a partial tree; git will not clone into
+            // it, so the retry would fail for a different reason than the one
+            // we are retrying. Only ever remove what a previous *attempt of
+            // this call* created — every caller already guarantees the
+            // destination is absent, and a helper that deletes whatever it
+            // finds there would be a trap for the next one that does not.
+            let _ = std::fs::remove_dir_all(dest);
+        }
+        let mut clone = std::process::Command::new("git");
+        clone.arg("clone").arg("--depth").arg("1");
+        if let Some(b) = branch {
+            clone.arg("--branch").arg(b);
+        }
+        clone.arg(url).arg(dest);
+        let status = clone
+            .status()
+            .with_context(|| format!("git clone {url} failed to spawn"))?;
+        if status.success() {
+            return Ok(());
+        }
+        last_code = status.code();
+        if attempt < ATTEMPTS {
+            output::warning(&format!(
+                "git clone {url} failed (attempt {attempt}/{ATTEMPTS}); \
+                 retrying in {}s",
+                BACKOFF.as_secs()
+            ));
+            std::thread::sleep(BACKOFF);
+        }
+    }
+    anyhow::bail!("git clone {url} exited with {last_code:?} after {ATTEMPTS} attempts")
+}
+
 fn build_deploy_manifest(
     manifest_path: &Path,
     config: &Config,
@@ -273,11 +362,11 @@ fn build_deploy_manifest(
     // `system:` non-builtin entries are real packages too (memory / scene
     // / speech / …), they just live under `<robonix_source>/system/<key>/`
     // instead of being declared with an explicit `path:` / `url:`. The
-    // builtin Rust binaries (atlas / executor / soma / pilot / vitals / liaison) are
+    // builtin Rust binaries (atlas / executor / pilot / liaison / soma / vitals) are
     // shipped via `cargo install` and skipped here.
     if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
         let source_root = config.robonix_source_path.as_ref();
-        for (key, _value) in map {
+        for (key, value) in map {
             let Some(key_str) = key.as_str() else {
                 continue;
             };
@@ -299,12 +388,14 @@ fn build_deploy_manifest(
                 ));
                 continue;
             }
+            let (manifest_override, _runtime_config) = manifest::split_system_package_config(value)
+                .with_context(|| format!("parse system/{key_str} package selector"))?;
             entries.push(Resolved {
                 section: "system",
                 name: key_str.to_string(),
                 pkg_dir,
                 url_to_clone: None,
-                manifest_override: None,
+                manifest_override,
             });
         }
     }
@@ -320,18 +411,7 @@ fn build_deploy_manifest(
         for r in &to_clone {
             let (url, branch) = r.url_to_clone.as_ref().unwrap();
             output::sub_step(&format!("git clone {url} -> {}", r.pkg_dir.display()));
-            let mut clone = std::process::Command::new("git");
-            clone.arg("clone").arg("--depth").arg("1");
-            if let Some(b) = branch {
-                clone.arg("--branch").arg(b);
-            }
-            clone.arg(url).arg(&r.pkg_dir);
-            let status = clone
-                .status()
-                .with_context(|| format!("git clone {url} failed to spawn"))?;
-            if !status.success() {
-                anyhow::bail!("git clone {url} exited with {:?}", status.code());
-            }
+            git_clone_with_retry(url, branch.as_deref(), &r.pkg_dir)?;
         }
     }
 
@@ -582,10 +662,24 @@ pub async fn execute_start(
     // Materialize per-instance config from --config + --set overrides
     // entirely in memory. The provider process never sees the file — config
     // is delivered via Driver(CMD_INIT, config_json) only (post-spawn
-    // task below). Empty inputs → no CMD_INIT push (start body still
-    // gets a default Driver(CMD_INIT, "{}") call so it can advance to
-    // INACTIVE, just with an empty config dict).
+    // task below). Empty inputs still deliver Driver(CMD_INIT, "{}") so a
+    // standalone `rbnx start` follows the same lifecycle as `rbnx boot`.
+    let has_explicit_config = config_file.is_some() || !set_overrides.is_empty();
+    // Omission is the canonical shared selection. Only one explicit legacy
+    // selection may opt into a current shared runtime while manifests migrate;
+    // omitted and explicit shared selections never downgrade to legacy.
+    let explicit_driver_contract = manifest.explicit_lifecycle_driver_contract()?;
+    let expected_driver_contract = manifest.selected_lifecycle_driver_contract()?.to_string();
+    let allow_shared_driver_upgrade = explicit_driver_contract
+        .is_some_and(|contract| contract != manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT);
+    let deploy_managed = std::env::var_os("RBNX_DEPLOY_MANAGED").is_some();
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
+
+    if let Some(message) =
+        lifecycle_driver_migration_warning(&manifest.package.name, explicit_driver_contract)
+    {
+        output::warning(&message);
+    }
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
     // owned by the package itself).  When `rbnx boot` spawns us, it sets
@@ -594,7 +688,7 @@ pub async fn execute_start(
     let log_dir = std::env::var("SCRIBE_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| package_root.join("rbnx-build").join("logs"));
-    let process_manager = ProcessManager::new(log_dir.clone())?;
+    let process_manager = Arc::new(ProcessManager::new(log_dir.clone())?);
 
     output::action("Running", &manifest.package.name);
     output::sub_step(&format!("Atlas endpoint: {}", endpoint));
@@ -613,8 +707,29 @@ pub async fn execute_start(
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
     env.insert("SCRIBE_LOG_DIR".to_string(), log_dir.display().to_string());
-    if materialized_cfg_json.is_some() {
+    // The exact selection and compatibility permission are distinct. The
+    // historical marker name is retained across wrapper/container boundaries,
+    // but it is now true only for a legacy manifest that may use shared runtime
+    // stubs. Shared selections never receive downgrade permission.
+    env.insert(
+        "ROBONIX_DRIVER_CONTRACT_ID".to_string(),
+        expected_driver_contract.clone(),
+    );
+    // Always overwrite any inherited marker so an explicit selection can
+    // never accidentally inherit omission's downgrade permission.
+    env.insert(
+        "ROBONIX_DRIVER_ALLOW_OLD_ARTIFACT_FALLBACK".to_string(),
+        if allow_shared_driver_upgrade {
+            "1"
+        } else {
+            "0"
+        }
+        .to_string(),
+    );
+    if has_explicit_config && !deploy_managed {
         output::sub_step("Config: will deliver via Driver(CMD_INIT) post-register");
+    } else if has_explicit_config && deploy_managed {
+        output::sub_step("Config: deployment owner will deliver Driver(CMD_INIT)");
     }
     // Force unbuffered stdout/stderr in any Python child the package's
     // start body launches. Without this, Python block-buffers stdout
@@ -661,27 +776,27 @@ pub async fn execute_start(
         format!("{}; {start_body}", prefix_parts.join("; "))
     };
 
-    // Post-spawn task: wait for the provider to register with atlas, then
-    // send Driver(CMD_INIT, config_json=<materialized>). The provider
-    // process never sees the JSON anywhere — atlas + this gRPC call
-    // is the only delivery path. Skipped when no --config / --set was
-    // given (rbnx start without config = run package as-is, init with
-    // default empty config).
-    let init_task = if let Some(json) = materialized_cfg_json {
-        // One package = one provider. Snapshot atlas, then post-spawn diff
-        // gives the new provider_id.
-        let endpoint_for_task = endpoint.clone();
-        let before_snapshot = match AtlasClient::connect(&endpoint).await {
-            Ok(mut a) => a
-                .query_capabilities("", "", atlas_pb::Transport::Unspecified)
-                .await
-                .map(|providers| providers.into_iter().map(|r| r.id).collect::<HashSet<_>>())
-                .unwrap_or_default(),
-            Err(_) => HashSet::new(),
-        };
-        Some(tokio::spawn(async move {
-            drive_cmd_init_after_register(&endpoint_for_task, &before_snapshot, json).await
-        }))
+    // A standalone lifecycle owner snapshots Atlas before spawning. Snapshot
+    // failures are fatal: treating them as an empty set could select an
+    // unrelated pre-existing provider and deliver this package's config to it.
+    // `rbnx boot` sets RBNX_DEPLOY_MANAGED and owns this sequence itself.
+    let standalone_lifecycle = if !deploy_managed {
+        let json = materialized_cfg_json
+            .expect("start config materialization always returns a JSON object");
+        let normalized = normalize_atlas_endpoint(&endpoint);
+        let mut atlas = AtlasClient::connect(&normalized)
+            .await
+            .with_context(|| format!("connect Atlas at {normalized} before standalone spawn"))?;
+        let before_snapshot = snapshot_provider_ids(&mut atlas)
+            .await
+            .context("standalone pre-spawn Atlas snapshot")?;
+        Some((
+            atlas,
+            before_snapshot,
+            json,
+            expected_driver_contract.clone(),
+            allow_shared_driver_upgrade,
+        ))
     } else {
         None
     };
@@ -694,19 +809,94 @@ pub async fn execute_start(
     // package.name only for a bare standalone `rbnx start` with no instance.
     let instance_name =
         std::env::var("RBNX_INSTANCE_NAME").unwrap_or_else(|_| manifest.package.name.clone());
-    let result = process_manager
-        .start_process(
-            &instance_name,
-            &instance_name,
-            "package",
-            &package_root,
-            &start_command,
-        )
-        .await?;
+    let result = if let Some((mut atlas, before, json, expected_contract, allow_shared_upgrade)) =
+        standalone_lifecycle
+    {
+        // `start_process` blocks for the package lifetime, so run it alongside
+        // registration/lifecycle driving. On lifecycle failure, stop the exact
+        // package process group instead of leaving a REGISTERED/ERROR provider.
+        let manager_for_start = Arc::clone(&process_manager);
+        let package_root_for_start = package_root.clone();
+        let start_command_for_start = start_command.clone();
+        let instance_for_start = instance_name.clone();
+        let mut process_task = tokio::spawn(async move {
+            manager_for_start
+                .start_process(
+                    &instance_for_start,
+                    &instance_for_start,
+                    "package",
+                    &package_root_for_start,
+                    &start_command_for_start,
+                )
+                .await
+        });
 
-    if let Some(handle) = init_task {
-        handle.abort(); // package exited; no point still polling
-    }
+        // Wait until ProcessManager has recorded the child so every lifecycle
+        // failure path can terminate it. Surface an early child exit directly.
+        let recorded_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !process_manager.has_process_record(&instance_name, "package") {
+            if process_task.is_finished() {
+                let process_result = process_task.await.context("package process task failed")?;
+                return match process_result {
+                    Ok(result) => anyhow::bail!(
+                        "package exited before registering with Atlas (PID {})",
+                        result.pid
+                    ),
+                    Err(error) => Err(error),
+                };
+            }
+            if tokio::time::Instant::now() >= recorded_deadline {
+                process_task.abort();
+                anyhow::bail!("package process was not recorded within 5s after spawn");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let lifecycle = drive_standalone_lifecycle(
+            &mut atlas,
+            &before,
+            &instance_name,
+            &expected_contract,
+            allow_shared_upgrade,
+            json,
+        );
+        tokio::pin!(lifecycle);
+        tokio::select! {
+            lifecycle_result = &mut lifecycle => {
+                if let Err(error) = lifecycle_result {
+                    output::warning(&format!("standalone lifecycle failed: {error:#}"));
+                    if let Err(stop_error) = process_manager.stop_process(&instance_name, "package").await {
+                        output::warning(&format!("failed to stop package after lifecycle error: {stop_error:#}"));
+                    }
+                    let _ = process_task.await;
+                    return Err(error);
+                }
+            }
+            process_result = &mut process_task => {
+                let process_result = process_result.context("package process task failed")?;
+                return match process_result {
+                    Ok(result) => anyhow::bail!(
+                        "package exited before completing standalone lifecycle (PID {})",
+                        result.pid
+                    ),
+                    Err(error) => Err(error),
+                };
+            }
+        }
+        process_task
+            .await
+            .context("package process task failed")??
+    } else {
+        process_manager
+            .start_process(
+                &instance_name,
+                &instance_name,
+                "package",
+                &package_root,
+                &start_command,
+            )
+            .await?
+    };
     output::check(&format!(
         "{} exited (PID {})",
         manifest.package.name, result.pid
@@ -742,187 +932,84 @@ fn generated_pythonpath_export(package_root: &Path) -> String {
     )
 }
 
-const CMD_INIT_DELIVERY: u32 = 0;
-const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
-const CAP_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
-
-fn driver_init_timeout() -> Duration {
-    std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_DRIVER_INIT_TIMEOUT)
-}
-
-/// Wait for the new provider (any provider not in `before`) to appear in atlas with a
-/// `*/driver` gRPC capability, then call Driver(CMD_INIT, config_json). One
-/// package = one provider. Gives up after 60s; `rbnx start` keeps the package
-/// running regardless.
-async fn drive_cmd_init_after_register(
-    atlas_endpoint: &str,
-    before: &HashSet<String>,
-    config_json: String,
-) {
-    let normalized = if atlas_endpoint.starts_with("http") {
-        atlas_endpoint.to_string()
-    } else {
-        format!("http://{atlas_endpoint}")
-    };
-    let mut atlas = match AtlasClient::connect(&normalized).await {
-        Ok(c) => c,
-        Err(e) => {
-            output::warning(&format!("CMD_INIT delivery: connect atlas failed: {e:#}"));
-            return;
-        }
-    };
-    let started = Instant::now();
-    loop {
-        if started.elapsed() > CAP_REGISTER_TIMEOUT {
-            output::warning(&format!(
-                "CMD_INIT delivery: no new provider registered within {:?}; config not delivered",
-                CAP_REGISTER_TIMEOUT
-            ));
-            return;
-        }
-        let providers = match atlas
-            .query_capabilities("", "", atlas_pb::Transport::Unspecified)
-            .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-        };
-        let new_provider = providers.iter().find(|r| !before.contains(&r.id));
-        let Some(provider) = new_provider else {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            continue;
-        };
-        let driver_cap = provider.capabilities.iter().find(|c| {
-            c.transport == atlas_pb::Transport::Grpc as i32 && c.contract_id.ends_with("/driver")
-        });
-        let Some(driver) = driver_cap else {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            continue;
-        };
-        let driver_contract = driver.contract_id.clone();
-        let provider_id = provider.id.clone();
-        match call_driver_init(
-            &mut atlas,
-            &provider_id,
-            &driver_contract,
-            config_json.clone(),
-        )
-        .await
-        {
-            Ok(state) => {
-                output::sub_step(&format!(
-                    "Driver(CMD_INIT) → {provider_id} ok (state={state})"
-                ));
-            }
-            Err(e) => {
-                output::warning(&format!("Driver(CMD_INIT) → {provider_id} failed: {e:#}"));
-            }
-        }
-        return;
-    }
-}
-
-/// Send Driver(CMD_INIT, config_json) to a known provider's `*/driver`
-/// gRPC capability. Mirrors deploy.rs's call_driver_cmd but inlined to
-/// keep run_package.rs free of cross-module coupling.
-async fn call_driver_init(
-    atlas: &mut AtlasClient,
-    provider_id: &str,
-    driver_contract: &str,
-    config_json: String,
-) -> Result<String> {
-    let (channel_id, endpoint, _params) = atlas
-        .connect_capability(
-            "rbnx-cli/start",
-            provider_id,
-            driver_contract,
-            atlas_pb::Transport::Grpc,
-        )
-        .await
-        .with_context(|| format!("ConnectCapability({driver_contract})"))?;
-    let normalized = if endpoint.starts_with("http") {
-        endpoint
+fn normalize_atlas_endpoint(endpoint: &str) -> String {
+    if endpoint.starts_with("http") {
+        endpoint.to_string()
     } else {
         format!("http://{endpoint}")
-    };
-    let result = async {
-        let driver_timeout = driver_init_timeout();
-        let channel = Endpoint::new(normalized.clone())
-            .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
-            .connect()
-            .await
-            .with_context(|| format!("dial driver at '{normalized}'"))?;
-        let svc = contract_id_to_service_name(driver_contract);
-        let path: tonic::codegen::http::uri::PathAndQuery =
-            format!("/robonix.contracts.{svc}/Driver")
-                .parse()
-                .with_context(|| format!("build gRPC path for '{driver_contract}'"))?;
-        let mut grpc = tonic::client::Grpc::new(channel);
-        grpc.ready().await.context("gRPC ready")?;
-        let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
-        let resp = tokio::time::timeout(
-            driver_timeout,
-            grpc.unary(
-                Request::new(DriverRequest {
-                    command: CMD_INIT_DELIVERY,
-                    config_json,
-                }),
-                path,
-                codec,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Driver(CMD_INIT) timed out after {}s",
-                driver_timeout.as_secs()
-            )
-        })?
-        .context("Driver(CMD_INIT) RPC failed")?;
-        Ok::<_, anyhow::Error>(resp.into_inner())
     }
-    .await;
-    let _ = atlas.disconnect_capability(&channel_id).await;
-    let r = result?;
-    if !r.ok {
-        anyhow::bail!(
-            "Driver(CMD_INIT) returned ok=false (state={}, error={})",
-            r.state,
-            r.error
-        );
-    }
-    Ok(r.state)
 }
 
-/// `robonix/primitive/chassis/move` → `RobonixPrimitiveChassisMove`.
-/// `mycomp/a/b/c`                   → `MycompABC`.
-/// Uniform PascalCase per `/`-segment; no prefix stripping.
-fn contract_id_to_service_name(contract_id: &str) -> String {
-    let mut out = String::new();
-    for seg in contract_id.split('/').filter(|s| !s.is_empty()) {
-        for part in seg.split('_').filter(|s| !s.is_empty()) {
-            let mut ch = part.chars();
-            if let Some(c) = ch.next() {
-                out.push(c.to_ascii_uppercase());
-                out.extend(ch);
-            }
-        }
+/// Wait for exactly one new provider, verify that it declares the driver
+/// contract from this package manifest, then drive INIT and (except for
+/// skills) ACTIVATE. Contract verification is mandatory before any config is
+/// sent, so a provider exposing a different lifecycle cannot receive this
+/// package's configuration. Concurrent starts of two instances with the same
+/// driver contract still require a future registration token for full identity
+/// correlation.
+async fn drive_standalone_lifecycle(
+    atlas: &mut AtlasClient,
+    before: &ProviderRegistrationSnapshot,
+    expected_provider_id: &str,
+    expected_driver_contract: &str,
+    allow_shared_driver_upgrade: bool,
+    config_json: String,
+) -> Result<()> {
+    let outcome =
+        wait_for_registration_core(atlas, before, expected_provider_id, "rbnx start").await?;
+    let driver_contract = resolve_runtime_driver_contract(
+        &outcome.provider_id,
+        &outcome.provider_namespace,
+        expected_driver_contract,
+        &outcome.driver_contracts,
+        allow_shared_driver_upgrade,
+    )?;
+    if driver_contract != expected_driver_contract {
+        output::warning(&format!(
+            "provider '{}' publishes shared lifecycle Driver '{}' for legacy manifest selection '{}'; remove the legacy Driver declaration to finish migration",
+            outcome.provider_id, driver_contract, expected_driver_contract,
+        ));
     }
-    out
+
+    let init_state = call_driver_cmd(
+        atlas,
+        &outcome.provider_id,
+        &driver_contract,
+        CMD_INIT,
+        config_json.clone(),
+        "rbnx start",
+    )
+    .await?;
+    output::sub_step(&format!(
+        "Driver(CMD_INIT) → {} ok (state={init_state})",
+        outcome.provider_id
+    ));
+    if should_activate_standalone_provider(outcome.provider_kind) {
+        let state = call_driver_cmd(
+            atlas,
+            &outcome.provider_id,
+            &driver_contract,
+            CMD_ACTIVATE,
+            config_json,
+            "rbnx start",
+        )
+        .await?;
+        output::sub_step(&format!(
+            "Driver(CMD_ACTIVATE) → {} ok (state={state})",
+            outcome.provider_id
+        ));
+    }
+    Ok(())
+}
+
+fn should_activate_standalone_provider(provider_kind: i32) -> bool {
+    provider_kind != atlas_pb::Kind::Skill as i32
 }
 
 /// Materialize a per-instance config from `--config <file>` plus
 /// repeatable `--set k.v=val` overrides. Returns the merged JSON
-/// string, or `None` when neither input was provided.
+/// string. When neither input was provided, returns an empty JSON object so
+/// `rbnx start` still performs the provider lifecycle initialization.
 ///
 /// Layering: load file (json or yaml) → overlay each `--set` on the
 /// tree → serialise to a single JSON string. The string is delivered
@@ -931,7 +1018,7 @@ fn contract_id_to_service_name(contract_id: &str) -> String {
 /// invariant `rbnx start` and `rbnx boot` both honour.
 fn build_start_config_json(config_file: Option<&Path>, sets: &[String]) -> Result<Option<String>> {
     if config_file.is_none() && sets.is_empty() {
-        return Ok(None);
+        return Ok(Some("{}".to_string()));
     }
 
     let mut value: serde_json::Value = match config_file {
@@ -1002,6 +1089,35 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// A failing clone must exhaust its attempts, name the exit status, and
+    /// leave no partial checkout behind. The stale directory seeded here
+    /// stands in for the tree a network-interrupted clone leaves: without the
+    /// cleanup between attempts, git refuses to clone into a non-empty
+    /// directory and every retry fails for the wrong reason.
+    ///
+    /// The URL is a local path that does not exist, so git fails immediately
+    /// and the test needs no network.
+    #[test]
+    fn git_clone_with_retry_cleans_partial_checkouts_and_reports_the_last_status() {
+        let root = temp_root("clone-retry");
+        let dest = root.join("pkg");
+        fs::create_dir_all(&dest).expect("dest");
+        fs::write(dest.join("leftover.txt"), b"partial clone").expect("seed leftover");
+
+        let missing = root.join("no-such-repo.git");
+        let err = git_clone_with_retry(&missing.to_string_lossy(), None, &dest)
+            .expect_err("clone of a nonexistent repo must fail");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("after 3 attempts"), "unexpected error: {msg}");
+        assert!(
+            !dest.exists(),
+            "a failed clone must not leave a partial checkout at {}",
+            dest.display()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     fn temp_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1025,6 +1141,115 @@ mod tests {
         assert!(export.contains(&mcp.display().to_string()));
         assert!(export.ends_with(":${PYTHONPATH:-}"));
         assert!(!root.join("rbnx-build/ws/install/setup.bash").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn start_without_config_still_materializes_empty_init_config() {
+        let config = build_start_config_json(None, &[]).unwrap();
+        assert_eq!(config.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn standalone_start_activates_primitive_and_service_but_not_skill() {
+        assert!(should_activate_standalone_provider(
+            atlas_pb::Kind::Primitive as i32
+        ));
+        assert!(should_activate_standalone_provider(
+            atlas_pb::Kind::Service as i32
+        ));
+        assert!(!should_activate_standalone_provider(
+            atlas_pb::Kind::Skill as i32
+        ));
+    }
+
+    #[test]
+    fn shared_driver_contract_needs_no_migration_warning() {
+        assert_eq!(
+            lifecycle_driver_migration_warning("test.scene", Some("robonix/lifecycle/driver"),),
+            None
+        );
+    }
+
+    #[test]
+    fn omitted_driver_is_the_canonical_shared_selection() {
+        assert_eq!(lifecycle_driver_migration_warning("test.scene", None), None);
+    }
+
+    #[test]
+    fn legacy_driver_contract_gets_one_actionable_migration_warning() {
+        let warning = lifecycle_driver_migration_warning(
+            "test.camera",
+            Some("robonix/primitive/camera/driver"),
+        )
+        .unwrap();
+        assert!(warning.contains("test.camera"));
+        assert!(warning.contains("robonix/primitive/camera/driver"));
+        assert!(warning.contains("robonix/lifecycle/driver"));
+        assert!(warning.contains("is backward-compatible"));
+        assert!(warning.contains("exact <provider namespace>/driver"));
+        assert!(warning.contains("shared runtime Driver"));
+        assert!(warning.contains("do not declare both"));
+    }
+
+    #[test]
+    fn system_package_uses_the_deploy_selected_manifest() {
+        let root = temp_root("system-manifest");
+        let source_root = root.join("source");
+        let scene_root = source_root.join("system/scene");
+        let deploy_root = root.join("deploy");
+        fs::create_dir_all(&scene_root).unwrap();
+        fs::create_dir_all(&deploy_root).unwrap();
+        fs::write(
+            scene_root.join("package_manifest.yaml"),
+            r#"manifestVersion: 1
+package:
+  name: test.system.scene
+  version: 0.1.0
+  vendor: test
+  description: default target
+  license: Apache-2.0
+build: touch default-selected
+start: "true"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            scene_root.join("package_manifest.jetson-native.yaml"),
+            r#"manifestVersion: 1
+package:
+  name: test.system.scene
+  version: 0.1.0
+  vendor: test
+  description: Jetson native target
+  license: Apache-2.0
+build: touch jetson-selected
+start: "true"
+"#,
+        )
+        .unwrap();
+        let deploy_manifest = deploy_root.join("robonix_manifest.yaml");
+        fs::write(
+            &deploy_manifest,
+            r#"manifestVersion: 1
+name: system-target-test
+system:
+  scene:
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      camera_provider_id: front_camera
+"#,
+        )
+        .unwrap();
+        let config = Config {
+            package_storage_path: root.join("packages"),
+            robonix_source_path: Some(source_root),
+        };
+
+        build_deploy_manifest(&deploy_manifest, &config, false, true).unwrap();
+
+        assert!(scene_root.join("jetson-selected").is_file());
+        assert!(!scene_root.join("default-selected").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

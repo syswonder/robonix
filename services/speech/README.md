@@ -45,7 +45,20 @@ Do not commit Tencent credentials. Put them in the operator shell, a local
 ignored env file, or a machine-local boot wrapper. The AppID and non-secret
 backend settings belong in the deployment manifest. Useful optional knobs:
 `TENCENT_ASR_ENGINE` (default `16k_zh`), `TENCENT_TTS_VOICE_TYPE` (default
-`1001`), and `TENCENT_TTS_REGION` (default `ap-guangzhou`).
+`1001`), `TENCENT_TTS_REGION` (default `ap-guangzhou`),
+`TENCENT_TTS_MAX_CHARS` (default `140`), and
+`TENCENT_TTS_MAX_TOTAL_CHARS` (default `5000`). The per-request setting accepts
+1–150 characters, using Tencent's Chinese limit as a conservative ceiling for
+mixed text. Long input is split at sentence punctuation, commas or whitespace,
+and finally a hard boundary, with its PCM segments returned in order. The
+service rejects input above the configured total limit, input requiring more
+than 40 provider requests, and separator runs that cannot be sent without a
+punctuation-only request. The Speech contract requires
+`TENCENT_TTS_CODEC=pcm`; encoded formats such as WAV or MP3 are rejected because
+their independently wrapped segments cannot be exposed as one `pcm_s16le`
+response. One-shot synthesis and `speech/speak` also stop below 4 MiB of decoded
+PCM so the result fits the core client's default gRPC receive limit; use the
+streaming TTS capability for larger output.
 
 With `SPEECH_BACKEND=tencent`, the build installs only the cloud client and
 audio adaptation dependencies. It does not install or warm FunASR, Whisper,

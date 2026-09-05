@@ -2,7 +2,7 @@
 # Caller sends raw audio + the user_id/user_name to bind. Service
 # extracts the speaker embedding and persists it. Subsequent calls
 # to Identify(...) with the same speaker should now match this user_id.
-# abstract_interface_id: robonix/system/speech/voiceprint_enroll
+# Contract: robonix/service/voiceprint/enroll
 string  user_id          # stable id (caller-chosen, must be unique)
 string  user_name        # human-friendly label (free-form)
 uint8[] audio_data       # raw PCM bytes, length >= 1 second is recommended
