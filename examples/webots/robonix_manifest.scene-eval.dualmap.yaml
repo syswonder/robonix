@@ -42,6 +42,12 @@ system:
           # and raising it to 20 stopped promotion altogether (0 promoted in
           # 180 s), which is where the cross-class merge happens.
           stable_num: 3
+          # Association gates point overlap at downsample_voxel_size (2 cm by
+          # default, which assumes ground-truth poses). This deployment's SLAM
+          # pose is off by 3-7 cm (P95) between keyframes, so at 2 cm two views
+          # of one object never overlap and every keyframe started a new track
+          # (54 of 57 objects had one observation). 5 cm covers that error.
+          downsample_voxel_size: 0.05
         confidence_threshold: 0.30
         max_detections: 30
         stationary_refinement:

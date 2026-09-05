@@ -81,6 +81,12 @@ DUALMAP_KEYS: frozenset[str] = frozenset({
     # observations make a track stable, how many recent frames count as active,
     # and how many rounds an unstable track survives outside that window
     "stable_num", "active_window_size", "max_pending_count",
+    # DualMap association: an observation joins an existing track when
+    # cos(CLIP) + point-overlap exceeds sim_threshold, and "overlap" counts the
+    # points whose nearest map point lies within downsample_voxel_size. The
+    # voxel therefore has to exceed the pose error between keyframes, or two
+    # views of one object never overlap and every keyframe starts a new track.
+    "downsample_voxel_size", "sim_threshold",
 })
 
 

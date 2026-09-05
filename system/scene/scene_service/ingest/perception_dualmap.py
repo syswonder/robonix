@@ -132,6 +132,12 @@ class DualMapDetector(ConceptGraphsDetector):
         self._lifecycle_cfg = {k: int(self._dualmap_cfg[k]) for k in
                                ("stable_num", "active_window_size", "max_pending_count")
                                if self._dualmap_cfg.get(k) is not None}
+        # Association knobs, also DualMap's own. Its dataset default gates
+        # point overlap at 2 cm, which assumes ground-truth poses; a robot whose
+        # SLAM pose is off by 3-10 cm between keyframes never meets it.
+        self._lifecycle_cfg.update({k: float(self._dualmap_cfg[k]) for k in
+                                    ("downsample_voxel_size", "sim_threshold")
+                                    if self._dualmap_cfg.get(k) is not None})
         self._all_objects: list = []  # every track, for the Replica export
         self._classes_file: Optional[str] = None
         self._classes_file_is_temp = False

@@ -171,6 +171,11 @@ system:
           # max_pending_count also delays promotion, and the global map is
           # where objects reported under several labels get merged.
           stable_num: 3
+          # Association: an observation joins a track when cos(CLIP) + point
+          # overlap > sim_threshold (1.2), and overlap counts points within
+          # downsample_voxel_size (0.02) of the track. The voxel must exceed
+          # the SLAM pose error between keyframes or nothing ever associates.
+          downsample_voxel_size: 0.05
 ```
 
 ```bash
