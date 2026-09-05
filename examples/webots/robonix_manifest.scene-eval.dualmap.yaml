@@ -24,10 +24,13 @@ system:
       perception:
         # DualMap variant of the Scene benchmark manifest; everything else is identical.
         backend: dualmap
-        # Slower than the ConceptGraphs default: DualMap maps keyframes, and a
-        # dense tick rate only fragments objects and competes with RTAB-Map's
-        # visual odometry for the GPU.
-        period_s: 2.0
+        # DualMap associates by point overlap between consecutive views of an
+        # object, and its class vote needs several observations; at 2 s per
+        # tick a robot at 0.15 m/s saw most objects once (54 of 57 exported
+        # objects had one observation). 1 s doubles that for 0.3 s of GPU per
+        # tick, and slam_toolbox no longer contends for the GPU as RTAB-Map's
+        # visual odometry did.
+        period_s: 1.0
         dualmap:
           keyframe_translation_m: 0.15
           keyframe_rotation_deg: 5.0
