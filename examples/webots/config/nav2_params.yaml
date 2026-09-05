@@ -195,7 +195,7 @@ local_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan depth
+        observation_sources: scan
         scan:
           topic: "__ROBONIX_SCAN_TOPIC__"
           max_obstacle_height: 2.0
@@ -206,33 +206,6 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
-        depth:
-          # The 2D lidar sees one horizontal slice, so a table top is invisible
-          # to it and the robot drives under it into the legs. The depth camera
-          # sees the whole volume in front; marking anything between the floor
-          # and the robot's height puts the table (and the door frame, and the
-          # shelf that sticks out) in the local costmap. Marking only — a
-          # camera's frustum is narrow, so it must not clear what the lidar
-          # marked outside it.
-          topic: /head_front_camera/depth_registered/points
-          data_type: "PointCloud2"
-          marking: True
-          # Clearing must be on. Marks that can never be cleared accumulate
-          # into a trail behind the robot — every stray point stays a wall
-          # forever. Raytracing is per-source, so this only clears along the
-          # camera's own rays and cannot erase what the lidar marked elsewhere.
-          clearing: True
-          # Above the floor by more than depth noise and the chassis pitch:
-          # at 0.08 m the floor itself was being marked. A table top is at
-          # ~0.7 m, a door frame higher still, so nothing that matters is lost.
-          min_obstacle_height: 0.20
-          max_obstacle_height: 1.20
-          # Depth error grows with range; past ~2 m the floor starts marking
-          # again whatever the height threshold.
-          obstacle_max_range: 2.0
-          obstacle_min_range: 0.15
-          raytrace_max_range: 2.5
-          raytrace_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.0
