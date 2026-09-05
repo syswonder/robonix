@@ -159,17 +159,18 @@ system:
           # Height of the floor in the world frame; tracks whose points lie on
           # it are depth noise, not objects (Replica's floor is at -1.5).
           floor_z_m: 0.0
-          # DualMap's object lifecycle, passed through to its own config. The
-          # defaults (8 / 10 / 5) are sized for a dataset replay that maps every
-          # frame: a track needs stable_num observations to become stable, and
-          # one that leaves the active_window_size most recent frames without
-          # getting there is deleted after max_pending_count rounds. A robot
-          # mapping keyframes at walking pace sees each object a handful of
-          # times, so on a deployment these must match the observation rate or
-          # the map empties out behind the robot.
+          # DualMap's object lifecycle, passed through to its own config. A
+          # track needs stable_num observations to become stable (default 8,
+          # sized for a dataset replay that maps every frame); one that leaves
+          # the active_window_size most recent frames without getting there is
+          # deleted after max_pending_count rounds, and one that IS stable is
+          # promoted to the global map after the same count. A robot mapping
+          # keyframes at walking pace sees each object a handful of times, so
+          # stable_num has to match the observation rate or the map empties out
+          # behind the robot. Leave the other two alone: raising
+          # max_pending_count also delays promotion, and the global map is
+          # where objects reported under several labels get merged.
           stable_num: 3
-          active_window_size: 40
-          max_pending_count: 20
 ```
 
 ```bash

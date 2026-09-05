@@ -32,14 +32,16 @@ system:
           keyframe_translation_m: 0.15
           keyframe_rotation_deg: 5.0
           keyframe_time_s: 5.0
-          # DualMap's lifecycle assumes a dataset replay that maps every frame:
-          # 8 observations to become stable, and deletion once a track leaves
-          # the 10 most recent frames without getting there. A robot mapping
-          # keyframes at walking pace sees each object a handful of times, so
-          # the map emptied out behind it (65 tracks -> 1 over one office run).
+          # DualMap needs stable_num observations before a track counts as
+          # stable; its default of 8 assumes a dataset replay that maps every
+          # frame. A robot mapping keyframes at walking pace sees each object a
+          # handful of times, so at 8 the map emptied out behind it (65 tracks
+          # -> 1 over one office run). 3 is enough here. The window and the
+          # pending count stay at DualMap's defaults: max_pending_count is also
+          # how long a STABLE track waits before promotion to the global map,
+          # and raising it to 20 stopped promotion altogether (0 promoted in
+          # 180 s), which is where the cross-class merge happens.
           stable_num: 3
-          active_window_size: 40
-          max_pending_count: 20
         confidence_threshold: 0.30
         max_detections: 30
         stationary_refinement:

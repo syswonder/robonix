@@ -120,8 +120,12 @@ class DualMapDetector(ConceptGraphsDetector):
         self._min_observations = int(self._dualmap_cfg.get("min_observations", 1))
         # Height of the floor in the world frame, and the gate measured from it:
         # a track whose points all lie on (or under) the floor is depth noise,
-        # not an object. The same rule guards the concept_graphs backend.
-        self._floor_z_m = float(self._dualmap_cfg.get("floor_z_m", 0.0))
+        # not an object. The same rule guards the concept_graphs backend, and
+        # the value comes from the same place — perception.floor_z_m or
+        # SCENE_CG_FLOOR_Z_M, which the Replica replay sets from the dataset's
+        # own floor (-1.51 m). A backend-private default of 0 here silently
+        # dropped every Replica object below the world origin.
+        self._floor_z_override = self._dualmap_cfg.get("floor_z_m")
         self._promoted = 0        # local tracks handed to the global map
         # DualMap object-lifecycle overrides, passed straight through to its
         # config; only the keys a deployment has a reason to change are exposed.
@@ -506,6 +510,14 @@ class DualMapDetector(ConceptGraphsDetector):
             if votes:
                 obj.uid = max(votes, key=votes.get)
             obj.is_merged = False  # consumed: the next merge round votes again
+
+    @property
+    def _floor_z_m(self) -> float:
+        """Floor height: the backend's own setting when given, else the shared
+        perception setting (env overrides are applied to that at start)."""
+        if self._floor_z_override is not None:
+            return float(self._floor_z_override)
+        return float((getattr(self, "cfg", None) or {}).get("floor_z_m", 0.0))
 
     def _to_map_object(self, o: Any, dropped: Optional[dict] = None) -> Optional[dict]:
         """Shape one DualMap ``LocalObject`` like a ConceptGraphs map entry, or

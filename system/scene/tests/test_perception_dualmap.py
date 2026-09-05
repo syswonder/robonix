@@ -167,6 +167,24 @@ def test_lifecycle_overrides_reach_dualmaps_config():
     print("  [PASS] test_lifecycle_overrides_reach_dualmaps_config")
 
 
+def test_floor_height_comes_from_the_shared_setting():
+    # Replica's floor is at -1.51 m and reaches Scene as the shared
+    # perception setting; a backend-private default of 0 dropped every object
+    # below the world origin as "floor noise".
+    import numpy as np
+    d = _detector()
+    d._dm_names = ["chair"]
+    d.cfg = {"floor_z_m": -1.51}
+    assert d._floor_z_m == -1.51
+    o = _obj("u", 0, n=200)
+    o.pcd.points = [(0.0, 0.0, float(v)) for v in np.linspace(-1.5, -0.9, 200)]
+    assert d._to_map_object(o) is not None            # a chair standing on that floor
+    explicit = _detector(floor_z_m=0.0)
+    explicit.cfg = {"floor_z_m": -1.51}
+    assert explicit._floor_z_m == 0.0                 # the backend's own value wins
+    print("  [PASS] test_floor_height_comes_from_the_shared_setting")
+
+
 def test_global_objects_shape_like_local_ones():
     # A GlobalObject carries uid / class_id / pcd / bbox / clip_ft but none of
     # the local-map bookkeeping (max_prob, observed_num, is_stable), so the map
@@ -191,3 +209,4 @@ if __name__ == "__main__":
     test_tracks_lying_on_the_floor_are_dropped()
     test_lifecycle_overrides_reach_dualmaps_config()
     test_global_objects_shape_like_local_ones()
+    test_floor_height_comes_from_the_shared_setting()
