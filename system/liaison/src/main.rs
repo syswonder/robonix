@@ -44,14 +44,18 @@ use pb::contracts::{
     robonix_system_liaison_submit_server::{
         RobonixSystemLiaisonSubmit, RobonixSystemLiaisonSubmitServer,
     },
+    robonix_system_liaison_voice_finish_server::{
+        RobonixSystemLiaisonVoiceFinish, RobonixSystemLiaisonVoiceFinishServer,
+    },
     robonix_system_liaison_voice_server::{
         RobonixSystemLiaisonVoice, RobonixSystemLiaisonVoiceServer,
     },
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{
-    GetHandsfreeStatusRequest, GetHandsfreeStatusResponse, SetHandsfreeRequest,
-    SetHandsfreeResponse, StartVoiceSessionRequest, VoiceEvent, WatchHandsfreeEventsRequest,
+    FinishVoiceCaptureRequest, FinishVoiceCaptureResponse, GetHandsfreeStatusRequest,
+    GetHandsfreeStatusResponse, SetHandsfreeRequest, SetHandsfreeResponse,
+    StartVoiceSessionRequest, VoiceEvent, WatchHandsfreeEventsRequest,
 };
 use pb::lifecycle::{DriverRequest, DriverResponse};
 use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
@@ -71,11 +75,13 @@ const LIAISON_PROVIDER_ID: &str = "liaison";
 const LIAISON_NAMESPACE: &str = "robonix/system/liaison";
 const LIAISON_SUBMIT_CONTRACT: &str = "robonix/system/liaison/submit";
 const LIAISON_VOICE_CONTRACT: &str = "robonix/system/liaison/voice";
+const LIAISON_VOICE_FINISH_CONTRACT: &str = "robonix/system/liaison/voice/finish";
 const LIAISON_HANDSFREE_SET_CONTRACT: &str = "robonix/system/liaison/handsfree/set_enabled";
 const LIAISON_HANDSFREE_STATUS_CONTRACT: &str = "robonix/system/liaison/handsfree/status";
 const LIAISON_HANDSFREE_EVENTS_CONTRACT: &str = "robonix/system/liaison/handsfree/events";
 const LIAISON_SUBMIT_TOML: &str = "capabilities/system/liaison/submit.v1.toml";
 const LIAISON_VOICE_TOML: &str = "capabilities/system/liaison/voice.v1.toml";
+const LIAISON_VOICE_FINISH_TOML: &str = "capabilities/system/liaison/voice/finish.v1.toml";
 const LIAISON_HANDSFREE_SET_TOML: &str =
     "capabilities/system/liaison/handsfree/set_enabled.v1.toml";
 const LIAISON_HANDSFREE_STATUS_TOML: &str = "capabilities/system/liaison/handsfree/status.v1.toml";
@@ -425,6 +431,46 @@ impl RobonixSystemLiaisonSubmit for LiaisonServiceImpl {
             .await
             .map_err(|e| Status::unavailable(format!("Pilot unreachable: {e:#}")))?;
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemLiaisonVoiceFinish for LiaisonServiceImpl {
+    /// End microphone capture for an in-flight voice session and let the turn
+    /// finish normally, submitting whatever has been recognized so far.
+    ///
+    /// The ASR backend's own end-of-utterance detection cannot fire when the
+    /// room never goes quiet, which otherwise strands the speaker until the
+    /// record-seconds ceiling expires. This is the manual equivalent of that
+    /// automatic endpoint, not an abort: dropping the StartVoiceSession
+    /// stream is what discards a turn.
+    ///
+    /// `ok=false` means no capture was registered for the id -- typically the
+    /// utterance ended on its own between the operator pressing the button and
+    /// this call landing. That is a benign race, so it is reported rather than
+    /// raised as an error.
+    async fn finish_voice_capture(
+        &self,
+        request: Request<FinishVoiceCaptureRequest>,
+    ) -> Result<Response<FinishVoiceCaptureResponse>, Status> {
+        let req = request.into_inner();
+        let session_id = req.session_id.trim().to_string();
+        if session_id.is_empty() {
+            return Err(Status::invalid_argument("session_id is required"));
+        }
+        let accepted = voice::finish_capture(&session_id);
+        let detail = if accepted {
+            info!("voice: finish requested for session {session_id}");
+            "capture finishing; transcript will be submitted".to_string()
+        } else {
+            info!("voice: finish requested for inactive session {session_id}");
+            "no capture is running for this session".to_string()
+        };
+        Ok(Response::new(FinishVoiceCaptureResponse {
+            ok: accepted,
+            session_id,
+            detail,
+        }))
     }
 }
 
@@ -797,6 +843,20 @@ async fn main() -> Result<()> {
     atlas
         .declare_capability(
             LIAISON_PROVIDER_ID,
+            LIAISON_VOICE_FINISH_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                LIAISON_VOICE_FINISH_TOML,
+                "robonix.contracts.RobonixSystemLiaisonVoiceFinish",
+                "/robonix.contracts.RobonixSystemLiaisonVoiceFinish/FinishVoiceCapture",
+            ),
+        )
+        .await
+        .context("declare liaison voice finish gRPC capability")?;
+    atlas
+        .declare_capability(
+            LIAISON_PROVIDER_ID,
             LIAISON_HANDSFREE_SET_CONTRACT,
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -879,6 +939,9 @@ async fn main() -> Result<()> {
             .add_service(RobonixLifecycleDriverServer::new(server_lifecycle))
             .add_service(RobonixSystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
             .add_service(RobonixSystemLiaisonVoiceServer::from_arc(Arc::clone(&svc)))
+            .add_service(RobonixSystemLiaisonVoiceFinishServer::from_arc(Arc::clone(
+                &svc,
+            )))
             .add_service(RobonixSystemLiaisonHandsfreeSetEnabledServer::from_arc(
                 Arc::clone(&svc),
             ))
