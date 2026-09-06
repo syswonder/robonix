@@ -1,5 +1,5 @@
 manifestVersion: 1
-name: robonix-webots-scene-evaluation-nav
+name: robonix-webots-scene-evaluation-cg-nav
 
 system:
   atlas:
@@ -22,102 +22,13 @@ system:
     manifest: package_manifest.yaml
     config:
       perception:
-        # DualMap variant of the Scene benchmark manifest; everything else is identical.
-        # The backend also has to be known when the image is built -- DualMap
-        # brings its own checkout and weights -- so build and boot with
-        # SCENE_PERCEPTION_BACKEND=dualmap, the same way SPEECH_BACKEND selects
-        # the speech service's. Starting with a mismatched image fails loudly.
-        backend: dualmap
-        # DualMap associates by point overlap between consecutive views of an
-        # object, and its class vote needs several observations; at 2 s per
-        # tick a robot at 0.15 m/s saw most objects once (54 of 57 exported
-        # objects had one observation). 1 s doubles that for 0.3 s of GPU per
-        # tick, and slam_toolbox no longer contends for the GPU as RTAB-Map's
-        # visual odometry did.
+        # ConceptGraphs counterpart of the DualMap benchmark manifest: the same
+        # world, the same nav2 tour and the same scorer, so the two rows differ
+        # only in which perception backend produced the objects. This is the
+        # "before" side of the comparison; it runs on the plain robonix-scene
+        # image, since only DualMap needs its own checkout and weights.
+        backend: concept_graphs
         period_s: 1.0
-        dualmap:
-          keyframe_translation_m: 0.15
-          keyframe_rotation_deg: 5.0
-          keyframe_time_s: 5.0
-          # DualMap needs stable_num observations before a track counts as
-          # stable; its default of 8 assumes a dataset replay that maps every
-          # frame. A robot mapping keyframes at walking pace sees each object a
-          # handful of times, so at 8 the map emptied out behind it (65 tracks
-          # -> 1 over one office run). 3 is enough here. The window and the
-          # pending count stay at DualMap's defaults: max_pending_count is also
-          # how long a STABLE track waits before promotion to the global map,
-          # and raising it to 20 stopped promotion altogether (0 promoted in
-          # 180 s), which is where the cross-class merge happens.
-          stable_num: 3
-          # Keep tracks around long enough to be re-observed: with the global
-          # map off these two no longer delay anything, they only decide how
-          # long an unseen track survives (10 / 5 deleted most objects before
-          # the robot came back to them).
-          active_window_size: 40
-          max_pending_count: 20
-          # Association gates point overlap at downsample_voxel_size (2 cm by
-          # default, which assumes ground-truth poses). This deployment's SLAM
-          # pose is off by 3-7 cm (P95) between keyframes, so at 2 cm two views
-          # of one object never overlap and every keyframe started a new track
-          # (54 of 57 objects had one observation). 5 cm covers that error.
-          downsample_voxel_size: 0.05
-          # DualMap's own duplicate merge: two tracks whose point overlap exceeds
-          # merge_sim_threshold are joined every merge_every_keyframes. The
-          # default 0.9 never fired here (65 -> 65 in the log) for the same
-          # reason association failed — pose error — so it is relaxed and run
-          # more often. Keeping tracks alive (above) is what makes recall; this
-          # is what keeps the duplicates that come with it from piling up.
-          merge_sim_threshold: 0.3
-          merge_every_keyframes: 10
-          # The detector can only answer with a name it was given, and DualMap
-          # ships a 101-name list built for homes -- bed, bathtub, ironing
-          # board. In an office it called the cabinet a sink and the chair an
-          # ironing board; 27 of the 38 objects the benchmark counted as
-          # invented sat within a metre of a real one, so they were the right
-          # place under the wrong name. This list is deliberately wider than
-          # what this world contains, so the score still measures recognition
-          # rather than a lookup.
-          classes:
-            - chair
-            - table
-            - desk
-            - couch
-            - sofa
-            - stool
-            - bench
-            - cabinet
-            - bookshelf
-            - shelf
-            - drawer
-            - door
-            - window
-            - curtain
-            - lamp
-            - ceiling_light
-            - monitor
-            - keyboard
-            - mouse
-            - computer
-            - laptop
-            - printer
-            - telephone
-            - potted_plant
-            - vase
-            - picture
-            - whiteboard
-            - clock
-            - trash_can
-            - box
-            - book
-            - cup
-            - bottle
-            - sink
-            - rug
-            - cushion
-            - backpack
-            - fan
-            - radiator
-            - mirror
         confidence_threshold: 0.30
         max_detections: 30
         stationary_refinement:

@@ -65,6 +65,55 @@ system:
           # is what keeps the duplicates that come with it from piling up.
           merge_sim_threshold: 0.3
           merge_every_keyframes: 10
+          # The detector can only answer with a name it was given, and DualMap
+          # ships a 101-name list built for homes -- bed, bathtub, ironing
+          # board. In an office it called the cabinet a sink and the chair an
+          # ironing board; 27 of the 38 objects the benchmark counted as
+          # invented sat within a metre of a real one, so they were the right
+          # place under the wrong name. This list is deliberately wider than
+          # what this world contains, so the score still measures recognition
+          # rather than a lookup.
+          classes:
+            - chair
+            - table
+            - desk
+            - couch
+            - sofa
+            - stool
+            - bench
+            - cabinet
+            - bookshelf
+            - shelf
+            - drawer
+            - door
+            - window
+            - curtain
+            - lamp
+            - ceiling_light
+            - monitor
+            - keyboard
+            - mouse
+            - computer
+            - laptop
+            - printer
+            - telephone
+            - potted_plant
+            - vase
+            - picture
+            - whiteboard
+            - clock
+            - trash_can
+            - box
+            - book
+            - cup
+            - bottle
+            - sink
+            - rug
+            - cushion
+            - backpack
+            - fan
+            - radiator
+            - mirror
         confidence_threshold: 0.30
         max_detections: 30
         stationary_refinement:
