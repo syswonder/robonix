@@ -230,3 +230,77 @@ if __name__ == "__main__":
     test_global_map_is_opt_in()
     test_floor_gate_is_off_unless_asked()
     test_floor_height_comes_from_the_shared_setting()
+
+
+def _track(cls, lo, hi, n):
+    """One map entry shaped like _to_map_object's output, spanning lo..hi."""
+    import numpy as np
+    o = _obj("u", 0, n=n)
+    xs = np.linspace(lo[0], hi[0], n)
+    ys = np.linspace(lo[1], hi[1], n)
+    zs = np.linspace(lo[2], hi[2], n)
+    o.pcd.points = [(float(a), float(b), float(c)) for a, b, c in zip(xs, ys, zs)]
+    return {"class_name": cls, "n_points": n, "pcd": o.pcd}
+
+
+def test_slices_of_the_floor_are_not_furniture():
+    # The floor arrives as a millimetre-thick slab carrying more points than any
+    # real object, so nothing that ranks by evidence can reject it.
+    d = _detector()
+    dropped = {"ground_slab": 0}
+    kept = d._drop_ground_slabs([
+        _track("desk", (-1, -1, -0.090), (1, 1, -0.089), 1900),   # the floor
+        _track("keyboard", (0, 0, 0.640), (0.4, 0.2, 0.653), 50),  # flat, but on a desk
+        _track("desk", (-1, -1, 0.61), (1, 1, 0.65), 800),         # a table top
+    ], dropped)
+    assert dropped["ground_slab"] == 1
+    assert [t["class_name"] for t in kept] == ["keyboard", "desk"]
+    print("  [PASS] test_slices_of_the_floor_are_not_furniture")
+
+
+def test_a_fragment_is_not_a_second_object_of_its_class():
+    # Scale is judged against the class's own members, not a table of sizes.
+    d = _detector()
+    dropped = {"class_outlier": 0}
+    group = [_track("desk", (0, 0, 0.6), (1.6, 1.5, 0.65), 2300),
+             _track("desk", (4, 4, 0.6), (5.5, 5.4, 0.65), 1500),
+             _track("desk", (9, 9, 0.2), (9.11, 9.10, 0.45), 20)]   # a smear copy
+    kept = d._drop_class_outliers(list(group), dropped)
+    assert dropped["class_outlier"] == 1 and len(kept) == 2
+    # Two members are not a scale: with nothing to judge against, both stay.
+    dropped = {"class_outlier": 0}
+    assert len(d._drop_class_outliers(group[:1] + group[2:], dropped)) == 2
+    print("  [PASS] test_a_fragment_is_not_a_second_object_of_its_class")
+
+
+def test_one_table_in_pieces_merges_but_two_tables_do_not():
+    d = _detector()
+    dropped = {"overlapping": 0}
+    # Same table from two sides: the smaller box is almost entirely inside.
+    kept = d._absorb_overlapping([
+        _track("desk", (-5.19, -3.31, 0.61), (-3.83, -1.47, 0.65), 2334),
+        _track("desk", (-5.08, -3.23, 0.61), (-3.80, -1.64, 0.65), 1545),
+    ], dropped)
+    assert dropped["overlapping"] == 1 and len(kept) == 1
+    # Two tables pushed together: they touch, so neither absorbs the other.
+    dropped = {"overlapping": 0}
+    kept = d._absorb_overlapping([
+        _track("desk", (-5.19, -3.31, 0.61), (-3.83, -1.47, 0.65), 2334),
+        _track("desk", (-4.22, -2.19, 0.61), (-2.62, -0.70, 0.65), 1536),
+    ], dropped)
+    assert dropped["overlapping"] == 0 and len(kept) == 2
+    print("  [PASS] test_one_table_in_pieces_merges_but_two_tables_do_not")
+
+
+def test_a_long_thin_copy_is_absorbed_even_on_little_overlap():
+    # The two tests are alternatives, not a single rule: a smear copy of a
+    # narrow object sits inside the original while overlapping well under half
+    # of it. Requiring overlap alone let these back in (duplicates 7 -> 16).
+    d = _detector()
+    dropped = {"overlapping": 0}
+    kept = d._absorb_overlapping([
+        _track("plant", (0.0, 0.0, 0.0), (0.60, 0.60, 1.60), 776),
+        _track("plant", (0.28, 0.28, 0.70), (0.34, 0.34, 0.90), 14),
+    ], dropped)
+    assert dropped["overlapping"] == 1 and len(kept) == 1
+    print("  [PASS] test_a_long_thin_copy_is_absorbed_even_on_little_overlap")

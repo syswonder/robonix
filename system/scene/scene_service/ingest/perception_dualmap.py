@@ -64,6 +64,19 @@ _EXPORT_CLIP = ("ViT-B-32", "/opt/models/open_clip_pytorch_model.bin")
 _EXPORT_EVERY_TICKS = 100
 # Consecutive CUDA failures after which the tick loop gives up (see _tick_locked).
 _CUDA_FAILURE_LIMIT = 20
+# How much of the smaller box the intersection must cover before two same-class
+# tracks are treated as one object. See _absorb_overlapping for the sweep.
+_MERGE_OVERLAP = 0.5
+# A reconstructed surface, not a body. The floor arrives through the detector as
+# a slab 1.6 mm thick carrying two thousand points, so evidence cannot tell it
+# from a table; thickness can. Well under a keyboard (7-13 mm measured) and a
+# rug (20-50 mm), both of which are real and thin.
+_SLAB_THICKNESS_M = 0.005
+_SLAB_OF_FLOOR_M = 0.20
+# A track this much smaller than the largest of its own class, on this much less
+# evidence, is a fragment rather than a second object of that kind.
+_OUTLIER_SIZE_FRACTION = 0.25
+_OUTLIER_POINTS_FRACTION = 0.10
 
 
 def _inst_color(uid: str) -> list[float]:
@@ -73,6 +86,27 @@ def _inst_color(uid: str) -> list[float]:
             0.35 + 0.65 * ((h >> 8) & 0xFF) / 255.0,
             0.35 + 0.65 * (h & 0xFF) / 255.0]
 
+
+
+def _overlap_fraction(a: tuple, b: tuple) -> float:
+    """Share of the smaller of two AABBs that their intersection covers.
+
+    Boxes are (min_xyz, max_xyz) arrays. A flat track has near-zero volume and
+    would divide out to nonsense, so each extent is floored at 2 cm — the
+    comparison is then over area rather than volume, which is the honest
+    reading for two coplanar table tops.
+    """
+    import numpy as np
+
+    lo = np.maximum(a[0], b[0])
+    hi = np.minimum(a[1], b[1])
+    span = hi - lo
+    if bool(np.any(span <= 0)):
+        return 0.0
+    inter = float(np.prod(span))
+    va = float(np.prod(np.maximum(a[1] - a[0], 0.02)))
+    vb = float(np.prod(np.maximum(b[1] - b[0], 0.02)))
+    return inter / max(1e-9, min(va, vb))
 
 class DualMapDetector(ConceptGraphsDetector):
     """Per-frame DualMap mapper that feeds Scene's ``ObjectRegistry``."""
@@ -90,6 +124,12 @@ class DualMapDetector(ConceptGraphsDetector):
         self._dm_data_input: Any = None
         self._dm_names: list[str] = []
         self._map_objects = []
+        # Occupancy grid cache for the consistency check, keyed by its stamp.
+        self._known_cache = None
+        self._known_stamp = 0.0
+        # Share of an object's points that must sit on ground the occupancy map
+        # has observed. 1.0 would reject anything overhanging the mapped area.
+        self._min_mapped_fraction = float(self._dualmap_cfg.get("min_mapped_fraction", 0.5))
         self._keep_unknown = bool(self._dualmap_cfg.get("keep_unknown", False))
         # FastSAM only adds class-agnostic segments, which become "unknown" objects.
         # When those are dropped anyway it is pure cost (and a second CUDA thread), so
@@ -168,16 +208,21 @@ class DualMapDetector(ConceptGraphsDetector):
     # ── lifecycle ─────────────────────────────────────────────────────
     async def start(self) -> None:
         """Load DualMap in an executor thread and start the tick loop. When
-        DualMap cannot be loaded the detector stays idle (no task) and Scene
-        runs without object recognition, mirroring the ConceptGraphs backend."""
+        A deployment that asked for this backend and cannot have it is a
+        deployment error, not a degraded mode: Scene would come up, answer every
+        query, and recognize nothing, which looks like an empty room rather than
+        a broken install. So a failed load raises instead of leaving the
+        detector idle."""
         if self._task is not None:
             return
         loop = asyncio.get_running_loop()
         self._asyncio_loop = loop
         ok = await loop.run_in_executor(None, self._load_dualmap)
         if not ok:
-            log.warning("DualMapDetector skipped — DualMap unavailable (see log above)")
-            return
+            raise RuntimeError(
+                "perception.backend is 'dualmap' but DualMap could not be loaded "
+                "(see the log above). Build the image for this backend: "
+                "SCENE_PERCEPTION_BACKEND=dualmap bash scripts/build.sh")
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="scene-dualmap-detector")
         log.info(
@@ -414,7 +459,10 @@ class DualMapDetector(ConceptGraphsDetector):
             return
         self._consecutive_failures = 0
         objects, all_objects, dropped = [], [], {"points": 0, "unknown": 0, "observations": 0,
-                                                 "unstable": 0, "floor": 0}
+                                                 "unstable": 0, "floor": 0, "unmapped": 0,
+                                                 "ground_slab": 0, "class_outlier": 0,
+                                                 "overlapping": 0}
+        known = self._known_ground()
         # A promoted object leaves the local map, so the scene is the union of
         # both: what the robot is looking at now, and what it has already
         # committed to memory. Promotion keeps the uid (GlobalObject inherits it
@@ -428,6 +476,9 @@ class DualMapDetector(ConceptGraphsDetector):
             if d is None:
                 continue
             all_objects.append(d)
+            if known is not None and not self._on_known_ground(d, known):
+                dropped["unmapped"] += 1
+                continue
             if d["num_detections"] < self._min_observations:
                 dropped["observations"] += 1
                 continue
@@ -435,17 +486,24 @@ class DualMapDetector(ConceptGraphsDetector):
                 dropped["unstable"] += 1
                 continue
             objects.append(d)
+        # Order matters: the floor slabs carry the most points of anything in
+        # the tick, so they have to go before any step that ranks by evidence.
+        objects = self._drop_ground_slabs(objects, dropped)
+        objects = self._drop_class_outliers(objects, dropped)
+        objects = self._absorb_overlapping(objects, dropped)
         self._map_objects = objects
         self._all_objects = all_objects
         n = len(objects)
         if n != self._last_lm_size or self._tick_idx % 25 == 0:
             log.info("[scene-dualmap] tick %d: %d observations, %d objects of %d tracks (%.2fs, %d frames skipped, "
                      "dropped: %d few-points %d unknown %d few-observations %d unstable "
-                     "%d on-floor, %d promoted)",
+                     "%d on-floor %d unmapped %d ground-slab %d class-outlier "
+                     "%d overlapping, %d promoted)",
                      self._tick_idx, len(obs) if obs is not None else 0, n, len(self._lm.local_map),
                      time.monotonic() - t0, self._skipped_frames,
                      dropped["points"], dropped["unknown"], dropped["observations"], dropped["unstable"],
-                     dropped["floor"], self._promoted)
+                     dropped["floor"], dropped["unmapped"], dropped["ground_slab"],
+                     dropped["class_outlier"], dropped["overlapping"], self._promoted)
             self._last_lm_size = n
         self._tick_idx += 1
         self._project_to_registry()
@@ -599,6 +657,190 @@ class DualMapDetector(ConceptGraphsDetector):
             "clip_ft": np.asarray(clip_ft, dtype=np.float32) if clip_ft is not None else None,
             "stable": bool(getattr(o, "is_stable", True)),
         }
+
+    # ── nested copies of one object ───────────────────────────────────
+    def _drop_ground_slabs(self, objects: list, dropped: dict) -> list:
+        """Drop tracks that are a slice of the floor rather than a thing on it.
+
+        Depth on a large flat surface segments into pieces that the detector
+        labels like furniture, and each piece carries a thousand points, so
+        every filter that ranks by evidence keeps it — the nine that survived
+        one office run were labelled `desk` and outnumbered the real tables.
+        Being flat is not enough on its own (a keyboard is flat): it has to be
+        flat AND lying on the floor, which nothing the robot is asked to find
+        is.
+        """
+        import numpy as np
+
+        kept = []
+        for o in objects:
+            pts = np.asarray(o["pcd"].points, dtype=np.float64)
+            if pts.shape[0]:
+                z0, z1 = float(pts[:, 2].min()), float(pts[:, 2].max())
+                if (z1 - z0) < _SLAB_THICKNESS_M and \
+                        abs(z0 - self._floor_z_m) < _SLAB_OF_FLOOR_M:
+                    dropped["ground_slab"] += 1
+                    continue
+            kept.append(o)
+        return kept
+
+    def _drop_class_outliers(self, objects: list, dropped: dict) -> list:
+        """Drop a track far too small to be the thing its own label names.
+
+        The scale comes from the class itself rather than from a table of
+        expected object sizes: a vocabulary is the deployment's own list, and
+        nobody should have to write down how big a desk is for their site. The
+        real members of a class agree on scale, while a depth-error copy is a
+        fragment an order of magnitude smaller on an order of magnitude less
+        evidence — 0.11 m tracks labelled `desk` beside 1.6 m ones. Both
+        conditions are required, so a class that genuinely holds one large and
+        one small member keeps both, and a class with fewer than three members
+        is left alone entirely for want of a scale to judge against.
+        """
+        import numpy as np
+
+        by_class: dict[str, list] = {}
+        boxes: dict[int, tuple] = {}
+        for o in objects:
+            pts = np.asarray(o["pcd"].points, dtype=np.float64)
+            if not pts.shape[0]:
+                continue
+            boxes[id(o)] = (float(np.max(pts.max(0) - pts.min(0))), int(o["n_points"]))
+            by_class.setdefault(o["class_name"], []).append(o)
+        drop: set[int] = set()
+        for group in by_class.values():
+            if len(group) < 3:
+                continue
+            big_d = max(boxes[id(o)][0] for o in group)
+            big_p = max(boxes[id(o)][1] for o in group)
+            for o in group:
+                d, n = boxes[id(o)]
+                if d < _OUTLIER_SIZE_FRACTION * big_d and n < _OUTLIER_POINTS_FRACTION * big_p:
+                    drop.add(id(o))
+        if not drop:
+            return objects
+        dropped["class_outlier"] += len(drop)
+        return [o for o in objects if id(o) not in drop]
+
+    def _absorb_overlapping(self, objects: list, dropped: dict) -> list:
+        """Absorb a same-class track that occupies the space of a bigger one.
+
+        A large object is registered in pieces -- one table seen from two sides
+        comes back as two tracks covering nearly the same volume -- and a
+        detection with wrong depth is re-registered along the camera ray, each
+        copy smaller and further out than the last (one plant became ten, point
+        counts falling 776 -> 14). Both are the same shape of error: two tracks
+        claiming one piece of space.
+
+        What separates them from two real objects is whether one claims the
+        other's space: the intersection covers half of the smaller box, or the
+        smaller box's centre is inside the bigger one. Two tables pushed
+        together satisfy neither -- they overlap only where they touch
+        (measured 0.12) and their centres are a metre apart -- so they stay
+        two. Deciding by space rather than by distance is what keeps two chairs
+        side by side apart, and it is why a plain radius merge could not be
+        used: at a radius wide enough to collapse the smear it also collapsed
+        distinct objects (measured: duplicates 31 -> 6, but true positives
+        40 -> 24).
+        """
+        import numpy as np
+
+        by_class: dict[str, list] = {}
+        for o in objects:
+            by_class.setdefault(o["class_name"], []).append(o)
+        absorbed: set[int] = set()
+        for group in by_class.values():
+            if len(group) < 2:
+                continue
+            # Bigger first: a copy is absorbed into the fullest version of itself.
+            order = sorted(group, key=lambda o: -int(o["n_points"]))
+            boxes = []
+            for o in order:
+                pts = np.asarray(o["pcd"].points, dtype=np.float64)
+                boxes.append((pts.min(0), pts.max(0)) if pts.shape[0] else None)
+            centres = [None if b is None else (b[0] + b[1]) / 2.0 for b in boxes]
+            for i, keeper in enumerate(order):
+                if id(keeper) in absorbed or boxes[i] is None:
+                    continue
+                lo, hi = boxes[i]
+                for j in range(i + 1, len(order)):
+                    if id(order[j]) in absorbed or boxes[j] is None:
+                        continue
+                    # Either test alone is a claim on the same piece of space.
+                    # Overlap catches a table met in halves, whose pieces sit
+                    # beside each other rather than one inside the other;
+                    # containment catches a long thin copy whose centre is well
+                    # inside the original but whose volume overlaps far less
+                    # than half. Replacing the second with the first raised
+                    # duplicates from 7 to 16 on the same tour.
+                    inside = bool(np.all(centres[j] >= lo) and np.all(centres[j] <= hi))
+                    if inside or _overlap_fraction(boxes[i], boxes[j]) > _MERGE_OVERLAP:
+                        absorbed.add(id(order[j]))
+        if not absorbed:
+            return objects
+        dropped["overlapping"] += len(absorbed)
+        return [o for o in objects if id(o) not in absorbed]
+
+    # ── occupancy consistency ─────────────────────────────────────────
+    def _known_ground(self):
+        """The occupancy grid as (mask, origin_xy, resolution), or None.
+
+        Cached per grid message: the mask is a byte per cell and the grid only
+        changes when the map does.
+        """
+        hub = self._hub
+        if hub is None or not hub.has("occupancy_grid"):
+            return None
+        msg, stamp, _count = hub.latest("occupancy_grid")
+        if msg is None or stamp <= 0.0:
+            return None
+        if self._known_stamp == stamp:
+            return self._known_cache
+        try:
+            import numpy as np
+
+            info = msg.info
+            grid = np.asarray(msg.data, dtype=np.int16).reshape(int(info.height), int(info.width))
+            # Occupied or free are both "the robot has looked here"; -1 is not.
+            mask = grid >= 0
+            self._known_cache = (mask, (float(info.origin.position.x),
+                                        float(info.origin.position.y)),
+                                 float(info.resolution))
+        except Exception as e:  # noqa: BLE001
+            log.warning("[scene-dualmap] cannot read the occupancy grid: %s", e)
+            self._known_cache = None
+        self._known_stamp = stamp
+        return self._known_cache
+
+    def _on_known_ground(self, obj: dict, known) -> bool:
+        """Has the robot ever looked where this object claims to be?
+
+        A detection whose depth is wrong lands along the camera ray, often well
+        past the walls, and the same object is then registered again further out
+        each time it is seen -- one plant came back as ten, strung along a line
+        into ground the map has never observed. That is not a threshold to tune:
+        a robot cannot have seen an object in a cell it never observed, so the
+        map itself settles it. Objects the map has no opinion about (no grid
+        yet) are kept.
+        """
+        import numpy as np
+
+        mask, (ox, oy), res = known
+        if res <= 0.0:
+            return True
+        pts = np.asarray(obj["pcd"].points, dtype=np.float64)
+        if pts.shape[0] == 0:
+            return True
+        cols = ((pts[:, 0] - ox) / res).astype(np.int32)
+        rows = ((pts[:, 1] - oy) / res).astype(np.int32)
+        inside = ((cols >= 0) & (cols < mask.shape[1])
+                  & (rows >= 0) & (rows < mask.shape[0]))
+        if not inside.any():
+            return False
+        seen = mask[rows[inside], cols[inside]]
+        # Most of the object has to stand on ground the robot has looked at;
+        # an edge overhanging unmapped space is normal.
+        return float(seen.mean()) >= self._min_mapped_fraction
 
     # ── text embedding (MobileCLIP shared with the detector) ──────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
