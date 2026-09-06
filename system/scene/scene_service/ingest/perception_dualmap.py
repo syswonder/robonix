@@ -45,6 +45,8 @@ from .perception_concept_graphs import (
     _image_msg_to_bgr,
 )
 
+from .geometry_gates import KnownGround, fraction_on_known_ground  # noqa: E402
+
 log = logging.getLogger("scene.dualmap")
 
 _DEFAULT_ROOT = "/opt/dualmap"
@@ -124,9 +126,8 @@ class DualMapDetector(ConceptGraphsDetector):
         self._dm_data_input: Any = None
         self._dm_names: list[str] = []
         self._map_objects = []
-        # Occupancy grid cache for the consistency check, keyed by its stamp.
-        self._known_cache = None
-        self._known_stamp = 0.0
+        # Occupancy-consistency gate, shared with the other backend.
+        self._known_gate = None
         # Share of an object's points that must sit on ground the occupancy map
         # has observed. 1.0 would reject anything overhanging the mapped area.
         self._min_mapped_fraction = float(self._dualmap_cfg.get("min_mapped_fraction", 0.5))
@@ -136,6 +137,10 @@ class DualMapDetector(ConceptGraphsDetector):
         # it follows keep_unknown unless the manifest says otherwise.
         self._use_fastsam = bool(self._dualmap_cfg.get("use_fastsam", self._keep_unknown))
         self._consecutive_failures = 0
+        # Named for the status page: which backend is actually running is a
+        # question people currently answer by reading the manifest.
+        self.backend_name = "dualmap"
+        self.last_tick_s = 0.0
         # Keyframe gate (see DualMap core.check_keyframe). Feeding every tick
         # gave ~10x the observations of DualMap's stride-10 evaluation and
         # fragmented objects; on a robot a frame without motion adds nothing.
@@ -494,6 +499,7 @@ class DualMapDetector(ConceptGraphsDetector):
         self._map_objects = objects
         self._all_objects = all_objects
         n = len(objects)
+        self.last_tick_s = time.monotonic() - t0
         if n != self._last_lm_size or self._tick_idx % 25 == 0:
             log.info("[scene-dualmap] tick %d: %d observations, %d objects of %d tracks (%.2fs, %d frames skipped, "
                      "dropped: %d few-points %d unknown %d few-observations %d unstable "
@@ -783,64 +789,25 @@ class DualMapDetector(ConceptGraphsDetector):
 
     # ── occupancy consistency ─────────────────────────────────────────
     def _known_ground(self):
-        """The occupancy grid as (mask, origin_xy, resolution), or None.
-
-        Cached per grid message: the mask is a byte per cell and the grid only
-        changes when the map does.
-        """
-        hub = self._hub
-        if hub is None or not hub.has("occupancy_grid"):
-            return None
-        msg, stamp, _count = hub.latest("occupancy_grid")
-        if msg is None or stamp <= 0.0:
-            return None
-        if self._known_stamp == stamp:
-            return self._known_cache
-        try:
-            import numpy as np
-
-            info = msg.info
-            grid = np.asarray(msg.data, dtype=np.int16).reshape(int(info.height), int(info.width))
-            # Occupied or free are both "the robot has looked here"; -1 is not.
-            mask = grid >= 0
-            self._known_cache = (mask, (float(info.origin.position.x),
-                                        float(info.origin.position.y)),
-                                 float(info.resolution))
-        except Exception as e:  # noqa: BLE001
-            log.warning("[scene-dualmap] cannot read the occupancy grid: %s", e)
-            self._known_cache = None
-        self._known_stamp = stamp
-        return self._known_cache
+        """The occupancy grid as a looked-here mask; see geometry_gates."""
+        if self._known_gate is None:
+            self._known_gate = KnownGround(self._hub)
+        return self._known_gate.current()
 
     def _on_known_ground(self, obj: dict, known) -> bool:
         """Has the robot ever looked where this object claims to be?
 
         A detection whose depth is wrong lands along the camera ray, often well
-        past the walls, and the same object is then registered again further out
-        each time it is seen -- one plant came back as ten, strung along a line
-        into ground the map has never observed. That is not a threshold to tune:
-        a robot cannot have seen an object in a cell it never observed, so the
-        map itself settles it. Objects the map has no opinion about (no grid
-        yet) are kept.
+        past the walls, and is registered again further out each time it is
+        seen -- one plant became ten, strung into ground the map never observed.
+        Not a threshold to tune: the map settles it. Objects the map has no
+        opinion about are kept.
         """
         import numpy as np
 
-        mask, (ox, oy), res = known
-        if res <= 0.0:
-            return True
         pts = np.asarray(obj["pcd"].points, dtype=np.float64)
-        if pts.shape[0] == 0:
-            return True
-        cols = ((pts[:, 0] - ox) / res).astype(np.int32)
-        rows = ((pts[:, 1] - oy) / res).astype(np.int32)
-        inside = ((cols >= 0) & (cols < mask.shape[1])
-                  & (rows >= 0) & (rows < mask.shape[0]))
-        if not inside.any():
-            return False
-        seen = mask[rows[inside], cols[inside]]
-        # Most of the object has to stand on ground the robot has looked at;
-        # an edge overhanging unmapped space is normal.
-        return float(seen.mean()) >= self._min_mapped_fraction
+        frac = fraction_on_known_ground(pts[:, :2] if pts.ndim == 2 and pts.shape[0] else pts, known)
+        return True if frac is None else frac >= self._min_mapped_fraction
 
     # ── text embedding (MobileCLIP shared with the detector) ──────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:

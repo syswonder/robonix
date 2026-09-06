@@ -29,6 +29,8 @@ import math
 import os
 import threading
 import time
+
+from .geometry_gates import KnownGround, fraction_on_known_ground, footprint_samples
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
@@ -773,6 +775,13 @@ class ConceptGraphsDetector:
         self._inference_lock = threading.Lock()
         self._classes = _resolved_classes()
         self._tick_idx = 0
+        # Named for the status page, alongside what one pass through the
+        # pipeline costs: comparing two backends on accuracy alone leaves out
+        # half of why one would be chosen over the other.
+        self.backend_name = "concept_graphs"
+        self.last_tick_s = 0.0
+        self._known_gate = KnownGround(hub) if hub is not None else None
+        self._min_mapped_fraction = 0.5
         # Set in start() so worker-thread `_project_to_registry` can
         # schedule the actual mutation on the asyncio loop (the registry
         # uses asyncio.Lock, not a sync lock).
@@ -1085,7 +1094,13 @@ class ConceptGraphsDetector:
 
     def _tick_once(self) -> None:
         with self._inference_lock:
-            self._tick_locked()
+            t0 = time.monotonic()
+            try:
+                self._tick_locked()
+            finally:
+                # Timed here rather than inside, so the figure covers the whole
+                # pass and is recorded even when the pass raises.
+                self.last_tick_s = time.monotonic() - t0
 
     def _tick_locked(self) -> None:
         rgb_msg = self._rgb_msg()
@@ -2552,6 +2567,22 @@ class ConceptGraphsDetector:
         and broke any consumer that held an oid across ticks.
         """
         now = time.time()
+        # The same occupancy gate the DualMap backend applies: an object standing
+        # on ground the map has never observed cannot have been seen there. This
+        # backend shipped without it and put objects outside the walls.
+        known = self._known_gate.current() if self._known_gate is not None else None
+        if known is not None:
+            kept, dropped = [], 0
+            for s_ in snapshots:
+                frac = fraction_on_known_ground(
+                    footprint_samples(s_["x"], s_["y"], s_["size_x"], s_["size_y"]), known)
+                if frac is None or frac >= self._min_mapped_fraction:
+                    kept.append(s_)
+                else:
+                    dropped += 1
+            if dropped and self._tick_idx % 25 == 0:
+                log.info("[scene-cg] %d object(s) stand on unmapped ground; not registered", dropped)
+            snapshots = kept
         live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
             wf = self._world_frame_fn()
