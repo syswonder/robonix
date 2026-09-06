@@ -75,6 +75,7 @@ _MERGE_OVERLAP = 0.5
 # rug (20-50 mm), both of which are real and thin.
 _SLAB_THICKNESS_M = 0.005
 _SLAB_OF_FLOOR_M = 0.20
+_BELOW_FLOOR_M = 0.02
 # A track this much smaller than the largest of its own class, on this much less
 # evidence, is a fragment rather than a second object of that kind.
 _OUTLIER_SIZE_FRACTION = 0.25
@@ -683,8 +684,15 @@ class DualMapDetector(ConceptGraphsDetector):
             pts = np.asarray(o["pcd"].points, dtype=np.float64)
             if pts.shape[0]:
                 z0, z1 = float(pts[:, 2].min()), float(pts[:, 2].max())
-                if (z1 - z0) < _SLAB_THICKNESS_M and \
-                        abs(z0 - self._floor_z_m) < _SLAB_OF_FLOOR_M:
+                zc = float(np.median(pts[:, 2]))
+                thin_on_floor = ((z1 - z0) < _SLAB_THICKNESS_M
+                                 and abs(z0 - self._floor_z_m) < _SLAB_OF_FLOOR_M)
+                # A 3.5 x 4.5 m "desk" whose median point sat 5 cm UNDER the
+                # floor: the floor plus a few table legs, and not thin at all.
+                # Nothing the robot is asked to find has most of itself below
+                # the ground it stands on. A rug's median is above the floor.
+                mostly_below_floor = zc < self._floor_z_m - _BELOW_FLOOR_M
+                if thin_on_floor or mostly_below_floor:
                     dropped["ground_slab"] += 1
                     continue
             kept.append(o)

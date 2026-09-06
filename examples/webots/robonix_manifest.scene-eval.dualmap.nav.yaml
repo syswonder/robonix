@@ -77,6 +77,9 @@ system:
           # place under the wrong name. This list is deliberately wider than
           # what this world contains, so the score still measures recognition
           # rather than a lookup.
+          # An office has no rugs; a track lying on the floor here is depth
+          # noise wearing a furniture label.
+          floor_gate: true
           classes:
             - chair
             - table

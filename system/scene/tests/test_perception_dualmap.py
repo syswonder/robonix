@@ -255,6 +255,18 @@ def test_slices_of_the_floor_are_not_furniture():
     ], dropped)
     assert dropped["ground_slab"] == 1
     assert [t["class_name"] for t in kept] == ["keyboard", "desk"]
+    # The floor plus some table legs: 30 cm tall, so not a slab, but most of
+    # it sits under the floor. A rug (median above the floor) stays.
+    dropped = {"ground_slab": 0}
+    floor_blob = _track("desk", (-2, -2, -0.09), (1.5, 2.5, 0.20), 3765)
+    # nine points in ten lie on the floor; the rest climb a table leg
+    floor_blob["pcd"].points = [(x, y, -0.09 if i % 10 else 0.20)
+                                for i, (x, y, _) in enumerate(floor_blob["pcd"].points)]
+    kept = d._drop_ground_slabs([
+        floor_blob,
+        _track("rug", (0, 0, 0.00), (1.5, 1.0, 0.03), 400),
+    ], dropped)
+    assert dropped["ground_slab"] == 1 and [t["class_name"] for t in kept] == ["rug"]
     print("  [PASS] test_slices_of_the_floor_are_not_furniture")
 
 
