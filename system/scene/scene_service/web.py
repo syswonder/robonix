@@ -1479,8 +1479,25 @@ def make_app(*, registry: ObjectRegistry,
             camera_preview_completed_s = loop.time()
             return Response(payload, media_type="application/json")
 
+    async def cost_page(_request):
+        """The cost view on its own, so it can sit in the combined layout."""
+        return HTMLResponse(_COST_HTML)
+
+    async def cost(_request):
+        """What this backend is costing right now, as one JSON object.
+
+        A backend chosen for being light has to be able to show it. The
+        numbers are the scene container's own: cgroup memory and CPU rather
+        than the host's, the GPU memory this process has actually reserved
+        rather than whatever else shares the card, and the perception loop's
+        own last tick.
+        """
+        return JSONResponse(_cost_sample(detector))
+
     routes = [
         Route("/", index, methods=["GET"]),
+        Route("/cost", cost_page, methods=["GET"]),
+        Route("/api/cost", cost, methods=["GET"]),
         Route("/2d", index2d, methods=["GET"]),
         Route("/3d", index3d, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
@@ -1508,6 +1525,103 @@ def make_app(*, registry: ObjectRegistry,
 # button. Click expand → that panel goes `position: fixed; inset: 0` and
 # covers the page (in-page fullscreen, not the browser's F11). Click again
 # to restore. URL hash (`#2d` / `#3d`) is updated so refresh preserves state.
+# Rolling CPU accounting: cgroup gives cumulative microseconds, so a rate needs
+# the previous reading. One sampler for the process, so every viewer of the page
+# sees the same series rather than each computing its own from its own last poll.
+_cost_prev = {"cpu_usec": 0.0, "at": 0.0}
+
+
+def _read_first(path, cast=float, default=None):
+    """First whitespace-separated field of a /sys or /proc file, or default."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return cast(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return default
+
+
+def _cgroup_cpu_usec():
+    """Cumulative CPU microseconds for this container, cgroup v2 then v1."""
+    try:
+        with open("/sys/fs/cgroup/cpu.stat", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("usage_usec"):
+                    return float(line.split()[1])
+    except OSError:
+        pass
+    ns = _read_first("/sys/fs/cgroup/cpuacct/cpuacct.usage")
+    return ns / 1000.0 if ns is not None else None
+
+
+def _gpu_sample():
+    """GPU memory this process reserved, and the card's utilisation.
+
+    Torch knows what this process holds, which is the honest number for "what
+    does this backend cost"; the card's total and utilisation come from NVML
+    when it is available and are shared with whatever else runs on the GPU.
+    """
+    out = {}
+    try:
+        import torch
+        if torch.cuda.is_available():
+            out["gpu_reserved_mb"] = torch.cuda.memory_reserved() / 1e6
+            out["gpu_allocated_mb"] = torch.cuda.memory_allocated() / 1e6
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+        out["gpu_card_used_mb"] = mem.used / 1e6
+        out["gpu_card_total_mb"] = mem.total / 1e6
+        out["gpu_util_pct"] = pynvml.nvmlDeviceGetUtilizationRates(h).gpu
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _cost_sample(detector):
+    """One reading of what the running perception backend costs."""
+    now = time.time()
+    sample = {"at": now}
+
+    backend = getattr(detector, "backend_name", None)
+    if backend is None and detector is not None:
+        backend = type(detector).__name__
+    sample["backend"] = backend or "none"
+
+    mem = _read_first("/sys/fs/cgroup/memory.current")
+    if mem is None:
+        mem = _read_first("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if mem is not None:
+        sample["mem_mb"] = mem / 1e6
+    limit = _read_first("/sys/fs/cgroup/memory.max", cast=str)
+    if limit not in (None, "max"):
+        try:
+            sample["mem_limit_mb"] = float(limit) / 1e6
+        except ValueError:
+            pass
+
+    usec = _cgroup_cpu_usec()
+    if usec is not None:
+        prev_usec, prev_at = _cost_prev["cpu_usec"], _cost_prev["at"]
+        if prev_at and now > prev_at:
+            sample["cpu_pct"] = (usec - prev_usec) / (now - prev_at) / 1e4
+        _cost_prev.update(cpu_usec=usec, at=now)
+
+    sample.update(_gpu_sample())
+    for attr, key in (("last_tick_s", "tick_s"), ("_last_tick_s", "tick_s"),
+                      ("_tick_idx", "ticks"), ("_skipped_frames", "frames_skipped")):
+        v = getattr(detector, attr, None)
+        if v is not None and key not in sample:
+            sample[key] = v
+    n = getattr(detector, "_map_objects", None)
+    if n is not None:
+        sample["objects"] = len(n)
+    return sample
+
+
 _COMBINED_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -1647,7 +1761,7 @@ _COMBINED_HTML = r"""<!doctype html>
     <div class="panel" id="panel-3d">
       <div class="titlebar">
         <span class="badge">3D</span>
-        <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
+        <span class="desc">objects + relations · drag rotate · WASD fly · click pick</span>
         <button class="expand" title="expand">⛶</button>
       </div>
       <iframe src="/3d" loading="eager"></iframe>
@@ -2336,6 +2450,8 @@ _INDEX_3D_HTML = r"""<!doctype html>
       for (const [id, entry] of objectMeshes) {
         if (entry.data && entry.data.center) {
           posMap.set(id, entry.data.center);
+          // Edges name objects by registry id, meshes by backend uuid: index both.
+          if (entry.data.object_id) posMap.set(entry.data.object_id, entry.data.center);
         }
       }
 
@@ -3755,6 +3871,120 @@ async function refresh() {
 setInterval(refresh, 1000);
 refresh();
 loadMaps();
+</script>
+</body>
+</html>
+"""
+
+
+_COST_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cost — scene</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08090c; color:#d8dde6;
+               font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; }
+  #wrap { display:flex; flex-direction:column; height:100vh; }
+  #head { flex:0 0 auto; padding:8px 10px 6px; border-bottom:1px solid #1a1d24; }
+  #backend { color:#f0c050; font-weight:600; letter-spacing:.04em; font-size:13px; }
+  #sub { color:#6a6f7a; margin-top:2px; }
+  #nums { flex:0 0 auto; display:grid; grid-template-columns:1fr 1fr; gap:1px;
+          background:#1a1d24; margin:8px 0 0; }
+  .cell { background:#0c0e13; padding:6px 10px; }
+  .cell .k { color:#6a6f7a; }
+  .cell .v { color:#d8dde6; font-size:15px; }
+  .cell .v .u { color:#6a6f7a; font-size:10px; }
+  #charts { flex:1 1 auto; min-height:0; display:flex; flex-direction:column;
+            gap:1px; background:#1a1d24; margin-top:1px; }
+  .chart { background:#0c0e13; flex:1 1 0; min-height:0; position:relative; }
+  .chart canvas { width:100%; height:100%; display:block; }
+  .chart .lbl { position:absolute; left:8px; top:5px; color:#6a6f7a; }
+  .chart .cur { position:absolute; right:8px; top:5px; }
+  #err { color:#f6a; padding:6px 10px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="head">
+    <div id="backend">—</div>
+    <div id="sub">perception backend · 1 Hz</div>
+  </div>
+  <div id="nums"></div>
+  <div id="charts">
+    <div class="chart"><span class="lbl">CPU %</span><span class="cur" id="c-cpu"></span><canvas id="k-cpu"></canvas></div>
+    <div class="chart"><span class="lbl">RSS MB</span><span class="cur" id="c-mem"></span><canvas id="k-mem"></canvas></div>
+    <div class="chart"><span class="lbl">GPU MB (this process)</span><span class="cur" id="c-gpu"></span><canvas id="k-gpu"></canvas></div>
+    <div class="chart"><span class="lbl">tick s</span><span class="cur" id="c-tick"></span><canvas id="k-tick"></canvas></div>
+  </div>
+  <div id="err"></div>
+</div>
+<script>
+const N = 180;                       // three minutes at 1 Hz
+const series = { cpu: [], mem: [], gpu: [], tick: [] };
+const COLOR = { cpu:'#7fd1ff', mem:'#c6a0f6', gpu:'#8bd5a0', tick:'#f0c050' };
+
+function push(k, v) {
+  series[k].push(typeof v === 'number' && isFinite(v) ? v : null);
+  if (series[k].length > N) series[k].shift();
+}
+function draw(k) {
+  const cv = document.getElementById('k-' + k);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w) cv.width = w;
+  if (cv.height !== h) cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const vals = series[k].filter(v => v !== null);
+  if (!vals.length) return;
+  // Scale from zero: a chart that autoscales to its own window makes an idle
+  // backend look as busy as a loaded one.
+  const hi = Math.max(...vals) * 1.15 || 1;
+  ctx.strokeStyle = '#1a1d24'; ctx.beginPath();
+  ctx.moveTo(0, h - 18.5); ctx.lineTo(w, h - 18.5); ctx.stroke();
+  ctx.strokeStyle = COLOR[k]; ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false;
+  series[k].forEach((v, i) => {
+    if (v === null) { started = false; return; }
+    const x = w * (i / Math.max(1, N - 1));
+    const y = (h - 22) * (1 - v / hi) + 18;
+    if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+  });
+  ctx.stroke();
+}
+function cell(k, v, u) {
+  return '<div class="cell"><div class="k">' + k + '</div><div class="v">' + v +
+         (u ? ' <span class="u">' + u + '</span>' : '') + '</div></div>';
+}
+function fmt(v, d) { return (typeof v === 'number' && isFinite(v)) ? v.toFixed(d === undefined ? 1 : d) : '—'; }
+
+async function poll() {
+  try {
+    const r = await fetch('/api/cost', { cache: 'no-store' });
+    const d = await r.json();
+    document.getElementById('err').textContent = '';
+    document.getElementById('backend').textContent = d.backend || 'none';
+    push('cpu', d.cpu_pct); push('mem', d.mem_mb);
+    push('gpu', d.gpu_reserved_mb); push('tick', d.tick_s);
+    document.getElementById('c-cpu').textContent = fmt(d.cpu_pct) + ' %';
+    document.getElementById('c-mem').textContent = fmt(d.mem_mb, 0) + ' MB';
+    document.getElementById('c-gpu').textContent = fmt(d.gpu_reserved_mb, 0) + ' MB';
+    document.getElementById('c-tick').textContent = fmt(d.tick_s, 2) + ' s';
+    let html = '';
+    html += cell('container RSS', fmt(d.mem_mb, 0), 'MB' + (d.mem_limit_mb ? ' / ' + fmt(d.mem_limit_mb, 0) : ''));
+    html += cell('container CPU', fmt(d.cpu_pct), '%');
+    html += cell('GPU this process', fmt(d.gpu_reserved_mb, 0), 'MB reserved');
+    html += cell('GPU card', fmt(d.gpu_card_used_mb, 0), 'MB' + (d.gpu_card_total_mb ? ' / ' + fmt(d.gpu_card_total_mb, 0) : '') + (d.gpu_util_pct !== undefined ? ' · ' + d.gpu_util_pct + '% util' : ''));
+    html += cell('perception tick', fmt(d.tick_s, 2), 's · ' + (d.ticks !== undefined ? d.ticks + ' ticks' : ''));
+    html += cell('objects', d.objects !== undefined ? d.objects : '—', d.frames_skipped !== undefined ? d.frames_skipped + ' frames skipped' : '');
+    document.getElementById('nums').innerHTML = html;
+    ['cpu','mem','gpu','tick'].forEach(draw);
+  } catch (e) {
+    document.getElementById('err').textContent = 'cost endpoint unreachable: ' + e;
+  }
+}
+poll(); setInterval(poll, 1000);
+window.addEventListener('resize', () => ['cpu','mem','gpu','tick'].forEach(draw));
 </script>
 </body>
 </html>

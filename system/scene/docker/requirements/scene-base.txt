@@ -1,6 +1,8 @@
 # ── Generic scene ────────────────────────────────────────────────
 scipy>=1.11
-mcp
+# mcp 2.x renamed FastMCP to MCPServer and changed the tool decorators;
+# scene_service/mcp_tools.py (and robonix-api) use the v1 API.
+mcp<2
 fastmcp
 grpcio
 grpcio-tools

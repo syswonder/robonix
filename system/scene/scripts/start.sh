@@ -122,6 +122,33 @@ declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
+# The ConceptGraphs export (SCENE_EXPORT_CG_PICKLE) is written inside the
+# container; mount the directory so the file lands on the host at the same
+# path the caller named.
+if [[ -n "${SCENE_EXPORT_CG_PICKLE:-}" ]]; then
+  mkdir -p "${SCENE_EXPORT_CG_PICKLE}"
+  EXTRA_MOUNTS+=(-v "${SCENE_EXPORT_CG_PICKLE}:${SCENE_EXPORT_CG_PICKLE}")
+fi
+# The `full` perception profile needs weights the image does not bake in
+# (SAM-L, CLIP ViT-H-14). Point SCENE_MODELS_DIR at a host directory holding
+# them; it appears in the container as /opt/models/full.
+# DualMap backend: a host vocabulary file is mounted read-only at the same path so
+# SCENE_DUALMAP_CLASSES means the same thing inside the container.
+if [[ -n "${SCENE_DUALMAP_CLASSES:-}" ]]; then
+  [[ -f "${SCENE_DUALMAP_CLASSES}" ]] || { echo "[scene/start] SCENE_DUALMAP_CLASSES=${SCENE_DUALMAP_CLASSES} is not a file" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_CLASSES}:${SCENE_DUALMAP_CLASSES}:ro")
+fi
+# A DualMap checkout other than the one baked into the image (a patched or
+# newer copy on the host) has to be visible inside the container at the same
+# path the adapter is told to use.
+if [[ -n "${SCENE_DUALMAP_ROOT:-}" ]]; then
+  [[ -d "${SCENE_DUALMAP_ROOT}/utils" ]] || { echo "[scene/start] SCENE_DUALMAP_ROOT=${SCENE_DUALMAP_ROOT} is not a DualMap checkout" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_ROOT}:${SCENE_DUALMAP_ROOT}:ro")
+fi
+if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
+  [[ -d "${SCENE_MODELS_DIR}" ]] || { echo "[scene/start] SCENE_MODELS_DIR=${SCENE_MODELS_DIR} is not a directory" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
+fi
 
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
@@ -182,8 +209,23 @@ exec docker run --rm \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
     -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
+    -e SCENE_PROFILE="${SCENE_PROFILE:-}" \
+    -e SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-}" \
+    -e SCENE_DUALMAP_CLASSES="${SCENE_DUALMAP_CLASSES:-}" \
+    -e SCENE_DUALMAP_ROOT="${SCENE_DUALMAP_ROOT:-}" \
+    -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
     -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \
+    -e SCENE_CG_MIN_POINTS="${SCENE_CG_MIN_POINTS:-}" \
+    -e SCENE_CG_FLOOR_Z_M="${SCENE_CG_FLOOR_Z_M:-}" \
+    -e SCENE_CG_PER_DETECTION_DBSCAN="${SCENE_CG_PER_DETECTION_DBSCAN:-}" \
+    -e SCENE_CG_OBJ_MAX_POINTS="${SCENE_CG_OBJ_MAX_POINTS:-}" \
+    -e SCENE_CG_MERGE_THRESHOLD="${SCENE_CG_MERGE_THRESHOLD:-}" \
+    -e SCENE_CG_VOXEL_SIZE="${SCENE_CG_VOXEL_SIZE:-}" \
+    -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
+    -e SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-}" \
+    -e SCENE_DETECT_PERIOD_S="${SCENE_DETECT_PERIOD_S:-}" \
+    -e SCENE_DETECT_CONFIDENCE="${SCENE_DETECT_CONFIDENCE:-}" \
     -e SCENE_CG_MAX_MERGE_DIST_M="${SCENE_CG_MAX_MERGE_DIST_M:-}" \
     -e SCENE_CG_CROSS_CLASS_CENTROID_MAX_M="${SCENE_CG_CROSS_CLASS_CENTROID_MAX_M:-}" \
     -e SCENE_CG_CROSS_CLASS_IOU_THRESH="${SCENE_CG_CROSS_CLASS_IOU_THRESH:-}" \
@@ -211,6 +253,10 @@ exec docker run --rm \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
+    -e SCENE_CAMERA_FRAME="${SCENE_CAMERA_FRAME:-}" \
+    -e SCENE_BASE_FRAME="${SCENE_BASE_FRAME:-}" \
+    -e SCENE_EXPORT_CG_PICKLE="${SCENE_EXPORT_CG_PICKLE:-}" \
+    -e SCENE_EXPORT_CG_EXP="${SCENE_EXPORT_CG_EXP:-}" \
     ${MAP_ID_ARGS[@]+"${MAP_ID_ARGS[@]}"} \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \

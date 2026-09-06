@@ -38,12 +38,13 @@ scene = Service(id="scene", namespace="robonix/system/scene")
 from . import mcp_tools
 from . import web as web_ui
 from .annotations import AnnotationStore
-from .ingest.capabilities import plan_perception, provider_for_kind
+from .ingest.capabilities import PERCEPTION_KEYS, perception_config, plan_perception, provider_for_kind
 from .map_binding import MapBinding, choose_map_binding, read_latched_lifecycle
 from .object_watchdog import ObjectWatchdog
 from .map_meta import MapMetaStore
 from .robot_geometry import RobotGeometryState, reconcile_robot_geometry
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
+from .ingest.perception_dualmap import DualMapDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
     SubscribersHub,
@@ -631,7 +632,15 @@ async def _start_ros_ingest(
     # ConceptGraphs (metric), VLM (visual), or no (geometric) path. The
     # metric path is strongly preferred — it owns depth-backprojected
     # poses; the others are named, logged degradations, not silent ones.
-    plan = plan_perception(hub)
+    perception_cfg = perception_config(config)
+    if perception_cfg.ignored_keys:
+        log.warning(
+            "[scene] perception config keys ignored (not implemented): %s; "
+            "recognised keys are %s",
+            ", ".join(perception_cfg.ignored_keys), ", ".join(sorted(PERCEPTION_KEYS)),
+        )
+    profile = perception_cfg.profile
+    plan = plan_perception(hub, profile, perception_cfg.backend)
     log.info("[scene] perception plan: %s", plan.summary())
     intrinsics_fallback = _scene_intrinsics_fallback(config.get("intrinsics_fallback"))
     detector: Optional[Any] = None
@@ -669,7 +678,7 @@ async def _start_ros_ingest(
         footprint = self_tracker.robot_geometry.current()
         return footprint.base_frame if footprint is not None else ""
 
-    if plan.detector == "concept_graphs":
+    if plan.detector in ("concept_graphs", "dualmap"):
 
         # Prefer the live `primitive/camera/intrinsics` contract. Deployments
         # without a reliable CameraInfo stream may opt in via an explicit
@@ -740,7 +749,13 @@ async def _start_ros_ingest(
                 return k
             return None
 
-        detector = ConceptGraphsDetector(
+        # The metric tier has two interchangeable mappers; the manifest's
+        # `perception.backend` (or SCENE_PERCEPTION_BACKEND) picks one. Both
+        # take the same inputs and feed the same registry.
+        backend = perception_cfg.backend
+        detector_cls = DualMapDetector if backend == "dualmap" else ConceptGraphsDetector
+        backend_kwargs = {"dualmap_cfg": perception_cfg.dualmap or None} if backend == "dualmap" else {}
+        detector = detector_cls(
             rgb_fetcher_msg=_rgb_msg,
             depth_fetcher_msg=_depth_msg,
             camera_info_fetcher=_cam_info,
@@ -757,13 +772,40 @@ async def _start_ros_ingest(
             # starves co-located GPU work (e.g. FunASR ASR), making voice slow.
             # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
             # speech + perception together.
-            period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            # manifest > launcher env > default
+            period_s=float(
+                perception_cfg.period_s
+                or os.environ.get("SCENE_DETECT_PERIOD_S", "")
+                or 0.6
+            ),
+            # Detector confidence floor. Every other perception knob has an
+            # override; this one did not, so the single threshold that decides
+            # whether a detection exists at all could only be changed by
+            # rebuilding. Upstream concept-graphs runs 0.2 against real
+            # imagery; low-texture synthetic scenes need the room to go lower
+            # still, and a cluttered deployment may want it higher.
+            confidence_threshold=float(
+                perception_cfg.confidence_threshold
+                or os.environ.get("SCENE_DETECT_CONFIDENCE", "")
+                or 0.30
+            ),
+            max_detections=int(perception_cfg.max_detections or 30),
+            cfg_overrides=perception_cfg.concept_graphs or None,
+            profile=profile,
             pose_max_age_s=pose_max_age_s,
             camera_frame=camera_frame,
             base_frame=configured_base_frame or None,
+            **backend_kwargs,
         )
         await detector.start()
-        log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
+        if getattr(detector, "_task", None) is None:
+            log.error(
+                "[scene] perception backend %s did not start (see warnings above); "
+                "Scene is running WITHOUT object recognition", backend,
+            )
+        else:
+            log.info("[scene] perception: %s (rgb+depth, backend=%s, profile=%s)",
+                     detector_cls.__name__, backend, profile)
     elif plan.detector == "vlm":
         log.warning(
             "[scene] perception: no depth stream — falling back to "
@@ -818,6 +860,12 @@ async def _start_ros_ingest(
             intrinsics_fn=_vlm_intrinsics,
         )
         await detector.start()
+    elif profile == "annotate":
+        log.info(
+            "[scene] perception: profile=annotate — object recognition off by "
+            "configuration; manual regions/annotations, occupancy_grid and "
+            "goal_near remain available"
+        )
     else:
         # geometric tier: no camera. Object detection is off, but the
         # occupancy grid + goal_near BFS stay available, so navigation-

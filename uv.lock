@@ -4198,7 +4198,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3" },
     { name = "grpcio", specifier = ">=1.50" },
     { name = "grpcio-tools", marker = "extra == 'codegen'", specifier = ">=1.50" },
-    { name = "mcp", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.0,<2" },
     { name = "protobuf", specifier = ">=4" },
     { name = "pyyaml", specifier = ">=6" },
 ]

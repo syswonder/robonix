@@ -22,6 +22,8 @@ sys.modules["scene_capabilities"] = _mod
 _spec.loader.exec_module(_mod)
 plan_perception = _mod.plan_perception
 provider_for_kind = _mod.provider_for_kind
+perception_config = _mod.perception_config
+resolve_profile = _mod.resolve_profile
 
 
 class _FakeHub:
@@ -103,3 +105,75 @@ if __name__ == "__main__":
     test_summary_is_self_describing()
     test_rgbd_camera_provider_is_bound_as_one_group()
     print("\nAll tests passed!")
+
+
+def test_profile_annotate_disables_detection_even_with_rgbd():
+    # annotate = operator says "no recognition"; wiring no longer matters.
+    plan = plan_perception(_FakeHub(["rgb", "depth", "intrinsics", "pose"]), "annotate")
+    assert plan.tier == "geometric"
+    assert plan.detector is None
+    assert plan.profile == "annotate"
+    assert "profile=annotate" in plan.summary()
+    print("  [PASS] test_profile_annotate_disables_detection_even_with_rgbd")
+
+
+def test_profile_full_keeps_metric_routing():
+    plan = plan_perception(_FakeHub(["rgb", "depth"]), "full")
+    assert plan.tier == "metric" and plan.detector == "concept_graphs"
+    assert "profile=full" in plan.summary()
+    print("  [PASS] test_profile_full_keeps_metric_routing")
+
+
+def test_resolve_profile_rejects_typos():
+    assert resolve_profile("") == "lite"
+    assert resolve_profile(" Full ") == "full"
+    try:
+        resolve_profile("ful")
+    except ValueError as e:
+        assert "lite, full, annotate" in str(e)
+    else:
+        raise AssertionError("typo accepted")
+    print("  [PASS] test_resolve_profile_rejects_typos")
+
+
+def test_perception_config_precedence_and_ignored_keys():
+    # manifest beats env; env beats default; unknown keys are reported, not swallowed
+    cfg = perception_config({"perception": {"profile": "full", "period_s": "1.5",
+                                            "stationary_refinement": {"enabled": True},
+                                            "concept_graphs": {"merge_threshold": 0.9}}},
+                            env={"SCENE_PROFILE": "annotate"})
+    assert cfg.profile == "full" and cfg.period_s == 1.5
+    assert cfg.concept_graphs == {"merge_threshold": 0.9}
+    assert cfg.ignored_keys == ("stationary_refinement",)
+    assert perception_config({}, env={"SCENE_PROFILE": "annotate"}).profile == "annotate"
+    assert perception_config({}, env={}).profile == "lite"
+    for bad in ({"perception": "lite"}, {"perception": {"concept_graphs": 3}},
+                {"perception": {"period_s": "fast"}}):
+        try:
+            perception_config(bad, env={})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad}")
+    print("  [PASS] test_perception_config_precedence_and_ignored_keys")
+
+
+def test_perception_backend_selection():
+    # manifest beats env; env beats default; a typo fails at boot; dualmap knobs pass through
+    from scene_service.ingest.capabilities import resolve_backend
+    cfg = perception_config({"perception": {"backend": "dualmap",
+                                            "dualmap": {"classes": ["chair", "table"], "keep_unknown": False}}},
+                            env={"SCENE_PERCEPTION_BACKEND": "concept_graphs"})
+    assert cfg.backend == "dualmap" and cfg.dualmap["classes"] == ["chair", "table"]
+    assert cfg.ignored_keys == ()
+    assert perception_config({}, env={"SCENE_PERCEPTION_BACKEND": "dualmap"}).backend == "dualmap"
+    assert perception_config({}, env={}).backend == "concept_graphs"
+    assert resolve_backend(" DualMap ") == "dualmap"
+    for bad in ({"perception": {"backend": "dual_map"}}, {"perception": {"dualmap": "chair"}}):
+        try:
+            perception_config(bad, env={})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad}")
+    print("  [PASS] test_perception_backend_selection")

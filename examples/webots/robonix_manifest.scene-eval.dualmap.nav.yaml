@@ -1,0 +1,376 @@
+manifestVersion: 1
+name: robonix-webots-scene-evaluation-nav
+
+system:
+  atlas:
+    listen: 0.0.0.0:50051
+  soma:
+    # 50191, not the default 50091. The benchmark host also runs a long-lived
+    # deployment out of ~/robonix-lab/deploy whose soma holds 50091, so a
+    # benchmark boot died on "Address already in use" before Scene ever
+    # started. Scoring Scene must not require tearing down someone's running
+    # robot, so the evaluation deployment moves aside instead.
+    listen: 127.0.0.1:50191
+    runtime_reader_command:
+      - docker
+      - exec
+      - robonix_tiago_sim_scene177
+      - bash
+      - -lc
+      - source /opt/ros/humble/setup.bash && exec python3 -u /robonix_runtime/soma/soma_runtime_ros.py /robonix_runtime/soma/soma_runtime_sources.json
+  scene:
+    manifest: package_manifest.yaml
+    config:
+      perception:
+        # DualMap variant of the Scene benchmark manifest; everything else is identical.
+        # The backend also has to be known when the image is built -- DualMap
+        # brings its own checkout and weights -- so build and boot with
+        # SCENE_PERCEPTION_BACKEND=dualmap, the same way SPEECH_BACKEND selects
+        # the speech service's. Starting with a mismatched image fails loudly.
+        backend: dualmap
+        # DualMap associates by point overlap between consecutive views of an
+        # object, and its class vote needs several observations; at 2 s per
+        # tick a robot at 0.15 m/s saw most objects once (54 of 57 exported
+        # objects had one observation). 1 s doubles that for 0.3 s of GPU per
+        # tick, and slam_toolbox no longer contends for the GPU as RTAB-Map's
+        # visual odometry did.
+        period_s: 1.0
+        dualmap:
+          keyframe_translation_m: 0.15
+          keyframe_rotation_deg: 5.0
+          keyframe_time_s: 5.0
+          # DualMap needs stable_num observations before a track counts as
+          # stable; its default of 8 assumes a dataset replay that maps every
+          # frame. A robot mapping keyframes at walking pace sees each object a
+          # handful of times, so at 8 the map emptied out behind it (65 tracks
+          # -> 1 over one office run). 3 is enough here. The window and the
+          # pending count stay at DualMap's defaults: max_pending_count is also
+          # how long a STABLE track waits before promotion to the global map,
+          # and raising it to 20 stopped promotion altogether (0 promoted in
+          # 180 s), which is where the cross-class merge happens.
+          stable_num: 3
+          # Keep tracks around long enough to be re-observed: with the global
+          # map off these two no longer delay anything, they only decide how
+          # long an unseen track survives (10 / 5 deleted most objects before
+          # the robot came back to them).
+          active_window_size: 40
+          max_pending_count: 20
+          # Association gates point overlap at downsample_voxel_size (2 cm by
+          # default, which assumes ground-truth poses). This deployment's SLAM
+          # pose is off by 3-7 cm (P95) between keyframes, so at 2 cm two views
+          # of one object never overlap and every keyframe started a new track
+          # (54 of 57 objects had one observation). 5 cm covers that error.
+          downsample_voxel_size: 0.05
+          # DualMap's own duplicate merge: two tracks whose point overlap exceeds
+          # merge_sim_threshold are joined every merge_every_keyframes. The
+          # default 0.9 never fired here (65 -> 65 in the log) for the same
+          # reason association failed — pose error — so it is relaxed and run
+          # more often. Keeping tracks alive (above) is what makes recall; this
+          # is what keeps the duplicates that come with it from piling up.
+          merge_sim_threshold: 0.3
+          merge_every_keyframes: 10
+          # The detector can only answer with a name it was given, and DualMap
+          # ships a 101-name list built for homes -- bed, bathtub, ironing
+          # board. In an office it called the cabinet a sink and the chair an
+          # ironing board; 27 of the 38 objects the benchmark counted as
+          # invented sat within a metre of a real one, so they were the right
+          # place under the wrong name. This list is deliberately wider than
+          # what this world contains, so the score still measures recognition
+          # rather than a lookup.
+          # An office has no rugs; a track lying on the floor here is depth
+          # noise wearing a furniture label.
+          floor_gate: true
+          classes:
+            - chair
+            - table
+            - desk
+            - couch
+            - sofa
+            - stool
+            - bench
+            - cabinet
+            - bookshelf
+            - shelf
+            - drawer
+            - door
+            - window
+            - curtain
+            - lamp
+            - ceiling_light
+            - monitor
+            - keyboard
+            - mouse
+            - computer
+            - laptop
+            - printer
+            - telephone
+            - potted_plant
+            - vase
+            - picture
+            - whiteboard
+            - clock
+            - trash_can
+            - box
+            - book
+            - cup
+            - bottle
+            - sink
+            - rug
+            - cushion
+            - backpack
+            - fan
+            - radiator
+            - mirror
+        confidence_threshold: 0.30
+        max_detections: 30
+        stationary_refinement:
+          enabled: true
+          min_stationary_s: 2.0
+          interval_s: 30.0
+          translation_threshold_m: 0.03
+          rotation_threshold_deg: 2.0
+          grid_size: 2
+          overlap_fraction: 0.20
+          input_size: 640
+          edge_margin_px: 4
+          duplicate_iou: 0.50
+          max_supplemental_detections: 8
+        confirmation_min_unique_frames: 2
+        confirmation_singleton_min_mean_confidence: 0.0
+        visible_miss_frames: 3
+        visibility_depth_margin_m: 0.10
+        visibility_min_clear_samples: 3
+        visibility_min_clear_fraction: 0.60
+        visibility_max_projected_samples: 25
+        object_ttl_s: 30.0
+        label:
+          history_size: 20
+          min_switch_observations: 2
+          min_winner_share: 0.55
+          switch_margin: 0.15
+          clip_rerank:
+            # Evaluation-only visual-label A/B.  The broad v25 group was
+            # rejected because it switched 567/1155 detections and introduced
+            # chair/desk -> door errors.  Keep architectural and packaging
+            # ambiguities in separate visual groups so evidence from one
+            # semantic family cannot rename an object into the other.
+            # Physical association remains conservative below and does not
+            # inherit either group.
+            groups:
+              - labels: [window, picture frame]
+                # Five-world feature sweep: 7 corrections, 0 regressions at
+                # 0.002. Higher margins leave true windows as picture frames.
+                min_margin: 0.002
+              - labels: [cereal box, book, box, plate]
+                # Lower values caused one helpful and one harmful switch.
+                min_margin: 0.05
+              - labels: [monitor, television]
+                # Strict top-1 still applies; ties never switch. Five-world
+                # sweep corrected 5/10 wrong labels with 0 regressions.
+                min_margin: 0.0
+            # Unlike groups, each route is evaluated only when its mapping key
+            # is the current detector label. The six-capture feature sweep
+            # corrected six matched labels with zero harmful matched switches.
+            routes:
+              chair:
+                labels: [chair, monitor]
+                min_margin: 0.02
+              shelf:
+                labels: [shelf, cabinet]
+                min_margin: 0.06
+              table:
+                labels: [table, chair]
+                min_margin: 0.02
+              cup:
+                # Five fresh persistent-feature captures corrected four cans
+                # with no harmful matched or all-feature switches at 0.02.
+                labels: [cup, can]
+                min_margin: 0.02
+              cabinet:
+                labels: [cabinet, window]
+                min_margin: 0.03
+              refrigerator:
+                labels: [refrigerator, cabinet]
+                min_margin: 0.03
+            prompts:
+              window:
+                - an indoor glass window showing an outdoor view
+                - a window installed in a wall
+              picture frame:
+                - a framed painting or photograph hanging on a wall
+                - a picture frame containing artwork
+              cereal box:
+                - a rectangular cardboard breakfast cereal package
+                - a printed cereal food box standing on a kitchen counter
+              book:
+                - a printed book with pages and a visible spine
+                - a closed book lying on a table
+              box:
+                - a plain cardboard storage or food box
+                - a rectangular cardboard package
+              plate:
+                - a round dining plate on a table
+                - a shallow ceramic plate viewed from above
+              monitor:
+                - a desktop computer monitor on an office desk
+                - a computer display with a stand, keyboard, and desk
+              television:
+                - a large living room television viewed from a sofa
+                - a wall mounted TV for watching programs
+              cup:
+                - a drinking cup with an open top
+                - a ceramic cup or mug
+              can:
+                - a cylindrical metal food or drink can
+                - a sealed aluminum can on a table
+            persistent_geometry:
+              # Persistent 3D extent is positive evidence only: it never
+              # changes ConceptGraphs association or per-frame labels.
+              score_bonus: 0.06
+              labels:
+                monitor:
+                  # Do not apply monitor-size evidence to the independent
+                  # chair -> monitor visual route.
+                  source_labels: [monitor, television]
+                  # 23/26 false television labels were <=0.68 m; every one
+                  # of 15 matched true televisions was >=0.719 m.
+                  max_horizontal_extent_m: 0.68
+            min_score: 0.20
+            # The candidate must also beat the detector label by a measurable
+            # margin; ties and weak visual evidence preserve the detector.
+            min_margin: 0.05
+          aliases:
+            plant: potted plant
+            sofa: couch
+        association:
+          # Labels are mutable track properties. Physical identity is decided
+          # by independent radius-tolerant geometry, distance, scale and
+          # visual gates; class names never enter the identity decision.
+          # Frozen Office trace: 0.03 retains a partial monitor view with
+          # 0.0368 radius-tolerant support while the independent visual,
+          # distance, extent, aggregate and one-to-one gates remain active.
+          min_spatial_similarity: 0.03
+          min_visual_similarity: 0.65
+          max_extent_ratio: 8.0
+          adaptive_extent_scale: 0.45
+          cleanup_interval_ticks: 10
+          exact_duplicate_centroid_max_m: 0.15
+          exact_duplicate_min_voxel_coverage: 0.40
+          exact_duplicate_max_extent_ratio: 1.50
+          coobserved_duplicate_min_shared_frames: 3
+          coobserved_duplicate_min_median_iou: 0.85
+          coobserved_duplicate_max_extent_ratio: 2.0
+          coobserved_duplicate_min_visual_similarity: 0.90
+          same_class_centroid_max_m: 0.15
+          same_class_min_voxel_coverage: 0.50
+          same_class_max_extent_ratio: 1.75
+          same_class_disjoint_min_unique_frames: 2
+          same_class_disjoint_max_frame_gap: 1
+          same_class_disjoint_max_center_major_extent_ratio: 0.20
+          same_class_disjoint_min_visual_similarity: 0.85
+          same_class_merge_interval_ticks: 1
+          identity_rebind_max_distance_m: 0.45
+        geometry:
+          mask_erosion_px: 1
+          min_depth_m: 0.15
+          max_depth_m: 6.0
+          depth_mad_scale: 3.5
+          depth_min_band_m: 0.12
+          frame_dbscan: true
+          scale_aware:
+            enabled: true
+            min_voxel_size_m: 0.01
+            min_points_floor: 8
+            transition_extent_m: 0.30
+            voxel_extent_factor: 0.30
+          require_occupancy_bounds: true
+          map_bounds_margin_m: 0.25
+          map_max_outside_fraction: 0.20
+          bbox_low_percentile: 5.0
+          bbox_high_percentile: 95.0
+          max_bbox_extent_m: 3.0
+          surface_snap:
+            labels: [window, picture frame]
+            max_distance_m: 0.60
+            tangent_padding_m: 0.25
+            min_shift_m: 0.05
+            min_support_cells: 30
+            min_dominant_share: 0.55
+            min_tangent_coverage: 0.50
+            occupancy_threshold: 50
+
+primitive:
+  - name: tiago_chassis
+    path: ./primitives/tiago_chassis
+    config: {}
+  - name: tiago_camera
+    path: ./primitives/tiago_camera
+    config:
+      width: 640
+      height: 480
+      fx: 554.0
+      fy: 554.0
+      cx: 320.0
+      cy: 240.0
+      sentinel_timeout_s: 150
+  - name: tiago_lidar
+    path: ./primitives/tiago_lidar
+    config:
+      sentinel_timeout_s: 150
+
+service:
+  - name: mapping
+    url: https://github.com/syswonder/service-map-rbnx
+    # Test branch: adds the `localizer` slot (particle filter on the saved grid
+    # with global relocalization). Point back at main once it merges.
+    branch: feat/map-localizer
+    config:
+      use_sim_time: true
+      # 2D-lidar SLAM instead of RTAB-Map: no visual loop closures to reject,
+      # which is what slid the pose graph (and the walls) mid-run.
+      algo: slam_toolbox
+      # Localization on saved maps: load_map without a pose asks for global
+      # localization instead of needing an operator's guess.
+      localizer: amcl
+      # Match the validated Webots deployment: planar lidar owns persistent
+      # structural occupancy; RGB-D remains a registration/loop-closure input.
+      occupancy_sources: [lidar]
+      # Unchanged from the reference manifest; slam_toolbox ignores these and
+      # reads the 2D scan plus the chassis odom -> base_link tf.
+      rtabmap_inputs: [lidar, rgbd, odom]
+      params_file: config/rtabmap_params.yaml
+      sensor_providers:
+        lidar2d: tiago_lidar
+        rgb: tiago_camera
+        depth: tiago_camera
+        odom: tiago_chassis
+
+  - name: nav2
+    url: https://github.com/syswonder/service-navigation-rbnx
+    branch: main
+    config:
+      params_file: config/nav2_params.yaml
+      use_sim_time: true
+      action_wait_s: 240.0
+      # Keep startup behavior at the controller's existing 0.26 m/s ceiling;
+      # runtime speed commands can then adjust it in 20-point increments.
+      dynamic_speed:
+        max_linear_speed_mps: 0.26
+        default_percentage: 100
+        step_percentage: 20
+        min_percentage: 20
+      # The simulation goal checker enters at 0.25 m. Keep the terminal
+      # rotation guard inside that boundary so path-alignment turns are not
+      # mistaken for a stuck final-yaw correction.
+      guard_terminal_xy_m: 0.20
+      provider_ids:
+        map: mapping
+        odom: tiago_chassis
+        scan: tiago_lidar
+
+skill:
+  # explore_rbnx — autonomous frontier exploration.
+  - name: explore
+    url: https://github.com/syswonder/skill-explore-rbnx
+    branch: main
+    config: {}

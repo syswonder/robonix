@@ -32,7 +32,7 @@ dependencies = [
     # the venv resolves cleanly on hosts running 3.13. plane_extract
     # already no-ops without it, so missing it is graceful.
     "open3d>=0.18; platform_machine == 'x86_64' and python_version < '3.13'",
-    "mcp",
+    "mcp<2",   # scene_service/mcp_tools.py uses the v1 FastMCP API
     "fastmcp",
     # Generated stubs from scripts/run_python_codegen.sh require these runtime
     # versions. The protobuf compiler stays in its isolated codegen venv.
