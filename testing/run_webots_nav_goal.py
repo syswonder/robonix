@@ -25,7 +25,9 @@ def _nav_endpoint(rbnx: Path) -> str:
     snap = json.loads(subprocess.run([str(rbnx), "inspect"], check=True, capture_output=True, text=True).stdout)
     provider = (snap.get("providers") or {}).get("nav2") or {}
     for ep in provider.get("endpoints") or ():
-        if str(ep.get("contract_id") or "") == "robonix/service/navigation/navigate":
+        # The same contract is served over gRPC and over MCP; take the MCP one.
+        if (str(ep.get("contract_id") or "") == "robonix/service/navigation/navigate"
+                and str(ep.get("transport") or "") == "TRANSPORT_MCP"):
             return str(ep.get("endpoint") or "")
     raise RuntimeError("nav2 navigate endpoint not registered")
 
