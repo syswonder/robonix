@@ -15,6 +15,7 @@ import pilot_pb2
 import robonix_contracts_pb2_grpc as contracts
 
 from vlm_verifier.directory import CameraDirectory
+from vlm_verifier.camera import CameraPool
 
 
 def free_port():
@@ -28,7 +29,7 @@ async def ready(endpoint):
         await asyncio.wait_for(channel.channel_ready(), 10)
 
 
-async def check(entry, mcp_port, model, stale_only):
+async def check(entry, mcp_port, model):
     """Assert one terminal result per node, original output, and fail-closed errors."""
     root = Path(__file__).resolve().parents[4]
     atlas_bin = os.environ.get("VLM_TEST_ATLAS_BIN", str(Path.home()/".cargo/bin/robonix-atlas"))
@@ -36,7 +37,6 @@ async def check(entry, mcp_port, model, stale_only):
     atlas_endpoint = f"127.0.0.1:{free_port()}"
     executor_endpoint = f"127.0.0.1:{free_port()}"
     processes = []
-    stale_only.clear()
     with tempfile.TemporaryDirectory(prefix="vlm-executor-") as work:
         with open(Path(work)/"process.log", "w+") as log:
             try:
@@ -88,6 +88,8 @@ async def check(entry, mcp_port, model, stale_only):
                                     '{"passed":"true","detail":"invalid"}' if mode == "malformed"
                                     else {"passed": mode == "passed", "detail": "visual evidence"})
                                 if mode == "missing_camera":
+                                    entry.CAMERAS.close()
+                                    entry.CAMERAS = CameraPool(lambda: entry.ATLAS, entry.service.id)
                                     await atlas.Unregister(pb.UnregisterRequest(id="wrist"))
                                 plan = pilot_pb2.Plan(
                                     plan_id=mode, session_id="vlm-smoke", root_index=0,

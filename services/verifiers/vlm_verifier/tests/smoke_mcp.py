@@ -10,7 +10,6 @@ import json
 import os
 import socket
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -44,7 +43,7 @@ class ModelHandler(BaseHTTPRequestHandler):
         assert self.path == "/v1/chat/completions"
         image_url = data["messages"][1]["content"][1]["image_url"]["url"]
         image = PillowImage.open(io.BytesIO(base64.b64decode(image_url.split(",")[1])))
-        # New frames are red. Stale frames are blue and must never reach the model.
+        # The shared latest frame is red.
         red, green, blue = image.getpixel((0, 0))
         assert red > 240 and blue < 10
         type(self).calls += 1
@@ -69,18 +68,13 @@ async def main():
     node = rclpy.create_node("verifier_test_camera", context=context)
     publisher = node.create_publisher(Image, "/verifier_test/rgb", 10)
     stopped = threading.Event()
-    stale_only = threading.Event()
-    phase_started = [time.monotonic()]
     executor = SingleThreadedExecutor(context=context)
     executor.add_node(node)
 
     def publish():
-        """Publish old blue frames first, then fresh red frames with ROS stamps."""
-        stale = stale_only.is_set() or time.monotonic() - phase_started[0] < 0.7
+        """Continuously publish the frame retained by the verifier's shared cache."""
         msg = Image(height=4, width=4, encoding="rgb8", step=12,
-                    data=([0, 0, 255] if stale else [255, 0, 0]) * 16)
-        if not stale:
-            msg.header.stamp = node.get_clock().now().to_msg()
+                    data=[255, 0, 0] * 16)
         publisher.publish(msg)
 
     node.create_timer(0.05, publish)
@@ -128,7 +122,6 @@ async def main():
 
                     async def call(provider="wrist"):
                         """Call."""
-                        phase_started[0] = time.monotonic()
                         payload = dict(
                             target_provider_id="pick", target_contract_id="robonix/skill/pick/pick",
                             target_description="Pick the red object",
@@ -150,16 +143,16 @@ async def main():
                     before = ModelHandler.calls
                     assert (await call("missing")).isError
                     assert ModelHandler.calls == before
-                    stale_only.set()
-                    assert (await call()).isError
-                    assert ModelHandler.calls == before
-                    # Cancellation/timeout cleanup may finish on the ROS worker.
-                    await asyncio.sleep(0.2)
-                    assert all(ch.close.call_count == 1 for ch in channels)
-                    print("PASS: real ROS fresh-frame filtering, MCP pass/reject/errors, HTTP VLM, channel cleanup")
+                    assert len(channels) == 1
+                    assert channels[0].close.call_count == 0
+                    print("PASS: shared latest ROS frame, MCP pass/reject/errors, HTTP VLM, channel reuse")
                     if os.environ.get("VLM_TEST_EXECUTOR_BIN"):
                         from executor_checks import check
-                        await check(entry, port, ModelHandler, stale_only)
+                        entry.CAMERAS.close()
+                        entry.CAMERAS = camera.CameraPool(lambda: entry.ATLAS, entry.service.id)
+                        await check(entry, port, ModelHandler)
+                    entry.shutdown()
+                    assert channels[0].close.call_count == 1
     finally:
         server.should_exit = True
         await server_task

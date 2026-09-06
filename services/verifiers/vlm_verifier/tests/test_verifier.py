@@ -1,6 +1,10 @@
 """Package-local tests; run with unittest discover after build."""
 import asyncio
 import json
+import os
+from pathlib import Path
+import stat
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -16,6 +20,25 @@ def envelope(provider="wrist"):
 
 
 class ParsingTests(unittest.TestCase):
+    def test_wrist_camera_prompt_recognizes_partial_opposing_jaws(self):
+        """Accept valid wrist-camera evidence without requiring the full gripper."""
+        prompt = vlm.SYSTEM_PROMPT
+        self.assertIn("wrist-mounted camera", prompt)
+        self.assertIn("two opposing jaw tips", prompt)
+        self.assertIn("do not require the complete gripper body", prompt)
+        self.assertIn("without two identifiable opposing jaws is insufficient", prompt)
+
+    def test_vlm_context_explains_the_verification_target(self):
+        """Identify target-defining fields separately from supporting context."""
+        text = vlm.describe_context(envelope())
+        target_section, supporting_section = text.split("Supporting call context", 1)
+        for field in ("target_contract_id", "target_description", "target_args"):
+            self.assertIn(field, target_section)
+        for field in ("target_provider_id", "target_output"):
+            self.assertIn(field, supporting_section)
+        self.assertIn("never as visual proof", supporting_section)
+        self.assertIn(json.dumps(envelope()["target_args"]), text)
+
     def test_context_json_or_string(self):
         for value in ({}, [], "original text", None):
             data = envelope()
@@ -95,6 +118,18 @@ class ParsingTests(unittest.TestCase):
             self.assertLess(decoded[2], 10)
         with self.assertRaises(ValueError):
             camera.encode_jpeg(Image())
+
+    def test_verification_frame_is_private_and_call_id_is_sanitized(self):
+        """Save the exact model JPEG without permitting call-id path traversal."""
+        jpeg = bytes([255, 216, 255, 217])
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"SCRIBE_LOG_DIR": directory}):
+                path = camera.save_verification_frame("2:0/../../secret", jpeg)
+            self.assertEqual(path.parent, Path(directory) / "vlm_verifier-frames")
+            self.assertNotIn("/", path.name)
+            self.assertIn("2_0_.._.._secret", path.name)
+            self.assertEqual(path.read_bytes(), jpeg)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
     def test_padding_and_invalid_image_shapes(self):

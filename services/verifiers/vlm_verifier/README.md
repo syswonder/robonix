@@ -3,7 +3,7 @@
 A generic visual result verification service. Provider ID: `vlm_verifier`.
 MCP contract: `robonix/service/verifier/verify`.
 
-The service takes one fresh RGB image from the camera selected by an Executor
+The service takes the latest RGB image from the camera selected by an Executor
 verification rule and asks a vision model whether the intended result is visible.
 It has no robot-specific grasp logic and does not move the robot.
 
@@ -78,11 +78,13 @@ profile enables only `pick`, not `put_down`.
 3. The verifier parses the action description, arguments, output, and camera
    provider from the request.
 4. It queries Atlas for that exact provider's
-   `robonix/primitive/camera/rgb` capability, connects to its ROS 2 topic, and
-   waits for one newly stamped frame. There is no snapshot RPC, default-topic
-   fallback, or camera substitution.
-5. It converts the image into JPEG and sends it with the action context to the
-   configured `<base_url>/chat/completions` endpoint.
+   `robonix/primitive/camera/rgb` capability on first use, keeps one shared ROS 2
+   subscription per camera provider, and reads its latest cached frame. There is
+   no snapshot RPC, default-topic fallback, or camera substitution.
+5. It converts the image into JPEG, saves the exact JPEG with private file
+   permissions under `$SCRIBE_LOG_DIR/vlm_verifier-frames/`, and sends those
+   same bytes with the action context to the configured
+   `<base_url>/chat/completions` endpoint.
 6. It accepts only a JSON object containing exactly a boolean `passed` and a
    nonempty string `detail`. Executor then reports one final result.
 
@@ -99,7 +101,10 @@ The image must provide clear evidence. For picking, the specified object must
 visibly be held, not just touched or nearby. For placement, it must visibly be
 at the intended destination. An invisible target, wrong object, or ambiguous
 evidence returns `passed=false`. The original capability's success flag is
-not visual proof. A single image cannot establish continuing grip stability.
+not visual proof. For a wrist-mounted camera, two opposing jaw tips visibly
+flanking or contacting the target can establish a grasp without the complete
+gripper body being in frame. A single image cannot establish continuing grip
+stability.
 
 | Outcome | Executor result |
 | --- | --- |
@@ -107,9 +112,12 @@ not visual proof. A single image cannot establish continuing grip stability.
 | `passed=false` | Failure with `result verification failed: <detail>`. |
 | Camera, network, timeout, or model-format error | Failure with `result verification unavailable: ...`. |
 
-Each request has isolated observation state. ROS subscriptions, Atlas channels,
-and HTTP connections are released after use. Logs correlate requests with
-`call_id`; credentials, image payloads, and upstream response bodies are not logged.
+Concurrent requests share the latest image cached for their selected camera.
+ROS subscriptions and Atlas channels remain open until service shutdown. Logs
+correlate requests and saved frame paths with `call_id`; credentials and model
+responses are not logged. Frame files accumulate until the operator removes
+them. Under `rbnx boot`, `SCRIBE_LOG_DIR` defaults to the deployment's
+`rbnx-boot/logs` directory.
 
 ## Request contract
 
@@ -147,9 +155,8 @@ values or original strings.
   and `sensor_msgs`. Pillow and the other Python dependencies are installed at build time.
 - `ROS_DISTRO` selects an installed ROS distribution. `RMW_IMPLEMENTATION`
   and `ROS_DOMAIN_ID` must match the camera.
-- RGB images must have valid timestamps in the verifier's ROS clock domain.
-  Old or zero-stamped frames are ignored. ROS simulated time is not currently
-  configured by this service.
+- The first request for a camera waits for its first delivered frame; later
+  requests immediately use the latest frame held by the shared subscription.
 - Supported image encodings: `rgb8`, `bgr8`, `rgba8`, `bgra8`, and `mono8`.
   Dimensions, row stride, and payload length are validated. Depth and camera
   intrinsics are not required. Conversion does not depend on cv_bridge.
