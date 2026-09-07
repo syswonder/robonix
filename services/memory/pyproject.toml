@@ -16,8 +16,8 @@ dependencies = [
     # Must match the runtime grpcio the rest of the workspace pins, or
     # RegisterService fails on a version skew.
     "grpcio==1.80.0",
-    "grpcio-tools==1.80.0",
-    "protobuf",
+    "grpcio-tools==1.76.0",
+    "protobuf==6.33.6",
     "uvicorn",
     "robonix-api",
     "pyyaml>=6.0",

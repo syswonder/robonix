@@ -12,9 +12,9 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
     "websockets>=16.0",
-    "grpcio>=1.60",
-    "grpcio-tools>=1.60",
-    "protobuf>=4.24",
+    "grpcio==1.80.0",
+    "grpcio-tools==1.76.0",
+    "protobuf==6.33.6",
     "pypinyin>=0.55",
     "sentencepiece>=0.2",
     "sherpa-onnx>=1.13.2,<1.14",

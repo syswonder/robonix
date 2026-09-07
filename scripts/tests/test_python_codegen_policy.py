@@ -28,6 +28,10 @@ DIRECT_CODEGEN = re.compile(
 EXEMPT_DIRECT_CODEGEN = {
     "system/scene/scripts/build.sh":
         "RBNX_CODEGEN_POLICY_EXEMPT: Scene's host codegen stages IDL/ROS artifacts.",
+    "examples/piper_vitals/primitives/piper_health/scripts/build.sh":
+        "RBNX_CODEGEN_POLICY_EXEMPT: generates and runs against the same host "
+        "interpreter (start.sh execs `python3 -m piper_health.driver`), so the "
+        "gencode and the runtime are one install and cannot disagree.",
 }
 
 

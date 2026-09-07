@@ -20,9 +20,9 @@
 scipy>=1.11
 mcp
 fastmcp
-grpcio
-grpcio-tools
-protobuf
+grpcio==1.80.0
+grpcio-tools==1.76.0
+protobuf==6.33.6
 uvicorn
 httpx
 Pillow

@@ -2,9 +2,9 @@
 scipy>=1.11
 mcp
 fastmcp
-grpcio
-grpcio-tools
-protobuf
+grpcio==1.80.0
+grpcio-tools==1.76.0
+protobuf==6.33.6
 pymilvus[milvus_lite]!=2.6.10,>=2.5.0
 uvicorn
 httpx

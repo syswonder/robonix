@@ -37,6 +37,7 @@ dependencies = [
     # Generated stubs from scripts/run_python_codegen.sh require these runtime
     # versions. The protobuf compiler stays in its isolated codegen venv.
     "grpcio==1.80.0",
+    "grpcio-tools==1.76.0",
     "protobuf==6.33.6",
     "uvicorn",
     "httpx",
