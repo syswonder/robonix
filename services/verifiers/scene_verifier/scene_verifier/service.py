@@ -9,24 +9,76 @@ VERIFY_CONTRACT = "robonix/service/verifier/verify"
 log = logging.getLogger("scene_verifier")
 
 
-async def verify_request(call_id: str, args_json: str, config: VerifierConfig,
-                         consumer_id: str, fetch=fetch_robot_context):
-    """Parse before observation; preserve errors for Executor's unavailable path."""
+async def verify_request(
+    call_id: str,
+    args_json: str,
+    config: VerifierConfig,
+    consumer_id: str,
+    fetch=fetch_robot_context,
+):
+    """Verify navigation and expose the failing stage in runtime logs."""
+    import traceback
+
     call_id = require_string(call_id, "call_id")
     envelope = parse_envelope(args_json)
     goal = parse_goal(envelope.target_args, envelope.check_yaw)
+
+    stage = "fetch_robot_context"
+
     try:
-        context = await fetch(consumer_id, envelope.scene_provider_id,
-                              config.observation_timeout_s)
-        passed, detail = verify_navigation_result(
-            goal, context, config, envelope.expected_map_id,
+        log.info(
+            "call_id=%s fetching Scene context: consumer=%s provider=%s",
+            call_id,
+            consumer_id,
+            envelope.scene_provider_id,
         )
-    except Exception:
-        log.exception("call_id=%s Scene verification unavailable", call_id)
+
+        context = await fetch(
+            consumer_id,
+            envelope.scene_provider_id,
+            config.observation_timeout_s,
+        )
+
+        stage = "verify_navigation_result"
+
+        log.info(
+            "call_id=%s Scene context received: type=%s",
+            call_id,
+            type(context).__name__,
+        )
+
+        passed, detail = verify_navigation_result(
+            goal,
+            context,
+            config,
+            envelope.expected_map_id,
+        )
+
+    except Exception as exc:
+        log.error(
+            "call_id=%s verification unavailable: stage=%s error=%s: %s",
+            call_id,
+            stage,
+            type(exc).__name__,
+            str(exc),
+        )
+
+        # Emit each traceback line as a normal log message so it remains
+        # visible even if the logging bridge drops exception metadata.
+        for line in traceback.format_exc().splitlines():
+            log.error("call_id=%s traceback | %s", call_id, line)
+
         raise
-    log.info("call_id=%s target_provider=%s scene_provider=%s passed=%s %s",
-             call_id, envelope.target_provider_id, envelope.scene_provider_id,
-             passed, detail)
+
+    log.info(
+        "call_id=%s target_provider=%s scene_provider=%s passed=%s %s",
+        call_id,
+        envelope.target_provider_id,
+        envelope.scene_provider_id,
+        passed,
+        detail,
+    )
+
     return passed, detail
 
 
@@ -66,7 +118,31 @@ def create_service():
 
 
 def main() -> None:
-    create_service().run()
+    """Print runtime identity before starting the verifier."""
+    import inspect
+    import os
+    import sys
+
+    service = create_service()
+
+    print(
+        "[scene_verifier/entrypoint]"
+        f" pid={os.getpid()}"
+        f" python={sys.executable}"
+        f" module={__file__}"
+        f" provider_class={type(service).__name__}"
+        f" provider_kind={service._kind}"
+        f" sdk={inspect.getfile(type(service))}"
+        f" mcp_app={service._mcp_app is not None}"
+        f" handler_count={len(service._mcp_handlers)}",
+        flush=True,
+    )
+
+    service.run()
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":

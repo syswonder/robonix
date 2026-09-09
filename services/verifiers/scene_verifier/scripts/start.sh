@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-set -eo pipefail
-PKG_ROOT="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-cd "$PKG_ROOT"
-
-export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${PYTHONPATH:-}"
-
-exec python3 -m scene_verifier.main
+set -euo pipefail
+PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "$PKG"
+export PYTHONPATH="$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+exec "$PKG/rbnx-build/venv/bin/python" -m scene_verifier.service

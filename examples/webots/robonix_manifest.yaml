@@ -178,6 +178,12 @@ service:
         rgb: tiago_camera
         depth: tiago_camera
         odom: tiago_chassis
+  - name: scene_verifier
+    path: ../../services/verifiers/scene_verifier
+    config:
+      distance_tolerance_m: 0.5
+      yaw_tolerance_rad: 0.35
+      observation_timeout_s: 5.0
 
   # nav2_wrapper_rbnx IS the navigation service for this deploy.
   #
@@ -211,12 +217,6 @@ service:
         map: mapping
         odom: tiago_chassis
         scan: tiago_lidar
-  - name: scene_verifier
-    path: ../../services/verifiers/scene_verifier
-    config:
-      distance_tolerance_m: 0.5
-      yaw_tolerance_rad: 0.35
-      observation_timeout_s: 5.0
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:
