@@ -1758,8 +1758,8 @@ async def _run_active(config: dict) -> None:
     )
     mcp_tools.attach_object_mutations(object_mutations)
 
-    # SCENE_WEB_HOST are environment fallbacks; an explicit Scene config file
-    # can set web_host: 127.0.0.1 to keep this operator surface local-only.
+    # SCENE_WEB_HOST is the environment fallback; an explicit Scene config file
+    # can set web_host. Both default to loopback — see web_binding.
     web_port = int(
         int(config.get("web_port") or "0")
         if config.get("web_port") is not None and config.get("web_port") != ""
@@ -1791,6 +1791,17 @@ async def _run_active(config: dict) -> None:
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
         log.info("web UI on http://%s:%d", web_host, web_port)
+        # Loopback is the default. Anything else was asked for, and is worth
+        # one line in the log because this surface has no authentication and
+        # its annotation endpoints write map data — whoever reaches it can
+        # change what the robot believes about its world.
+        if web_host not in ("127.0.0.1", "::1", "localhost"):
+            log.warning(
+                "web UI is bound to %s, not loopback, and has no "
+                "authentication: anyone who can reach %s:%d may read and "
+                "modify map annotations.",
+                web_host, web_host, web_port,
+            )
 
     log.info(
         "scene up; cap=%s mcp=%s observations=%d",
