@@ -18,8 +18,13 @@
 
 # ── Generic scene ────────────────────────────────────────────────
 scipy>=1.11
-mcp
-fastmcp
+# mcp 2.x renamed FastMCP to MCPServer and moved the import path. Every
+# caller here — scene_service/mcp_tools.py, robonix_api/capability.py,
+# robonix_api/tool.py — still uses `from mcp.server.fastmcp import FastMCP`,
+# so an unpinned install silently upgrades and the service exits at import.
+# Matches uv.lock, which resolves mcp 1.27.0.
+mcp>=1.27,<2
+fastmcp>=3,<5
 grpcio==1.80.0
 grpcio-tools==1.76.0
 protobuf==6.33.6

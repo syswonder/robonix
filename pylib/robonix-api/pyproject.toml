@@ -26,8 +26,12 @@ classifiers = [
 dependencies = [
     "grpcio==1.80.0",
     "protobuf==6.33.6",
-    "mcp>=1.0",
-    "fastmcp>=3",
+    # Ceilings, not just floors: mcp 2.x renamed FastMCP to MCPServer and
+    # moved its import path, and robonix_api/capability.py and tool.py both
+    # still do `from mcp.server.fastmcp import FastMCP`. `>=1.0` admitted
+    # 2.x and took the scene service down at import time.
+    "mcp>=1.27,<2",
+    "fastmcp>=3,<5",
     "pyyaml>=6",
 ]
 
