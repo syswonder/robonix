@@ -38,5 +38,9 @@ package = false
 members = [
     "pylib/*",        # shared Python libs (robonix-api, …)
     "system/scene",   # only Python-implemented system component today
-    "services/*",     # reference services (memsearch, speech, voiceprint, …)
+    "services/memory",
+    "services/memsearch",
+    "services/speech",
+    "services/voiceprint",
+    "services/verifiers/*",
 ]

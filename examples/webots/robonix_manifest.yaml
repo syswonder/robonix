@@ -37,6 +37,14 @@ system:
     # robonix-client polls Executor for authoritative active RTDL plans.
     # Bind externally on trusted LAN/Tailscale deployments.
     listen: 0.0.0.0:50061
+    # verifier.
+    verification:
+      - target_contract_id: robonix/service/navigation/navigate
+        target_provider_id: nav2
+        verifier_provider_id: scene_verifier
+        verifier_args:
+          scene_provider_id: scene
+          check_yaw: true
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071
@@ -203,6 +211,12 @@ service:
         map: mapping
         odom: tiago_chassis
         scan: tiago_lidar
+  - name: scene_verifier
+    path: ../../services/verifiers/scene_verifier
+    config:
+      distance_tolerance_m: 0.5
+      yaw_tolerance_rad: 0.35
+      observation_timeout_s: 5.0
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:

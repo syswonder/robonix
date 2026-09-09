@@ -26,8 +26,8 @@ classifiers = [
 dependencies = [
     "grpcio>=1.50",
     "protobuf>=4",
-    "mcp>=1.0",
-    "fastmcp>=3",
+    "mcp>=1.28.1,<2",
+    "fastmcp>=3,<4",
     "pyyaml>=6",
 ]
 
