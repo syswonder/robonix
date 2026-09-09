@@ -25,6 +25,11 @@ each one provides.
   are loaded at startup so `QueryContract` returns IDL metadata to any
   client.
 
+Contract TOMLs may set `llm_callable = false` under `[contract]` when an
+interface is intended for system orchestration rather than direct planning
+model use. Atlas only publishes this metadata; registration, discovery, and
+calling remain available to other consumers. Omitted values default to `true`.
+
 The wire schema lives in [`proto/atlas.proto`](proto/atlas.proto).
 
 ## Namespace diagnostics

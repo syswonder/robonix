@@ -522,6 +522,10 @@ message ContractDescriptor {
   // without a namespace-mismatch diagnostic. Intended for shared framework
   // contracts such as lifecycle and health. Defaults to false.
   bool cross_namespace = 12;
+  // Whether Pilot may include capabilities implementing this contract in the
+  // model-facing capability catalog. Absence means true for compatibility
+  // with Atlas instances built before this field existed.
+  optional bool llm_callable = 13;
 }
 
 message FieldSpec {

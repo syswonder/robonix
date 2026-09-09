@@ -44,7 +44,14 @@ The VLM-facing RTDL envelope rules (grammar, example, constraints) live in `rtdl
 
 Pilot's standing system prompt is built in `src/planner.rs`; it includes the runtime operating principles, including the rule that failed required capability calls stop autonomous physical task progress until the user confirms the next step.
 
-Atlas discovery still runs before every planning round. When its LLM-visible provider, contract, description, and schema fields are unchanged, Pilot reuses the rendered capability catalog. The startup-cached Soma YAML is serialized as compact JSON while the authoritative URDF remains unchanged.
+Atlas discovery still runs before every planning round. Pilot omits contracts
+whose `[contract]` metadata sets `llm_callable = false` from the model-facing
+catalog and target map, while leaving them available to Executor and other
+Atlas consumers. An omitted field, including metadata from an older Atlas,
+defaults to visible. When the remaining provider, contract, description, and
+schema fields are unchanged, Pilot reuses the rendered capability catalog. The
+startup-cached Soma YAML is serialized as compact JSON while the authoritative
+URDF remains unchanged.
 
 Every request writes a `[pilot/prompt]` JSON log with text bytes and four-byte token estimates for the standing context, RTDL protocol, capability catalog, task, in-flight trees, Executor state, live embodiment, environment, history, and correction. Pilot supplies a random per-turn `prompt_cache_key`, with stable sections ordered before live state, so supporting providers can reuse the longest unchanged prefix without receiving a session identifier. Compatible providers also report exact prompt/completion tokens and cached prompt tokens through streaming usage; those totals are logged separately under the same prefix. The fake VLM's reported usage is explicitly a deterministic four-byte estimate, not a production tokenizer result. A provider that rejects a named optional cache/usage field with HTTP 400 or 422 is retried once without those fields; unrelated client errors are returned unchanged.
 

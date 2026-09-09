@@ -4,6 +4,9 @@ version = "1"
 kind = "service"
 idl = "verifier/srv/Verify.srv"
 description = "Verify the result of one completed capability call."
+# Executor invokes this postcondition check automatically. It is not an action
+# that Pilot should offer to the planning model.
+llm_callable = false
 
 [mode]
 type = "rpc"

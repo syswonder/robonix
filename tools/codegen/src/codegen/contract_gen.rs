@@ -35,6 +35,14 @@ struct ContractMeta {
     /// provider/runtime capability description declared to Atlas.
     #[serde(default)]
     description: String,
+    /// Whether Pilot may include implementations in its model-facing catalog.
+    /// This metadata does not change generated transport stubs.
+    #[serde(default = "default_true")]
+    llm_callable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +98,8 @@ pub struct ContractSummary {
     pub idl: String,
     /// Documentation-only meaning of this abstract contract.
     pub description: String,
+    /// Whether Pilot may expose implementations to its planning model.
+    pub llm_callable: bool,
     /// Absolute path to the source `.v1.toml`.
     pub toml_path: PathBuf,
 }
@@ -115,6 +125,7 @@ pub fn load_contract_summaries(dirs: &[PathBuf]) -> Result<Vec<ContractSummary>>
                     mode: c.mode.mode_type,
                     idl: c.contract.idl,
                     description: c.contract.description.trim().to_string(),
+                    llm_callable: c.contract.llm_callable,
                     toml_path: p,
                 },
             );
