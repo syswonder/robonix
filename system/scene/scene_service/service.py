@@ -1791,6 +1791,19 @@ async def _run_active(config: dict) -> None:
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
         log.info("web UI on http://%s:%d", web_host, web_port)
+        # This surface carries no authentication — it is a debug and operator
+        # UI, and its annotation endpoints read and write map data. That is
+        # tenable on loopback and is a decision on any other address, so an
+        # operator who did not make that decision deliberately should be told
+        # they have. `web_host: 127.0.0.1` in the Scene config, or
+        # SCENE_WEB_HOST, keeps it local.
+        if web_host not in ("127.0.0.1", "::1", "localhost"):
+            log.warning(
+                "web UI is bound to %s and has no authentication: anyone who "
+                "can reach %s:%d may read and modify map annotations. Set "
+                "web_host: 127.0.0.1 (or SCENE_WEB_HOST) to keep it local.",
+                web_host, web_host, web_port,
+            )
 
     log.info(
         "scene up; cap=%s mcp=%s observations=%d",

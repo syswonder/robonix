@@ -7,6 +7,7 @@ import math
 from collections.abc import Iterable, Sequence
 
 from .geometry import point_in_polygon, polygon_centroid
+from .message_shape import occupancy_grid_is_well_formed
 from .robot_geometry import RobotFootprint
 
 Point = tuple[float, float]
@@ -157,7 +158,7 @@ def _grid_array(grid_msg, *, width: int, height: int):
         grid = np.frombuffer(data, dtype=np.int8)
     else:
         grid = np.asarray(data, dtype=np.int8)
-    if grid.size != width * height:
+    if not occupancy_grid_is_well_formed(width, height, grid.size):
         raise ValueError(
             f"occupancy grid contains {grid.size} cells; expected {width * height}"
         )
