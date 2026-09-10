@@ -34,6 +34,7 @@ members = [
     "robonix-system-scene",
     "robonix-system-speech",
     "robonix-system-voiceprint",
+    "robonix-vlm-verifier",
 ]
 
 [[package]]
@@ -4421,6 +4422,25 @@ requires-dist = [
     { name = "torch", marker = "platform_machine != 'aarch64'", specifier = ">=2.0" },
     { name = "torchaudio", marker = "platform_machine != 'aarch64'", specifier = ">=2.0" },
     { name = "tqdm", specifier = ">=4.42.0" },
+]
+
+[[package]]
+name = "robonix-vlm-verifier"
+version = "0.1.0"
+source = { virtual = "services/verifiers/vlm_verifier" }
+dependencies = [
+    { name = "grpcio-tools" },
+    { name = "httpx" },
+    { name = "pillow" },
+    { name = "robonix-api" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "grpcio-tools" },
+    { name = "httpx" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "robonix-api", editable = "pylib/robonix-api" },
 ]
 
 [[package]]

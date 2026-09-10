@@ -112,6 +112,7 @@ class ContractDescriptor:
     source_toml_path: str = ""
     description: str = ""
     cross_namespace: bool = False
+    llm_callable: bool = True
     msg_fields: tuple[FieldSpec, ...] = ()
     srv_request_fields: tuple[FieldSpec, ...] = ()
     srv_response_fields: tuple[FieldSpec, ...] = ()
@@ -217,6 +218,12 @@ def from_pb_provider(pb_rec) -> CapabilityProvider:
 
 
 def from_pb_contract(pb_c) -> ContractDescriptor:
+    # Proto presence matters here: an older Atlas omits this field and must
+    # retain the historical behavior in which contracts are model-visible.
+    try:
+        llm_callable = bool(pb_c.llm_callable) if pb_c.HasField("llm_callable") else True
+    except (AttributeError, ValueError):
+        llm_callable = True
     return ContractDescriptor(
         id=pb_c.id,
         version=pb_c.version,
@@ -227,6 +234,7 @@ def from_pb_contract(pb_c) -> ContractDescriptor:
         source_toml_path=pb_c.source_toml_path,
         description=pb_c.description,
         cross_namespace=getattr(pb_c, "cross_namespace", False),
+        llm_callable=llm_callable,
         msg_fields=tuple(from_pb_field_spec(f) for f in pb_c.msg_fields),
         srv_request_fields=tuple(
             from_pb_field_spec(f) for f in pb_c.srv_request_fields
