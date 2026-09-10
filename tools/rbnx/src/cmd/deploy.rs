@@ -184,6 +184,68 @@ fn resolve_entry_path(
 mod tests {
     use super::*;
 
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed in {}", dir.display());
+    }
+
+    #[test]
+    fn the_lockfile_records_the_commit_and_whether_the_tree_was_edited() {
+        // A deployment pins packages by branch, so the same manifest is not the
+        // same code twice, and a cache cloned once is reused untouched. One was
+        // found three commits behind its branch with uncommitted edits on top
+        // and nothing about the run said so. The lockfile is what says so.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!("rbnx-lock-{}-{nonce}", std::process::id()));
+        let pkg = temp.join("pkg");
+        std::fs::create_dir_all(&pkg).expect("package directory");
+        git(&pkg, &["init", "-q"]);
+        git(&pkg, &["config", "user.email", "test@example.invalid"]);
+        git(&pkg, &["config", "user.name", "test"]);
+        std::fs::write(pkg.join("f"), "one").expect("file");
+        git(&pkg, &["add", "."]);
+        git(&pkg, &["commit", "-qm", "one"]);
+
+        let deploy: DeployManifest =
+            serde_yaml::from_str("primitive:\n  - name: sample\n    path: pkg\n    branch: main\n")
+                .expect("deployment manifest");
+        let cache_root = temp.join("rbnx-boot/cache");
+        let lock = temp.join("rbnx-boot/deployment.lock");
+
+        write_lockfile(&deploy, &cache_root, &temp);
+        let clean = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(clean.contains("name: sample"), "{clean}");
+        assert!(clean.contains("branch: main"), "{clean}");
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&pkg)
+            .output()
+            .expect("git rev-parse");
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert!(clean.contains(&format!("commit: {head}")), "{clean}");
+        assert!(
+            !clean.contains("dirty"),
+            "a clean checkout must not be flagged: {clean}"
+        );
+
+        // An edited checkout is the case the branch name cannot describe.
+        std::fs::write(pkg.join("f"), "two").expect("edit");
+        write_lockfile(&deploy, &cache_root, &temp);
+        let dirty = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(dirty.contains("dirty: true"), "{dirty}");
+
+        std::fs::remove_dir_all(&temp).expect("remove test directory");
+    }
+
     #[test]
     fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
         let nonce = std::time::SystemTime::now()
@@ -458,6 +520,120 @@ fn check_prerequisites(
             .with_context(|| format!("inline build of {name} at {} failed", pkg_path.display()))?;
     }
     Ok(())
+}
+
+/// One package as it was actually found on disk when the deployment ran.
+struct ResolvedPackage {
+    name: String,
+    url: Option<String>,
+    branch: Option<String>,
+    commit: Option<String>,
+    dirty: bool,
+}
+
+/// Read `git rev-parse HEAD` and whether the tree has uncommitted changes.
+///
+/// Both are read from the checkout rather than from the manifest, because the
+/// manifest only ever says which branch to follow. A branch is not a version:
+/// the same manifest resolves to different code a week later, and a cache that
+/// was cloned once is never revisited. Returns `(None, false)` for anything
+/// that is not a git checkout — a `path:` entry pointing into the source tree
+/// is version-controlled by whatever contains it.
+fn git_state(dir: &Path) -> (Option<String>, bool) {
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+    (head, dirty)
+}
+
+/// Write `rbnx-boot/deployment.lock`: what this run actually used.
+///
+/// A deployment pins packages by branch, so "the same manifest" is not the same
+/// code twice. Nothing recorded which commit a run had, and a cache cloned once
+/// is reused untouched forever — a deployment was found three commits behind
+/// its branch with uncommitted edits on top, and no artifact of the run said
+/// so. This is that artifact. It is written, not enforced: a run that would
+/// have been wrong now leaves evidence, which is the half that has to exist
+/// first.
+fn write_lockfile(deploy: &DeployManifest, cache_root: &Path, manifest_dir: &Path) {
+    let mut rows: Vec<ResolvedPackage> = Vec::new();
+    for entry in deploy
+        .primitive
+        .iter()
+        .chain(deploy.service.iter())
+        .chain(deploy.skill.iter())
+    {
+        let Ok(pkg_path) = resolve_entry_path(entry, cache_root, manifest_dir) else {
+            continue;
+        };
+        if !pkg_path.exists() {
+            continue;
+        }
+        let (commit, dirty) = git_state(&pkg_path);
+        rows.push(ResolvedPackage {
+            name: if entry.name.is_empty() {
+                pkg_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(unnamed)")
+                    .to_string()
+            } else {
+                entry.name.clone()
+            },
+            url: entry.url.clone(),
+            branch: entry.branch.clone(),
+            commit,
+            dirty,
+        });
+    }
+    for row in rows.iter().filter(|r| r.dirty) {
+        output::warning(&format!(
+            "{}: the cached checkout has uncommitted changes — this run is not \
+             reproducible from its branch alone",
+            row.name
+        ));
+    }
+    let mut out = String::from(
+        "# Written by `rbnx boot`: the packages this deployment actually used.\n\
+         # Branches move and a cache is cloned once, so the manifest alone does\n\
+         # not say which code ran. This does.\n",
+    );
+    for row in &rows {
+        out.push_str(&format!("- name: {}\n", row.name));
+        if let Some(u) = &row.url {
+            out.push_str(&format!("  url: {u}\n"));
+        }
+        if let Some(b) = &row.branch {
+            out.push_str(&format!("  branch: {b}\n"));
+        }
+        match &row.commit {
+            Some(c) => out.push_str(&format!("  commit: {c}\n")),
+            None => out.push_str("  commit: not a git checkout\n"),
+        }
+        if row.dirty {
+            out.push_str("  dirty: true\n");
+        }
+    }
+    let path = manifest_dir.join("rbnx-boot").join("deployment.lock");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, out) {
+        output::warning(&format!("could not write {}: {e}", path.display()));
+    }
 }
 
 /// Apply top-level deployment variables, then expand every scalar in the
@@ -1203,6 +1379,10 @@ pub async fn execute(
         &manifest_dir,
         config.robonix_source_path.as_deref(),
     )?;
+
+    // Record what this run is about to use, after the caches are settled and
+    // before anything is spawned.
+    write_lockfile(&deploy, &cache_root, &manifest_dir);
 
     // Install the SIGINT/SIGTERM handlers BEFORE bringup begins, not after.
     // Bringup takes many seconds (git, spawns, waiting for ACTIVE); a Ctrl-C

@@ -44,6 +44,20 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 Run `rbnx <cmd> --help` for full flags.
 
+### What a boot leaves behind
+
+`rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
+anything: one entry per package with the URL, the branch the manifest asked
+for, the commit the checkout was actually on, and `dirty: true` when that
+checkout had uncommitted changes.
+
+A manifest pins packages by branch, and a cache is cloned once and then reused
+untouched, so "the same manifest" is not the same code twice — a deployment was
+found running three commits behind its branch with hand-applied edits on top,
+and nothing about the run recorded it. The lockfile is that record. It is
+written, not enforced: boot still runs whatever the cache holds, and a dirty
+checkout is warned about rather than refused.
+
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
