@@ -39,6 +39,7 @@ use robonix_cli::launch::{
 };
 use robonix_cli::output;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -223,8 +224,12 @@ mod tests {
 
         write_lockfile(&deploy, &cache_root, &temp);
         let clean = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(clean.contains("version: 1"), "{clean}");
         assert!(clean.contains("name: sample"), "{clean}");
+        // what was asked for and what it resolved to are kept apart
+        assert!(clean.contains("original:"), "{clean}");
         assert!(clean.contains("branch: main"), "{clean}");
+        assert!(clean.contains("locked:"), "{clean}");
         let head = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&pkg)
@@ -237,11 +242,44 @@ mod tests {
             "a clean checkout must not be flagged: {clean}"
         );
 
-        // An edited checkout is the case the branch name cannot describe.
+        // Deterministic: running again with nothing changed must not rewrite it.
+        let before = std::fs::metadata(&lock)
+            .expect("lock metadata")
+            .modified()
+            .ok();
+        write_lockfile(&deploy, &cache_root, &temp);
+        assert_eq!(std::fs::read_to_string(&lock).expect("lockfile"), clean);
+        assert_eq!(
+            std::fs::metadata(&lock)
+                .expect("lock metadata")
+                .modified()
+                .ok(),
+            before,
+            "an unchanged deployment must not rewrite its lock"
+        );
+
+        // An edited checkout is the case the branch name cannot describe. A
+        // flag alone cannot tell two different edits apart, so it carries a
+        // digest of them.
         std::fs::write(pkg.join("f"), "two").expect("edit");
         write_lockfile(&deploy, &cache_root, &temp);
         let dirty = std::fs::read_to_string(&lock).expect("lockfile");
         assert!(dirty.contains("dirty: true"), "{dirty}");
+        assert!(dirty.contains("dirty_digest: sha256:"), "{dirty}");
+
+        let first_digest = dirty
+            .lines()
+            .find(|l| l.contains("dirty_digest"))
+            .expect("digest line")
+            .trim()
+            .to_string();
+        std::fs::write(pkg.join("f"), "three").expect("second edit");
+        write_lockfile(&deploy, &cache_root, &temp);
+        let dirty2 = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(
+            !dirty2.contains(&first_digest),
+            "a different edit must not share a digest: {dirty2}"
+        );
 
         std::fs::remove_dir_all(&temp).expect("remove test directory");
     }
@@ -525,49 +563,70 @@ fn check_prerequisites(
 /// One package as it was actually found on disk when the deployment ran.
 struct ResolvedPackage {
     name: String,
+    /// What the manifest asked for.
     url: Option<String>,
+    path: Option<String>,
     branch: Option<String>,
+    /// What that resolved to.
     commit: Option<String>,
-    dirty: bool,
+    dirty_digest: Option<String>,
 }
 
-/// Read `git rev-parse HEAD` and whether the tree has uncommitted changes.
+/// `git rev-parse HEAD`, and a digest of the uncommitted changes if any.
 ///
-/// Both are read from the checkout rather than from the manifest, because the
-/// manifest only ever says which branch to follow. A branch is not a version:
-/// the same manifest resolves to different code a week later, and a cache that
-/// was cloned once is never revisited. Returns `(None, false)` for anything
-/// that is not a git checkout — a `path:` entry pointing into the source tree
-/// is version-controlled by whatever contains it.
-fn git_state(dir: &Path) -> (Option<String>, bool) {
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+/// Both are read from the checkout, not from the manifest: a manifest only ever
+/// names a branch, and a branch is not a version. Returns `(None, None)` for
+/// anything that is not a git checkout — a `path:` entry into the source tree
+/// is versioned by whatever contains it.
+///
+/// A dirty tree gets a digest rather than a bare flag. `dirty: true` says the
+/// commit is not the whole story; a digest says *which* not-the-whole-story,
+/// so two machines claiming the same lock can be compared. This is the same
+/// device the project's own reproducibility record uses for its overlays.
+fn git_state(dir: &Path) -> (Option<String>, Option<String>) {
+    let run = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let head = run(&["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let dirty = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(dir)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false);
-    (head, dirty)
+    if head.is_none() {
+        return (None, None);
+    }
+    // Tracked edits and the list of untracked files, together: either alone
+    // misses a way the checkout can differ from its commit.
+    let status = run(&["status", "--porcelain"]).unwrap_or_default();
+    if status.trim().is_empty() {
+        return (head, None);
+    }
+    let diff = run(&["diff", "HEAD"]).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(status.as_bytes());
+    hasher.update(diff.as_bytes());
+    (head, Some(format!("sha256:{:x}", hasher.finalize())))
 }
 
 /// Write `rbnx-boot/deployment.lock`: what this run actually used.
 ///
-/// A deployment pins packages by branch, so "the same manifest" is not the same
-/// code twice. Nothing recorded which commit a run had, and a cache cloned once
-/// is reused untouched forever — a deployment was found three commits behind
-/// its branch with uncommitted edits on top, and no artifact of the run said
-/// so. This is that artifact. It is written, not enforced: a run that would
-/// have been wrong now leaves evidence, which is the half that has to exist
-/// first.
+/// Shaped after the lockfiles that had to solve this already. From
+/// `flake.lock`, the split between what was asked for and what it resolved to:
+/// a branch is the request, a commit is the answer, and conflating them is the
+/// bug this file exists to expose. From `Cargo.lock` and `package-lock.json`, a
+/// format version, so the file can change without a reader guessing. From all
+/// three, determinism: entries sorted, no timestamp, so the file changes when
+/// the deployment changes and not when it merely ran again — a lock that
+/// rewrites itself on every boot is one nobody reads a diff of.
+///
+/// Written, not enforced. A deployment was found three commits behind its
+/// branch with uncommitted edits on top and no artifact of the run said so.
+/// This is that artifact; refusing to boot on a moved branch is a separate
+/// decision that needs a fetch and a policy.
 fn write_lockfile(deploy: &DeployManifest, cache_root: &Path, manifest_dir: &Path) {
     let mut rows: Vec<ResolvedPackage> = Vec::new();
     for entry in deploy
@@ -582,7 +641,7 @@ fn write_lockfile(deploy: &DeployManifest, cache_root: &Path, manifest_dir: &Pat
         if !pkg_path.exists() {
             continue;
         }
-        let (commit, dirty) = git_state(&pkg_path);
+        let (commit, dirty_digest) = git_state(&pkg_path);
         rows.push(ResolvedPackage {
             name: if entry.name.is_empty() {
                 pkg_path
@@ -594,42 +653,62 @@ fn write_lockfile(deploy: &DeployManifest, cache_root: &Path, manifest_dir: &Pat
                 entry.name.clone()
             },
             url: entry.url.clone(),
+            path: entry.path.clone(),
             branch: entry.branch.clone(),
             commit,
-            dirty,
+            dirty_digest,
         });
     }
-    for row in rows.iter().filter(|r| r.dirty) {
+    // Deterministic order: the file is meant to be diffed.
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for row in rows.iter().filter(|r| r.dirty_digest.is_some()) {
         output::warning(&format!(
             "{}: the cached checkout has uncommitted changes — this run is not \
              reproducible from its branch alone",
             row.name
         ));
     }
+
     let mut out = String::from(
-        "# Written by `rbnx boot`: the packages this deployment actually used.\n\
-         # Branches move and a cache is cloned once, so the manifest alone does\n\
-         # not say which code ran. This does.\n",
+        "# Generated by `rbnx boot`. Do not edit.\n\
+         #\n\
+         # `original` is what the manifest asked for, `locked` is what that\n\
+         # resolved to on this machine. A manifest pins packages by branch and a\n\
+         # cache is cloned once, so the two are not the same thing and only this\n\
+         # file records the second.\n\
+         version: 1\n\
+         packages:\n",
     );
     for row in &rows {
-        out.push_str(&format!("- name: {}\n", row.name));
+        out.push_str(&format!("  - name: {}\n    original:\n", row.name));
         if let Some(u) = &row.url {
-            out.push_str(&format!("  url: {u}\n"));
+            out.push_str(&format!("      url: {u}\n"));
+        }
+        if let Some(p) = &row.path {
+            out.push_str(&format!("      path: {p}\n"));
         }
         if let Some(b) = &row.branch {
-            out.push_str(&format!("  branch: {b}\n"));
+            out.push_str(&format!("      branch: {b}\n"));
         }
+        out.push_str("    locked:\n");
         match &row.commit {
-            Some(c) => out.push_str(&format!("  commit: {c}\n")),
-            None => out.push_str("  commit: not a git checkout\n"),
+            Some(c) => out.push_str(&format!("      commit: {c}\n")),
+            None => out.push_str("      commit: null    # not a git checkout\n"),
         }
-        if row.dirty {
-            out.push_str("  dirty: true\n");
+        if let Some(d) = &row.dirty_digest {
+            out.push_str(&format!("      dirty: true\n      dirty_digest: {d}\n"));
         }
     }
+
     let path = manifest_dir.join("rbnx-boot").join("deployment.lock");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    // Only rewrite when something changed, so the file's mtime means something
+    // and a boot that changed nothing leaves no diff.
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(out.as_str()) {
+        return;
     }
     if let Err(e) = std::fs::write(&path, out) {
         output::warning(&format!("could not write {}: {e}", path.display()));
