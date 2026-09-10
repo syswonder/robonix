@@ -443,18 +443,7 @@ fn check_prerequisites(
         ));
         let dest = cache_root.join(repo_dir_name(url));
         std::fs::create_dir_all(cache_root)?;
-        let mut clone = std::process::Command::new("git");
-        clone.arg("clone").arg("--depth").arg("1");
-        if let Some(b) = branch {
-            clone.arg("--branch").arg(b);
-        }
-        clone.arg(url).arg(&dest);
-        let status = clone
-            .status()
-            .with_context(|| format!("git clone {url} failed to spawn"))?;
-        if !status.success() {
-            anyhow::bail!("git clone {url} exited with {:?}", status.code());
-        }
+        super::run_package::git_clone_with_retry(url, branch.as_deref(), &dest)?;
         // Newly-cloned package needs a build too.
         let stamp = dest.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {

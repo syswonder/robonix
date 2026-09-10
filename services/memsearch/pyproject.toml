@@ -13,8 +13,10 @@ dependencies = [
     # Pin NumPy 1.x: pandas via pymilvus needs >=1.26; some downstream
     # consumers haven't migrated off NumPy 1.x.
     "numpy>=1.26,<2",
-    "mcp",
-    "fastmcp",
+    # Pinned: mcp 2.x renamed FastMCP to MCPServer and moved its import
+    # path, and every caller still imports mcp.server.fastmcp.
+    "mcp>=1.27,<2",
+    "fastmcp>=3,<5",
     "memsearch[onnx]",
     # Newer official ARM64 wheels abort on Jetson power modes with offline
     # cores. 1.18.1 plus our explicit SessionOptions path is verified here.
@@ -22,9 +24,9 @@ dependencies = [
     # Keep non-ARM deployments on the current supported line. The disjoint
     # markers let uv lock both variants without downgrading x86 CI/runners.
     "onnxruntime>=1.23,<1.24; platform_machine != 'aarch64'",
-    "grpcio",
-    "grpcio-tools",
-    "protobuf",
+    "grpcio==1.80.0",
+    "grpcio-tools==1.76.0",
+    "protobuf==6.33.6",
     "uvicorn",
     "robonix-api",
 ]

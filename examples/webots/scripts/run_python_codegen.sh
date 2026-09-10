@@ -20,7 +20,7 @@ WEBOTS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$WEBOTS_ROOT/rbnx-boot/python-codegen-venv"
 PROTOBUF_VERSION="6.33.6"
 GRPC_TOOLS_VERSION="1.76.0"
-GRPCIO_VERSION="1.78.0"
+GRPCIO_VERSION="1.80.0"
 
 if ! command -v uv >/dev/null 2>&1; then
     echo "[webots/codegen] error: 'uv' not found on PATH. Install: https://docs.astral.sh/uv/" >&2

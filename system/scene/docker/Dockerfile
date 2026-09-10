@@ -182,9 +182,13 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         --retries 3 \
     && rm /tmp/requirements/scene-perception-heavy.txt
 
-# Force protobuf upgrade — host rbnx codegen emits >=7.35 protos;
-# the base ROS image ships an older runtime.
-RUN without-proxy pip install --upgrade "protobuf>=7.35"
+# Keep this runtime in the major line the deployment's stubs are generated in.
+# Scene imports stubs produced by the same host codegen as the Webots packages,
+# and those are pinned to protobuf 6.33.6 by
+# examples/webots/scripts/run_python_codegen.sh; a runtime in a different major
+# rejects them at import ("gencode 7.35.1 runtime 6.33.6"). The floor is here
+# because the base ROS image ships something older still.
+RUN without-proxy pip install --upgrade "protobuf==6.33.6"
 
 # pytorch3d (see requirements/scene-pytorch3d.txt to decide whether installing it or not.)
 # COPY requirements/scene-pytorch3d.txt /tmp/requirements/scene-pytorch3d.txt

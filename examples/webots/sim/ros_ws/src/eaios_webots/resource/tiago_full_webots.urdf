@@ -1759,7 +1759,19 @@
         <imageSuffix>/image_raw</imageSuffix>
         <pointCloudSuffix>/points</pointCloudSuffix>
         <alwaysOn>true</alwaysOn>
-        <frameName>head_front_camera_depth_optical_frame</frameName>
+        <!-- The topic is depth_registered: the depth is registered to the
+             colour camera, so its frame IS the RGB optical frame. Naming a
+             separate depth frame here made the driver publish
+             head_front_camera_depth_optical_frame with identity rotation,
+             while the URDF's own optical joint for it never reached the TF
+             tree. Consumers that read the frame from the image header then
+             projected with the optical convention (Z forward) against a
+             body-oriented transform, so forward distance landed on Y and the
+             height difference became the reported "depth". That is why the benchmark
+             found 48 of 51 objects "out of range". Both frames already
+             resolve to the same translation, so this only supplies the
+             rotation that was missing. -->
+        <frameName>head_front_camera_rgb_optical_frame</frameName>
       </ros>
     </device>
     <plugin type="webots_ros2_control::Ros2Control" />

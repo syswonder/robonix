@@ -170,7 +170,6 @@ pub fn ts_parse(s: &str) -> Option<u64> {
             t as u64
         }
     };
-    let ts_ns = secs.checked_mul(1_000_000_000)?.checked_add(nsec as u64)?;
     #[cfg(not(unix))]
     let secs = {
         let days_before_month: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
@@ -184,6 +183,7 @@ pub fn ts_parse(s: &str) -> Option<u64> {
             - 1;
         days as u64 * 86400 + hour as u64 * 3600 + min as u64 * 60 + sec as u64
     };
+    let ts_ns = secs.checked_mul(1_000_000_000)?.checked_add(nsec as u64)?;
     Some(ts_ns)
 }
 

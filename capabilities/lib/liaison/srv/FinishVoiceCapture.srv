@@ -1,0 +1,25 @@
+# End microphone capture for an in-flight voice session and submit what has
+# already been recognized, instead of discarding the turn.
+#
+# `robonix/system/liaison/voice` normally ends a turn on the ASR backend's
+# own end-of-utterance detection. Under continuous background noise that
+# detection may never fire, leaving the user stuck until the record-seconds
+# ceiling expires. This contract is the manual equivalent of that automatic
+# endpoint: capture stops, the ASR request stream is flushed so the backend
+# emits its final transcript, and the turn proceeds down the normal
+# submission path.
+#
+# This is NOT an abort. To discard a turn or stop a running task, drop the
+# StartVoiceSession stream instead.
+
+# Session to finish, exactly as returned in the VoiceEvent stream.
+string session_id
+---
+# False when no capture is currently running under this session id -- for
+# example the utterance already ended on its own between the user pressing
+# the button and this call arriving. Callers should treat that as benign.
+bool ok
+# Echo of the session the call applied to.
+string session_id
+# Human-readable outcome, for logs and operator-facing UI.
+string detail
