@@ -77,6 +77,11 @@ REQUIRED_ACTIVE = [
     "scene", "tiago_camera", "tiago_lidar", "audio_driver",
     "mapping", "nav2", "memory", "speech", "voiceprint",
 ]
+# Skills idle in INACTIVE until a consumer activates them, so "boot done"
+# for a skill means rbnx has driven it out of REGISTERED (CMD_INIT accepted).
+# Capability declaration alone races the executor: it refuses to auto-activate
+# a skill that is still REGISTERED, and it never retries.
+REQUIRED_INITIALIZED = ["explore"]
 
 # Runtime processes that the user has called out by name in the issue.
 # `pgrep -f` matches the wrapper command; the `rbnx start` form is
@@ -338,6 +343,10 @@ def wait_for_boot(
             caps.returncode == 0
             and all(c in out for c in REQUIRED_CAPS)
             and all(f"● {p} [ACTIVE]" in out for p in REQUIRED_ACTIVE)
+            and all(
+                any(f"● {p} [{state}]" in out for state in ("INACTIVE", "ACTIVE"))
+                for p in REQUIRED_INITIALIZED
+            )
         )
         if ok:
             log(f"{label}: all required providers ACTIVE")

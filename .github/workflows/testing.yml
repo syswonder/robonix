@@ -530,6 +530,17 @@ jobs:
           # developer workstation, so CI must not mutate ~/.gitconfig.
           git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
           : > "$git_config"
+          # The runner service inherited HTTP_PROXY=127.0.0.1:9981 from a
+          # macOS-forwarding config that was disabled on 2026-08-10. The
+          # listener is still up but forwards nothing, so every clone since has
+          # died with `GnuTLS, handshake failed` — an error that names TLS and
+          # hides the fact that the proxy is a dead end. Drop the inherited
+          # values for this job so the routing decided below is the one that
+          # applies.
+          for stale in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+            printf '%s=\n' "$stale" >> "$GITHUB_ENV"
+          done
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
           if timeout 15s git ls-remote --exit-code \
               "https://ghfast.top/https://github.com/syswonder/robonix.git" \
               HEAD >/dev/null 2>&1; then
@@ -537,11 +548,34 @@ jobs:
               url."https://ghfast.top/https://github.com/".insteadOf \
               "https://github.com/"
             echo "Using ghfast.top for GitHub clones"
-          else
+          elif proxy_ok=0
+               # Clash on this runner drops out for stretches at a time. Both
+               # other routes are hard-blocked here — a direct clone and
+               # ghfast.top both come back "Connection reset by peer" — so the
+               # proxy is the only way out and a single failed probe is worth
+               # waiting on rather than treating as absent.
+               for attempt in 1 2 3 4 5 6; do
+                 if timeout 20s git -c 'http.https://github.com/.proxy=http://127.0.0.1:7897' \
+                      ls-remote --exit-code "https://github.com/syswonder/robonix.git" \
+                      HEAD >/dev/null 2>&1; then
+                   proxy_ok=1; break
+                 fi
+                 echo "Clash probe $attempt/6 failed; retrying in 10s"
+                 sleep 10
+               done
+               [ "$proxy_ok" = 1 ]; then
             git config --file "$git_config" \
               'http.https://github.com/.proxy' \
               'http://127.0.0.1:7897'
             echo "ghfast.top unavailable; using GitHub through Clash at 127.0.0.1:7897"
+          else
+            # Both routes are gone. Pointing git at a proxy that is not
+            # listening is worse than not setting one: every clone dies with a
+            # GnuTLS handshake failure against a closed port, which reads like
+            # a TLS problem rather than a missing proxy. Leave git alone and
+            # let it reach github.com directly; if that also fails the error
+            # will at least name the real cause.
+            echo "ghfast.top unavailable and no proxy on 127.0.0.1:7897; going direct"
           fi
           echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
@@ -1219,7 +1253,8 @@ jobs:
           for i in $(seq 1 60); do
             if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.post-restart.txt" 2>&1 \
               && grep -q "robonix/service/navigation/navigate" "$RUNNER_TEMP/caps.post-restart.txt" \
-              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
+              && grep -q "^● nav2 \[ACTIVE\]" "$RUNNER_TEMP/caps.post-restart.txt" \
+              && grep -qE "^● explore \[(INACTIVE|ACTIVE)\]" "$RUNNER_TEMP/caps.post-restart.txt"; then
               echo "post-restart atlas ready"
               break
             fi
@@ -1309,9 +1344,44 @@ jobs:
           if [ "$scene_ready" -ne 1 ]; then
             echo "::error::scene did not expose a non-robot object after lifecycle restart"
             cat "$state_file" || true
-            tail -260 "examples/webots/rbnx-boot/logs/scene.log" || true
+            tail -260 "$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs/scene.log" || true
             exit 1
           fi
+          # A Webots boot starts a fresh live SLAM session by design — see the
+          # comment at the top of examples/webots/robonix_manifest.yaml — so the
+          # rebooted RTAB-Map opens an empty database and refills it from the
+          # sensor stream. Until it has, /map is published and entirely unknown.
+          #
+          # object_navigation is the only scenario that needs a global plan, and
+          # --first puts it at the head of this pass. Without this gate it asked
+          # the planner to route across a map that did not exist yet: nav2
+          # answered "GridBased: failed to create plan", Pilot retried, and the
+          # scenario spent its whole 300s that way.
+          #
+          # Waiting for a publisher would not help, because the publisher exists
+          # from the moment the node starts, and neither would waiting for a
+          # message, because an all-unknown grid is a valid message. The gate has
+          # to be free space. The reasoning is the one written above for Scene:
+          # Atlas readiness proves a provider registered its contracts, not that
+          # it has produced anything usable.
+          map_readiness="$RUNNER_TEMP/sim-logs/map-readiness-post-restart.txt"
+          echo "waiting for /map to carry known cells after lifecycle restart"
+          if ! docker exec -i "$ROBONIX_SIM_CONTAINER" bash -lc '
+            set -eo pipefail
+            source /opt/ros/humble/setup.bash
+            set -u
+            export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+            export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+            python3 - --timeout 240 "$@"
+          ' _ <"$GITHUB_WORKSPACE/testing/wait_for_map.py" \
+            >"$map_readiness" 2>&1; then
+            echo "::error::/map had no usable occupancy grid after lifecycle restart"
+            cat "$map_readiness" || true
+            tail -260 "$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs/mapping.log" || true
+            exit 1
+          fi
+          cat "$map_readiness"
+
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
             --first object_navigation \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \

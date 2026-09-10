@@ -138,6 +138,14 @@ _CFG_DEFAULTS = {
     #   true matches and 0.3–0.7 for spurious pairs, threshold 0.85
     #   is the sweet spot. Lower → over-merging, higher → ghosting again.
     "merge_threshold": 0.85,
+    # Visible-absence eviction. An unmatched object is removed from the CG
+    # map only after `visibility_miss_ticks` consecutive ticks in which its
+    # stored cloud projects onto depth that is clearly *behind* it (see
+    # _visible_missing_uuids). Margins err toward keeping objects.
+    "visibility_depth_margin_m": 0.10,
+    "visibility_min_clear_samples": 3,
+    "visibility_min_clear_fraction": 0.60,
+    "visibility_miss_ticks": 3,
     # Hard centroid-distance gate on the per-tick merge. With
     # merge_threshold low, visual similarity alone can match; this
     # caps the physical separation so two "potted_plant" detections
@@ -302,6 +310,261 @@ def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained):
         return (None,) * 6
 
     return yolo, sam, clip_model, clip_preprocess, clip_tokenizer, device
+
+
+# ── Visible-absence detection ────────────────────────────────────────────
+# The upstream MapObjectList only ever grows: an object carried out of the
+# room keeps its cloud forever, because nothing ever produces negative
+# evidence. This function is that negative evidence, with the burden of
+# proof on deletion: a miss counts only where the *measured* surface is
+# materially behind the stored object. Closer surface = occlusion; similar
+# depth = detector miss; invalid depth = unknown. None of those delete
+# state. Ported unchanged from the reviewed #199 draft — the algorithm was
+# the part of that PR worth keeping.
+def _visible_missing_uuids(
+    map_objects: Any,
+    *,
+    observed_uuids: set[str],
+    depth_m: Any,
+    intrinsics: Any,
+    camera_to_world: Any,
+    depth_margin_m: float,
+    min_clear_samples: int = 3,
+    min_clear_fraction: float = 0.60,
+    max_projected_samples: int = 25,
+    upper_sample_fraction: float = 0.70,
+    min_depth_margin_m: float = 0.015,
+    extent_margin_scale: float = 0.30,
+    diagnostics: Optional[dict[str, dict[str, Any]]] = None,
+) -> set[str]:
+    """Return unmatched objects whose old location is visibly empty.
+
+    A spatially distributed set of stored object-cloud samples is projected
+    into the current depth image. A miss counts only when enough samples show
+    the measured surface materially *behind* the stored object. A closer
+    surface means occlusion; a similar depth means the object may still be
+    present but the detector missed it; invalid/out-of-FOV depth is unknown.
+    Those cases must not delete state.
+
+    Sampling multiple projected regions fixes the old center-pixel blind spot:
+    the object center can land on a depth hole or thin occluder even when the
+    rest of the former object footprint is clearly empty. Requiring both an
+    absolute sample count and a clear fraction prevents one background pixel
+    from deleting an object that is mostly occluded or still present.
+    """
+    try:
+        depth = np.asarray(depth_m, dtype=np.float32)
+        transform = np.asarray(camera_to_world, dtype=np.float64)
+        if depth.ndim != 2 or transform.shape != (4, 4):
+            return set()
+        world_to_camera = np.linalg.inv(transform)
+    except (TypeError, ValueError, np.linalg.LinAlgError):
+        return set()
+
+    height, width = depth.shape
+    margin = max(0.0, float(depth_margin_m))
+    minimum_margin = max(0.0, float(min_depth_margin_m))
+    margin_scale = max(0.0, float(extent_margin_scale))
+    upper_fraction = max(0.0, min(1.0, float(upper_sample_fraction)))
+    minimum = max(1, int(min_clear_samples))
+    clear_fraction = max(0.0, min(1.0, float(min_clear_fraction)))
+    sample_limit = max(minimum, int(max_projected_samples))
+    visible_missing: set[str] = set()
+
+    def record(uuid_value: str, status: str, **values: Any) -> None:
+        if diagnostics is not None and uuid_value:
+            diagnostics[uuid_value] = {
+                "status": status,
+                **values,
+            }
+
+    for obj in map_objects or ():
+        uuid_value = ""
+        try:
+            uuid_value = str(obj.get("id", "") or "")
+            if not uuid_value:
+                continue
+            if uuid_value in observed_uuids:
+                record(uuid_value, "observed")
+                continue
+            points = np.asarray(obj["pcd"].points, dtype=np.float64)
+            points = points[np.all(np.isfinite(points), axis=1)]
+            if points.shape[0] < 1:
+                record(uuid_value, "no_finite_points")
+                continue
+            vertical_low, vertical_high = np.percentile(
+                points[:, 2],
+                (5.0, 95.0),
+            )
+            vertical_extent = max(
+                0.0,
+                float(vertical_high - vertical_low),
+            )
+            effective_margin = min(
+                margin,
+                max(minimum_margin, margin_scale * vertical_extent),
+            )
+            visibility_points = points
+            if 0.0 < upper_fraction < 1.0 and vertical_extent > 0.0:
+                vertical_cutoff = vertical_high - (
+                    upper_fraction * vertical_extent
+                )
+                upper_points = points[points[:, 2] >= vertical_cutoff]
+                if upper_points.shape[0] >= minimum:
+                    visibility_points = upper_points
+            homogeneous = np.column_stack(
+                (
+                    visibility_points,
+                    np.ones(
+                        visibility_points.shape[0],
+                        dtype=np.float64,
+                    ),
+                )
+            )
+            camera_points = (world_to_camera @ homogeneous.T).T[:, :3]
+            expected_depths = camera_points[:, 2]
+            projectable = np.isfinite(expected_depths) & (
+                expected_depths > 0.0
+            )
+            if not np.any(projectable):
+                record(uuid_value, "behind_camera")
+                continue
+            camera_points = camera_points[projectable]
+            expected_depths = expected_depths[projectable]
+            us = np.rint(
+                float(intrinsics.fx)
+                * camera_points[:, 0]
+                / expected_depths
+                + float(intrinsics.cx)
+            ).astype(np.int64)
+            vs = np.rint(
+                float(intrinsics.fy)
+                * camera_points[:, 1]
+                / expected_depths
+                + float(intrinsics.cy)
+            ).astype(np.int64)
+            in_view = (
+                (us >= 0)
+                & (us < width)
+                & (vs >= 0)
+                & (vs < height)
+            )
+            if not np.any(in_view):
+                record(
+                    uuid_value,
+                    "out_of_view",
+                    projectable_points=int(camera_points.shape[0]),
+                )
+                continue
+            us, vs, expected_depths = (
+                us[in_view],
+                vs[in_view],
+                expected_depths[in_view],
+            )
+
+            # Keep the front-most stored surface at each projected pixel, then
+            # select evenly across image-space order. This is deterministic,
+            # bounded, and avoids overweighting dense patches of the fused
+            # cloud while retaining the object's spatial footprint.
+            projected: dict[tuple[int, int], float] = {}
+            for u, v, expected_depth in zip(
+                us.tolist(),
+                vs.tolist(),
+                expected_depths.tolist(),
+            ):
+                key = (int(u), int(v))
+                projected[key] = min(
+                    float(expected_depth),
+                    projected.get(key, math.inf),
+                )
+            samples = sorted(
+                (
+                    (u, v, expected_depth)
+                    for (u, v), expected_depth in projected.items()
+                ),
+                key=lambda item: (item[1], item[0]),
+            )
+            if len(samples) > sample_limit:
+                indices = np.linspace(
+                    0,
+                    len(samples) - 1,
+                    sample_limit,
+                    dtype=np.int64,
+                )
+                samples = [samples[int(index)] for index in indices]
+
+            clear = 0
+            occluded = 0
+            similar_depth = 0
+            valid_sample_count = 0
+            depth_deltas: list[float] = []
+            for u, v, expected_depth in samples:
+                u0, u1 = max(0, u - 1), min(width, u + 2)
+                v0, v1 = max(0, v - 1), min(height, v + 2)
+                patch = depth[v0:v1, u0:u1]
+                valid = patch[np.isfinite(patch) & (patch > 0.0)]
+                if valid.size == 0:
+                    continue
+                valid_sample_count += 1
+                measured_depth = float(np.median(valid))
+                delta = measured_depth - expected_depth
+                depth_deltas.append(delta)
+                if delta > effective_margin:
+                    clear += 1
+                elif delta < -effective_margin:
+                    occluded += 1
+                else:
+                    similar_depth += 1
+            clear_ratio = (
+                clear / valid_sample_count
+                if valid_sample_count
+                else 0.0
+            )
+            is_visibly_missing = (
+                valid_sample_count >= minimum
+                and clear >= minimum
+                and clear_ratio >= clear_fraction
+            )
+            record(
+                uuid_value,
+                (
+                    "clear_absence"
+                    if is_visibly_missing
+                    else "insufficient_clear_support"
+                ),
+                source_points=int(points.shape[0]),
+                visibility_source_points=int(visibility_points.shape[0]),
+                object_vertical_extent_m=round(vertical_extent, 6),
+                unique_projected_pixels=int(len(projected)),
+                sampled_pixels=int(len(samples)),
+                valid_samples=int(valid_sample_count),
+                clear_samples=int(clear),
+                occluded_samples=int(occluded),
+                similar_depth_samples=int(similar_depth),
+                clear_fraction=round(float(clear_ratio), 6),
+                depth_delta_median_m=(
+                    round(float(np.median(depth_deltas)), 6)
+                    if depth_deltas
+                    else None
+                ),
+                depth_delta_max_m=(
+                    round(float(np.max(depth_deltas)), 6)
+                    if depth_deltas
+                    else None
+                ),
+                required_clear_samples=int(minimum),
+                required_clear_fraction=float(clear_fraction),
+                configured_depth_margin_m=float(margin),
+                effective_depth_margin_m=round(effective_margin, 6),
+                depth_margin_m=round(effective_margin, 6),
+            )
+            if is_visibly_missing:
+                visible_missing.add(uuid_value)
+        except (KeyError, TypeError, ValueError, np.linalg.LinAlgError) as exc:
+            record(uuid_value, "diagnostic_error", error=type(exc).__name__)
+            continue
+    return visible_missing
+
 
 
 def _import_cg():
@@ -1132,9 +1395,85 @@ class ConceptGraphsDetector:
                     log.warning("concept-graphs merge pipeline failed: %s", e)
                 return
 
+        self._update_visible_absence(depth=depth, K=K, trans_pose=trans_pose)
         self._tick_idx += 1
         self._maybe_periodic_cleanup()
         self._project_to_registry()
+
+    def _update_visible_absence(self, *, depth, K, trans_pose) -> None:
+        """Remove map objects whose old location is verifiably empty.
+
+        Observation this tick is read off the upstream merge itself: a
+        matched object's `image_idx` list gains the current tick index,
+        so anything else is unmatched. An unmatched object must then show
+        `visibility_miss_ticks` consecutive clear-absence verdicts before
+        its entries leave the map — one noisy frame deletes nothing. The
+        registry record is not touched here: the next projection tick
+        soft-evicts it when the uuid stops being live, and the TTL prune
+        finishes the job unless the object is re-observed first.
+
+        Runs on the worker thread inside `_inference_lock` (tick context),
+        so the MapObjectList surgery needs no extra locking."""
+        import numpy as np
+
+        if self._map_objects is None or len(self._map_objects) == 0:
+            return
+        observed: set[str] = set()
+        for obj in self._map_objects:
+            try:
+                idx_list = obj.get("image_idx") or []
+                if idx_list and int(idx_list[-1]) == int(self._tick_idx):
+                    observed.add(str(obj.get("id", "") or ""))
+            except Exception:  # noqa: BLE001
+                continue
+
+        diagnostics: dict[str, dict] = {}
+        misses = _visible_missing_uuids(
+            self._map_objects,
+            observed_uuids=observed,
+            depth_m=depth,
+            intrinsics=K,
+            camera_to_world=trans_pose,
+            depth_margin_m=float(self.cfg["visibility_depth_margin_m"]),
+            min_clear_samples=int(self.cfg["visibility_min_clear_samples"]),
+            min_clear_fraction=float(self.cfg["visibility_min_clear_fraction"]),
+            diagnostics=diagnostics,
+        )
+        self._visibility_diagnostics = diagnostics
+
+        if not hasattr(self, "_visible_miss_streak"):
+            self._visible_miss_streak = {}
+        streak = self._visible_miss_streak
+        # Reset the streak for everything except this tick's misses —
+        # an observation or an inconclusive verdict both break it.
+        for uuid_value in list(streak):
+            if uuid_value not in misses:
+                del streak[uuid_value]
+        doomed: set[str] = set()
+        required = max(1, int(self.cfg["visibility_miss_ticks"]))
+        for uuid_value in misses:
+            streak[uuid_value] = streak.get(uuid_value, 0) + 1
+            if streak[uuid_value] >= required:
+                doomed.add(uuid_value)
+                del streak[uuid_value]
+        if not doomed:
+            return
+        if self._cg is not None:
+            retained = self._cg["MapObjectList"]()
+        else:  # pragma: no cover - loaders guarantee _cg by now
+            retained = []
+        removed = 0
+        for obj in self._map_objects:
+            if str(obj.get("id", "") or "") in doomed:
+                removed += 1
+                continue
+            retained.append(obj)
+        if removed:
+            self._map_objects = retained
+            log.info(
+                "[scene-cg] visible-absence removed %d object(s) after %d "
+                "consecutive clear ticks", removed, required,
+            )
 
     # ── Voxel pcd-overlap (replaces concept-graphs `overlap` mode) ──
     @staticmethod
@@ -1973,8 +2312,13 @@ class ConceptGraphsDetector:
                     # Update in place. Preserve oid + first_seen. The count is
                     # registry-owned (one per tick seen) so it survives a uuid
                     # swap instead of resetting to the CG object's num_detections.
-                    existing.pose = pose
-                    existing.bbox = bbox
+                    # An operator-corrected pose/bbox outranks perception: the
+                    # CG cloud still sits where the model last saw the object,
+                    # so writing its geometry back would silently undo the
+                    # human's edit on the next tick. Liveness still refreshes.
+                    if not existing.attributes.get("operator_geometry"):
+                        existing.pose = pose
+                        existing.bbox = bbox
                     existing.confidence = max(0.0, min(1.0, s["confidence"]))
                     existing.last_seen = now
                     existing.missing = False
@@ -2018,6 +2362,14 @@ class ConceptGraphsDetector:
                     continue
                 cg_uuid = obj.attributes.get("cg_uuid")
                 if cg_uuid is None or cg_uuid not in live_uuids:
+                    # A human-corrected record stays visible even when
+                    # concept-graphs culls its cloud: release the binding so
+                    # the uuid can be reused, but never soft-evict the edit.
+                    if obj.attributes.get("operator_geometry"):
+                        if cg_uuid is not None:
+                            self._uuid_to_oid.pop(cg_uuid, None)
+                            obj.attributes.pop("cg_uuid", None)
+                        continue
                     doomed.append(obj)
                     if cg_uuid is not None:
                         self._uuid_to_oid.pop(cg_uuid, None)
@@ -2031,6 +2383,60 @@ class ConceptGraphsDetector:
             for obj in doomed:
                 self._registry.soft_evict(obj)
             self._registry.prune_expired(now, self._object_ttl_s)
+
+    # ── operator mutation hooks ─────────────────────────────────────────
+    # Called by ObjectMutationCoordinator (asyncio thread). The CG map is
+    # owned by the worker tick under `_inference_lock`, so both hooks do
+    # their MapObjectList surgery on a thread while holding that lock.
+    # Registry-side deletion is the coordinator's job; these only stop the
+    # perception layer from re-projecting the deleted state next tick.
+
+    async def delete_object(self, object_id: str) -> None:
+        """Drop the CG map entries whose uuid is bound to `object_id`.
+
+        Without this, the next projection tick re-binds the surviving CG
+        object and resurrects the record the operator just deleted. If
+        the physical object is later re-observed it re-enters as a fresh
+        detection — the contract deletes a record, not a fact."""
+        uuids = [u for u, oid in getattr(self, "_uuid_to_oid", {}).items()
+                 if oid == object_id]
+        for u in uuids:
+            self._uuid_to_oid.pop(u, None)
+        if not uuids:
+            return
+
+        def _drop() -> None:
+            with self._inference_lock:
+                if self._map_objects is None:
+                    return
+                gone = set(uuids)
+                if self._cg is not None:
+                    retained = self._cg["MapObjectList"]()
+                else:
+                    retained = []
+                for obj in self._map_objects:
+                    if str(obj.get("id", "") or "") not in gone:
+                        retained.append(obj)
+                self._map_objects = retained
+
+        await asyncio.to_thread(_drop)
+
+    async def reset_derived_state(self) -> None:
+        """Empty the CG map and uuid bindings (flush). Re-detections
+        rebuild the map from scratch on subsequent ticks."""
+        if hasattr(self, "_uuid_to_oid"):
+            self._uuid_to_oid.clear()
+
+        def _reset() -> None:
+            with self._inference_lock:
+                if self._map_objects is None:
+                    return
+                if self._cg is not None:
+                    self._map_objects = self._cg["MapObjectList"]()
+                else:
+                    self._map_objects = []
+
+        await asyncio.to_thread(_reset)
 
     def _rebind_restored(self, cls: str, pose: Pose3D) -> Optional[SceneObject]:
         """Nearest warm-restored, not-yet-rebound object of class `cls` whose

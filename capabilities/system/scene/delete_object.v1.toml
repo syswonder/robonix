@@ -1,0 +1,10 @@
+# Remove one incorrect derived object from the current Scene epoch.
+[contract]
+id      = "robonix/system/scene/delete_object"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/DeleteObject.srv"
+description = "Delete one derived Scene object in the caller-asserted map epoch."
+
+[mode]
+type = "rpc"

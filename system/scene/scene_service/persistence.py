@@ -360,6 +360,34 @@ class ObjectStore:
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"delete_map({target}) failed: {e}") from e
 
+    def delete_object(
+        self,
+        object_id: str,
+        *,
+        partition: Optional[str] = None,
+    ) -> bool:
+        """Delete one exact object row from one semantic snapshot partition."""
+        target = self._partition(partition)
+        pk = f"{target}::{object_id}"
+        predicate = f"pk == {json.dumps(pk)}"
+        try:
+            rows = self._client.query(
+                collection_name=_COLLECTION,
+                filter=predicate,
+                output_fields=["pk"],
+                limit=1,
+            )
+            if rows:
+                self._client.delete(
+                    collection_name=_COLLECTION,
+                    filter=predicate,
+                )
+            return bool(rows)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"delete_object({target}, {object_id}) failed: {e}"
+            ) from e
+
     def purge_live_partitions(self) -> int:
         """Best-effort deletion of leftover `.live*` partitions.
 
