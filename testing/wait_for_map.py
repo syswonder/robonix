@@ -13,7 +13,9 @@ all-unknown grid is a perfectly good message. What a scenario that needs a
 global plan actually depends on is free space, so that is what this waits for.
 
 Prints the grid's size and known-cell count and exits 0 when the threshold is
-met, or exits 1 on timeout having printed the best it saw.
+met, or exits 1 on timeout having printed the best it saw. Progress markers go
+to stderr as it goes, because the middleware setup this cannot bound is where
+it is most likely to stop.
 """
 
 import argparse
@@ -35,6 +37,12 @@ def main() -> int:
     ap.add_argument("--min-known", type=int, default=200)
     args = ap.parse_args()
 
+    # Progress markers, unbuffered, on stderr. Everything below can block:
+    # rclpy.init() opens the rmw session, and rmw_zenoh retries a router it
+    # cannot reach indefinitely, which no --timeout of ours can interrupt. A
+    # probe that dies without printing anything is indistinguishable from a map
+    # that never came back, and once cost a CI run 80 minutes to say nothing.
+    print("connecting to the middleware", file=sys.stderr, flush=True)
     rclpy.init()
     node = rclpy.create_node("robonix_ci_wait_for_map")
 
@@ -57,6 +65,12 @@ def main() -> int:
             )
 
     node.create_subscription(OccupancyGrid, args.topic, on_map, qos)
+    print(
+        f"subscribed to {args.topic}; waiting up to {args.timeout:.0f}s "
+        f"for {args.min_known} known cells",
+        file=sys.stderr,
+        flush=True,
+    )
 
     deadline = time.monotonic() + args.timeout
     try:

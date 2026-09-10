@@ -1364,18 +1364,36 @@ jobs:
           # to be free space. The reasoning is the one written above for Scene:
           # Atlas readiness proves a provider registered its contracts, not that
           # it has produced anything usable.
+          #
+          # The probe's own --timeout bounds the loop it spins waiting for a
+          # grid, not the middleware setup that happens before it. An
+          # rmw_zenoh session whose router is not where it was retries
+          # forever, so the probe can block having printed nothing at all, and
+          # the step's only other bound is the job's 90 minute timeout. That
+          # is exactly what happened once: RTAB-Map published for the whole 80
+          # minutes while the readiness file stayed empty, and the run was
+          # cancelled rather than failed. Bound the probe here too, and run it
+          # unbuffered so a hang leaves the line it reached behind.
           map_readiness="$RUNNER_TEMP/sim-logs/map-readiness-post-restart.txt"
           echo "waiting for /map to carry known cells after lifecycle restart"
-          if ! docker exec -i "$ROBONIX_SIM_CONTAINER" bash -lc '
+          probe=0
+          timeout --signal=TERM --kill-after=15 300 \
+            docker exec -i "$ROBONIX_SIM_CONTAINER" bash -lc '
             set -eo pipefail
             source /opt/ros/humble/setup.bash
             set -u
             export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
             export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
-            python3 - --timeout 240 "$@"
+            python3 -u - --timeout 200 "$@"
           ' _ <"$GITHUB_WORKSPACE/testing/wait_for_map.py" \
-            >"$map_readiness" 2>&1; then
-            echo "::error::/map had no usable occupancy grid after lifecycle restart"
+            >"$map_readiness" 2>&1 || probe=$?
+          if [ "$probe" -ne 0 ]; then
+            if [ "$probe" -ge 124 ]; then
+              echo "::error::the /map readiness probe never returned; it hung before its own timeout could fire"
+            else
+              echo "::error::/map had no usable occupancy grid after lifecycle restart"
+            fi
+            echo "--- probe output (empty means it never reached its first print) ---"
             cat "$map_readiness" || true
             tail -260 "$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs/mapping.log" || true
             exit 1
