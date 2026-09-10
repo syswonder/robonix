@@ -216,3 +216,73 @@ def test_live_view_inline_javascript_is_valid(html_name):
         script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
         args = [node, "--check"]
     subprocess.run(args, input=script, text=True, check=True)
+
+
+@pytest.mark.parametrize("field", ["url", "url_2d"])
+def test_viewer_frame_inline_javascript_is_valid(field):
+    """Parse the viewer page's inline script with the host JavaScript engine.
+
+    The script is assembled from Python string literals with escaped quotes
+    inside an HTML attribute inside a JavaScript string. A quoting mistake
+    there produces a page that loads and then silently does nothing, which is
+    indistinguishable from a viewer that has no data.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    web = _web_module()
+    body = web._viewer_body(field, "/3d")
+    script = body.split("<script>", 1)[1].split("</script>", 1)[0]
+    subprocess.run([node, "--check"], input=script, text=True, check=True)
+
+
+def test_every_navigation_target_is_a_page_with_the_sidebar():
+    """The sidebar links must all resolve, and each page must carry it back.
+
+    Before the shell the pages had no links between them and a reader reached
+    the annotation view by editing the address bar. A link that 404s, or a page
+    that drops the sidebar, puts them back there.
+    """
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    client = TestClient(app)
+    for href, label in web._NAV_LINKS:
+        response = client.get(href)
+        assert response.status_code == 200, href
+        assert label in response.text, href
+        # Every link is present on every page, so any page reaches any other.
+        for _, other in web._NAV_LINKS:
+            assert other in response.text, (href, other)
+
+
+def test_the_bare_query_serves_the_built_in_page_without_the_shell():
+    """`?bare=1` is what the combined layout and a native install embed."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    client = TestClient(app)
+    bare = client.get("/2d?bare=1")
+    assert bare.status_code == 200
+    assert bare.text == web._INDEX_HTML
+
+
+def test_the_viewer_endpoint_says_why_there_is_no_viewer():
+    """A blank frame cannot distinguish "no data" from "never started"."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    payload = TestClient(app).get("/api/viewer").json()
+    assert payload["url"] == ""
+    assert payload["url_2d"] == ""
+    assert payload["detail"]
+
+
+def _registry_with_no_objects():
+    """An empty registry, enough for the page-shape assertions above."""
+    from scene_service.state import ObjectRegistry
+
+    return ObjectRegistry()

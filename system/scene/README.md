@@ -192,6 +192,9 @@ system:
     config:
       camera_provider_id: front_rgbd_camera
       web_port: 50107
+      # rerun | builtin | auto (default). Native installs stay on the
+      # built-in page; the x86 docker image ships rerun.
+      web_viewer: auto
 ```
 
 The value is the camera package entry's `name` (and therefore its Atlas
@@ -336,6 +339,9 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_BASE_SEC` / `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_MAX_SEC` | `30` / `300` | bounded exponential retry window for whole-scene image-relation failures |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 | `SCENE_WEB_HOST` | `0.0.0.0` | Web UI bind host; set `127.0.0.1` on a robot/control workstation to keep the operator surface local-only. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
+| `SCENE_WEB_VIEWER` | `auto` | Which viewer renders the map pages: `rerun` embeds the rerun viewer on both the 3D and the 2D page, `builtin` keeps the bundled three.js and canvas pages, `auto` picks rerun when `rerun-sdk` is importable. The x86 docker image ships rerun; native installs do not, so `auto` leaves them on the built-in pages. Setting `rerun` where it is not installed fails the start rather than serving an empty frame. Config key: `web_viewer`. |
+| `SCENE_RERUN_WEB_PORT` | `9090` | Port the embedded rerun viewer is served on. One server feeds both pages. |
+| `SCENE_RERUN_GRPC_PORT` | `9876` | Port the 3D page reads log data from. The 2D page reads the next port up (`9877` by default), so forward both. |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | enable the object snapshot DB backing the map UI's Save/Load (boot warm-restore only under `SCENE_RESTORE_ON_START`) |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
 | `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |

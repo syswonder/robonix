@@ -305,6 +305,15 @@ _CAMERA_CACHE: dict[str, dict[str, Any]] = {
 _CAMERA_PREVIEW_MIN_INTERVAL_S = 0.4
 
 
+def occupancy_payload(hub: Any) -> Optional[dict]:
+    """The occupancy snapshot the UI and the 3D viewer share.
+
+    A public name for the private builder below, so the viewer does not reach
+    into this module's internals to draw the floor the objects stand on.
+    """
+    return _occupancy_payload(hub)
+
+
 def _occupancy_payload(hub: Any) -> Optional[dict]:
     """Encode the latest OccupancyGrid (from /map via hub) as a small
     PNG + metadata. Cached by hub message count — only re-encodes when
@@ -668,6 +677,101 @@ def _maps_payload() -> dict:
     return {"ok": bool(out.get("ok")), "detail": out.get("detail", ""), "maps": maps}
 
 
+_NAV_LINKS = (
+    ("/", "semantic map"),
+    ("/2d", "2D map"),
+    ("/cam", "camera"),
+    ("/user", "annotations"),
+)
+
+
+def _nav(active: str) -> str:
+    """The sidebar every page shares.
+
+    Before this the pages had no links between them: reaching the annotation
+    view from the map meant editing the address bar, and nothing on any page
+    said the other views existed.
+    """
+    items = []
+    for href, label in _NAV_LINKS:
+        current = ' class="on"' if href == active else ""
+        items.append(f'<a href="{href}"{current}>{label}</a>')
+    return "".join(items)
+
+
+_SHELL_CSS = """
+  html,body{margin:0;height:100%;background:#0c0e12;color:#c8cedb;
+            font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .wrap{display:flex;height:100%}
+  nav{width:132px;flex:0 0 132px;background:#12151b;border-right:1px solid #232833;
+      display:flex;flex-direction:column;padding:10px 0}
+  nav .brand{padding:6px 14px 12px;color:#f0c050;font-weight:600;letter-spacing:.04em}
+  nav a{display:block;padding:7px 14px;color:#98a0b0;text-decoration:none;border-left:2px solid transparent}
+  nav a:hover{color:#e8edf5;background:#171b23}
+  nav a.on{color:#f0c050;border-left-color:#f0c050;background:#171b23}
+  main{flex:1;position:relative;min-width:0}
+  iframe{border:0;width:100%;height:100%;display:block}
+  .msg{padding:24px;color:#8a92a2;max-width:560px}
+  .msg code{background:#171b23;padding:.1em .35em;border-radius:3px}
+"""
+
+
+def _shell_page(active: str, body: str, title: str) -> str:
+    """Wrap page content in the shared sidebar."""
+    return (
+        "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title><style>{_SHELL_CSS}</style></head><body>"
+        f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}</nav>'
+        f"<main>{body}</main></div></body></html>"
+    )
+
+
+
+def _viewer_body(field: str, fallback: str) -> str:
+    """Page body that fills an iframe from /api/viewer.
+
+    The URL is fetched rather than baked in because the servers start after
+    this module is imported, and because a viewer that failed to start has to
+    say so: `fallback` is the page to link to instead, so a reader who cannot
+    see the map is not left guessing which half is broken. The fetch itself is
+    caught for the same reason — a rejected promise leaves the frame blank
+    forever, which is the one failure that looks like the map simply being
+    empty.
+    """
+    return (
+        '<iframe id="v" title="scene viewer"></iframe>'
+        '<script>'
+        'function down(t){document.querySelector("main").innerHTML='
+        '"<div class=\'msg\'>No viewer: " + t +'
+        f'". <br><br>The built-in view is at <a href=\'{fallback}\'>'
+        f'{fallback}</a>.</div>";}}'
+        'fetch("/api/viewer").then(function(r){return r.json();})'
+        '.then(function(d){'
+        f'var u=d["{field}"];'
+        'if(u){document.getElementById("v").src=u;}'
+        'else{down(d.detail||"the viewer is not running");}'
+        '}).catch(function(e){down(String(e));});'
+        '</script>'
+    )
+
+
+def _framed(path: str, title: str) -> str:
+    """A sub-page rendered inside the shared sidebar.
+
+    The standalone pages are kept exactly as they are and embedded, so each one
+    stays individually addressable for debugging while the sidebar is present
+    everywhere. `?bare=1` is what stops the embedded copy from drawing a second
+    sidebar inside itself.
+    """
+    return _shell_page(
+        path, f'<iframe src="{path}?bare=1" title="{title}"></iframe>', title)
+
+
+def _bare(request) -> bool:
+    """True when the caller wants the page without the sidebar."""
+    return request.query_params.get("bare") == "1"
+
+
 def make_app(*, registry: ObjectRegistry,
              hub: Any = None, detector: Any = None,
              sg_store: Any = None, anno_store: Any = None,
@@ -675,12 +779,14 @@ def make_app(*, registry: ObjectRegistry,
              map_binding: Optional[dict] = None,
              ops_lock: Optional[asyncio.Lock] = None,
              semantic_hold: Optional[dict] = None,
-             robot_geometry: Any = None) -> Starlette:
+             robot_geometry: Any = None,
+             rerun_sink: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
     Routes:
-      GET /                — combined split layout (2D map · 3D · cam)
+      GET /                — the semantic map, rendered by the embedded rerun
+                             viewer, with the sidebar the other pages share
       GET /2d              — 2D top-down map (occupancy grid + objects)
       GET /3d              — 3D scene (point clouds + bbox; three.js)
       GET /cam             — camera stack (live RGB + depth)
@@ -843,16 +949,37 @@ def make_app(*, registry: ObjectRegistry,
             "source": source,
         })
 
-    async def index(_request) -> HTMLResponse:
+    async def index(request) -> HTMLResponse:
         # Combined split layout: 2D map left, 3D viz right, each with
         # an expand-button that maximises the panel inside the page
         # (NOT browser-fullscreen). The two iframes embed the original
         # standalone /2d and /3d routes so they remain individually
         # bookmarkable / debuggable.
-        return HTMLResponse(_COMBINED_HTML)
+        #
+        # The landing page is the semantic map: it is the view that answers
+        # "is the perception any good", which is what this UI is opened for.
+        # The other pages are one click away in the sidebar.
+        #
+        # A deployment whose viewer is the built-in one keeps the page it had.
+        # Native installs do not ship rerun and must not be handed a broken
+        # frame in place of a working layout.
+        if _bare(request):
+            return HTMLResponse(_COMBINED_HTML)
+        if rerun_sink is None or not rerun_sink.ready:
+            return HTMLResponse(_framed("/", "scene — semantic map"))
+        body = _viewer_body("url", "/3d")
+        return HTMLResponse(_shell_page("/", body, "scene — semantic map"))
 
-    async def index2d(_request) -> HTMLResponse:
-        return HTMLResponse(_INDEX_HTML)
+    async def index2d(request) -> HTMLResponse:
+        # `?bare=1` is the built-in canvas map. It stays the page itself where
+        # rerun is absent, and stays reachable everywhere: the combined layout
+        # embeds it, and a native install has nothing else.
+        if _bare(request):
+            return HTMLResponse(_INDEX_HTML)
+        if rerun_sink is None or not rerun_sink.ready:
+            return HTMLResponse(_framed("/2d", "scene — 2D map"))
+        return HTMLResponse(_shell_page(
+            "/2d", _viewer_body("url_2d", "/2d?bare=1"), "scene — 2D map"))
 
     async def state(_request) -> JSONResponse:
         return JSONResponse(
@@ -1435,19 +1562,53 @@ def make_app(*, registry: ObjectRegistry,
                 out["detail"] = (out.get("detail") or "pose estimate sent") + "; current pose not available yet"
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
-    async def index3d(_request) -> HTMLResponse:
-        return HTMLResponse(_INDEX_3D_HTML)
+    async def index3d(request) -> HTMLResponse:
+        # The built-in three.js view. It stays reachable on its own path even
+        # where rerun serves the landing page: a native install has no rerun,
+        # and this is the only 3D view it has.
+        if _bare(request):
+            return HTMLResponse(_INDEX_3D_HTML)
+        return HTMLResponse(_framed("/3d", "scene — built-in 3D"))
+
+    async def viewer_url(request) -> JSONResponse:
+        """Where the embedded viewers are served, and why they are not.
+
+        The page needs to tell a reader whether the map is missing because
+        nothing has been detected or because the viewer was never started; a
+        blank frame cannot say which.
+        """
+        if rerun_sink is None:
+            return JSONResponse({
+                "url": "", "url_2d": "",
+                "detail": "this deployment uses the built-in viewer "
+                          "(scene web_viewer: builtin)",
+            })
+        if not rerun_sink.ready:
+            return JSONResponse({
+                "url": "", "url_2d": "", "detail": rerun_sink.detail,
+            })
+        # The viewer is reached from wherever this page was reached from. The
+        # request's Host is the only thing that knows that; the address Scene
+        # bound to does not.
+        host = (request.headers.get("host") or "").split(":")[0] or "127.0.0.1"
+        return JSONResponse({"url": rerun_sink.viewer_url(host),
+                             "url_2d": rerun_sink.viewer_url_2d(host),
+                             "detail": ""})
 
     async def objects3d(_request) -> JSONResponse:
         if detector is None or not hasattr(detector, "export_3d_snapshot"):
             return JSONResponse({"objects": [], "stamp_unix": 0.0})
         return JSONResponse(detector.export_3d_snapshot())
 
-    async def cam(_request) -> HTMLResponse:
-        return HTMLResponse(_INDEX_CAM_HTML)
+    async def cam(request) -> HTMLResponse:
+        if _bare(request):
+            return HTMLResponse(_INDEX_CAM_HTML)
+        return HTMLResponse(_framed("/cam", "scene — camera"))
 
-    async def user_page(_request) -> HTMLResponse:
-        return HTMLResponse(_USER_HTML)
+    async def user_page(request) -> HTMLResponse:
+        if _bare(request):
+            return HTMLResponse(_USER_HTML)
+        return HTMLResponse(_framed("/user", "scene — annotations"))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -1487,6 +1648,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/user", user_page, methods=["GET"]),
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
+        Route("/api/viewer", viewer_url, methods=["GET"]),
         Route("/api/camera", camera_state, methods=["GET"]),
         Route("/api/annotations", annotations_list, methods=["GET"]),
         Route("/api/annotations", annotations_create, methods=["POST"]),
@@ -1642,7 +1804,7 @@ _COMBINED_HTML = r"""<!doctype html>
         <span class="desc">map · occupancy grid + tracked objects · 5 Hz</span>
         <button class="expand" title="expand">⛶</button>
       </div>
-      <iframe src="/2d" loading="eager"></iframe>
+      <iframe src="/2d?bare=1" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-3d">
       <div class="titlebar">
@@ -1650,7 +1812,7 @@ _COMBINED_HTML = r"""<!doctype html>
         <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
         <button class="expand" title="expand">⛶</button>
       </div>
-      <iframe src="/3d" loading="eager"></iframe>
+      <iframe src="/3d?bare=1" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-cam">
       <div class="titlebar">
@@ -1658,7 +1820,7 @@ _COMBINED_HTML = r"""<!doctype html>
         <span class="desc">live RGB + depth · perception input</span>
         <button class="expand" title="expand">⛶</button>
       </div>
-      <iframe src="/cam" loading="eager"></iframe>
+      <iframe src="/cam?bare=1" loading="eager"></iframe>
     </div>
   </div>
   <div id="info-fp">
