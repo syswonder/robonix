@@ -44,6 +44,38 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 Run `rbnx <cmd> --help` for full flags.
 
+### What a boot leaves behind
+
+`rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
+anything. Each package records what the manifest asked for and what that
+resolved to, kept apart the way `flake.lock` keeps them:
+
+```yaml
+version: 1
+packages:
+  - name: mapping
+    original:
+      url: https://github.com/syswonder/service-map-rbnx
+      branch: feat/map-localizer
+    locked:
+      commit: df2ba718c0de1a5f...
+      dirty: true
+      dirty_digest: sha256:9c5e5cd...
+```
+
+Entries are sorted and nothing is timestamped, so the file changes when the
+deployment changes rather than every time it runs — a lock that rewrites itself
+on every boot is one nobody reads a diff of. A dirty checkout gets a digest of
+its uncommitted changes, not just a flag: a flag cannot tell two different
+local edits apart.
+
+A manifest pins packages by branch, and a cache is cloned once and then reused
+untouched, so "the same manifest" is not the same code twice — a deployment was
+found running three commits behind its branch with hand-applied edits on top,
+and nothing about the run recorded it. The lockfile is that record. It is
+written, not enforced: boot still runs whatever the cache holds, and a dirty
+checkout is warned about rather than refused.
+
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
