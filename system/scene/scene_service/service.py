@@ -1902,9 +1902,24 @@ async def _run_active(config: dict) -> None:
                 # Registered like every other background task: this one is
                 # appended after the loop that installs the exit callback, so
                 # it has to install its own or its death goes unreported.
+                # The publish period is the viewer's frame rate, and a
+                # reader watching a robot drive over a forwarded connection
+                # wants a slower one than a reader sitting at the machine.
+                # Every tick now costs only what actually changed, so this is
+                # a latency knob rather than a volume one.
+                try:
+                    viewer_period = float(
+                        os.environ.get("SCENE_RERUN_PERIOD_S", "") or 1.0)
+                except ValueError:
+                    log.warning(
+                        "[scene-rerun] SCENE_RERUN_PERIOD_S=%r is not a "
+                        "number; publishing once a second",
+                        os.environ.get("SCENE_RERUN_PERIOD_S"))
+                    viewer_period = 1.0
                 viewer_task = asyncio.create_task(
                     _rerun_tick(rerun_sink, registry, perception, hub,
-                                sg_store, robot_geometry),
+                                sg_store, robot_geometry,
+                                period_s=max(0.1, viewer_period)),
                     name="scene-rerun")
                 viewer_task.add_done_callback(_log_bg_task_exit)
                 bg_tasks.append(viewer_task)

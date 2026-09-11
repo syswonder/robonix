@@ -135,7 +135,11 @@ def test_the_three_cell_meanings_get_three_colours():
     occupied, unknown, free = (tuple(int(c) for c in texture[0][i])
                               for i in range(3))
     assert len({occupied, unknown, free}) == 3
-    assert sum(occupied) < sum(unknown) < sum(free)
+    # The map is drawn on a dark ground, so the brightness order is the
+    # inverse of a printed floor plan's: ground the robot has never seen
+    # recedes into the background, floor it has seen lifts off it, and the
+    # walls are the brightest thing because they are what bounds the room.
+    assert sum(unknown) < sum(free) < sum(occupied)
 
 
 class _FakeEdge:
@@ -193,9 +197,12 @@ class _FakeRerun:
 
     def __init__(self):
         self.logged = []
+        self.static = []
 
-    def log(self, path, entity, recording=None):
+    def log(self, path, entity, recording=None, static=False):
         self.logged.append((path, type(entity).__name__))
+        if static:
+            self.static.append(path)
 
     def __getattr__(self, name):
         def archetype(*args, **kwargs):
@@ -280,3 +287,115 @@ def test_a_viewer_whose_ports_are_taken_declines_instead_of_hanging():
         assert sink.start() is False
         assert not sink.ready
         assert str(port) in sink.detail
+
+
+# ── The viewer's cost is how often the map is sent, not how big it is ───────
+# Every publish used to append a full copy of the grid, of every point cloud
+# and of every box to the timeline whether or not anything had moved. The
+# browser keeps what it is sent, so a stationary robot still filled the
+# viewer's store until it hit its limit and the page stopped responding.
+
+
+def _sink_with(fake, *, history="changes", monkeypatch=None):
+    """A sink wired to the fake, without starting any server."""
+    from scene_service.rerun_sink import RerunSink
+
+    sink = RerunSink()
+    sink._rr = fake
+    sink._ready = True
+    sink._history = history
+    sink._map3d.recording = object()
+    sink._map2d.recording = object()
+    return sink
+
+
+def test_an_unchanged_map_is_not_sent_twice():
+    """A tick that changed nothing must put nothing on the wire."""
+    fake = _FakeRerun()
+    sink = _sink_with(fake)
+    objects = [_FakeObject("a", "chair", 1.0, 1.0)]
+    clouds = {"a": [[1.0, 1.0, 0.1], [1.0, 1.1, 0.2]]}
+
+    sink.log_objects(objects, clouds)
+    first = len(fake.logged)
+    assert first, "the first tick has to draw the object"
+
+    sink.log_objects(objects, clouds)
+    assert len(fake.logged) == first, (
+        "the second tick logged again although nothing moved")
+
+
+def test_a_moved_object_is_sent_again():
+    """Change detection must not swallow a real update."""
+    fake = _FakeRerun()
+    sink = _sink_with(fake)
+    objects = [_FakeObject("a", "chair", 1.0, 1.0)]
+    sink.log_objects(objects, {"a": [[1.0, 1.0, 0.1]]})
+    before = len(fake.logged)
+    sink.log_objects(objects, {"a": [[2.0, 1.0, 0.1]]})
+    assert len(fake.logged) > before
+
+
+def test_an_object_redrawn_after_being_cleared_is_sent_again():
+    """Clearing has to forget what the entity carried.
+
+    The entity is empty on screen after a clear, so suppressing the next
+    identical value would leave it empty for the rest of the session.
+    """
+    fake = _FakeRerun()
+    sink = _sink_with(fake)
+    objects = [_FakeObject("a", "chair", 1.0, 1.0)]
+    clouds = {"a": [[1.0, 1.0, 0.1]]}
+    sink.log_objects(objects, clouds)
+    sink.log_objects([], {})            # the registry drops it: cleared
+    before = len(fake.logged)
+    sink.log_objects(objects, clouds)   # and it comes back unchanged
+    assert len(fake.logged) > before
+
+
+def test_the_grid_is_static_so_its_history_is_never_kept():
+    """The floor plan is a current-state artefact.
+
+    SLAM rewrites it continuously and every superseded version is weight the
+    browser carries for the rest of the session.
+    """
+    numpy = pytest.importorskip("numpy")
+    PIL = pytest.importorskip("PIL.Image")
+    buffer = io.BytesIO()
+    PIL.fromarray(numpy.full((4, 4), 240, dtype=numpy.uint8),
+                  mode="L").save(buffer, format="PNG")
+    fake = _FakeRerun()
+    sink = _sink_with(fake)
+    sink.log_occupancy(dict(
+        _grid(), png_b64=base64.b64encode(buffer.getvalue()).decode()))
+    assert "/map/floor" in fake.static
+
+
+def test_latest_history_logs_everything_static():
+    """The mode a forwarded or weak client needs: one value per entity."""
+    fake = _FakeRerun()
+    sink = _sink_with(fake, history="latest")
+    sink.log_objects([_FakeObject("a", "chair", 1.0, 1.0)],
+                     {"a": [[1.0, 1.0, 0.1]]})
+    assert fake.static, "nothing was logged static in `latest` mode"
+
+
+def test_latest_history_pins_the_timeline():
+    """With one value per entity there is no timeline to place it on."""
+    fake = _FakeRerun()
+    sink = _sink_with(fake, history="latest")
+    calls = []
+    sink._map3d.recording = type("R", (), {
+        "set_time": lambda self, *a, **k: calls.append(a)})()
+    sink._map2d.recording = type("R", (), {
+        "set_time": lambda self, *a, **k: calls.append(a)})()
+    sink.set_time(12.0)
+    assert calls == []
+
+
+def test_the_viewer_link_asks_for_the_dark_theme():
+    """The map is drawn for a dark ground; the chrome must not be light."""
+    fake = _FakeRerun()
+    sink = _sink_with(fake)
+    sink._map3d.grpc_url = "rerun+http://127.0.0.1:9876/proxy"
+    assert "theme=dark" in sink.viewer_url("robot.local")

@@ -25,6 +25,7 @@ import colorsys
 import hashlib
 import logging
 import math
+import os
 import threading
 import urllib.parse
 from typing import Any, Iterable, Optional, Sequence
@@ -36,18 +37,29 @@ log = logging.getLogger(__name__)
 # first page's views and shows nothing, because its entities are not under
 # their origin.
 # The viewer's own chrome is dark and rerun 0.37 gives no way to change it
-# (the web backend ignores SetTheme), but everything inside a view is ours.
-# A light ground is what makes the occupancy grid read as a map rather than as
-# a lit surface floating in a dark room.
-_VIEW_BACKGROUND = [249, 250, 252]
-_COLOUR_OCCUPIED = (72, 78, 88)      # walls: they bound the room
-_COLOUR_FREE = (255, 255, 255)       # floor the robot has seen
-_COLOUR_UNKNOWN = (203, 209, 218)    # never observed
+# (the web backend ignores SetTheme). A light view inside that dark chrome
+# leaves the page half lit and half dark, and every label rerun draws takes
+# its colour from the entity it belongs to, so on a light ground the muted
+# object colours that read well as point clouds are exactly the colours that
+# make the text unreadable. The view is dark for the same reason the chrome
+# is, and the map is drawn the way a dark-mode floor plan is drawn: unknown
+# ground recedes into the background, seen floor lifts off it, and the walls
+# are the brightest thing in the grid because they are what bounds the room.
+# The three cell meanings have to separate at a glance, and on the 3D page
+# they are seen through a lit surface that darkens them: the swept floor is
+# what says where the robot has actually been, and at the first dark values
+# tried it was indistinguishable from ground nobody has ever observed. The
+# steps are widened accordingly — unknown sits on the background, seen floor
+# lifts well clear of it, walls are near white.
+_VIEW_BACKGROUND = [16, 18, 24]
+_COLOUR_OCCUPIED = (240, 243, 250)   # walls: they bound the room
+_COLOUR_FREE = (104, 113, 133)       # floor the robot has seen
+_COLOUR_UNKNOWN = (24, 27, 34)       # never observed
 # Relations are context, not evidence. They are drawn thin, muted and
 # translucent so that the point clouds stay the thing the eye lands on.
-_COLOUR_RELATION = (96, 122, 158, 150)
+_COLOUR_RELATION = (138, 166, 206, 170)
 _RELATION_RADIUS_M = 0.004
-_COLOUR_ROBOT = (214, 122, 20)
+_COLOUR_ROBOT = (255, 166, 54)
 
 _APP_3D = "robonix-scene"
 _APP_2D = "robonix-scene-2d"
@@ -57,12 +69,47 @@ _APP_2D = "robonix-scene-2d"
 # which puts neon magenta next to muddy brown and makes the map read as noise
 # rather than as a legend; holding saturation and lightness fixed keeps every
 # object distinguishable while the set stays coherent on a light background.
-_OBJECT_SATURATION = 0.46
+_OBJECT_SATURATION = 0.52
 # Two lightness bands rather than one. Hue alone collides: thirty objects on a
 # 360-degree wheel put some pair within a couple of degrees more often than
 # not, and two near-identical clouds read as one object seen twice. A second
 # axis makes such a pair a light and a dark version of the same hue.
-_OBJECT_LIGHTNESS = (0.42, 0.58)
+# Both bands sit above the background's lightness: these colours carry the
+# object labels as well as its points, and a 0.42 band that reads fine as a
+# cloud is unreadable as text on a dark ground.
+_OBJECT_LIGHTNESS = (0.62, 0.76)
+
+
+def _digest(*parts: Any) -> str:
+    """A short content hash of whatever was passed.
+
+    The viewer's cost is not the size of the map but the number of times the
+    map is sent: every publish used to append a full copy of the grid, every
+    point cloud and every box to the timeline whether or not anything had
+    moved, and the browser keeps what it is sent. A hash per entity is what
+    lets a tick decide it has nothing to say.
+
+    Point lists arrive as nested Python sequences, which are slow to hash as
+    text; numpy flattens them into one buffer when it is available and the
+    text form stays as the fallback for the environments that lack it.
+    """
+    hasher = hashlib.blake2s(digest_size=12)
+    for part in parts:
+        if part is None:
+            hasher.update(b"\x00")
+            continue
+        buffer = None
+        if isinstance(part, (list, tuple)) and part:
+            try:
+                import numpy as np
+
+                buffer = np.asarray(part, dtype=np.float32).tobytes()
+            except Exception:  # noqa: BLE001
+                buffer = None
+        hasher.update(buffer if buffer is not None
+                      else repr(part).encode("utf-8", "replace"))
+        hasher.update(b"\x1e")
+    return hasher.hexdigest()
 
 
 def instance_colour(object_id: str) -> tuple[int, int, int]:
@@ -303,6 +350,18 @@ class RerunSink:
         self._drawn: set[str] = set()
         self._grid_signature: object = None
         self._grid_cache = None
+        # What each entity last carried. An entity whose content has not
+        # changed is not logged again: see `_digest`.
+        self._sent: dict[str, str] = {}
+        # `changes` keeps the timeline, so dragging it replays the map filling
+        # in; `latest` logs everything as static, which holds exactly one value
+        # per entity in the browser's store and is what a weak or forwarded
+        # client needs. The grid is static in both modes regardless: it is a
+        # current-state artefact that SLAM rewrites continuously, and keeping
+        # its history is what fills a browser with megabytes of superseded
+        # floor plans.
+        self._history = (os.environ.get("SCENE_RERUN_HISTORY", "changes")
+                         .strip().lower())
 
     @property
     def ready(self) -> bool:
@@ -393,14 +452,42 @@ class RerunSink:
         and no map: the other failure that looks like this working.
         """
         source = grpc_url.replace("127.0.0.1", host).replace("0.0.0.0", host)
+        # `theme=dark` pins the viewer's chrome rather than letting it follow
+        # the reader's OS preference: the map inside the view is drawn for a
+        # dark ground, and a light chrome around it leaves half the page lit
+        # and every label sitting on the wrong background.
         return (f"http://{host}:{self._web_port}/"
-                f"?url={urllib.parse.quote(source, safe='')}")
+                f"?url={urllib.parse.quote(source, safe='')}"
+                f"&theme=dark")
 
-    def _log3d(self, path: str, entity: Any) -> None:
-        self._rr.log(path, entity, recording=self._map3d.recording)
+    def _log3d(self, path: str, entity: Any, *, static: bool = False) -> None:
+        self._rr.log(path, entity, static=static or self._static,
+                     recording=self._map3d.recording)
 
-    def _log2d(self, path: str, entity: Any) -> None:
-        self._rr.log(path, entity, recording=self._map2d.recording)
+    def _log2d(self, path: str, entity: Any, *, static: bool = False) -> None:
+        self._rr.log(path, entity, static=static or self._static,
+                     recording=self._map2d.recording)
+
+    @property
+    def _static(self) -> bool:
+        """True when this feed keeps only the newest value of each entity."""
+        return self._history == "latest"
+
+    def _unchanged(self, key: str, signature: str) -> bool:
+        """True when `key` already carries exactly this content.
+
+        Records the signature as a side effect, so a caller that asks is a
+        caller that is about to log. Clearing an entity has to forget its
+        signature, or the next identical value would be suppressed and the
+        entity would stay cleared on screen.
+        """
+        if self._sent.get(key) == signature:
+            return True
+        self._sent[key] = signature
+        return False
+
+    def _forget(self, key: str) -> None:
+        self._sent.pop(key, None)
 
     def set_time(self, seconds: float) -> None:
         """Place everything logged next at this point on the timeline.
@@ -410,7 +497,7 @@ class RerunSink:
         the map filling in as the robot drove, which is how a reader tells a
         detection that persisted from one that appeared for a single frame.
         """
-        if self._ready:
+        if self._ready and not self._static:
             for feed in (self._map3d, self._map2d):
                 feed.recording.set_time("scene", duration=float(seconds))
 
@@ -440,8 +527,18 @@ class RerunSink:
         """
         if not self._ready or not occupancy:
             return
+        # The grid is the heaviest thing published and the thing that repeats
+        # most: a room-scale texture, re-sent on every tick whether or not
+        # SLAM touched it. Hashing the encoded grid is what turns a stationary
+        # robot's viewer feed into nothing at all.
+        if self._unchanged("/map/floor", _digest(occupancy.get("png_b64"),
+                                                 occupancy.get("resolution"),
+                                                 occupancy.get("origin_x"),
+                                                 occupancy.get("origin_y"))):
+            return
         texture = self._texture(occupancy)
         if texture is None:
+            self._forget("/map/floor")
             return
         height, width = texture.shape[:2]
         resolution = float(occupancy.get("resolution") or 0.05)
@@ -458,12 +555,15 @@ class RerunSink:
             [origin_x + span_x, origin_y + span_y, 0.0],
             [origin_x, origin_y + span_y, 0.0],
         ]
+        # Static in both history modes: the floor plan a reader wants is the
+        # one SLAM holds now, and every superseded version of it is weight the
+        # browser carries for the rest of the session.
         self._log3d("/map/floor", self._rr.Mesh3D(
             vertex_positions=corners,
             triangle_indices=[[0, 1, 2], [0, 2, 3]],
             vertex_texcoords=[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
             albedo_texture=texture,
-        ))
+        ), static=True)
 
     def log_objects(self, objects: Iterable[Any],
                     clouds: Optional[dict[str, Sequence]] = None,
@@ -495,30 +595,44 @@ class RerunSink:
             if points:
                 positions = [p[:3] for p in points]
                 rgb = colours.get(obj.object_id)
+                # A cloud is republished on every tick even when perception
+                # has not revisited the object, and each republication is a
+                # full copy of every point. Hashing the points is what keeps
+                # an unchanged object out of the feed.
                 if rgb and len(rgb) == len(positions):
-                    self._log3d(
-                        f"/map/objects/rgb_pcd/{obj.object_id}",
-                        rr.Points3D(positions, colors=list(rgb)))
-                self._log3d(
-                    f"/map/objects/sem_pcd/{obj.object_id}",
-                    rr.Points3D(positions,
-                                colors=[instance] * len(positions),
-                                labels=[obj.cls], show_labels=True))
+                    path = f"/map/objects/rgb_pcd/{obj.object_id}"
+                    if not self._unchanged(path, _digest(positions, rgb)):
+                        self._log3d(path, rr.Points3D(positions,
+                                                      colors=list(rgb)))
+                path = f"/map/objects/sem_pcd/{obj.object_id}"
+                if not self._unchanged(path, _digest(positions, obj.cls)):
+                    self._log3d(path, rr.Points3D(
+                        positions, colors=[instance] * len(positions),
+                        labels=[obj.cls], show_labels=True))
             # The box is drawn faintly and carries the label. It is the
             # perception layer's own estimate of extent, it is often wrong, and
             # a solid box that is wrong reads as a solid claim: the points are
             # the evidence and should keep the visual weight. Kept because a
             # box far from its own points is exactly what a reader is looking
             # for when checking a detection.
-            self._log3d(f"/map/objects/bbox/{obj.object_id}", rr.Boxes3D(
-                centers=[[obj.pose.x, obj.pose.y, obj.pose.z]],
-                half_sizes=[[obj.bbox.size_x / 2.0,
-                             obj.bbox.size_y / 2.0,
-                             obj.bbox.size_z / 2.0]],
-                colors=[(*instance, 60)],
-                labels=[obj.cls],
-                show_labels=not points,
-            ))
+            path = f"/map/objects/bbox/{obj.object_id}"
+            centre = [obj.pose.x, obj.pose.y, obj.pose.z]
+            half = [obj.bbox.size_x / 2.0, obj.bbox.size_y / 2.0,
+                    obj.bbox.size_z / 2.0]
+            # rerun draws a label in the colour of the entity that carries it,
+            # so the alpha that keeps the box faint also dims its text. When
+            # the box is the only thing labelling an object — no cloud to put
+            # the name on — it is drawn solid enough for the label to read.
+            alpha = 60 if points else 190
+            if not self._unchanged(path, _digest(centre, half, obj.cls,
+                                                 bool(points))):
+                self._log3d(path, rr.Boxes3D(
+                    centers=[centre],
+                    half_sizes=[half],
+                    colors=[(*instance, alpha)],
+                    labels=[obj.cls],
+                    show_labels=not points,
+                ))
         self._clear_gone(drawn)
 
     def log_map2d(self, occupancy: dict, objects: Iterable[Any],
@@ -546,7 +660,9 @@ class RerunSink:
         if texture is None or to_pixels is None:
             return
         rr = self._rr
-        self._log2d("/map2d/grid", rr.Image(texture))
+        if not self._unchanged("/map2d/grid", _digest(
+                occupancy.get("png_b64"), occupancy.get("resolution"))):
+            self._log2d("/map2d/grid", rr.Image(texture), static=True)
 
         clouds = clouds or {}
         centres_by_id: dict[str, tuple[float, float]] = {}
@@ -567,10 +683,14 @@ class RerunSink:
         # Each layer is one entity, logged every tick even when empty: an
         # entity that stops being logged keeps its last value on screen, so
         # skipping would leave a map full of objects the registry has dropped.
-        self._log2d("/map2d/objects/points", rr.Points2D(
-            cloud_points, colors=cloud_colours, radii=0.7))
-        self._log2d("/map2d/objects/labels", rr.Points2D(
-            centres, colors=centre_colours, labels=labels, radii=2.5))
+        if not self._unchanged("/map2d/objects/points",
+                               _digest(cloud_points, cloud_colours)):
+            self._log2d("/map2d/objects/points", rr.Points2D(
+                cloud_points, colors=cloud_colours, radii=0.7))
+        if not self._unchanged("/map2d/objects/labels",
+                               _digest(centres, labels, centre_colours)):
+            self._log2d("/map2d/objects/labels", rr.Points2D(
+                centres, colors=centre_colours, labels=labels, radii=2.5))
 
         strips = []
         for relation in relations or ():
@@ -584,8 +704,9 @@ class RerunSink:
         # Labelled in 3D, unlabelled here: seen from above the edges are short
         # and cluster, and a chip on each one covers the objects the edge is
         # drawn between.
-        self._log2d("/map2d/relations", rr.LineStrips2D(
-            strips, colors=[_COLOUR_RELATION] * len(strips), radii=0.4))
+        if not self._unchanged("/map2d/relations", _digest(strips)):
+            self._log2d("/map2d/relations", rr.LineStrips2D(
+                strips, colors=[_COLOUR_RELATION] * len(strips), radii=0.4))
 
         if robot is None:
             return
@@ -616,8 +737,9 @@ class RerunSink:
         rr = self._rr
         for object_id in self._drawn - drawn:
             for group in ("rgb_pcd", "sem_pcd", "bbox"):
-                self._log3d(f"/map/objects/{group}/{object_id}",
-                            rr.Clear(recursive=True))
+                path = f"/map/objects/{group}/{object_id}"
+                self._forget(path)
+                self._log3d(path, rr.Clear(recursive=True))
         self._drawn = drawn
 
     def log_relations(self, relations: Iterable[Any],
@@ -640,7 +762,11 @@ class RerunSink:
             strips.append([list(subject), list(target)])
             labels.append(str(relation.get("predicate", "")))
         # Logged even when empty: skipping leaves the previous edges on screen
-        # after the last relation stops holding.
+        # after the last relation stops holding. Unchanged edges are still
+        # skipped — the entity keeps its value, so re-sending it draws the
+        # same picture at the cost of another copy.
+        if self._unchanged("/map/relations", _digest(strips, labels)):
+            return
         self._log3d("/map/relations", self._rr.LineStrips3D(
             strips, labels=labels, colors=[_COLOUR_RELATION] * len(strips),
             radii=_RELATION_RADIUS_M, show_labels=False,
