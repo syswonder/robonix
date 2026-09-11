@@ -21,6 +21,7 @@ Entity paths group the map so the viewer's tree is navigable:
 """
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import logging
 import math
@@ -34,8 +35,31 @@ log = logging.getLogger(__name__)
 # recordings sharing an id share a layout: the second page then opens on the
 # first page's views and shows nothing, because its entities are not under
 # their origin.
+# The viewer's own chrome is dark and rerun 0.37 gives no way to change it
+# (the web backend ignores SetTheme), but everything inside a view is ours.
+# A light ground is what makes the occupancy grid read as a map rather than as
+# a lit surface floating in a dark room.
+_VIEW_BACKGROUND = [249, 250, 252]
+_COLOUR_OCCUPIED = (72, 78, 88)      # walls: they bound the room
+_COLOUR_FREE = (255, 255, 255)       # floor the robot has seen
+_COLOUR_UNKNOWN = (203, 209, 218)    # never observed
+_COLOUR_RELATION = (32, 108, 196)
+_COLOUR_ROBOT = (214, 122, 20)
+
 _APP_3D = "robonix-scene"
 _APP_2D = "robonix-scene-2d"
+
+
+# Object colours vary in hue only. Three random bytes span the whole RGB cube,
+# which puts neon magenta next to muddy brown and makes the map read as noise
+# rather than as a legend; holding saturation and lightness fixed keeps every
+# object distinguishable while the set stays coherent on a light background.
+_OBJECT_SATURATION = 0.46
+# Two lightness bands rather than one. Hue alone collides: thirty objects on a
+# 360-degree wheel put some pair within a couple of degrees more often than
+# not, and two near-identical clouds read as one object seen twice. A second
+# axis makes such a pair a light and a dark version of the same hue.
+_OBJECT_LIGHTNESS = (0.42, 0.58)
 
 
 def instance_colour(object_id: str) -> tuple[int, int, int]:
@@ -46,9 +70,14 @@ def instance_colour(object_id: str) -> tuple[int, int, int]:
     screenshots impossible to compare. `hash()` cannot be used for this:
     Python salts string hashing per process, so it produces exactly the
     per-boot palette this exists to avoid.
+
+    Only the hue comes from the identifier. See the constants above.
     """
     digest = hashlib.blake2s(object_id.encode("utf-8"), digest_size=3).digest()
-    return (digest[0], digest[1], digest[2])
+    hue = ((digest[0] << 8) | digest[1]) / 65536.0
+    lightness = _OBJECT_LIGHTNESS[digest[2] & 1]
+    red, green, blue = colorsys.hls_to_rgb(hue, lightness, _OBJECT_SATURATION)
+    return (round(red * 255), round(green * 255), round(blue * 255))
 
 
 def _blueprint_3d():
@@ -70,7 +99,7 @@ def _blueprint_3d():
         rrb.Spatial3DView(
             origin="/map",
             name="semantic map",
-            background=[18, 20, 26],
+            background=_VIEW_BACKGROUND,
             # The occupancy grid is drawn as a real floor, so rerun's own
             # infinite grid adds a second, larger floor at the same height and
             # the map reads as a small patch floating on it.
@@ -93,7 +122,7 @@ def _blueprint_2d():
         rrb.Spatial2DView(
             origin="/map2d",
             name="2D map",
-            background=[18, 20, 26],
+            background=_VIEW_BACKGROUND,
         ),
         collapse_panels=True,
     )
@@ -130,9 +159,9 @@ def _grid_texture(occupancy: dict):
     texture = np.empty((*grid.shape, 3), dtype=np.uint8)
     occupied = grid < 100
     free = grid > 200
-    texture[occupied] = (36, 40, 48)     # walls: darkest, they bound the room
-    texture[free] = (196, 202, 214)      # floor the robot has seen
-    texture[~(occupied | free)] = (74, 78, 88)   # never observed
+    texture[occupied] = _COLOUR_OCCUPIED
+    texture[free] = _COLOUR_FREE
+    texture[~(occupied | free)] = _COLOUR_UNKNOWN
     return texture
 
 
@@ -553,7 +582,7 @@ class RerunSink:
         # and cluster, and a chip on each one covers the objects the edge is
         # drawn between.
         self._log2d("/map2d/relations", rr.LineStrips2D(
-            strips, colors=[(115, 215, 255)] * len(strips), radii=0.4))
+            strips, colors=[_COLOUR_RELATION] * len(strips), radii=0.4))
 
         if robot is None:
             return
@@ -565,13 +594,13 @@ class RerunSink:
                 [[to_pixels(x + px * cos_yaw - py * sin_yaw,
                             y + px * sin_yaw + py * cos_yaw)
                   for px, py in ring]],
-                colors=[(255, 170, 51)], radii=0.6))
+                colors=[_COLOUR_ROBOT], radii=0.6))
         head = to_pixels(x + 0.45 * math.cos(yaw), y + 0.45 * math.sin(yaw))
         base = to_pixels(x, y)
         self._log2d("/map2d/robot/heading", rr.Arrows2D(
             origins=[base],
             vectors=[[head[0] - base[0], head[1] - base[1]]],
-            colors=[(255, 170, 51)]))
+            colors=[_COLOUR_ROBOT]))
 
     def _clear_gone(self, drawn: set) -> None:
         """Erase the objects that were drawn last tick and are gone now.
@@ -610,8 +639,8 @@ class RerunSink:
         # Logged even when empty: skipping leaves the previous edges on screen
         # after the last relation stops holding.
         self._log3d("/map/relations", self._rr.LineStrips3D(
-            strips, labels=labels, colors=[(115, 215, 255)] * len(strips),
-            radii=0.006,
+            strips, labels=labels, colors=[_COLOUR_RELATION] * len(strips),
+            radii=0.009,
         ))
 
     def log_robot(self, pose: tuple[float, float, float],
@@ -633,10 +662,10 @@ class RerunSink:
                 [[[x + px * cos_yaw - py * sin_yaw,
                    y + px * sin_yaw + py * cos_yaw,
                    0.02] for px, py in ring]],
-                colors=[(255, 170, 51)], radii=0.01,
+                colors=[_COLOUR_ROBOT], radii=0.01,
             ))
         self._log3d("/map/robot/heading", rr.Arrows3D(
             origins=[[x, y, 0.05]],
             vectors=[[0.45 * math.cos(yaw), 0.45 * math.sin(yaw), 0.0]],
-            colors=[(255, 170, 51)],
+            colors=[_COLOUR_ROBOT],
         ))

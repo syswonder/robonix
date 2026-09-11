@@ -700,19 +700,23 @@ def _nav(active: str) -> str:
 
 
 _SHELL_CSS = """
-  html,body{margin:0;height:100%;background:#0c0e12;color:#c8cedb;
+  /* Light throughout. The map pages are read next to a physical robot and a
+     printed floor plan, and a dark page makes the occupancy grid look like a
+     lit surface rather than a map. The rerun viewer's own chrome stays dark:
+     version 0.37 ignores SetTheme on the web backend. */
+  html,body{margin:0;height:100%;background:#f6f7f9;color:#22262e;
             font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
   .wrap{display:flex;height:100%}
-  nav{width:132px;flex:0 0 132px;background:#12151b;border-right:1px solid #232833;
+  nav{width:132px;flex:0 0 132px;background:#eceef2;border-right:1px solid #dcdfe6;
       display:flex;flex-direction:column;padding:10px 0}
-  nav .brand{padding:6px 14px 12px;color:#f0c050;font-weight:600;letter-spacing:.04em}
-  nav a{display:block;padding:7px 14px;color:#98a0b0;text-decoration:none;border-left:2px solid transparent}
-  nav a:hover{color:#e8edf5;background:#171b23}
-  nav a.on{color:#f0c050;border-left-color:#f0c050;background:#171b23}
+  nav .brand{padding:6px 14px 12px;color:#8a5a00;font-weight:600;letter-spacing:.04em}
+  nav a{display:block;padding:7px 14px;color:#5b6270;text-decoration:none;border-left:2px solid transparent}
+  nav a:hover{color:#141820;background:#e2e5ec}
+  nav a.on{color:#8a5a00;border-left-color:#c98a10;background:#e2e5ec}
   main{flex:1;position:relative;min-width:0}
   iframe{border:0;width:100%;height:100%;display:block}
-  .msg{padding:24px;color:#8a92a2;max-width:560px}
-  .msg code{background:#171b23;padding:.1em .35em;border-radius:3px}
+  .msg{padding:24px;color:#5b6270;max-width:560px}
+  .msg code{background:#e2e5ec;padding:.1em .35em;border-radius:3px}
 """
 
 
