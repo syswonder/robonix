@@ -43,7 +43,10 @@ _VIEW_BACKGROUND = [249, 250, 252]
 _COLOUR_OCCUPIED = (72, 78, 88)      # walls: they bound the room
 _COLOUR_FREE = (255, 255, 255)       # floor the robot has seen
 _COLOUR_UNKNOWN = (203, 209, 218)    # never observed
-_COLOUR_RELATION = (32, 108, 196)
+# Relations are context, not evidence. They are drawn thin, muted and
+# translucent so that the point clouds stay the thing the eye lands on.
+_COLOUR_RELATION = (96, 122, 158, 150)
+_RELATION_RADIUS_M = 0.004
 _COLOUR_ROBOT = (214, 122, 20)
 
 _APP_3D = "robonix-scene"
@@ -640,7 +643,7 @@ class RerunSink:
         # after the last relation stops holding.
         self._log3d("/map/relations", self._rr.LineStrips3D(
             strips, labels=labels, colors=[_COLOUR_RELATION] * len(strips),
-            radii=0.009,
+            radii=_RELATION_RADIUS_M, show_labels=False,
         ))
 
     def log_robot(self, pose: tuple[float, float, float],
