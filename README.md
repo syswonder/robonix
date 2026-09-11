@@ -114,7 +114,10 @@ Browse them in the [package catalog](https://packages.robonix.ai/packages/), or 
 | x86\_64 | Ubuntu 22.04                                       | ✅ Tested  |
 | x86\_64 | Debian 13                                          | ✅ Tested  |
 | arm64   | NVIDIA Jetson — JetPack 6.2 (L4T 36.4.3, Ubuntu 22.04) | ✅ Tested  |
+| LoongArch64 | Loongson 3A6000 + AMD Radeon 7900 XTX — Loong ArchLinux 2026.08.07 | ✅ Tested |
 | x86\_64 / arm64 | Ubuntu 24.04 and newer                     | 🚧 Planned |
+
+> **Note (LoongArch64):** Robonix itself runs on the Loongson 3A6000 host, while the simulation platform (Webots) runs on a separate x86\_64 machine with Ubuntu 22.04. The two machines are connected over Ethernet on the same LAN.
 
 "Tested" means the full Robonix pipeline runs end-to-end on that platform — in simulation or on a real robot: voice & interaction, task execution, body movement, scene & mapping (semantic map + spatial map), navigation, and skill execution. Other Linux distributions will likely work but are not regularly verified.
 
