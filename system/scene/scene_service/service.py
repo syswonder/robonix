@@ -464,6 +464,100 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
         await asyncio.sleep(period_s)
 
 
+async def _rerun_tick(sink, registry, detector, hub, sg_store=None,
+                      robot_geometry=None, *, period_s: float = 1.0) -> None:
+    """Publish the annotated map to the rerun viewer.
+
+    Runs on its own period rather than inside perception: the viewer should
+    keep showing the map while a tick is busy, and a slow log must never delay
+    a detection. Reads a snapshot under the registry lock and nothing else, so
+    it cannot affect object persistence, annotations or the map lifecycle.
+    """
+    from . import web as web_ui
+    from .rerun_sink import relation_edges
+
+    ticks = 0
+    started = time.time()
+    while True:
+        try:
+            # `snapshot()` takes the registry lock itself and asyncio locks are
+            # not reentrant: wrapping this call in `async with registry.lock()`
+            # blocks the task on its first iteration, with no error and no data
+            # — the viewer just stays empty.
+            objects, _surfaces = await registry.snapshot()
+            live = list(objects.values())
+            clouds: dict[str, list] = {}
+            colours: dict[str, list] = {}
+            if detector is not None and hasattr(detector, "export_3d_snapshot"):
+                try:
+                    snapshot = detector.export_3d_snapshot()
+                    for entry in snapshot.get("objects") or []:
+                        # The snapshot is keyed by the perception layer's own
+                        # uuid and carries the registry id alongside it. The
+                        # registry id is what the viewer draws under, so it is
+                        # preferred; the uuid is the fallback for a backend
+                        # that has not projected the object yet.
+                        key = entry.get("object_id") or entry.get("id")
+                        if not key:
+                            continue
+                        clouds[key] = entry.get("points") or []
+                        point_colours = entry.get("point_colors")
+                        if point_colours:
+                            colours[key] = point_colours
+                except Exception:  # noqa: BLE001
+                    # Not debug: a perception backend whose export keeps
+                    # failing produces a permanently object-less map, and at
+                    # debug level nothing in the log would say so.
+                    log.warning(
+                        "[scene-rerun] the point-cloud export failed; objects "
+                        "will have no points this tick", exc_info=True)
+            # One timeline point per tick: with it the viewer replays the map
+            # filling in as the robot drove, which is how a reader separates a
+            # detection that persisted from one that flickered for a frame.
+            sink.set_time(time.time() - started)
+            occupancy = web_ui.occupancy_payload(hub)
+            sink.log_occupancy(occupancy)
+            sink.log_objects(live, clouds, colours)
+            positions = {
+                o.object_id: (o.pose.x, o.pose.y, o.pose.z) for o in live
+            }
+            edges = relation_edges(sg_store)
+            sink.log_relations(edges, positions)
+            robot = next(
+                (o for o in live if o.attributes.get("is_robot")), None)
+            pose = None
+            # Soma's real polygon, which the registry object does not carry:
+            # the robot's own entry has a pose and a bounding box, and drawing
+            # a box where the machine is would say nothing about which way it
+            # faces or how much floor it needs.
+            shape = robot_geometry.current() if robot_geometry else None
+            footprint = [list(point) for point in shape.points] if shape else []
+            if robot is not None:
+                pose = (robot.pose.x, robot.pose.y, robot.pose.yaw)
+                sink.log_robot(pose, footprint)
+            sink.log_map2d(occupancy, live, clouds, edges, pose, footprint)
+            # An empty viewer and a viewer nobody is feeding look identical in
+            # the browser, so the tick says what it published: on the first
+            # pass, and once a minute after that.
+            if ticks % 60 == 0:
+                # Counts what was drawn, not what was available: an id that
+                # does not join is the difference between a map with objects
+                # in it and an empty one, and a count taken from the export
+                # would report healthy in exactly that case.
+                log.info(
+                    "[scene-rerun] tick %d: %d objects, %d with points, "
+                    "%d with colour, robot=%s, %d edges", ticks, len(live),
+                    sum(1 for o in live if clouds.get(o.object_id)),
+                    sum(1 for o in live if colours.get(o.object_id)),
+                    pose is not None, len(edges))
+            ticks += 1
+        except Exception:  # noqa: BLE001
+            # The viewer is a debugging aid. A failure here must not take the
+            # service with it, and must not retry in a tight loop.
+            log.exception("[scene-rerun] publish failed")
+        await asyncio.sleep(period_s)
+
+
 async def _auto_discover_loop(
     *,
     atlas_stub,
@@ -1769,10 +1863,78 @@ async def _run_active(config: dict) -> None:
     web_server: uvicorn.Server | None = None
     if web_port > 0:
         web_host = resolve_web_host(config)
+        # Which viewer renders the 3D map. `auto` uses rerun when it is
+        # installed and the built-in page when it is not, so a native
+        # deployment that never installed it behaves exactly as before and a
+        # docker image that ships it gets the better view without being told.
+        # `rerun` and `builtin` force one either way.
+        viewer_choice = str(
+            config.get("web_viewer")
+            or os.environ.get("SCENE_WEB_VIEWER", "auto")
+        ).strip().lower()
+        if viewer_choice not in ("auto", "rerun", "builtin"):
+            raise ValueError(
+                f"scene web_viewer must be auto, rerun or builtin, not {viewer_choice!r}"
+            )
+
+        rerun_sink = None
+        if viewer_choice != "builtin":
+            from .rerun_sink import RerunSink
+
+            # Distinct names from Scene's own `web_port`: binding uvicorn to
+            # the viewer's port is a port clash that kills the service after
+            # the map has already started publishing, which reads as a rerun
+            # crash rather than as the shadowed variable it is.
+            viewer_grpc_port = int(
+                os.environ.get("SCENE_RERUN_GRPC_PORT", "9876"))
+            viewer_web_port = int(
+                os.environ.get("SCENE_RERUN_WEB_PORT", "9090"))
+            # The 2D page is a second recording on its own gRPC port. Both
+            # pages are served by the one web viewer, so a deployment forwards
+            # the two data ports and the one viewer port.
+            rerun_sink = RerunSink(
+                grpc_port=viewer_grpc_port,
+                web_port=viewer_web_port,
+                grpc_port_2d=viewer_grpc_port + 1,
+                web_host=web_host if web_host != "0.0.0.0" else "127.0.0.1",
+            )
+            if rerun_sink.start():
+                # Registered like every other background task: this one is
+                # appended after the loop that installs the exit callback, so
+                # it has to install its own or its death goes unreported.
+                # The publish period is the viewer's frame rate, and a
+                # reader watching a robot drive over a forwarded connection
+                # wants a slower one than a reader sitting at the machine.
+                # Every tick now costs only what actually changed, so this is
+                # a latency knob rather than a volume one.
+                try:
+                    viewer_period = float(
+                        os.environ.get("SCENE_RERUN_PERIOD_S", "") or 1.0)
+                except ValueError:
+                    log.warning(
+                        "[scene-rerun] SCENE_RERUN_PERIOD_S=%r is not a "
+                        "number; publishing once a second",
+                        os.environ.get("SCENE_RERUN_PERIOD_S"))
+                    viewer_period = 1.0
+                viewer_task = asyncio.create_task(
+                    _rerun_tick(rerun_sink, registry, perception, hub,
+                                sg_store, robot_geometry,
+                                period_s=max(0.1, viewer_period)),
+                    name="scene-rerun")
+                viewer_task.add_done_callback(_log_bg_task_exit)
+                bg_tasks.append(viewer_task)
+            elif viewer_choice == "rerun":
+                raise RuntimeError(
+                    "scene web_viewer is set to 'rerun' but the viewer could "
+                    f"not start: {rerun_sink.detail}. Fix that or set "
+                    "web_viewer: builtin"
+                )
+
         web_app = web_ui.make_app(
             registry=registry,
             hub=hub,
             detector=perception,
+            rerun_sink=rerun_sink,
             sg_store=sg_store,
             anno_store=anno_store,
             object_store=obj_store,

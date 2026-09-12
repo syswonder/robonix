@@ -57,6 +57,7 @@ jobs:
           system/scene/tests/test_vlm_inference_cache.py
           system/scene/tests/test_perception_vlm_geometry.py
           system/scene/tests/test_image_relations.py
+          system/scene/tests/test_rerun_sink.py
 
   check:
     name: Rust (fmt + clippy + build + tests)

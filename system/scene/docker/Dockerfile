@@ -164,6 +164,13 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         --retries 3 \
     && rm /tmp/requirements/scene-base.txt
 
+# viewer (see the file for why this one is --no-deps)
+COPY requirements/scene-viewer.txt /tmp/requirements/scene-viewer.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy pip install --no-deps -r /tmp/requirements/scene-viewer.txt \
+        --progress-bar on --timeout 60 --retries 3 \
+    && rm /tmp/requirements/scene-viewer.txt
+
 # core
 COPY requirements/scene-perception-core.txt /tmp/requirements/scene-perception-core.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \

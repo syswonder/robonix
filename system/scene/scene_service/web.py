@@ -27,7 +27,9 @@ import time
 from typing import Any, Optional
 
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import (HTMLResponse, JSONResponse,
+                                 PlainTextResponse, Response,
+                                 StreamingResponse)
 from starlette.routing import Route
 
 from robonix_api import ATLAS
@@ -303,6 +305,15 @@ _CAMERA_CACHE: dict[str, dict[str, Any]] = {
     "depth": {"hub": None, "count": -1, "payload": None},
 }
 _CAMERA_PREVIEW_MIN_INTERVAL_S = 0.4
+
+
+def occupancy_payload(hub: Any) -> Optional[dict]:
+    """The occupancy snapshot the UI and the 3D viewer share.
+
+    A public name for the private builder below, so the viewer does not reach
+    into this module's internals to draw the floor the objects stand on.
+    """
+    return _occupancy_payload(hub)
 
 
 def _occupancy_payload(hub: Any) -> Optional[dict]:
@@ -668,6 +679,358 @@ def _maps_payload() -> dict:
     return {"ok": bool(out.get("ok")), "detail": out.get("detail", ""), "maps": maps}
 
 
+_NAV_LINKS = (
+    ("/", "semantic map"),
+    ("/2d", "2D map"),
+    ("/cam", "camera"),
+    ("/user", "annotations"),
+)
+
+
+def _nav(active: str) -> str:
+    """The sidebar every page shares.
+
+    Before this the pages had no links between them: reaching the annotation
+    view from the map meant editing the address bar, and nothing on any page
+    said the other views existed.
+    """
+    items = []
+    for href, label in _NAV_LINKS:
+        current = ' class="on"' if href == active else ""
+        items.append(f'<a href="{href}"{current}>{label}</a>')
+    return "".join(items)
+
+
+# ── The object and relation list ───────────────────────────────────────────
+# Which objects the registry holds, where they are, and which relations hold
+# between them: the thing a reader checks the map against. It used to live on
+# the combined layout, which stopped being the landing page when the viewer
+# became rerun's -- and rerun draws the map but knows nothing about the
+# registry behind it, so the list went with it. It is shared by both now: a
+# floating panel over whatever view is underneath, fed by /api/state.
+_INFO_PANEL_CSS = r"""
+    /* ── Floating info overlay ──
+       imgui-style draggable panel. Sits in the top-left corner over
+       the 2D map by default (small enough not to swallow the canvas).
+       Click the header to collapse to a single bar; drag the header
+       to move; click ✕ to dismiss for this session. State is
+       remembered in localStorage so refresh keeps your layout. */
+    #info-fp {
+      position: fixed; top: 12px; left: 12px; z-index: 200;
+      width: 320px; max-height: calc(100vh - 24px);
+      background: rgba(14, 16, 21, 0.94);
+      border: 1px solid #303542; border-radius: 6px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+      display: flex; flex-direction: column;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; color: #d8dde6;
+      backdrop-filter: blur(2px);
+    }
+    #info-fp.collapsed { max-height: 28px; }
+    #info-fp.collapsed #info-body { display: none; }
+    #info-fp.dismissed { display: none; }
+    #info-head {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 8px; cursor: move; user-select: none;
+      border-bottom: 1px solid #2a2e38;
+      font-size: 11px; color: #889;
+    }
+    #info-head .title { color: #f0c050; font-weight: 600;
+                        letter-spacing: 0.04em; }
+    #info-head .stamp { flex: 1; color: #6a6f7a; font-size: 10px;
+                        white-space: nowrap; overflow: hidden;
+                        text-overflow: ellipsis; }
+    #info-head button {
+      background: none; border: 1px solid #303542; color: #889;
+      width: 22px; height: 20px; padding: 0; border-radius: 3px;
+      cursor: pointer; font-size: 11px; line-height: 1;
+    }
+    #info-head button:hover { color: #f0c050; border-color: #5a606e; }
+    #info-body { padding: 8px 10px 10px; overflow: auto; flex: 1; }
+    #info-body h2 {
+      margin: 8px 0 4px 0; font-size: 10px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: #6a6f7a;
+    }
+    #info-body h2:first-child { margin-top: 0; }
+    #info-body .pose { color: #7aa7ff; }
+    #info-body table { width: 100%; border-collapse: collapse;
+                       font-size: 11px; }
+    #info-body td { padding: 2px 4px; vertical-align: top;
+                    border-bottom: 1px solid #1a1d24; }
+    #info-body td.id { color: #7aa7ff; white-space: nowrap; }
+    #info-body td.cls { color: #f0c674; white-space: nowrap; }
+    #info-body td.pp { color: #6a6f7a; font-size: 10px; }
+    #info-body td.miss { color: #555; }
+    /* Relation list: one "<source> <predicate> <target>" row per edge,
+       replacing the old on-canvas dashed lines. */
+    #info-rels .rel { display: flex; gap: 6px; align-items: baseline;
+                      padding: 2px 4px; border-bottom: 1px solid #1a1d24;
+                      font-size: 11px; white-space: nowrap;
+                      overflow: hidden; text-overflow: ellipsis; }
+    #info-rels .rs { color: #7aa7ff; }
+    #info-rels .rp { color: #f0c050; font-weight: 600; }
+    #info-rels .rt { color: #f0c674; }
+    /* "Show info" pill that appears once the panel is dismissed. */
+    #info-show {
+      position: fixed; top: 12px; left: 12px; z-index: 200;
+      padding: 4px 10px; font-size: 11px;
+      background: rgba(14, 16, 21, 0.94); border: 1px solid #303542;
+      border-radius: 4px; color: #889; cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      display: none;
+    }
+    #info-show:hover { color: #f0c050; border-color: #5a606e; }
+    body.info-dismissed #info-show { display: block; }
+"""
+
+_INFO_PANEL_HTML = r"""
+  <div id="info-fp">
+    <div id="info-head" title="drag to move; click title to collapse">
+      <span class="title">scene</span>
+      <span class="stamp" id="info-stamp">—</span>
+      <button id="info-collapse" title="collapse / expand">_</button>
+      <button id="info-dismiss" title="hide (click 'show info' to bring back)">×</button>
+    </div>
+    <div id="info-body">
+      <h2>robot</h2>
+      <div class="pose" id="info-pose">no fix yet</div>
+      <h2>objects</h2>
+      <table>
+        <tbody id="info-objs"><tr><td colspan="3" style="color:#555">—</td></tr></tbody>
+      </table>
+      <h2>relations</h2>
+      <div id="info-rels"><span style="color:#555">—</span></div>
+    </div>
+  </div>
+  <button id="info-show" title="re-open the floating info panel">▸ show info</button>
+"""
+
+_INFO_PANEL_JS = r"""
+    // ── Floating info overlay: drag, collapse, dismiss, fetch loop ──
+    const fp = document.getElementById('info-fp');
+    const fphead = document.getElementById('info-head');
+    const fpcollapse = document.getElementById('info-collapse');
+    const fpdismiss = document.getElementById('info-dismiss');
+    const fpshow = document.getElementById('info-show');
+    const LS_KEY = 'sceneInfoFp.v1';
+    function fpSave() {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+          x: fp.style.left, y: fp.style.top,
+          collapsed: fp.classList.contains('collapsed'),
+          dismissed: document.body.classList.contains('info-dismissed'),
+        }));
+      } catch (_) {}
+    }
+    function fpLoad() {
+      try {
+        const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+        if (s.x) fp.style.left = s.x;
+        if (s.y) fp.style.top = s.y;
+        if (s.collapsed) fp.classList.add('collapsed');
+        if (s.dismissed) document.body.classList.add('info-dismissed');
+      } catch (_) {}
+    }
+    fpLoad();
+    // Click title (not buttons) to toggle collapse.
+    fphead.addEventListener('click', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      // dragstart suppresses click via a flag; see drag logic.
+      if (fphead._dragged) { fphead._dragged = false; return; }
+      fp.classList.toggle('collapsed');
+      fpSave();
+    });
+    fpcollapse.addEventListener('click', e => {
+      e.stopPropagation();
+      fp.classList.toggle('collapsed');
+      fpSave();
+    });
+    fpdismiss.addEventListener('click', e => {
+      e.stopPropagation();
+      document.body.classList.add('info-dismissed');
+      fpSave();
+    });
+    fpshow.addEventListener('click', () => {
+      document.body.classList.remove('info-dismissed');
+      fpSave();
+    });
+    // Drag — pointerdown on the header, follow until pointerup.
+    let dragOff = null;
+    fphead.addEventListener('pointerdown', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      const r = fp.getBoundingClientRect();
+      dragOff = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      fphead.setPointerCapture(e.pointerId);
+      fphead._dragged = false;
+    });
+    fphead.addEventListener('pointermove', e => {
+      if (!dragOff) return;
+      const x = e.clientX - dragOff.dx;
+      const y = e.clientY - dragOff.dy;
+      // Clamp to viewport so the header is always grabbable.
+      const maxX = window.innerWidth  - fp.offsetWidth - 4;
+      const maxY = window.innerHeight - 30;
+      fp.style.left = Math.max(4, Math.min(x, maxX)) + 'px';
+      fp.style.top  = Math.max(4, Math.min(y, maxY)) + 'px';
+      fphead._dragged = true;
+    });
+    fphead.addEventListener('pointerup', e => {
+      dragOff = null;
+      try { fphead.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (fphead._dragged) fpSave();
+    });
+
+    // Fetch /api/state and populate the floating panel.
+    const fmt = n => Number(n).toFixed(2);
+    async function fpTick() {
+      try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (r.ok) {
+          const s = await r.json();
+          const objs = (s.objects || []).slice().sort(
+            (a, b) => a.cls.localeCompare(b.cls));
+          document.getElementById('info-stamp').textContent =
+            `${objs.length} obj · ${(s.relations || []).length} rel · ${(s.scene_graph && s.scene_graph.edges || []).length} sg · t=${fmt(s.stamp_unix)}`;
+          const robotEl = document.getElementById('info-pose');
+          if (s.robot) {
+            robotEl.textContent =
+              `(${fmt(s.robot.x)}, ${fmt(s.robot.y)}, ${fmt(s.robot.z)}) yaw=${fmt(s.robot.yaw)}`;
+          } else {
+            robotEl.textContent = 'no fix yet';
+          }
+          const tbody = document.getElementById('info-objs');
+          if (!objs.length) {
+            tbody.innerHTML = '<tr><td colspan="3" style="color:#555">—</td></tr>';
+          } else {
+            tbody.innerHTML = objs.map(o => `
+              <tr>
+                <td class="id">${o.short_id}</td>
+                <td class="cls">${o.cls}</td>
+                <td class="pp ${o.missing ? 'miss' : ''}">
+                  (${fmt(o.pose.x)}, ${fmt(o.pose.y)}) c=${fmt(o.confidence)}
+                </td>
+              </tr>
+            `).join('');
+          }
+          // Relations as an explicit "<source> <predicate> <target>" list
+          // (replaces the old on-canvas dashed lines). short_id = last
+          // dotted segment of the object id, e.g. scene.object.cup_001 → cup_001.
+          const shortId = id => String(id).split('.').pop();
+          const edges = (s.scene_graph && s.scene_graph.edges) || [];
+          const relsEl = document.getElementById('info-rels');
+          if (!edges.length) {
+            relsEl.innerHTML = '<span style="color:#555">none</span>';
+          } else {
+            relsEl.innerHTML = edges.map(e => `
+              <div class="rel">
+                <span class="rs">${shortId(e.source_id)}</span>
+                <span class="rp">${e.relation}</span>
+                <span class="rt">${shortId(e.target_id)}</span>
+              </div>
+            `).join('');
+          }
+        }
+      } catch (_) { /* swallow; next tick will retry */ }
+      setTimeout(fpTick, 500);
+    }
+    fpTick();
+"""
+
+
+_SHELL_CSS = """
+  /* Dark throughout, on the annotation page's palette. The shell frames
+     pages that are themselves dark -- the rerun viewer's chrome cannot be
+     made light (0.37 ignores SetTheme on the web backend), the map is drawn
+     for a dark ground, and the annotation view has always been dark. A light
+     sidebar around them left every page half lit, with the seam running down
+     the middle of the window. */
+  :root{--bg:#0e1015;--panel:#161a22;--fg:#e8eaed;--muted:#7d828b;
+        --line:#232936;--acc:#7aa7ff}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+            font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .wrap{display:flex;height:100%}
+  nav{width:132px;flex:0 0 132px;background:var(--panel);
+      border-right:1px solid var(--line);
+      display:flex;flex-direction:column;padding:10px 0}
+  nav .brand{padding:6px 14px 12px;color:var(--acc);font-weight:600;letter-spacing:.04em}
+  nav a{display:block;padding:7px 14px;color:var(--muted);text-decoration:none;
+        border-left:2px solid transparent}
+  nav a:hover{color:var(--fg);background:#1c2230}
+  nav a.on{color:var(--acc);border-left-color:var(--acc);background:#1c2230}
+  main{flex:1;position:relative;min-width:0;background:var(--bg)}
+  iframe{border:0;width:100%;height:100%;display:block}
+  .msg{padding:24px;color:var(--muted);max-width:560px}
+  .msg a{color:var(--acc)}
+  .msg code{background:#222a3a;padding:.1em .35em;border-radius:3px}
+"""
+
+
+def _shell_page(active: str, body: str, title: str,
+                info_panel: bool = False) -> str:
+    """Wrap page content in the shared sidebar.
+
+    `info_panel` adds the object and relation list over the page. The map
+    pages carry it: rerun draws the map but knows nothing about the registry
+    behind it, and "which objects does scene actually hold" is the question
+    the map is opened to answer.
+    """
+    css = _SHELL_CSS + (_INFO_PANEL_CSS if info_panel else "")
+    extra = (_INFO_PANEL_HTML + f"<script>{_INFO_PANEL_JS}</script>"
+             if info_panel else "")
+    return (
+        "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title><style>{css}</style></head><body>"
+        f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}</nav>'
+        f"<main>{body}</main></div>{extra}</body></html>"
+    )
+
+
+
+def _viewer_body(field: str, fallback: str) -> str:
+    """Page body that fills an iframe from /api/viewer.
+
+    The URL is fetched rather than baked in because the servers start after
+    this module is imported, and because a viewer that failed to start has to
+    say so: `fallback` is the page to link to instead, so a reader who cannot
+    see the map is not left guessing which half is broken. The fetch itself is
+    caught for the same reason — a rejected promise leaves the frame blank
+    forever, which is the one failure that looks like the map simply being
+    empty.
+    """
+    return (
+        '<iframe id="v" title="scene viewer"></iframe>'
+        '<script>'
+        'function down(t){document.querySelector("main").innerHTML='
+        '"<div class=\'msg\'>No viewer: " + t +'
+        f'". <br><br>The built-in view is at <a href=\'{fallback}\'>'
+        f'{fallback}</a>.</div>";}}'
+        'fetch("/api/viewer").then(function(r){return r.json();})'
+        '.then(function(d){'
+        f'var u=d["{field}"];'
+        'if(u){document.getElementById("v").src=u;}'
+        'else{down(d.detail||"the viewer is not running");}'
+        '}).catch(function(e){down(String(e));});'
+        '</script>'
+    )
+
+
+def _framed(path: str, title: str) -> str:
+    """A sub-page rendered inside the shared sidebar.
+
+    The standalone pages are kept exactly as they are and embedded, so each one
+    stays individually addressable for debugging while the sidebar is present
+    everywhere. `?bare=1` is what stops the embedded copy from drawing a second
+    sidebar inside itself.
+    """
+    return _shell_page(
+        path, f'<iframe src="{path}?bare=1" title="{title}"></iframe>', title)
+
+
+def _bare(request) -> bool:
+    """True when the caller wants the page without the sidebar."""
+    return request.query_params.get("bare") == "1"
+
+
 def make_app(*, registry: ObjectRegistry,
              hub: Any = None, detector: Any = None,
              sg_store: Any = None, anno_store: Any = None,
@@ -675,12 +1038,14 @@ def make_app(*, registry: ObjectRegistry,
              map_binding: Optional[dict] = None,
              ops_lock: Optional[asyncio.Lock] = None,
              semantic_hold: Optional[dict] = None,
-             robot_geometry: Any = None) -> Starlette:
+             robot_geometry: Any = None,
+             rerun_sink: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
     Routes:
-      GET /                — combined split layout (2D map · 3D · cam)
+      GET /                — the semantic map, rendered by the embedded rerun
+                             viewer, with the sidebar the other pages share
       GET /2d              — 2D top-down map (occupancy grid + objects)
       GET /3d              — 3D scene (point clouds + bbox; three.js)
       GET /cam             — camera stack (live RGB + depth)
@@ -843,16 +1208,39 @@ def make_app(*, registry: ObjectRegistry,
             "source": source,
         })
 
-    async def index(_request) -> HTMLResponse:
+    async def index(request) -> HTMLResponse:
         # Combined split layout: 2D map left, 3D viz right, each with
         # an expand-button that maximises the panel inside the page
         # (NOT browser-fullscreen). The two iframes embed the original
         # standalone /2d and /3d routes so they remain individually
         # bookmarkable / debuggable.
-        return HTMLResponse(_COMBINED_HTML)
+        #
+        # The landing page is the semantic map: it is the view that answers
+        # "is the perception any good", which is what this UI is opened for.
+        # The other pages are one click away in the sidebar.
+        #
+        # A deployment whose viewer is the built-in one keeps the page it had.
+        # Native installs do not ship rerun and must not be handed a broken
+        # frame in place of a working layout.
+        if _bare(request):
+            return HTMLResponse(_COMBINED_HTML)
+        if rerun_sink is None or not rerun_sink.ready:
+            return HTMLResponse(_framed("/", "scene — semantic map"))
+        body = _viewer_body("url", "/3d")
+        return HTMLResponse(_shell_page("/", body, "scene — semantic map",
+                                        info_panel=True))
 
-    async def index2d(_request) -> HTMLResponse:
-        return HTMLResponse(_INDEX_HTML)
+    async def index2d(request) -> HTMLResponse:
+        # `?bare=1` is the built-in canvas map. It stays the page itself where
+        # rerun is absent, and stays reachable everywhere: the combined layout
+        # embeds it, and a native install has nothing else.
+        if _bare(request):
+            return HTMLResponse(_INDEX_HTML)
+        if rerun_sink is None or not rerun_sink.ready:
+            return HTMLResponse(_framed("/2d", "scene — 2D map"))
+        return HTMLResponse(_shell_page(
+            "/2d", _viewer_body("url_2d", "/2d?bare=1"), "scene — 2D map",
+            info_panel=True))
 
     async def state(_request) -> JSONResponse:
         return JSONResponse(
@@ -1435,19 +1823,212 @@ def make_app(*, registry: ObjectRegistry,
                 out["detail"] = (out.get("detail") or "pose estimate sent") + "; current pose not available yet"
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
-    async def index3d(_request) -> HTMLResponse:
-        return HTMLResponse(_INDEX_3D_HTML)
+    async def index3d(request) -> HTMLResponse:
+        # The built-in three.js view. It stays reachable on its own path even
+        # where rerun serves the landing page: a native install has no rerun,
+        # and this is the only 3D view it has.
+        if _bare(request):
+            return HTMLResponse(_INDEX_3D_HTML)
+        return HTMLResponse(_framed("/3d", "scene — built-in 3D"))
+
+    # rerun serves the viewer application on one port and each page's log
+    # stream on another, and the embedded frame pointed straight at them. That
+    # is invisible on the robot and unusable off it: reading the map from a
+    # laptop meant forwarding four ports, and forgetting one produced a blank
+    # frame with no error. Scene proxies all of them under its own port, so the
+    # whole UI — shell, viewer and data — travels over the one port an operator
+    # already has to reach.
+    #
+    # The stream is gRPC-web over HTTP/1.1 (`application/grpc-web+proto`), not
+    # HTTP/2 gRPC: status and trailers ride inside the body, so an ordinary
+    # streaming reverse proxy carries it without special handling.
+    _PROXY_SKIP = {"host", "content-length", "connection", "keep-alive",
+                   "transfer-encoding", "upgrade"}
+
+    async def _proxy(request, port: int, path: str, extra: dict = None):
+        """Stream one request to a local rerun server and back."""
+        import httpx
+
+        url = f"http://127.0.0.1:{port}/{path.lstrip('/')}"
+        if request.url.query:
+            url = f"{url}?{request.url.query}"
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in _PROXY_SKIP}
+        # `trust_env=False` is load-bearing: httpx otherwise honours
+        # HTTP_PROXY/ALL_PROXY from the environment, and both the robot and a
+        # developer's machine usually have one set. The upstream here is
+        # loopback on this very host, so a proxy in the path turns a working
+        # viewer into a 502 that looks like the viewer being down.
+        client = httpx.AsyncClient(timeout=None, trust_env=False)
+        try:
+            body = await request.body()
+            upstream = client.build_request(
+                request.method, url, headers=headers, content=body)
+            response = await client.send(upstream, stream=True)
+        except Exception as error:  # noqa: BLE001
+            await client.aclose()
+            # A viewer that is not running is the common case here, and a
+            # bare 502 in the frame says nothing about which half is down.
+            return PlainTextResponse(
+                f"the rerun viewer is not reachable on 127.0.0.1:{port}: "
+                f"{error}", status_code=502)
+
+        async def stream():
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        out = {k: v for k, v in response.headers.items()
+               if k.lower() not in _PROXY_SKIP}
+        out.update(extra or {})
+        return StreamingResponse(stream(), status_code=response.status_code,
+                                 headers=out)
+
+    # The viewer application is a 40 MB wasm bundle that rerun serves with no
+    # caching headers at all, so every visit re-downloaded the whole thing --
+    # seconds on a forwarded connection, every single time. The bundle only
+    # changes when the installed rerun does, which cannot happen without
+    # restarting this process, so an identity minted per process is enough to
+    # let the browser keep its copy: the first visit pays for the download and
+    # every later one revalidates in a round trip.
+    _ASSET_ETAG = f'W/"rerun-{os.getpid()}"'
+    _CACHEABLE = (".wasm", ".js", ".css", ".svg", ".ico", ".woff2")
+
+    def _asset_cache_headers(path: str) -> dict:
+        if not path.endswith(_CACHEABLE):
+            return {}
+        # `no-cache` is revalidate-every-time, not do-not-store: the browser
+        # keeps the bundle and asks whether it is still current, which is the
+        # behaviour that makes a second visit instant without ever serving a
+        # stale viewer after an upgrade.
+        return {"etag": _ASSET_ETAG, "cache-control": "no-cache"}
+
+    async def rerun_app(request):
+        """The viewer application, under a path that names its feed.
+
+        The feed cannot travel in the query: rerun rewrites its own URL once
+        it has parsed it, dropping anything it does not recognise, and the
+        referrer on the data calls then names no feed at all -- which is how
+        the 2D page came to show the 3D map. The path survives that rewrite.
+        """
+        if rerun_sink is None or not rerun_sink.ready:
+            return PlainTextResponse("no viewer", status_code=404)
+        if request.path_params.get("feed") not in ("2d", "3d"):
+            return PlainTextResponse("not found", status_code=404)
+        path = request.path_params.get("path", "")
+        cache = _asset_cache_headers(path)
+        if cache and request.headers.get("if-none-match") == _ASSET_ETAG:
+            return Response(status_code=304, headers=cache)
+        return await _proxy(request, rerun_sink.web_port, path, extra=cache)
+
+    async def rerun_asset(request):
+        """The viewer's own assets, which it requests from the site root."""
+        if rerun_sink is None or not rerun_sink.ready:
+            return PlainTextResponse("no viewer", status_code=404)
+        path = request.url.path.lstrip("/")
+        cache = _asset_cache_headers(path)
+        if cache and request.headers.get("if-none-match") == _ASSET_ETAG:
+            return Response(status_code=304, headers=cache)
+        return await _proxy(request, rerun_sink.web_port, path, extra=cache)
+
+    async def rerun_data(request):
+        """One page's log stream, at the only path rerun will accept.
+
+        rerun parses the data-source URL itself and takes the endpoint path
+        to be exactly `/proxy`. Anything longer is rejected before a single
+        request is made, silently: the viewer drops the source and shows its
+        start page, which looks exactly like a map with nothing in it.
+
+        `/proxy` in that URL names the endpoint; it is not where the traffic
+        goes. The viewer speaks gRPC-web, so the requests land on the service
+        path at the origin root -- `/rerun.sdk_comms.<version>.MessageProxy
+        Service/ReadMessages` -- and this handler answers both.
+
+        Both feeds therefore live at the same paths, and which one a request
+        wants is read from the page that asked. The two feeds are two frames
+        with different URLs, so the referrer separates them; `feed` in the
+        query is accepted as well for anyone opening the endpoint by hand.
+        A request that says neither gets the 3D feed, which is the page the
+        UI opens on.
+        """
+        if rerun_sink is None or not rerun_sink.ready:
+            return PlainTextResponse("no viewer", status_code=404)
+        feed = request.query_params.get("feed")
+        if feed not in ("2d", "3d"):
+            referer = request.headers.get("referer") or ""
+            feed = "2d" if "/rerun/2d/" in referer else "3d"
+        return await _proxy(request, rerun_sink.data_port(feed),
+                            request.url.path)
+
+    async def rerun_grpc(request):
+        """The viewer's gRPC-web calls, which arrive at the origin root."""
+        service = request.path_params.get("service", "")
+        if "MessageProxyService" not in service:
+            return PlainTextResponse("not found", status_code=404)
+        return await rerun_data(request)
+
+    def _proxied_viewer(page: str, authority: str) -> str:
+        """The viewer page for one feed, served under scene's own origin.
+
+        rerun takes its data source from an absolute URL in the query string,
+        so this has to name the host and port the reader actually reached —
+        the Host header, not what scene bound. Behind a forwarded port those
+        differ, and the address scene bound is unreachable from the browser.
+        """
+        import urllib.parse as _url
+
+        source = f"rerun+http://{authority}/proxy"
+        # The feed is in the path, not the query: see `rerun_app`.
+        return (f"/rerun/{page}/?url=" + _url.quote(source, safe="")
+                + "&theme=dark")
+
+    async def viewer_url(request) -> JSONResponse:
+        """Where the embedded viewers are served, and why they are not.
+
+        The page needs to tell a reader whether the map is missing because
+        nothing has been detected or because the viewer was never started; a
+        blank frame cannot say which.
+        """
+        if rerun_sink is None:
+            return JSONResponse({
+                "url": "", "url_2d": "",
+                "detail": "this deployment uses the built-in viewer "
+                          "(scene web_viewer: builtin)",
+            })
+        if not rerun_sink.ready:
+            return JSONResponse({
+                "url": "", "url_2d": "", "detail": rerun_sink.detail,
+            })
+        # The viewer is reached from wherever this page was reached from. The
+        # request's Host is the only thing that knows that; the address Scene
+        # bound to does not.
+        host = (request.headers.get("host") or "").split(":")[0] or "127.0.0.1"
+        # Same-origin links: the frame, the viewer application and the log
+        # stream all travel over the port the reader already reached scene on.
+        # `viewer_url()` on the sink stays for an operator opening rerun
+        # directly on the robot, where the ports are local anyway.
+        authority = request.headers.get("host") or f"{host}:50107"
+        return JSONResponse({"url": _proxied_viewer("3d", authority),
+                             "url_2d": _proxied_viewer("2d", authority),
+                             "detail": ""})
 
     async def objects3d(_request) -> JSONResponse:
         if detector is None or not hasattr(detector, "export_3d_snapshot"):
             return JSONResponse({"objects": [], "stamp_unix": 0.0})
         return JSONResponse(detector.export_3d_snapshot())
 
-    async def cam(_request) -> HTMLResponse:
-        return HTMLResponse(_INDEX_CAM_HTML)
+    async def cam(request) -> HTMLResponse:
+        if _bare(request):
+            return HTMLResponse(_INDEX_CAM_HTML)
+        return HTMLResponse(_framed("/cam", "scene — camera"))
 
-    async def user_page(_request) -> HTMLResponse:
-        return HTMLResponse(_USER_HTML)
+    async def user_page(request) -> HTMLResponse:
+        if _bare(request):
+            return HTMLResponse(_USER_HTML)
+        return HTMLResponse(_framed("/user", "scene — annotations"))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -1487,6 +2068,19 @@ def make_app(*, registry: ObjectRegistry,
         Route("/user", user_page, methods=["GET"]),
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
+        Route("/api/viewer", viewer_url, methods=["GET"]),
+        # Everything the embedded viewer needs, under scene's own origin.
+        Route("/rerun/{feed}", rerun_app, methods=["GET"]),
+        Route("/rerun/{feed}/{path:path}", rerun_app, methods=["GET"]),
+        Route("/proxy", rerun_data, methods=["GET", "POST", "OPTIONS"]),
+        # The gRPC-web service path, kept version-tolerant: the package name
+        # carries rerun's own version and changes with it, so the route
+        # matches any two-segment service call and the handler decides.
+        Route("/{service}/{method}", rerun_grpc, methods=["POST", "OPTIONS"]),
+        Route("/re_viewer.js", rerun_asset, methods=["GET"]),
+        Route("/re_viewer_bg.wasm", rerun_asset, methods=["GET"]),
+        Route("/favicon.svg", rerun_asset, methods=["GET"]),
+        Route("/sw.js", rerun_asset, methods=["GET"]),
         Route("/api/camera", camera_state, methods=["GET"]),
         Route("/api/annotations", annotations_list, methods=["GET"]),
         Route("/api/annotations", annotations_create, methods=["POST"]),
@@ -1642,7 +2236,7 @@ _COMBINED_HTML = r"""<!doctype html>
         <span class="desc">map · occupancy grid + tracked objects · 5 Hz</span>
         <button class="expand" title="expand">⛶</button>
       </div>
-      <iframe src="/2d" loading="eager"></iframe>
+      <iframe src="/2d?bare=1" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-3d">
       <div class="titlebar">
@@ -1650,7 +2244,7 @@ _COMBINED_HTML = r"""<!doctype html>
         <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
         <button class="expand" title="expand">⛶</button>
       </div>
-      <iframe src="/3d" loading="eager"></iframe>
+      <iframe src="/3d?bare=1" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-cam">
       <div class="titlebar">
@@ -1658,7 +2252,7 @@ _COMBINED_HTML = r"""<!doctype html>
         <span class="desc">live RGB + depth · perception input</span>
         <button class="expand" title="expand">⛶</button>
       </div>
-      <iframe src="/cam" loading="eager"></iframe>
+      <iframe src="/cam?bare=1" loading="eager"></iframe>
     </div>
   </div>
   <div id="info-fp">

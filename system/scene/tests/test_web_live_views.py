@@ -216,3 +216,167 @@ def test_live_view_inline_javascript_is_valid(html_name):
         script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
         args = [node, "--check"]
     subprocess.run(args, input=script, text=True, check=True)
+
+
+@pytest.mark.parametrize("field", ["url", "url_2d"])
+def test_viewer_frame_inline_javascript_is_valid(field):
+    """Parse the viewer page's inline script with the host JavaScript engine.
+
+    The script is assembled from Python string literals with escaped quotes
+    inside an HTML attribute inside a JavaScript string. A quoting mistake
+    there produces a page that loads and then silently does nothing, which is
+    indistinguishable from a viewer that has no data.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    web = _web_module()
+    body = web._viewer_body(field, "/3d")
+    script = body.split("<script>", 1)[1].split("</script>", 1)[0]
+    subprocess.run([node, "--check"], input=script, text=True, check=True)
+
+
+def test_every_navigation_target_is_a_page_with_the_sidebar():
+    """The sidebar links must all resolve, and each page must carry it back.
+
+    Before the shell the pages had no links between them and a reader reached
+    the annotation view by editing the address bar. A link that 404s, or a page
+    that drops the sidebar, puts them back there.
+    """
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    client = TestClient(app)
+    for href, label in web._NAV_LINKS:
+        response = client.get(href)
+        assert response.status_code == 200, href
+        assert label in response.text, href
+        # Every link is present on every page, so any page reaches any other.
+        for _, other in web._NAV_LINKS:
+            assert other in response.text, (href, other)
+
+
+def test_the_bare_query_serves_the_built_in_page_without_the_shell():
+    """`?bare=1` is what the combined layout and a native install embed."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    client = TestClient(app)
+    bare = client.get("/2d?bare=1")
+    assert bare.status_code == 200
+    assert bare.text == web._INDEX_HTML
+
+
+def test_the_viewer_endpoint_says_why_there_is_no_viewer():
+    """A blank frame cannot distinguish "no data" from "never started"."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    payload = TestClient(app).get("/api/viewer").json()
+    assert payload["url"] == ""
+    assert payload["url_2d"] == ""
+    assert payload["detail"]
+
+
+def _registry_with_no_objects():
+    """An empty registry, enough for the page-shape assertions above."""
+    from scene_service.state import ObjectRegistry
+
+    return ObjectRegistry()
+
+
+# ── One port for the whole UI ───────────────────────────────────────────────
+# rerun serves the viewer application on one port and each page's stream on
+# another. The frame used to point straight at them, so reading the map from
+# a laptop meant forwarding four ports and forgetting one produced a blank
+# frame with no error. Scene proxies all of them under its own port.
+
+
+class _FakeSink:
+    """A sink that is up, with recognisable ports and nothing behind them."""
+
+    ready = True
+    web_port = 55550
+    detail = ""
+
+    def data_port(self, page):
+        return 55552 if page == "2d" else 55551
+
+
+def _proxy_client():
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    return TestClient(web.make_app(registry=_registry_with_no_objects(),
+                                   hub=None, rerun_sink=_FakeSink()))
+
+
+def test_the_viewer_link_stays_on_scenes_own_origin():
+    """Nothing in the page may name a port the reader has not reached."""
+    client = _proxy_client()
+    payload = client.get("/api/viewer").json()
+    for key in ("url", "url_2d"):
+        assert payload[key].startswith("/rerun/"), payload[key]
+        assert "55550" not in payload[key] and "9090" not in payload[key]
+    # The data source is absolute — rerun needs a URL — but on this origin.
+    assert "%2Fproxy" in payload["url"]
+    assert "testserver" in payload["url"]
+
+
+def test_the_data_path_is_exactly_what_rerun_accepts():
+    """rerun parses the source URL and takes the path to be `/proxy`.
+
+    A longer path is rejected before any request is made, and the viewer then
+    shows its start page: the failure looks like an empty map, not an error.
+    """
+    client = _proxy_client()
+    source = client.get("/api/viewer").json()["url"]
+    assert "proxy%3Ffeed" not in source, "a query on the endpoint path"
+    assert source.startswith("/rerun/3d/?url=")
+    assert source.endswith("&theme=dark")
+
+
+def test_each_page_reaches_its_own_feed():
+    """The two feeds share a path, so the asking page decides which one.
+
+    Nothing listens on either port here: the proxy's own failure names the
+    port it tried, which is what this reads.
+    """
+    client = _proxy_client()
+    two_d = client.get("/proxy",
+                       headers={"referer": "http://h/rerun/2d/?url=x"})
+    assert "55552" in two_d.text, two_d.text
+    three_d = client.get("/proxy",
+                         headers={"referer": "http://h/rerun/3d/?url=x"})
+    assert "55551" in three_d.text, three_d.text
+    bare = client.get("/proxy")
+    assert "55551" in bare.text, "an unmarked request must get the 3D feed"
+
+
+def test_the_proxy_says_so_when_there_is_no_viewer():
+    """A native install has no rerun; the frame must not hang on a dead port."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    client = TestClient(web.make_app(registry=_registry_with_no_objects(),
+                                     hub=None))
+    assert client.get("/rerun/3d/").status_code == 404
+    assert client.get("/proxy").status_code == 404
+
+
+def test_the_map_pages_carry_the_object_and_relation_list():
+    """rerun draws the map; it knows nothing about the registry behind it.
+
+    "Which objects does scene hold, and which relations hold between them" is
+    the question the map is opened to answer, and it moved out of sight when
+    the landing page became the viewer's.
+    """
+    client = _proxy_client()
+    for href in ("/", "/2d"):
+        page = client.get(href).text
+        assert 'id="info-objs"' in page, href
+        assert 'id="info-rels"' in page, href
+        assert "/api/state" in page, href
