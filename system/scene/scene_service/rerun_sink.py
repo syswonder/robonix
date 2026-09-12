@@ -288,18 +288,26 @@ def _relation_end(relation: Any, *names: str) -> Optional[str]:
 
 
 def _port_is_free(port: int) -> bool:
-    """Whether a TCP port can still be bound on this host.
+    """Whether a TCP port is genuinely unused on this host.
 
-    `serve_grpc` does not return an error when its port is taken; it blocks,
-    and a blocked call inside lifecycle activation reads as Scene hanging on
-    startup with nothing in the log. A previous Scene that has not finished
-    exiting is exactly when that happens, so the port is checked first and the
-    viewer declines to start rather than stopping the service.
+    `serve_grpc` does not return an error when its port is taken: it blocks,
+    holding the interpreter lock, which freezes the whole service. Nothing
+    inside Python can recover from that -- a watchdog thread never gets
+    scheduled to fire -- so the only defence is to not make the call.
+
+    That puts the weight on this check being right. Binding with SO_REUSEADDR
+    was not: it is meant for restarting a listener over a socket that is
+    winding down, and it succeeds in exactly the case this exists to catch.
+    A connection attempt is the direct question -- is anybody listening --
+    and a strict bind then catches a socket still on its way out.
     """
     import socket
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.settimeout(0.25)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
             probe.bind(("0.0.0.0", port))
         except OSError:
@@ -357,6 +365,14 @@ class RerunSink:
         # What each entity last carried. An entity whose content has not
         # changed is not logged again: see `_digest`.
         self._sent: dict[str, str] = {}
+        # The last point cloud seen for each object. Perception exports them
+        # intermittently -- a tick reporting "0 with points" for objects it
+        # reported points for a second ago is normal -- and logging that empty
+        # export erased the cloud, so an object alternated between its full
+        # geometry and a bare marker. Absence in one export is not evidence
+        # that the geometry is gone; only the registry dropping the object is.
+        self._clouds: dict[str, list] = {}
+        self._cloud_colours: dict[str, list] = {}
         # `changes` keeps the timeline, so dragging it replays the map filling
         # in; `latest` logs everything as static, which holds exactly one value
         # per entity in the browser's store and is what a weak or forwarded
@@ -416,10 +432,23 @@ class RerunSink:
             # say so rather than leave the web UI unreachable forever.
             outcome: dict[str, Any] = {}
 
+            def claim(port: int) -> None:
+                """Refuse a port that was taken since the first check.
+
+                Seconds pass between that check and here -- importing rerun is
+                not cheap -- and a previous run finishing its exit inside that
+                window is the whole failure this guards.
+                """
+                if not _port_is_free(port):
+                    raise OSError(f"port {port} is in use")
+
             def bring_up() -> None:
                 try:
+                    claim(self._map3d.grpc_port)
                     self._map3d.serve(rr, _blueprint_3d(), self._memory_limit)
+                    claim(self._map2d.grpc_port)
                     self._map2d.serve(rr, _blueprint_2d(), self._memory_limit)
+                    claim(self._web_port)
                     # One web server for both pages. `serve_web_viewer` hands
                     # out the viewer application, not the data: which recording
                     # a page shows is decided by the `url` in its query string.
@@ -629,8 +658,21 @@ class RerunSink:
         if not self._ready:
             return
         rr = self._rr
-        clouds = clouds or {}
-        colours = colours or {}
+        clouds = dict(clouds or {})
+        colours = dict(colours or {})
+        for obj in objects:
+            points = clouds.get(obj.object_id)
+            if points:
+                self._clouds[obj.object_id] = points
+                if colours.get(obj.object_id):
+                    self._cloud_colours[obj.object_id] = colours[obj.object_id]
+            else:
+                remembered = self._clouds.get(obj.object_id)
+                if remembered:
+                    clouds[obj.object_id] = remembered
+                    kept = self._cloud_colours.get(obj.object_id)
+                    if kept:
+                        colours[obj.object_id] = kept
         drawn: set[str] = set()
         for obj in objects:
             drawn.add(obj.object_id)
@@ -708,7 +750,12 @@ class RerunSink:
                 occupancy.get("png_b64"), occupancy.get("resolution"))):
             self._log2d("/map2d/grid", rr.Image(texture), static=True)
 
-        clouds = clouds or {}
+        clouds = dict(clouds or {})
+        for obj in objects:
+            if not clouds.get(obj.object_id):
+                remembered = self._clouds.get(obj.object_id)
+                if remembered:
+                    clouds[obj.object_id] = remembered
         centres_by_id: dict[str, tuple[float, float]] = {}
         cloud_points: list[list[float]] = []
         cloud_colours: list[tuple[int, int, int]] = []
@@ -780,6 +827,8 @@ class RerunSink:
         """
         rr = self._rr
         for object_id in self._drawn - drawn:
+            self._clouds.pop(object_id, None)
+            self._cloud_colours.pop(object_id, None)
             for group in ("rgb_pcd", "sem_pcd", "bbox"):
                 path = f"/map/objects/{group}/{object_id}"
                 self._forget(path)

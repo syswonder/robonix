@@ -701,6 +701,242 @@ def _nav(active: str) -> str:
     return "".join(items)
 
 
+# ── The object and relation list ───────────────────────────────────────────
+# Which objects the registry holds, where they are, and which relations hold
+# between them: the thing a reader checks the map against. It used to live on
+# the combined layout, which stopped being the landing page when the viewer
+# became rerun's -- and rerun draws the map but knows nothing about the
+# registry behind it, so the list went with it. It is shared by both now: a
+# floating panel over whatever view is underneath, fed by /api/state.
+_INFO_PANEL_CSS = r"""
+    /* ── Floating info overlay ──
+       imgui-style draggable panel. Sits in the top-left corner over
+       the 2D map by default (small enough not to swallow the canvas).
+       Click the header to collapse to a single bar; drag the header
+       to move; click ✕ to dismiss for this session. State is
+       remembered in localStorage so refresh keeps your layout. */
+    #info-fp {
+      position: fixed; top: 12px; left: 12px; z-index: 200;
+      width: 320px; max-height: calc(100vh - 24px);
+      background: rgba(14, 16, 21, 0.94);
+      border: 1px solid #303542; border-radius: 6px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+      display: flex; flex-direction: column;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; color: #d8dde6;
+      backdrop-filter: blur(2px);
+    }
+    #info-fp.collapsed { max-height: 28px; }
+    #info-fp.collapsed #info-body { display: none; }
+    #info-fp.dismissed { display: none; }
+    #info-head {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 8px; cursor: move; user-select: none;
+      border-bottom: 1px solid #2a2e38;
+      font-size: 11px; color: #889;
+    }
+    #info-head .title { color: #f0c050; font-weight: 600;
+                        letter-spacing: 0.04em; }
+    #info-head .stamp { flex: 1; color: #6a6f7a; font-size: 10px;
+                        white-space: nowrap; overflow: hidden;
+                        text-overflow: ellipsis; }
+    #info-head button {
+      background: none; border: 1px solid #303542; color: #889;
+      width: 22px; height: 20px; padding: 0; border-radius: 3px;
+      cursor: pointer; font-size: 11px; line-height: 1;
+    }
+    #info-head button:hover { color: #f0c050; border-color: #5a606e; }
+    #info-body { padding: 8px 10px 10px; overflow: auto; flex: 1; }
+    #info-body h2 {
+      margin: 8px 0 4px 0; font-size: 10px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: #6a6f7a;
+    }
+    #info-body h2:first-child { margin-top: 0; }
+    #info-body .pose { color: #7aa7ff; }
+    #info-body table { width: 100%; border-collapse: collapse;
+                       font-size: 11px; }
+    #info-body td { padding: 2px 4px; vertical-align: top;
+                    border-bottom: 1px solid #1a1d24; }
+    #info-body td.id { color: #7aa7ff; white-space: nowrap; }
+    #info-body td.cls { color: #f0c674; white-space: nowrap; }
+    #info-body td.pp { color: #6a6f7a; font-size: 10px; }
+    #info-body td.miss { color: #555; }
+    /* Relation list: one "<source> <predicate> <target>" row per edge,
+       replacing the old on-canvas dashed lines. */
+    #info-rels .rel { display: flex; gap: 6px; align-items: baseline;
+                      padding: 2px 4px; border-bottom: 1px solid #1a1d24;
+                      font-size: 11px; white-space: nowrap;
+                      overflow: hidden; text-overflow: ellipsis; }
+    #info-rels .rs { color: #7aa7ff; }
+    #info-rels .rp { color: #f0c050; font-weight: 600; }
+    #info-rels .rt { color: #f0c674; }
+    /* "Show info" pill that appears once the panel is dismissed. */
+    #info-show {
+      position: fixed; top: 12px; left: 12px; z-index: 200;
+      padding: 4px 10px; font-size: 11px;
+      background: rgba(14, 16, 21, 0.94); border: 1px solid #303542;
+      border-radius: 4px; color: #889; cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      display: none;
+    }
+    #info-show:hover { color: #f0c050; border-color: #5a606e; }
+    body.info-dismissed #info-show { display: block; }
+"""
+
+_INFO_PANEL_HTML = r"""
+  <div id="info-fp">
+    <div id="info-head" title="drag to move; click title to collapse">
+      <span class="title">scene</span>
+      <span class="stamp" id="info-stamp">—</span>
+      <button id="info-collapse" title="collapse / expand">_</button>
+      <button id="info-dismiss" title="hide (click 'show info' to bring back)">×</button>
+    </div>
+    <div id="info-body">
+      <h2>robot</h2>
+      <div class="pose" id="info-pose">no fix yet</div>
+      <h2>objects</h2>
+      <table>
+        <tbody id="info-objs"><tr><td colspan="3" style="color:#555">—</td></tr></tbody>
+      </table>
+      <h2>relations</h2>
+      <div id="info-rels"><span style="color:#555">—</span></div>
+    </div>
+  </div>
+  <button id="info-show" title="re-open the floating info panel">▸ show info</button>
+"""
+
+_INFO_PANEL_JS = r"""
+    // ── Floating info overlay: drag, collapse, dismiss, fetch loop ──
+    const fp = document.getElementById('info-fp');
+    const fphead = document.getElementById('info-head');
+    const fpcollapse = document.getElementById('info-collapse');
+    const fpdismiss = document.getElementById('info-dismiss');
+    const fpshow = document.getElementById('info-show');
+    const LS_KEY = 'sceneInfoFp.v1';
+    function fpSave() {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+          x: fp.style.left, y: fp.style.top,
+          collapsed: fp.classList.contains('collapsed'),
+          dismissed: document.body.classList.contains('info-dismissed'),
+        }));
+      } catch (_) {}
+    }
+    function fpLoad() {
+      try {
+        const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+        if (s.x) fp.style.left = s.x;
+        if (s.y) fp.style.top = s.y;
+        if (s.collapsed) fp.classList.add('collapsed');
+        if (s.dismissed) document.body.classList.add('info-dismissed');
+      } catch (_) {}
+    }
+    fpLoad();
+    // Click title (not buttons) to toggle collapse.
+    fphead.addEventListener('click', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      // dragstart suppresses click via a flag; see drag logic.
+      if (fphead._dragged) { fphead._dragged = false; return; }
+      fp.classList.toggle('collapsed');
+      fpSave();
+    });
+    fpcollapse.addEventListener('click', e => {
+      e.stopPropagation();
+      fp.classList.toggle('collapsed');
+      fpSave();
+    });
+    fpdismiss.addEventListener('click', e => {
+      e.stopPropagation();
+      document.body.classList.add('info-dismissed');
+      fpSave();
+    });
+    fpshow.addEventListener('click', () => {
+      document.body.classList.remove('info-dismissed');
+      fpSave();
+    });
+    // Drag — pointerdown on the header, follow until pointerup.
+    let dragOff = null;
+    fphead.addEventListener('pointerdown', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      const r = fp.getBoundingClientRect();
+      dragOff = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      fphead.setPointerCapture(e.pointerId);
+      fphead._dragged = false;
+    });
+    fphead.addEventListener('pointermove', e => {
+      if (!dragOff) return;
+      const x = e.clientX - dragOff.dx;
+      const y = e.clientY - dragOff.dy;
+      // Clamp to viewport so the header is always grabbable.
+      const maxX = window.innerWidth  - fp.offsetWidth - 4;
+      const maxY = window.innerHeight - 30;
+      fp.style.left = Math.max(4, Math.min(x, maxX)) + 'px';
+      fp.style.top  = Math.max(4, Math.min(y, maxY)) + 'px';
+      fphead._dragged = true;
+    });
+    fphead.addEventListener('pointerup', e => {
+      dragOff = null;
+      try { fphead.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (fphead._dragged) fpSave();
+    });
+
+    // Fetch /api/state and populate the floating panel.
+    const fmt = n => Number(n).toFixed(2);
+    async function fpTick() {
+      try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (r.ok) {
+          const s = await r.json();
+          const objs = (s.objects || []).slice().sort(
+            (a, b) => a.cls.localeCompare(b.cls));
+          document.getElementById('info-stamp').textContent =
+            `${objs.length} obj · ${(s.relations || []).length} rel · ${(s.scene_graph && s.scene_graph.edges || []).length} sg · t=${fmt(s.stamp_unix)}`;
+          const robotEl = document.getElementById('info-pose');
+          if (s.robot) {
+            robotEl.textContent =
+              `(${fmt(s.robot.x)}, ${fmt(s.robot.y)}, ${fmt(s.robot.z)}) yaw=${fmt(s.robot.yaw)}`;
+          } else {
+            robotEl.textContent = 'no fix yet';
+          }
+          const tbody = document.getElementById('info-objs');
+          if (!objs.length) {
+            tbody.innerHTML = '<tr><td colspan="3" style="color:#555">—</td></tr>';
+          } else {
+            tbody.innerHTML = objs.map(o => `
+              <tr>
+                <td class="id">${o.short_id}</td>
+                <td class="cls">${o.cls}</td>
+                <td class="pp ${o.missing ? 'miss' : ''}">
+                  (${fmt(o.pose.x)}, ${fmt(o.pose.y)}) c=${fmt(o.confidence)}
+                </td>
+              </tr>
+            `).join('');
+          }
+          // Relations as an explicit "<source> <predicate> <target>" list
+          // (replaces the old on-canvas dashed lines). short_id = last
+          // dotted segment of the object id, e.g. scene.object.cup_001 → cup_001.
+          const shortId = id => String(id).split('.').pop();
+          const edges = (s.scene_graph && s.scene_graph.edges) || [];
+          const relsEl = document.getElementById('info-rels');
+          if (!edges.length) {
+            relsEl.innerHTML = '<span style="color:#555">none</span>';
+          } else {
+            relsEl.innerHTML = edges.map(e => `
+              <div class="rel">
+                <span class="rs">${shortId(e.source_id)}</span>
+                <span class="rp">${e.relation}</span>
+                <span class="rt">${shortId(e.target_id)}</span>
+              </div>
+            `).join('');
+          }
+        }
+      } catch (_) { /* swallow; next tick will retry */ }
+      setTimeout(fpTick, 500);
+    }
+    fpTick();
+"""
+
+
 _SHELL_CSS = """
   /* Dark throughout, on the annotation page's palette. The shell frames
      pages that are themselves dark -- the rerun viewer's chrome cannot be
@@ -729,13 +965,23 @@ _SHELL_CSS = """
 """
 
 
-def _shell_page(active: str, body: str, title: str) -> str:
-    """Wrap page content in the shared sidebar."""
+def _shell_page(active: str, body: str, title: str,
+                info_panel: bool = False) -> str:
+    """Wrap page content in the shared sidebar.
+
+    `info_panel` adds the object and relation list over the page. The map
+    pages carry it: rerun draws the map but knows nothing about the registry
+    behind it, and "which objects does scene actually hold" is the question
+    the map is opened to answer.
+    """
+    css = _SHELL_CSS + (_INFO_PANEL_CSS if info_panel else "")
+    extra = (_INFO_PANEL_HTML + f"<script>{_INFO_PANEL_JS}</script>"
+             if info_panel else "")
     return (
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
-        f"<title>{title}</title><style>{_SHELL_CSS}</style></head><body>"
+        f"<title>{title}</title><style>{css}</style></head><body>"
         f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}</nav>'
-        f"<main>{body}</main></div></body></html>"
+        f"<main>{body}</main></div>{extra}</body></html>"
     )
 
 
@@ -981,7 +1227,8 @@ def make_app(*, registry: ObjectRegistry,
         if rerun_sink is None or not rerun_sink.ready:
             return HTMLResponse(_framed("/", "scene — semantic map"))
         body = _viewer_body("url", "/3d")
-        return HTMLResponse(_shell_page("/", body, "scene — semantic map"))
+        return HTMLResponse(_shell_page("/", body, "scene — semantic map",
+                                        info_panel=True))
 
     async def index2d(request) -> HTMLResponse:
         # `?bare=1` is the built-in canvas map. It stays the page itself where
@@ -992,7 +1239,8 @@ def make_app(*, registry: ObjectRegistry,
         if rerun_sink is None or not rerun_sink.ready:
             return HTMLResponse(_framed("/2d", "scene — 2D map"))
         return HTMLResponse(_shell_page(
-            "/2d", _viewer_body("url_2d", "/2d?bare=1"), "scene — 2D map"))
+            "/2d", _viewer_body("url_2d", "/2d?bare=1"), "scene — 2D map",
+            info_panel=True))
 
     async def state(_request) -> JSONResponse:
         return JSONResponse(
@@ -1597,7 +1845,7 @@ def make_app(*, registry: ObjectRegistry,
     _PROXY_SKIP = {"host", "content-length", "connection", "keep-alive",
                    "transfer-encoding", "upgrade"}
 
-    async def _proxy(request, port: int, path: str):
+    async def _proxy(request, port: int, path: str, extra: dict = None):
         """Stream one request to a local rerun server and back."""
         import httpx
 
@@ -1635,8 +1883,28 @@ def make_app(*, registry: ObjectRegistry,
 
         out = {k: v for k, v in response.headers.items()
                if k.lower() not in _PROXY_SKIP}
+        out.update(extra or {})
         return StreamingResponse(stream(), status_code=response.status_code,
                                  headers=out)
+
+    # The viewer application is a 40 MB wasm bundle that rerun serves with no
+    # caching headers at all, so every visit re-downloaded the whole thing --
+    # seconds on a forwarded connection, every single time. The bundle only
+    # changes when the installed rerun does, which cannot happen without
+    # restarting this process, so an identity minted per process is enough to
+    # let the browser keep its copy: the first visit pays for the download and
+    # every later one revalidates in a round trip.
+    _ASSET_ETAG = f'W/"rerun-{os.getpid()}"'
+    _CACHEABLE = (".wasm", ".js", ".css", ".svg", ".ico", ".woff2")
+
+    def _asset_cache_headers(path: str) -> dict:
+        if not path.endswith(_CACHEABLE):
+            return {}
+        # `no-cache` is revalidate-every-time, not do-not-store: the browser
+        # keeps the bundle and asks whether it is still current, which is the
+        # behaviour that makes a second visit instant without ever serving a
+        # stale viewer after an upgrade.
+        return {"etag": _ASSET_ETAG, "cache-control": "no-cache"}
 
     async def rerun_app(request):
         """The viewer application, under a path that names its feed.
@@ -1650,15 +1918,21 @@ def make_app(*, registry: ObjectRegistry,
             return PlainTextResponse("no viewer", status_code=404)
         if request.path_params.get("feed") not in ("2d", "3d"):
             return PlainTextResponse("not found", status_code=404)
-        return await _proxy(request, rerun_sink.web_port,
-                            request.path_params.get("path", ""))
+        path = request.path_params.get("path", "")
+        cache = _asset_cache_headers(path)
+        if cache and request.headers.get("if-none-match") == _ASSET_ETAG:
+            return Response(status_code=304, headers=cache)
+        return await _proxy(request, rerun_sink.web_port, path, extra=cache)
 
     async def rerun_asset(request):
         """The viewer's own assets, which it requests from the site root."""
         if rerun_sink is None or not rerun_sink.ready:
             return PlainTextResponse("no viewer", status_code=404)
-        return await _proxy(request, rerun_sink.web_port,
-                            request.url.path.lstrip("/"))
+        path = request.url.path.lstrip("/")
+        cache = _asset_cache_headers(path)
+        if cache and request.headers.get("if-none-match") == _ASSET_ETAG:
+            return Response(status_code=304, headers=cache)
+        return await _proxy(request, rerun_sink.web_port, path, extra=cache)
 
     async def rerun_data(request):
         """One page's log stream, at the only path rerun will accept.

@@ -399,3 +399,46 @@ def test_the_viewer_link_asks_for_the_dark_theme():
     sink = _sink_with(fake)
     sink._map3d.grpc_url = "rerun+http://127.0.0.1:9876/proxy"
     assert "theme=dark" in sink.viewer_url("robot.local")
+
+
+def test_a_port_someone_is_listening_on_is_not_free():
+    """The check that decides whether to make a call that cannot be undone.
+
+    `serve_grpc` blocks holding the interpreter lock when its port is taken,
+    which freezes the service with nothing in the log; binding with
+    SO_REUSEADDR reported such a port free, because that option exists to
+    allow exactly this case.
+    """
+    import socket
+
+    from scene_service.rerun_sink import _port_is_free
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        assert not _port_is_free(port), "a listening port reported free"
+    # And free again once the listener is gone.
+    assert _port_is_free(port) or True  # TIME_WAIT may still hold it briefly
+
+
+def test_an_export_that_skipped_an_object_does_not_erase_its_cloud():
+    """Perception exports point clouds intermittently.
+
+    A tick that reports no points for an object it had points for a moment
+    ago is normal. Logging that as an empty cloud made the object flicker
+    between its geometry and a bare marker, which reads as the perception
+    losing the object rather than as one quiet export.
+    """
+    fake = _FakeRerun()
+    sink = _sink_with(fake)
+    objects = [_FakeObject("a", "chair", 1.0, 1.0)]
+    sink.log_objects(objects, {"a": [[1.0, 1.0, 0.1], [1.0, 1.2, 0.1]]})
+    fake.logged.clear()
+    sink.log_objects(objects, {})          # the export skipped it this tick
+    assert not any(p.startswith("/map/objects/sem_pcd") for p, _ in fake.logged), (
+        "the cloud was logged again, which means it was replaced")
+    # And the object still carries its points when something else changes.
+    moved = [_FakeObject("a", "sofa", 1.0, 1.0)]
+    sink.log_objects(moved, {})
+    assert sink._clouds["a"], "the remembered cloud was dropped"

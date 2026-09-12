@@ -365,3 +365,18 @@ def test_the_proxy_says_so_when_there_is_no_viewer():
                                      hub=None))
     assert client.get("/rerun/3d/").status_code == 404
     assert client.get("/proxy").status_code == 404
+
+
+def test_the_map_pages_carry_the_object_and_relation_list():
+    """rerun draws the map; it knows nothing about the registry behind it.
+
+    "Which objects does scene hold, and which relations hold between them" is
+    the question the map is opened to answer, and it moved out of sight when
+    the landing page became the viewer's.
+    """
+    client = _proxy_client()
+    for href in ("/", "/2d"):
+        page = client.get(href).text
+        assert 'id="info-objs"' in page, href
+        assert 'id="info-rels"' in page, href
+        assert "/api/state" in page, href
