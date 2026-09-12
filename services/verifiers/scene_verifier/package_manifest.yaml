@@ -1,0 +1,13 @@
+manifestVersion: 1
+package:
+  name: com.robonix.service.scene_verifier
+  version: 0.1.0
+  vendor: robonix
+  description: Verify planar navigation results using Scene observations.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/service/verifier/verify

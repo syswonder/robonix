@@ -18,6 +18,10 @@ The library API (`robonix_codegen::codegen::{msg_parser, contract_gen,
 proto_gen}`) is what Rust callers use; the CLI is what Python packages
 use via `rbnx codegen` (which wraps this binary).
 
+Contract reference generation also records `[contract].llm_callable` as
+whether Pilot may show implementations to its planning model. The field
+defaults to `true` and does not alter generated transport stubs.
+
 ## Build
 
 From the repo root:

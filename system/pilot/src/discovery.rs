@@ -5,6 +5,7 @@ use anyhow::Result;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::warn;
+use std::collections::HashSet;
 
 /// LLM-facing tool name = `<area>_<leaf>` of a contract_id, where
 /// `<area>` is the segment immediately before the leaf.
@@ -111,7 +112,7 @@ pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
 }
 
 /// Query atlas for every MCP-transport capability. Returns one
-/// `(provider_id, Capability)` pair per LLM-callable contract; callers
+/// `(provider_id, Capability)` pair per usable MCP contract; callers
 /// pull description + input_schema_json out of `params.kind` themselves.
 /// Capabilities with missing or non-MCP params are dropped with a warning.
 pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::Capability)>> {
@@ -142,4 +143,16 @@ pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::
         }
     }
     Ok(out)
+}
+
+/// Load the immutable contract-level exclusions for Pilot's model catalog.
+/// A missing field means visible so Pilot remains compatible with an older
+/// Atlas. The capabilities remain registered and callable by other consumers.
+pub async fn non_llm_callable_contract_ids(atlas: &mut AtlasClient) -> Result<HashSet<String>> {
+    let contracts = atlas.list_contracts("").await?;
+    Ok(contracts
+        .into_iter()
+        .filter(|contract| contract.llm_callable == Some(false))
+        .map(|contract| contract.id)
+        .collect())
 }

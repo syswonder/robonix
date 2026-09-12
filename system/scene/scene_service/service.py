@@ -169,6 +169,7 @@ def _build_topic_specs(
     atlas_stub,
     transport: str,
     camera_provider_id: str = "",
+    known_kinds: set[str] | None = None,
 ) -> list[TopicSpec]:
     """Two paths:
 
@@ -184,32 +185,45 @@ def _build_topic_specs(
          contract is one scene already knows.
 
     `transport` is `"ros2"` (today's wired ingest) or `"grpc"` (future).
-    Errors at any step skip that one entry but never fail bring-up.
+    `known_kinds` lets the background reconciler resolve only subscriptions
+    the hub does not already own. Errors skip one entry but never fail bring-up.
     """
     pb_t = _resolve_pb_transport(transport)
     if observations:
         return _resolve_explicit(observations, atlas_stub, pb_t, camera_provider_id)
-    return _resolve_auto(atlas_stub, pb_t, camera_provider_id)
+    return _resolve_auto(
+        atlas_stub,
+        pb_t,
+        camera_provider_id,
+        known_kinds=known_kinds,
+    )
 
 
 def _resolve_auto(
-    _unused, pb_transport: int, camera_provider_id: str = ""
+    _unused,
+    pb_transport: int,
+    camera_provider_id: str = "",
+    *,
+    known_kinds: set[str] | None = None,
 ) -> list[TopicSpec]:
     """Walk `_SCENE_CONTRACTS` and use `ATLAS.find_capability` + `connect_capability`
     to resolve each contract. atlas hands out the endpoint via
     ConnectCapability; the cap framework also tracks the channel for
     teardown so we don't leak edges in atlas.
 
-    Skipped contracts (no provider yet) come back via the reconciler
-    every `period_s` — scene tolerates services that come up after it.
+    Contracts without a provider come back via the reconciler every
+    `period_s`. Kinds already owned by the subscriber hub are skipped so each
+    live subscription retains one Atlas channel instead of opening one per
+    reconciliation pass.
 
     `_unused` keeps the call signature stable for callers built around
     the old raw atlas_pb stub; the actual lookup goes through `atlas`.
     """
     transport = Transport(pb_transport)
+    known = known_kinds or set()
     out: list[TopicSpec] = []
     for kind, contract_id, msg_type in _SCENE_CONTRACTS:
-        if kind in _DEFAULT_DISABLED_KINDS:
+        if kind in _DEFAULT_DISABLED_KINDS or kind in known:
             continue
         spec = _resolve_one_contract(
             transport,
@@ -485,7 +499,11 @@ async def _auto_discover_loop(
             await asyncio.sleep(period_s)
             current = hub.has_kinds()
             specs = _build_topic_specs(
-                explicit, atlas_stub, transport, camera_provider_id
+                explicit,
+                atlas_stub,
+                transport,
+                camera_provider_id,
+                known_kinds=current,
             )
             for spec in specs:
                 if spec.kind not in current:

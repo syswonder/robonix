@@ -1,0 +1,7 @@
+# Verify one completed capability call. The verifier-specific payload is JSON
+# so verifier implementations can evolve without changing this common RPC.
+string call_id
+string args_json
+---
+bool passed
+string detail

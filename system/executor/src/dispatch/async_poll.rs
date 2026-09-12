@@ -5,38 +5,29 @@ use robonix_scribe::warn;
 use std::time::Duration;
 
 use crate::dispatch::{self, async_registry::AsyncGroup};
-use crate::pb::executor::RtdlEvent;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use crate::plan_runtime::{PlanRuntime, RunningAsyncCall};
 use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
-use tokio::sync::mpsc::Sender;
 use tokio::time;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Dispatch an async cap, poll status every 2s, stream node_state changes, return terminal result.
+/// Dispatch an async cap and poll status every 2s. The caller owns the single
+/// terminal event so successful work can be verified before it is published.
 pub async fn run_until_terminal(
     call: &CapabilityCall,
     group: &AsyncGroup,
     self_provider_id: &str,
     atlas: &mut AtlasClient,
-    tx: &Sender<Result<RtdlEvent, tonic::Status>>,
     node: &NodeEventContext,
     runtime: &PlanRuntime,
-) -> CapabilityCallResult {
+) -> (CapabilityCallResult, u32) {
     let initial = dispatch::dispatch(call, self_provider_id, atlas, runtime, &node.plan_id).await;
     if !initial.success {
-        let _ = tx
-            .send(Ok(rtdl_wire::node_state_from_result(
-                node,
-                initial.clone(),
-                RtdlNodeStateEnum::Failed as u32,
-            )))
-            .await;
-        return initial;
+        return (initial, RtdlNodeStateEnum::Failed as u32);
     }
 
     let run_id = extract_run_id(&initial.output);
@@ -55,14 +46,7 @@ pub async fn run_until_terminal(
         .await;
     if !accepted {
         let result = canceled_result(call, "plan was cancelled before async polling began");
-        let _ = tx
-            .send(Ok(rtdl_wire::node_state_from_result(
-                node,
-                result.clone(),
-                RtdlNodeStateEnum::Canceled as u32,
-            )))
-            .await;
-        return result;
+        return (result, RtdlNodeStateEnum::Canceled as u32);
     }
 
     let mut interval = time::interval(POLL_INTERVAL);
@@ -75,14 +59,7 @@ pub async fn run_until_terminal(
                 .cancel_async_call_for_plan(&node.plan_id, &call.call_id, self_provider_id, atlas)
                 .await;
             let result = canceled_result(call, "plan was cancelled");
-            let _ = tx
-                .send(Ok(rtdl_wire::node_state_from_result(
-                    node,
-                    result.clone(),
-                    RtdlNodeStateEnum::Canceled as u32,
-                )))
-                .await;
-            return result;
+            return (result, RtdlNodeStateEnum::Canceled as u32);
         }
         let status_out = match poll_status(
             self_provider_id,
@@ -101,37 +78,23 @@ pub async fn run_until_terminal(
                 runtime
                     .unregister_async_call(&node.plan_id, &call.call_id)
                     .await;
-                let _ = tx
-                    .send(Ok(rtdl_wire::node_state_from_result(
-                        node,
-                        result.clone(),
-                        RtdlNodeStateEnum::Failed as u32,
-                    )))
-                    .await;
-                return result;
+                return (result, RtdlNodeStateEnum::Failed as u32);
             }
         };
 
         let (state, detail) = parse_status_json(&status_out);
-        // Record live state (RUNNING/PENDING/PAUSED or terminal) so
-        // get_plan_status reflects async progress between polls.
-        runtime
-            .record_op_state(&node.plan_id, &node.op_id, state)
-            .await;
         if rtdl_wire::is_terminal_state(state) {
             let result = terminal_result(call, state, &detail, &status_out);
             runtime
                 .unregister_async_call(&node.plan_id, &call.call_id)
                 .await;
-            let _ = tx
-                .send(Ok(rtdl_wire::node_state_from_result(
-                    node,
-                    result.clone(),
-                    state,
-                )))
-                .await;
-            return result;
+            return (result, state);
         }
+        // Record only live states here. The caller records the final state
+        // after optional verification has completed.
+        runtime
+            .record_op_state(&node.plan_id, &node.op_id, state)
+            .await;
     }
 }
 
