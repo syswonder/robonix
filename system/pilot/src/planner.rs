@@ -1458,7 +1458,7 @@ pub async fn run_turn(
                         &messages,
                         &[],
                         Some(&prompt_cache_key),
-                        ReplyShape::JsonObject,
+                        ReplyShape::RtdlEnvelope,
                     ),
                 )
                 .await
