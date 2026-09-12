@@ -230,12 +230,14 @@ async fn read_capability_doc(
         .await
     {
         Ok(providers) => match providers.iter().find(|p| p.id == provider_id) {
-            Some(p) if !p.capability_md.is_empty() => {
-                out.success = true;
-                out.output = truncate(&p.capability_md, 12000);
-            }
-            Some(_) => {
-                out.error = format!("provider '{provider_id}' registered no CAPABILITY.md");
+            Some(p) => {
+                let doc = render_provider_doc(p);
+                if doc.is_empty() {
+                    out.error = format!("provider '{provider_id}' published no documentation");
+                } else {
+                    out.success = true;
+                    out.output = truncate(&doc, 12000);
+                }
             }
             None => {
                 out.error = format!("no provider '{provider_id}' registered in atlas");
@@ -246,6 +248,33 @@ async fn read_capability_doc(
         }
     }
     out
+}
+
+/// Everything atlas knows that helps a caller use `provider`: its CAPABILITY.md
+/// when it registered one, followed by the full description of each capability
+/// the provider offers.
+///
+/// The planning catalogue prints only the opening paragraph of a description,
+/// so this is where a caller reads the rest. Serving the descriptions as well
+/// as the manual matters because a provider registers its descriptions from its
+/// contracts, always, while CAPABILITY.md is hand-written and usually absent —
+/// answering only from the manual left this builtin with nothing to return for
+/// most providers.
+fn render_provider_doc(provider: &atlas_pb::CapabilityProvider) -> String {
+    let mut doc = String::new();
+    let manual = provider.capability_md.trim();
+    if !manual.is_empty() {
+        doc.push_str(manual);
+        doc.push('\n');
+    }
+    for cap in &provider.capabilities {
+        let description = cap.description.trim();
+        if description.is_empty() {
+            continue;
+        }
+        doc.push_str(&format!("\n## {}\n\n{}\n", cap.contract_id, description));
+    }
+    doc
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -452,6 +481,36 @@ fn format_command_output(out: std::process::Output) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_without_a_manual_still_documents_its_capabilities() {
+        // Most providers never hand-write a CAPABILITY.md, but every provider
+        // registers its capabilities' descriptions. Answering only from the
+        // manual left this builtin with nothing to return for those providers,
+        // which is exactly when the planner asks.
+        let provider = atlas_pb::CapabilityProvider {
+            id: "memgraph".to_string(),
+            capability_md: String::new(),
+            capabilities: vec![atlas_pb::Capability {
+                contract_id: "robonix/service/memory/hybrid_search".to_string(),
+                description: "Search memory.\n\nRequest JSON: {...}".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let doc = render_provider_doc(&provider);
+        assert!(doc.contains("robonix/service/memory/hybrid_search"));
+        assert!(doc.contains("Request JSON: {...}"));
+    }
+
+    #[test]
+    fn a_provider_with_neither_manual_nor_descriptions_documents_nothing() {
+        let provider = atlas_pb::CapabilityProvider {
+            id: "bare".to_string(),
+            ..Default::default()
+        };
+        assert!(render_provider_doc(&provider).is_empty());
+    }
 
     #[test]
     fn path_traversal_dotdot_is_rejected() {

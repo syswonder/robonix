@@ -13,7 +13,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
     ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
-    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat,
+    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -34,9 +34,32 @@ fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> b
         return false;
     }
     let body = body.to_ascii_lowercase();
-    ["stream_options", "include_usage", "prompt_cache_key"]
-        .iter()
-        .any(|field| body.contains(field))
+    [
+        "stream_options",
+        "include_usage",
+        "prompt_cache_key",
+        "response_format",
+        "json_schema",
+    ]
+    .iter()
+    .any(|field| body.contains(field))
+}
+
+/// Downgrade a `json_schema` response format to `json_object`.
+///
+/// A provider that does not implement schema-guided output still implements
+/// `json_object`, and the planner's reply must stay parseable as JSON: dropping
+/// the format outright would let a rejection turn every later reply into prose.
+/// Returns whether anything changed.
+fn downgrade_response_format(body: &mut Value) -> bool {
+    let Some(format) = body.get_mut("response_format") else {
+        return false;
+    };
+    if format.get("type").and_then(Value::as_str) != Some("json_schema") {
+        return false;
+    }
+    *format = serde_json::json!({"type": "json_object"});
+    true
 }
 
 fn open_retry_delay(
@@ -229,6 +252,97 @@ pub struct VlmClient {
     model: String,
 }
 
+/// What the caller wants back from one completion.
+///
+/// A request for `JsonObject` is not free: the OpenAI chat API rejects it
+/// unless the messages themselves mention JSON, so a prompt that asks for
+/// prose must not carry it. Making the shape explicit per call keeps a
+/// summarisation request from inheriting the planner's structured-output mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReplyShape {
+    /// Free text. The caller reads the content as prose.
+    Text,
+    /// The RTDL envelope, described to the provider as a JSON schema so the
+    /// shape is carried by the request rather than only by prose in the prompt.
+    RtdlEnvelope,
+}
+
+/// The RTDL envelope as a JSON schema.
+///
+/// Deliberately not `strict`. Strict structured output requires every object in
+/// the schema to close with `additionalProperties: false`, and an RTDL `do`
+/// node's `args` is open by construction: its keys come from the called
+/// capability's own contract, which differs per capability. Closing it would
+/// mean flattening `args` into a JSON string, which is the opaque-blob shape
+/// that costs a contract its type surface. The schema therefore guides the
+/// model; admission stays with Pilot's own validator, which resolves every call
+/// against the catalog before a plan is dispatched.
+fn rtdl_envelope_schema() -> Value {
+    let node = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["sequence", "parallel", "do"]},
+            "op_id": {"type": "integer"},
+            "description": {"type": "string"},
+            "cap": {"type": "string"},
+            "args": {"type": "object"},
+            "children": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        },
+        "required": ["op", "op_id", "description"],
+    });
+    // A plan-control meta op replaces the whole tree rather than sitting inside
+    // one, and carries none of a node's fields. Leaving it out of the schema
+    // would tell the model that cancelling a running plan is malformed.
+    let meta = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["cancel_plan", "cancel_all", "stop_plan_at"]},
+            "plan_id": {"type": "string"},
+            "target_op_id": {"type": "string"},
+            "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
+            "wait_ms": {"type": "integer"},
+        },
+        "required": ["op"],
+    });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "rtdl_description": {"type": "string"},
+            "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
+            "task_update": {
+                "type": ["object", "null"],
+                "properties": {
+                    "goal": {"type": "string"},
+                    "success_criterion": {"type": "string"},
+                    "status": {"type": "string", "enum": ["in_progress", "done"]},
+                },
+            },
+        },
+        "required": ["content", "rtdl_description", "rtdl", "task_update"],
+        "$defs": {"node": node, "meta": meta},
+    })
+}
+
+/// The `response_format` a reply shape needs, if any.
+///
+/// Prose carries none: the chat API rejects `json_object` unless the messages
+/// themselves mention JSON, so attaching it to a summarisation prompt turns
+/// every such request into a 400.
+fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
+    match shape {
+        ReplyShape::Text => None,
+        ReplyShape::RtdlEnvelope => Some(ResponseFormat::JsonSchema {
+            json_schema: ResponseFormatJsonSchema {
+                description: None,
+                name: "rtdl_envelope".to_string(),
+                schema: Some(rtdl_envelope_schema()),
+                strict: Some(false),
+            },
+        }),
+    }
+}
+
 impl VlmClient {
     pub fn new(cfg: &VlmConfig) -> Self {
         Self {
@@ -249,6 +363,7 @@ impl VlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         prompt_cache_key: Option<&str>,
+        reply_shape: ReplyShape,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<VlmStreamItem>> + Send>>> {
         let oai_messages = build_openai_messages(messages)?;
         let oai_tools = build_openai_tools(tools)?;
@@ -261,8 +376,10 @@ impl VlmClient {
             .stream_options(ChatCompletionStreamOptions {
                 include_usage: Some(true),
                 include_obfuscation: None,
-            })
-            .response_format(ResponseFormat::JsonObject);
+            });
+        if let Some(format) = response_format_for(reply_shape) {
+            req_builder.response_format(format);
+        }
         if !oai_tools.is_empty() {
             req_builder.tools(oai_tools);
         }
@@ -300,17 +417,36 @@ impl VlmClient {
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
             if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
-                let removed = request_body.as_object_mut().is_some_and(|body| {
-                    let stream_options = body.remove("stream_options").is_some();
-                    let prompt_cache_key = body.remove("prompt_cache_key").is_some();
-                    stream_options || prompt_cache_key
-                });
-                if !removed {
+                let downgraded = downgrade_response_format(&mut request_body);
+                let mut dropped: Vec<&str> = Vec::new();
+                if let Some(body) = request_body.as_object_mut() {
+                    for field in ["stream_options", "prompt_cache_key"] {
+                        if body.remove(field).is_some() {
+                            dropped.push(field);
+                        }
+                    }
+                }
+                if dropped.is_empty() && !downgraded {
                     bail!("open VLM chat stream: HTTP {status}: {text}");
                 }
-                robonix_scribe::warn!(
-                    "[pilot/vlm] upstream rejected optional cache/usage fields with HTTP {status}; retrying without them"
-                );
+                // Name what changed rather than "retrying without them": a
+                // downgrade is not a removal, and a run that later reads as
+                // schema-guided needs this line to say it was not.
+                if downgraded {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] upstream rejected response_format json_schema with HTTP \
+                         {status}; downgrading to json_object for the rest of this stream. \
+                         RTDL shape is no longer schema-guided; admission still runs in Pilot. \
+                         Upstream said: {text}"
+                    );
+                }
+                if !dropped.is_empty() {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] upstream rejected optional request fields with HTTP {status}; \
+                         retrying without {}",
+                        dropped.join(", ")
+                    );
+                }
                 compatibility_fallback_attempted = true;
                 continue;
             }
@@ -415,8 +551,9 @@ impl VlmClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccumulatedToolCall, MAX_OPEN_RETRIES, VlmStreamItem, VlmUsage, open_retry_delay,
-        parse_usage, process_stream_line, rejects_optional_request_fields,
+        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
+        downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
+        rejects_optional_request_fields, response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -465,6 +602,61 @@ mod tests {
                 cached_tokens: Some(900),
             })
         );
+    }
+
+    #[test]
+    fn prose_replies_carry_no_response_format() {
+        // The chat API rejects json_object unless the messages themselves
+        // mention JSON, so the compaction prompt, which asks for prose, must
+        // not carry it.
+        assert!(response_format_for(ReplyShape::Text).is_none());
+    }
+
+    #[test]
+    fn a_planning_reply_carries_the_rtdl_schema() {
+        let Some(ResponseFormat::JsonSchema { json_schema }) =
+            response_format_for(ReplyShape::RtdlEnvelope)
+        else {
+            panic!("planning replies must carry a schema");
+        };
+        assert_eq!(json_schema.name, "rtdl_envelope");
+        // Strict would require every object to close, and an RTDL `do` node's
+        // `args` is open by construction: its keys come from the called
+        // capability's contract.
+        assert_eq!(json_schema.strict, Some(false));
+        let schema = json_schema.schema.expect("schema body");
+        let node = &schema["$defs"]["node"];
+        assert_eq!(node["properties"]["op"]["enum"][0], "sequence");
+        assert_eq!(
+            node["properties"]["children"]["items"]["$ref"],
+            "#/$defs/node"
+        );
+        // A plan-control meta op replaces the whole tree and carries none of a
+        // node's fields; leaving it out would describe cancelling a running
+        // plan as malformed.
+        let meta = &schema["$defs"]["meta"];
+        assert_eq!(meta["properties"]["op"]["enum"][0], "cancel_plan");
+        let alternatives = schema["properties"]["rtdl"]["anyOf"]
+            .as_array()
+            .expect("rtdl accepts a node or a meta op");
+        assert_eq!(alternatives.len(), 2);
+    }
+
+    #[test]
+    fn a_provider_without_schema_support_falls_back_to_a_json_object() {
+        // Dropping the format outright would let one rejection turn every later
+        // planning reply into prose.
+        assert!(rejects_optional_request_fields(
+            reqwest::StatusCode::BAD_REQUEST,
+            "Invalid schema for response_format 'rtdl_envelope'"
+        ));
+        let mut body = serde_json::json!({
+            "response_format": {"type": "json_schema", "json_schema": {"name": "rtdl_envelope"}}
+        });
+        assert!(downgrade_response_format(&mut body));
+        assert_eq!(body["response_format"]["type"], "json_object");
+        // Already downgraded, or never schema-shaped: nothing to do.
+        assert!(!downgrade_response_format(&mut body));
     }
 
     #[test]

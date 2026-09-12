@@ -16,7 +16,7 @@ use crate::pb::pilot::{
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
-use crate::vlm::{Message, VlmClient, VlmStreamItem};
+use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
@@ -148,7 +148,27 @@ fn assemble_planning_messages(
     if let Some(correction) = correction {
         messages.push(Message::user(correction));
     }
+    close_trailing_assistant(&mut messages);
     messages
+}
+
+/// The narration a planning round records lands in the history as an
+/// `assistant` message, so a round that narrates without calling a tool leaves
+/// the next request ending on that message. Some providers read a trailing
+/// assistant message as a prefill to continue and reject it outright, which
+/// aborts the task rather than degrading it. Close the turn with an explicit
+/// instruction to continue: this keeps the request valid everywhere and says
+/// what the next round is actually for.
+fn close_trailing_assistant(messages: &mut Vec<Message>) {
+    let trailing_assistant = messages
+        .last()
+        .is_some_and(|message| message.role == "assistant");
+    if trailing_assistant {
+        messages.push(Message::user(
+            "Continue from the state above. Take the next action, \
+             or give your final answer if the task is complete.",
+        ));
+    }
 }
 
 fn max_tool_rounds() -> usize {
@@ -874,7 +894,10 @@ async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
 /// Run one non-streaming VLM completion and return the full text (drains the
 /// stream). Returns `None` on any stream error.
 async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<String> {
-    let mut stream = vlm.chat_stream(messages, &[], None).await.ok()?;
+    let mut stream = vlm
+        .chat_stream(messages, &[], None, ReplyShape::Text)
+        .await
+        .ok()?;
     let mut text = String::new();
     while let Some(item) = stream.next().await {
         if let Ok(VlmStreamItem::TextDelta(d)) = item {
@@ -1004,16 +1027,23 @@ pub async fn run_turn(
         return Ok(());
     }
 
-    // 1. Build stable system-prompt sections once per turn.
-    let standing_prompt = build_system_prompt(load_agent_soul().as_deref());
-
-    // Pilot's capability catalog comes straight from atlas (filtered to
+    // 1. Pilot's capability catalog comes straight from atlas (filtered to
     // MCP transport — only those are LLM-callable). McpParams ride along
     // in Capability.params, no Connect needed.
     let _ = consumer_id; // currently unused; kept on the signature for future channel-tracked discovery
     let initial_caps = discovery::discover(atlas)
         .await
         .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
+
+    // Build the stable system-prompt sections once per turn. Discovery runs
+    // first because the standing prompt covers only the capability families
+    // this deployment actually registered.
+    let standing_prompt = build_system_prompt(
+        load_agent_soul().as_deref(),
+        PromptScope::from_contract_ids(
+            initial_caps.iter().map(|(_, cap)| cap.contract_id.as_str()),
+        ),
+    );
     // Pilot binds to the canonical contract_id, not the LLM-facing tool
     // name: the latter is just the contract_id leaf and a provider could
     // rename it freely. contract_id is the stable identity.
@@ -1424,7 +1454,12 @@ pub async fn run_turn(
             let (content, raw_tool_calls) = loop {
                 let mut stream = match tokio::time::timeout(
                     vlm_idle_timeout(),
-                    vlm.chat_stream(&messages, &[], Some(&prompt_cache_key)),
+                    vlm.chat_stream(
+                        &messages,
+                        &[],
+                        Some(&prompt_cache_key),
+                        ReplyShape::RtdlEnvelope,
+                    ),
                 )
                 .await
                 {
@@ -2054,6 +2089,30 @@ fn capability_prompt_fingerprint(display_caps: &[DisplayCapability<'_>]) -> u64 
 /// Render the complete capability catalog in a compact, deterministic shape.
 /// Names remain on their own line for the CI fake VLM and descriptions are
 /// JSON-escaped so embedded whitespace cannot inflate or corrupt the catalog.
+/// Longest capability description the catalogue prints inline.
+///
+/// A description past this is a manual, not a summary. The catalogue keeps its
+/// opening paragraph and points the model at `read_capability_doc` for the
+/// rest, so one verbose provider cannot tax every planning call for the whole
+/// system: the catalogue ships on every request, the manual only when the model
+/// decides it needs that provider.
+const MAX_INLINE_DESCRIPTION_CHARS: usize = 300;
+
+/// Opening paragraph of `description`, bounded by `MAX_INLINE_DESCRIPTION_CHARS`.
+///
+/// Returns the summary and whether anything was left behind, so the caller can
+/// tell the model where to read the remainder. Truncation is on a character
+/// boundary, never a byte offset, so multi-byte text survives intact.
+fn summarize_description(description: &str) -> (String, bool) {
+    let full = description.trim();
+    let first = full.split("\n\n").next().unwrap_or(full).trim();
+    if first.chars().count() <= MAX_INLINE_DESCRIPTION_CHARS {
+        return (first.to_string(), first.len() < full.len());
+    }
+    let cut: String = first.chars().take(MAX_INLINE_DESCRIPTION_CHARS).collect();
+    (cut, true)
+}
+
 fn render_capability_prompt(display_caps: &[DisplayCapability<'_>]) -> String {
     let mut prompt = String::from("\n## Available capabilities\n\n");
     for cap in display_caps {
@@ -2065,12 +2124,19 @@ fn render_capability_prompt(display_caps: &[DisplayCapability<'_>]) -> String {
         };
         let schema: serde_json::Value =
             serde_json::from_str(&mcp.input_schema_json).unwrap_or(serde_json::Value::Null);
-        let description =
-            serde_json::to_string(c.description.trim()).unwrap_or_else(|_| "\"\"".to_string());
+        let (summary, truncated) = summarize_description(&c.description);
+        let description = serde_json::to_string(&summary).unwrap_or_else(|_| "\"\"".to_string());
         prompt.push_str(&format!(
             "- capability_name: {}\n  description: {}\n  args_schema: {}\n",
             cap.display_name, description, schema
         ));
+        if truncated {
+            prompt.push_str(&format!(
+                "  more: call `read_capability_doc` with provider_id `{}` for this \
+                 capability's full description\n",
+                cap.provider_id
+            ));
+        }
     }
     prompt
 }
@@ -2889,7 +2955,37 @@ fn load_agent_soul() -> Option<String> {
     None
 }
 
-fn build_system_prompt(soul: Option<&str>) -> String {
+/// Which optional capability families the running deployment registered.
+///
+/// Prompt sections that instruct the model about a family are emitted only when
+/// that family is present. A prompt documenting capabilities the body does not
+/// have spends context on every planning call and misleads the planner about
+/// what it can do.
+#[derive(Clone, Copy, Default)]
+struct PromptScope {
+    scene: bool,
+    memory: bool,
+    chassis: bool,
+}
+
+impl PromptScope {
+    /// Derive the scope from the contract ids atlas reported for this turn.
+    ///
+    /// Matching is on the contract id rather than the provider name because the
+    /// contract is the stable identity: a provider may be renamed freely, and
+    /// several providers may serve the same family.
+    fn from_contract_ids<'a>(contract_ids: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut scope = Self::default();
+        for id in contract_ids {
+            scope.scene |= id.contains("/scene/");
+            scope.memory |= id.contains("/memory/");
+            scope.chassis |= id.contains("/chassis/");
+        }
+        scope
+    }
+}
+
+fn build_system_prompt(soul: Option<&str>, scope: PromptScope) -> String {
     let mut p = String::new();
     if let Some(s) = soul {
         let t = s.trim();
@@ -2915,8 +3011,20 @@ by planning capability calls available to you.
   RTDL. Emitting one single-node tree per round (ReAct-style drip) is wrong
   UNLESS the next step genuinely needs to see the previous step's result.
 - Do NOT claim missing capabilities unless verified from the current capability list/results.
+",
+    );
+    // Long-term memory is a deployment choice, not a given: a body without memory
+    // capabilities should not be told it has them.
+    if scope.memory {
+        p.push_str(
+            "\
   - If `memory_search` / `memory_save` / `memory_compact` capabilities are available,
     treat long-term memory as available via those capabilities.
+",
+        );
+    }
+    p.push_str(
+        "\
 - Prefer structured output; report capability results concisely.
 - Scope every result to the `plan_id` and independent RTDL tree named in its
   Executor feedback. If a capability fails, times out, returns success=false,
@@ -2933,6 +3041,13 @@ by planning capability calls available to you.
   Use `on_complete` for 'after step X' and `on_enter` for 'before step X'.
   Bind X itself; never substitute X's predecessor or successor.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
+",
+    );
+    // Scene resolution rules describe capabilities that only some deployments
+    // register; on a body without Scene they name tools that do not exist.
+    if scope.scene {
+        p.push_str(
+            "\
 - For semantic navigation, resolve names through Scene before calling navigation:
   - call Scene `list_regions` first to discover the stable ID for a named room
     or region, and call `list_objects` for a physical object; pass that exact
@@ -2950,6 +3065,11 @@ by planning capability calls available to you.
   A transport/action status of `SUCCEEDED` does not by itself prove that the
   requested movement occurred: if the submitted pose was already the current
   pose, state that the robot was already there instead of claiming it moved.
+",
+        );
+    }
+    p.push_str(
+        "\
 - Some later messages may be labelled `Executor feedback for the current task`.
   Treat those as results of capability calls you already planned, not as new
   user requests.
@@ -2989,9 +3109,22 @@ Concretely:
   literally every action. Re-observe and re-plan when the NEXT step depends on
   what you'd see (e.g. you must confirm an object moved before grasping it), not
   as a reflex after each call.
+",
+    );
+    // Chassis burst physics applies to velocity-controlled bodies. On a body whose
+    // movement capability is a single discrete navigation action it is not merely
+    // unused, it is wrong: one call does finish the move.
+    if scope.chassis {
+        p.push_str(
+            "\
 - A single short chassis movement burst typically rotates ~0.4–0.8 rad
   (≈ 25–45°) or translates ~0.1–0.2 m. To turn 180° you need MULTIPLE
   bursts; do not assume one call finishes the rotation.
+",
+        );
+    }
+    p.push_str(
+        "\
 - Only mark `status: \"done\"` once the criterion is met OR you've exhausted
   reasonable attempts and need to report a blocker. 'Done.' with no
   verification is wrong — verify first.
@@ -3009,19 +3142,22 @@ Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO,
-        RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep,
-        append_steer, apply_task_update, build_capability_target_map, build_display_capabilities,
-        build_executor_active_block, build_forest_block, compact_tool_result,
-        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
-        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION,
+        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptScope, RTDL_DO, RTDL_PARALLEL,
+        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer,
+        apply_task_update, build_capability_target_map, build_display_capabilities,
+        build_executor_active_block, build_forest_block, build_system_prompt,
+        close_trailing_assistant, compact_tool_result, configured_vlm_idle_timeout,
+        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        is_legacy_plan_control_contract, mixes_control_inspection_with_action, parse_meta_plan_op,
+        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
-        task_is_session_end,
+        summarize_description, task_is_session_end,
     };
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
+    use crate::vlm::Message;
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -3166,6 +3302,68 @@ mod tests {
         assert!(!crate::history::is_image_output(&original));
         let compact = compact_tool_result("camera/snapshot", &original, 4096);
         assert!(compact.chars().count() <= 4096);
+    }
+
+    #[test]
+    fn a_body_without_scene_or_chassis_is_told_about_neither() {
+        // These sections name tools that do not exist on such a body, and the
+        // chassis burst figures are wrong for one whose only movement
+        // capability is a single discrete navigation action.
+        let scope = PromptScope::from_contract_ids([
+            "robonix/skill/embodiedbench/habitat_step",
+            "robonix/system/executor/builtin_read_capability_doc",
+        ]);
+        let prompt = build_system_prompt(None, scope);
+        assert!(!prompt.contains("list_regions"));
+        assert!(!prompt.contains("chassis movement burst"));
+        assert!(!prompt.contains("memory_search"));
+        // The core planning rules survive the trim.
+        assert!(prompt.contains("COMPOSE multi-step RTDL trees"));
+    }
+
+    #[test]
+    fn a_body_with_scene_memory_and_a_chassis_keeps_all_three_sections() {
+        let scope = PromptScope::from_contract_ids([
+            "robonix/service/scene/list_regions",
+            "robonix/service/memory/search",
+            "robonix/primitive/chassis/twist_in",
+        ]);
+        let prompt = build_system_prompt(None, scope);
+        assert!(prompt.contains("list_regions"));
+        assert!(prompt.contains("chassis movement burst"));
+        assert!(prompt.contains("memory_search"));
+    }
+
+    #[test]
+    fn a_one_line_capability_description_reaches_the_catalog_whole() {
+        let description = "Take one RGB snapshot from the head camera.";
+        let (summary, truncated) = summarize_description(description);
+        assert_eq!(summary, description);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_capability_manual_is_summarized_to_its_opening_paragraph() {
+        // A provider that writes its request/response manual into `description`
+        // would otherwise ship that manual on every planning call, for every
+        // caller, whether or not anyone uses the capability.
+        let description = format!(
+            "Search memory using a 3-stage pipeline.\n\n\
+             Request JSON schema:\n{}\n\nResponse JSON:\n{}",
+            "x".repeat(1200),
+            "y".repeat(1200)
+        );
+        let (summary, truncated) = summarize_description(&description);
+        assert_eq!(summary, "Search memory using a 3-stage pipeline.");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn an_overlong_opening_paragraph_is_cut_on_a_character_boundary() {
+        let description = "。".repeat(MAX_INLINE_DESCRIPTION_CHARS + 50);
+        let (summary, truncated) = summarize_description(&description);
+        assert_eq!(summary.chars().count(), MAX_INLINE_DESCRIPTION_CHARS);
+        assert!(truncated);
     }
 
     #[test]
@@ -4025,5 +4223,29 @@ mod tests {
         let rtdl = json!({ "op": "race", "children": [] });
         let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
         assert!(err.to_string().contains("unknown operator"));
+    }
+
+    #[test]
+    fn trailing_assistant_message_is_closed_with_a_user_turn() {
+        let mut messages = vec![
+            Message::system("s"),
+            Message::user("do the task"),
+            Message::assistant("thinking about it"),
+        ];
+        close_trailing_assistant(&mut messages);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.last().unwrap().role, "user");
+    }
+
+    #[test]
+    fn a_request_already_ending_in_user_is_left_alone() {
+        let mut messages = vec![
+            Message::system("s"),
+            Message::assistant("thinking about it"),
+            Message::user("keep going"),
+        ];
+        let before = messages.len();
+        close_trailing_assistant(&mut messages);
+        assert_eq!(messages.len(), before);
     }
 }
