@@ -148,7 +148,27 @@ fn assemble_planning_messages(
     if let Some(correction) = correction {
         messages.push(Message::user(correction));
     }
+    close_trailing_assistant(&mut messages);
     messages
+}
+
+/// The narration a planning round records lands in the history as an
+/// `assistant` message, so a round that narrates without calling a tool leaves
+/// the next request ending on that message. Some providers read a trailing
+/// assistant message as a prefill to continue and reject it outright, which
+/// aborts the task rather than degrading it. Close the turn with an explicit
+/// instruction to continue: this keeps the request valid everywhere and says
+/// what the next round is actually for.
+fn close_trailing_assistant(messages: &mut Vec<Message>) {
+    let trailing_assistant = messages
+        .last()
+        .is_some_and(|message| message.role == "assistant");
+    if trailing_assistant {
+        messages.push(Message::user(
+            "Continue from the state above. Take the next action, \
+             or give your final answer if the task is complete.",
+        ));
+    }
 }
 
 fn max_tool_rounds() -> usize {
@@ -3012,16 +3032,17 @@ mod tests {
         CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO,
         RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep,
         append_steer, apply_task_update, build_capability_target_map, build_display_capabilities,
-        build_executor_active_block, build_forest_block, compact_tool_result,
-        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
-        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
-        should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
-        task_is_session_end,
+        build_executor_active_block, build_forest_block, close_trailing_assistant,
+        compact_tool_result, configured_vlm_idle_timeout, duplicate_in_flight_signature,
+        expand_rtdl_to_plan, extract_json_object, feed_results_into_history, format_plan_summary,
+        invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
+        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
+        parse_task_update, plan_call_signatures, record_dispatched_plan, rtdl_node_kind_name,
+        rtdl_recovery_final_text, rtdl_state_name, should_replan_after_plan_done,
+        skip_memory_prefetch, start_or_resume_task, task_is_session_end,
     };
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
+    use crate::vlm::Message;
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -4025,5 +4046,29 @@ mod tests {
         let rtdl = json!({ "op": "race", "children": [] });
         let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
         assert!(err.to_string().contains("unknown operator"));
+    }
+
+    #[test]
+    fn trailing_assistant_message_is_closed_with_a_user_turn() {
+        let mut messages = vec![
+            Message::system("s"),
+            Message::user("do the task"),
+            Message::assistant("thinking about it"),
+        ];
+        close_trailing_assistant(&mut messages);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.last().unwrap().role, "user");
+    }
+
+    #[test]
+    fn a_request_already_ending_in_user_is_left_alone() {
+        let mut messages = vec![
+            Message::system("s"),
+            Message::assistant("thinking about it"),
+            Message::user("keep going"),
+        ];
+        let before = messages.len();
+        close_trailing_assistant(&mut messages);
+        assert_eq!(messages.len(), before);
     }
 }
