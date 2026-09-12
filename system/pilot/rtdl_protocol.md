@@ -88,20 +88,17 @@ owned by that plan.
 
 ### Normal RTDL tree
 
-RTDL nodes are JSON objects with an `op` string. EVERY node — whatever its
-`op` — also carries:
+The response schema carries a node's shape. What a schema cannot carry:
+
 - `op_id`: always write `0`. The system assigns the real, globally-unique id;
   any value you put here is ignored.
 - `description`: a short human-readable phrase naming THIS node's own intent
   (e.g. `"drive to the kitchen"`, `"snapshot the door"`). One per node, not one
   per tree. Required and non-empty.
-
-Normal RTDL supports only these three `op` values:
-- `sequence`: fields `op`, `op_id`, `description`, `children`; `children` is an array of RTDL nodes executed in order.
-- `parallel`: fields `op`, `op_id`, `description`, `children`; `children` is an array of RTDL nodes executed concurrently. Executor waits for all children.
-- `do`: fields `op`, `op_id`, `description`, `cap`, and `args`.
-  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry. That name is provider-qualified and contains a dot (e.g. `front_camera.camera_snapshot`); copy it verbatim, including the provider prefix.
-  - `args` MUST be a JSON object whose keys and value shapes come from that capability's `args_schema`.
+- `sequence` runs its children in order. `parallel` runs them concurrently and
+  Executor waits for all of them. `do` calls one capability.
+- `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry. That name is provider-qualified and contains a dot (e.g. `front_camera.camera_snapshot`); copy it verbatim, including the provider prefix.
+- `args` MUST be a JSON object whose keys and value shapes come from that capability's `args_schema`.
 
 Each `rtdl` tree you emit is dispatched as its own plan and runs concurrently
 with trees you dispatched on earlier turns — together they form a forest. Trees
@@ -188,22 +185,6 @@ Rules:
     destination. `SUCCEEDED` for a pose equal to the current pose is a
     zero-distance no-op; do not describe it as movement to a different place.
 
-Example — dispatch one tree, keep the existing goal (`task_update` null):
-
-{
-  "content": "I will inspect the current scene.",
-  "rtdl_description": "inspect scene",
-  "rtdl": {
-    "op": "sequence",
-    "op_id": 0,
-    "description": "inspect the current scene",
-    "children": [
-      { "op": "do", "op_id": 0, "description": "take a camera snapshot", "cap": "front_camera.camera_snapshot", "args": {} }
-    ]
-  },
-  "task_update": null
-}
-
 Example — accept a new goal and dispatch independent work in one `parallel`
 tree (the steps are known up front, so do not split them across rounds):
 
@@ -268,19 +249,3 @@ Example — overall task finished (no new tree, mark done):
   }
 }
 
-Example — root `parallel` (Executor runs every child concurrently and waits for all to finish):
-
-{
-  "content": "I'll grab a camera frame and query battery status in parallel.",
-  "rtdl_description": "snapshot + battery check",
-  "rtdl": {
-    "op": "parallel",
-    "op_id": 0,
-    "description": "snapshot and battery check at once",
-    "children": [
-      { "op": "do", "op_id": 0, "description": "grab a camera frame", "cap": "front_camera.camera_snapshot", "args": {} },
-      { "op": "do", "op_id": 0, "description": "read the battery status", "cap": "battery.battery_status", "args": {} }
-    ]
-  },
-  "task_update": null
-}

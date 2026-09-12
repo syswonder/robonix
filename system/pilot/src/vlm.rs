@@ -290,12 +290,26 @@ fn rtdl_envelope_schema() -> Value {
         },
         "required": ["op", "op_id", "description"],
     });
+    // A plan-control meta op replaces the whole tree rather than sitting inside
+    // one, and carries none of a node's fields. Leaving it out of the schema
+    // would tell the model that cancelling a running plan is malformed.
+    let meta = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["cancel_plan", "cancel_all", "stop_plan_at"]},
+            "plan_id": {"type": "string"},
+            "target_op_id": {"type": "string"},
+            "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
+            "wait_ms": {"type": "integer"},
+        },
+        "required": ["op"],
+    });
     serde_json::json!({
         "type": "object",
         "properties": {
             "content": {"type": "string"},
             "rtdl_description": {"type": "string"},
-            "rtdl": {"$ref": "#/$defs/node"},
+            "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
             "task_update": {
                 "type": ["object", "null"],
                 "properties": {
@@ -306,7 +320,7 @@ fn rtdl_envelope_schema() -> Value {
             },
         },
         "required": ["content", "rtdl_description", "rtdl", "task_update"],
-        "$defs": {"node": node},
+        "$defs": {"node": node, "meta": meta},
     })
 }
 
@@ -404,17 +418,35 @@ impl VlmClient {
             let text = response.text().await.unwrap_or_default();
             if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
                 let downgraded = downgrade_response_format(&mut request_body);
-                let removed = request_body.as_object_mut().is_some_and(|body| {
-                    let stream_options = body.remove("stream_options").is_some();
-                    let prompt_cache_key = body.remove("prompt_cache_key").is_some();
-                    stream_options || prompt_cache_key
-                });
-                if !removed && !downgraded {
+                let mut dropped: Vec<&str> = Vec::new();
+                if let Some(body) = request_body.as_object_mut() {
+                    for field in ["stream_options", "prompt_cache_key"] {
+                        if body.remove(field).is_some() {
+                            dropped.push(field);
+                        }
+                    }
+                }
+                if dropped.is_empty() && !downgraded {
                     bail!("open VLM chat stream: HTTP {status}: {text}");
                 }
-                robonix_scribe::warn!(
-                    "[pilot/vlm] upstream rejected optional request fields with HTTP {status}; retrying without them"
-                );
+                // Name what changed rather than "retrying without them": a
+                // downgrade is not a removal, and a run that later reads as
+                // schema-guided needs this line to say it was not.
+                if downgraded {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] upstream rejected response_format json_schema with HTTP \
+                         {status}; downgrading to json_object for the rest of this stream. \
+                         RTDL shape is no longer schema-guided; admission still runs in Pilot. \
+                         Upstream said: {text}"
+                    );
+                }
+                if !dropped.is_empty() {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] upstream rejected optional request fields with HTTP {status}; \
+                         retrying without {}",
+                        dropped.join(", ")
+                    );
+                }
                 compatibility_fallback_attempted = true;
                 continue;
             }
@@ -599,6 +631,15 @@ mod tests {
             node["properties"]["children"]["items"]["$ref"],
             "#/$defs/node"
         );
+        // A plan-control meta op replaces the whole tree and carries none of a
+        // node's fields; leaving it out would describe cancelling a running
+        // plan as malformed.
+        let meta = &schema["$defs"]["meta"];
+        assert_eq!(meta["properties"]["op"]["enum"][0], "cancel_plan");
+        let alternatives = schema["properties"]["rtdl"]["anyOf"]
+            .as_array()
+            .expect("rtdl accepts a node or a meta op");
+        assert_eq!(alternatives.len(), 2);
     }
 
     #[test]
