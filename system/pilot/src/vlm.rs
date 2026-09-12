@@ -229,6 +229,32 @@ pub struct VlmClient {
     model: String,
 }
 
+/// What the caller wants back from one completion.
+///
+/// A request for `JsonObject` is not free: the OpenAI chat API rejects it
+/// unless the messages themselves mention JSON, so a prompt that asks for
+/// prose must not carry it. Making the shape explicit per call keeps a
+/// summarisation request from inheriting the planner's structured-output mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReplyShape {
+    /// Free text. The caller reads the content as prose.
+    Text,
+    /// A single JSON object. Only valid when the messages ask for JSON.
+    JsonObject,
+}
+
+/// The `response_format` a reply shape needs, if any.
+///
+/// Prose carries none: the chat API rejects `json_object` unless the messages
+/// themselves mention JSON, so attaching it to a summarisation prompt turns
+/// every such request into a 400.
+fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
+    match shape {
+        ReplyShape::Text => None,
+        ReplyShape::JsonObject => Some(ResponseFormat::JsonObject),
+    }
+}
+
 impl VlmClient {
     pub fn new(cfg: &VlmConfig) -> Self {
         Self {
@@ -249,6 +275,7 @@ impl VlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         prompt_cache_key: Option<&str>,
+        reply_shape: ReplyShape,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<VlmStreamItem>> + Send>>> {
         let oai_messages = build_openai_messages(messages)?;
         let oai_tools = build_openai_tools(tools)?;
@@ -261,8 +288,10 @@ impl VlmClient {
             .stream_options(ChatCompletionStreamOptions {
                 include_usage: Some(true),
                 include_obfuscation: None,
-            })
-            .response_format(ResponseFormat::JsonObject);
+            });
+        if let Some(format) = response_format_for(reply_shape) {
+            req_builder.response_format(format);
+        }
         if !oai_tools.is_empty() {
             req_builder.tools(oai_tools);
         }
@@ -415,8 +444,9 @@ impl VlmClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccumulatedToolCall, MAX_OPEN_RETRIES, VlmStreamItem, VlmUsage, open_retry_delay,
-        parse_usage, process_stream_line, rejects_optional_request_fields,
+        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
+        open_retry_delay, parse_usage, process_stream_line, rejects_optional_request_fields,
+        response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -465,6 +495,22 @@ mod tests {
                 cached_tokens: Some(900),
             })
         );
+    }
+
+    #[test]
+    fn prose_replies_carry_no_response_format() {
+        // The chat API rejects json_object unless the messages themselves
+        // mention JSON, so the compaction prompt, which asks for prose, must
+        // not carry it.
+        assert!(response_format_for(ReplyShape::Text).is_none());
+    }
+
+    #[test]
+    fn json_replies_request_a_json_object() {
+        assert!(matches!(
+            response_format_for(ReplyShape::JsonObject),
+            Some(ResponseFormat::JsonObject)
+        ));
     }
 
     #[test]

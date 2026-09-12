@@ -16,7 +16,7 @@ use crate::pb::pilot::{
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
-use crate::vlm::{Message, VlmClient, VlmStreamItem};
+use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
@@ -894,7 +894,10 @@ async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
 /// Run one non-streaming VLM completion and return the full text (drains the
 /// stream). Returns `None` on any stream error.
 async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<String> {
-    let mut stream = vlm.chat_stream(messages, &[], None).await.ok()?;
+    let mut stream = vlm
+        .chat_stream(messages, &[], None, ReplyShape::Text)
+        .await
+        .ok()?;
     let mut text = String::new();
     while let Some(item) = stream.next().await {
         if let Ok(VlmStreamItem::TextDelta(d)) = item {
@@ -1444,7 +1447,12 @@ pub async fn run_turn(
             let (content, raw_tool_calls) = loop {
                 let mut stream = match tokio::time::timeout(
                     vlm_idle_timeout(),
-                    vlm.chat_stream(&messages, &[], Some(&prompt_cache_key)),
+                    vlm.chat_stream(
+                        &messages,
+                        &[],
+                        Some(&prompt_cache_key),
+                        ReplyShape::JsonObject,
+                    ),
                 )
                 .await
                 {
