@@ -27,7 +27,9 @@ import time
 from typing import Any, Optional
 
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import (HTMLResponse, JSONResponse,
+                                 PlainTextResponse, Response,
+                                 StreamingResponse)
 from starlette.routing import Route
 
 from robonix_api import ATLAS
@@ -700,23 +702,30 @@ def _nav(active: str) -> str:
 
 
 _SHELL_CSS = """
-  /* Light throughout. The map pages are read next to a physical robot and a
-     printed floor plan, and a dark page makes the occupancy grid look like a
-     lit surface rather than a map. The rerun viewer's own chrome stays dark:
-     version 0.37 ignores SetTheme on the web backend. */
-  html,body{margin:0;height:100%;background:#f6f7f9;color:#22262e;
+  /* Dark throughout, on the annotation page's palette. The shell frames
+     pages that are themselves dark -- the rerun viewer's chrome cannot be
+     made light (0.37 ignores SetTheme on the web backend), the map is drawn
+     for a dark ground, and the annotation view has always been dark. A light
+     sidebar around them left every page half lit, with the seam running down
+     the middle of the window. */
+  :root{--bg:#0e1015;--panel:#161a22;--fg:#e8eaed;--muted:#7d828b;
+        --line:#232936;--acc:#7aa7ff}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
             font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
   .wrap{display:flex;height:100%}
-  nav{width:132px;flex:0 0 132px;background:#eceef2;border-right:1px solid #dcdfe6;
+  nav{width:132px;flex:0 0 132px;background:var(--panel);
+      border-right:1px solid var(--line);
       display:flex;flex-direction:column;padding:10px 0}
-  nav .brand{padding:6px 14px 12px;color:#8a5a00;font-weight:600;letter-spacing:.04em}
-  nav a{display:block;padding:7px 14px;color:#5b6270;text-decoration:none;border-left:2px solid transparent}
-  nav a:hover{color:#141820;background:#e2e5ec}
-  nav a.on{color:#8a5a00;border-left-color:#c98a10;background:#e2e5ec}
-  main{flex:1;position:relative;min-width:0}
+  nav .brand{padding:6px 14px 12px;color:var(--acc);font-weight:600;letter-spacing:.04em}
+  nav a{display:block;padding:7px 14px;color:var(--muted);text-decoration:none;
+        border-left:2px solid transparent}
+  nav a:hover{color:var(--fg);background:#1c2230}
+  nav a.on{color:var(--acc);border-left-color:var(--acc);background:#1c2230}
+  main{flex:1;position:relative;min-width:0;background:var(--bg)}
   iframe{border:0;width:100%;height:100%;display:block}
-  .msg{padding:24px;color:#5b6270;max-width:560px}
-  .msg code{background:#e2e5ec;padding:.1em .35em;border-radius:3px}
+  .msg{padding:24px;color:var(--muted);max-width:560px}
+  .msg a{color:var(--acc)}
+  .msg code{background:#222a3a;padding:.1em .35em;border-radius:3px}
 """
 
 
@@ -1574,6 +1583,134 @@ def make_app(*, registry: ObjectRegistry,
             return HTMLResponse(_INDEX_3D_HTML)
         return HTMLResponse(_framed("/3d", "scene — built-in 3D"))
 
+    # rerun serves the viewer application on one port and each page's log
+    # stream on another, and the embedded frame pointed straight at them. That
+    # is invisible on the robot and unusable off it: reading the map from a
+    # laptop meant forwarding four ports, and forgetting one produced a blank
+    # frame with no error. Scene proxies all of them under its own port, so the
+    # whole UI — shell, viewer and data — travels over the one port an operator
+    # already has to reach.
+    #
+    # The stream is gRPC-web over HTTP/1.1 (`application/grpc-web+proto`), not
+    # HTTP/2 gRPC: status and trailers ride inside the body, so an ordinary
+    # streaming reverse proxy carries it without special handling.
+    _PROXY_SKIP = {"host", "content-length", "connection", "keep-alive",
+                   "transfer-encoding", "upgrade"}
+
+    async def _proxy(request, port: int, path: str):
+        """Stream one request to a local rerun server and back."""
+        import httpx
+
+        url = f"http://127.0.0.1:{port}/{path.lstrip('/')}"
+        if request.url.query:
+            url = f"{url}?{request.url.query}"
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in _PROXY_SKIP}
+        # `trust_env=False` is load-bearing: httpx otherwise honours
+        # HTTP_PROXY/ALL_PROXY from the environment, and both the robot and a
+        # developer's machine usually have one set. The upstream here is
+        # loopback on this very host, so a proxy in the path turns a working
+        # viewer into a 502 that looks like the viewer being down.
+        client = httpx.AsyncClient(timeout=None, trust_env=False)
+        try:
+            body = await request.body()
+            upstream = client.build_request(
+                request.method, url, headers=headers, content=body)
+            response = await client.send(upstream, stream=True)
+        except Exception as error:  # noqa: BLE001
+            await client.aclose()
+            # A viewer that is not running is the common case here, and a
+            # bare 502 in the frame says nothing about which half is down.
+            return PlainTextResponse(
+                f"the rerun viewer is not reachable on 127.0.0.1:{port}: "
+                f"{error}", status_code=502)
+
+        async def stream():
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        out = {k: v for k, v in response.headers.items()
+               if k.lower() not in _PROXY_SKIP}
+        return StreamingResponse(stream(), status_code=response.status_code,
+                                 headers=out)
+
+    async def rerun_app(request):
+        """The viewer application, under a path that names its feed.
+
+        The feed cannot travel in the query: rerun rewrites its own URL once
+        it has parsed it, dropping anything it does not recognise, and the
+        referrer on the data calls then names no feed at all -- which is how
+        the 2D page came to show the 3D map. The path survives that rewrite.
+        """
+        if rerun_sink is None or not rerun_sink.ready:
+            return PlainTextResponse("no viewer", status_code=404)
+        if request.path_params.get("feed") not in ("2d", "3d"):
+            return PlainTextResponse("not found", status_code=404)
+        return await _proxy(request, rerun_sink.web_port,
+                            request.path_params.get("path", ""))
+
+    async def rerun_asset(request):
+        """The viewer's own assets, which it requests from the site root."""
+        if rerun_sink is None or not rerun_sink.ready:
+            return PlainTextResponse("no viewer", status_code=404)
+        return await _proxy(request, rerun_sink.web_port,
+                            request.url.path.lstrip("/"))
+
+    async def rerun_data(request):
+        """One page's log stream, at the only path rerun will accept.
+
+        rerun parses the data-source URL itself and takes the endpoint path
+        to be exactly `/proxy`. Anything longer is rejected before a single
+        request is made, silently: the viewer drops the source and shows its
+        start page, which looks exactly like a map with nothing in it.
+
+        `/proxy` in that URL names the endpoint; it is not where the traffic
+        goes. The viewer speaks gRPC-web, so the requests land on the service
+        path at the origin root -- `/rerun.sdk_comms.<version>.MessageProxy
+        Service/ReadMessages` -- and this handler answers both.
+
+        Both feeds therefore live at the same paths, and which one a request
+        wants is read from the page that asked. The two feeds are two frames
+        with different URLs, so the referrer separates them; `feed` in the
+        query is accepted as well for anyone opening the endpoint by hand.
+        A request that says neither gets the 3D feed, which is the page the
+        UI opens on.
+        """
+        if rerun_sink is None or not rerun_sink.ready:
+            return PlainTextResponse("no viewer", status_code=404)
+        feed = request.query_params.get("feed")
+        if feed not in ("2d", "3d"):
+            referer = request.headers.get("referer") or ""
+            feed = "2d" if "/rerun/2d/" in referer else "3d"
+        return await _proxy(request, rerun_sink.data_port(feed),
+                            request.url.path)
+
+    async def rerun_grpc(request):
+        """The viewer's gRPC-web calls, which arrive at the origin root."""
+        service = request.path_params.get("service", "")
+        if "MessageProxyService" not in service:
+            return PlainTextResponse("not found", status_code=404)
+        return await rerun_data(request)
+
+    def _proxied_viewer(page: str, authority: str) -> str:
+        """The viewer page for one feed, served under scene's own origin.
+
+        rerun takes its data source from an absolute URL in the query string,
+        so this has to name the host and port the reader actually reached —
+        the Host header, not what scene bound. Behind a forwarded port those
+        differ, and the address scene bound is unreachable from the browser.
+        """
+        import urllib.parse as _url
+
+        source = f"rerun+http://{authority}/proxy"
+        # The feed is in the path, not the query: see `rerun_app`.
+        return (f"/rerun/{page}/?url=" + _url.quote(source, safe="")
+                + "&theme=dark")
+
     async def viewer_url(request) -> JSONResponse:
         """Where the embedded viewers are served, and why they are not.
 
@@ -1595,8 +1732,13 @@ def make_app(*, registry: ObjectRegistry,
         # request's Host is the only thing that knows that; the address Scene
         # bound to does not.
         host = (request.headers.get("host") or "").split(":")[0] or "127.0.0.1"
-        return JSONResponse({"url": rerun_sink.viewer_url(host),
-                             "url_2d": rerun_sink.viewer_url_2d(host),
+        # Same-origin links: the frame, the viewer application and the log
+        # stream all travel over the port the reader already reached scene on.
+        # `viewer_url()` on the sink stays for an operator opening rerun
+        # directly on the robot, where the ports are local anyway.
+        authority = request.headers.get("host") or f"{host}:50107"
+        return JSONResponse({"url": _proxied_viewer("3d", authority),
+                             "url_2d": _proxied_viewer("2d", authority),
                              "detail": ""})
 
     async def objects3d(_request) -> JSONResponse:
@@ -1653,6 +1795,18 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
         Route("/api/viewer", viewer_url, methods=["GET"]),
+        # Everything the embedded viewer needs, under scene's own origin.
+        Route("/rerun/{feed}", rerun_app, methods=["GET"]),
+        Route("/rerun/{feed}/{path:path}", rerun_app, methods=["GET"]),
+        Route("/proxy", rerun_data, methods=["GET", "POST", "OPTIONS"]),
+        # The gRPC-web service path, kept version-tolerant: the package name
+        # carries rerun's own version and changes with it, so the route
+        # matches any two-segment service call and the handler decides.
+        Route("/{service}/{method}", rerun_grpc, methods=["POST", "OPTIONS"]),
+        Route("/re_viewer.js", rerun_asset, methods=["GET"]),
+        Route("/re_viewer_bg.wasm", rerun_asset, methods=["GET"]),
+        Route("/favicon.svg", rerun_asset, methods=["GET"]),
+        Route("/sw.js", rerun_asset, methods=["GET"]),
         Route("/api/camera", camera_state, methods=["GET"]),
         Route("/api/annotations", annotations_list, methods=["GET"]),
         Route("/api/annotations", annotations_create, methods=["POST"]),

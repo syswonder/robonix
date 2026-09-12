@@ -286,3 +286,82 @@ def _registry_with_no_objects():
     from scene_service.state import ObjectRegistry
 
     return ObjectRegistry()
+
+
+# ── One port for the whole UI ───────────────────────────────────────────────
+# rerun serves the viewer application on one port and each page's stream on
+# another. The frame used to point straight at them, so reading the map from
+# a laptop meant forwarding four ports and forgetting one produced a blank
+# frame with no error. Scene proxies all of them under its own port.
+
+
+class _FakeSink:
+    """A sink that is up, with recognisable ports and nothing behind them."""
+
+    ready = True
+    web_port = 55550
+    detail = ""
+
+    def data_port(self, page):
+        return 55552 if page == "2d" else 55551
+
+
+def _proxy_client():
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    return TestClient(web.make_app(registry=_registry_with_no_objects(),
+                                   hub=None, rerun_sink=_FakeSink()))
+
+
+def test_the_viewer_link_stays_on_scenes_own_origin():
+    """Nothing in the page may name a port the reader has not reached."""
+    client = _proxy_client()
+    payload = client.get("/api/viewer").json()
+    for key in ("url", "url_2d"):
+        assert payload[key].startswith("/rerun/"), payload[key]
+        assert "55550" not in payload[key] and "9090" not in payload[key]
+    # The data source is absolute — rerun needs a URL — but on this origin.
+    assert "%2Fproxy" in payload["url"]
+    assert "testserver" in payload["url"]
+
+
+def test_the_data_path_is_exactly_what_rerun_accepts():
+    """rerun parses the source URL and takes the path to be `/proxy`.
+
+    A longer path is rejected before any request is made, and the viewer then
+    shows its start page: the failure looks like an empty map, not an error.
+    """
+    client = _proxy_client()
+    source = client.get("/api/viewer").json()["url"]
+    assert "proxy%3Ffeed" not in source, "a query on the endpoint path"
+    assert source.startswith("/rerun/3d/?url=")
+    assert source.endswith("&theme=dark")
+
+
+def test_each_page_reaches_its_own_feed():
+    """The two feeds share a path, so the asking page decides which one.
+
+    Nothing listens on either port here: the proxy's own failure names the
+    port it tried, which is what this reads.
+    """
+    client = _proxy_client()
+    two_d = client.get("/proxy",
+                       headers={"referer": "http://h/rerun/2d/?url=x"})
+    assert "55552" in two_d.text, two_d.text
+    three_d = client.get("/proxy",
+                         headers={"referer": "http://h/rerun/3d/?url=x"})
+    assert "55551" in three_d.text, three_d.text
+    bare = client.get("/proxy")
+    assert "55551" in bare.text, "an unmarked request must get the 3D feed"
+
+
+def test_the_proxy_says_so_when_there_is_no_viewer():
+    """A native install has no rerun; the frame must not hang on a dead port."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    client = TestClient(web.make_app(registry=_registry_with_no_objects(),
+                                     hub=None))
+    assert client.get("/rerun/3d/").status_code == 404
+    assert client.get("/proxy").status_code == 404

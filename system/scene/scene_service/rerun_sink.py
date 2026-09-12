@@ -61,6 +61,10 @@ _COLOUR_RELATION = (138, 166, 206, 170)
 _RELATION_RADIUS_M = 0.004
 _COLOUR_ROBOT = (255, 166, 54)
 
+# How long to wait for the viewer to bind its three ports before
+# giving up on it and serving the built-in pages.
+_START_TIMEOUT_S = 20.0
+
 _APP_3D = "robonix-scene"
 _APP_2D = "robonix-scene-2d"
 
@@ -402,27 +406,57 @@ class RerunSink:
                 log.warning("[scene-rerun] %s", self._detail)
                 return False
             self._rr = rr
-            try:
-                self._map3d.serve(rr, _blueprint_3d(), self._memory_limit)
-                self._map2d.serve(rr, _blueprint_2d(), self._memory_limit)
-            except Exception as error:  # noqa: BLE001
-                # Usually a port already in use. The viewer is a debugging
-                # aid, so under `auto` a deployment that cannot serve it falls
-                # back to the built-in pages; letting this escape would stop
-                # the map service itself over a busy port.
-                self._detail = f"the viewer could not start: {error}"
+            # Every call below binds a port, and none of them fails when the
+            # port is taken: `serve_grpc` blocks forever instead, and a bind
+            # check beforehand does not catch it -- a socket left in TIME_WAIT
+            # by the previous run accepts the check and still wedges the
+            # server. The whole bring-up therefore runs in a thread this waits
+            # on with a deadline: the map service must not be held hostage by
+            # its own debugging aid, and a viewer that never came up has to
+            # say so rather than leave the web UI unreachable forever.
+            outcome: dict[str, Any] = {}
+
+            def bring_up() -> None:
+                try:
+                    self._map3d.serve(rr, _blueprint_3d(), self._memory_limit)
+                    self._map2d.serve(rr, _blueprint_2d(), self._memory_limit)
+                    # One web server for both pages. `serve_web_viewer` hands
+                    # out the viewer application, not the data: which recording
+                    # a page shows is decided by the `url` in its query string.
+                    # Calling it a second time only fights the first for the
+                    # port, and the bind error takes the service down with it.
+                    rr.serve_web_viewer(
+                        web_port=self._web_port, open_browser=False,
+                        connect_to=self._map3d.grpc_url)
+                    outcome["ok"] = True
+                except Exception as error:  # noqa: BLE001
+                    outcome["error"] = error
+
+            worker = threading.Thread(target=bring_up, name="scene-rerun-up",
+                                      daemon=True)
+            worker.start()
+            worker.join(_START_TIMEOUT_S)
+            if worker.is_alive():
+                self._detail = (
+                    f"the viewer did not finish starting within "
+                    f"{_START_TIMEOUT_S:.0f}s; one of its ports "
+                    f"({self._map3d.grpc_port}, {self._map2d.grpc_port}, "
+                    f"{self._web_port}) is still held, most likely by the "
+                    "previous run")
                 log.warning(
                     "[scene-rerun] %s; scene will serve the built-in pages "
                     "instead", self._detail)
                 return False
-            # One web server for both pages. `serve_web_viewer` hands out the
-            # viewer application, not the data: which recording a page shows
-            # is decided by the `url` in its query string. Calling it a second
-            # time only fights the first for the port, and the bind error takes
-            # the service down with it.
-            rr.serve_web_viewer(
-                web_port=self._web_port, open_browser=False,
-                connect_to=self._map3d.grpc_url)
+            if "error" in outcome:
+                # Usually a port already in use. The viewer is a debugging
+                # aid, so under `auto` a deployment that cannot serve it falls
+                # back to the built-in pages; letting this escape would stop
+                # the map service itself over a busy port.
+                self._detail = f"the viewer could not start: {outcome['error']}"
+                log.warning(
+                    "[scene-rerun] %s; scene will serve the built-in pages "
+                    "instead", self._detail)
+                return False
             self._ready = True
             self._detail = ""
             log.info("[scene-rerun] 3D viewer on %s",
@@ -430,6 +464,16 @@ class RerunSink:
             log.info("[scene-rerun] 2D viewer on %s",
                      self.viewer_url_2d(self._web_host))
             return True
+
+    @property
+    def web_port(self) -> int:
+        """Where rerun serves the viewer application itself."""
+        return self._web_port
+
+    def data_port(self, page: str) -> int:
+        """The gRPC-web port carrying one page's log stream."""
+        feed = self._map2d if page == "2d" else self._map3d
+        return feed.grpc_port
 
     def viewer_url(self, host: str) -> str:
         """The 3D viewer page, as seen from `host`."""
