@@ -52,6 +52,10 @@ robonix-api and Atlas emit a visible warning unless the contract TOML marks it
 as `cross_namespace = true`. The warning is diagnostic and never blocks boot,
 discovery, or calls.
 
+Contract descriptors also expose `llm_callable`. It defaults to `true`; a
+contract may set it to `false` to keep its implementations out of Pilot's
+model-facing catalog without changing registration, discovery, or calls.
+
 Current codegen provides the shared `robonix/lifecycle/driver` contract, and
 package authors normally omit Driver from the manifest: rbnx and robonix-api
 select/register shared automatically. Explicit shared selection remains valid,

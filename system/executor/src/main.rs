@@ -18,6 +18,7 @@ mod pb;
 mod plan_runtime;
 mod rtdl_wire;
 mod service;
+mod verification;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -32,6 +33,7 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
 use service::ExecutorServiceImpl;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
@@ -194,7 +196,12 @@ async fn main() -> Result<()> {
         });
     }
 
-    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
+    let verification = Arc::new(verification::VerificationPolicy::new(cfg.verification));
+    info!(
+        "loaded {} executor verification rule(s)",
+        verification.len()
+    );
+    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone(), verification);
     info!("executor gRPC on {listen_addr}");
     info!("robonix-executor ready on {listen_addr}");
 

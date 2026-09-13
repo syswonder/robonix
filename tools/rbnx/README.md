@@ -33,6 +33,7 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx start PKG`          | Launch one package directly (used internally by boot)  |
 | `rbnx caps [-v]`          | List capabilities currently registered with atlas      |
 | `rbnx contracts`          | List contracts in the loaded registry                  |
+| `rbnx tools`              | List the MCP capabilities visible to Pilot's model     |
 | `rbnx channels`           | List open consumer→provider channels                   |
 | `rbnx inspect`            | Dump atlas state for debugging                         |
 | `rbnx codegen [--mcp]`    | Generate proto + MCP type stubs for a package          |
@@ -43,6 +44,11 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx clean`              | Remove per-package build artefacts                     |
 
 Run `rbnx <cmd> --help` for full flags.
+
+`rbnx tools` follows contract metadata and omits entries marked
+`llm_callable = false`; `rbnx contracts` still lists those contracts and marks
+them `pilot-hidden`, because they remain registered and callable by system
+consumers.
 
 ## Built-in system components
 
