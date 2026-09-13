@@ -49,7 +49,10 @@ pub async fn execute(config: Config, out_dir: Option<PathBuf>) -> Result<()> {
         out.display()
     );
     println!("{} version stamp: {}", "[docs]".bold(), stamp);
-    let mut cmd = build_codegen_cmd(direct.as_ref(), cargo.as_deref(), &rust_root);
+    // `rbnx docs` runs from the source tree, so keep codegen's scribe log with
+    // the generated output instead of dropping a `logs/` beside the sources.
+    let log_dir = out.parent().unwrap_or(&out).join("rbnx-build").join("logs");
+    let mut cmd = build_codegen_cmd(direct.as_ref(), cargo.as_deref(), &rust_root, &log_dir);
     cmd.args(["--lang", "docs", "-I"])
         .arg(&interfaces_lib)
         .arg("--contracts")
