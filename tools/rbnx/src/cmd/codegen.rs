@@ -163,13 +163,12 @@ pub async fn execute(
     //    <pkg>/capabilities/lib. --contracts: global capabilities tree
     //    (per-package contracts merging through codegen is a follow-up).
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    let mut proto_cmd =
-        build_codegen_cmd(
-            direct_codegen.as_ref(),
-            cargo_bin.as_deref(),
-            &rust_root,
-            &codegen_log_dir,
-        );
+    let mut proto_cmd = build_codegen_cmd(
+        direct_codegen.as_ref(),
+        cargo_bin.as_deref(),
+        &rust_root,
+        &codegen_log_dir,
+    );
     proto_cmd
         .args(["--lang", "proto", "-I"])
         .arg(&interfaces_lib);
@@ -187,8 +186,7 @@ pub async fn execute(
     if mcp {
         println!("{} robonix-codegen --lang mcp ...", "[codegen]".bold());
         std::fs::create_dir_all(&mcp_types).ok();
-        let mut mcp_cmd =
-            build_codegen_cmd(
+        let mut mcp_cmd = build_codegen_cmd(
             direct_codegen.as_ref(),
             cargo_bin.as_deref(),
             &rust_root,
@@ -283,8 +281,7 @@ pub async fn execute(
     //     container) and start.sh sources <ros2_idl>/install/setup.bash.
     if ros2 {
         println!("{} robonix-codegen --lang ros2 ...", "[codegen]".bold());
-        let mut ros2_cmd =
-            build_codegen_cmd(
+        let mut ros2_cmd = build_codegen_cmd(
             direct_codegen.as_ref(),
             cargo_bin.as_deref(),
             &rust_root,
