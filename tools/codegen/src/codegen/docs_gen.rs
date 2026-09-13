@@ -128,9 +128,9 @@ fn render_contracts(
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "| 能力约定 ID | 接口含义 | kind | mode | 载荷（IDL） | 能力约定 TOML |"
+            "| 能力约定 ID | 接口含义 | Pilot 可见 | kind | mode | 载荷（IDL） | 能力约定 TOML |"
         );
-        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|");
         for c in rows {
             let payload = if idl_rels.contains(c.idl.as_str()) {
                 format!("[`{}`](idl.md#{})", c.idl, idl_anchor(&c.idl))
@@ -141,8 +141,14 @@ fn render_contracts(
             let meaning = md_table_cell(&c.description);
             let _ = writeln!(
                 out,
-                "| `{}` | {} | {} | `{}` | {} | `{}` |",
-                c.id, meaning, c.kind, c.mode, payload, toml_rel
+                "| `{}` | {} | {} | {} | `{}` | {} | `{}` |",
+                c.id,
+                meaning,
+                if c.llm_callable { "是" } else { "否" },
+                c.kind,
+                c.mode,
+                payload,
+                toml_rel
             );
         }
     }
