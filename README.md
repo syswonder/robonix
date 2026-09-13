@@ -19,12 +19,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/syswonder/robonix/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MulanPSL--2.0-red?style=flat-square" alt="License" /></a>
-  <img src="https://img.shields.io/github/languages/code-size/syswonder/robonix?color=green&style=flat-square" alt="Code size" />
-  <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=lightgray&style=flat-square" alt="Repo size" />
-  <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange&style=flat-square" alt="Top language" />
-  <a href="https://packages.robonix.ai/packages/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpackages.robonix.ai%2Fapi%2Fv1%2Fpackages&query=%24.packages.length&label=Robonix%20packages&color=0f766e&style=flat-square" alt="Robonix packages" /></a>
-  <a href="#supported-robots"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpackages.robonix.ai%2Fapi%2Fv1%2Frobots&query=%24.robots.length&label=Robot%20deployments&color=2563eb&style=flat-square" alt="Published robot deployments" /></a>
+  <a href="https://github.com/syswonder/robonix/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MulanPSL--2.0-red" alt="License" /></a>
+  <img src="https://img.shields.io/github/languages/code-size/syswonder/robonix?color=green" alt="Code size" />
+  <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=lightgray" alt="Repo size" />
+  <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange" alt="Top language" />
+  <a href="https://packages.robonix.ai/packages/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpackages.robonix.ai%2Fapi%2Fv1%2Fpackages&query=%24.packages.length&label=Robonix%20packages&color=0f766e" alt="Robonix packages" /></a>
+  <a href="#supported-robots"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpackages.robonix.ai%2Fapi%2Fv1%2Frobots&query=%24.robots.length&label=Robot%20deployments&color=2563eb" alt="Published robot deployments" /></a>
+  <a href="https://deepwiki.com/syswonder/robonix"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 <br />
