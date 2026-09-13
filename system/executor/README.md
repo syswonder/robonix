@@ -41,6 +41,7 @@ system:
       - target_contract_id: robonix/service/navigation/navigate
         target_provider_id: simple_nav  # optional provider-specific override
         verifier_provider_id: scene_verifier
+        overlap: true                   # optional; defaults to false
         verifier_args:
           scene_provider_id: scene
 ```
@@ -48,7 +49,8 @@ system:
 An exact `target_provider_id` + `target_contract_id` rule wins over a
 contract-only rule. Duplicate rules at the same specificity are rejected at
 startup. `verifier_args` must be a JSON/YAML object and is forwarded unchanged
-inside the verifier request.
+inside the verifier request. `overlap` applies to one rule and defaults to
+`false`, preserving synchronous verification.
 
 ## RTDL Execution
 
@@ -129,7 +131,15 @@ node to `FAILED` with `result verification failed: ...`; an unavailable,
 timed-out, or malformed verifier response changes it to `FAILED` with
 `result verification unavailable: ...`. Failed, cancelled, and timed-out
 target calls are never verified. Executor emits only one terminal node event,
-after verification has finished.
+after verification has finished when `overlap=false`.
+
+With `overlap=true`, Executor first emits the successful capability result and
+continues the RTDL tree while verification runs in the background. A passing
+verifier emits nothing further; a failed verifier emits a second `FAILED` state
+for the same node, correcting its earlier optimistic success. This correction
+never cancels or changes the execution of sequence or parallel siblings.
+Executor waits for all background verifications before `plan_complete` and
+includes their failures in `any_failed`.
 
 ## Builtin capabilities
 

@@ -189,6 +189,7 @@ mod tests {
             target_contract_id: "cap/target".to_string(),
             target_provider_id: provider.map(str::to_string),
             verifier_provider_id: verifier.to_string(),
+            overlap: false,
             verifier_args: serde_json::json!({"camera_provider_id":"front_camera"}),
         }
     }

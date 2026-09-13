@@ -30,6 +30,9 @@ pub struct VerificationRule {
     #[serde(default)]
     pub target_provider_id: Option<String>,
     pub verifier_provider_id: String,
+    /// Publish the successful capability result before verification finishes.
+    #[serde(default)]
+    pub overlap: bool,
     #[serde(default = "empty_json_object")]
     pub verifier_args: serde_json::Value,
 }
@@ -218,16 +221,34 @@ mod tests {
                 "verification": [{
                     "target_contract_id": "robonix/service/navigation/navigate",
                     "verifier_provider_id": "scene_verifier",
+                    "overlap": true,
                     "verifier_args": {"scene_provider_id": "scene"}
                 }]
             }"#,
         )))
         .unwrap();
         assert_eq!(cfg.verification.len(), 1);
+        assert!(cfg.verification[0].overlap);
         assert_eq!(
             cfg.verification[0].verifier_args["scene_provider_id"],
             "scene"
         );
+    }
+
+    /// Rules that omit overlap retain the synchronous verification behavior.
+    #[test]
+    fn verification_overlap_defaults_to_false() {
+        let cfg = ExecutorConfig::resolve(args(Some(
+            r#"{
+                "verification": [{
+                    "target_contract_id": "cap/a",
+                    "verifier_provider_id": "verifier"
+                }]
+            }"#,
+        )))
+        .unwrap();
+
+        assert!(!cfg.verification[0].overlap);
     }
 
     #[test]

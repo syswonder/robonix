@@ -365,7 +365,7 @@ async fn drive_plan(
                         } else if ns.state != RtdlNodeStateEnum::Succeeded as u32 {
                             any_failed = true;
                         }
-                        results.push(ns);
+                        upsert_terminal_result(&mut results, ns);
                     }
                 }
             }
@@ -387,6 +387,18 @@ async fn drive_plan(
             canceled,
         })
         .await;
+}
+
+/// Keep one latest terminal state per RTDL node so verification can correct it.
+fn upsert_terminal_result(results: &mut Vec<RtdlNodeState>, state: RtdlNodeState) {
+    if let Some(existing) = results
+        .iter_mut()
+        .find(|existing| existing.node_index == state.node_index)
+    {
+        *existing = state;
+    } else {
+        results.push(state);
+    }
 }
 
 /// Cancel every real task tree owned by this turn before reporting the Pilot
@@ -3029,9 +3041,12 @@ mod tests {
         parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
-        task_is_session_end,
+        task_is_session_end, upsert_terminal_result,
     };
-    use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
+    use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
+    use crate::pb::pilot::{
+        CapabilityCall, CapabilityCallResult, Plan, RtdlNode, RtdlNodeState, Task,
+    };
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -3052,6 +3067,28 @@ mod tests {
             configured_vlm_idle_timeout(Some("bad")),
             Duration::from_secs(30)
         );
+    }
+
+    /// A verification correction replaces rather than duplicates a node result.
+    #[test]
+    fn verification_correction_replaces_the_prior_terminal_result() {
+        let mut results = vec![RtdlNodeState {
+            node_index: 4,
+            state: RtdlNodeStateEnum::Succeeded as u32,
+            ..Default::default()
+        }];
+
+        upsert_terminal_result(
+            &mut results,
+            RtdlNodeState {
+                node_index: 4,
+                state: RtdlNodeStateEnum::Failed as u32,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, RtdlNodeStateEnum::Failed as u32);
     }
 
     fn test_capability(provider: &str, leaf: &str) -> (String, atlas_pb::Capability) {
