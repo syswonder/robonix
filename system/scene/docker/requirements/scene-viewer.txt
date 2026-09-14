@@ -1,0 +1,14 @@
+# ── Scene map viewer ─────────────────────────────────────────────
+# rerun renders the semantic map and the floor plan in the scene web UI.
+#
+# Installed with --no-deps. rerun-sdk 0.37 declares numpy>=2, while
+# supervision 0.14 and this image's ROS packages require numpy<2. That
+# declaration is conservative: 0.37.1 was verified in this image against
+# numpy 1.26.4, logging Points3D, Boxes3D, LineStrips2D/3D and a textured
+# Mesh3D. So numpy stays where the rest of the image needs it, and rerun's
+# own runtime imports are pinned here instead of being resolved for it.
+rerun-sdk==0.37.1
+pyarrow==25.0.1
+attrs==26.1.0
+typing_extensions==4.16.0
+psutil==5.9.0

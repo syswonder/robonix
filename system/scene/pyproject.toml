@@ -53,6 +53,20 @@ dependencies = [
     "robonix-api",
 ]
 
+# The 3D viewer, deliberately optional. Scene used to draw its own map with
+# three.js pulled from a CDN, which needs WebGL and outbound network: on a
+# headless robot that page renders nothing. rerun ships the viewer, its own
+# web server and the wire protocol between them, so Scene logs entities and
+# links to the viewer instead of maintaining one.
+#
+# It is an extra rather than a dependency because a port to a new board has
+# to be able to bring Scene up without solving for it: rerun-sdk declares
+# numpy>=2, which the perception stack cannot take. The x86 docker image
+# installs it separately (docker/requirements/scene-viewer.txt) and Scene
+# falls back to the built-in pages wherever it is missing.
+[project.optional-dependencies]
+viewer = ["rerun-sdk>=0.37,<0.38"]
+
 # This package is the service itself; `uv sync` only needs to install
 # dependencies into a venv, not build/install scene_service as a wheel.
 [tool.uv]
