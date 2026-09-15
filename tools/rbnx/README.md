@@ -33,6 +33,7 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx start PKG`          | Launch one package directly (used internally by boot)  |
 | `rbnx caps [-v]`          | List capabilities currently registered with atlas      |
 | `rbnx contracts`          | List contracts in the loaded registry                  |
+| `rbnx tools`              | List the MCP capabilities visible to Pilot's model     |
 | `rbnx channels`           | List open consumer→provider channels                   |
 | `rbnx inspect`            | Dump atlas state for debugging                         |
 | `rbnx codegen [--mcp]`    | Generate proto + MCP type stubs for a package          |
@@ -43,6 +44,43 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx clean`              | Remove per-package build artefacts                     |
 
 Run `rbnx <cmd> --help` for full flags.
+
+`rbnx tools` follows contract metadata and omits entries marked
+`llm_callable = false`; `rbnx contracts` still lists those contracts and marks
+them `pilot-hidden`, because they remain registered and callable by system
+consumers.
+
+### What a boot leaves behind
+
+`rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
+anything. Each package records what the manifest asked for and what that
+resolved to, kept apart the way `flake.lock` keeps them:
+
+```yaml
+version: 1
+packages:
+  - name: mapping
+    original:
+      url: https://github.com/syswonder/service-map-rbnx
+      branch: feat/map-localizer
+    locked:
+      commit: df2ba718c0de1a5f...
+      dirty: true
+      dirty_digest: sha256:9c5e5cd...
+```
+
+Entries are sorted and nothing is timestamped, so the file changes when the
+deployment changes rather than every time it runs — a lock that rewrites itself
+on every boot is one nobody reads a diff of. A dirty checkout gets a digest of
+its uncommitted changes, not just a flag: a flag cannot tell two different
+local edits apart.
+
+A manifest pins packages by branch, and a cache is cloned once and then reused
+untouched, so "the same manifest" is not the same code twice — a deployment was
+found running three commits behind its branch with hand-applied edits on top,
+and nothing about the run recorded it. The lockfile is that record. It is
+written, not enforced: boot still runs whatever the cache holds, and a dirty
+checkout is warned about rather than refused.
 
 ## Built-in system components
 

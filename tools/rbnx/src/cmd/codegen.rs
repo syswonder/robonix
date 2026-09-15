@@ -123,6 +123,9 @@ pub async fn execute(
     let ros2_idl = out_root.join("ros2_idl");
     // Per-invocation staging for the system-wide .proto files. No commits;
     // grpc_tools.protoc reads from here in step 3.
+    // Keep codegen's own scribe log with the other build artefacts rather than
+    // letting it default to `./logs` inside the package checkout.
+    let codegen_log_dir = rbnx_build.join("logs");
     let proto_staging = rbnx_build.join("proto-staging");
 
     if clean {
@@ -160,8 +163,12 @@ pub async fn execute(
     //    <pkg>/capabilities/lib. --contracts: global capabilities tree
     //    (per-package contracts merging through codegen is a follow-up).
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    let mut proto_cmd =
-        build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+    let mut proto_cmd = build_codegen_cmd(
+        direct_codegen.as_ref(),
+        cargo_bin.as_deref(),
+        &rust_root,
+        &codegen_log_dir,
+    );
     proto_cmd
         .args(["--lang", "proto", "-I"])
         .arg(&interfaces_lib);
@@ -179,8 +186,12 @@ pub async fn execute(
     if mcp {
         println!("{} robonix-codegen --lang mcp ...", "[codegen]".bold());
         std::fs::create_dir_all(&mcp_types).ok();
-        let mut mcp_cmd =
-            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        let mut mcp_cmd = build_codegen_cmd(
+            direct_codegen.as_ref(),
+            cargo_bin.as_deref(),
+            &rust_root,
+            &codegen_log_dir,
+        );
         mcp_cmd.args(["--lang", "mcp", "-I"]).arg(&interfaces_lib);
         // Include per-package <pkg>/capabilities/lib too — same merge
         // semantics as the proto step, so per-pkg srv files (e.g.
@@ -270,8 +281,12 @@ pub async fn execute(
     //     container) and start.sh sources <ros2_idl>/install/setup.bash.
     if ros2 {
         println!("{} robonix-codegen --lang ros2 ...", "[codegen]".bold());
-        let mut ros2_cmd =
-            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        let mut ros2_cmd = build_codegen_cmd(
+            direct_codegen.as_ref(),
+            cargo_bin.as_deref(),
+            &rust_root,
+            &codegen_log_dir,
+        );
         ros2_cmd.args(["--lang", "ros2", "-I"]).arg(&interfaces_lib);
         if let Some(p) = pkg_caps_lib.as_ref() {
             ros2_cmd.arg("-I").arg(p);
@@ -684,8 +699,9 @@ pub(crate) fn build_codegen_cmd(
     direct: Option<&PathBuf>,
     cargo: Option<&str>,
     rust_root: &Path,
+    log_dir: &Path,
 ) -> Command {
-    if let Some(bin) = direct {
+    let mut cmd = if let Some(bin) = direct {
         Command::new(bin)
     } else {
         let cargo = cargo.expect("either direct codegen bin or cargo bin must be set");
@@ -694,7 +710,15 @@ pub(crate) fn build_codegen_cmd(
             .arg(rust_root.join("Cargo.toml"))
             .arg("--");
         cmd
-    }
+    };
+    // robonix-codegen logs through scribe, which falls back to `./logs` when
+    // SCRIBE_LOG_DIR is unset. Run from a package directory that put an
+    // untracked `logs/codegen.log` inside the checkout, next to the source
+    // rather than under `rbnx-build/` with every other build artefact, where
+    // it then showed up as a local edit in `git status`. Point it at the same
+    // place run_package.rs already uses.
+    cmd.env("SCRIBE_LOG_DIR", log_dir);
+    cmd
 }
 
 #[cfg(test)]
