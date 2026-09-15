@@ -95,6 +95,7 @@ fn assemble_planning_messages(
     capability_cache_hit: bool,
     sections: &[PromptSection<'_>],
     history_messages: &[Message],
+    observation: Option<Message>,
     correction: Option<&str>,
 ) -> Vec<Message> {
     let system_bytes = sections.iter().map(|section| section.content.len()).sum();
@@ -142,9 +143,15 @@ fn assemble_planning_messages(
         })
     );
 
-    let mut messages = Vec::with_capacity(sanitized_history.len() + 2);
+    let mut messages = Vec::with_capacity(sanitized_history.len() + 3);
     messages.push(Message::system(&system));
     messages.extend(sanitized_history);
+    // After the history, so the current view is the most recent image the
+    // model sees, and before any correction, which is about the reply rather
+    // than about the world.
+    if let Some(observation) = observation {
+        messages.push(observation);
+    }
     if let Some(correction) = correction {
         messages.push(Message::user(correction));
     }
@@ -1451,11 +1458,16 @@ pub async fn run_turn(
                     content: &environment_block,
                 },
             ];
+            // Captured per round, not per turn: the robot moves between
+            // rounds, so a frame taken once at the start of the turn would
+            // describe a place the planner has already left.
+            let observation = state_context::collect_visual_observation(executor, &cap_list).await;
             let messages = assemble_planning_messages(
                 round,
                 capability_cache_hit,
                 &sections,
                 history,
+                observation,
                 correction.as_deref(),
             );
 
@@ -3182,13 +3194,13 @@ mod tests {
         CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION,
         MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptScope, RTDL_DO, RTDL_PARALLEL,
         RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer,
-        apply_task_update, build_capability_target_map, build_display_capabilities,
-        build_executor_active_block, build_forest_block, build_system_prompt,
-        close_trailing_assistant, compact_tool_result, configured_vlm_idle_timeout,
-        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
-        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
-        is_legacy_plan_control_contract, mixes_control_inspection_with_action, parse_meta_plan_op,
-        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        apply_task_update, assemble_planning_messages, build_capability_target_map,
+        build_display_capabilities, build_executor_active_block, build_forest_block,
+        build_system_prompt, close_trailing_assistant, compact_tool_result,
+        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
+        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
+        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
+        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         summarize_description, task_is_session_end,
@@ -4351,5 +4363,72 @@ mod tests {
         let before = messages.len();
         close_trailing_assistant(&mut messages);
         assert_eq!(messages.len(), before);
+    }
+
+    #[test]
+    fn the_current_observation_is_the_last_thing_before_a_correction() {
+        // Ordering is the whole point: the history may carry older frames, so
+        // the current view has to arrive after them, and the correction is
+        // about the previous reply rather than about the world.
+        let history = vec![
+            Message::user("do the task"),
+            Message::assistant("first attempt"),
+        ];
+        let messages = assemble_planning_messages(
+            1,
+            true,
+            &[],
+            &history,
+            Some(Message::user_with_image("current view", "AAAA".into())),
+            Some("that reply did not parse"),
+        );
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["system", "user", "assistant", "user", "user"]);
+        assert_eq!(
+            messages[3].content.as_deref(),
+            Some("current view"),
+            "the observation must sit between the history and the correction"
+        );
+        assert_eq!(
+            messages[4].content.as_deref(),
+            Some("that reply did not parse")
+        );
+    }
+
+    #[test]
+    fn an_observation_already_closes_a_trailing_assistant_turn() {
+        // The observation is a user message, so a round that narrated without
+        // calling a tool no longer needs the synthetic continue prompt.
+        let history = vec![Message::assistant("thinking about it")];
+        let messages = assemble_planning_messages(
+            1,
+            true,
+            &[],
+            &history,
+            Some(Message::user_with_image("current view", "AAAA".into())),
+            None,
+        );
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.last().unwrap().role, "user");
+        assert_eq!(
+            messages.last().unwrap().content.as_deref(),
+            Some("current view")
+        );
+    }
+
+    #[test]
+    fn without_an_observation_the_request_is_what_it_was() {
+        let history = vec![Message::assistant("thinking about it")];
+        let messages = assemble_planning_messages(1, true, &[], &history, None, None);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.last().unwrap().role, "user");
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Continue from the state above"))
+        );
     }
 }
