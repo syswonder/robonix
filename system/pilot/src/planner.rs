@@ -1027,21 +1027,31 @@ pub async fn run_turn(
         return Ok(());
     }
 
-    // 1. Pilot's capability catalog comes straight from atlas (filtered to
-    // MCP transport — only those are LLM-callable). McpParams ride along
-    // in Capability.params, no Connect needed.
+    // 1. Pilot's capability catalog comes straight from Atlas. MCP params ride
+    // along in Capability.params, and contract metadata below decides which
+    // of those capabilities the planning model may see; no Connect is needed.
     let _ = consumer_id; // currently unused; kept on the signature for future channel-tracked discovery
     let initial_caps = discovery::discover(atlas)
         .await
         .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
+    // Contract metadata is immutable for one Atlas process, so resolve the
+    // model-facing exclusions once per turn. This does not affect Executor or
+    // any other Atlas consumer's ability to resolve and call the capability.
+    let non_llm_callable_contract_ids = discovery::non_llm_callable_contract_ids(atlas)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas contract discovery failed: {e}"))?;
 
-    // Build the stable system-prompt sections once per turn. Discovery runs
+    // Build the stable system-prompt sections once per turn. Both queries run
     // first because the standing prompt covers only the capability families
-    // this deployment actually registered.
+    // this deployment registered AND lets the planning model call: a family the
+    // model may not reach is one the prompt has no reason to describe.
     let standing_prompt = build_system_prompt(
         load_agent_soul().as_deref(),
         PromptScope::from_contract_ids(
-            initial_caps.iter().map(|(_, cap)| cap.contract_id.as_str()),
+            initial_caps
+                .iter()
+                .map(|(_, cap)| cap.contract_id.as_str())
+                .filter(|contract_id| !non_llm_callable_contract_ids.contains(*contract_id)),
         ),
     );
     // Pilot binds to the canonical contract_id, not the LLM-facing tool
@@ -1362,7 +1372,7 @@ pub async fn run_turn(
             crate::soma_context::fetch_runtime_prompt_block(atlas, consumer_id).await;
         let environment_block = state_context::collect(executor, atlas, &cap_list).await;
 
-        let display_caps = build_display_capabilities(&cap_list);
+        let display_caps = build_display_capabilities(&cap_list, &non_llm_callable_contract_ids);
         let target_map = build_capability_target_map(&display_caps);
         let protocol_prompt = rtdl_protocol(round == 0);
         let (capability_prompt, capability_cache_hit) =
@@ -2000,12 +2010,16 @@ pub async fn run_turn(
 
 /// Convert Atlas rows to provider-qualified model names and sort them so an
 /// unchanged catalog remains byte-identical even if discovery order varies.
-fn build_display_capabilities(
-    cap_list: &[(String, atlas_pb::Capability)],
-) -> Vec<DisplayCapability<'_>> {
+fn build_display_capabilities<'a>(
+    cap_list: &'a [(String, atlas_pb::Capability)],
+    non_llm_callable_contract_ids: &HashSet<String>,
+) -> Vec<DisplayCapability<'a>> {
     let mut display = cap_list
         .iter()
-        .filter(|(_, cap)| !is_legacy_plan_control_contract(&cap.contract_id))
+        .filter(|(_, cap)| {
+            !is_legacy_plan_control_contract(&cap.contract_id)
+                && !non_llm_callable_contract_ids.contains(&cap.contract_id)
+        })
         .map(|(provider_id, cap)| DisplayCapability {
             display_name: format!("{}.{}", provider_id, llm_name(&cap.contract_id)),
             provider_id: provider_id.as_str(),
@@ -3247,7 +3261,7 @@ mod tests {
             test_capability("demo", "remember"),
             test_capability("demo", "report"),
         ];
-        let display = build_display_capabilities(&capabilities);
+        let display = build_display_capabilities(&capabilities, &HashSet::new());
         let mut cache = CapabilityPromptCache::default();
         let (first, first_hit) = cache.render(&display);
         let first = first.to_string();
@@ -3279,7 +3293,7 @@ mod tests {
         // its contract id, so a plan that uses it is naming something the
         // runtime has. It must dispatch exactly like the catalog name.
         let capabilities = vec![test_capability("demo", "observe")];
-        let display = build_display_capabilities(&capabilities);
+        let display = build_display_capabilities(&capabilities, &HashSet::new());
         let targets = build_capability_target_map(&display);
         assert_eq!(
             targets.get("robonix/service/test/observe"),
@@ -3308,11 +3322,36 @@ mod tests {
             test_capability("left", "observe"),
             test_capability("right", "observe"),
         ];
-        let display = build_display_capabilities(&capabilities);
+        let display = build_display_capabilities(&capabilities, &HashSet::new());
         let targets = build_capability_target_map(&display);
         assert!(!targets.contains_key("robonix/service/test/observe"));
         assert!(targets.contains_key("left.test_observe"));
         assert!(targets.contains_key("right.test_observe"));
+    }
+
+    #[test]
+    fn a_capability_hidden_by_contract_metadata_never_reaches_the_alias_map() {
+        // The alias must not become a back door into a capability the contract
+        // metadata withholds from the planning model.
+        let capabilities = vec![test_capability("vlm_verifier", "verify")];
+        let hidden = HashSet::from([capabilities[0].1.contract_id.clone()]);
+        let display = build_display_capabilities(&capabilities, &hidden);
+        let targets = build_capability_target_map(&display);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn contract_metadata_excludes_capability_from_model_catalog() {
+        let capabilities = vec![
+            test_capability("pick", "pick"),
+            test_capability("vlm_verifier", "verify"),
+        ];
+        let hidden = HashSet::from([capabilities[1].1.contract_id.clone()]);
+
+        let display = build_display_capabilities(&capabilities, &hidden);
+
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].provider_id, "pick");
     }
 
     #[test]

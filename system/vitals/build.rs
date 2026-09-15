@@ -41,7 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         false,
     )?;
 
-    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    // Prefer a system protoc when present (needed on architectures like
+    // LoongArch where protoc-bin-vendored does not ship a binary).
+    let protoc = std::env::var_os("PROTOC")
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(protoc_bin_vendored::protoc_bin_path)?;
     // SAFETY: build.rs is single-threaded.
     unsafe {
         std::env::set_var("PROTOC", protoc);

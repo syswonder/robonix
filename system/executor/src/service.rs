@@ -19,6 +19,7 @@ use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::{PlanRuntime, StopWhen};
 use crate::rtdl_wire::{self, NodeEventContext};
+use crate::verification::{self, VerificationPolicy};
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
 use std::collections::HashSet;
@@ -49,14 +50,20 @@ pub struct ExecutorServiceImpl {
     ///      handlers instead of going through MCP loopback.
     provider_id: String,
     runtime: PlanRuntime,
+    verification: Arc<VerificationPolicy>,
 }
 
 impl ExecutorServiceImpl {
-    pub fn new(atlas: AtlasClient, provider_id: String) -> Self {
+    pub fn new(
+        atlas: AtlasClient,
+        provider_id: String,
+        verification: Arc<VerificationPolicy>,
+    ) -> Self {
         Self {
             atlas,
             provider_id,
             runtime: PlanRuntime::default(),
+            verification,
         }
     }
 }
@@ -75,6 +82,7 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
         let runtime = self.runtime.clone();
+        let verification = Arc::clone(&self.verification);
 
         tokio::spawn(async move {
             let plan_id = plan.plan_id.clone();
@@ -89,6 +97,7 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
                 atlas,
                 provider_id,
                 runtime.clone(),
+                verification,
             )
             .await;
             let cancelled = runtime.is_cancelled(&plan_id).await;
@@ -115,6 +124,7 @@ fn execute_node(
     atlas: AtlasClient,
     provider_id: String,
     runtime: PlanRuntime,
+    verification: Arc<VerificationPolicy>,
 ) -> ExecuteNodeFuture {
     Box::pin(async move {
         let node = &plan.nodes[node_index];
@@ -162,6 +172,7 @@ fn execute_node(
                         atlas.clone(),
                         provider_id.clone(),
                         runtime.clone(),
+                        Arc::clone(&verification),
                     )
                     .await;
                     if any_failed {
@@ -194,6 +205,7 @@ fn execute_node(
                     let child_atlas = atlas.clone();
                     let child_provider_id = provider_id.clone();
                     let child_runtime = runtime.clone();
+                    let child_verification = Arc::clone(&verification);
                     let child_index = *child as usize;
                     handles.push(tokio::spawn(async move {
                         execute_node(
@@ -203,6 +215,7 @@ fn execute_node(
                             child_atlas,
                             child_provider_id,
                             child_runtime,
+                            child_verification,
                         )
                         .await
                     }));
@@ -247,6 +260,7 @@ fn execute_node(
                     atlas,
                     provider_id.clone(),
                     runtime.clone(),
+                    verification,
                 )
                 .await
             }
@@ -368,6 +382,7 @@ async fn execute_call(
     mut atlas: AtlasClient,
     provider_id: String,
     runtime: PlanRuntime,
+    verification_policy: Arc<VerificationPolicy>,
 ) -> bool {
     // Log the args too (bounded) so the log shows what each call requested —
     // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
@@ -384,8 +399,8 @@ async fn execute_call(
         call.call_id, call.provider_id, call.contract_id, args_preview, args_ellipsis,
     );
 
-    // Mark the op running so get_plan_status shows the in-flight node; the
-    // terminal state below (or async_poll for async caps) overwrites it.
+    // Mark the op running so get_plan_status shows the in-flight node. Live
+    // async states may replace it, then this function records one final state.
     runtime
         .record_op_state(
             &node.plan_id,
@@ -400,7 +415,7 @@ async fn execute_call(
         async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id).await
     };
 
-    let result = match async_group {
+    let (mut result, mut state) = match async_group {
         Err(error) => {
             let r = CapabilityCallResult {
                 call_id: call.call_id.clone(),
@@ -410,29 +425,11 @@ async fn execute_call(
                 output: String::new(),
                 error,
             };
-            runtime
-                .record_op_state(&node.plan_id, &node.op_id, RtdlNodeStateEnum::Failed as u32)
-                .await;
-            let _ = tx
-                .send(Ok(rtdl_wire::node_state_from_result(
-                    &node,
-                    r.clone(),
-                    RtdlNodeStateEnum::Failed as u32,
-                )))
-                .await;
-            r
+            (r, RtdlNodeStateEnum::Failed as u32)
         }
         Ok(Some(group)) => {
-            async_poll::run_until_terminal(
-                call,
-                &group,
-                &provider_id,
-                &mut atlas,
-                &tx,
-                &node,
-                &runtime,
-            )
-            .await
+            async_poll::run_until_terminal(call, &group, &provider_id, &mut atlas, &node, &runtime)
+                .await
         }
         Ok(None) => {
             let r =
@@ -440,19 +437,42 @@ async fn execute_call(
                     .await;
             let cancelled = runtime.is_cancelled(&node.plan_id).await;
             let state = leaf_terminal_state(r.success, cancelled);
-            runtime
-                .record_op_state(&node.plan_id, &node.op_id, state)
-                .await;
-            let _ = tx
-                .send(Ok(rtdl_wire::node_state_from_result(
-                    &node,
-                    r.clone(),
-                    state,
-                )))
-                .await;
-            r
+            (r, state)
         }
     };
+
+    if result.success
+        && state == RtdlNodeStateEnum::Succeeded as u32
+        && !runtime.is_cancelled(&node.plan_id).await
+    {
+        result = verification::verify_result(
+            verification_policy.as_ref(),
+            call,
+            &node,
+            result,
+            &provider_id,
+            &mut atlas,
+            &runtime,
+        )
+        .await;
+        if !result.success {
+            state = RtdlNodeStateEnum::Failed as u32;
+        }
+    }
+
+    if runtime.is_cancelled(&node.plan_id).await {
+        state = RtdlNodeStateEnum::Canceled as u32;
+    }
+    runtime
+        .record_op_state(&node.plan_id, &node.op_id, state)
+        .await;
+    let _ = tx
+        .send(Ok(rtdl_wire::node_state_from_result(
+            &node,
+            result.clone(),
+            state,
+        )))
+        .await;
     let failed = !result.success;
 
     if result.success {

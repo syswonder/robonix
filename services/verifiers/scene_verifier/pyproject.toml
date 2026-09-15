@@ -1,0 +1,17 @@
+[project]
+name = "robonix-scene-verifier"
+version = "0.1.0"
+description = "Scene-backed planar navigation result verifier"
+requires-python = ">=3.10"
+dependencies = [
+    "robonix-api",
+    "mcp>=1.27,<2",
+    "grpcio-tools>=1.60",
+    "uvicorn",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+robonix-api = { workspace = true }

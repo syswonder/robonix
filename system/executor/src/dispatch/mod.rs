@@ -80,6 +80,20 @@ pub async fn dispatch(
     runtime: &PlanRuntime,
     plan_id: &str,
 ) -> CapabilityCallResult {
+    dispatch_with_timeout(call, self_provider_id, atlas, runtime, plan_id, None).await
+}
+
+/// Dispatch one call with an optional MCP deadline while always releasing its
+/// Atlas channel. Verification uses this to bound a verifier that stops
+/// responding without leaking the ConnectCapability record.
+pub async fn dispatch_with_timeout(
+    call: &CapabilityCall,
+    self_provider_id: &str,
+    atlas: &mut AtlasClient,
+    runtime: &PlanRuntime,
+    plan_id: &str,
+    timeout: Option<Duration>,
+) -> CapabilityCallResult {
     if call.provider_id == self_provider_id {
         return builtin::execute(call, runtime, self_provider_id, atlas, plan_id).await;
     }
@@ -103,7 +117,17 @@ pub async fn dispatch(
         }
     };
 
-    let result = mcp::execute(call, &endpoint).await;
+    let result = match timeout {
+        Some(duration) => match tokio::time::timeout(duration, mcp::execute(call, &endpoint)).await
+        {
+            Ok(result) => result,
+            Err(_) => error_result(
+                call,
+                format!("MCP call timed out after {}s", duration.as_secs()),
+            ),
+        },
+        None => mcp::execute(call, &endpoint).await,
+    };
 
     let _ = atlas.disconnect_capability(&channel_id).await;
     result

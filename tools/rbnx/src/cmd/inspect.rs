@@ -207,15 +207,32 @@ pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> 
 }
 
 pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
-    // "Tools" in Robonix-speak = MCP-transport capabilities (LLM-callable providers).
+    // "Tools" here mirrors Pilot's model-facing MCP catalog. Contract
+    // metadata only filters this view; it does not alter Atlas discovery.
     let mut atlas = connect(endpoint).await?;
     let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
         .await?;
+    let contracts = atlas
+        .inner()
+        .list_contracts(atlas_pb::ListContractsRequest {
+            namespace_prefix: String::new(),
+        })
+        .await
+        .context("ListContracts RPC")?
+        .into_inner()
+        .contracts;
+    let hidden_contracts = contracts
+        .into_iter()
+        .filter(|contract| !contract_llm_callable(contract))
+        .map(|contract| contract.id)
+        .collect::<std::collections::HashSet<_>>();
     let mut entries: Vec<(String, String, String, String)> = Vec::new();
     for provider in &providers {
         for cap in &provider.capabilities {
-            if cap.transport != atlas_pb::Transport::Mcp as i32 {
+            if cap.transport != atlas_pb::Transport::Mcp as i32
+                || hidden_contracts.contains(&cap.contract_id)
+            {
                 continue;
             }
             let schema = match cap.params.as_ref().and_then(|p| p.kind.as_ref()) {
@@ -339,6 +356,7 @@ pub async fn contracts(
                     "io_msg_type": c.io_msg_type,
                     "io_srv_type": c.io_srv_type,
                     "cross_namespace": c.cross_namespace,
+                    "llm_callable": contract_llm_callable(c),
                     "source_toml_path": c.source_toml_path,
                     "msg_fields": c.msg_fields.iter().map(|f| serde_json::json!({
                         "name": f.name, "type_name": f.type_name,
@@ -381,7 +399,7 @@ pub async fn contracts(
             "(none)".dimmed().to_string()
         };
         println!(
-            "● {}  {} {} {}{}",
+            "● {}  {} {} {}{}{}",
             c.id.bold(),
             format!("[{}]", c.kind).dimmed(),
             format!("mode={}", c.mode).cyan(),
@@ -390,6 +408,11 @@ pub async fn contracts(
                 " cross-namespace".dimmed().to_string()
             } else {
                 String::new()
+            },
+            if contract_llm_callable(c) {
+                String::new()
+            } else {
+                " pilot-hidden".dimmed().to_string()
             },
         );
         if verbose {
@@ -432,6 +455,12 @@ pub async fn contracts(
     Ok(())
 }
 
+/// Interpret absent metadata as visible for compatibility with older Atlas
+/// processes, whose wire descriptor predates `llm_callable`.
+fn contract_llm_callable(contract: &atlas_pb::ContractDescriptor) -> bool {
+    contract.llm_callable.unwrap_or(true)
+}
+
 pub async fn inspect(endpoint: &str) -> Result<()> {
     let atlas = connect(endpoint).await?;
     let raw = atlas
@@ -443,4 +472,21 @@ pub async fn inspect(endpoint: &str) -> Result<()> {
         .json;
     println!("{raw}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contract_llm_callable;
+    use robonix_atlas::pb as atlas_pb;
+
+    #[test]
+    fn absent_contract_visibility_defaults_to_visible() {
+        assert!(contract_llm_callable(
+            &atlas_pb::ContractDescriptor::default()
+        ));
+        assert!(!contract_llm_callable(&atlas_pb::ContractDescriptor {
+            llm_callable: Some(false),
+            ..Default::default()
+        }));
+    }
 }

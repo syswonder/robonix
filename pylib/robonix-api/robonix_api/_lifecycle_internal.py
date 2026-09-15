@@ -16,6 +16,11 @@ from .atlas_types import LifecycleState
 
 log = logging.getLogger("robonix_api._lifecycle_internal")
 
+# State reporting runs inside the provider's lifecycle Driver handler.  Keep
+# the Atlas call bounded so a transport that applies the update but loses the
+# response cannot block Driver(INIT) forever.
+_STATE_PUSH_TIMEOUT_S = 5.0
+
 
 def _resolve_state(s: LifecycleState | str | int) -> LifecycleState:
     if isinstance(s, LifecycleState):
@@ -51,11 +56,14 @@ def _set_lifecycle_state(
     ATLAS._ensure_stub()
     pb = ATLAS._wire_pb
     try:
-        ATLAS._wire_stub.SetLifecycleState(pb.SetLifecycleStateRequest(
-            id=id,
-            state=int(cs),
-            detail=detail,
-        ))
+        ATLAS._wire_stub.SetLifecycleState(
+            pb.SetLifecycleStateRequest(
+                id=id,
+                state=int(cs),
+                detail=detail,
+            ),
+            timeout=_STATE_PUSH_TIMEOUT_S,
+        )
     except Exception as e:  # noqa: BLE001
         # State pushes are a correctness signal — when atlas drops them
         # the local provider thinks ACTIVE but `rbnx caps` still shows
