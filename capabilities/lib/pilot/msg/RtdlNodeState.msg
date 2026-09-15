@@ -9,6 +9,8 @@ uint32 FAILED=3
 uint32 CANCELED=4
 uint32 TIMEOUT=5
 uint32 PAUSED=6
+# Capability execution finished, but result verification is still pending.
+uint32 VERIFYING=7
 # RTDL non-leaf node result, like sequence or parallel.
 string operator_detail
 # RTDL leaf node result.

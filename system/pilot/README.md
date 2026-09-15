@@ -85,6 +85,12 @@ MVP RTDL supports only:
 
 Pilot buffers the full assistant JSON before showing user-visible text, validates the RTDL, expands it into an arena-style `Plan { nodes, root_index }`, sends that `Plan` to Liaison, and dispatches it to Executor. Executor interprets `sequence`, `parallel`, and `do` nodes directly.
 
+Pilot forwards `VERIFYING` node states for live visibility but does not put
+them in LLM history or `BatchResult`. Once verification finishes, the final
+leaf result is written to history exactly once; a final failure triggers
+replanning immediately. `BatchResult` contains only the latest final state for
+each node.
+
 Parallel example:
 
 ```json

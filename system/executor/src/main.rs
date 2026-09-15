@@ -196,7 +196,10 @@ async fn main() -> Result<()> {
         });
     }
 
-    let verification = Arc::new(verification::VerificationPolicy::new(cfg.verification));
+    let verification = Arc::new(verification::VerificationPolicy::new(
+        cfg.verification.overlap,
+        cfg.verification.rules,
+    ));
     info!(
         "loaded {} executor verification rule(s)",
         verification.len()
