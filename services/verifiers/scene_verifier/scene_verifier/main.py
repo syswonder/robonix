@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""scene_verifier — Robonix skill provider."""
-from robonix_api import Skill, Ok
+"""scene_verifier — Robonix service provider."""
+from robonix_api import Service, Ok
 
 # `id` must equal this entry's `name:` in the deploy robonix_manifest.yaml.
 # `namespace` groups the capabilities this provider declares.
-provider = Skill(id="scene_verifier", namespace="robonix/skill/scene_verifier")
+provider = Service(id="scene_verifier", namespace="robonix/service/scene_verifier")
 
 
 @provider.on_init
