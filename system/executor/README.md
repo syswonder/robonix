@@ -32,25 +32,26 @@ Important configuration:
 
 Result verification rules live in the deployment manifest's `system.executor`
 block. A rule is optional; calls with no matching rule keep their original
-result.
+result. For example:
 
 ```yaml
 system:
   executor:
     verification:
-      - target_contract_id: robonix/service/navigation/navigate
-        target_provider_id: simple_nav  # optional provider-specific override
-        verifier_provider_id: scene_verifier
-        overlap: true                   # optional; defaults to false
-        verifier_args:
-          scene_provider_id: scene
+      overlap: true                     # optional; defaults to false
+      rules:
+        - target_contract_id: robonix/service/navigation/navigate
+          target_provider_id: simple_nav  # optional provider-specific override
+          verifier_provider_id: scene_verifier
+          verifier_args:
+            scene_provider_id: scene
 ```
 
 An exact `target_provider_id` + `target_contract_id` rule wins over a
 contract-only rule. Duplicate rules at the same specificity are rejected at
 startup. `verifier_args` must be a JSON/YAML object and is forwarded unchanged
-inside the verifier request. `overlap` applies to one rule and defaults to
-`false`, preserving synchronous verification.
+inside the verifier request. `overlap` applies to the entire verification
+configuration and defaults to `false`, preserving synchronous verification.
 
 ## RTDL Execution
 
@@ -133,13 +134,22 @@ timed-out, or malformed verifier response changes it to `FAILED` with
 target calls are never verified. Executor emits only one terminal node event,
 after verification has finished when `overlap=false`.
 
-With `overlap=true`, Executor first emits the successful capability result and
-continues the RTDL tree while verification runs in the background. A passing
-verifier emits nothing further; a failed verifier emits a second `FAILED` state
-for the same node, correcting its earlier optimistic success. This correction
-never cancels or changes the execution of sequence or parallel siblings.
-Executor waits for all background verifications before `plan_complete` and
-includes their failures in `any_failed`.
+With `overlap=true`, a matched successful capability call first emits
+`VERIFYING` with its result and continues the RTDL tree while verification runs
+in the background. Sequence and parallel operators with verifying descendants
+also emit `VERIFYING` without blocking their parents. Every leaf and operator
+later emits exactly one final `SUCCEEDED`, `FAILED`, or `CANCELED` state after
+its verification dependencies finish. Verification never cancels or changes
+the execution of sequence or parallel siblings. Executor waits for every final
+state before `plan_complete` and includes verification failures in `any_failed`.
+
+`VERIFYING` is also the cancellation boundary for a leaf: its capability call
+has already completed, so `cancel_plan` does not cancel that leaf or replace its
+final verification outcome. The verifier continues running and the leaf later
+becomes `SUCCEEDED` when verification passes or `FAILED` when verification
+fails. Cancellation still applies to nodes that are running or have not
+started, and sequence/parallel operators and the plan may therefore finish as
+`CANCELED` even when an already-verifying leaf finishes successfully.
 
 ## Builtin capabilities
 
@@ -162,7 +172,7 @@ Executor declares builtin MCP capabilities under
   discover running plans, then drill in with `get_plan_status`.
 - `get_plan_status`: inspect an in-flight RTDL plan. Args: `plan_id` (required).
   Returns each op as JSON with `op_id`, `kind`, `description`, current `state`
-  (`pending`/`running`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`) and
+  (`pending`/`running`/`verifying`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`) and
   any armed `stop_point`. Lets the LLM read a running plan's structure + live
   progress before issuing a `stop_plan_at` / `cancel_plan` (inspect first, then
   act). Errors if the plan is not active (stale/wrong id or already finished) —

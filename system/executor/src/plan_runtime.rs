@@ -689,6 +689,7 @@ fn state_label(state: u32) -> &'static str {
         Ok(RtdlNodeStateEnum::Canceled) => "canceled",
         Ok(RtdlNodeStateEnum::Timeout) => "timeout",
         Ok(RtdlNodeStateEnum::Paused) => "paused",
+        Ok(RtdlNodeStateEnum::Verifying) => "verifying",
         _ => "unknown",
     }
 }

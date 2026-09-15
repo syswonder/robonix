@@ -39,13 +39,14 @@ system:
     listen: 0.0.0.0:50061
     # verifier.
     verification:
-      - target_contract_id: robonix/service/navigation/navigate
-        target_provider_id: nav2
-        verifier_provider_id: scene_verifier
-        overlap: true
-        verifier_args:
-          scene_provider_id: scene
-          check_yaw: true
+      overlap: true
+      rules:
+        - target_contract_id: robonix/service/navigation/navigate
+          target_provider_id: nav2
+          verifier_provider_id: scene_verifier
+          verifier_args:
+            scene_provider_id: scene
+            check_yaw: true
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071

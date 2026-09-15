@@ -896,8 +896,7 @@ async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<Strin
     Some(text)
 }
 
-/// Feed one finished tree's terminal results into the LLM history, mirroring
-/// the per-round feedback the blocking loop used to produce.
+/// Feed finalized leaf results into LLM history.
 fn feed_results_into_history(
     history: &mut Vec<Message>,
     plan_id: &str,
@@ -909,7 +908,7 @@ fn feed_results_into_history(
          Attribute the following results only to this tree. A failure here blocks dependent \
          steps in this tree, but does not cancel or invalidate other in-flight trees."
     )));
-    let mut deferred_followups: Vec<Message> = Vec::new();
+    let mut deferred_followups = Vec::new();
     for r in results {
         let mut bounded = r.clone();
         if !history::is_image_output(&bounded.output) {
@@ -1227,15 +1226,10 @@ pub async fn run_turn(
                             // this too, but be explicit so the live view always
                             // correlates with the Plan already sent).
                             ns.plan_id = plan_id.clone();
-                            // Feed every node's result into context the moment it
-                            // reaches a terminal state, using names rather than
-                            // numeric RTDL state codes in logs. Successful nodes wait
-                            // for PlanDone before replanning; non-success terminal
-                            // nodes replan immediately below. The tree-level feed in
-                            // PlanDone is dropped to avoid double-feeding — every
-                            // leaf result already arrives here.
-                            const TERMINAL: [u32; 4] = [2, 3, 4, 5];
-                            if TERMINAL.contains(&ns.state)
+                            // VERIFYING is deliberately non-terminal. Feed only a
+                            // leaf's post-verification final state so history never
+                            // contains an optimistic result that must be corrected.
+                            if is_terminal_executor_state(ns.state)
                                 && let Some(r) = ns.leaf_result.as_ref()
                             {
                                 let description = forest
@@ -1288,8 +1282,7 @@ pub async fn run_turn(
                                 )));
                                 history::trim(history, MAX_HISTORY);
                             }
-                            // Leaf results were already fed per-node (see above);
-                            // only surface the batch to the chat UI here.
+                            // Leaf results were already upserted per node event.
                             log_plan_complete(&plan_id, &results, any_failed);
                             let batch = BatchResult {
                                 plan_id: plan_id.clone(),
@@ -2595,6 +2588,7 @@ fn rtdl_state_name(state: u32) -> String {
         Ok(RtdlNodeStateEnum::Canceled) => "Canceled".to_string(),
         Ok(RtdlNodeStateEnum::Timeout) => "Timeout".to_string(),
         Ok(RtdlNodeStateEnum::Paused) => "Paused".to_string(),
+        Ok(RtdlNodeStateEnum::Verifying) => "Verifying".to_string(),
         Err(_) => format!("Unknown({state})"),
     }
 }
@@ -3037,11 +3031,11 @@ mod tests {
         build_executor_active_block, build_forest_block, compact_tool_result,
         configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
-        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
-        should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
-        task_is_session_end, upsert_terminal_result,
+        is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
+        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
+        parse_task_update, plan_call_signatures, record_dispatched_plan, rtdl_node_kind_name,
+        rtdl_recovery_final_text, rtdl_state_name, should_replan_after_plan_done,
+        skip_memory_prefetch, start_or_resume_task, task_is_session_end, upsert_terminal_result,
     };
     use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
     use crate::pb::pilot::{
@@ -3069,9 +3063,9 @@ mod tests {
         );
     }
 
-    /// A verification correction replaces rather than duplicates a node result.
+    /// Repeated final events retain only the latest node result defensively.
     #[test]
-    fn verification_correction_replaces_the_prior_terminal_result() {
+    fn repeated_terminal_state_replaces_the_prior_result() {
         let mut results = vec![RtdlNodeState {
             node_index: 4,
             state: RtdlNodeStateEnum::Succeeded as u32,
@@ -3746,7 +3740,11 @@ mod tests {
         assert_eq!(rtdl_state_name(3), "Failed");
         assert_eq!(rtdl_state_name(4), "Canceled");
         assert_eq!(rtdl_state_name(5), "Timeout");
+        assert_eq!(rtdl_state_name(7), "Verifying");
         assert_eq!(rtdl_state_name(999), "Unknown(999)");
+        assert!(!is_terminal_executor_state(
+            RtdlNodeStateEnum::Verifying as u32
+        ));
     }
 
     #[test]

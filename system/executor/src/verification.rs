@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 //
 // Executor-owned result verification. A configured rule turns one successful
-// capability result into a synchronous call to a provider implementing the
-// shared `robonix/service/verifier/verify` contract.
+// capability result into a call to a provider implementing the shared
+// `robonix/service/verifier/verify` contract. Executor-wide overlap controls
+// whether matching calls wait synchronously or finalize in the background.
 
 use std::time::Duration;
 
@@ -22,16 +23,21 @@ const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Immutable rule set shared by all concurrently executing plans.
 #[derive(Clone, Debug, Default)]
 pub struct VerificationPolicy {
+    overlap: bool,
     rules: Vec<VerificationRule>,
 }
 
 impl VerificationPolicy {
-    pub fn new(rules: Vec<VerificationRule>) -> Self {
-        Self { rules }
+    pub fn new(overlap: bool, rules: Vec<VerificationRule>) -> Self {
+        Self { overlap, rules }
     }
 
     pub fn len(&self) -> usize {
         self.rules.len()
+    }
+
+    pub fn overlap(&self) -> bool {
+        self.overlap
     }
 
     /// Exact provider+contract rules override a contract-only fallback.
@@ -189,7 +195,6 @@ mod tests {
             target_contract_id: "cap/target".to_string(),
             target_provider_id: provider.map(str::to_string),
             verifier_provider_id: verifier.to_string(),
-            overlap: false,
             verifier_args: serde_json::json!({"camera_provider_id":"front_camera"}),
         }
     }
@@ -231,8 +236,10 @@ mod tests {
 
     #[test]
     fn exact_provider_rule_wins_over_contract_fallback() {
-        let policy =
-            VerificationPolicy::new(vec![rule(None, "fallback"), rule(Some("arm"), "exact")]);
+        let policy = VerificationPolicy::new(
+            false,
+            vec![rule(None, "fallback"), rule(Some("arm"), "exact")],
+        );
         assert_eq!(
             policy.rule_for(&call()).unwrap().verifier_provider_id,
             "exact"
@@ -309,7 +316,7 @@ mod tests {
         )
         .await
         .expect("connect test Atlas");
-        let policy = VerificationPolicy::new(vec![rule(None, "missing_verifier")]);
+        let policy = VerificationPolicy::new(false, vec![rule(None, "missing_verifier")]);
         let verified = verify_result(
             &policy,
             &call(),
