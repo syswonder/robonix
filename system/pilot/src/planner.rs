@@ -2026,6 +2026,16 @@ fn is_legacy_plan_control_contract(contract_id: &str) -> bool {
     )
 }
 
+/// Every name a plan may legitimately write for a capability, mapped to its
+/// dispatch target.
+///
+/// The catalog lists `<provider_id>.<llm_name>`, but the contract id is the
+/// identifier Atlas logs, the capability files, and skill documentation all
+/// carry, so a plan naming it is asking for a capability the runtime really
+/// has. Rejecting that spelling costs a retry round and teaches the model
+/// nothing it can act on, so a contract id is accepted as an alias whenever it
+/// is unambiguous: exactly one provider offers it, and it does not shadow a
+/// catalog name.
 fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> CapabilityTargetMap {
     let mut out = HashMap::new();
     for cap in display_caps {
@@ -2033,6 +2043,19 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
             cap.display_name.clone(),
             (cap.provider_id.to_string(), cap.cap.contract_id.clone()),
         );
+    }
+    let mut providers_per_contract: HashMap<&str, usize> = HashMap::new();
+    for cap in display_caps {
+        *providers_per_contract
+            .entry(cap.cap.contract_id.as_str())
+            .or_default() += 1;
+    }
+    for cap in display_caps {
+        if providers_per_contract.get(cap.cap.contract_id.as_str()) != Some(&1) {
+            continue;
+        }
+        out.entry(cap.cap.contract_id.clone())
+            .or_insert_with(|| (cap.provider_id.to_string(), cap.cap.contract_id.clone()));
     }
     out
 }
@@ -3248,6 +3271,48 @@ mod tests {
             expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "multi-step").unwrap();
         assert_eq!(super::plan_call_count(&plan), 3);
         assert_eq!(plan.round, 1);
+    }
+
+    #[test]
+    fn a_contract_id_names_the_same_capability_as_the_catalog_entry() {
+        // Atlas logs, capability files and skill docs all spell a capability by
+        // its contract id, so a plan that uses it is naming something the
+        // runtime has. It must dispatch exactly like the catalog name.
+        let capabilities = vec![test_capability("demo", "observe")];
+        let display = build_display_capabilities(&capabilities);
+        let targets = build_capability_target_map(&display);
+        assert_eq!(
+            targets.get("robonix/service/test/observe"),
+            targets.get("demo.test_observe")
+        );
+
+        let rtdl = json!({
+            "op": "do",
+            "op_id": 0,
+            "description": "observe",
+            "cap": "robonix/service/test/observe",
+            "args": {"observe": "room"},
+        });
+        let plan =
+            expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "by contract id")
+                .unwrap();
+        assert_eq!(super::plan_call_count(&plan), 1);
+    }
+
+    #[test]
+    fn a_contract_id_two_providers_offer_stays_unknown() {
+        // With more than one provider behind the id, the alias would have to
+        // pick one of them. Silently choosing is worse than the retry: the
+        // catalog name is what disambiguates, so only it resolves.
+        let capabilities = vec![
+            test_capability("left", "observe"),
+            test_capability("right", "observe"),
+        ];
+        let display = build_display_capabilities(&capabilities);
+        let targets = build_capability_target_map(&display);
+        assert!(!targets.contains_key("robonix/service/test/observe"));
+        assert!(targets.contains_key("left.test_observe"));
+        assert!(targets.contains_key("right.test_observe"));
     }
 
     #[test]
