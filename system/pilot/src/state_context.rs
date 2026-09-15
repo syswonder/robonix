@@ -5,6 +5,7 @@ use crate::pb::executor::rtdl_event::RtdlEventEnum;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
 use crate::planner::ExecutorConn;
+use crate::vlm::Message;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use serde_json::{Value, json};
@@ -15,6 +16,7 @@ use uuid::Uuid;
 
 const RTDL_DO: u32 = 2;
 const SCENE_CONTEXT: &str = "robonix/system/scene/get_robot_context";
+const CAMERA_SNAPSHOT: &str = "robonix/primitive/camera/snapshot";
 
 pub async fn collect(
     executor: &ExecutorConn,
@@ -70,9 +72,33 @@ pub async fn collect(
 }
 
 async fn query_scene(
-    mut graph: RobonixSystemExecutorExecuteClient<Channel>,
+    graph: RobonixSystemExecutorExecuteClient<Channel>,
     provider_id: String,
 ) -> Value {
+    match query_capability(
+        graph,
+        provider_id,
+        SCENE_CONTEXT,
+        "scene_snapshot",
+        "Read Scene spatial context before planning",
+    )
+    .await
+    {
+        Ok(value) => json!({"available": true, "state": value}),
+        Err(error) => json!({"available": false, "error": error}),
+    }
+}
+
+/// Dispatch one capability through Executor and return its output, so a
+/// prefetch reaches a provider the same way a planned call would: same plan
+/// shape, same lifecycle, same failure reporting.
+async fn query_capability(
+    mut graph: RobonixSystemExecutorExecuteClient<Channel>,
+    provider_id: String,
+    contract_id: &str,
+    op_id: &str,
+    description: &str,
+) -> Result<Value, String> {
     let plan_id = format!("state-prefetch-{}", Uuid::new_v4());
     let plan = Plan {
         plan_id: plan_id.clone(),
@@ -84,11 +110,11 @@ async fn query_scene(
             call: Some(CapabilityCall {
                 call_id: format!("{plan_id}:0"),
                 provider_id,
-                contract_id: SCENE_CONTEXT.into(),
+                contract_id: contract_id.into(),
                 args_json: "{}".into(),
             }),
-            op_id: "scene_snapshot".into(),
-            description: "Read Scene spatial context before planning".into(),
+            op_id: op_id.into(),
+            description: description.into(),
         }],
         root_index: 0,
     };
@@ -121,12 +147,11 @@ async fn query_scene(
                 return Err(state.operator_detail);
             }
         }
-        Err("Scene query ended without a terminal result".into())
+        Err(format!("{contract_id} ended without a terminal result"))
     };
     match tokio::time::timeout(Duration::from_secs(3), query).await {
-        Ok(Ok(value)) => json!({"available": true, "state": value}),
-        Ok(Err(error)) => json!({"available": false, "error": error}),
-        Err(_) => json!({"available": false, "error": "Scene query timed out after 3 seconds"}),
+        Ok(result) => result,
+        Err(_) => Err(format!("{contract_id} timed out after 3 seconds")),
     }
 }
 
@@ -139,6 +164,101 @@ fn lifecycle_name(state: i32) -> &'static str {
         Ok(atlas_pb::LifecycleState::StateTerminated) => "terminated",
         _ => "unknown",
     }
+}
+
+/// One camera frame for the planning round about to run, or `None`.
+///
+/// A planner that must elect to look is not equivalent to one handed a current
+/// observation: in an EB-Habitat episode the model called the registered camera
+/// zero times and searched receptacles blindly, while 82% of its planning
+/// requests carried no image at all and the rest carried up to nine stale
+/// frames accumulated in the history. This captures a fresh frame per round so
+/// the observation in the prompt is the view the robot has now.
+///
+/// Off unless `ROBONIX_PILOT_AUTO_CAMERA_OBSERVATION` is set: a body whose
+/// planner does not need per-round vision should not pay for an image on every
+/// request. `ROBONIX_PILOT_OBSERVATION_CAMERA_PROVIDER` picks the camera when
+/// several are registered; without it the first registered camera is used.
+/// Every failure path returns `None` — a missing observation degrades the round
+/// to what it was before, and must never end the turn.
+pub async fn collect_visual_observation(
+    executor: &ExecutorConn,
+    caps: &[(String, atlas_pb::Capability)],
+) -> Option<Message> {
+    if !env_flag("ROBONIX_PILOT_AUTO_CAMERA_OBSERVATION") {
+        return None;
+    }
+    let preferred = std::env::var("ROBONIX_PILOT_OBSERVATION_CAMERA_PROVIDER").ok();
+    let provider_id = provider_for(caps, CAMERA_SNAPSHOT, preferred.as_deref())?;
+    let value = query_capability(
+        executor.graph.clone(),
+        provider_id,
+        CAMERA_SNAPSHOT,
+        "camera_observation",
+        "Capture the current camera observation before planning",
+    )
+    .await
+    .ok()?;
+    camera_observation(&value)
+}
+
+/// The provider to read a contract from: the preferred one when it offers the
+/// contract, otherwise any registered provider of it. A named preference that
+/// does not offer the contract resolves to nothing rather than silently
+/// reading a different camera than the caller asked for.
+fn provider_for(
+    caps: &[(String, atlas_pb::Capability)],
+    contract_id: &str,
+    preferred_provider: Option<&str>,
+) -> Option<String> {
+    let matches_contract =
+        |capability: &atlas_pb::Capability| capability.contract_id == contract_id;
+    if let Some(preferred) = preferred_provider {
+        return caps
+            .iter()
+            .find(|(provider_id, capability)| {
+                provider_id == preferred && matches_contract(capability)
+            })
+            .map(|(provider_id, _)| provider_id.clone());
+    }
+    caps.iter()
+        .find(|(_, capability)| matches_contract(capability))
+        .map(|(provider_id, _)| provider_id.clone())
+}
+
+/// Turn a camera snapshot payload into a user message carrying the image.
+///
+/// Accepts both the `image_base64` shape and `sensor_msgs/Image`'s `data`.
+/// `encoding = "error"` is the primitive's placeholder for "no frame", and an
+/// empty payload is the same thing said differently; neither is an observation.
+fn camera_observation(value: &Value) -> Option<Message> {
+    let encoding = value
+        .get("encoding")
+        .and_then(Value::as_str)
+        .unwrap_or("jpeg");
+    if encoding.eq_ignore_ascii_case("error") {
+        return None;
+    }
+    let image = value
+        .get("image_base64")
+        .or_else(|| value.get("data"))
+        .and_then(Value::as_str)
+        .filter(|image| !image.is_empty())?;
+    Some(Message::user_with_image(
+        "Current camera observation, captured immediately before this planning \
+         round. This is the view the robot has now; earlier images in the \
+         history are older views from other places.",
+        image.to_string(),
+    ))
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 #[cfg(test)]
