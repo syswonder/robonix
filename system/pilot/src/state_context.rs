@@ -169,11 +169,10 @@ fn lifecycle_name(state: i32) -> &'static str {
 /// One camera frame for the planning round about to run, or `None`.
 ///
 /// A planner that must elect to look is not equivalent to one handed a current
-/// observation: in an EB-Habitat episode the model called the registered camera
-/// zero times and searched receptacles blindly, while 82% of its planning
-/// requests carried no image at all and the rest carried up to nine stale
-/// frames accumulated in the history. This captures a fresh frame per round so
-/// the observation in the prompt is the view the robot has now.
+/// observation. A model that never calls the camera plans without one, and a
+/// model that called it some rounds ago carries whatever the history kept —
+/// older views of places the robot has already left. This captures a fresh
+/// frame per round so the observation in the prompt is the view it has now.
 ///
 /// Off unless `ROBONIX_PILOT_AUTO_CAMERA_OBSERVATION` is set: a body whose
 /// planner does not need per-round vision should not pay for an image on every
