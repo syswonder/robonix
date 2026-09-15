@@ -95,12 +95,11 @@ fn estimated_text_tokens(bytes: usize) -> usize {
 /// The split between `sections` and `live_sections` is what makes the request
 /// cacheable. Providers cache a prompt by its prefix, so everything before the
 /// first byte that changed this round is all that can be reused. With live
-/// state inside the system message the prefix ended there and the accumulated
-/// history behind it was re-read at full price every round; measured on
-/// EB-Habitat the reused prefix stayed at about 4.2k tokens while the request
-/// grew past 20k. `sections` therefore holds only what is stable for the turn,
-/// and `live_sections` goes after the history, where the growing prefix is
-/// stable by construction.
+/// state inside the system message the prefix ends at the first such block,
+/// and the accumulated history behind it is re-read at full price every round
+/// however long it grows. `sections` therefore holds only what is stable for
+/// the turn, and `live_sections` goes after the history, where the growing
+/// prefix is stable by construction.
 fn assemble_planning_messages(
     round: u32,
     capability_cache_hit: bool,
