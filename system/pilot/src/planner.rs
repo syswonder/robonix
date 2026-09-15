@@ -90,10 +90,22 @@ fn estimated_text_tokens(bytes: usize) -> usize {
 /// Assemble one request while emitting a bounded, machine-readable breakdown
 /// of every prompt section. Section token counts are explicit four-byte
 /// estimates; the provider-reported total is logged separately when available.
+/// Build one planning request.
+///
+/// The split between `sections` and `live_sections` is what makes the request
+/// cacheable. Providers cache a prompt by its prefix, so everything before the
+/// first byte that changed this round is all that can be reused. With live
+/// state inside the system message the prefix ended there and the accumulated
+/// history behind it was re-read at full price every round; measured on
+/// EB-Habitat the reused prefix stayed at about 4.2k tokens while the request
+/// grew past 20k. `sections` therefore holds only what is stable for the turn,
+/// and `live_sections` goes after the history, where the growing prefix is
+/// stable by construction.
 fn assemble_planning_messages(
     round: u32,
     capability_cache_hit: bool,
     sections: &[PromptSection<'_>],
+    live_sections: &[PromptSection<'_>],
     history_messages: &[Message],
     observation: Option<Message>,
     correction: Option<&str>,
@@ -103,15 +115,24 @@ fn assemble_planning_messages(
     for section in sections {
         system.push_str(section.content);
     }
+    let live_bytes: usize = live_sections
+        .iter()
+        .map(|section| section.content.len())
+        .sum();
+    let mut live = String::with_capacity(live_bytes);
+    for section in live_sections {
+        live.push_str(section.content);
+    }
     let sanitized_history = history::sanitize_for_vlm(history_messages);
     let history_bytes: usize = sanitized_history
         .iter()
         .map(|message| message.content.as_deref().map_or(0, str::len))
         .sum();
     let correction_bytes = correction.map_or(0, str::len);
-    let prompt_bytes = system.len() + history_bytes + correction_bytes;
+    let prompt_bytes = system.len() + history_bytes + live.len() + correction_bytes;
     let mut section_metrics = sections
         .iter()
+        .chain(live_sections.iter())
         .map(|section| {
             serde_json::json!({
                 "name": section.name,
@@ -139,13 +160,17 @@ fn assemble_planning_messages(
             "history_bytes": history_bytes,
             "correction_bytes": correction_bytes,
             "capability_catalog_render_cache_hit": capability_cache_hit,
+            "cacheable_prefix_bytes": system.len(),
             "sections": section_metrics,
         })
     );
 
-    let mut messages = Vec::with_capacity(sanitized_history.len() + 3);
+    let mut messages = Vec::with_capacity(sanitized_history.len() + 4);
     messages.push(Message::system(&system));
     messages.extend(sanitized_history);
+    if !live.is_empty() {
+        messages.push(Message::user(&live));
+    }
     // After the history, so the current view is the most recent image the
     // model sees, and before any correction, which is about the reply rather
     // than about the world.
@@ -1441,6 +1466,15 @@ pub async fn run_turn(
                     name: "task",
                     content: &task_block,
                 },
+            ];
+            // Recomputed every round from live state, so they cannot sit in
+            // the system message: a block that changes each round ends the
+            // provider's cached prefix at its own offset, and everything after
+            // it — including the whole accumulated history — is then re-read at
+            // full price every round. Sent after the history instead, where
+            // they also read as what they are: observations of the current
+            // state rather than standing instructions.
+            let live_sections = [
                 PromptSection {
                     name: "in_flight_trees",
                     content: &forest_block,
@@ -1466,6 +1500,7 @@ pub async fn run_turn(
                 round,
                 capability_cache_hit,
                 &sections,
+                &live_sections,
                 history,
                 observation,
                 correction.as_deref(),
@@ -3192,9 +3227,9 @@ Concretely:
 mod tests {
     use super::{
         CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION,
-        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptScope, RTDL_DO, RTDL_PARALLEL,
-        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, append_steer,
-        apply_task_update, assemble_planning_messages, build_capability_target_map,
+        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptScope, PromptSection, RTDL_DO,
+        RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep,
+        append_steer, apply_task_update, assemble_planning_messages, build_capability_target_map,
         build_display_capabilities, build_executor_active_block, build_forest_block,
         build_system_prompt, close_trailing_assistant, compact_tool_result,
         configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
@@ -4381,6 +4416,7 @@ mod tests {
             1,
             true,
             &[],
+            &[],
             &history,
             Some(Message::user_with_image("current view", "AAAA".into())),
             Some("that reply did not parse"),
@@ -4407,6 +4443,7 @@ mod tests {
             1,
             true,
             &[],
+            &[],
             &history,
             Some(Message::user_with_image("current view", "AAAA".into())),
             None,
@@ -4420,9 +4457,41 @@ mod tests {
     }
 
     #[test]
+    fn live_state_follows_the_history_so_the_prefix_stays_cacheable() {
+        // The system message must contain nothing that changes between rounds:
+        // whatever changes ends the provider's cached prefix, and the history
+        // behind it is then re-read at full price.
+        let history = vec![
+            Message::user("do the task"),
+            Message::assistant("first attempt"),
+        ];
+        let stable = [PromptSection {
+            name: "standing_system",
+            content: "standing rules",
+        }];
+        let live = [PromptSection {
+            name: "executor_state",
+            content: "plan 7 is running",
+        }];
+        let messages = assemble_planning_messages(1, true, &stable, &live, &history, None, None);
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+        assert_eq!(messages[0].content.as_deref(), Some("standing rules"));
+        assert_eq!(messages[3].content.as_deref(), Some("plan 7 is running"));
+    }
+
+    #[test]
+    fn with_no_live_state_the_request_carries_no_empty_turn() {
+        let history = vec![Message::user("do the task")];
+        let messages = assemble_planning_messages(1, true, &[], &[], &history, None, None);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content.as_deref(), Some("do the task"));
+    }
+
+    #[test]
     fn without_an_observation_the_request_is_what_it_was() {
         let history = vec![Message::assistant("thinking about it")];
-        let messages = assemble_planning_messages(1, true, &[], &history, None, None);
+        let messages = assemble_planning_messages(1, true, &[], &[], &history, None, None);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages.last().unwrap().role, "user");
         assert!(
