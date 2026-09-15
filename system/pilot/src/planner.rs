@@ -3476,7 +3476,10 @@ mod tests {
 
     #[test]
     fn an_overlong_opening_paragraph_is_cut_on_a_character_boundary() {
-        let description = "。".repeat(MAX_INLINE_DESCRIPTION_CHARS + 50);
+        // The fixture must be multi-byte to prove the cut counts characters
+        // rather than bytes: a provider writing its description in a non-Latin
+        // script is the case that would panic if it did not.
+        let description = "。".repeat(MAX_INLINE_DESCRIPTION_CHARS + 50); // i18n-ok
         let (summary, truncated) = summarize_description(&description);
         assert_eq!(summary.chars().count(), MAX_INLINE_DESCRIPTION_CHARS);
         assert!(truncated);
