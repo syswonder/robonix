@@ -1,0 +1,4 @@
+string action  # 要执行的控件动作名（取自 list_capabilities 返回的 name）
+string params  # JSON 对象字符串，作为该动作的参数体；无参数则传空串
+---
+std_msgs/String status

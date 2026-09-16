@@ -1,0 +1,10 @@
+# 紧急悬停，取消当前运动。
+[contract]
+id      = "robonix/primitive/drone/hover"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Hover.srv"
+description = "紧急悬停，立即取消当前运动。"
+
+[mode]
+type = "rpc"
