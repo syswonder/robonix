@@ -277,6 +277,13 @@ pub enum ReplyShape {
 /// that costs a contract its type surface. The schema therefore guides the
 /// model; admission stays with Pilot's own validator, which resolves every call
 /// against the catalog before a plan is dispatched.
+/// How long a `task_update` field may be.
+///
+/// It has to admit an honest restatement of a long instruction and refuse a
+/// copy of the prompt. The EB-Habitat task text with its seventy-entry action
+/// catalogue is about 3.6 KB; a restatement of it fits in a line.
+const TASK_FIELD_MAX_CHARS: usize = 400;
+
 fn rtdl_envelope_schema() -> Value {
     let node = serde_json::json!({
         "type": "object",
@@ -297,8 +304,12 @@ fn rtdl_envelope_schema() -> Value {
         "type": "object",
         "properties": {
             "op": {"type": "string", "enum": ["cancel_plan", "cancel_all", "stop_plan_at"]},
-            "plan_id": {"type": "string"},
-            "target_op_id": {"type": "string"},
+            // An identifier is the same identifier whether JSON spells it 1 or
+            // "1". Demanding the quoted form cost four of thirty-five planning
+            // rounds in one deepseek episode, for a value Pilot then stringifies
+            // anyway.
+            "plan_id": {"type": ["string", "integer"]},
+            "target_op_id": {"type": ["string", "integer"]},
             "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
             "wait_ms": {"type": "integer"},
         },
@@ -310,13 +321,22 @@ fn rtdl_envelope_schema() -> Value {
             "content": {"type": "string"},
             "rtdl_description": {"type": "string"},
             "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
+            // `goal` and `success_criterion` are restatements, not transcripts.
+            // Without an upper bound a model may copy the task text back --
+            // deepseek-v3.2 returned the whole prompt, action catalogue
+            // included, on every round, hit the 4096-token output ceiling and
+            // had its JSON truncated mid-string. A model that summarises, as
+            // 4o-mini does, spends 109-155 tokens on the same field.
             "task_update": {
                 "type": ["object", "null"],
                 "properties": {
-                    "goal": {"type": "string"},
-                    "success_criterion": {"type": "string"},
+                    "goal": {"type": "string", "maxLength": TASK_FIELD_MAX_CHARS},
+                    "success_criterion": {
+                        "type": "string", "maxLength": TASK_FIELD_MAX_CHARS,
+                    },
                     "status": {"type": "string", "enum": ["in_progress", "done"]},
                 },
+                "required": ["goal", "success_criterion", "status"],
             },
         },
         "required": ["content", "rtdl_description", "rtdl", "task_update"],

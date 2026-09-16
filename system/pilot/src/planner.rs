@@ -521,12 +521,20 @@ fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<MetaPlanOp>> {
     let Some(op) = obj.get("op").and_then(|value| value.as_str()) else {
         return Ok(None);
     };
+    // A plan id and an op id are identifiers, and JSON spells an identifier
+    // either 1 or "1" depending on which the model reached for. Both name the
+    // same plan, and Pilot puts it back on the wire as a string regardless, so
+    // rejecting the unquoted form only costs a planning round: it did so four
+    // times in thirty-five rounds of one deepseek-v3.2 episode.
     let string = |key: &str| -> Result<String> {
         let value = obj
             .get(key)
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("meta op `{op}` requires string `{key}`"))?;
+            .and_then(|value| match value {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("meta op `{op}` requires string or integer `{key}`"))?;
         if value.trim().is_empty() {
             anyhow::bail!("meta op `{op}` requires non-empty `{key}`");
         }
@@ -2380,6 +2388,20 @@ fn build_rtdl_retry_prompt(
         p.push_str(&cap.display_name);
         p.push('\n');
     }
+    // A truncated reply and a malformed one read the same to a parser, but the
+    // model can only act on the first if it is told which it was. deepseek-v3.2
+    // copied the task text back into `task_update.goal` every round, hit the
+    // output ceiling and had its JSON cut mid-string; "fix the RTDL error" gave
+    // it nothing to change, and it repeated the same reply.
+    let truncated = format!("{err:#}").contains("EOF while parsing");
+    if truncated {
+        p.push_str(
+            "\nYour reply was cut off because it ran past the output limit. Do not \
+             restate the task, the action catalogue, or any other prompt text: \
+             `task_update.goal` and `success_criterion` are one-line summaries, \
+             a few dozen characters each. Keep the whole reply short.\n",
+        );
+    }
     p.push_str(
         "\nIf no further capability call is needed, use \
          {\"op\":\"sequence\",\"children\":[]} as `rtdl`. If the user's requested action cannot \
@@ -3469,6 +3491,22 @@ mod tests {
         assert!(!should_replan_after_plan_done(true, true, false, true));
         assert!(!should_replan_after_plan_done(true, false, true, true));
         assert!(!should_replan_after_plan_done(true, true, true, false));
+    }
+
+    #[test]
+    fn a_meta_op_id_may_arrive_unquoted() {
+        // JSON spells an identifier either 1 or "1", and Pilot puts it back on
+        // the wire as a string either way. Rejecting the unquoted form cost
+        // four of thirty-five planning rounds in one deepseek-v3.2 episode.
+        let quoted = parse_meta_plan_op(&json!({
+            "op": "stop_plan_at", "plan_id": "1", "target_op_id": "1",
+        }))
+        .unwrap();
+        let unquoted = parse_meta_plan_op(&json!({
+            "op": "stop_plan_at", "plan_id": 1, "target_op_id": 1,
+        }))
+        .unwrap();
+        assert_eq!(quoted, unquoted);
     }
 
     #[test]
