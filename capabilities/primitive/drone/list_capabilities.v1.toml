@@ -1,0 +1,10 @@
+# 查询 APK 当前可用的全部控件能力（动态发现）。
+[contract]
+id      = "robonix/primitive/drone/list_capabilities"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/ListCapabilities.srv"
+description = "查询 APK 当前可用的全部控件能力（名称/HTTP 方法/路径/参数/说明），供动态发现与 invoke 使用。"
+
+[mode]
+type = "rpc"

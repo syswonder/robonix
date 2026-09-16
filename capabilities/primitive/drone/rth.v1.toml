@@ -1,0 +1,10 @@
+# 智能返航至起飞点。
+[contract]
+id      = "robonix/primitive/drone/rth"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Rth.srv"
+description = "智能返航至起飞点并降落。"
+
+[mode]
+type = "rpc"

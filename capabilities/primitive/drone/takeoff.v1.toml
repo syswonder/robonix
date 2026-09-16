@@ -1,0 +1,10 @@
+# 起飞并悬停至指定高度。
+[contract]
+id      = "robonix/primitive/drone/takeoff"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Takeoff.srv"
+description = "控制无人机起飞并悬停至指定高度（米）。"
+
+[mode]
+type = "rpc"

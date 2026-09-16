@@ -1,0 +1,10 @@
+# 原地降落（注：APK 暂无 /api/land 端点，调用返回失败，建议用 rth）。
+[contract]
+id      = "robonix/primitive/drone/land"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Land.srv"
+description = "原地降落（APK 暂无该端点，建议用 rth 返航降落）。"
+
+[mode]
+type = "rpc"
