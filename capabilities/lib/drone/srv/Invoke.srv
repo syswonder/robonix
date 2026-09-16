@@ -1,4 +1,4 @@
-string action  # 要执行的控件动作名（取自 list_capabilities 返回的 name）
-string params  # JSON 对象字符串，作为该动作的参数体；无参数则传空串
+string action  # control action name to execute (taken from the name returned by list_capabilities)
+string params  # JSON object string used as the action's parameter body; pass an empty string when there are no parameters
 ---
 std_msgs/String status
