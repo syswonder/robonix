@@ -1,10 +1,10 @@
-# 紧急悬停，取消当前运动。
+# Emergency hover: cancel the current motion.
 [contract]
 id      = "robonix/primitive/drone/hover"
 version = "1"
 kind    = "primitive"
 idl     = "drone/srv/Hover.srv"
-description = "紧急悬停，立即取消当前运动。"
+description = "Emergency hover: immediately cancel the current motion."
 
 [mode]
 type = "rpc"

@@ -1,11 +1,11 @@
-# 通用控件透传：执行任意无人机动作（动态扩展入口）。
-# 用法：先调 list_capabilities 查询可用 action，再以 action + JSON params 调用本原语。
+# Generic control passthrough: execute arbitrary drone actions (dynamic extension entry point).
+# Usage: call list_capabilities to query available actions, then invoke this primitive with action + JSON params.
 [contract]
 id      = "robonix/primitive/drone/invoke"
 version = "1"
 kind    = "primitive"
 idl     = "drone/srv/Invoke.srv"
-description = "通用控件透传：执行任意无人机动作(action)。action 的取值与参数请先调用 list_capabilities 查询；新控件无需改契约即可通过本原语调用。"
+description = "Generic control passthrough: execute an arbitrary drone action. Call list_capabilities first to query available actions and their parameters; new controls can be called through this primitive without changing the contract."
 
 [mode]
 type = "rpc"

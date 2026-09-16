@@ -1,10 +1,10 @@
-# 生命周期契约：rbnx boot 通过 Driver(CMD_INIT) 拉起驱动。
+# Lifecycle contract: rbnx boot starts the driver via Driver(CMD_INIT).
 [contract]
 id      = "robonix/primitive/drone/driver"
 version = "1"
 kind    = "primitive"
 idl     = "lifecycle/srv/Driver.srv"
-description = "dji_msdk 无人机原语生命周期管理。"
+description = "Lifecycle management for the dji_msdk drone primitive."
 
 [mode]
 type = "rpc"

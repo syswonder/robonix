@@ -1,10 +1,10 @@
-# 无人机完整状态（任务/模式/高度/GPS/巡航/SDK）。
+# Full drone state (mission/mode/altitude/GPS/cruise/SDK).
 [contract]
 id      = "robonix/primitive/drone/state"
 version = "1"
 kind    = "primitive"
 idl     = "drone/srv/State.srv"
-description = "无人机完整状态（任务/模式/高度/GPS/巡航/SDK）。"
+description = "Full drone state (mission/mode/altitude/GPS/cruise/SDK)."
 
 [mode]
 type = "rpc"
