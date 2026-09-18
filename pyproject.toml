@@ -32,6 +32,13 @@ description = "Robonix monorepo (Rust crates + Python packages + system services
 requires-python = ">=3.10"
 
 [tool.uv]
+# rerun-sdk (the scene viewer extra) declares numpy>=2 while the perception
+# stack requires numpy<2. That bound of rerun's is conservative, not real:
+# system/scene/docker/requirements/scene-viewer.txt records 0.37.1 verified
+# in the scene image against numpy 1.26.4. uv's lockfile covers every
+# member's extras, so without saying this here the shared lock is unsolvable
+# and `uv sync` fails for members that have nothing to do with scene.
+override-dependencies = ["numpy>=1.26,<2"]
 package = false
 
 [tool.uv.workspace]
