@@ -32,7 +32,20 @@ if [[ "$MODE" == "native" ]]; then
 fi
 
 CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
-IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
+# Named no image, prefer the DualMap one where this host has built it.
+#
+# This mirrors capabilities.default_backend() inside the container, which
+# prefers DualMap wherever the image carries a checkout: building the layer is
+# what opts a host in, and a host that never built it keeps the plain image and
+# the ConceptGraphs backend exactly as before. Building stays explicit --
+# scripts/build.sh still has to be asked for the dualmap image, because a
+# default build should not silently become the heavy one.
+DEFAULT_IMG=robonix-scene
+if [[ "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]] \
+   && docker image inspect robonix-scene-dualmap >/dev/null 2>&1; then
+    DEFAULT_IMG=robonix-scene-dualmap
+fi
+IMG="${ROBONIX_SCENE_IMAGE:-$DEFAULT_IMG}"
 RUNTIME_PROTO_TMP=""
 
 cleanup() {

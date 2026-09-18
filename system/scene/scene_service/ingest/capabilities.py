@@ -54,12 +54,45 @@ DEFAULT_PROFILE: Profile = "lite"
 
 # Perception backend: which open-vocabulary mapper implements the metric tier.
 #
-#   concept_graphs  Scene's ConceptGraphs-derived pipeline (the default)
-#   dualmap         DualMap (Eku127/DualMap): YOLO-World + FastSAM/MobileSAM +
+#   concept_graphs  Scene's ConceptGraphs-derived pipeline (the fallback)
+#   dualmap         DualMap (Eku127/DualMap): preferred wherever the image has
+#                   it; YOLO-World + FastSAM/MobileSAM +
 #                   MobileCLIP with a Bayesian class filter; online, ~4 GB VRAM
 Backend = Literal["concept_graphs", "dualmap"]
 BACKENDS: tuple[str, ...] = ("concept_graphs", "dualmap")
-DEFAULT_BACKEND: Backend = "concept_graphs"
+
+# The backend a deployment gets when it asks for none is resolved, not fixed.
+#
+# DualMap arrives as a layer on top of the scene image (docker/Dockerfile.dualmap),
+# so an image either carries its checkout and weights or it does not, and there is
+# no DualMap build for Jetson at all. A hard default of "dualmap" would leave every
+# plain image failing at boot on a backend it cannot import; a hard default of
+# "concept_graphs" leaves the better mapper switched off on the images built to
+# carry it, which is the whole point of building them. So the default is whichever
+# one is actually present, and which one that was is logged at startup.
+FALLBACK_BACKEND: Backend = "concept_graphs"
+PREFERRED_BACKEND: Backend = "dualmap"
+
+# Kept for callers that import it; equal to the fallback, since a module-level
+# constant cannot describe a choice that depends on the image it runs in.
+DEFAULT_BACKEND: Backend = FALLBACK_BACKEND
+
+
+def dualmap_available() -> bool:
+    """True when this image carries a DualMap checkout the detector can import.
+
+    The same location scripts/start.sh mounts and Dockerfile.dualmap clones
+    into. Checked by path rather than by importing DualMap, because the import
+    pulls in torch and the weights and is far too expensive to run just to
+    answer which backend to pick.
+    """
+    root = os.environ.get("SCENE_DUALMAP_ROOT") or "/opt/dualmap"
+    return os.path.isdir(os.path.join(root, "utils"))
+
+
+def default_backend() -> Backend:
+    """The backend to use when config and environment both stay silent."""
+    return PREFERRED_BACKEND if dualmap_available() else FALLBACK_BACKEND
 
 
 # Knobs accepted under `scene.config.perception.dualmap`; anything else is a typo
@@ -102,12 +135,15 @@ DUALMAP_KEYS: frozenset[str] = frozenset({
 def resolve_backend(value: Any) -> Backend:
     """Validate a backend name from config/env; blank means the default.
 
+    Blank resolves to DualMap on an image that carries it and to ConceptGraphs
+    on one that does not -- see default_backend().
+
     Raises ValueError naming the accepted values so a manifest typo fails
     at boot instead of silently running the default mapper.
     """
     name = str(value or "").strip().lower()
     if not name:
-        return DEFAULT_BACKEND
+        return default_backend()
     if name not in BACKENDS:
         raise ValueError(
             f"unknown perception backend {value!r}; expected one of {', '.join(BACKENDS)}"
