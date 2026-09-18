@@ -683,7 +683,7 @@ _NAV_LINKS = (
     ("/", "semantic map"),
     ("/2d", "2D map"),
     ("/cam", "camera"),
-    ("/user", "annotations"),
+    ("/user", "regions"),
 )
 
 
@@ -2028,7 +2028,7 @@ def make_app(*, registry: ObjectRegistry,
     async def user_page(request) -> HTMLResponse:
         if _bare(request):
             return HTMLResponse(_USER_HTML)
-        return HTMLResponse(_framed("/user", "scene — annotations"))
+        return HTMLResponse(_framed("/user", "scene — regions"))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -3253,7 +3253,7 @@ _USER_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>robonix — map & rooms</title>
+  <title>robonix — map & regions</title>
   <style>
     :root { --fg:#e8eaed; --bg:#0e1015; --panel:#161a22; --acc:#7aa7ff;
             --muted:#7d828b; --warn:#e6c454; --danger:#e06c75; }
@@ -3370,9 +3370,9 @@ _USER_HTML = r"""<!doctype html>
 <body data-ready="loading">
 <div id="app">
   <header>
-    <h1>Map &amp; rooms</h1>
+    <h1>Map &amp; regions</h1>
     <span class="meta" id="meta">map: —</span>
-    <span class="stale-alert" id="stale-alert">⚠ map was rebuilt — review stale rooms</span>
+    <span class="stale-alert" id="stale-alert">⚠ map was rebuilt — review stale regions</span>
   </header>
   <div id="main">
     <div id="panel">
@@ -3387,7 +3387,7 @@ _USER_HTML = r"""<!doctype html>
         <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
       </div>
       <div class="actions">
-        <button class="primary" id="btn-draw">✏ Annotate room</button>
+        <button class="primary" id="btn-draw">✏ Mark region</button>
       </div>
       <div id="room-list"><div id="empty">No rooms yet. Click “Annotate room”,
         then click on the map to outline one (double-click or Enter to finish,
@@ -3402,14 +3402,14 @@ _USER_HTML = r"""<!doctype html>
     </div>
   </div>
 </div>
-<dialog class="modal" id="room-modal">
+<dialog class="modal" id="region-modal">
   <form method="dialog" class="modal-body">
-    <div class="modal-title" id="room-modal-title">Room</div>
-    <div class="modal-message" id="room-modal-message"></div>
-    <input class="modal-input" id="room-modal-input" autocomplete="off" />
+    <div class="modal-title" id="region-modal-title">Region</div>
+    <div class="modal-message" id="region-modal-message"></div>
+    <input class="modal-input" id="region-modal-input" autocomplete="off" />
     <div class="modal-actions">
-      <button id="room-modal-cancel" value="cancel">Cancel</button>
-      <button class="primary" id="room-modal-ok" value="ok">OK</button>
+      <button id="region-modal-cancel" value="cancel">Cancel</button>
+      <button class="primary" id="region-modal-ok" value="ok">OK</button>
     </div>
   </form>
 </dialog>
@@ -4100,12 +4100,12 @@ function esc(s) {
         ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 
-const roomModal = document.getElementById('room-modal');
-const roomModalTitle = document.getElementById('room-modal-title');
-const roomModalMessage = document.getElementById('room-modal-message');
-const roomModalInput = document.getElementById('room-modal-input');
-const roomModalOk = document.getElementById('room-modal-ok');
-const roomModalCancel = document.getElementById('room-modal-cancel');
+const roomModal = document.getElementById('region-modal');
+const roomModalTitle = document.getElementById('region-modal-title');
+const roomModalMessage = document.getElementById('region-modal-message');
+const roomModalInput = document.getElementById('region-modal-input');
+const roomModalOk = document.getElementById('region-modal-ok');
+const roomModalCancel = document.getElementById('region-modal-cancel');
 
 function askModal({ title, message = '', defaultValue = '', input = true, okText = 'OK', danger = false }) {
     return new Promise((resolve) => {
