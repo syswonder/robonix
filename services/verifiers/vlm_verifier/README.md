@@ -27,11 +27,13 @@ system:
   executor:
     listen: 0.0.0.0:50061
     verification:
-      - target_contract_id: robonix/skill/pick/pick
-        target_provider_id: pick
-        verifier_provider_id: vlm_verifier
-        verifier_args:
-          camera_provider_id: orbbec_wrist_camera
+      overlap: true
+      rules:
+        - target_contract_id: robonix/skill/pick/pick
+          target_provider_id: pick
+          verifier_provider_id: vlm_verifier
+          verifier_args:
+            camera_provider_id: orbbec_wrist_camera
 ```
 
 | Field | Meaning |

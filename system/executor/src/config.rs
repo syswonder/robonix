@@ -20,7 +20,17 @@ pub struct ExecutorConfig {
     pub atlas_endpoint: String,
     pub listen: String,
     pub id: String,
-    pub verification: Vec<VerificationRule>,
+    pub verification: VerificationConfig,
+}
+
+/// Executor-wide verification timing plus capability-specific routes.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct VerificationConfig {
+    /// Allow capability execution to continue while matched rules verify.
+    #[serde(default)]
+    pub overlap: bool,
+    #[serde(default)]
+    pub rules: Vec<VerificationRule>,
 }
 
 /// Route one completed capability call to a verifier provider.
@@ -84,13 +94,13 @@ struct FileConfig {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
-    verification: Option<Vec<VerificationRule>>,
+    verification: Option<VerificationConfig>,
 }
 
 #[derive(Default, Deserialize)]
 struct ManifestConfig {
     #[serde(default)]
-    verification: Option<Vec<VerificationRule>>,
+    verification: Option<VerificationConfig>,
 }
 
 impl ExecutorConfig {
@@ -105,12 +115,11 @@ impl ExecutorConfig {
             Some(raw) => serde_json::from_str(raw).context("parse Executor --config-json")?,
             None => ManifestConfig::default(),
         };
-        let verification = validate_verification_rules(
-            manifest_cfg
-                .verification
-                .or(file_cfg.verification)
-                .unwrap_or_default(),
-        )?;
+        let mut verification = manifest_cfg
+            .verification
+            .or(file_cfg.verification)
+            .unwrap_or_default();
+        verification.rules = validate_verification_rules(verification.rules)?;
         Ok(Self {
             atlas_endpoint: args
                 .atlas
@@ -215,35 +224,58 @@ mod tests {
     fn parses_manifest_verification_rules() {
         let cfg = ExecutorConfig::resolve(args(Some(
             r#"{
-                "verification": [{
-                    "target_contract_id": "robonix/service/navigation/navigate",
-                    "verifier_provider_id": "scene_verifier",
-                    "verifier_args": {"scene_provider_id": "scene"}
-                }]
+                "verification": {
+                    "overlap": true,
+                    "rules": [{
+                        "target_contract_id": "robonix/service/navigation/navigate",
+                        "verifier_provider_id": "scene_verifier",
+                        "verifier_args": {"scene_provider_id": "scene"}
+                    }]
+                }
             }"#,
         )))
         .unwrap();
-        assert_eq!(cfg.verification.len(), 1);
+        assert_eq!(cfg.verification.rules.len(), 1);
+        assert!(cfg.verification.overlap);
         assert_eq!(
-            cfg.verification[0].verifier_args["scene_provider_id"],
+            cfg.verification.rules[0].verifier_args["scene_provider_id"],
             "scene"
         );
     }
 
+    /// Verification configs that omit overlap retain synchronous behavior.
+    #[test]
+    fn verification_overlap_defaults_to_false() {
+        let cfg = ExecutorConfig::resolve(args(Some(
+            r#"{
+                "verification": {
+                    "rules": [{
+                        "target_contract_id": "cap/a",
+                        "verifier_provider_id": "verifier"
+                    }]
+                }
+            }"#,
+        )))
+        .unwrap();
+
+        assert!(!cfg.verification.overlap);
+    }
+
     #[test]
     fn explicit_empty_manifest_rules_disable_defaults() {
-        let cfg = ExecutorConfig::resolve(args(Some(r#"{"verification": []}"#))).unwrap();
-        assert!(cfg.verification.is_empty());
+        let cfg =
+            ExecutorConfig::resolve(args(Some(r#"{"verification": {"rules": []}}"#))).unwrap();
+        assert!(cfg.verification.rules.is_empty());
     }
 
     #[test]
     fn rejects_duplicate_rules_at_the_same_specificity() {
         let error = ExecutorConfig::resolve(args(Some(
             r#"{
-                "verification": [
+                "verification": {"rules": [
                     {"target_contract_id":"cap/a","verifier_provider_id":"v1"},
                     {"target_contract_id":"cap/a","verifier_provider_id":"v2"}
-                ]
+                ]}
             }"#,
         )))
         .unwrap_err();
@@ -254,11 +286,11 @@ mod tests {
     fn rejects_non_object_verifier_args() {
         let error = ExecutorConfig::resolve(args(Some(
             r#"{
-                "verification": [{
+                "verification": {"rules": [{
                     "target_contract_id":"cap/a",
                     "verifier_provider_id":"v1",
                     "verifier_args": ["bad"]
-                }]
+                }]}
             }"#,
         )))
         .unwrap_err();
