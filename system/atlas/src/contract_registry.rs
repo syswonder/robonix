@@ -8,7 +8,7 @@
 // truth for "what contracts exist and what's their wire shape".
 //
 // Scope is deliberately small: only the fields current TOMLs actually
-// carry (`[contract]` id/version/kind/cross_namespace, `[mode]` type,
+// carry (`[contract]` id/version/kind/cross_namespace/llm_callable, `[mode]` type,
 // `[io.msg].msg`, `[io.srv].srv`). Richer metadata (summary / examples / safety /
 // capability-card-style fields) waits until the TOML schema grows.
 
@@ -59,6 +59,15 @@ struct ContractSection {
     /// primary namespace differs from this contract's id prefix.
     #[serde(default)]
     cross_namespace: bool,
+    /// Whether Pilot may expose this contract to its planning model. This is
+    /// presentation metadata only; Atlas registration and Executor routing
+    /// are unchanged. Existing contracts default to visible.
+    #[serde(default = "default_true")]
+    llm_callable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +337,7 @@ fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
         source_toml_path: path.to_string_lossy().into_owned(),
         description,
         cross_namespace: parsed.contract.cross_namespace,
+        llm_callable: Some(parsed.contract.llm_callable),
         // Filled later by attach_idl_fields() after every TOML has
         // been loaded. Empty here is the right default.
         msg_fields: Vec::new(),
@@ -542,5 +552,33 @@ mod tests {
         )
         .expect("regular contract TOML");
         assert!(!regular.contract.cross_namespace);
+    }
+
+    #[test]
+    fn llm_callable_is_explicit_and_defaults_to_true() {
+        let hidden: RawContract = toml::from_str(
+            r#"
+                [contract]
+                id = "robonix/service/verifier/verify"
+                llm_callable = false
+
+                [mode]
+                type = "rpc"
+            "#,
+        )
+        .expect("hidden contract TOML");
+        assert!(!hidden.contract.llm_callable);
+
+        let regular: RawContract = toml::from_str(
+            r#"
+                [contract]
+                id = "robonix/service/example/run"
+
+                [mode]
+                type = "rpc"
+            "#,
+        )
+        .expect("regular contract TOML");
+        assert!(regular.contract.llm_callable);
     }
 }

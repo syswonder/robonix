@@ -365,7 +365,7 @@ async fn drive_plan(
                         } else if ns.state != RtdlNodeStateEnum::Succeeded as u32 {
                             any_failed = true;
                         }
-                        results.push(ns);
+                        upsert_terminal_result(&mut results, ns);
                     }
                 }
             }
@@ -387,6 +387,18 @@ async fn drive_plan(
             canceled,
         })
         .await;
+}
+
+/// Keep one latest terminal state per RTDL node so verification can correct it.
+fn upsert_terminal_result(results: &mut Vec<RtdlNodeState>, state: RtdlNodeState) {
+    if let Some(existing) = results
+        .iter_mut()
+        .find(|existing| existing.node_index == state.node_index)
+    {
+        *existing = state;
+    } else {
+        results.push(state);
+    }
 }
 
 /// Cancel every real task tree owned by this turn before reporting the Pilot
@@ -884,8 +896,7 @@ async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<Strin
     Some(text)
 }
 
-/// Feed one finished tree's terminal results into the LLM history, mirroring
-/// the per-round feedback the blocking loop used to produce.
+/// Feed finalized leaf results into LLM history.
 fn feed_results_into_history(
     history: &mut Vec<Message>,
     plan_id: &str,
@@ -897,7 +908,7 @@ fn feed_results_into_history(
          Attribute the following results only to this tree. A failure here blocks dependent \
          steps in this tree, but does not cancel or invalidate other in-flight trees."
     )));
-    let mut deferred_followups: Vec<Message> = Vec::new();
+    let mut deferred_followups = Vec::new();
     for r in results {
         let mut bounded = r.clone();
         if !history::is_image_output(&bounded.output) {
@@ -1007,13 +1018,19 @@ pub async fn run_turn(
     // 1. Build stable system-prompt sections once per turn.
     let standing_prompt = build_system_prompt(load_agent_soul().as_deref());
 
-    // Pilot's capability catalog comes straight from atlas (filtered to
-    // MCP transport — only those are LLM-callable). McpParams ride along
-    // in Capability.params, no Connect needed.
+    // Pilot's capability catalog comes straight from Atlas. MCP params ride
+    // along in Capability.params, and contract metadata below decides which
+    // of those capabilities the planning model may see; no Connect is needed.
     let _ = consumer_id; // currently unused; kept on the signature for future channel-tracked discovery
     let initial_caps = discovery::discover(atlas)
         .await
         .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
+    // Contract metadata is immutable for one Atlas process, so resolve the
+    // model-facing exclusions once per turn. This does not affect Executor or
+    // any other Atlas consumer's ability to resolve and call the capability.
+    let non_llm_callable_contract_ids = discovery::non_llm_callable_contract_ids(atlas)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas contract discovery failed: {e}"))?;
     // Pilot binds to the canonical contract_id, not the LLM-facing tool
     // name: the latter is just the contract_id leaf and a provider could
     // rename it freely. contract_id is the stable identity.
@@ -1209,15 +1226,10 @@ pub async fn run_turn(
                             // this too, but be explicit so the live view always
                             // correlates with the Plan already sent).
                             ns.plan_id = plan_id.clone();
-                            // Feed every node's result into context the moment it
-                            // reaches a terminal state, using names rather than
-                            // numeric RTDL state codes in logs. Successful nodes wait
-                            // for PlanDone before replanning; non-success terminal
-                            // nodes replan immediately below. The tree-level feed in
-                            // PlanDone is dropped to avoid double-feeding — every
-                            // leaf result already arrives here.
-                            const TERMINAL: [u32; 4] = [2, 3, 4, 5];
-                            if TERMINAL.contains(&ns.state)
+                            // VERIFYING is deliberately non-terminal. Feed only a
+                            // leaf's post-verification final state so history never
+                            // contains an optimistic result that must be corrected.
+                            if is_terminal_executor_state(ns.state)
                                 && let Some(r) = ns.leaf_result.as_ref()
                             {
                                 let description = forest
@@ -1270,8 +1282,7 @@ pub async fn run_turn(
                                 )));
                                 history::trim(history, MAX_HISTORY);
                             }
-                            // Leaf results were already fed per-node (see above);
-                            // only surface the batch to the chat UI here.
+                            // Leaf results were already upserted per node event.
                             log_plan_complete(&plan_id, &results, any_failed);
                             let batch = BatchResult {
                                 plan_id: plan_id.clone(),
@@ -1332,7 +1343,7 @@ pub async fn run_turn(
             crate::soma_context::fetch_runtime_prompt_block(atlas, consumer_id).await;
         let environment_block = state_context::collect(executor, atlas, &cap_list).await;
 
-        let display_caps = build_display_capabilities(&cap_list);
+        let display_caps = build_display_capabilities(&cap_list, &non_llm_callable_contract_ids);
         let target_map = build_capability_target_map(&display_caps);
         let protocol_prompt = rtdl_protocol(round == 0);
         let (capability_prompt, capability_cache_hit) =
@@ -1965,12 +1976,16 @@ pub async fn run_turn(
 
 /// Convert Atlas rows to provider-qualified model names and sort them so an
 /// unchanged catalog remains byte-identical even if discovery order varies.
-fn build_display_capabilities(
-    cap_list: &[(String, atlas_pb::Capability)],
-) -> Vec<DisplayCapability<'_>> {
+fn build_display_capabilities<'a>(
+    cap_list: &'a [(String, atlas_pb::Capability)],
+    non_llm_callable_contract_ids: &HashSet<String>,
+) -> Vec<DisplayCapability<'a>> {
     let mut display = cap_list
         .iter()
-        .filter(|(_, cap)| !is_legacy_plan_control_contract(&cap.contract_id))
+        .filter(|(_, cap)| {
+            !is_legacy_plan_control_contract(&cap.contract_id)
+                && !non_llm_callable_contract_ids.contains(&cap.contract_id)
+        })
         .map(|(provider_id, cap)| DisplayCapability {
             display_name: format!("{}.{}", provider_id, llm_name(&cap.contract_id)),
             provider_id: provider_id.as_str(),
@@ -2573,6 +2588,7 @@ fn rtdl_state_name(state: u32) -> String {
         Ok(RtdlNodeStateEnum::Canceled) => "Canceled".to_string(),
         Ok(RtdlNodeStateEnum::Timeout) => "Timeout".to_string(),
         Ok(RtdlNodeStateEnum::Paused) => "Paused".to_string(),
+        Ok(RtdlNodeStateEnum::Verifying) => "Verifying".to_string(),
         Err(_) => format!("Unknown({state})"),
     }
 }
@@ -3015,13 +3031,16 @@ mod tests {
         build_executor_active_block, build_forest_block, compact_tool_result,
         configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
-        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
-        should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
-        task_is_session_end,
+        is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
+        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
+        parse_task_update, plan_call_signatures, record_dispatched_plan, rtdl_node_kind_name,
+        rtdl_recovery_final_text, rtdl_state_name, should_replan_after_plan_done,
+        skip_memory_prefetch, start_or_resume_task, task_is_session_end, upsert_terminal_result,
     };
-    use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
+    use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
+    use crate::pb::pilot::{
+        CapabilityCall, CapabilityCallResult, Plan, RtdlNode, RtdlNodeState, Task,
+    };
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -3042,6 +3061,28 @@ mod tests {
             configured_vlm_idle_timeout(Some("bad")),
             Duration::from_secs(30)
         );
+    }
+
+    /// Repeated final events retain only the latest node result defensively.
+    #[test]
+    fn repeated_terminal_state_replaces_the_prior_result() {
+        let mut results = vec![RtdlNodeState {
+            node_index: 4,
+            state: RtdlNodeStateEnum::Succeeded as u32,
+            ..Default::default()
+        }];
+
+        upsert_terminal_result(
+            &mut results,
+            RtdlNodeState {
+                node_index: 4,
+                state: RtdlNodeStateEnum::Failed as u32,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, RtdlNodeStateEnum::Failed as u32);
     }
 
     fn test_capability(provider: &str, leaf: &str) -> (String, atlas_pb::Capability) {
@@ -3088,7 +3129,7 @@ mod tests {
             test_capability("demo", "remember"),
             test_capability("demo", "report"),
         ];
-        let display = build_display_capabilities(&capabilities);
+        let display = build_display_capabilities(&capabilities, &HashSet::new());
         let mut cache = CapabilityPromptCache::default();
         let (first, first_hit) = cache.render(&display);
         let first = first.to_string();
@@ -3112,6 +3153,20 @@ mod tests {
             expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "multi-step").unwrap();
         assert_eq!(super::plan_call_count(&plan), 3);
         assert_eq!(plan.round, 1);
+    }
+
+    #[test]
+    fn contract_metadata_excludes_capability_from_model_catalog() {
+        let capabilities = vec![
+            test_capability("pick", "pick"),
+            test_capability("vlm_verifier", "verify"),
+        ];
+        let hidden = HashSet::from([capabilities[1].1.contract_id.clone()]);
+
+        let display = build_display_capabilities(&capabilities, &hidden);
+
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].provider_id, "pick");
     }
 
     #[test]
@@ -3685,7 +3740,11 @@ mod tests {
         assert_eq!(rtdl_state_name(3), "Failed");
         assert_eq!(rtdl_state_name(4), "Canceled");
         assert_eq!(rtdl_state_name(5), "Timeout");
+        assert_eq!(rtdl_state_name(7), "Verifying");
         assert_eq!(rtdl_state_name(999), "Unknown(999)");
+        assert!(!is_terminal_executor_state(
+            RtdlNodeStateEnum::Verifying as u32
+        ));
     }
 
     #[test]
