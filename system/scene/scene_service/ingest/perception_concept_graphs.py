@@ -1250,10 +1250,25 @@ class ConceptGraphsDetector:
                 confidence=confs.astype(np.float32),
             )
             sv_dets.mask = masks
+            # concept-graphs does `classes[class_id]`, and class_id is the
+            # detector's own id -- not a position in Scene's vocabulary. The
+            # two lists are different lengths (YOLO-World returned id 71
+            # against 55 Scene classes), so every tick died in IndexError.
+            #
+            # The ids are renumbered densely rather than the name list being
+            # stretched to cover them: a list built as range(max_id + 1) is
+            # correct for the ids a model actually emits and unbounded for
+            # anything else, and this runs inside the perception tick.
+            present = sorted({int(c) for c in cls_idx})
+            dense_id = {c: i for i, c in enumerate(present)}
+            clip_classes = [str(names.get(c, f"class_{c}")) for c in present]
+            sv_dets.class_id = np.array(
+                [dense_id[int(c)] for c in cls_idx], dtype=int
+            )
             _, image_feats, _ = self._cg["compute_clip_features_batched"](
                 rgb_for_clip, sv_dets,
                 self._clip_model, self._clip_preprocess, self._clip_tokenizer,
-                self._classes, self._device,
+                clip_classes, self._device,
             )
         except Exception as e:  # noqa: BLE001
             # First failure: dump full traceback so we know which list
