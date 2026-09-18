@@ -1,0 +1,10 @@
+# Land in place (note: the APK has no /api/land endpoint yet, so this call fails; use rth instead).
+[contract]
+id      = "robonix/primitive/drone/land"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Land.srv"
+description = "Land in place (the APK has no such endpoint yet; use rth to return and land instead)."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,10 @@
+# Full drone state (mission/mode/altitude/GPS/cruise/SDK).
+[contract]
+id      = "robonix/primitive/drone/state"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/State.srv"
+description = "Full drone state (mission/mode/altitude/GPS/cruise/SDK)."
+
+[mode]
+type = "rpc"
