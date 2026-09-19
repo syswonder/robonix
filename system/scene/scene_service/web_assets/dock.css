@@ -72,6 +72,9 @@
     .dock td.nm { color: var(--fg); font-family: var(--font-ui);
                   font-size: 12.5px; white-space: nowrap; }
 
+        /* Same UA-rule trap as the maps page: an author `display` beats
+       `[hidden]`, so the attribute needs help to mean anything. */
+    #dock-detail[hidden] { display: none; }
     .dock .detail { padding: 10px 0 8px; margin-top: 10px;
                     border-top: 1px solid var(--line); }
     /* With the detail below rather than over the list, the highlight is the
@@ -94,23 +97,11 @@
                        word-break: break-all; }
     .dock .detail .warn { color: #e0a050; }
     .dock .detail .acts { display: flex; gap: 8px; }
-    .dock .detail .acts button {
-      flex: 1; padding: 6px 0; border-radius: 5px; cursor: pointer;
-      background: #12161e; border: 1px solid var(--line); color: var(--fg);
-      font: inherit; font-size: 12px; }
-    .dock .detail .acts button:hover { background: #1c2230; }
-    .dock .detail .acts .danger { color: #e5484d; border-color: #452226; }
-    .dock .detail .acts .danger:hover { background: #241417; }
+    .dock .detail .acts .btn { flex: 1; }
+    .dock .detail .edit .field { flex: 1; min-width: 0; }
     .dock .detail .edit { display: flex; gap: 6px; margin-bottom: 10px; }
-    .dock .detail .edit input {
-      flex: 1; min-width: 0; padding: 5px 8px; border-radius: 5px;
-      background: #0e1218; border: 1px solid var(--acc); color: var(--fg);
-      font: inherit; font-size: 13px; }
-    .dock .detail .edit button { padding: 5px 10px; }
     /* The confirming button is the red one, so the destructive option is
        never the one the cursor is already resting on. */
-    .dock .detail .acts .confirm { color: #e5484d; border-color: #452226;
-                                   background: #241417; }
     .dock .detail .said { margin-top: 9px; font-size: 11.5px; color: #e0a050;
                           min-height: 1em; }
 
@@ -147,3 +138,25 @@
     .dock .kv .k { color: var(--muted); }
     .dock .kv .v { font-family: var(--font-mono); font-size: 11px;
                    color: var(--acc); }
+
+    /* Same duration and curve as the shell: the dock is part of it, not a
+       separate thing with its own timing. Width is deliberately excluded --
+       the grip drags it, and a transition there lags the pointer. */
+    .dock .tabs button { transition: color var(--t) var(--ease),
+                                     background var(--t) var(--ease),
+                                     border-color var(--t) var(--ease); }
+    .dock .grip { transition: background var(--t) var(--ease),
+                              opacity var(--t) var(--ease); }
+    .dock tr.row td { transition: background var(--t) var(--ease),
+                                  color var(--t) var(--ease); }
+    .dock .detail .acts button,
+    .dock .head .shutbtn { transition: color var(--t) var(--ease),
+                                       background var(--t) var(--ease),
+                                       border-color var(--t) var(--ease); }
+    /* The detail opens with the content, not with the box: fading is a
+       colour change, so it does not reflow the list above it. */
+    .dock .detail { animation: dock-in var(--t) var(--ease); }
+    @keyframes dock-in { from { opacity: 0 } to { opacity: 1 } }
+    @media (prefers-reduced-motion: reduce) {
+      .dock .detail { animation: none; }
+    }

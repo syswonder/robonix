@@ -75,6 +75,68 @@
       show(s.tab || 'objects');
     })();
 
+
+    // ── Writing only what differs ──
+    // Assigning the same string to a Text node still tears down the
+    // selection sitting in it, so every write is guarded by a comparison.
+    function setText(el, text) {
+      if (el && el.textContent !== text) el.textContent = text;
+    }
+    function setClass(el, name, on) {
+      if (el && el.classList.contains(name) !== !!on) {
+        el.classList.toggle(name, !!on);
+      }
+    }
+
+    function objectRow(o) {
+      const tr = document.createElement('tr');
+      tr.className = 'row';
+      tr.dataset.oid = o.id;
+      tr.innerHTML = '<td class="nm"></td><td class="cls"></td><td class="pp"></td>';
+      tr.addEventListener('click', () => openDetail(tr.dataset.oid));
+      return tr;
+    }
+
+    function fillRow(tr, o) {
+      const unsure = Number(o.confidence) < UNSURE;
+      setClass(tr, 'unsure', unsure);
+      setText(tr.children[0], o.short_id);
+      setText(tr.children[1], o.cls);
+      setText(tr.children[2], `${fmt(o.pose.x)}, ${fmt(o.pose.y)}`);
+      setClass(tr.children[2], 'miss', !!o.missing);
+    }
+
+    // Keyed by object id: what stayed is updated, what arrived is inserted,
+    // what went is removed. Order follows the sorted list, so a row that
+    // changes class moves rather than being rebuilt somewhere else.
+    function syncObjects(tbody, objs) {
+      const existing = new Map();
+      tbody.querySelectorAll('tr.row').forEach(tr => existing.set(tr.dataset.oid, tr));
+      const placeholder = tbody.querySelector('tr:not(.row)');
+      if (objs.length && placeholder) placeholder.remove();
+      if (!objs.length) {
+        existing.forEach(tr => tr.remove());
+        if (!placeholder) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="empty">${t('dock.empty.objects')}</td>`;
+          tbody.appendChild(tr);
+        } else {
+          setText(placeholder.firstElementChild, t('dock.empty.objects'));
+        }
+        return;
+      }
+      let prev = null;
+      for (const o of objs) {
+        let tr = existing.get(o.id);
+        if (tr) { existing.delete(o.id); } else { tr = objectRow(o); }
+        fillRow(tr, o);
+        const after = prev ? prev.nextSibling : tbody.firstChild;
+        if (after !== tr) tbody.insertBefore(tr, after);
+        prev = tr;
+      }
+      existing.forEach(tr => tr.remove());
+    }
+
     // ── The detail view ──
     // One object, and the two corrections perception makes necessary often
     // enough that having to leave the panel to apply them is the wrong shape.
@@ -168,9 +230,9 @@
       if (!head || detail.querySelector('.edit')) return;
       const box = document.createElement('div');
       box.className = 'edit';
-      box.innerHTML = `<input value="${o.cls}" />
-        <button class="ok" data-i18n="dock.save"></button>
-        <button class="no" data-i18n="dock.cancel"></button>`;
+      box.innerHTML = `<input class="field" value="${o.cls}" />
+        <button class="btn ok" data-i18n="dock.save"></button>
+        <button class="btn no" data-i18n="dock.cancel"></button>`;
       head.replaceWith(box);
       const field = box.querySelector('input');
       const restore = () => { box.replaceWith(head); };
@@ -211,8 +273,8 @@
       acts.dataset.asking = '1';
       const original = acts.innerHTML;
       say(t('dock.deleteAsk'), said);
-      acts.innerHTML = `<button class="confirm" data-i18n="dock.delete"></button>
-        <button class="no" data-i18n="dock.cancel"></button>`;
+      acts.innerHTML = `<button class="btn confirm" data-i18n="dock.delete"></button>
+        <button class="btn no" data-i18n="dock.cancel"></button>`;
       const undo = () => {
         acts.innerHTML = original;
         delete acts.dataset.asking;
@@ -268,20 +330,7 @@
             `${objs.length}${unsure ? ' · ' + unsure + '?' : ''}`;
 
           lastObjects = objs;
-          const tb = document.getElementById('dock-objs');
-          tb.innerHTML = objs.length ? objs.map(o => `
-            <tr class="row ${Number(o.confidence) < UNSURE ? 'unsure' : ''}"
-                data-oid="${o.id}">
-              <td class="nm">${o.short_id}</td>
-              <td class="cls">${o.cls}</td>
-              <td class="pp ${o.missing ? 'miss' : ''}">
-                ${fmt(o.pose.x)}, ${fmt(o.pose.y)}
-              </td>
-            </tr>`).join('')
-            : `<tr><td class="empty">${t('dock.empty.objects')}</td></tr>`;
-          tb.querySelectorAll('tr.row').forEach(tr => {
-            tr.addEventListener('click', () => openDetail(tr.dataset.oid));
-          });
+          syncObjects(document.getElementById('dock-objs'), objs);
           if (selectedId) {
             // A selection that no longer exists outranks an open edit: the
             // thing being edited is gone, and the card would otherwise offer
@@ -298,21 +347,25 @@
           }
 
           const rel = document.getElementById('dock-rels');
-          rel.innerHTML = edges.length ? edges.map(e => `
+          const relHtml = edges.length ? edges.map(e => `
             <div class="rel">
               <span class="rs">${shortId(e.source_id)}</span>
               <span class="rp">${e.relation}</span>
               <span class="rt">${shortId(e.target_id)}</span>
             </div>`).join('')
             : `<span class="empty">${t('dock.empty.relations')}</span>`;
+          // Written only when it differs: an identical assignment still
+          // collapses any selection inside it.
+          if (rel.innerHTML !== relHtml) rel.innerHTML = relHtml;
 
           const rb = document.getElementById('dock-robot');
-          rb.innerHTML = s.robot ? `
+          const robHtml = s.robot ? `
             <div class="kv"><span class="k">x</span><span class="v">${fmt(s.robot.x)}</span></div>
             <div class="kv"><span class="k">y</span><span class="v">${fmt(s.robot.y)}</span></div>
             <div class="kv"><span class="k">z</span><span class="v">${fmt(s.robot.z)}</span></div>
             <div class="kv"><span class="k">yaw</span><span class="v">${fmt(s.robot.yaw)}</span></div>`
             : `<span class="empty">${t('dock.empty.robot')}</span>`;
+          if (rb.innerHTML !== robHtml) rb.innerHTML = robHtml;
         }
       } catch (_) { /* swallow; next tick will retry */ }
       setTimeout(tick, 500);

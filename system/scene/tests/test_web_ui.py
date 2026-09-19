@@ -316,13 +316,12 @@ def test_maps_page_owns_map_management(page):
     _goto(page, "/maps")
     page.wait_for_timeout(900)
 
-    frame = page.frame_locator("iframe")
-    for control in ("#map-id", "#btn-save-map", "#btn-pose-estimate"):
-        assert frame.locator(control).is_visible(), (
-            f"maps page is missing {control}"
-        )
-    assert not frame.locator("#btn-draw").is_visible(), (
-        "the maps page still offers region drawing"
+    # The page is rendered into the shell now, not an iframe: it is a
+    # library, not an editor, so it has no canvas to frame.
+    assert page.locator("#mg-grid").count() == 1, "no map grid"
+    assert page.locator("#mg-save").is_visible(), "no way to save a session"
+    assert page.locator("#btn-draw").count() == 0, (
+        "the maps page still carries the region editor"
     )
 
 
@@ -373,7 +372,7 @@ def test_a_temporary_map_can_still_be_marked(page):
 def test_the_bound_map_is_named_on_the_page(page):
     """Which map the thing in front of you describes is never left to be
     inferred from the map drawing itself."""
-    for path in ("/maps", "/regions"):
+    for path in ("/regions",):
         _goto(page, path)
         page.wait_for_timeout(2000)
         pill = page.frame_locator("iframe").locator("#bound-pill")
@@ -509,7 +508,8 @@ def test_the_map_form_switches_language(page):
     panel -- which is worse than either language alone, because it reads as a
     half-finished translation rather than as a choice.
     """
-    _goto(page, "/maps")
+    # Still the regions page: it is where the map form remains.
+    _goto(page, "/regions")
     page.wait_for_timeout(1500)
 
     frame = page.frame_locator("iframe")
@@ -536,7 +536,8 @@ def test_the_status_line_default_survives_translation(page):
     the key with it. So what must hold is that whenever the line *is* showing
     the default, it carries the key that identifies it as the default.
     """
-    _goto(page, "/maps")
+    # The map form lives on the regions page now; maps is a grid.
+    _goto(page, "/regions")
     page.wait_for_timeout(1800)
 
     msg = page.frame_locator("iframe").locator("#map-status-msg")
@@ -567,7 +568,7 @@ def test_the_status_line_default_survives_translation(page):
 def test_the_bound_map_is_named_once(page):
     """It was named twice: the binding pill, and a line beside it repeating the
     same thing in English regardless of the chosen language."""
-    _goto(page, "/maps")
+    _goto(page, "/regions")
     page.wait_for_timeout(1500)
     frame = page.frame_locator("iframe")
     assert frame.locator("#meta").count() == 0, (
@@ -819,4 +820,121 @@ def test_delete_asks_inside_the_panel(page):
     assert page.locator("#dock-detail .del").count() == 1, (
         "cancelling the delete did not restore the actions"
     )
+
+
+# ── The map library ────────────────────────────────────────────────────────
+# Maps used to be the regions editor with its controls hidden by CSS, which
+# made choosing a map look like editing one. It is a grid of cards now.
+
+
+def test_maps_is_a_grid_not_the_region_editor(page):
+    """No form column, no plan canvas, no marking controls -- a grid and the
+    one action that adds to it."""
+    _goto(page, "/maps")
+    page.wait_for_timeout(1200)
+
+    assert page.locator("#mg-grid").count() == 1, "no grid"
+    assert page.locator("#mg-save").is_visible(), "no save action"
+    assert page.locator("#mg-name").is_visible(), "no name field"
+    # The regions editor's parts must not be here in any form.
+    for gone in ("#btn-draw", "#region-list", "#map-tools", "canvas#c"):
+        assert page.locator(gone).count() == 0, (
+            f"the maps page still carries {gone}"
+        )
+
+
+def test_maps_grid_reports_an_empty_library_honestly(page):
+    """With nothing saved, the page says so rather than showing an empty
+    rectangle that looks like a failure to load."""
+    _goto(page, "/maps")
+    page.wait_for_timeout(1500)
+
+    cards = page.locator(".mg-card")
+    if cards.count() == 0:
+        note = page.locator("#mg-empty")
+        assert note.is_visible(), "an empty library shows nothing at all"
+        assert note.inner_text().strip(), "the empty note has no text"
+    else:
+        # Every card must name its map and offer the two actions.
+        first = cards.first
+        assert first.locator(".mg-name").inner_text().strip(), "card has no name"
+        assert first.locator(".mg-acts .del").count() == 1, "card cannot be deleted"
+
+
+def test_saving_without_a_name_is_refused_in_the_page(page):
+    """The one destructive-ish mistake here is saving over nothing: it asks
+    for a name first, in the page rather than through the browser."""
+    fired = []
+    page.on("dialog", lambda d: (fired.append(d.type), d.dismiss()))
+
+    _goto(page, "/maps")
+    page.wait_for_timeout(1000)
+    page.locator("#mg-name").fill("")
+    page.locator("#mg-save").click()
+    page.wait_for_timeout(400)
+
+    assert not fired, f"a browser dialog opened: {fired}"
+    assert page.locator("#mg-msg.err").inner_text().strip(), (
+        "saving with no name said nothing"
+    )
+
+
+def test_the_shell_has_transitions(page):
+    """Controls move. A nav item that changes colour between two frames reads
+    as a series of stills rather than as something being operated."""
+    _goto(page, "/maps")
+    page.wait_for_timeout(600)
+
+    dur = page.locator("nav a").first.evaluate(
+        "el => getComputedStyle(el).transitionDuration")
+    assert dur and dur != "0s", f"nav items have no transition ({dur})"
+
+    marker = page.locator("nav a.on").first.evaluate(
+        "el => getComputedStyle(el, '::before').transitionDuration")
+    assert marker and marker != "0s", (
+        f"the active marker does not animate ({marker})"
+    )
+
+
+def test_map_cards_keep_a_uniform_shape(page):
+    """A map's own proportions must not decide its card's.
+
+    The thumbnail slot is fixed and the image fits inside it; without that,
+    one corridor-shaped floor plan stretches its card and the grid stops
+    being a grid.
+    """
+    _goto(page, "/maps")
+    page.wait_for_timeout(1500)
+    shots = page.locator(".mg-shot")
+    if shots.count() == 0:
+        pytest.skip("no saved maps to draw")
+    heights = [shots.nth(i).bounding_box()["height"] for i in range(shots.count())]
+    assert max(heights) - min(heights) < 2, (
+        f"thumbnail slots differ in height: {heights}"
+    )
+
+
+def test_a_map_card_opens_its_details(page):
+    """A Details button opens it, not the card itself: a map id is there to be
+    read and copied, and making the whole surface a control takes that away.
+    Open shows everything list_maps reports, including why a broken one
+    cannot be loaded."""
+    _goto(page, "/maps")
+    page.wait_for_timeout(1500)
+    cards = page.locator(".mg-card")
+    if cards.count() == 0:
+        pytest.skip("no saved maps")
+
+    cards.first.locator('.mg-acts .more').click()
+    page.wait_for_timeout(300)
+    more = cards.first.locator(".mg-more")
+    assert more.is_visible(), "the card did not open"
+    for key in ("maps.health", "maps.id", "maps.artifactPath"):
+        assert more.locator(f'[data-i18n="{key}"]').count() == 1, (
+            f"the detail is missing {key}"
+        )
+
+    cards.first.locator('.mg-acts .more').click()
+    page.wait_for_timeout(300)
+    assert not more.is_visible(), "Back did not close the details"
 

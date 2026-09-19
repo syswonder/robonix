@@ -582,6 +582,46 @@ _STRINGS: dict[str, dict[str, str]] = {
     "st.nameRequired": {"en": 'Region name is required.', "zh": '区域名称不能为空。'},
     "st.liveUnsaved": {"en": 'Live mapping session is not saved yet. Enter a Map ID, then Save current. ', "zh": '当前是未保存的建图会话。填写地图 ID 后点「保存当前」。'},
     "st.localization": {"en": 'Localization mode is active. Use Pose estimate if the robot pose is off.', "zh": '定位模式已启用。位姿不对时用「位姿估计」。'},
+    # the status bar every page carries
+    "bar.mapping":     {"en": "building the map", "zh": "正在建图"},
+    "bar.localizing":  {"en": "localizing",       "zh": "定位中"},
+    "bar.idle":        {"en": "mode unknown",     "zh": "模式未知"},
+    "bar.mode":        {"en": "robot",            "zh": "机器人"},
+    "bar.map":         {"en": "active map",       "zh": "当前地图"},
+    "bar.temporary":   {"en": "temporary, not saved",
+                        "zh": "临时会话，未保存"},
+    "bar.offline":     {"en": "scene is not responding",
+                        "zh": "scene 无响应"},
+    # the maps library
+    "maps.newName":    {"en": "Name for this session", "zh": "给本次会话命名"},
+    "maps.save":       {"en": "Save current session",  "zh": "保存当前会话"},
+    "maps.refresh":    {"en": "Refresh",   "zh": "刷新"},
+    "maps.load":       {"en": "Load",      "zh": "加载"},
+    "maps.delete":     {"en": "Delete",    "zh": "删除"},
+    "maps.cancel":     {"en": "Cancel",    "zh": "取消"},
+    "maps.saved":      {"en": "saved",     "zh": "保存于"},
+    "maps.size":       {"en": "artifact",  "zh": "产物大小"},
+    "maps.inUse":      {"en": "in use",    "zh": "使用中"},
+    "maps.broken":     {"en": "cannot be loaded", "zh": "无法加载"},
+    "maps.noPreview":  {"en": "no preview", "zh": "没有预览图"},
+    "maps.working":    {"en": "working…",   "zh": "处理中…"},
+    "maps.saving":     {"en": "saving…",    "zh": "保存中…"},
+    "maps.failed":     {"en": "failed",     "zh": "失败"},
+    "maps.nameRequired": {"en": "Give this session a name first.",
+                          "zh": "先给这次会话起个名字。"},
+    "maps.details":    {"en": "Details", "zh": "详情"},
+    "maps.back":       {"en": "Back",    "zh": "返回"},
+    "maps.regions":    {"en": "regions", "zh": "区域"},
+    "maps.objects":    {"en": "objects", "zh": "物体"},
+    "maps.nothing":    {"en": "none",    "zh": "无"},
+    "maps.health":     {"en": "artifact",  "zh": "空间产物"},
+    "maps.healthy":    {"en": "integrity check passed", "zh": "完整性校验通过"},
+    "maps.id":         {"en": "id",        "zh": "标识"},
+    "maps.artifactPath": {"en": "artifact path", "zh": "产物路径"},
+    "maps.previewPath":  {"en": "preview path",  "zh": "预览图路径"},
+    "maps.empty":      {"en": "No saved maps yet. Explore, then save this "
+                              "session under a name.",
+                        "zh": "还没有保存过地图。先探索，再把这次会话命名保存。"},
     # page titles
     "page.maps":       {"en": "Maps",    "zh": "地图"},
     "page.regions":    {"en": "Regions", "zh": "区域"},
@@ -748,6 +788,70 @@ def _read_log_slice(path: Path, offset: Optional[int]) -> tuple[list[dict], int]
         })
     return out, consumed
 
+
+def _read_grid_meta(map_dir: Path) -> Optional[dict]:
+    """The saved grid's geometry, from the metadata mapping writes beside it.
+
+    A tiny `key: value` file with one list; parsed here rather than with a
+    YAML dependency, because that is the whole grammar it uses and pulling in
+    a parser for six keys is not a trade worth making.
+    """
+    path = map_dir / "meta.yaml"
+    if not path.is_file():
+        return None
+    out: dict = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if ":" not in line:
+                continue
+            key, raw = line.split(":", 1)
+            key, raw = key.strip(), raw.strip()
+            if raw.startswith("[") and raw.endswith("]"):
+                try:
+                    out[key] = [float(x) for x in raw[1:-1].split(",")]
+                except ValueError:
+                    continue
+            else:
+                try:
+                    out[key] = float(raw)
+                except ValueError:
+                    out[key] = raw
+    except OSError:
+        return None
+    origin = out.get("origin") or [0.0, 0.0, 0.0]
+    try:
+        return {
+            "resolution": float(out.get("resolution") or 0.0),
+            "width": int(out.get("width") or 0),
+            "height": int(out.get("height") or 0),
+            "origin_x": float(origin[0]),
+            "origin_y": float(origin[1]),
+            "saved_at": out.get("saved_at") or "",
+        }
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _read_saved_regions(base_dir: Optional[str], map_id: str) -> list:
+    """One map's regions, read from its own file.
+
+    The live store is bound to whichever map the session is on; rebinding it
+    to read a different one would move the session. The storage is a file per
+    map, so the other map's file is simply read.
+    """
+    if not base_dir:
+        return []
+    path = Path(base_dir).expanduser() / f"{_sanitize_map_id(map_id)}.json"
+    if not path.is_file():
+        return []
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = blob.get("annotations") if isinstance(blob, dict) else blob
+    return rows if isinstance(rows, list) else []
+
+
 def _nav(active: str) -> str:
     """The sidebar every page shares.
 
@@ -848,6 +952,74 @@ _SHELL_CSS = _asset("shell.css")
 
 # ── The log view ───────────────────────────────────────────────────────────
 _LOGS_BODY = _asset("logs.html")
+_MAPS_BODY = _asset("maps_page.html")
+
+
+
+# ── The status bar ─────────────────────────────────────────────────────────
+# Present on every page by construction: what the robot is doing, and which
+# map it is doing it to. Those two facts decide what everything else on the
+# screen means, and they used to be stated in one corner of one page.
+_STATUS_BAR = """
+<div class="sbar" id="sbar">
+  <div class="sb-block">
+    <span class="sb-k" data-i18n="bar.mode"></span>
+    <span class="sb-mode" id="sb-mode"><i class="dot"></i><span class="txt"></span></span>
+  </div>
+  <div class="sb-rule"></div>
+  <div class="sb-block">
+    <span class="sb-k" data-i18n="bar.map"></span>
+    <span class="sb-map" id="sb-map">—</span>
+  </div>
+</div>
+<script>
+  // The same poll the rest of the UI uses. A page that cannot reach scene
+  // says so here: a stale map name is worse than an admitted disconnection.
+  (function () {
+    const bar = document.getElementById('sbar');
+    const modeEl = document.getElementById('sb-mode');
+    const modeTxt = modeEl.querySelector('.txt');
+    const mapEl = document.getElementById('sb-map');
+    const set = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+    const cls = (el, name) => { if (el.className !== name) el.className = name; };
+
+    async function beat() {
+      try {
+        const r = await fetch('/api/state', {cache: 'no-store'});
+        if (!r.ok) throw new Error(r.status);
+        const s = await r.json();
+        const mb = s.map_binding || {};
+        // An unnamed live session is mapping: there is no saved map to be
+        // localising against yet.
+        const temp = mb.source === 'default' && !mb.mode;
+        const mode = temp ? 'mapping' : (mb.mode || '');
+        cls(bar, 'sbar');
+        cls(modeEl, 'sb-mode ' + (mode === 'localization' ? 'loc'
+                                : mode === 'mapping' ? 'map' : 'idle'));
+        modeTxt.dataset.i18n = mode === 'localization' ? 'bar.localizing'
+                             : mode === 'mapping' ? 'bar.mapping' : 'bar.idle';
+        set(modeTxt, t(modeTxt.dataset.i18n));
+        if (temp) {
+          mapEl.dataset.i18n = 'bar.temporary';
+          set(mapEl, t('bar.temporary'));
+          cls(mapEl, 'sb-map temp');
+        } else {
+          mapEl.removeAttribute('data-i18n');
+          set(mapEl, mb.map_id || '—');
+          cls(mapEl, 'sb-map');
+        }
+      } catch (_) {
+        cls(bar, 'sbar down');
+        cls(modeEl, 'sb-mode down');
+        modeTxt.dataset.i18n = 'bar.offline';
+        set(modeTxt, t('bar.offline'));
+      }
+      setTimeout(beat, 1000);
+    }
+    beat();
+  })();
+</script>
+"""
 
 
 def _shell_page(active: str, body: str, title: str,
@@ -884,7 +1056,7 @@ def _shell_page(active: str, body: str, title: str,
         '<div class="spacer"></div>'
         '<button class="lang" id="lang-switch" data-i18n="nav.lang"'
         ' data-i18n-title="nav.lang.title">中文</button></nav>'
-        f"<main>{body}</main>{dock}</div>{script}</body></html>"
+        f"<main>{_STATUS_BAR}{body}</main>{dock}</div>{script}</body></html>"
     )
 
 
@@ -2014,6 +2186,84 @@ def make_app(*, registry: ObjectRegistry,
             "generation": generation, "persisted": persisted,
         })
 
+    async def map_preview(request):
+        """The stored occupancy thumbnail for one saved map.
+
+        Mapping writes it beside the map's spatial artifact on every save.
+        The directory is named by SCENE_MAP_PREVIEW_DIR because it belongs to
+        mapping's filesystem, not scene's, and a service should be told where
+        another service's files are rather than deduce it.
+        """
+        root = (os.environ.get("SCENE_MAP_PREVIEW_DIR") or "").strip()
+        if not root or not Path(root).is_dir():
+            return PlainTextResponse(
+                "SCENE_MAP_PREVIEW_DIR is not set for this deployment, so "
+                "saved-map previews are not available here",
+                status_code=404)
+        base = Path(root).resolve()
+        # Sanitised, then checked to land inside `base`: an id from the URL
+        # joined to a path is where directory traversal lives.
+        candidate = (base / _sanitize_map_id(request.path_params["map_id"])
+                     / "occupancy.png")
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(base)
+        except (OSError, ValueError):
+            return PlainTextResponse("not found", status_code=404)
+        if not resolved.is_file():
+            return PlainTextResponse("this map has no preview", status_code=404)
+        try:
+            blob = resolved.read_bytes()
+        except OSError as error:
+            return PlainTextResponse(f"unreadable: {error}", status_code=404)
+        return Response(blob, media_type="image/png", headers={
+            # A saved map's preview changes only when the map is saved again,
+            # and the grid asks for one per card.
+            "Cache-Control": "public, max-age=60",
+        })
+
+    async def map_contents(request) -> JSONResponse:
+        """One saved map's regions, objects and grid geometry.
+
+        Answers "what is in this map" without loading it, which is what
+        choosing between two of them requires.
+        """
+        map_id = _sanitize_map_id(request.path_params["map_id"])
+
+        def collect() -> dict:
+            root = (os.environ.get("SCENE_MAP_PREVIEW_DIR") or "").strip()
+            grid = _read_grid_meta(Path(root) / map_id) if root else None
+
+            regions = _read_saved_regions(
+                str(anno_store.path.parent) if anno_store is not None else None,
+                map_id)
+
+            objects: list = []
+            if map_meta is not None and object_store is not None:
+                meta = map_meta.read(map_id)
+                if meta is not None:
+                    try:
+                        rows = object_store.load_all(
+                            partition=meta.object_partition)
+                    except Exception:  # noqa: BLE001
+                        rows = []
+                    for obj in rows or []:
+                        pose = getattr(obj, "pose", None)
+                        objects.append({
+                            "id": getattr(obj, "object_id", ""),
+                            "short_id": _shorten_id(getattr(obj, "object_id", "")),
+                            "cls": getattr(obj, "cls", "object"),
+                            "x": float(getattr(pose, "x", 0.0) or 0.0),
+                            "y": float(getattr(pose, "y", 0.0) or 0.0),
+                            "confidence": float(getattr(obj, "confidence", 0.0) or 0.0),
+                        })
+            return {
+                "ok": True, "map_id": map_id, "grid": grid,
+                "regions": regions, "objects": objects,
+            }
+
+        return JSONResponse(await asyncio.to_thread(collect))
+
     async def logs_api(request) -> JSONResponse:
         """Whatever scribe appended since the caller's cursor.
 
@@ -2072,7 +2322,7 @@ def make_app(*, registry: ObjectRegistry,
         """Scene's log view: scribe's files, tailed live."""
         return HTMLResponse(_shell_page("/logs", _LOGS_BODY, "scene — logs"))
 
-    async def maps_page(request) -> HTMLResponse:
+    async def maps_page_old(request) -> HTMLResponse:
         """Map management: name and save the live session, load a saved map,
         delete one, or re-estimate the pose on the one that is loaded.
 
@@ -2084,6 +2334,15 @@ def make_app(*, registry: ObjectRegistry,
         if _bare(request):
             return HTMLResponse(_user_html("maps"))
         return HTMLResponse(_framed("/maps", "scene — maps"))
+
+    async def maps_page(request) -> HTMLResponse:
+        """The map library: a grid of what exists, and how to add to it.
+
+        Rendered straight into the shell rather than an iframe -- it has no
+        canvas and no viewer, so a frame would only cost it the stylesheet
+        and the language runtime.
+        """
+        return HTMLResponse(_shell_page("/maps", _MAPS_BODY, "scene — maps"))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -2123,6 +2382,8 @@ def make_app(*, registry: ObjectRegistry,
         Route("/maps", maps_page, methods=["GET"]),
         Route("/logs", logs_page, methods=["GET"]),
         Route("/api/logs", logs_api, methods=["GET"]),
+        Route("/api/maps/{map_id}/preview", map_preview, methods=["GET"]),
+        Route("/api/maps/{map_id}/contents", map_contents, methods=["GET"]),
         Route("/api/objects/{object_id}/label", object_label,
               methods=["POST"]),
         Route("/api/objects/{object_id}", object_delete,

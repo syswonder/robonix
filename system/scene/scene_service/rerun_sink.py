@@ -335,70 +335,6 @@ def _port_is_free(port: int) -> bool:
     return True
 
 
-def _rerun_cli() -> Optional[str]:
-    """The `rerun` executable, or None.
-
-    Looked up rather than assumed: the SDK is a wheel and the CLI is a
-    separate binary it ships, so one can be present without the other --
-    which is a different failure from rerun being missing entirely and says
-    so differently.
-    """
-    import shutil
-
-    return shutil.which("rerun") or shutil.which("rerun-cli")
-
-
-def _port_accepts(port: int, host: str = "127.0.0.1") -> bool:
-    """Whether something is listening and accepting on `port`."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(0.25)
-        return probe.connect_ex((host, port)) == 0
-
-
-def _spawn_rerun(args: list, ready_port: int, label: str,
-                 deadline_s: float = _START_TIMEOUT_S):
-    """Start a `rerun` server as a child and wait for it to accept.
-
-    Returns the Popen, or None when it never came up -- in which case the
-    child is killed rather than left holding a port against the next boot.
-
-    The wait is a socket poll rather than reading the child's output: rerun
-    prints its banner before the listener is actually accepting, and a reader
-    that trusts the banner reconnects into a refused connection.
-    """
-    import subprocess
-    import time as _time
-
-    try:
-        proc = subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as error:
-        log.warning("[scene-rerun] could not start %s: %s", label, error)
-        return None
-
-    end = _time.monotonic() + deadline_s
-    while _time.monotonic() < end:
-        if proc.poll() is not None:
-            log.warning("[scene-rerun] %s exited immediately (code %s)",
-                        label, proc.returncode)
-            return None
-        if _port_accepts(ready_port):
-            log.info("[scene-rerun] %s listening on :%d", label, ready_port)
-            return proc
-        _time.sleep(0.2)
-
-    log.warning("[scene-rerun] %s did not accept on :%d within %.0fs",
-                label, ready_port, deadline_s)
-    proc.kill()
-    return None
-
-
 class _Feed:
     """One recording and the gRPC server that streams it."""
 
@@ -408,17 +344,19 @@ class _Feed:
         self.recording: Any = None
         self.grpc_url = ""
 
-    def connect(self, rr: Any, blueprint: Any) -> None:
-        """Open the recording and point it at the server already running.
-
-        `connect_grpc` is a client call against a port something is already
-        accepting on -- checked before we get here -- so unlike `serve_grpc`
-        it hosts nothing in this process and has no server startup to block
-        on. That is the whole reason the servers are children now.
-        """
-        self.grpc_url = f"rerun+http://127.0.0.1:{self.grpc_port}/proxy"
+    def serve(self, rr: Any, blueprint: Any, memory_limit: str) -> None:
+        """Open the recording and its gRPC server."""
         self.recording = rr.RecordingStream(self.app_id)
-        self.recording.connect_grpc(self.grpc_url, default_blueprint=blueprint)
+        self.grpc_url = self.recording.serve_grpc(
+            grpc_port=self.grpc_port,
+            server_memory_limit=memory_limit,
+            default_blueprint=blueprint,
+            # The buffer exists so a late viewer gets the whole recording;
+            # for a live map that meant replaying the session every time the
+            # page was opened. Newest first lands on the current state and
+            # fills the backlog in behind it.
+            newest_first=True,
+        )
 
 
 class RerunSink:
@@ -480,21 +418,7 @@ class RerunSink:
         return self._detail
 
     def start(self) -> bool:
-        """Bring the viewer up. False when it is not available.
-
-        The two gRPC proxies and the web viewer run as child processes of the
-        `rerun` CLI rather than inside this interpreter. Hosting them here is
-        what wedged the service: `RecordingStream.serve_grpc` is documented to
-        return immediately and does in isolation, but under the contention of
-        the asyncio loop, the rclpy executor and a CUDA perception tick it
-        stops returning while holding the interpreter lock -- so the bounded
-        `join` that was meant to catch it could never be scheduled, and scene
-        hung before binding its own web port.
-
-        A child that wedges is a child we can wait on with a real timeout and
-        kill. What stays in-process is `connect_grpc`, a client call against a
-        port already proven to be accepting.
-        """
+        """Start the recording and both servers. False when rerun is absent."""
         with self._lock:
             if self._ready:
                 return True
@@ -503,8 +427,10 @@ class RerunSink:
                                        self._web_port)
                      if not _port_is_free(port)]
             if taken:
-                # Named, so an operator can tell a leftover process from a
-                # missing package.
+                # Checked before the import: a busy port is a failure whether
+                # or not rerun is installed, and naming the port is what tells
+                # an operator this is a leftover process rather than a missing
+                # package.
                 self._detail = (
                     "the viewer's ports are already in use: "
                     + ", ".join(str(port) for port in taken))
@@ -520,63 +446,71 @@ class RerunSink:
                     "the scene `viewer` extra to enable the map viewer")
                 log.warning("[scene-rerun] %s", self._detail)
                 return False
-
-            cli = _rerun_cli()
-            if cli is None:
-                self._detail = (
-                    "the rerun command-line tool is not on PATH; it hosts the "
-                    "viewer's servers, which are deliberately not hosted in "
-                    "this process")
-                log.warning("[scene-rerun] %s", self._detail)
-                return False
-
             self._rr = rr
+            # Every call below binds a port, and none of them fails when the
+            # port is taken: `serve_grpc` blocks forever instead, and a bind
+            # check beforehand does not catch it -- a socket left in TIME_WAIT
+            # by the previous run accepts the check and still wedges the
+            # server. The whole bring-up therefore runs in a thread this waits
+            # on with a deadline: the map service must not be held hostage by
+            # its own debugging aid, and a viewer that never came up has to
+            # say so rather than leave the web UI unreachable forever.
+            outcome: dict[str, Any] = {}
 
-            # One child serves the 3D proxy and the web viewer together;
-            # --serve-web hosts both, so the 2D feed only needs a plain proxy.
-            web_child = _spawn_rerun(
-                [cli, "--serve-web",
-                 # Current state first; the backlog fills in behind it.
-                 "--newest-first",
-                 "--port", str(self._map3d.grpc_port),
-                 "--web-viewer-port", str(self._web_port),
-                 "--bind", "0.0.0.0",
-                 "--server-memory-limit", str(self._memory_limit)],
-                self._map3d.grpc_port, "3D proxy + web viewer")
-            if web_child is None:
+            def claim(port: int) -> None:
+                """Refuse a port that was taken since the first check.
+
+                Seconds pass between that check and here -- importing rerun is
+                not cheap -- and a previous run finishing its exit inside that
+                window is the whole failure this guards.
+                """
+                if not _port_is_free(port):
+                    raise OSError(f"port {port} is in use")
+
+            def bring_up() -> None:
+                try:
+                    claim(self._map3d.grpc_port)
+                    self._map3d.serve(rr, _blueprint_3d(), self._memory_limit)
+                    claim(self._map2d.grpc_port)
+                    self._map2d.serve(rr, _blueprint_2d(), self._memory_limit)
+                    claim(self._web_port)
+                    # One web server for both pages. `serve_web_viewer` hands
+                    # out the viewer application, not the data: which recording
+                    # a page shows is decided by the `url` in its query string.
+                    # Calling it a second time only fights the first for the
+                    # port, and the bind error takes the service down with it.
+                    rr.serve_web_viewer(
+                        web_port=self._web_port, open_browser=False,
+                        connect_to=self._map3d.grpc_url)
+                    outcome["ok"] = True
+                except Exception as error:  # noqa: BLE001
+                    outcome["error"] = error
+
+            worker = threading.Thread(target=bring_up, name="scene-rerun-up",
+                                      daemon=True)
+            worker.start()
+            worker.join(_START_TIMEOUT_S)
+            if worker.is_alive():
                 self._detail = (
-                    "the viewer's server did not start; scene is serving the "
-                    "built-in pages instead")
-                return False
-
-            grpc_child = _spawn_rerun(
-                [cli, "--serve-grpc",
-                 # Current state first; the backlog fills in behind it.
-                 "--newest-first",
-                 "--port", str(self._map2d.grpc_port),
-                 "--bind", "0.0.0.0",
-                 "--server-memory-limit", str(self._memory_limit)],
-                self._map2d.grpc_port, "2D proxy")
-            if grpc_child is None:
-                web_child.kill()
-                self._detail = "the 2D viewer's server did not start"
-                return False
-
-            self._children = [web_child, grpc_child]
-
-            try:
-                self._map3d.connect(rr, _blueprint_3d())
-                self._map2d.connect(rr, _blueprint_2d())
-            except Exception as error:  # noqa: BLE001
-                for child in self._children:
-                    child.kill()
-                self._children = []
-                self._detail = f"the viewer could not be connected: {error}"
+                    f"the viewer did not finish starting within "
+                    f"{_START_TIMEOUT_S:.0f}s; one of its ports "
+                    f"({self._map3d.grpc_port}, {self._map2d.grpc_port}, "
+                    f"{self._web_port}) is still held, most likely by the "
+                    "previous run")
                 log.warning(
                     "[scene-rerun] %s; scene will serve the built-in pages "
                     "instead", self._detail)
                 return False
-
+            if "error" in outcome:
+                # Usually a port already in use. The viewer is a debugging
+                # aid, so under `auto` a deployment that cannot serve it falls
+                # back to the built-in pages; letting this escape would stop
+                # the map service itself over a busy port.
+                self._detail = f"the viewer could not start: {outcome['error']}"
+                log.warning(
+                    "[scene-rerun] %s; scene will serve the built-in pages "
+                    "instead", self._detail)
+                return False
             self._ready = True
             self._detail = ""
             log.info("[scene-rerun] 3D viewer on %s",
@@ -584,29 +518,6 @@ class RerunSink:
             log.info("[scene-rerun] 2D viewer on %s",
                      self.viewer_url_2d(self._web_host))
             return True
-
-    def stop(self) -> None:
-        """Stop the viewer's child processes.
-
-        Terminate first: the servers flush and close their listeners on
-        SIGTERM, and a killed one leaves the port in TIME_WAIT for the next
-        boot's port check to trip over.
-        """
-        children, self._children = getattr(self, "_children", []), []
-        for child in children:
-            try:
-                child.terminate()
-            except Exception:  # noqa: BLE001
-                pass
-        for child in children:
-            try:
-                child.wait(timeout=5)
-            except Exception:  # noqa: BLE001
-                try:
-                    child.kill()
-                except Exception:  # noqa: BLE001
-                    pass
-        self._ready = False
 
     @property
     def web_port(self) -> int:
