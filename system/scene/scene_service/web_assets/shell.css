@@ -23,6 +23,12 @@
       border-right:1px solid var(--line);
       display:flex;flex-direction:column;padding:10px 0}
   nav .brand{padding:8px 14px 14px;color:var(--acc);font-weight:650;font-size:15px;letter-spacing:.01em}
+  /* A heading, not a destination: smaller, quieter, and not clickable, so
+   * the three links under it read as views of one thing. */
+  .nav-group{margin-bottom:10px}
+  .nav-head{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+            color:#5f6673;padding:6px 14px 4px}
+  .nav-group nav a,.nav-group a{padding-left:24px}
   nav a{display:flex;align-items:center;gap:9px;padding:8px 14px;
         color:var(--muted);text-decoration:none;font-size:13.5px;
         white-space:nowrap;border-left:2px solid transparent}

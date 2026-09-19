@@ -470,9 +470,10 @@ def _maps_payload() -> dict:
 # drops the translation, and it makes the table impossible to audit for gaps.
 _STRINGS: dict[str, dict[str, str]] = {
     # the sidebar
-    "nav.maps":        {"en": "maps",         "zh": "地图"},
-    "nav.semantic":    {"en": "semantic map", "zh": "语义地图"},
-    "nav.2d":          {"en": "2D map",       "zh": "平面图"},
+    "nav.group.live":  {"en": "current map",  "zh": "当前地图"},
+    "nav.maps":        {"en": "map library",  "zh": "地图库"},
+    "nav.semantic":    {"en": "3D",           "zh": "3D"},
+    "nav.2d":          {"en": "2D",           "zh": "2D"},
     "nav.cam":         {"en": "camera",       "zh": "相机"},
     "nav.regions":     {"en": "regions",      "zh": "区域"},
     "nav.logs":        {"en": "logs",          "zh": "日志"},
@@ -669,12 +670,17 @@ def _i18n_js() -> str:
 
 _NAV_LINKS = (
     ("/maps", "maps", "nav.maps"),
-    ("/", "semantic map", "nav.semantic"),
-    ("/2d", "2D map", "nav.2d"),
+    ("/", "3D", "nav.semantic"),
+    ("/2d", "2D", "nav.2d"),
     ("/cam", "camera", "nav.cam"),
     ("/regions", "regions", "nav.regions"),
     ("/logs", "logs", "nav.logs"),
 )
+
+# Which entries are views of the one live map, and so belong under a heading
+# rather than beside the library of saved ones. Order is the order they are
+# rendered in; everything not named here stays a top-level entry.
+_NAV_LIVE_MAP = ("/", "/2d", "/regions")
 
 
 # One mark per destination, inline. Stroked rather than filled so they sit at
@@ -887,17 +893,27 @@ def _nav(active: str) -> str:
     view from the map meant editing the address bar, and nothing on any page
     said the other views existed.
     """
-    items = []
-    for href, label, key in _NAV_LINKS:
+    by_href = {href: (label, key) for href, label, key in _NAV_LINKS}
+
+    def link(href: str) -> str:
+        label, key = by_href[href]
         current = ' class="on"' if href == active else ""
         icon = _NAV_ICONS.get(href, "")
         # The English is in the markup so the page is readable before the
         # script runs and so a crawler or a screenshot of a dead page still
         # says something; the script replaces it with the chosen language.
-        items.append(
-            f'<a href="{href}"{current}>{icon}'
-            f'<span data-i18n="{key}">{label}</span></a>'
-        )
+        return (f'<a href="{href}"{current}>{icon}'
+                f'<span data-i18n="{key}">{label}</span></a>')
+
+    # The live map first, as one group: these are three ways of looking at
+    # the same map, and the heading is what says so.
+    items = ['<div class="nav-group"><div class="nav-head" '
+             'data-i18n="nav.group.live">current map</div>']
+    items += [link(href) for href in _NAV_LIVE_MAP]
+    items.append("</div>")
+    # Then everything that is its own thing rather than a view of that one.
+    items += [link(href) for href, _, _ in _NAV_LINKS
+              if href not in _NAV_LIVE_MAP]
     return "".join(items)
 
 

@@ -38,13 +38,17 @@ BASE_URL = os.environ.get("SCENE_WEB_URL", "http://127.0.0.1:50107").rstrip("/")
 # Every page the sidebar offers, with the text that proves the right one
 # arrived rather than a generic shell.
 PAGES = [
-    ("/maps", "maps"),
-    ("/", "semantic map"),
-    ("/2d", "2D map"),
+    ("/maps", "map library"),
+    ("/", "3D"),
+    ("/2d", "2D"),
     ("/cam", "camera"),
     ("/regions", "regions"),
     ("/logs", "logs"),
 ]
+
+# The three that are views of the one live map, and so sit under the
+# heading rather than beside the library of saved ones.
+LIVE_MAP_VIEWS = ("/", "/2d", "/regions")
 
 pytest.importorskip(
     "playwright.sync_api",
@@ -105,12 +109,32 @@ def test_page_loads_with_its_own_sidebar(page, path, label):
     nav = page.locator("a, .nav a, nav a")
     assert nav.count() > 0, f"{path} rendered no navigation at all"
 
-    body = page.inner_text("body").lower()
-    for entry in ("maps", "semantic map", "2d map", "camera", "regions",
-                  "logs"):
-        assert entry in body, f"{path} is missing the '{entry}' sidebar entry"
+    # Asked of the sidebar rather than of the whole page: "map library"
+    # contains "map", and a body-text search cannot tell a nav entry from a
+    # heading or from a map name that happens to match.
+    hrefs = set(page.eval_on_selector_all(
+        "nav a", "els => els.map(e => new URL(e.href).pathname)"))
+    for href, _ in PAGES:
+        assert href in hrefs, f"{path} is missing the {href} sidebar entry"
 
     assert not page.errors, f"{path} logged console errors: {page.errors[:3]}"
+
+
+def test_the_sidebar_groups_the_live_maps_views(page):
+    """Three of these entries are ways of looking at the map the robot is on
+    now, and one is the library of saved maps. Listed flat they read as four
+    maps, which is what the heading exists to stop -- so the heading has to
+    actually contain the three, and not the library."""
+    _goto(page, "/")
+    grouped = set(page.eval_on_selector_all(
+        ".nav-group a", "els => els.map(e => new URL(e.href).pathname)"))
+    assert grouped == set(LIVE_MAP_VIEWS), (
+        f"the live map's views are {sorted(grouped)}, "
+        f"expected {sorted(LIVE_MAP_VIEWS)}"
+    )
+    head = page.locator(".nav-group .nav-head")
+    assert head.count() == 1, "the group has no heading to say what it is"
+    assert head.inner_text().strip(), "the heading is empty"
 
 
 def test_sidebar_reaches_every_page(page):
