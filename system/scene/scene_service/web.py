@@ -268,7 +268,22 @@ function draw(state) {
 
     // re-center on the robot if there is one; fall back to last-known.
     const robot = (state.objects || []).find(o => o.cls === 'robot');
-    if (robot) center = [robot.pose.x, robot.pose.y];
+    // Frame on the map when there is one, on the robot until then. A fixed
+    // zoom centred on the robot drew an apartment as a postage stamp in the
+    // middle of an empty grid -- the one thing the page is for, smallest on
+    // it.
+    const occ = state.occupancy;
+    if (occ && occ.width && occ.height && occ.resolution) {
+        const wM = occ.width * occ.resolution;
+        const hM = occ.height * occ.resolution;
+        center = [occ.origin_x + wM / 2, occ.origin_y + hM / 2];
+        // 40px of margin, and a ceiling so a one-metre grid does not fill the
+        // screen with a single cell.
+        pxPerM = Math.max(5, Math.min((c.width - 40) / wM,
+                                      (c.height - 40) / hM, 120));
+    } else if (robot) {
+        center = [robot.pose.x, robot.pose.y];
+    }
 
     // ── Occupancy map underlay ──────────────────────────────────────
     if (state.occupancy && state.occupancy.stamp_ms !== occStamp
