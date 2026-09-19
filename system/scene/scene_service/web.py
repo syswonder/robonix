@@ -873,12 +873,116 @@ def _maps_payload() -> dict:
 
 # Maps first: nothing else can be operated until one is bound, so it is the
 # page a reader starts on and the one they come back to when switching.
+# ── Interface language ─────────────────────────────────────────────────────
+# One table, two documents: the shell and the view inside its iframe both read
+# the same key, and the choice lives in localStorage so it survives a reload
+# and is shared across the frame boundary without a server round trip.
+#
+# Keys, not English text. Matching on the English means a typo fix silently
+# drops the translation, and it makes the table impossible to audit for gaps.
+_STRINGS: dict[str, dict[str, str]] = {
+    # the sidebar
+    "nav.maps":        {"en": "maps",         "zh": "地图"},
+    "nav.semantic":    {"en": "semantic map", "zh": "语义地图"},
+    "nav.2d":          {"en": "2D map",       "zh": "平面图"},
+    "nav.cam":         {"en": "camera",       "zh": "相机"},
+    "nav.regions":     {"en": "regions",      "zh": "区域"},
+    "nav.lang":        {"en": "中文",          "zh": "English"},
+    "nav.lang.title":  {"en": "switch to Chinese", "zh": "switch to English"},
+    # the dock
+    "dock.objects":    {"en": "Objects",   "zh": "物体"},
+    "dock.relations":  {"en": "Relations", "zh": "关系"},
+    "dock.robot":      {"en": "Robot",     "zh": "机器人"},
+    "dock.objects.hint":   {"en": "what the registry holds",
+                            "zh": "registry 里有什么"},
+    "dock.relations.hint": {"en": "how they sit together",
+                            "zh": "它们彼此怎么摆"},
+    "dock.robot.hint":     {"en": "where it thinks it is",
+                            "zh": "机器人认为自己在哪"},
+    "dock.collapse":   {"en": "collapse the dock", "zh": "折叠面板"},
+    "dock.resize":     {"en": "drag to resize",    "zh": "拖动改变宽度"},
+    "dock.empty.objects":   {"en": "nothing in the registry yet",
+                             "zh": "registry 里还没有东西"},
+    "dock.empty.relations": {"en": "no relations inferred yet",
+                             "zh": "还没有推断出关系"},
+    "dock.empty.robot":     {"en": "no fix yet", "zh": "还没有定位"},
+    # map binding
+    "map.temporary":   {"en": "temporary, unsaved", "zh": "临时地图，未保存"},
+    "note.title":      {"en": "Temporary map", "zh": "临时地图（未保存）"},
+    "note.body":       {"en": "Marking and recognition work normally here. "
+                              "Saving this session under a name keeps the "
+                              "regions and objects with it; without that, "
+                              "they end with the session.",
+                        "zh": "标记区域和识别物体都照常可用。把本次会话命名保存后，"
+                              "区域和物体会一起存进去；不保存则随会话结束丢失。"},
+    "note.link":       {"en": "Go to maps", "zh": "前往地图管理"},
+    # page titles
+    "page.maps":       {"en": "Maps",    "zh": "地图"},
+    "page.regions":    {"en": "Regions", "zh": "区域"},
+}
+
+_I18N_JS = """
+// One language on screen, chosen once and remembered. Both the shell and the
+// view in its iframe read this key, so the choice crosses the frame boundary
+// without a server round trip.
+const I18N = __TABLE__;
+const LANGS = ['en', 'zh'];
+function langGet() {
+  try {
+    const v = localStorage.getItem('sceneLang');
+    if (LANGS.includes(v)) return v;
+  } catch (_) {}
+  // First visit follows the browser rather than assuming English.
+  return (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+}
+function t(key, lang) {
+  const row = I18N[key];
+  // A missing key shows its key rather than blank: a gap in the table should
+  // be visible in a screenshot, not silently render an empty control.
+  return row ? (row[lang || langGet()] || row.en || key) : key;
+}
+function applyLang(lang, root) {
+  const d = root || document;
+  d.documentElement && (d.documentElement.lang = lang === 'zh' ? 'zh' : 'en');
+  d.querySelectorAll('[data-i18n]').forEach(
+    el => { el.textContent = t(el.dataset.i18n, lang); });
+  d.querySelectorAll('[data-i18n-title]').forEach(
+    el => { el.title = t(el.dataset.i18nTitle, lang); });
+  d.querySelectorAll('[data-i18n-aria]').forEach(
+    el => { el.setAttribute('aria-label', t(el.dataset.i18nAria, lang)); });
+}
+function langSet(lang) {
+  try { localStorage.setItem('sceneLang', lang); } catch (_) {}
+  applyLang(lang);
+  // The views are iframes with their own documents; tell them rather than
+  // waiting for the next navigation.
+  document.querySelectorAll('iframe').forEach(f => {
+    try { f.contentWindow.postMessage({sceneLang: lang}, '*'); } catch (_) {}
+  });
+}
+// A frame applies what it is told, and what it already had on load.
+window.addEventListener('message', e => {
+  const lang = e.data && e.data.sceneLang;
+  if (LANGS.includes(lang)) {
+    try { localStorage.setItem('sceneLang', lang); } catch (_) {}
+    applyLang(lang);
+  }
+});
+"""
+
+
+def _i18n_js() -> str:
+    """The runtime with the table baked in."""
+    import json
+    return _I18N_JS.replace("__TABLE__", json.dumps(_STRINGS, ensure_ascii=False))
+
+
 _NAV_LINKS = (
-    ("/maps", "maps"),
-    ("/", "semantic map"),
-    ("/2d", "2D map"),
-    ("/cam", "camera"),
-    ("/regions", "regions"),
+    ("/maps", "maps", "nav.maps"),
+    ("/", "semantic map", "nav.semantic"),
+    ("/2d", "2D map", "nav.2d"),
+    ("/cam", "camera", "nav.cam"),
+    ("/regions", "regions", "nav.regions"),
 )
 
 
@@ -919,11 +1023,15 @@ def _nav(active: str) -> str:
     said the other views existed.
     """
     items = []
-    for href, label in _NAV_LINKS:
+    for href, label, key in _NAV_LINKS:
         current = ' class="on"' if href == active else ""
         icon = _NAV_ICONS.get(href, "")
+        # The English is in the markup so the page is readable before the
+        # script runs and so a crawler or a screenshot of a dead page still
+        # says something; the script replaces it with the chosen language.
         items.append(
-            f'<a href="{href}"{current}>{icon}<span>{label}</span></a>'
+            f'<a href="{href}"{current}>{icon}'
+            f'<span data-i18n="{key}">{label}</span></a>'
         )
     return "".join(items)
 
@@ -1060,19 +1168,23 @@ def _dock_html() -> str:
             ' stroke-width="1.7" stroke-linecap="round"'
             ' stroke-linejoin="round">{}</svg>')
     tabs = "".join(
-        f'<button data-tab="{tid}" title="{label} — {hint}"'
-        f' aria-label="{label}">{icon.format(path)}</button>'
+        f'<button data-tab="{tid}" data-i18n-title="dock.{tid}.hint"'
+        f' data-i18n-aria="dock.{tid}"'
+        f' title="{label} — {hint}" aria-label="{label}">'
+        f'{icon.format(path)}</button>'
         for tid, label, hint, path in _DOCK_TABS
     )
     return f"""
   <aside class="dock" id="dock">
-    <div class="grip" id="dock-grip" title="drag to resize"></div>
+    <div class="grip" id="dock-grip" data-i18n-title="dock.resize"
+         title="drag to resize"></div>
     <div class="tabs">{tabs}</div>
     <div class="col">
       <div class="head">
-        <span class="name" id="dock-name">Objects</span>
+        <span class="name" id="dock-name" data-i18n="dock.objects">Objects</span>
         <span class="stamp" id="dock-stamp">—</span>
-        <button class="shutbtn" id="dock-shut" title="collapse the dock"
+        <button class="shutbtn" id="dock-shut" data-i18n-title="dock.collapse"
+                data-i18n-aria="dock.collapse" title="collapse the dock"
                 aria-label="collapse the dock">»</button>
       </div>
       <div class="panes">
@@ -1098,7 +1210,8 @@ _DOCK_JS = r"""
     const dock = document.getElementById('dock');
     const dockName = document.getElementById('dock-name');
     const LS = 'sceneDock.v2';
-    const LABELS = {objects: 'Objects', relations: 'Relations', robot: 'Robot'};
+    const TAB_KEY = {objects: 'dock.objects', relations: 'dock.relations',
+                     robot: 'dock.robot'};
 
     function save(patch) {
       try {
@@ -1116,7 +1229,8 @@ _DOCK_JS = r"""
         b => b.classList.toggle('on', b.dataset.tab === tab));
       dock.querySelectorAll('.pane').forEach(
         p => p.classList.toggle('on', p.dataset.pane === tab));
-      dockName.textContent = LABELS[tab] || tab;
+      dockName.dataset.i18n = TAB_KEY[tab] || '';
+      dockName.textContent = t(TAB_KEY[tab] || tab);
       save({tab: tab});
     }
 
@@ -1200,7 +1314,7 @@ _DOCK_JS = r"""
                 ${fmt(o.pose.x)},${fmt(o.pose.y)} · ${fmt(o.confidence)}
               </td>
             </tr>`).join('')
-            : '<tr><td class="empty">nothing in the registry yet</td></tr>';
+            : `<tr><td class="empty">${t('dock.empty.objects')}</td></tr>`;
 
           const rel = document.getElementById('dock-rels');
           rel.innerHTML = edges.length ? edges.map(e => `
@@ -1209,7 +1323,7 @@ _DOCK_JS = r"""
               <span class="rp">${e.relation}</span>
               <span class="rt">${shortId(e.target_id)}</span>
             </div>`).join('')
-            : '<span class="empty">no relations inferred yet</span>';
+            : `<span class="empty">${t('dock.empty.relations')}</span>`;
 
           const rb = document.getElementById('dock-robot');
           rb.innerHTML = s.robot ? `
@@ -1217,7 +1331,7 @@ _DOCK_JS = r"""
             <div class="kv"><span class="k">y</span><span class="v">${fmt(s.robot.y)}</span></div>
             <div class="kv"><span class="k">z</span><span class="v">${fmt(s.robot.z)}</span></div>
             <div class="kv"><span class="k">yaw</span><span class="v">${fmt(s.robot.yaw)}</span></div>`
-            : '<span class="empty">no fix yet</span>';
+            : `<span class="empty">${t('dock.empty.robot')}</span>`;
         }
       } catch (_) { /* swallow; next tick will retry */ }
       setTimeout(tick, 500);
@@ -1255,6 +1369,13 @@ _SHELL_CSS = """
         color:var(--muted);text-decoration:none;font-size:13.5px;
         white-space:nowrap;border-left:2px solid transparent}
   nav .ico{width:16px;height:16px;flex:0 0 16px;opacity:.85}
+  /* The switch sits at the foot of the sidebar, away from the destinations:
+     it changes how the interface reads, not where you are in it. */
+  nav .spacer{flex:1}
+  nav .lang{margin:0 10px 6px;padding:5px 0;background:none;cursor:pointer;
+            border:1px solid var(--line);border-radius:5px;
+            color:var(--muted);font:inherit;font-size:12px}
+  nav .lang:hover{color:var(--fg);border-color:#39415260;background:#1c2230}
   nav a.on .ico{opacity:1}
   nav a:hover{color:var(--fg);background:#1c2230}
   nav a.on{color:var(--acc);border-left-color:var(--acc);background:#1c2230}
@@ -1278,11 +1399,28 @@ def _shell_page(active: str, body: str, title: str,
     """
     css = _SHELL_CSS + (_DOCK_CSS if info_panel else "")
     dock = _dock_html() if info_panel else ""
-    script = f"<script>{_DOCK_JS}</script>" if info_panel else ""
+    # The language runtime loads on every page, dock or not: the sidebar is
+    # everywhere and the switch lives in it.
+    script = "<script>" + _i18n_js() + """
+    applyLang(langGet());
+    document.getElementById('lang-switch').addEventListener('click', () => {
+      langSet(langGet() === 'zh' ? 'en' : 'zh');
+    });
+    // A frame that loads later than the choice still needs telling.
+    document.querySelectorAll('iframe').forEach(f => f.addEventListener(
+      'load', () => {
+        try { f.contentWindow.postMessage({sceneLang: langGet()}, '*'); }
+        catch (_) {}
+      }));
+    </script>"""
+    script += f"<script>{_DOCK_JS}</script>" if info_panel else ""
     return (
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
         f"<title>{title}</title><style>{css}</style></head><body>"
-        f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}</nav>'
+        f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}'
+        '<div class="spacer"></div>'
+        '<button class="lang" id="lang-switch" data-i18n="nav.lang"'
+        ' data-i18n-title="nav.lang.title">中文</button></nav>'
         f"<main>{body}</main>{dock}</div>{script}</body></html>"
     )
 
@@ -3580,10 +3718,12 @@ def _user_html(page: str) -> str:
     title does not match its controls is the state this split was undoing.
     """
     title = "Maps" if page == "maps" else "Regions"
+    key = "page.maps" if page == "maps" else "page.regions"
     return (_USER_HTML
             .replace("__PAGE__", page)
-            .replace('<h1 id="page-title">Maps</h1>',
-                     f'<h1 id="page-title">{title}</h1>'))
+            .replace("__I18N_RUNTIME__", _i18n_js())
+            .replace('<h1 id="page-title" data-i18n="page.maps">Maps</h1>',
+                     f'<h1 id="page-title" data-i18n="{key}">{title}</h1>'))
 
 
 _USER_HTML = r"""<!doctype html>
@@ -3705,6 +3845,8 @@ _USER_HTML = r"""<!doctype html>
   </style>
 </head>
 <body data-ready="loading" data-page="__PAGE__">
+<script>__I18N_RUNTIME__
+applyLang(langGet());</script>
 <style>
     /* ── One template, two pages ──
        Maps binds a map; regions marks areas on the map that is bound. They
@@ -3741,7 +3883,7 @@ _USER_HTML = r"""<!doctype html>
 </style>
 <div id="app">
   <header>
-    <h1 id="page-title">Maps</h1>
+    <h1 id="page-title" data-i18n="page.maps">Maps</h1>
     <span id="bound-pill" class="none"><span class="dot"></span><span id="bound-text">no map bound</span></span>
     <span class="meta" id="meta">map: —</span>
     <span class="stale-alert" id="stale-alert">⚠ map was rebuilt — review stale regions</span>
@@ -3759,12 +3901,11 @@ _USER_HTML = r"""<!doctype html>
         <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
       </div>
       <div id="map-note">
-        <b>临时地图（未保存） · temporary map</b><br>
-        标记区域和识别物体都照常可用。保存时它们会跟着一起存进去；
-        不保存则随本次会话结束丢失。<br>
-        Marking and recognition work normally here. Saving this session under
-        a name in <a href="/maps">maps</a> keeps the regions and objects with
-        it; without that, they end with the session.
+        <b data-i18n="note.title">Temporary map</b><br>
+        <span data-i18n="note.body">Marking and recognition work normally
+        here. Saving this session under a name keeps the regions and objects
+        with it; without that, they end with the session.</span><br>
+        <a href="/maps" data-i18n="note.link">Go to maps</a>
       </div>
       <div class="actions">
         <button class="primary" id="btn-draw">✏ Mark region</button>
@@ -4127,35 +4268,49 @@ function draw() {
     if (robot) {
         const [rx, ry] = w2p(robot.x, robot.y);
         const yaw = robot.yaw || 0;
-        const robotMarkerNose = 24;
+        // A disc for where it is, a cone for where it faces. Same blue as
+        // the 2D page draws the robot in: one robot, one colour.
+        const R = 8, CONE = 26, SPREAD = 0.38;  // radians either side
         ctx.save();
         ctx.translate(rx, ry);
         ctx.rotate(-yaw);
 
+        // The cone, fading out along its length so it reads as a direction
+        // of attention rather than as a spike stuck through the robot.
+        const grad = ctx.createRadialGradient(0, 0, R, 0, 0, CONE);
+        grad.addColorStop(0, 'rgba(122, 167, 255, 0.42)');
+        grad.addColorStop(1, 'rgba(122, 167, 255, 0)');
         ctx.beginPath();
-        ctx.arc(0, 0, 12, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(7, 10, 16, 0.92)';
-        ctx.fill();
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = '#ffffff';
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.moveTo(robotMarkerNose, 0);
-        ctx.lineTo(-7, -10);
-        ctx.lineTo(-3, 0);
-        ctx.lineTo(-7, 10);
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, CONE, -SPREAD, SPREAD);
         ctx.closePath();
-        ctx.fillStyle = '#ff5a1f';
+        ctx.fillStyle = grad;
         ctx.fill();
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = '#ffffff';
-        ctx.stroke();
+
+        // A soft shadow under the disc: the occupancy behind it is white
+        // where the floor is free and near-black where it is unknown, and no
+        // single outline colour reads on both.
+        ctx.beginPath();
+        ctx.arc(0, 0, R + 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(8, 11, 17, 0.55)';
+        ctx.fill();
 
         ctx.beginPath();
-        ctx.arc(0, 0, 4, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffffff';
+        ctx.arc(0, 0, R, 0, Math.PI * 2);
+        ctx.fillStyle = '#7aa7ff';
         ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
+
+        // A short tick on the rim, so heading is still readable when the
+        // cone falls on pale floor and washes out.
+        ctx.beginPath();
+        ctx.moveTo(R - 1, 0);
+        ctx.lineTo(R + 5, 0);
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#0d1420';
+        ctx.stroke();
         ctx.restore();
     }
 
@@ -4715,9 +4870,14 @@ async function refresh() {
     const pillText = document.getElementById('bound-text');
     if (pill && pillText) {
       pill.className = saved ? '' : 'none';
-      pillText.textContent = saved
-        ? `${mb.map_id} · ${mb.mode || 'mode unknown'}`
-        : '临时地图 · temporary, unsaved';
+      if (saved) {
+        delete pill.dataset.i18n;
+        pillText.textContent = `${mb.map_id} · ${mb.mode || 'mode unknown'}`;
+        pillText.removeAttribute('data-i18n');
+      } else {
+        pillText.setAttribute('data-i18n', 'map.temporary');
+        pillText.textContent = t('map.temporary');
+      }
     }
     document.getElementById('meta').textContent = mb
         ? (unsavedLive ? 'map: live session · unsaved' : `map: ${mb.map_id} · ${mb.mode || 'mode unknown'}`)

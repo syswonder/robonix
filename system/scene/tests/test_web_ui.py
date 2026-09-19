@@ -422,3 +422,74 @@ def test_2d_labels_do_not_overlap(page):
         f"labels overlap by {worst:.0%} of a label's area; placement failed"
     )
 
+
+# ── Interface language ─────────────────────────────────────────────────────
+# One language on screen, chosen once and remembered. Printing the Chinese and
+# the English side by side is not a bilingual interface; it is one interface
+# with everything said twice.
+
+
+def test_language_switch_changes_the_sidebar(page):
+    """The switch is in the sidebar and it changes the sidebar."""
+    _goto(page, "/")
+    page.wait_for_timeout(800)
+
+    before = page.inner_text("nav")
+    page.locator("#lang-switch").click()
+    page.wait_for_timeout(400)
+    after = page.inner_text("nav")
+
+    assert before != after, "the switch changed nothing"
+    han = [c for c in after if "\u4e00" <= c <= "\u9fff"]
+    latin_before = [c for c in before if c.isascii() and c.isalpha()]
+    assert han or latin_before, "neither language rendered"
+
+
+def test_language_choice_survives_a_reload(page):
+    """Chosen once, not once per page."""
+    _goto(page, "/")
+    page.wait_for_timeout(800)
+    page.locator("#lang-switch").click()
+    page.wait_for_timeout(400)
+    chosen = page.inner_text("nav")
+
+    _goto(page, "/2d")
+    page.wait_for_timeout(900)
+    assert page.inner_text("nav") == chosen, (
+        "the language reset on navigation"
+    )
+
+
+def test_the_view_follows_the_shell(page):
+    """The views are iframes with their own documents; they have to be told,
+    not left to pick the language up on the next navigation."""
+    _goto(page, "/regions")
+    page.wait_for_timeout(2000)
+
+    frame = page.frame_locator("iframe").locator("#page-title")
+    before = frame.inner_text()
+    page.locator("#lang-switch").click()
+    page.wait_for_timeout(700)
+    assert frame.inner_text() != before, (
+        f"the view kept its old language ({before!r})"
+    )
+
+
+def test_nothing_is_printed_in_both_languages(page):
+    """The bug this replaced: every string written twice, once per language.
+    A block of text is in one language or the other, never both."""
+    _goto(page, "/regions")
+    page.wait_for_timeout(2500)
+
+    note = page.frame_locator("iframe").locator("#map-note")
+    if note.count() == 0 or not note.is_visible():
+        pytest.skip("the map is saved; no temporary-map note on screen")
+    text = note.inner_text()
+    han = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    # "maps" in a link is a route, not a translation; require a real English
+    # sentence before calling it doubled.
+    words = len([w for w in text.split() if w.isascii() and len(w) > 3])
+    assert not (han > 8 and words > 8), (
+        "the note is printed in both languages at once:\n" + text
+    )
+
