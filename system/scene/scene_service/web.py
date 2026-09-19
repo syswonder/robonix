@@ -1381,7 +1381,7 @@ def make_app(*, registry: ObjectRegistry,
             # previously saved rooms; a startup binding that happens to name
             # this map (lifecycle broadcast / env) is NOT a load.
             return _anno_error(409, (
-                f"map {map_id} already has saved room annotations; load it "
+                f"map {map_id} already has saved regions; load it "
                 "first (or delete the map) instead of overwriting them with "
                 "this live session"
             ))
@@ -3393,7 +3393,7 @@ _USER_HTML = r"""<!doctype html>
       <div class="actions">
         <button class="primary" id="btn-draw">✏ Mark region</button>
       </div>
-      <div id="room-list"><div id="empty">No rooms yet. Click “Annotate room”,
+      <div id="room-list"><div id="empty">No regions yet. Click “Mark region”,
         then click on the map to outline one (double-click or Enter to finish,
         Esc to cancel).</div></div>
     </div>
@@ -3635,7 +3635,7 @@ const ROOM_COLORS = [
     { stroke:'#8fcf66', fill:'rgba(143,207,102,.18)', label:'#e3f8d5' },
 ];
 function roomColor(annotation) {
-    const key = String(annotation.annotation_id || annotation.name || 'room');
+    const key = String(annotation.annotation_id || annotation.name || 'region');
     let hash = 2166136261;
     for (let i = 0; i < key.length; i++) {
         hash ^= key.charCodeAt(i);
@@ -3699,7 +3699,7 @@ function draw() {
 
     // saved rooms
     for (const a of (state.annotations || [])) {
-        if (a.kind !== 'room' || a.points.length < 3) continue;
+        if (a.kind !== 'region' || a.points.length < 3) continue;
         const pts = a.points.map(p => w2p(p[0], p[1]));
         ctx.beginPath();
         pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
@@ -4154,18 +4154,18 @@ function askConfirm(title, message, okText = 'Delete') {
     return askModal({ title, message, input: false, okText, danger: true });
 }
 function renderPanel() {
-    const rooms = (state && state.annotations || []).filter(a => a.kind === 'room');
+    const rooms = (state && state.annotations || []).filter(a => a.kind === 'region');
     const list = document.getElementById('room-list');
     const anyStale = rooms.some(a => a.stale);
     document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
     if (!rooms.length) {
-        list.innerHTML = '<div id="empty">No rooms yet. Click “Annotate room”, ' +
+        list.innerHTML = '<div id="empty">No regions yet. Click “Mark region”, ' +
           'then click on the map to outline one (double-click or Enter to ' +
           'finish, Esc to cancel).</div>';
         return;
     }
     list.innerHTML = rooms.map(a => `
-      <div class="room ${a.annotation_id === selectedId ? 'selected' : ''}"
+      <div class="region ${a.annotation_id === selectedId ? 'selected' : ''}"
            data-id="${a.annotation_id}" style="--room-color:${roomColor(a).stroke}">
         <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || '(unnamed)')}</span>
         ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
@@ -4179,7 +4179,7 @@ function renderPanel() {
 }
 document.getElementById('room-list').addEventListener('click', async (ev) => {
     if (mapBusy) return;
-    const roomEl = ev.target.closest('.room');
+    const roomEl = ev.target.closest('.region');
     if (!roomEl) return;
     const id = roomEl.dataset.id;
     const act = ev.target.dataset && ev.target.dataset.act;
@@ -4187,12 +4187,12 @@ document.getElementById('room-list').addEventListener('click', async (ev) => {
     const room = (state.annotations || []).find(a => a.annotation_id === id);
     if (!room) return;
     if (act === 'rename') {
-        const name = await askRoomName('Rename room', room.name);
+        const name = await askRoomName('Rename region', room.name);
         if (name !== null && name) await api('PUT', '/api/annotations/' + id, { name });
     } else if (act === 'confirm') {
         await api('PUT', '/api/annotations/' + id, { stale: false });
     } else if (act === 'delete') {
-        if (await askConfirm('Delete room', `Delete room “${room.name}”?`))
+        if (await askConfirm('Delete region', `Delete region “${room.name}”?`))
             await api('DELETE', '/api/annotations/' + id);
     }
 });
@@ -4203,7 +4203,7 @@ function setDrawMode(on) {
     drawMode = on;
     draft = [];
     btnDraw.classList.toggle('active', on);
-    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Annotate room';
+    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Mark region';
     c.style.cursor = on ? 'crosshair' : 'grab';
     setHint(on ? 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel' : '');
     draw();
@@ -4212,14 +4212,14 @@ btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
 
 async function finishDraft() {
     if (mapBusy || draftSubmitting) return;
-    if (draft.length < 3) { toast('A room needs at least 3 corners.'); return; }
+    if (draft.length < 3) { toast('A region needs at least 3 corners.'); return; }
     draftSubmitting = true;
     try {
         const points = draft.map(p => [p[0], p[1]]);
         const name = await askRoomName('Create room', '');
         if (name === null) return;          // keep drawing
         if (!name) { toast('Room name is required.'); return; }
-        const body = { kind: 'room', name, points };
+        const body = { kind: 'region', name, points };
         draft = [];
         const created = await api('POST', '/api/annotations', body);
         if (created) setDrawMode(false);
@@ -4340,7 +4340,7 @@ async function refresh() {
     }
     const msg = document.getElementById('map-status-msg');
     if (unsavedLive && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
-        setMapStatus('Live mapping session is not saved yet. Enter a Map ID, then Save current.', 'busy');
+        setMapStatus('Live mapping session is not saved yet. Enter a Map ID, then Save current. ', 'busy');
     } else if (mb && mb.mode === 'localization' && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
         setMapStatus('Localization mode is active. Use Pose estimate if the robot pose is off.', 'ok');
     }
