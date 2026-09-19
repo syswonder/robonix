@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>scene — robonix system service</title>
+  <style>
+    :root { --fg:#e8eaed; --bg:#0e1015; --acc:#7aa7ff; --muted:#7d828b; }
+    html, body { background: var(--bg); color: var(--fg); margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Mono", "Segoe UI", sans-serif; height: 100%; }
+    /* The 2D view embeds as an iframe inside the combined layout. The
+       info side panel was fighting that iframe for width on small
+       screens (MacBook Air etc.) — moved out to a floating top-level
+       panel in `_COMBINED_HTML`. The canvas now claims the full iframe
+       width unconditionally. */
+    #wrap { display: block; height: 100vh; }
+    #canvas-wrap { position: relative; width: 100%; height: 100%; }
+    canvas { display: block; width: 100%; height: 100%; background: #14171f; }
+    .legend { position: absolute; bottom: 8px; left: 12px; font-size: 11px;
+      color: var(--muted); background: rgba(20,23,31,.85); padding: 4px 8px; border-radius: 4px; }
+    .scene-status { position: absolute; top: 10px; left: 12px; z-index: 2;
+      color: var(--muted); background: rgba(20,23,31,.92); border: 1px solid #33405a;
+      padding: 5px 9px; border-radius: 5px; font-size: 12px; }
+    .scene-status.error { color: #ff8b82; border-color: #6b3640; }
+  </style>
+</head>
+<body data-ready="loading">
+<div id="wrap">
+  <div id="canvas-wrap">
+    <canvas id="c"></canvas>
+    <div class="scene-status" id="scene-status" role="status">loading Scene state…</div>
+    <div class="legend">scene · 1 m grid · north = +x · 5 Hz</div>
+  </div>
+</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const sceneStatus = document.getElementById('scene-status');
+let currentState = null;
+function fit() { c.width = c.clientWidth; c.height = c.clientHeight; }
+window.addEventListener('resize', () => {
+    fit();
+    if (currentState) draw(currentState);
+});
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && currentState) draw(currentState);
+});
+fit();
+
+function setSceneStatus(text, kind = '') {
+    sceneStatus.textContent = text || '';
+    sceneStatus.className = 'scene-status' + (kind ? ' ' + kind : '');
+    sceneStatus.style.display = text ? 'block' : 'none';
+}
+function setSceneReady(value) { document.body.dataset.ready = value; }
+
+// World-to-pixel: center on robot if known, else (0,0). 1m = 40 px.
+let center = [0, 0];
+let pxPerM = 40;
+function w2p(x, y) {
+    const cx = c.width / 2, cy = c.height / 2;
+    return [cx + (x - center[0]) * pxPerM, cy - (y - center[1]) * pxPerM];
+}
+
+const CLS_COLORS = {
+    robot: '#7aa7ff', table: '#f0c674', chair: '#e9b06b', monitor: '#88c0d0',
+    person: '#f55', cup: '#a3be8c', bottle: '#a3be8c', tray: '#d08770',
+    door: '#bf616a', plant: '#a3be8c', cabinet: '#d08770',
+    keyboard: '#88c0d0', book: '#88c0d0', light_fixture: '#ebcb8b',
+};
+
+function classColor(cls) { return CLS_COLORS[cls] || '#9aa0a6'; }
+
+// Cache the decoded occupancy image so the canvas doesn't re-decode
+// every 200 ms tick. Re-decode only when state.occupancy.stamp_ms changes.
+let occImg = null;
+let occMeta = null;
+let occStamp = 0;
+let occLoading = 0;
+let occLoadToken = 0;
+
+function isCurrentOccupancyLoad(token, stamp) {
+    return token === occLoadToken && stamp === occLoading;
+}
+
+// ── Point-feature label placement ────────────────────────────────────────
+// Simulated annealing over label offsets, after Christensen, Marks & Shieber,
+// "An empirical study of algorithms for point-feature label placement"
+// (ACM Transactions on Graphics 14(3), 1995), which is also what d3-labeler
+// implements. Inline rather than vendored: this runs on a robot with no
+// network, and a library that cannot be fetched when it is needed is not a
+// dependency.
+//
+// Anchors are the object dots; each label starts at the up-right position
+// the old code used and is free to move. Cost is overlap area with other
+// labels, overlap with any dot, and how far the label sits from its own
+// anchor. Annealing accepts a worsening move with probability e^(-dC/T),
+// which is what lets it out of the local minimum a greedy pass settles into
+// when three labels want the same gap.
+const LBL = {
+  // Eight positions around the anchor, in the order a reader prefers them:
+  // up-right first, because that is where a label is expected, then around.
+  CANDIDATES: [
+    [ 1, -1], [ 1,  0], [ 1,  1], [ 0, -1],
+    [ 0,  1], [-1, -1], [-1,  0], [-1,  1],
+  ],
+  PAD: 3,          // px of air around a label box before it counts as touching
+  SWEEPS: 36,      // annealing sweeps; each visits every label once
+  T0: 1.0,         // starting temperature, in units of the cost function
+  COOL: 0.92,
+};
+
+function lblBox(a, pos, mw, mh) {
+  // `pos` is [dx, dy] in units of the anchor's radius plus half the label.
+  const gap = a.r + 4;
+  const x = a.x + pos[0] * (gap + mw / 2) - mw / 2;
+  const y = a.y + pos[1] * (gap + mh / 2) - mh / 2;
+  return {x: x, y: y, w: mw, h: mh};
+}
+
+function lblOverlap(p, q) {
+  const dx = Math.min(p.x + p.w, q.x + q.w) - Math.max(p.x, q.x);
+  const dy = Math.min(p.y + p.h, q.y + q.h) - Math.max(p.y, q.y);
+  return (dx > 0 && dy > 0) ? dx * dy : 0;
+}
+
+function lblCost(boxes, anchors, i, W, H) {
+  const b = boxes[i];
+  let cost = 0;
+  for (let j = 0; j < boxes.length; j++) {
+    if (j === i) continue;
+    // Overlap is normalised by the label's own area so the term is
+    // comparable across font sizes rather than tuned to one.
+    cost += 2.4 * lblOverlap(b, boxes[j]) / (b.w * b.h);
+  }
+  for (let j = 0; j < anchors.length; j++) {
+    const a = anchors[j];
+    // A label sitting on another object's dot hides a thing it does not even
+    // name, which is worse than sitting on another label.
+    if (a.x > b.x - a.r && a.x < b.x + b.w + a.r &&
+        a.y > b.y - a.r && a.y < b.y + b.h + a.r) {
+      cost += (j === i) ? 0 : 1.6;
+    }
+  }
+  // Distance from the anchor, in label-heights: a label far from its dot
+  // needs a leader line, and a leader line is a cost to the reader.
+  const a = anchors[i];
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  cost += 0.55 * Math.hypot(cx - a.x, cy - a.y) / b.h;
+  // Off-canvas is not a placement.
+  if (b.x < 2 || b.y < 2 || b.x + b.w > W - 2 || b.y + b.h > H - 2) cost += 6;
+  return cost;
+}
+
+function placeLabels(anchors, W, H) {
+  // anchors: [{x, y, r, text, w, h}] in canvas pixels.
+  const n = anchors.length;
+  const idx = new Array(n).fill(0);
+  const boxes = anchors.map((a, i) =>
+    lblBox(a, LBL.CANDIDATES[0], a.w + LBL.PAD * 2, a.h + LBL.PAD * 2));
+
+  let T = LBL.T0;
+  for (let sweep = 0; sweep < LBL.SWEEPS; sweep++) {
+    for (let i = 0; i < n; i++) {
+      const before = lblCost(boxes, anchors, i, W, H);
+      const keepIdx = idx[i], keepBox = boxes[i];
+      const cand = LBL.CANDIDATES[
+        (Math.random() * LBL.CANDIDATES.length) | 0];
+      idx[i] = LBL.CANDIDATES.indexOf(cand);
+      boxes[i] = lblBox(anchors[i], cand,
+                        anchors[i].w + LBL.PAD * 2, anchors[i].h + LBL.PAD * 2);
+      const after = lblCost(boxes, anchors, i, W, H);
+      const d = after - before;
+      // Uphill moves are accepted with e^(-d/T): the escape hatch a greedy
+      // pass does not have, and the reason this beats it when labels are
+      // dense.
+      if (d > 0 && Math.random() >= Math.exp(-d / T)) {
+        idx[i] = keepIdx; boxes[i] = keepBox;
+      }
+    }
+    T *= LBL.COOL;
+  }
+  return boxes;
+}
+
+// Placement is not cheap and the map redraws five times a second. It is also
+// not needed that often: it only changes when the objects change or the view
+// moves. A crawling label is harder to read than an overlapping one.
+// Exposed deliberately: the placement is the one part of this page a
+// screenshot cannot check, so the UI test reads the solved boxes.
+let lblCache = {key: '', boxes: null};
+window.lblCache = lblCache;
+function placedLabels(anchors, W, H, viewKey) {
+  const key = viewKey + '|' + anchors.map(
+    a => a.text + ':' + (a.x | 0) + ',' + (a.y | 0)).join(';');
+  if (key !== lblCache.key) {
+    lblCache = {key: key, boxes: placeLabels(anchors, W, H)};
+    window.lblCache = lblCache;
+  }
+  return lblCache.boxes;
+}
+
+function drawLeader(ctx, box, a) {
+  // Only when the label has actually moved away from its dot: a leader to a
+  // label that is already touching it is a line that says nothing.
+  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+  if (Math.hypot(cx - a.x, cy - a.y) < a.r + box.h) return;
+  // From the box edge nearest the anchor, so the line does not cross the
+  // text it belongs to.
+  const ex = Math.max(box.x, Math.min(a.x, box.x + box.w));
+  const ey = Math.max(box.y, Math.min(a.y, box.y + box.h));
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.38)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(a.x, a.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function draw(state) {
+    fit();
+    ctx.clearRect(0, 0, c.width, c.height);
+
+    // re-center on the robot if there is one; fall back to last-known.
+    const robot = (state.objects || []).find(o => o.cls === 'robot');
+    // Frame on the map when there is one, on the robot until then. A fixed
+    // zoom centred on the robot drew an apartment as a postage stamp in the
+    // middle of an empty grid -- the one thing the page is for, smallest on
+    // it.
+    const occ = state.occupancy;
+    if (occ && occ.width && occ.height && occ.resolution) {
+        const wM = occ.width * occ.resolution;
+        const hM = occ.height * occ.resolution;
+        center = [occ.origin_x + wM / 2, occ.origin_y + hM / 2];
+        // 40px of margin, and a ceiling so a one-metre grid does not fill the
+        // screen with a single cell.
+        pxPerM = Math.max(5, Math.min((c.width - 40) / wM,
+                                      (c.height - 40) / hM, 120));
+    } else if (robot) {
+        center = [robot.pose.x, robot.pose.y];
+    }
+
+    // ── Occupancy map underlay ──────────────────────────────────────
+    if (state.occupancy && state.occupancy.stamp_ms !== occStamp
+        && state.occupancy.stamp_ms !== occLoading) {
+        occLoading = state.occupancy.stamp_ms;
+        const loadToken = ++occLoadToken;
+        const meta = state.occupancy;
+        const im = new Image();
+        im.onload = () => {
+            if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;
+            occImg = im;
+            occMeta = meta;
+            occStamp = meta.stamp_ms;
+            occLoading = 0;
+            if (currentState) draw(currentState);
+        };
+        im.onerror = () => {
+            if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;
+            occLoading = 0;
+            setSceneReady('error');
+            setSceneStatus('Scene map image could not be decoded; retrying…', 'error');
+            console.error('occupancy PNG decode failed');
+        };
+        im.src = 'data:image/png;base64,' + meta.png_b64;
+    }
+    if (occImg && occMeta) {
+        // Map cell [0,0] is at world (origin_x, origin_y). Width/height
+        // in cells; resolution in m/cell. Map y grows up but image y
+        // grows down → flip via negative scale.
+        const wMeters = occMeta.width * occMeta.resolution;
+        const hMeters = occMeta.height * occMeta.resolution;
+        const [x0, y0] = w2p(occMeta.origin_x, occMeta.origin_y + hMeters);
+        const wPx = wMeters * pxPerM;
+        const hPx = hMeters * pxPerM;
+        ctx.globalAlpha = 0.85;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(occImg, x0, y0, wPx, hPx);
+        ctx.globalAlpha = 1.0;
+    }
+
+    // 1m grid — subtle dashed lines so they don't fight the occupancy.
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.setLineDash([2, 6]);
+    ctx.lineWidth = 1;
+    const w = c.width, h = c.height;
+    const stepPx = pxPerM; // 1 m
+    const offsetX = ((c.width / 2) - center[0] * pxPerM) % stepPx;
+    const offsetY = ((c.height / 2) + center[1] * pxPerM) % stepPx;
+    for (let x = offsetX - stepPx; x < w; x += stepPx) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    }
+    for (let y = offsetY - stepPx; y < h; y += stepPx) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+    ctx.restore();
+
+    // axes through robot — same subtle treatment, slightly stronger
+    const [rxp, ryp] = w2p(center[0], center[1]);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, ryp); ctx.lineTo(w, ryp); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(rxp, 0); ctx.lineTo(rxp, h); ctx.stroke();
+    ctx.restore();
+
+    // objects — only the cls label on map, with high-contrast outline
+    // so it reads against any occupancy background (free / unknown /
+    // occupied are all different shades).
+    // Two passes. Placement has to see every label before it can put any of
+    // them down, so the dots go first and the text second -- drawing each
+    // name as its dot was reached is what let a later object print over an
+    // earlier one.
+    //
+    // The face is the UI stack: a class name is a word, not a column.
+    ctx.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", '
+             + '"PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textBaseline = 'middle';
+
+    // Below this an object is a lead, not a fact -- the same threshold the
+    // dock marks its rows with. A hollow dashed ring says "go and look"
+    // where a filled dot would have said "it is there".
+    const UNSURE = 0.55;
+
+    const anchors = [];
+    for (const o of (state.objects || [])) {
+        const [px, py] = w2p(o.pose.x, o.pose.y);
+        const r = Math.max(4, Math.min(20, (o.bbox.size_x || 0.2) * pxPerM * 0.5));
+        const color = classColor(o.cls);
+        const unsure = Number(o.confidence) < UNSURE;
+        ctx.globalAlpha = o.missing ? 0.3 : 1.0;
+        if (unsure) {
+            ctx.save();
+            ctx.setLineDash([3, 3]);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.6;
+            ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+        } else {
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        const text = unsure ? o.cls + ' ?' : o.cls;
+        anchors.push({
+            x: px, y: py, r: r, text: text, color: color,
+            faint: !!o.missing, unsure: unsure,
+            w: ctx.measureText(text).width, h: 12,
+        });
+    }
+
+    // One solve for the whole set, cached on the view and the dots -- the map
+    // redraws five times a second and a label that crawls is harder to read
+    // than one that overlaps.
+    const viewKey = `${pxPerM.toFixed(3)}:${center[0].toFixed(2)}:${center[1].toFixed(2)}:${w}x${h}`;
+    const boxes = placedLabels(anchors, w, h, viewKey);
+    for (let i = 0; i < anchors.length; i++) {
+        const a = anchors[i], b = boxes[i];
+        ctx.globalAlpha = a.faint ? 0.35 : 1.0;
+        drawLeader(ctx, b, a);
+        const tx = b.x + LBL.PAD, ty = b.y + b.h / 2;
+        // Black halo under the text: the occupancy behind it is white where
+        // the floor is free, dark where it is unknown and grey where it is
+        // occupied, and no single fill colour reads on all three.
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(a.text, tx, ty);
+        ctx.fillStyle = a.color;
+        ctx.fillText(a.text, tx, ty);
+        ctx.globalAlpha = 1;
+    }
+
+    // Relation edges are NOT drawn on the map any more. Overlapping
+    // object dots + crossing dashed lines were unreadable once more than
+    // a couple of edges existed; relations now read as an explicit text
+    // list in the floating info panel (see `info-rels` in _COMBINED_HTML).
+
+    // Robot pose: the same disc and arrow the plan view draws, so the same
+    // robot does not look like two different things depending on the page.
+    // Screen pixels, because a heading does not matter less when zoomed out.
+    if (robot) {
+        const yaw = robot.pose.yaw || 0;
+        const [rx, ry] = w2p(robot.pose.x, robot.pose.y);
+        const R = 8, TIP = 34, HALF = 7;
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
+        ctx.beginPath();
+        ctx.moveTo(TIP, 0);
+        ctx.lineTo(R + 2, -HALF);
+        ctx.lineTo(R + 2, HALF);
+        ctx.closePath();
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
+
+        // A dark ring under the body: the occupancy behind it is white where
+        // the floor is free and near-black where it is unknown.
+        ctx.beginPath();
+        ctx.arc(0, 0, R + 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(8, 11, 17, 0.55)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(0, 0, R, 0, Math.PI * 2);
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
+        ctx.restore();
+        ctx.lineWidth = 1;
+    }
+
+    const canvasVisible = c.clientWidth > 0 && c.clientHeight > 0;
+    if (canvasVisible
+        && (!state.occupancy || (occImg && occStamp === state.occupancy.stamp_ms))) {
+        setSceneReady('true');
+        setSceneStatus('');
+    } else {
+        setSceneReady('loading');
+        setSceneStatus(canvasVisible ? 'loading occupancy map…' : 'waiting for visible canvas…');
+    }
+}
+
+function fmt(n) { return Number(n).toFixed(2); }
+
+async function tick() {
+    try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (!r.ok) {
+            setSceneReady('error');
+            setSceneStatus(`Scene state unavailable (HTTP ${r.status}); retrying…`, 'error');
+            return;
+        }
+        currentState = await r.json();
+        draw(currentState);
+        // Info panel was moved to a top-level floating overlay in
+        // _COMBINED_HTML; this iframe no longer has any DOM for it.
+    } catch (error) {
+        setSceneReady('error');
+        setSceneStatus(`Scene state unavailable; retrying… (${error})`, 'error');
+    }
+}
+// 2Hz tick. The map updates at 1 Hz from slam_toolbox; the robot
+// pose is interpolated visually so 500ms is smooth enough without
+// blasting the canvas with redraws every frame.
+setInterval(tick, 500);
+tick();
+</script>
+</body>
+</html>

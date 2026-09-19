@@ -7,7 +7,7 @@ import asyncio
 import copy
 import logging
 import math
-from typing import Any
+from typing import Any, Optional
 
 from .state import BBox3D, ObjectRegistry, Pose3D, SceneObject
 
@@ -138,6 +138,105 @@ class ObjectMutationCoordinator:
             )
         )
         return written == len(objects)
+
+    # ── The entry points every protocol goes through ──────────────────────
+    # MCP, the web API and gRPC differ in how a request arrives and how a
+    # reply is shaped. They must not differ in what the operation does, so
+    # they all land here rather than each assembling a call to the mechanism
+    # below.
+
+    def _persist_default(self, map_id: str, requested) -> bool:
+        """Whether to write this correction into the map's snapshot.
+
+        None -- the unasked case -- means "if there is one". A map that has
+        never been saved has no snapshot to write into, and that is not a
+        reason to refuse the edit: the session is editable, the edit simply
+        lives as long as the session does, which is what the page already
+        tells the reader about a temporary map.
+        """
+        if requested is not None:
+            return bool(requested)
+        meta = getattr(self, "map_meta", None)
+        if meta is None:
+            return False
+        try:
+            return meta.read(map_id) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def resolve_epoch(
+        self,
+        expected_map_id: str = "",
+        expected_generation: Optional[int] = None,
+    ) -> tuple[str, int]:
+        """The map epoch an edit is aimed at.
+
+        A caller that names one is asserting "the object I saw, on the map I
+        saw it on" -- the guard that stops an edit crossing a map switch. A
+        caller that names none gets the current epoch, which is right for a
+        script acting on what it just read and is exactly what an interactive
+        client must not do.
+        """
+        current_id, current_generation = self.current_epoch()
+        map_id = str(expected_map_id or "").strip()
+        if not map_id:
+            return current_id, current_generation
+        try:
+            generation = int(expected_generation)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            generation = current_generation
+        return map_id, generation
+
+    async def apply_label_correction(
+        self,
+        *,
+        object_id: str,
+        label: str,
+        clear_override: bool = False,
+        expected_map_id: str = "",
+        expected_generation: Optional[int] = None,
+        persist_to_snapshot: Optional[bool] = None,
+        note: str = "",
+    ):
+        """Rename one object, or clear a previous rename. The one entry point.
+
+        Persistence defaults to "if this map has a snapshot": a temporary
+        session has none, and being unsaved is not a reason to refuse an edit
+        on it.
+        """
+        map_id, generation = self.resolve_epoch(
+            expected_map_id, expected_generation)
+        persist = self._persist_default(map_id, persist_to_snapshot)
+        return await self.update_label(
+            object_id=object_id,
+            label=label,
+            clear_override=clear_override,
+            expected_map_id=map_id,
+            expected_generation=generation,
+            persist_to_snapshot=persist,
+            note=note,
+        )
+
+    async def remove_object(
+        self,
+        *,
+        object_id: str,
+        expected_map_id: str = "",
+        expected_generation: Optional[int] = None,
+        persist_to_snapshot: Optional[bool] = None,
+        note: str = "",
+    ):
+        """Delete one object. The one entry point."""
+        map_id, generation = self.resolve_epoch(
+            expected_map_id, expected_generation)
+        persist = self._persist_default(map_id, persist_to_snapshot)
+        return await self.delete_object(
+            object_id=object_id,
+            expected_map_id=map_id,
+            expected_generation=generation,
+            persist_to_snapshot=persist,
+            note=note,
+        )
 
     async def update_label(
         self,

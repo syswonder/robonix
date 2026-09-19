@@ -2,9 +2,9 @@
 """FastMCP tool definitions for read-only Scene queries.
 
   list_objects()           → perceived physical objects in the registry
-  list_regions()           → user-authored room regions with stable IDs
+  list_regions()           → user-authored region regions with stable IDs
   goal_near(object_id)     → reachable approach pose for a physical object
-  goal_room(room_id)       → reachable pose inside a room polygon
+  goal_region(region_id)       → reachable pose inside a region polygon
 
 Writes happen on the ingest path (perception → registry); these
 handlers only read. Inputs are codegen-derived ROS dataclasses
@@ -42,8 +42,8 @@ import semantic_map_mcp  # type: ignore
 from semantic_map_mcp import (  # type: ignore
     GoalNear_Request,
     GoalNear_Response,
-    GoalRoom_Request,
-    GoalRoom_Response,
+    GoalRegion_Request,
+    GoalRegion_Response,
     GetObjectContext_Request,
     GetObjectContext_Response,
     GetRobotContext_Request,
@@ -336,52 +336,73 @@ def _find_annotation_target(object_id: str) -> "Annotation | None":
     return None
 
 
-def _normalize_room_reference(value: str) -> str:
+def _normalize_region_reference(value: str) -> str:
     return " ".join(str(value or "").strip().casefold().split())
 
 
-def _room_aliases(room: "Annotation") -> set[str]:
-    name = _normalize_room_reference(room.name)
+def _reference_forms(value: str) -> set[str]:
+    """A reference, plus the same reference with a leading kind word removed."""
+    name = _normalize_region_reference(value)
+    forms = {name}
+    for prefix in ("region ", "region-", "room ", "room-",
+                   "房间 ", "房间"):  # i18n-ok: user region aliases
+        if name.startswith(prefix) and name[len(prefix):].strip():
+            forms.add(name[len(prefix):].strip())
+    return forms
+
+
+def _region_aliases(region: "Annotation") -> set[str]:
+    name = _normalize_region_reference(region.name)
     aliases = {name}
-    for prefix in ("room ", "room-", "房间 ", "房间"):  # i18n-ok: user room aliases
+    # "room" is kept as an accepted input word even though the type is called
+    # a region: people and models say "room 315", and refusing that to enforce
+    # our own vocabulary would be pedantry at the caller's expense. Consistent
+    # on the way out, tolerant on the way in.
+    for prefix in ("region ", "region-", "room ", "room-",
+                   "房间 ", "房间"):  # i18n-ok: user region aliases
         if name.startswith(prefix) and name[len(prefix):].strip():
             aliases.add(name[len(prefix):].strip())
     return aliases
 
 
-def _resolve_room_target(reference: str) -> tuple["Annotation | None", list["Annotation"]]:
-    """Resolve stable ID first, then an exact unique room name/short alias.
+def _resolve_region_target(reference: str) -> tuple["Annotation | None", list["Annotation"]]:
+    """Resolve stable ID first, then an exact unique region name/short alias.
 
     The second return value contains ambiguous candidates. Fuzzy matching is
-    deliberately excluded: navigation must not guess between similar rooms.
+    deliberately excluded: navigation must not guess between similar regions.
     """
     exact = _find_annotation_target(reference)
-    if exact is not None and exact.kind == "room":
+    if exact is not None and exact.kind == "region":
         return exact, []
     if _ANNO_STORE is None:
         return None, []
-    needle = _normalize_room_reference(reference)
+    # Both sides are reduced the same way. The stored name and the reference
+    # a caller types are equally likely to carry the word: a region named
+    # "region 315" asked for as "room 315" is the same place, and matching
+    # only one side makes the answer depend on which word the person who drew
+    # it happened to use.
+    needles = _reference_forms(reference)
     matches = [
-        room for room in _ANNO_STORE.list()
-        if room.kind == "room" and needle in _room_aliases(room)
+        region for region in _ANNO_STORE.list()
+        if region.kind == "region" and (needles & _region_aliases(region))
     ]
     if len(matches) == 1:
         return matches[0], []
     return None, matches
 
 
-def _room_id_hint() -> str:
+def _region_id_hint() -> str:
     if _ANNO_STORE is None:
-        return "no rooms are currently registered"
-    rooms = [a for a in _ANNO_STORE.list() if a.kind == "room"]
-    if not rooms:
-        return "no rooms are currently registered"
+        return "no regions are currently registered"
+    regions = [a for a in _ANNO_STORE.list() if a.kind == "region"]
+    if not regions:
+        return "no regions are currently registered"
     candidates = ", ".join(
-        f"{room.name!r} (id={_annotation_object_id(room)})"
-        for room in rooms[:20]
+        f"{region.name!r} (id={_annotation_object_id(region)})"
+        for region in regions[:20]
     )
-    suffix = "" if len(rooms) <= 20 else f", ... {len(rooms) - 20} more"
-    return f"available rooms: {candidates}{suffix}"
+    suffix = "" if len(regions) <= 20 else f", ... {len(regions) - 20} more"
+    return f"available regions: {candidates}{suffix}"
 
 
 def _object_id_hint(reference: str, objects: list[SceneObject]) -> str:
@@ -411,9 +432,9 @@ mcp = FastMCP("scene_provider")
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/list_objects")
 async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
-    """Return perceived objects plus compatibility room entries.
+    """Return perceived objects plus compatibility region entries.
 
-    New callers should call list_regions for full room geometry and staleness.
+    New callers should call list_regions for full region geometry and staleness.
     Use get_scene_graph only when object relationships are needed.
     Contract: robonix/system/scene/list_objects."""
     if _REGISTRY is None:
@@ -434,7 +455,7 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
         objects.extend(
             _annotation_to_object(annotation)
             for annotation in _ANNO_STORE.list()
-            if annotation.kind == "room"
+            if annotation.kind == "region"
         )
 
     # Scene Hook: auto-save observation when objects are visible.
@@ -459,15 +480,19 @@ async def update_object_label(
     """Apply a sticky operator label correction to one derived object."""
     if _OBJECT_MUTATIONS is None:
         raise RuntimeError("Scene object mutation coordinator is unavailable")
-    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_label(
-        object_id=req.object_id,
-        label=req.label,
-        clear_override=req.clear_override,
-        expected_map_id=req.expected_map_id,
-        expected_generation=req.expected_generation,
-        persist_to_snapshot=req.persist_to_snapshot,
-        note=req.note,
-    )
+    # The shared entry point, not the mechanism under it: the web API and
+    # gRPC call the same function, so the three protocols cannot drift on
+    # what a rename does.
+    obj, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.apply_label_correction(
+            object_id=req.object_id,
+            label=req.label,
+            clear_override=req.clear_override,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
+        ))
     return UpdateObjectLabel_Response(
         object=_to_idl(obj),
         map_id=map_id,
@@ -512,7 +537,7 @@ async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
     if _OBJECT_MUTATIONS is None:
         raise RuntimeError("Scene object mutation coordinator is unavailable")
     deleted_id, persisted, map_id, generation = (
-        await _OBJECT_MUTATIONS.delete_object(
+        await _OBJECT_MUTATIONS.remove_object(
             object_id=req.object_id,
             expected_map_id=req.expected_map_id,
             expected_generation=req.expected_generation,
@@ -568,11 +593,11 @@ def _annotation_to_region(a: "Annotation") -> Region:
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/list_regions")
 async def list_regions(_req: ListRegions_Request) -> ListRegions_Response:
-    """Return every registered room region with its stable goal_room ID.
+    """Return every registered region region with its stable goal_region ID.
 
     Perceived physical objects are intentionally excluded. Stale annotations
     remain visible and are marked explicitly so callers never infer absence
-    from a hidden or incomplete room list.
+    from a hidden or incomplete region list.
     Contract: robonix/system/scene/list_regions.
     """
     if _ANNO_STORE is None:
@@ -581,7 +606,7 @@ async def list_regions(_req: ListRegions_Request) -> ListRegions_Response:
         regions=[
             _annotation_to_region(annotation)
             for annotation in _ANNO_STORE.list()
-            if annotation.kind == "room"
+            if annotation.kind == "region"
         ],
         map_id=_ANNO_STORE.map_id,
         stamp_unix=time.time(),
@@ -614,7 +639,7 @@ async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Re
     if robot is None:
         return GetRobotContext_Response(
             pose_known=False, map_id=map_id, x=0.0, y=0.0, z=0.0, yaw=0.0,
-            room_id="", room_name="", containing_area_ids=[],
+            region_id="", region_name="", containing_area_ids=[],
             containing_area_names=[], nearby_objects=[], observed_at_unix=0.0,
             snapshot_at_unix=snapshot_at, stale=True,
             reason="robot pose is not available from Scene",
@@ -628,11 +653,11 @@ async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Re
             if len(annotation.points or []) >= 3
             and point_in_polygon(x, y, annotation.points)
         ]
-    rooms = sorted(
-        (annotation for annotation in containing if annotation.kind == "room"),
+    regions = sorted(
+        (annotation for annotation in containing if annotation.kind == "region"),
         key=lambda annotation: (_polygon_area(annotation.points), annotation.name),
     )
-    room = rooms[0] if rooms else None
+    region = regions[0] if regions else None
     containing.sort(key=lambda annotation: (annotation.kind, annotation.name))
     nearby = []
     for item in objects.values():
@@ -648,13 +673,13 @@ async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Re
     reason = "current Scene spatial snapshot"
     if stale:
         reason = "Scene robot pose is older than 2 seconds"
-    elif room is None:
-        reason = "robot pose is current but outside every registered room"
+    elif region is None:
+        reason = "robot pose is current but outside every registered region"
     return GetRobotContext_Response(
         pose_known=True, map_id=map_id, x=x, y=y, z=float(robot.pose.z),
         yaw=float(robot.pose.yaw),
-        room_id=_annotation_object_id(room) if room is not None else "",
-        room_name=str(room.name) if room is not None else "",
+        region_id=_annotation_object_id(region) if region is not None else "",
+        region_name=str(region.name) if region is not None else "",
         containing_area_ids=[_annotation_object_id(item) for item in containing],
         containing_area_names=[str(item.name) for item in containing],
         nearby_objects=[_to_idl(item) for _, item in nearby[:12]],
@@ -669,8 +694,8 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     """Find a navigation-safe approach pose near a physical scene object.
     Returns map-frame (x, y, yaw); pass to navigation/navigate.
 
-    Room annotations are deliberately not accepted. Resolve those through
-    goal_room so the returned pose is constrained to the room polygon.
+    Region annotations are deliberately not accepted. Resolve those through
+    goal_region so the returned pose is constrained to the region polygon.
 
     ``reachable=false`` when:
 
@@ -699,7 +724,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
             reason=(
                 f"unknown physical object_id '{req.object_id}'; "
                 f"{_object_id_hint(req.object_id, visible)}; "
-                "use goal_room for room annotations"
+                "use goal_region for region annotations"
             ),
         )
 
@@ -789,51 +814,51 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     )
 
 
-@mcp_contract(mcp, contract_id="robonix/system/scene/goal_room")
-async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
-    """Resolve a room annotation to a safe map-frame pose inside its polygon.
+@mcp_contract(mcp, contract_id="robonix/system/scene/goal_region")
+async def goal_region(req: GoalRegion_Request) -> GoalRegion_Response:
+    """Resolve a region annotation to a safe map-frame pose inside its polygon.
 
-    Use this for named rooms and user-defined regions before navigation/navigate.
-    The result never falls outside the room polygon.
-    Contract: robonix/system/scene/goal_room.
+    Use this for named regions and user-defined regions before navigation/navigate.
+    The result never falls outside the region polygon.
+    Contract: robonix/system/scene/goal_region.
     """
     # The footprint is read further down, right before it is used. Checking it
     # here as well made robot readiness preempt every check on the request
-    # itself, so a stale or unknown room came back as "robot geometry is not
+    # itself, so a stale or unknown region came back as "robot geometry is not
     # ready" and the caller had no idea which of the two was actually wrong.
-    room, ambiguous = _resolve_room_target(req.room_id)
+    region, ambiguous = _resolve_region_target(req.region_id)
     if ambiguous:
         candidates = ", ".join(
             f"{item.name!r} (id={_annotation_object_id(item)})"
             for item in ambiguous
         )
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"ambiguous room reference '{req.room_id}'; candidates: "
+                f"ambiguous region reference '{req.region_id}'; candidates: "
                 f"{candidates}; pass one exact stable ID"
             ),
         )
-    if room is None:
-        return GoalRoom_Response(
+    if region is None:
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"unknown room reference '{req.room_id}'; pass a stable ID or "
-                f"unique room name returned by list_regions; {_room_id_hint()}"
+                f"unknown region reference '{req.region_id}'; pass a stable ID or "
+                f"unique region name returned by list_regions; {_region_id_hint()}"
             ),
         )
-    stable_room_id = _annotation_object_id(room)
-    if room.stale:
-        return GoalRoom_Response(
+    stable_region_id = _annotation_object_id(region)
+    if region.stale:
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"room '{room.name}' ({stable_room_id}) is stale: "
-                f"{room.stale_reason or 'geometry may not match the active map'}"
+                f"region '{region.name}' ({stable_region_id}) is stale: "
+                f"{region.stale_reason or 'geometry may not match the active map'}"
             ),
         )
     footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
     if footprint is None:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False,
             x=0.0,
             y=0.0,
@@ -841,19 +866,19 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
             reason="Soma footprint unavailable — robot geometry is not ready",
         )
     if _HUB is None or not _HUB.has("occupancy_grid"):
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason="no occupancy_grid available - mapping not running",
         )
     try:
         msg, _stamp, count = _HUB.latest("occupancy_grid")
     except Exception as exc:  # noqa: BLE001
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=f"occupancy_grid hub error: {exc}",
         )
     if msg is None or count == 0 or not msg.info.width or not msg.info.height:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason="occupancy_grid empty - wait for mapping to publish",
         )
@@ -861,7 +886,7 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
         getattr(getattr(msg, "header", None), "frame_id", "") or ""
     ).strip()
     if not grid_frame:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False,
             x=0.0,
             y=0.0,
@@ -870,27 +895,27 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
         )
     found = room_goal(
         msg,
-        room.points,
+        region.points,
         footprint,
-        yaw_candidates=room_yaw_candidates(room.points),
+        yaw_candidates=room_yaw_candidates(region.points),
     )
     if found is None:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason=f"no known free pose inside room '{room.name}' ({stable_room_id})",
+            reason=f"no known free pose inside region '{region.name}' ({stable_region_id})",
         )
     x, y, room_yaw = found
-    if not point_in_polygon(x, y, room.points):
-        return GoalRoom_Response(
+    if not point_in_polygon(x, y, region.points):
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason="internal validation rejected a pose outside the room polygon",
+            reason="internal validation rejected a pose outside the region polygon",
         )
-    return GoalRoom_Response(
+    return GoalRegion_Response(
         reachable=True,
         x=float(x),
         y=float(y),
         yaw=room_yaw,
-        reason=f"safe pose inside room '{room.name}' ({stable_room_id})",
+        reason=f"safe pose inside region '{region.name}' ({stable_region_id})",
     )
 
 
@@ -1052,7 +1077,7 @@ __all__ = [
     "list_objects",
     "list_regions",
     "goal_near",
-    "goal_room",
+    "goal_region",
     "get_scene_graph",
     "get_object_context",
     "list_relations",

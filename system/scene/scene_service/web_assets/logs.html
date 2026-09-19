@@ -1,0 +1,240 @@
+
+<style>
+  .lg { display:flex; flex-direction:column; height:100%; min-height:0; }
+  .lg-bar { flex:0 0 auto; display:flex; align-items:center; gap:10px;
+            padding:10px 14px; border-bottom:1px solid var(--line);
+            background:var(--panel); flex-wrap:wrap; }
+  .lg-chips { display:flex; gap:6px; }
+  .lg-chip { display:flex; flex-direction:column; gap:3px; min-width:62px;
+             padding:4px 8px 5px; border:1px solid var(--line);
+             border-radius:5px; background:#12161e; cursor:pointer;
+             color:var(--muted); font-size:11px; line-height:1.2; }
+  .lg-chip:hover { background:#1c2230; color:var(--fg); }
+  .lg-chip.on { border-color:currentColor; }
+  .lg-chip .k { display:flex; justify-content:space-between; gap:8px;
+                align-items:baseline; }
+  .lg-chip .c { font-family:var(--font-mono); font-size:11px; color:var(--fg); }
+  /* The share of the received window, so the mix reads without the numbers. */
+  .lg-chip .bar { height:2px; background:#232936; border-radius:2px; }
+  .lg-chip .bar i { display:block; height:2px; border-radius:2px;
+                    background:currentColor; width:0; }
+  .lg-chip.debug { color:#6a7282; }
+  .lg-chip.info  { color:#7aa7ff; }
+  .lg-chip.warn  { color:#e0a050; }
+  .lg-chip.error { color:#e5484d; }
+
+  .lg-bar input, .lg-bar select {
+    background:#12161e; border:1px solid var(--line); border-radius:5px;
+    color:var(--fg); font:inherit; font-size:12px; padding:5px 8px; }
+  .lg-bar input { min-width:180px; }
+  .lg-bar button {
+    background:#12161e; border:1px solid var(--line); border-radius:5px;
+    color:var(--muted); font:inherit; font-size:12px; padding:5px 10px;
+    cursor:pointer; }
+  .lg-bar button:hover { color:var(--fg); background:#1c2230; }
+  .lg-bar button.live { color:#8ef0b7; border-color:#2f4a3a; }
+  .lg-spacer { flex:1; }
+  .lg-note { color:#5a6070; font-size:11px; }
+
+  .lg-body { flex:1; overflow:auto; min-height:0; padding:4px 0 14px; }
+  .lg-row { display:grid; grid-template-columns:82px 52px 108px 1fr;
+            gap:10px; padding:2px 14px; font-family:var(--font-mono);
+            font-size:11.5px; line-height:1.55; }
+  .lg-row:hover { background:#12161e; }
+  .lg-row .t { color:#5a6070; }
+  .lg-row .l { font-weight:600; }
+  .lg-row .g { color:#7d8496; overflow:hidden; text-overflow:ellipsis;
+               white-space:nowrap; }
+  .lg-row .m { color:#c9cedb; white-space:pre-wrap; word-break:break-word; }
+  .lg-row.debug .l { color:#6a7282; }
+  .lg-row.info  .l { color:#7aa7ff; }
+  .lg-row.warn  .l { color:#e0a050; }
+  .lg-row.error .l { color:#e5484d; }
+  .lg-row.warn  .m { color:#e8d3ad; }
+  .lg-row.error .m { color:#ffb4b4; }
+  .lg-empty { padding:26px 16px; color:#555; font-size:12.5px; }
+</style>
+
+<div class="lg">
+  <div class="lg-bar">
+    <div class="lg-chips" id="lg-chips"></div>
+    <select id="lg-tag"><option value="" data-i18n="logs.alltags">all tags</option></select>
+    <input id="lg-q" data-i18n-ph="logs.search" placeholder="filter text…">
+    <button id="lg-live" class="live" data-i18n="logs.live">Live</button>
+    <button id="lg-clear" data-i18n="logs.clear">Clear</button>
+    <div class="lg-spacer"></div>
+    <span class="lg-note" data-i18n="logs.hint"></span>
+  </div>
+  <div class="lg-body" id="lg-body">
+    <div class="lg-empty" id="lg-empty" data-i18n="logs.waiting">waiting for lines…</div>
+  </div>
+</div>
+
+<script>
+  const LEVELS = ['debug', 'info', 'warn', 'error'];
+  const RANK = {debug: 0, info: 1, warn: 2, error: 3};
+  // Enough to scroll back through a boot, bounded so a service that floods
+  // cannot turn the page into a memory leak with a nice view.
+  const MAX_ROWS = 4000;
+
+  let cursor = {};
+  let live = true;
+  let minLevel = 'debug';
+  let rows = [];                       // every line received, unfiltered
+  const counts = {debug: 0, info: 0, warn: 0, error: 0};
+  const knownTags = new Set();
+
+  const body = document.getElementById('lg-body');
+  const empty = document.getElementById('lg-empty');
+  const chips = document.getElementById('lg-chips');
+  const tagSel = document.getElementById('lg-tag');
+  const qBox = document.getElementById('lg-q');
+
+  function drawChips() {
+    const total = LEVELS.reduce((a, l) => a + counts[l], 0) || 1;
+    chips.innerHTML = LEVELS.map(l => `
+      <div class="lg-chip ${l} ${minLevel === l ? 'on' : ''}" data-level="${l}"
+           title="${l}">
+        <div class="k"><span>${l}</span><span class="c">${counts[l]}</span></div>
+        <div class="bar"><i style="width:${(counts[l] / total * 100).toFixed(1)}%"></i></div>
+      </div>`).join('');
+    chips.querySelectorAll('.lg-chip').forEach(el => {
+      el.addEventListener('click', () => {
+        // Clicking the level you are already on clears the floor, so the
+        // control is its own undo rather than needing an "all" button.
+        minLevel = (minLevel === el.dataset.level) ? 'debug' : el.dataset.level;
+        drawChips(); render();
+      });
+    });
+  }
+
+  function shown() {
+    const needle = qBox.value.trim().toLowerCase();
+    const tag = tagSel.value;
+    const floor = RANK[minLevel] || 0;
+    return rows.filter(r =>
+      (RANK[r.level] || 1) >= floor
+      && (!tag || r.tag === tag)
+      && (!needle || r.msg.toLowerCase().includes(needle)
+          || r.tag.toLowerCase().includes(needle)));
+  }
+
+  // How many of `rows` are already on screen. A poll appends what arrived;
+  // only a filter change, which can alter any row's visibility, rebuilds.
+  let drawn = 0;
+
+  function rowHtml(r) {
+    const esc = x => x.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+    return `
+      <div class="lg-row ${r.level}">
+        <span class="t">${esc((r.ts || '').slice(11, 23))}</span>
+        <span class="l">${r.level}</span>
+        <span class="g" title="${esc(r.tag)}">${esc(r.tag)}</span>
+        <span class="m">${esc(r.msg)}</span>
+      </div>`;
+  }
+
+  function passes(r) {
+    const needle = qBox.value.trim().toLowerCase();
+    const tag = tagSel.value;
+    return (RANK[r.level] || 1) >= (RANK[minLevel] || 0)
+      && (!tag || r.tag === tag)
+      && (!needle || r.msg.toLowerCase().includes(needle)
+          || r.tag.toLowerCase().includes(needle));
+  }
+
+  function append(fresh) {
+    const keep = fresh.filter(passes);
+    drawn = rows.length;
+    if (!keep.length) return;
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    empty.style.display = 'none';
+    body.insertAdjacentHTML('beforeend', keep.map(rowHtml).join(''));
+    // Bound the DOM the same way `rows` is bounded, from the old end: a tail
+    // is about what just happened.
+    const drawnRows = body.querySelectorAll('.lg-row');
+    for (let i = 0; i < drawnRows.length - MAX_ROWS; i++) drawnRows[i].remove();
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+
+  function render() {
+    const list = shown();
+    drawn = rows.length;
+    empty.style.display = list.length ? 'none' : 'block';
+    // Was the reader at the bottom before this draw? If so keep them there;
+    // if they had scrolled up to read something, do not yank them away.
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    // Named `x`, not `t`: `t` is the translation function in scope here,
+    // and shadowing it inside the hot path is a trap for the next edit.
+    const esc = x => x.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+    const frag = list.slice(-MAX_ROWS).map(r => `
+      <div class="lg-row ${r.level}">
+        <span class="t">${esc((r.ts || '').slice(11, 23))}</span>
+        <span class="l">${r.level}</span>
+        <span class="g" title="${esc(r.tag)}">${esc(r.tag)}</span>
+        <span class="m">${esc(r.msg)}</span>
+      </div>`).join('');
+    body.querySelectorAll('.lg-row').forEach(e => e.remove());
+    body.insertAdjacentHTML('beforeend', frag);
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+
+  async function tick() {
+    if (live) {
+      try {
+        const url = '/api/logs?cursor=' + encodeURIComponent(JSON.stringify(cursor));
+        const r = await fetch(url, {cache: 'no-store'});
+        if (r.ok) {
+          const d = await r.json();
+          if (d.ok === false) {
+            empty.textContent = t('logs.nodir');
+            empty.style.display = 'block';
+            live = false;
+          } else {
+            cursor = d.cursor || cursor;
+            for (const tag of (d.tags || [])) {
+              if (!knownTags.has(tag)) {
+                knownTags.add(tag);
+                const o = document.createElement('option');
+                o.value = tag; o.textContent = tag;
+                tagSel.appendChild(o);
+              }
+            }
+            const fresh = d.entries || [];
+            if (fresh.length) {
+              for (const e of fresh) counts[e.level] = (counts[e.level] || 0) + 1;
+              rows = rows.concat(fresh);
+              const trimmed = rows.length > MAX_ROWS * 2;
+              if (trimmed) rows = rows.slice(-MAX_ROWS);
+              drawChips();
+              // Rebuild only when the backlog was trimmed underneath us;
+              // otherwise the cost of a poll is the lines it brought.
+              if (trimmed) render(); else append(fresh);
+            }
+          }
+        }
+      } catch (_) { /* swallow; the next tick retries */ }
+    }
+    setTimeout(tick, 700);
+  }
+
+  document.getElementById('lg-live').addEventListener('click', e => {
+    live = !live;
+    e.target.classList.toggle('live', live);
+    e.target.dataset.i18n = live ? 'logs.live' : 'logs.paused';
+    e.target.textContent = t(e.target.dataset.i18n);
+  });
+  document.getElementById('lg-clear').addEventListener('click', () => {
+    // Clears the view, not the cursor: the point is to stop looking at what
+    // is already understood, not to re-read it from the start.
+    rows = [];
+    drawn = 0;
+    LEVELS.forEach(l => counts[l] = 0);
+    drawChips(); render();
+  });
+  qBox.addEventListener('input', render);
+  tagSel.addEventListener('change', render);
+
+  drawChips();
+  tick();
+</script>

@@ -13,7 +13,7 @@ class _Store:
         return [
             SimpleNamespace(
                 annotation_id="anno.315",
-                kind="room",
+                kind="region",
                 name="room 315",
                 points=[(0.0, 0.0), (2.0, 0.0), (2.0, 3.0), (0.0, 3.0)],
                 theta=0.5,
@@ -34,15 +34,15 @@ class _Store:
         ]
 
 
-def test_list_regions_returns_rooms_with_goal_room_ids_and_full_geometry():
+def test_list_regions_returns_regions_with_goal_region_ids_and_full_geometry():
     mcp_tools.attach_annotation_store(_Store())
     response = asyncio.run(mcp_tools.list_regions(mcp_tools.ListRegions_Request()))
 
     assert response.map_id == "3f_demo"
     assert len(response.regions) == 1
     region = response.regions[0]
-    assert region.id == "scene.room.anno.315"
-    assert region.kind == "room"
+    assert region.id == "scene.region.anno.315"
+    assert region.kind == "region"
     assert region.name == "room 315"
     assert region.points_xy == [0.0, 0.0, 2.0, 0.0, 2.0, 3.0, 0.0, 3.0]
     assert region.stale is False
@@ -59,25 +59,25 @@ class _Registry:
         return {}, {}
 
 
-def test_list_objects_keeps_room_entries_for_v1_compatibility():
+def test_list_objects_keeps_region_entries_for_v1_compatibility():
     mcp_tools.attach_state(registry=_Registry())
     mcp_tools.attach_annotation_store(_Store())
     response = asyncio.run(mcp_tools.list_objects(mcp_tools.ListObjects_Request()))
-    assert [obj.id for obj in response.objects] == ["scene.room.anno.315"]
+    assert [obj.id for obj in response.objects] == ["scene.region.anno.315"]
 
 
 class _StaleStore(_Store):
     def list(self):
-        rooms = super().list()
-        rooms[0].stale = True
-        rooms[0].stale_reason = "map epoch changed"
-        return rooms
+        regions = super().list()
+        regions[0].stale = True
+        regions[0].stale_reason = "map epoch changed"
+        return regions
 
 
-def test_goal_room_rejects_stale_geometry_before_navigation():
+def test_goal_region_rejects_stale_geometry_before_navigation():
     mcp_tools.attach_annotation_store(_StaleStore())
     response = asyncio.run(
-        mcp_tools.goal_room(mcp_tools.GoalRoom_Request(room_id="scene.room.anno.315"))
+        mcp_tools.goal_region(mcp_tools.GoalRegion_Request(region_id="scene.region.anno.315"))
     )
     assert response.reachable is False
     assert "is stale" in response.reason

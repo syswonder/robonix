@@ -896,8 +896,14 @@ class ConceptGraphsDetector:
                     inst_color = [0.5, 0.5, 0.5]
                 else:
                     inst_color = [float(v) for v in inst_color]
+                uuid = str(obj.get("id", f"obj_{obj_idx}"))
                 out.append({
-                    "id": str(obj.get("id", f"obj_{obj_idx}")),
+                    "id": uuid,
+                    # The id the registry and the viewer both use. Without it
+                    # the consumer falls back to the uuid above, which is not
+                    # what the viewer draws under, and the object's points are
+                    # filed under a key nothing looks up.
+                    "object_id": (live_uuids or {}).get(uuid),
                     "cls": obj.get("class_name", "object"),
                     "num_detections": int(obj.get("num_detections", 1)),
                     "n_points": int(obj.get("n_points", pts.shape[0])),
@@ -1107,10 +1113,25 @@ class ConceptGraphsDetector:
                 confidence=confs.astype(np.float32),
             )
             sv_dets.mask = masks
+            # concept-graphs does `classes[class_id]`, and class_id is the
+            # detector's own id -- not a position in Scene's vocabulary. The
+            # two lists are different lengths (YOLO-World returned id 71
+            # against 55 Scene classes), so every tick died in IndexError.
+            #
+            # The ids are renumbered densely rather than the name list being
+            # stretched to cover them: a list built as range(max_id + 1) is
+            # correct for the ids a model actually emits and unbounded for
+            # anything else, and this runs inside the perception tick.
+            present = sorted({int(c) for c in cls_idx})
+            dense_id = {c: i for i, c in enumerate(present)}
+            clip_classes = [str(names.get(c, f"class_{c}")) for c in present]
+            sv_dets.class_id = np.array(
+                [dense_id[int(c)] for c in cls_idx], dtype=int
+            )
             _, image_feats, _ = self._cg["compute_clip_features_batched"](
                 rgb_for_clip, sv_dets,
                 self._clip_model, self._clip_preprocess, self._clip_tokenizer,
-                self._classes, self._device,
+                clip_classes, self._device,
             )
         except Exception as e:  # noqa: BLE001
             # First failure: dump full traceback so we know which list
