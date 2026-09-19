@@ -34,14 +34,9 @@
     .panel .titlebar .desc { flex: 1; color: #6a6f7a;
                              white-space: nowrap; overflow: hidden;
                              text-overflow: ellipsis; }
-    .panel button.expand {
-      flex: 0 0 auto;
-      width: 22px; height: 18px; padding: 0;
-      background: transparent; color: #889;
-      border: 1px solid #303542; border-radius: 3px;
-      cursor: pointer; font-size: 11px; line-height: 1;
-    }
-    .panel button.expand:hover { color: #f0c050; border-color: #5a606e; }
+    /* Look comes from the shared controls; only the fact that it must
+     * not stretch in the header flexbox belongs to this page. */
+    .panel button.expand { flex: 0 0 auto; }
     .panel iframe { flex: 1 1 auto;
                     width: 100%; min-height: 0;
                     border: 0; display: block; background: #08090c; }
@@ -82,12 +77,6 @@
     #info-head .stamp { flex: 1; color: #6a6f7a; font-size: 10px;
                         white-space: nowrap; overflow: hidden;
                         text-overflow: ellipsis; }
-    #info-head button {
-      background: none; border: 1px solid #303542; color: #889;
-      width: 22px; height: 20px; padding: 0; border-radius: 3px;
-      cursor: pointer; font-size: 11px; line-height: 1;
-    }
-    #info-head button:hover { color: #f0c050; border-color: #5a606e; }
     #info-body { padding: 8px 10px 10px; overflow: auto; flex: 1; }
     #info-body h2 {
       margin: 8px 0 4px 0; font-size: 10px; font-weight: 600;
@@ -116,15 +105,14 @@
     #info-show {
       position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
          navigation and swallowed clicks meant for it */
-      padding: 4px 10px; font-size: 11px;
-      background: rgba(14, 16, 21, 0.94); border: 1px solid #303542;
-      border-radius: 4px; color: #889; cursor: pointer;
+      /* Only what makes it a floating pill; the rest is shared. */
+      background: rgba(14, 16, 21, 0.94);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       display: none;
     }
-    #info-show:hover { color: #f0c050; border-color: #5a606e; }
     body.info-dismissed #info-show { display: block; }
   </style>
+<style>__CONTROLS__</style>
 </head>
 <body>
   <div id="grid">
@@ -132,7 +120,7 @@
       <div class="titlebar">
         <span class="badge">2D</span>
         <span class="desc">map · occupancy grid + tracked objects · 5 Hz</span>
-        <button class="expand" title="expand">⛶</button>
+        <button class="btn icon expand" title="expand">⛶</button>
       </div>
       <iframe src="/2d?bare=1" loading="eager"></iframe>
     </div>
@@ -140,7 +128,7 @@
       <div class="titlebar">
         <span class="badge">3D</span>
         <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
-        <button class="expand" title="expand">⛶</button>
+        <button class="btn icon expand" title="expand">⛶</button>
       </div>
       <iframe src="/3d?bare=1" loading="eager"></iframe>
     </div>
@@ -148,7 +136,7 @@
       <div class="titlebar">
         <span class="badge">cam</span>
         <span class="desc">live RGB + depth · perception input</span>
-        <button class="expand" title="expand">⛶</button>
+        <button class="btn icon expand" title="expand">⛶</button>
       </div>
       <iframe src="/cam?bare=1" loading="eager"></iframe>
     </div>
@@ -157,8 +145,8 @@
     <div id="info-head" title="drag to move; click title to collapse">
       <span class="title">scene</span>
       <span class="stamp" id="info-stamp">—</span>
-      <button id="info-collapse" title="collapse / expand">_</button>
-      <button id="info-dismiss" title="hide (click 'show info' to bring back)">×</button>
+      <button id="info-collapse" class="btn icon" title="collapse / expand">_</button>
+      <button id="info-dismiss" class="btn icon" title="hide (click 'show info' to bring back)">×</button>
     </div>
     <div id="info-body">
       <h2>robot</h2>
@@ -171,7 +159,7 @@
       <div id="info-rels"><span style="color:#555">—</span></div>
     </div>
   </div>
-  <button id="info-show" title="re-open the floating info panel">▸ show info</button>
+  <button id="info-show" class="btn" title="re-open the floating info panel">▸ show info</button>
   <script>
     function setExpanded(id) {
       document.querySelectorAll('.panel').forEach(p => p.classList.remove('expanded'));

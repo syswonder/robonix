@@ -581,6 +581,28 @@ _STRINGS: dict[str, dict[str, str]] = {
     "st.drawHint": {"en": 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel', "zh": '点击添加顶点 · 双击或回车完成（≥3）· Esc 取消'},
     "st.nameRequired": {"en": 'Region name is required.', "zh": '区域名称不能为空。'},
     "st.liveUnsaved": {"en": 'Live mapping session is not saved yet. Enter a Map ID, then Save current. ', "zh": '当前是未保存的建图会话。填写地图 ID 后点「保存当前」。'},
+    # Sentences that carry a value. The placeholder stays inside the
+    # translated sentence so each language can put it where it belongs;
+    # Chinese does not order these the way English does.
+    "st.verbSave": {"en": 'Save', "zh": '保存'},
+    "st.verbLoad": {"en": 'Load', "zh": '加载'},
+    "st.opFailed": {"en": '{verb} {id} failed: {error}', "zh": '{verb}「{id}」失败：{error}'},
+    "st.opFailedTitle": {"en": '{verb} failed', "zh": '{verb}失败'},
+    "st.unexpected": {"en": 'Unexpected error; the editor has been unlocked.', "zh": '发生意外错误；编辑器已解锁。'},
+    "st.saved": {"en": 'Saved', "zh": '已保存'},
+    "st.mapSaved": {"en": 'Map saved', "zh": '地图已保存'},
+    "st.savedReport": {"en": '{what} {id}; spatial artifact {artifact}; regions {regions}.', "zh": '{what}「{id}」；空间地图{artifact}；区域 {regions} 个。'},
+    "st.artifactOk": {"en": 'ok', "zh": '正常'},
+    "st.artifactBad": {"en": 'failed', "zh": '失败'},
+    "st.saveFailedFor": {"en": 'Save {id} failed: {detail}', "zh": '保存「{id}」失败：{detail}'},
+    "st.loadedHint": {"en": 'Loaded {id}. Mapping requested localization mode; use Pose estimate if the robot pose is off.', "zh": '已加载「{id}」。已请求建图切到定位模式；若机器人位姿不对，用「位姿估计」修正。'},
+    "st.loadFailedFor": {"en": 'Load {id} failed: {detail}', "zh": '加载「{id}」失败：{detail}'},
+    "st.deletedFor": {"en": 'Deleted {id}.', "zh": '已删除「{id}」。'},
+    "st.deleteFailedFor": {"en": 'Delete {id} failed.', "zh": '删除「{id}」失败。'},
+    "st.poseFailedAt": {"en": 'Pose estimate failed for ({x}, {y}).', "zh": '在 ({x}, {y}) 处位姿估计失败。'},
+    "st.selectedHint": {"en": 'Selected {id}. Click Load to enter localization mode.', "zh": '已选中「{id}」。点击「加载」进入定位模式。'},
+    "st.notLoadable": {"en": 'Map {id} is not loadable: {detail}', "zh": '地图「{id}」无法加载：{detail}'},
+    "st.invalidArtifact": {"en": 'invalid spatial artifact', "zh": '空间地图无效'},
     "st.localization": {"en": 'Localization mode is active. Use Pose estimate if the robot pose is off.', "zh": '定位模式已启用。位姿不对时用「位姿估计」。'},
     # the status bar every page carries
     "bar.mapping":     {"en": "building the map", "zh": "正在建图"},
@@ -590,6 +612,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     "bar.map":         {"en": "active map",       "zh": "当前地图"},
     "bar.temporary":   {"en": "temporary, not saved",
                         "zh": "临时会话，未保存"},
+    "bar.viewer":       {"en": "viewer",   "zh": "可视化"},
+    "bar.viewerRerun":  {"en": "rerun",    "zh": "rerun"},
+    "bar.viewerBuiltin": {"en": "built-in", "zh": "内置"},
+    "bar.viewerFailed": {"en": "rerun did not start:",
+                         "zh": "rerun 未能启动："},
     "bar.offline":     {"en": "scene is not responding",
                         "zh": "scene 无响应"},
     # the maps library
@@ -600,7 +627,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "maps.delete":     {"en": "Delete",    "zh": "删除"},
     "maps.cancel":     {"en": "Cancel",    "zh": "取消"},
     "maps.saved":      {"en": "saved",     "zh": "保存于"},
-    "maps.size":       {"en": "artifact",  "zh": "产物大小"},
+    "maps.size":       {"en": "artifact size",   "zh": "产物大小"},
     "maps.inUse":      {"en": "in use",    "zh": "使用中"},
     "maps.broken":     {"en": "cannot be loaded", "zh": "无法加载"},
     "maps.noPreview":  {"en": "no preview", "zh": "没有预览图"},
@@ -614,7 +641,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "maps.regions":    {"en": "regions", "zh": "区域"},
     "maps.objects":    {"en": "objects", "zh": "物体"},
     "maps.nothing":    {"en": "none",    "zh": "无"},
-    "maps.health":     {"en": "artifact",  "zh": "空间产物"},
+    "maps.health":     {"en": "artifact health", "zh": "产物状态"},
     "maps.healthy":    {"en": "integrity check passed", "zh": "完整性校验通过"},
     "maps.id":         {"en": "id",        "zh": "标识"},
     "maps.artifactPath": {"en": "artifact path", "zh": "产物路径"},
@@ -948,6 +975,7 @@ _DOCK_JS = _asset("dock.js")
 
 
 _SHELL_CSS = _asset("shell.css")
+_CONTROLS_CSS = _asset("controls.css")
 
 
 # ── The log view ───────────────────────────────────────────────────────────
@@ -971,6 +999,11 @@ _STATUS_BAR = """
     <span class="sb-k" data-i18n="bar.map"></span>
     <span class="sb-map" id="sb-map">—</span>
   </div>
+  <div class="sb-rule"></div>
+  <div class="sb-block">
+    <span class="sb-k" data-i18n="bar.viewer"></span>
+    <span class="sb-viewer" id="sb-viewer">—</span>
+  </div>
 </div>
 <script>
   // The same poll the rest of the UI uses. A page that cannot reach scene
@@ -980,6 +1013,7 @@ _STATUS_BAR = """
     const modeEl = document.getElementById('sb-mode');
     const modeTxt = modeEl.querySelector('.txt');
     const mapEl = document.getElementById('sb-map');
+    const viewEl = document.getElementById('sb-viewer');
     const set = (el, text) => { if (el.textContent !== text) el.textContent = text; };
     const cls = (el, name) => { if (el.className !== name) el.className = name; };
 
@@ -1008,11 +1042,24 @@ _STATUS_BAR = """
           set(mapEl, mb.map_id || '—');
           cls(mapEl, 'sb-map');
         }
+        const v = s.viewer || {};
+        const key = v.backend === 'rerun' ? 'bar.viewerRerun'
+                                          : 'bar.viewerBuiltin';
+        viewEl.dataset.i18n = key;
+        set(viewEl, t(key));
+        // Amber only when rerun was expected and did not arrive: an install
+        // that never had it is not in a degraded state.
+        cls(viewEl, 'sb-viewer' + (v.fell_back ? ' fell-back' : ''));
+        viewEl.title = v.fell_back && v.detail
+          ? t('bar.viewerFailed') + ' ' + v.detail : '';
       } catch (_) {
         cls(bar, 'sbar down');
         cls(modeEl, 'sb-mode down');
         modeTxt.dataset.i18n = 'bar.offline';
         set(modeTxt, t('bar.offline'));
+        viewEl.removeAttribute('data-i18n');
+        set(viewEl, '—');
+        cls(viewEl, 'sb-viewer');
       }
       setTimeout(beat, 1000);
     }
@@ -1032,7 +1079,7 @@ def _shell_page(active: str, body: str, title: str,
     the question the map is opened to answer. It docks rather than floats so
     the view resizes around it instead of being covered by it.
     """
-    css = _SHELL_CSS + (_DOCK_CSS if info_panel else "")
+    css = _CONTROLS_CSS + _SHELL_CSS + (_DOCK_CSS if info_panel else "")
     dock = _dock_html() if info_panel else ""
     # The language runtime loads on every page, dock or not: the sidebar is
     # everywhere and the switch lives in it.
@@ -1299,7 +1346,11 @@ def make_app(*, registry: ObjectRegistry,
         # Native installs do not ship rerun and must not be handed a broken
         # frame in place of a working layout.
         if _bare(request):
-            return HTMLResponse(_COMBINED_HTML)
+            # Served raw rather than through the shell, so the
+            # shared controls travel with it the same way the
+            # framed map page receives them.
+            return HTMLResponse(
+                _COMBINED_HTML.replace("__CONTROLS__", _CONTROLS_CSS))
         if rerun_sink is None or not rerun_sink.ready:
             return HTMLResponse(_framed("/", "scene — semantic map"))
         body = _viewer_body("url", "/3d")
@@ -1320,16 +1371,27 @@ def make_app(*, registry: ObjectRegistry,
             "scene — 2D map", info_panel=True))
 
     async def state(_request) -> JSONResponse:
-        return JSONResponse(
-            _state_payload(
-                registry,
-                hub,
-                sg_store,
-                anno_store,
-                map_binding,
-                robot_geometry,
-            )
+        payload = _state_payload(
+            registry,
+            hub,
+            sg_store,
+            anno_store,
+            map_binding,
+            robot_geometry,
         )
+        # Which viewer is drawing. The page swaps to the built-in canvas on
+        # its own when the sink is not up, and that swap was invisible: the
+        # layout simply lost its docked panels with no reason given.
+        live = rerun_sink is not None and rerun_sink.ready
+        payload["viewer"] = {
+            "backend": "rerun" if live else "builtin",
+            # A deployment with no sink at all has not fallen back; the
+            # built-in canvas is simply what it has.
+            "fell_back": rerun_sink is not None and not live,
+            "detail": "" if live else (
+                rerun_sink.detail if rerun_sink is not None else ""),
+        }
+        return JSONResponse(payload)
 
     # ── annotation CRUD ──────────────────────────────────────────────
     def _anno_error(status: int, detail: str) -> JSONResponse:
@@ -2257,9 +2319,24 @@ def make_app(*, registry: ObjectRegistry,
                             "y": float(getattr(pose, "y", 0.0) or 0.0),
                             "confidence": float(getattr(obj, "confidence", 0.0) or 0.0),
                         })
+            # The provider publishes no paths, but scene opens these
+            # files itself on every preview request, so it can say where
+            # they are. Absent files are omitted rather than reported as
+            # an empty string: the caller renders what it is given.
+            paths: dict = {}
+            if root:
+                map_dir = Path(root) / map_id
+                for field, name in (("artifact", "rtabmap.db"),
+                                    ("preview", "occupancy.png")):
+                    candidate = map_dir / name
+                    try:
+                        size = candidate.stat().st_size
+                    except OSError:
+                        continue
+                    paths[field] = {"path": str(candidate), "bytes": size}
             return {
                 "ok": True, "map_id": map_id, "grid": grid,
-                "regions": regions, "objects": objects,
+                "regions": regions, "objects": objects, "paths": paths,
             }
 
         return JSONResponse(await asyncio.to_thread(collect))
@@ -2468,6 +2545,9 @@ def _user_html(page: str) -> str:
     title = "Maps" if page == "maps" else "Regions"
     key = "page.maps" if page == "maps" else "page.regions"
     return (_USER_HTML
+            # A framed page loads none of the shell's CSS, so the shared
+            # controls travel with it rather than being redefined in it.
+            .replace("__CONTROLS__", _CONTROLS_CSS)
             .replace("__PAGE__", page)
             .replace("__I18N_RUNTIME__", _i18n_js())
             .replace('<h1 id="page-title" data-i18n="page.maps">Maps</h1>',

@@ -18,11 +18,25 @@ function t(key, lang) {
   // be visible in a screenshot, not silently render an empty control.
   return row ? (row[lang || langGet()] || row.en || key) : key;
 }
+// A sentence with `{name}` holes in it, filled from `vars`. An unknown
+// hole is left as written rather than blanked, so a table row that has
+// drifted from its call site shows up on screen instead of going quiet.
+function tv(key, vars, lang) {
+  return t(key, lang).replace(/\{(\w+)\}/g,
+    (whole, name) => (vars && name in vars) ? String(vars[name]) : whole);
+}
 function applyLang(lang, root) {
   const d = root || document;
   d.documentElement && (d.documentElement.lang = lang === 'zh' ? 'zh' : 'en');
-  d.querySelectorAll('[data-i18n]').forEach(
-    el => { el.textContent = t(el.dataset.i18n, lang); });
+  d.querySelectorAll('[data-i18n]').forEach(el => {
+    // The values travel with the key: re-rendering a sentence in the other
+    // language means filling its holes again, not reusing the old text.
+    const packed = el.dataset.i18nVars;
+    let vars = null;
+    if (packed) { try { vars = JSON.parse(packed); } catch (_) {} }
+    el.textContent = vars ? tv(el.dataset.i18n, vars, lang)
+                          : t(el.dataset.i18n, lang);
+  });
   d.querySelectorAll('[data-i18n-title]').forEach(
     el => { el.title = t(el.dataset.i18nTitle, lang); });
   d.querySelectorAll('[data-i18n-ph]').forEach(

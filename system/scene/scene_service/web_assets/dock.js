@@ -171,12 +171,50 @@
                 || detail.querySelector('.acts[data-asking]'));
     }
 
+    // Which object the current DOM was built for. While it matches, the
+    // poll only assigns values; the structure is left alone, so the fade
+    // does not replay and a selection inside it survives.
+    let renderedId = null;
+
+
+    function updateDetail(o) {
+      // Only the four values that move. Everything else -- the id, the
+      // buttons, the labels -- was correct when it was built and rewriting
+      // it would only cost the reader their selection.
+      const unsure = Number(o.confidence) < UNSURE;
+      const head = detail.querySelector('h3');
+      const sub = detail.querySelector('.sub');
+      if (head) setText(head, o.short_id);
+      if (sub) setText(sub, o.cls + (unsure ? ' ?' : ''));
+      const dds = detail.querySelectorAll('dl dd');
+      // Order follows the markup below: id, confidence, observations, pose.
+      if (dds[1]) {
+        setText(dds[1], fmt(o.confidence));
+        setClass(dds[1], 'warn', unsure);
+      }
+      if (dds[2]) setText(dds[2], String(o.observation_count ?? '—'));
+      if (dds[3]) {
+        setText(dds[3],
+          `${fmt(o.pose.x)}, ${fmt(o.pose.y)}, ${fmt(o.pose.z ?? 0)}`);
+      }
+    }
+
     function renderDetail(force) {
       if (!force && detailBusy()) return;
       markSelected();
-      if (!selectedId) { detail.hidden = true; detail.innerHTML = ''; return; }
+      if (!selectedId) {
+        detail.hidden = true;
+        detail.innerHTML = '';
+        renderedId = null;
+        return;
+      }
       const o = lastObjects.find(x => x.id === selectedId);
       detail.hidden = false;
+      if (o && renderedId === selectedId && detail.querySelector('.detail')) {
+        updateDetail(o);
+        return;
+      }
+      renderedId = o ? selectedId : null;
       if (!o) {
         // It was deleted, or the map changed under it. Say so rather than
         // leave a stale card that still offers to rename something gone.
@@ -201,8 +239,8 @@
           ${o.missing ? `<dt></dt><dd class="warn">${t('dock.missing')}</dd>` : ''}
         </dl>
         <div class="acts">
-          <button class="ren" data-i18n="dock.rename"></button>
-          <button class="danger del" data-i18n="dock.delete"></button>
+          <button class="btn ren" data-i18n="dock.rename"></button>
+          <button class="btn danger del" data-i18n="dock.delete"></button>
         </div>
         <div class="said" id="dock-said"></div>
       </div>`;
@@ -326,8 +364,8 @@
           // No timestamp: a unix float tells a reader nothing they can
           // act on and rewrites itself twice a second, which made the one
           // line meant to be stable chrome the busiest thing in the panel.
-          document.getElementById('dock-stamp').textContent =
-            `${objs.length}${unsure ? ' · ' + unsure + '?' : ''}`;
+          setText(document.getElementById('dock-stamp'),
+            `${objs.length}${unsure ? ' · ' + unsure + '?' : ''}`);
 
           lastObjects = objs;
           syncObjects(document.getElementById('dock-objs'), objs);

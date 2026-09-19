@@ -5,6 +5,9 @@
             padding:10px 14px; border-bottom:1px solid var(--line);
             background:var(--panel); flex-wrap:wrap; }
   .lg-chips { display:flex; gap:6px; }
+  /* Layout only: the control itself is the shared one. */
+  .lg-bar .field { min-width:180px; }
+  .lg-bar select.field { min-width:0; }
   .lg-chip { display:flex; flex-direction:column; gap:3px; min-width:62px;
              padding:4px 8px 5px; border:1px solid var(--line);
              border-radius:5px; background:#12161e; cursor:pointer;
@@ -23,16 +26,6 @@
   .lg-chip.warn  { color:#e0a050; }
   .lg-chip.error { color:#e5484d; }
 
-  .lg-bar input, .lg-bar select {
-    background:#12161e; border:1px solid var(--line); border-radius:5px;
-    color:var(--fg); font:inherit; font-size:12px; padding:5px 8px; }
-  .lg-bar input { min-width:180px; }
-  .lg-bar button {
-    background:#12161e; border:1px solid var(--line); border-radius:5px;
-    color:var(--muted); font:inherit; font-size:12px; padding:5px 10px;
-    cursor:pointer; }
-  .lg-bar button:hover { color:var(--fg); background:#1c2230; }
-  .lg-bar button.live { color:#8ef0b7; border-color:#2f4a3a; }
   .lg-spacer { flex:1; }
   .lg-note { color:#5a6070; font-size:11px; }
 
@@ -58,10 +51,10 @@
 <div class="lg">
   <div class="lg-bar">
     <div class="lg-chips" id="lg-chips"></div>
-    <select id="lg-tag"><option value="" data-i18n="logs.alltags">all tags</option></select>
-    <input id="lg-q" data-i18n-ph="logs.search" placeholder="filter text…">
-    <button id="lg-live" class="live" data-i18n="logs.live">Live</button>
-    <button id="lg-clear" data-i18n="logs.clear">Clear</button>
+    <select class="field" id="lg-tag"><option value="" data-i18n="logs.alltags">all tags</option></select>
+    <input class="field" id="lg-q" data-i18n-ph="logs.search" placeholder="filter text…">
+    <button id="lg-live" class="btn live" data-i18n="logs.live">Live</button>
+    <button class="btn" id="lg-clear" data-i18n="logs.clear">Clear</button>
     <div class="lg-spacer"></div>
     <span class="lg-note" data-i18n="logs.hint"></span>
   </div>

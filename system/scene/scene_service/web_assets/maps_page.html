@@ -79,6 +79,11 @@
   .mg-more dd { margin: 0; font-family: var(--font-mono); color: var(--fg);
                 word-break: break-all; }
   .mg-more dd.bad { color: #e5484d; }
+  /* The appended path rows join the grid above them rather than forming a
+   * second one inside it. */
+  .mg-paths { display: contents; }
+  .mg-more dd.path { font-size: 11px; word-break: break-all;
+                     color: var(--muted); }
   .mg-lists { grid-column: 1 / -1; display: grid; gap: 14px;
               grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
               margin-top: 8px; }
@@ -189,8 +194,7 @@
         ? `${(m.artifact_size / 1048576).toFixed(2)} MB` : '—', false],
       ['maps.saved', when(m.updated), false],
       ['maps.id', m.map_id, false],
-      ['maps.artifactPath', m.artifact_path || '—', false],
-      ['maps.previewPath', m.preview_path || '—', false],
+      // The paths come with the contents, which arrive after this renders.
     ];
     return rows.map(([key, value, bad]) =>
       `<dt data-i18n="${key}"></dt>`
@@ -266,6 +270,22 @@
       [r.name || r.id || '—', `${(r.points || []).length} pts`]);
     const objects = (d.objects || []).map(o =>
       [o.cls || '—', `${o.x.toFixed(2)}, ${o.y.toFixed(2)}`]);
+    // Straight into the same definition grid the rows above sit in,
+    // before the lists, so a path reads as one more fact about the map
+    // rather than as a footnote under its contents.
+    const paths = d.paths || {};
+    const pathRows = [['maps.artifactPath', paths.artifact],
+                      ['maps.previewPath', paths.preview]]
+      .filter(([, value]) => value && value.path);
+    if (pathRows.length) {
+      const dl = document.createElement('div');
+      dl.className = 'mg-paths';
+      dl.innerHTML = pathRows.map(([key, value]) =>
+        `<dt data-i18n="${key}"></dt><dd class="path">${esc(value.path)}</dd>`
+      ).join('');
+      more.appendChild(dl);
+    }
+
     const host = document.createElement('div');
     host.className = 'mg-lists';
     host.innerHTML = listBlock('maps.regions', regions)

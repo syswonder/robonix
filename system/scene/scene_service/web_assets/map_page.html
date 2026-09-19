@@ -38,14 +38,9 @@
     .mapitem .name { font-weight: 700; }
     .mapitem .sub { color: var(--muted); font-size: 10px; margin: 2px 0 6px; overflow-wrap: anywhere; }
     .mapitem .map-status { color: var(--acc); font-size: 10px; min-height: 12px; margin-top: 4px; }
-    button:disabled { opacity: .55; cursor: progress; }
-    button { background: #222a3a; color: var(--fg); border: 1px solid #33405a;
-      border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
-    button:hover { background: #2a3550; }
-    button.primary { background: #2b4a86; border-color: #3c62ad; }
-    button.primary.active { background: var(--acc); color: #0e1015; }
-    button.small { padding: 2px 7px; font-size: 11px; }
-    button.danger { border-color: #6b3640; color: var(--danger); }
+    /* Size and colour come from the shared controls; only the
+     * drawing tool's on-state is this page's own. */
+    .btn.primary.active { background: var(--acc); color: #0e1015; }
     #region-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px 10px;
       overscroll-behavior: contain; scrollbar-gutter: stable; }
     .region { --region-color: var(--acc); border: 1px solid #232936;
@@ -82,9 +77,6 @@
     .modal-body { padding: 16px; display: grid; gap: 12px; }
     .modal-title { font-weight: 700; font-size: 14px; }
     .modal-message { color: var(--muted); font-size: 12px; line-height: 1.45; }
-    .modal-input { width: 100%; box-sizing: border-box; border: 1px solid #33405a;
-      border-radius: 7px; background: #0f131b; color: var(--fg); padding: 8px 10px;
-      font-size: 13px; outline: none; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
     /* See the comment on the buttons: OK leads in the DOM so Enter
        confirms, and is ordered last so it still reads on the right. */
@@ -120,6 +112,7 @@
   </style>
 </head>
 <body data-ready="loading" data-page="__PAGE__">
+<style>__CONTROLS__</style>
 <script>__I18N_RUNTIME__
 applyLang(langGet());</script>
 <style>
@@ -165,11 +158,11 @@ applyLang(langGet());</script>
   <div id="main">
     <div id="panel">
       <div id="map-tools">
-        <label><span data-i18n="form.mapid">Map ID</span><input id="map-id" placeholder="apartment_demo" /></label>
+        <label><span data-i18n="form.mapid">Map ID</span><input class="field" id="map-id" placeholder="apartment_demo" /></label>
         <div id="map-actions">
-          <button class="primary" id="btn-save-map" data-i18n="form.save">Save current</button>
-          <button id="btn-refresh-maps" data-i18n="form.refresh">Refresh</button>
-          <button id="btn-pose-estimate" data-i18n="form.pose">Pose estimate</button>
+          <button class="btn primary" id="btn-save-map" data-i18n="form.save">Save current</button>
+          <button class="btn" id="btn-refresh-maps" data-i18n="form.refresh">Refresh</button>
+          <button class="btn" id="btn-pose-estimate" data-i18n="form.pose">Pose estimate</button>
         </div>
         <div id="map-status"><span id="map-status-msg" data-i18n="status.ready">Ready.</span><span class="mode-label" data-i18n="form.mode">Map mode:</span><span id="mode-pill">unknown</span></div>
         <div id="map-list"><div id="empty" data-i18n="form.nomaps">No saved maps listed yet.</div></div>
@@ -182,7 +175,7 @@ applyLang(langGet());</script>
         <a href="/maps" target="_top" data-i18n="note.link">Go to maps</a>
       </div>
       <div class="actions">
-        <button class="primary" id="btn-draw" data-i18n="btn.mark">✏ Mark region</button>
+        <button class="btn primary" id="btn-draw" data-i18n="btn.mark">✏ Mark region</button>
       </div>
       <div id="region-list"><div id="empty" data-i18n="regions.empty">No regions yet. Click “Mark region”, then click on the map to outline one (double-click or Enter to finish, Esc to cancel).</div></div>
     </div>
@@ -199,13 +192,13 @@ applyLang(langGet());</script>
   <form method="dialog" class="modal-body">
     <div class="modal-title" id="region-modal-title">Region</div>
     <div class="modal-message" id="region-modal-message"></div>
-    <input class="modal-input" id="region-modal-input" autocomplete="off" />
+    <input class="modal-input field" id="region-modal-input" autocomplete="off" />
     <div class="modal-actions">
       <!-- OK first: `method="dialog"` submits on Enter with the form's first
            submit button, so DOM order is what decides whether Enter confirms
            or discards. `order` puts it back on the right visually. -->
-      <button class="primary" id="region-modal-ok" value="ok">OK</button>
-      <button id="region-modal-cancel" value="cancel">Cancel</button>
+      <button class="btn primary" id="region-modal-ok" value="ok">OK</button>
+      <button class="btn" id="region-modal-cancel" value="cancel">Cancel</button>
     </div>
   </form>
 </dialog>
@@ -218,7 +211,7 @@ applyLang(langGet());</script>
     </div>
     <pre class="save-report-log" id="save-report-log"></pre>
     <div class="modal-actions">
-      <button class="primary" value="ok">OK</button>
+      <button class="btn primary" value="ok">OK</button>
     </div>
   </form>
 </dialog>
@@ -232,8 +225,8 @@ applyLang(langGet());</script>
     <div class="operation-steps" id="map-operation-steps"></div>
     <pre class="operation-detail" id="map-operation-detail"></pre>
     <div class="modal-actions">
-      <button id="map-operation-close" type="button">Close</button>
-      <button class="primary" id="map-operation-primary" type="button" disabled>Working...</button>
+      <button class="btn" id="map-operation-close" type="button">Close</button>
+      <button class="btn primary" id="map-operation-primary" type="button" disabled>Working...</button>
     </div>
   </div>
 </dialog>
@@ -302,7 +295,7 @@ function toast(text) {
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { t.style.display = 'none'; }, 4000);
 }
-function setMapStatus(text, kind = '', key = '') {
+function setMapStatus(text, kind = '', key = '', vars = null) {
     const el = document.getElementById('map-status');
     const msg = document.getElementById('map-status-msg');
     if (!el || !msg) return;
@@ -312,7 +305,14 @@ function setMapStatus(text, kind = '', key = '') {
     // untouched default", not "does it read 'Ready.'".
     // A key is remembered so the language switch can re-render it; free
     // text cannot be, because there is nothing to re-render it from.
-    if (key) { msg.dataset.i18n = key; msg.textContent = t(key); }
+    if (key) {
+      msg.dataset.i18n = key;
+      // Remembered so the language switch can re-fill the sentence; deleted
+      // when there are none, or a later plain message would inherit them.
+      if (vars) msg.dataset.i18nVars = JSON.stringify(vars);
+      else delete msg.dataset.i18nVars;
+      msg.textContent = vars ? tv(key, vars) : t(key);
+    }
     else if (text) { delete msg.dataset.i18n; msg.textContent = text; }
     else { msg.dataset.i18n = 'status.ready'; msg.textContent = t('status.ready'); }
 }
@@ -683,8 +683,8 @@ function renderMaps() {
         <div class="name">${esc(m.map_id)}</div>
         <div class="sub"${dbTitle}>${dbLabel} · ${m.has_preview ? 'preview' : 'no preview'} · ${m.updated || '-'}</div>
         <div class="map-btns">
-          <button class="small" data-map-act="load" ${canLoad && !mapBusy ? '' : 'disabled'}>Load</button>
-          <button class="small danger" data-map-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
+          <button class="btn small" data-map-act="load" ${canLoad && !mapBusy ? '' : 'disabled'}>Load</button>
+          <button class="btn small danger" data-map-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
         </div>
         <div class="map-status">${canLoad ? '' : esc(m.artifact_detail || 'not loadable')}</div>
       </div>`;
@@ -740,11 +740,13 @@ function rejectWhileBusy() {
 function failMapOperation(verb, id, error, retry) {
     // Unlocks the editor when an operation throws. Without it the modal stays
     // on 'Working...' with every control disabled and Esc blocked.
-    setMapStatus(`${verb} ${id} failed: ${error}`, 'err');
+    const verbText = t(verb);
+    setMapStatus('', 'err', 'st.opFailed',
+                 {verb: verbText, id, error: String(error)});
     finishMapOperation({
         ok: false,
-        title: `${verb} failed`,
-        message: 'Unexpected error; the editor has been unlocked.',
+        title: tv('st.opFailedTitle', {verb: verbText}),
+        message: t('st.unexpected'),
         detail: String(error),
         retry,
     });
@@ -779,12 +781,17 @@ async function saveCurrentMap() {
         const validation = out.validation || {};
         const ok = validation.spatial_ok !== false && validation.has_preview !== false;
         const semanticOnly = Boolean(out.spatial_unchanged);
-        setMapStatus(`${semanticOnly ? t('st.updatedFor') : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; regions ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
+        setMapStatus('', ok ? 'ok' : 'err', 'st.savedReport', {
+            what: semanticOnly ? t('st.updatedFor') : t('st.saved'),
+            id: out.map_id || id,
+            artifact: ok ? t('st.artifactOk') : t('st.artifactBad'),
+            regions: validation.room_count ?? '-',
+        });
         toast((semanticOnly ? 'updated scene data for ' : 'saved map ') + (out.map_id || id));
         await loadMaps();
         finishMapOperation({
             ok,
-            title: ok ? (semanticOnly ? t('st.updated') : 'Map saved') : t('st.saveFailed'),
+            title: ok ? (semanticOnly ? t('st.updated') : t('st.mapSaved')) : t('st.saveFailed'),
             message: ok
                 ? `${out.map_id || id} is ready to load after a stack restart.`
                 : `${out.map_id || id} was written, but artifact validation did not pass.`,
@@ -795,7 +802,8 @@ async function saveCurrentMap() {
         });
     }
     else {
-        setMapStatus(`Save ${id} failed: ${result.detail}`, 'err');
+        setMapStatus('', 'err', 'st.saveFailedFor',
+                     {id, detail: result.detail});
         finishMapOperation({
             ok: false,
             title: 'Save failed',
@@ -805,7 +813,7 @@ async function saveCurrentMap() {
         });
     }
     } catch (error) {
-        failMapOperation('Save', id, error, saveCurrentMap);
+        failMapOperation('st.verbSave', id, error, saveCurrentMap);
     }
 }
 async function loadSelectedMap(id) {
@@ -825,7 +833,7 @@ async function loadSelectedMap(id) {
     setMapItemStatus(id, '');
     if (result.ok) {
         const out = result.out;
-        setMapStatus(`Loaded ${id}. Mapping requested localization mode; use Pose estimate if the robot pose is off.`, 'ok');
+        setMapStatus('', 'ok', 'st.loadedHint', {id});
         toast('loaded map ' + id + ' · localization mode requested');
         await loadMaps();
         const occupancy = out.occupancy || {};
@@ -841,7 +849,8 @@ async function loadSelectedMap(id) {
             ].filter(Boolean).join('\n'),
         });
     } else {
-        setMapStatus(`Load ${id} failed: ${result.detail}`, 'err');
+        setMapStatus('', 'err', 'st.loadFailedFor',
+                     {id, detail: result.detail});
         finishMapOperation({
             ok: false,
             title: 'Load failed',
@@ -852,7 +861,7 @@ async function loadSelectedMap(id) {
     }
     } catch (error) {
         setMapItemStatus(id, '');
-        failMapOperation('Load', id, error, () => loadSelectedMap(id));
+        failMapOperation('st.verbLoad', id, error, () => loadSelectedMap(id));
     }
 }
 async function deleteSelectedMap(id) {
@@ -861,8 +870,8 @@ async function deleteSelectedMap(id) {
     setMapItemStatus(id, 'deleting...');
     const out = await withMapBusy(`Deleting map ${id}...`,
         () => api('POST', '/api/maps/delete', { map_id: id }));
-    if (out) { setMapStatus(`Deleted ${id}.`, 'ok'); toast('deleted map ' + id); await loadMaps(); }
-    else { setMapItemStatus(id, ''); setMapStatus(`Delete ${id} failed.`, 'err'); }
+    if (out) { setMapStatus('', 'ok', 'st.deletedFor', {id}); toast('deleted map ' + id); await loadMaps(); }
+    else { setMapItemStatus(id, ''); setMapStatus('', 'err', 'st.deleteFailedFor', {id}); }
 }
 function setPoseEstimateMode(on) {
     poseEstimateMode = on;
@@ -892,7 +901,8 @@ async function sendPoseEstimate(world) {
             (out.delta_after ? ` · after ${poseDeltaText(out.delta_after)}` : '');
         setMapStatus(msg, 'ok');
         toast(out.detail || 'pose estimate sent');
-    } else setMapStatus(`Pose estimate failed for (${x.toFixed(2)}, ${y.toFixed(2)}).`, 'err');
+    } else setMapStatus('', 'err', 'st.poseFailedAt',
+                        {x: x.toFixed(2), y: y.toFixed(2)});
 }
 document.getElementById('btn-save-map').addEventListener('click', saveCurrentMap);
 document.getElementById('btn-refresh-maps').addEventListener('click', async () => { setMapStatus('', 'busy', 'st.refreshing'); await loadMaps(); setMapStatus('', 'ok', 'st.refreshed'); });
@@ -907,13 +917,14 @@ document.getElementById('map-list').addEventListener('click', (ev) => {
         selectedMapId = id;
         document.getElementById('map-id').value = id;
         renderMaps();
-        setMapStatus(`Selected ${id}. Click Load to enter localization mode.`, 'ok');
+        setMapStatus('', 'ok', 'st.selectedHint', {id});
         return;
     }
     if (act === 'load') {
         const m = savedMaps.find(x => x.map_id === id);
         if (m && (!m.has_spatial_artifact || m.spatial_ok === false)) {
-            setMapStatus(`Map ${id} is not loadable: ${m.artifact_detail || 'invalid spatial artifact'}`, 'err');
+            setMapStatus('', 'err', 'st.notLoadable',
+                         {id, detail: m.artifact_detail || t('st.invalidArtifact')});
             return;
         }
         loadSelectedMap(id);
@@ -993,9 +1004,9 @@ function renderPanel() {
         ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
         <div class="sub">${a.points.length} corners</div>
         <div class="btns">
-          <button class="small" data-act="rename" ${mapBusy ? 'disabled' : ''}>Rename</button>
-          ${a.stale ? `<button class="small" data-act="confirm" ${mapBusy ? 'disabled' : ''}>Still valid</button>` : ''}
-          <button class="small danger" data-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
+          <button class="btn small" data-act="rename" ${mapBusy ? 'disabled' : ''}>Rename</button>
+          ${a.stale ? `<button class="btn small" data-act="confirm" ${mapBusy ? 'disabled' : ''}>Still valid</button>` : ''}
+          <button class="btn small danger" data-act="delete" ${mapBusy ? 'disabled' : ''}>Delete</button>
         </div>
       </div>`).join('');
 }
