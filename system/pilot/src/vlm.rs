@@ -202,6 +202,9 @@ impl Message {
 pub enum VlmStreamItem {
     TextDelta(String),
     ToolCall(ToolCall),
+    /// Non-user-visible reasoning arrived from the provider. Consumers use
+    /// this only as stream activity; it must not enter assistant content.
+    ReasoningActivity,
     /// Provider-reported usage for the complete streamed request. OpenAI sends
     /// it in a final choice-less chunk when `include_usage` is supported.
     Usage(VlmUsage),
@@ -509,6 +512,27 @@ mod tests {
             })))
         ));
     }
+
+    /// Reasoning deltas keep the stream alive without contaminating JSON text.
+    #[tokio::test]
+    async fn reasoning_content_becomes_activity_not_text() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
+        let mut finish = String::new();
+        process_stream_line(
+            r#"data: {"choices":[{"delta":{"reasoning_content":"still thinking"}}]}"#,
+            &mut calls,
+            &mut finish,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(Ok(VlmStreamItem::ReasoningActivity))
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 }
 
 #[derive(Default)]
@@ -518,6 +542,8 @@ struct AccumulatedToolCall {
     arguments: String,
 }
 
+/// Parse one SSE line and forward visible output plus non-visible stream
+/// activity. Provider reasoning is never copied into assistant text.
 async fn process_stream_line(
     line: &str,
     tc_acc: &mut BTreeMap<u32, AccumulatedToolCall>,
@@ -551,6 +577,15 @@ async fn process_stream_line(
         return Ok(false);
     };
 
+    if let Some(reasoning) = choice
+        .get("delta")
+        .and_then(|delta| delta.get("reasoning_content"))
+        .and_then(Value::as_str)
+        && !reasoning.is_empty()
+        && tx.send(Ok(VlmStreamItem::ReasoningActivity)).await.is_err()
+    {
+        return Ok(true);
+    }
     if let Some(content) = choice
         .get("delta")
         .and_then(|delta| delta.get("content"))

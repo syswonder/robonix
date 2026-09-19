@@ -1488,6 +1488,7 @@ pub async fn run_turn(
                             match item {
                                 VlmStreamItem::TextDelta(delta) => full_text.push_str(&delta),
                                 VlmStreamItem::ToolCall(tc) => tool_calls.push(tc),
+                                VlmStreamItem::ReasoningActivity => {},
                                 VlmStreamItem::Usage(usage) => info!(
                                     "[pilot/prompt] {}",
                                     serde_json::json!({
