@@ -1,0 +1,52 @@
+{
+  "_COMBINED_HTML": {
+    "bytes": 14932,
+    "file": "combined.html",
+    "sha256": "c3bac38878c7dda3b1bde4fce8149745e773c22a04e0fa45284c1bd2ac273656"
+  },
+  "_DOCK_CSS": {
+    "bytes": 7379,
+    "file": "dock.css",
+    "sha256": "e39618b2b6b72fb0a2b7d82a3dc5a92976851b5688434cf9ed33f0402620de57"
+  },
+  "_DOCK_JS": {
+    "bytes": 13542,
+    "file": "dock.js",
+    "sha256": "36ca6de4a2b828dd091737c6f98e8fb49ef0caf530202790e5646bb2db39a1f3"
+  },
+  "_I18N_JS": {
+    "bytes": 2020,
+    "file": "i18n.js",
+    "sha256": "eec00f174152bb1509b805f3c71cb170f1c8634c48787819ddaa359a8efc3d18"
+  },
+  "_INDEX_3D_HTML": {
+    "bytes": 31506,
+    "file": "viewer_3d.html",
+    "sha256": "1de46d5396328f3681e7f2d08875bd527577a2cc5b9badc268a5a2caff70778c"
+  },
+  "_INDEX_CAM_HTML": {
+    "bytes": 3821,
+    "file": "camera.html",
+    "sha256": "fbfcc75cfd99d7f0d8a9bf51d92069d283f2b8c1475b369ba23cfad3fa2b48a3"
+  },
+  "_INDEX_HTML": {
+    "bytes": 18806,
+    "file": "map_2d.html",
+    "sha256": "a855dced1999313b4ad5d90c70d0e710ca16e72cebe6eabf420c90cef1c58b67"
+  },
+  "_LOGS_BODY": {
+    "bytes": 10088,
+    "file": "logs.html",
+    "sha256": "085495ee42bd5e7a0f7caa7965851462fc9bb8c089bc153888f219cda428caa8"
+  },
+  "_SHELL_CSS": {
+    "bytes": 2545,
+    "file": "shell.css",
+    "sha256": "b4baa62ad1980e05cc8c4c58d3b537f93d52e208a066008698d2dc0e607d4913"
+  },
+  "_USER_HTML": {
+    "bytes": 57086,
+    "file": "map_page.html",
+    "sha256": "b9d6a88c9cbb84d7ff89e663a7e69f4fcb36ff4bd29d537f2fa92dc0277a280e"
+  }
+}

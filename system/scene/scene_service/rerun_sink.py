@@ -536,6 +536,8 @@ class RerunSink:
             # --serve-web hosts both, so the 2D feed only needs a plain proxy.
             web_child = _spawn_rerun(
                 [cli, "--serve-web",
+                 # Current state first; the backlog fills in behind it.
+                 "--newest-first",
                  "--port", str(self._map3d.grpc_port),
                  "--web-viewer-port", str(self._web_port),
                  "--bind", "0.0.0.0",
@@ -549,6 +551,8 @@ class RerunSink:
 
             grpc_child = _spawn_rerun(
                 [cli, "--serve-grpc",
+                 # Current state first; the backlog fills in behind it.
+                 "--newest-first",
                  "--port", str(self._map2d.grpc_port),
                  "--bind", "0.0.0.0",
                  "--server-memory-limit", str(self._memory_limit)],

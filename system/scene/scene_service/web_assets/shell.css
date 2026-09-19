@@ -1,0 +1,44 @@
+
+  /* Dark throughout, on the annotation page's palette. The shell frames
+     pages that are themselves dark -- the rerun viewer's chrome cannot be
+     made light (0.37 ignores SetTheme on the web backend), the map is drawn
+     for a dark ground, and the annotation view has always been dark. A light
+     sidebar around them left every page half lit, with the seam running down
+     the middle of the window. */
+  :root{
+    /* Chrome. Han faces included: the UI is going bilingual, and a
+       Latin-only stack leaves the browser to pick the Chinese face. */
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Helvetica Neue", Arial, sans-serif;
+    /* Data whose columns have to line up: ids, coordinates, stamps. */
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  :root{--bg:#0e1015;--panel:#161a22;--fg:#e8eaed;--muted:#7d828b;
+        --line:#232936;--acc:#7aa7ff}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+            font:13px/1.6 var(--font-ui)}
+  .wrap{display:flex;height:100%}
+  nav{width:150px;flex:0 0 150px;background:var(--panel);
+      border-right:1px solid var(--line);
+      display:flex;flex-direction:column;padding:10px 0}
+  nav .brand{padding:8px 14px 14px;color:var(--acc);font-weight:650;font-size:15px;letter-spacing:.01em}
+  nav a{display:flex;align-items:center;gap:9px;padding:8px 14px;
+        color:var(--muted);text-decoration:none;font-size:13.5px;
+        white-space:nowrap;border-left:2px solid transparent}
+  nav .ico{width:16px;height:16px;flex:0 0 16px;opacity:.85}
+  /* The switch sits at the foot of the sidebar, away from the destinations:
+     it changes how the interface reads, not where you are in it. */
+  nav .spacer{flex:1}
+  nav .lang{margin:0 10px 6px;padding:5px 0;background:none;cursor:pointer;
+            border:1px solid var(--line);border-radius:5px;
+            color:var(--muted);font:inherit;font-size:12px}
+  nav .lang:hover{color:var(--fg);border-color:#39415260;background:#1c2230}
+  nav a.on .ico{opacity:1}
+  nav a:hover{color:var(--fg);background:#1c2230}
+  nav a.on{color:var(--acc);border-left-color:var(--acc);background:#1c2230}
+  main{flex:1;position:relative;min-width:0;background:var(--bg)}
+  iframe{border:0;width:100%;height:100%;display:block}
+  .msg{padding:24px;color:var(--muted);max-width:560px}
+  .msg a{color:var(--acc)}
+  .msg code{background:#222a3a;padding:.1em .35em;border-radius:3px}

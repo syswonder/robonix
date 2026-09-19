@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>scene 3D — robonix</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #08090c;
+                 color: #d8dde6; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #app { position: absolute; inset: 0; }
+    canvas { display: block; }
+    /* HUD: collapsed state is a tiny `[?]` pill in the top-left so it
+       can NEVER overlap the inspector on a narrow iframe (combined-
+       layout middle column on a MacBook Air). Expanded reveals title
+       + keymap. Stats moved to a separate bottom-left bubble so the
+       3D iframe never shows two boxes fighting at the top. */
+    #hud { position: absolute; top: 8px; left: 8px; z-index: 5; }
+    #hud .head {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 8px; background: rgba(10,12,16,0.85);
+      border: 1px solid #303542; border-radius: 4px;
+      cursor: pointer; user-select: none; font-size: 11px; color: #889;
+    }
+    #hud .head:hover { color: #f0c050; border-color: #5a606e; }
+    #hud .head b { color: #f0c050; font-weight: 600;
+                   display: none; }      /* hidden when collapsed */
+    #hud.expanded .head b { display: inline; }
+    #hud .toggle { color: #6a6f7a; font-size: 10px; }
+    #hud .help {
+      display: none; margin-top: 4px; padding: 6px 10px;
+      background: rgba(10,12,16,0.85); border: 1px solid #303542;
+      border-radius: 4px; max-width: 280px; font-size: 11px;
+      line-height: 1.5; color: #aab;
+    }
+    #hud.expanded .help { display: block; }
+    #hud .help .k, #hud .help .key { color: #5fc; }
+    #hud-stats {
+      position: absolute; bottom: 30px; left: 8px;
+      padding: 3px 8px; background: rgba(10,12,16,0.7);
+      border-radius: 3px; font-size: 10px; color: #889;
+      pointer-events: none;
+    }
+    /* Inspector: top-right. Tiny dot when empty so it can't overflow.
+       Click sets `.expanded` and fills in object details. */
+    #panel { position: absolute; top: 8px; right: 8px; z-index: 5;
+             padding: 6px 10px; background: rgba(10,12,16,0.85);
+             border: 1px solid #303542; border-radius: 4px;
+             font-size: 12px; line-height: 1.5; overflow-wrap: break-word; }
+    #panel.empty { padding: 3px 8px; font-size: 10px;
+                   color: #6a6f7a; font-style: italic; }
+    #panel:not(.empty) { min-width: 200px; }
+    #panel h3 { margin: 0 0 6px; font-size: 13px; color: #f0c050; }
+    #panel .row { display: flex; justify-content: space-between; gap: 16px; }
+    #panel .k { color: #889; }
+    #foot { position: absolute; bottom: 8px; left: 8px; right: 8px;
+            padding: 4px 10px; background: rgba(10,12,16,0.7);
+            border-radius: 3px; font-size: 11px; color: #889; pointer-events: none; }
+    a { color: #5fc; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "three/examples/jsm/loaders/STLLoader.js": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/STLLoader.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hud">
+    <div class="head" id="hud-head" title="click to expand / collapse">
+      <span class="toggle" id="hud-toggle">▸</span>
+      <b>scene 3D</b>
+    </div>
+    <div class="help">
+      <div><span class="k">drag</span> rotate · <span class="k">scroll</span> zoom · <span class="k">right-drag</span> pan</div>
+      <div><span class="key">W A S D</span> fly · <span class="key">Q E</span> down/up · <span class="key">Shift</span> 3× speed</div>
+      <div><span class="key">click</span> pick object · <span class="key">R</span> reset · <span class="key">G</span> grid</div>
+    </div>
+  </div>
+  <div id="hud-stats">objects: 0 · points: 0</div>
+  <div id="panel" class="empty">▸</div>
+  <div id="foot"><a href="/">← back to 2D map</a> · auto-refresh 1Hz · <span id="foot-time">—</span></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // ── Scene setup ────────────────────────────────────────────────────
+    const app = document.getElementById('app');
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x08090c, 1.0);
+    app.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.05, 200);
+    // Robonix convention: map frame X-forward, Y-left, Z-up. Use a
+    // perspective camera looking down at +Z so the user sees the
+    // floor as the ground plane.
+    camera.up.set(0, 0, 1);
+    camera.position.set(4, 4, 4);
+    camera.lookAt(0, 0, 0.5);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0.5);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+
+    // ── Lights + grid + axes ───────────────────────────────────────────
+    scene.add(new THREE.HemisphereLight(0x9ab8ff, 0x202028, 0.9));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir.position.set(2, 2, 5);
+    scene.add(dir);
+
+    let grid = new THREE.GridHelper(20, 40, 0x303542, 0x202428);
+    grid.rotation.x = Math.PI / 2;  // GridHelper is in XZ plane; rotate to XY for Z-up
+    scene.add(grid);
+    const axes = new THREE.AxesHelper(0.6);
+    scene.add(axes);
+
+    // ── 2D occupancy underlay ──────────────────────────────────────────
+    // The user reads the 3D scene by looking down at point clouds + bboxes.
+    // Without a floor reference it's hard to tell where a wall actually
+    // is or how far the robot has driven. Drop the slam_toolbox / rtabmap
+    // occupancy PNG onto a horizontal plane at z = -0.01 (just below
+    // origin so it doesn't fight axes/grid for z-buffer). The same PNG
+    // the 2D panel uses is fetched via /api/state and re-textured each
+    // tick.
+    let mapPlane = null;          // current THREE.Mesh
+    let mapPlaneStamp = 0;        // last occupancy.stamp_ms applied
+    function decodeMapPng(b64) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error('decode'));
+            img.src = 'data:image/png;base64,' + b64;
+        });
+    }
+    async function refreshMapPlane(occ) {
+        if (!occ || !occ.png_b64 || !occ.stamp_ms) return;
+        if (occ.stamp_ms === mapPlaneStamp) return;
+        const img = await decodeMapPng(occ.png_b64).catch(() => null);
+        if (!img) return;
+        const W = occ.width, H = occ.height, R = occ.resolution;
+        // Repaint the PNG with darker free-space + hard-edged walls so
+        // the underlay reads at a glance (the raw OccupancyGrid PNG is
+        // black/grey/white; in 3D against the dark background that's
+        // basically invisible). Map: white(unknown)→transparent,
+        // black(wall)→solid #d8dde6, grey(free)→very dim #1a1d24.
+        const cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        const cx = cv.getContext('2d');
+        cx.drawImage(img, 0, 0);
+        const id = cx.getImageData(0, 0, W, H);
+        const px = id.data;
+        for (let i = 0; i < px.length; i += 4) {
+            const v = px[i];          // R; PNG is greyscale-ish
+            const a = px[i + 3];
+            if (a === 0 || v >= 220) {
+                // unknown → transparent
+                px[i + 3] = 0;
+            } else if (v <= 60) {
+                // wall / occupied → bright + opaque
+                px[i] = 0xd8; px[i + 1] = 0xdd; px[i + 2] = 0xe6;
+                px[i + 3] = 240;
+            } else {
+                // free space → dim background tint, semi-transparent
+                px[i] = 0x4a; px[i + 1] = 0x52; px[i + 2] = 0x60;
+                px[i + 3] = 90;
+            }
+        }
+        cx.putImageData(id, 0, 0);
+
+        const tex = new THREE.CanvasTexture(cv);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.needsUpdate = true;
+
+        const planeW = W * R, planeH = H * R;
+        // The PNG's pixel (0,0) is at (origin_x, origin_y + planeH);
+        // we'll set a Mesh at origin + half-extent so plane corners
+        // line up with the OccupancyGrid origin.
+        const geom = new THREE.PlaneGeometry(planeW, planeH);
+        const mat = new THREE.MeshBasicMaterial({
+            map: tex, transparent: true, depthWrite: false,
+            side: THREE.DoubleSide,
+        });
+        if (mapPlane) scene.remove(mapPlane);
+        mapPlane = new THREE.Mesh(geom, mat);
+        // OccupancyGrid orientation: image y axis is down (row 0 is
+        // top), but world y axis is up. Three.js PlaneGeometry is in
+        // local +X +Y plane with +Z normal — by default flat in XY at
+        // z=0 already; we just flip the texture's V to match the PNG.
+        mat.map.flipY = true;
+        mat.map.needsUpdate = true;
+        mapPlane.position.set(
+            occ.origin_x + planeW / 2,
+            occ.origin_y + planeH / 2,
+            -0.01,
+        );
+        scene.add(mapPlane);
+        mapPlaneStamp = occ.stamp_ms;
+    }
+    async function pollMap() {
+        try {
+            const r = await fetch('/api/state', {cache: 'no-store'});
+            const j = await r.json();
+            await refreshMapPlane(j.occupancy);
+        } catch (e) { /* swallow — pollRobot uses the same endpoint */ }
+    }
+    pollMap();
+    // SLAM /map updates ~1 Hz; 2 Hz polling gives a tight cadence
+    // without re-decoding the PNG on every frame.
+    setInterval(pollMap, 500);
+
+    // ── Object registry (id → mesh-set) ────────────────────────────────
+    const objectMeshes = new Map();   // id → { points, bboxLines, label, data }
+    const pickables = [];             // bbox edges as raycaster targets
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line = { threshold: 0.05 };
+    let highlighted = null;
+
+    // ── Robot footprint — deployment geometry supplied by Soma ─────────
+    const robotGroup = new THREE.Group();
+    const robotMaterial = new THREE.MeshStandardMaterial({
+        color: 0xffaa33, transparent: true, opacity: 0.65,
+        emissive: 0x553300, emissiveIntensity: 0.20,
+        metalness: 0.10, roughness: 0.60, side: THREE.DoubleSide,
+    });
+    let footprintKey = '';
+    function updateRobotFootprint(footprint) {
+        if (!footprint || !Array.isArray(footprint.points) || footprint.points.length < 3) {
+            robotGroup.visible = false;
+            return;
+        }
+        robotGroup.visible = true;
+        const key = JSON.stringify(footprint.points);
+        if (key === footprintKey) return;
+        footprintKey = key;
+        while (robotGroup.children.length) {
+            const child = robotGroup.remove(robotGroup.children[0]);
+            if (child.geometry) child.geometry.dispose();
+        }
+        const shape = new THREE.Shape();
+        footprint.points.forEach((point, index) => {
+            if (index === 0) shape.moveTo(point[0], point[1]);
+            else shape.lineTo(point[0], point[1]);
+        });
+        shape.closePath();
+        const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), robotMaterial);
+        mesh.position.z = 0.02;
+        robotGroup.add(mesh);
+    }
+    scene.add(robotGroup);
+
+    // Forward-pointing arrow so yaw is visible even when zoomed out.
+    // Lives outside robotGroup because ArrowHelper has its own internal
+    // rotation that we set per-frame from yaw.
+    const arrowDir = new THREE.Vector3(1, 0, 0);
+    const robotArrow = new THREE.ArrowHelper(
+        arrowDir, new THREE.Vector3(0, 0, 0.08), 0.5, 0xff5522, 0.14, 0.08,
+    );
+    robotArrow.visible = false;
+    scene.add(robotArrow);
+
+    // Robot label sprite (separate so it doesn't tilt with the group).
+    const robotLabelCv = document.createElement('canvas');
+    robotLabelCv.width = 200; robotLabelCv.height = 56;
+    {
+        const cx = robotLabelCv.getContext('2d');
+        cx.fillStyle = 'rgba(8,9,12,0.92)'; cx.fillRect(0,0,robotLabelCv.width,robotLabelCv.height);
+        cx.strokeStyle = '#ffaa33'; cx.lineWidth = 2;
+        cx.strokeRect(1,1,robotLabelCv.width-2,robotLabelCv.height-2);
+        cx.fillStyle = '#ffaa33'; cx.font = 'bold 22px ui-monospace, monospace';
+        cx.textAlign = 'center'; cx.textBaseline = 'middle';
+        cx.fillText('robot', robotLabelCv.width/2, robotLabelCv.height/2);
+    }
+    const robotLabel = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(robotLabelCv), transparent: true, depthTest: false,
+    }));
+    robotLabel.scale.set(0.5, 0.14, 1);
+    robotLabel.visible = false;
+    scene.add(robotLabel);
+
+    function updateRobotPose(rx, ry, rz, ryaw, footprint) {
+        updateRobotFootprint(footprint);
+        const radius = Number(footprint && footprint.circumscribed_radius_m);
+        if (!robotGroup.visible || !Number.isFinite(radius) || radius <= 0) {
+            robotArrow.visible = false;
+            robotLabel.visible = false;
+            return;
+        }
+        robotArrow.visible = true;
+        robotLabel.visible = true;
+        robotGroup.position.set(rx, ry, rz);
+        robotGroup.rotation.set(0, 0, ryaw);
+        const dir = new THREE.Vector3(Math.cos(ryaw), Math.sin(ryaw), 0);
+        robotArrow.setLength(Math.max(0.25, radius * 1.5), 0.14, 0.08);
+        robotArrow.position.set(rx, ry, rz + 0.08);
+        robotArrow.setDirection(dir);
+        robotLabel.position.set(rx, ry, rz + 0.35);
+    }
+
+    async function pollRobot() {
+        try {
+            const r = await fetch('/api/state', {cache: 'no-store'});
+            const j = await r.json();
+            const rb = j.robot;
+            if (rb && Number.isFinite(rb.x)) {
+                updateRobotPose(
+                    rb.x || 0, rb.y || 0, rb.z || 0, rb.yaw || 0,
+                    j.robot_footprint,
+                );
+            } else {
+                robotGroup.visible = false;
+                robotArrow.visible = false;
+                robotLabel.visible = false;
+            }
+        } catch (e) {}
+    }
+    pollRobot();
+    setInterval(pollRobot, 500);  // 2 Hz — same as the 2D map / panel
+                                  // pollers; matches /map publish rate
+                                  // and avoids redundant /api/state hits
+
+    // ── Scene Graph relation edges ────────────────────────────────────
+    const sgEdgeGroup = new THREE.Group();
+    sgEdgeGroup.name = 'scene-graph-edges';
+    scene.add(sgEdgeGroup);
+    const sgLabelGroup = new THREE.Group();
+    sgLabelGroup.name = 'scene-graph-labels';
+    scene.add(sgLabelGroup);
+
+    const SG_EDGE_COLORS = {
+      on_top_of: 0x4caf50,  // green
+      under:     0x4caf50,
+      inside:    0x2196f3,  // blue
+      contains:  0x2196f3,
+      near:      0x9e9e9e,  // gray
+      attached_to: 0xff9800, // orange
+      part_of:   0xff9800,
+      same_object: 0xf44336, // red
+    };
+
+    function makeSGLabel(text) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 48;
+      const ctx = c.getContext('2d');
+      ctx.font = 'bold 22px monospace';
+      ctx.fillStyle = '#e8eaed';
+      ctx.textAlign = 'center';
+      ctx.fillText(text, 128, 32);
+      const tex = new THREE.CanvasTexture(c);
+      const mat = new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false});
+      const s = new THREE.Sprite(mat);
+      s.scale.set(0.6, 0.12, 1);
+      return s;
+    }
+
+    function rebuildSGEdges(sgData) {
+      // Clear old edges
+      while (sgEdgeGroup.children.length) sgEdgeGroup.remove(sgEdgeGroup.children[0]);
+      while (sgLabelGroup.children.length) sgLabelGroup.remove(sgLabelGroup.children[0]);
+      if (!sgData || !sgData.edges || sgData.edges.length === 0) return;
+
+      // Build position lookup from current objectMeshes
+      const posMap = new Map();
+      for (const [id, entry] of objectMeshes) {
+        if (entry.data && entry.data.center) {
+          posMap.set(id, entry.data.center);
+        }
+      }
+
+      for (const edge of sgData.edges) {
+        const posA = posMap.get(edge.source_id);
+        const posB = posMap.get(edge.target_id);
+        if (!posA || !posB) continue;
+
+        const color = SG_EDGE_COLORS[edge.relation] || 0x757575;
+        const pts = new Float32Array([
+          posA[0], posA[1], posA[2],
+          posB[0], posB[1], posB[2],
+        ]);
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+        const mat = new THREE.LineBasicMaterial({
+          color, linewidth: 2, transparent: true, opacity: 0.7,
+        });
+        const line = new THREE.LineSegments(geom, mat);
+        sgEdgeGroup.add(line);
+
+        // Label at midpoint
+        const mx = (posA[0] + posB[0]) / 2;
+        const my = (posA[1] + posB[1]) / 2;
+        const mz = (posA[2] + posB[2]) / 2 + 0.05;
+        const label = makeSGLabel(edge.relation);
+        label.position.set(mx, my, mz);
+        sgLabelGroup.add(label);
+      }
+    }
+
+    // Poll scene graph edges at 0.2 Hz (every 5s — it updates at 30s)
+    async function pollSGEdges() {
+      try {
+        const r = await fetch('/api/state', {cache: 'no-store'});
+        const j = await r.json();
+        if (j.scene_graph) rebuildSGEdges(j.scene_graph);
+      } catch (e) {}
+    }
+    pollSGEdges();
+    setInterval(pollSGEdges, 5000);
+
+    // ── Color palette (deterministic per class) ────────────────────────
+    function classColor(cls) {
+        let h = 0;
+        for (let i = 0; i < cls.length; i++) h = (h * 131 + cls.charCodeAt(i)) & 0xffffff;
+        const hue = (h % 360) / 360;
+        const c = new THREE.Color();
+        c.setHSL(hue, 0.65, 0.6);
+        return c;
+    }
+
+    // ── Build/update object meshes from snapshot ───────────────────────
+    function rebuild(snapshot) {
+        const incomingIds = new Set();
+        let totalPts = 0;
+        for (const obj of snapshot.objects) {
+            incomingIds.add(obj.id);
+            totalPts += obj.points.length;
+            const colour = classColor(obj.cls);
+            let entry = objectMeshes.get(obj.id);
+            if (!entry) {
+                entry = { points: null, bboxLines: null, label: null, data: null, pickGroup: null };
+                objectMeshes.set(obj.id, entry);
+            }
+            // ── Points ──
+            const ptArr = new Float32Array(obj.points.length * 3);
+            for (let i = 0; i < obj.points.length; i++) {
+                ptArr[i*3+0] = obj.points[i][0];
+                ptArr[i*3+1] = obj.points[i][1];
+                ptArr[i*3+2] = obj.points[i][2];
+            }
+            if (entry.points) scene.remove(entry.points);
+            const ptGeom = new THREE.BufferGeometry();
+            ptGeom.setAttribute('position', new THREE.BufferAttribute(ptArr, 3));
+            const ptMat = new THREE.PointsMaterial({
+                color: colour, size: 0.025, sizeAttenuation: true,
+                transparent: true, opacity: 0.85,
+            });
+            entry.points = new THREE.Points(ptGeom, ptMat);
+            scene.add(entry.points);
+
+            // ── Bounding box edges (yaw-rotated, vertical Z) ──
+            // The Python side computed an OBB constrained to yaw-only
+            // (perception_concept_graphs.py:export_3d_snapshot) and
+            // gave us 8 corners that are already in world frame with
+            // Z-axis vertical. We must NOT min/max them — that would
+            // throw away the yaw rotation and give a grid-aligned box
+            // (the bug the user kept catching).
+            //
+            // Open3D's get_box_points() returns corners in this order:
+            //   0:(--+), 1:(+--), 2:(-+-), 3:(--+),
+            //   4:(+++), 5:(-++), 6:(+-+), 7:(++-)
+            // (signs along local x/y/z). 12 cube edges connect any
+            // pair differing in exactly one coordinate sign.
+            const c = obj.bbox_corners;
+            const O3D_EDGES = [
+                [0,1],[0,2],[0,3],[1,6],[1,7],[2,5],
+                [2,7],[3,5],[3,6],[4,5],[4,6],[4,7],
+            ];
+            const edgePts = new Float32Array(O3D_EDGES.length * 2 * 3);
+            for (let e = 0; e < O3D_EDGES.length; e++) {
+                const [a, b] = O3D_EDGES[e];
+                edgePts[e*6+0]=c[a][0]; edgePts[e*6+1]=c[a][1]; edgePts[e*6+2]=c[a][2];
+                edgePts[e*6+3]=c[b][0]; edgePts[e*6+4]=c[b][1]; edgePts[e*6+5]=c[b][2];
+            }
+            const edgeGeom = new THREE.BufferGeometry();
+            edgeGeom.setAttribute('position', new THREE.BufferAttribute(edgePts, 3));
+            if (entry.bboxLines) scene.remove(entry.bboxLines);
+            const edgeMat = new THREE.LineBasicMaterial({ color: colour, linewidth: 2 });
+            entry.bboxLines = new THREE.LineSegments(edgeGeom, edgeMat);
+            scene.add(entry.bboxLines);
+
+            // ── ctr + sz (Vector3 each) — used by label + click target ──
+            // Centroid of the 8 corners.
+            const ctr = new THREE.Vector3();
+            for (const p of c) ctr.add(new THREE.Vector3(p[0], p[1], p[2]));
+            ctr.multiplyScalar(1 / 8);
+            // Local axes from corner 0 — three edges of the box.
+            const ax = new THREE.Vector3(c[1][0]-c[0][0], c[1][1]-c[0][1], c[1][2]-c[0][2]);
+            const ay = new THREE.Vector3(c[2][0]-c[0][0], c[2][1]-c[0][1], c[2][2]-c[0][2]);
+            const az = new THREE.Vector3(c[3][0]-c[0][0], c[3][1]-c[0][1], c[3][2]-c[0][2]);
+            // sz keeps the Vector3 shape so `sz.x/sz.y/sz.z` work in
+            // the label code below (we got bitten by this last time —
+            // sz used to be a plain number and label position read
+            // `sz.z` as undefined, so labels disappeared).
+            const sz = new THREE.Vector3(ax.length(), ay.length(), az.length());
+            ax.normalize(); ay.normalize(); az.normalize();
+            const rotMat = new THREE.Matrix4().makeBasis(ax, ay, az);
+
+            // ── Click target — translucent rotated mesh ──
+            if (entry.pickGroup) scene.remove(entry.pickGroup);
+            const pickGeom = new THREE.BoxGeometry(
+                Math.max(sz.x, 0.01), Math.max(sz.y, 0.01), Math.max(sz.z, 0.01),
+            );
+            const pickMat = new THREE.MeshBasicMaterial({
+                color: colour, transparent: true, opacity: 0.0, depthWrite: false,
+            });
+            const pickMesh = new THREE.Mesh(pickGeom, pickMat);
+            pickMesh.position.copy(ctr);
+            pickMesh.quaternion.setFromRotationMatrix(rotMat);
+            pickMesh.userData = { id: obj.id, data: obj, bbox: entry.bboxLines };
+            entry.pickGroup = pickMesh;
+            scene.add(pickMesh);
+
+            // ── Label sprite ──
+            if (entry.label) scene.remove(entry.label);
+            const labelText = `${obj.cls} ×${obj.num_detections}`;
+            const cv = document.createElement('canvas');
+            cv.width = 256; cv.height = 64;
+            const ctx = cv.getContext('2d');
+            ctx.fillStyle = 'rgba(8,9,12,0.9)'; ctx.fillRect(0,0,cv.width,cv.height);
+            ctx.strokeStyle = '#'+colour.getHexString(); ctx.lineWidth = 2;
+            ctx.strokeRect(1,1,cv.width-2,cv.height-2);
+            ctx.fillStyle = '#'+colour.getHexString();
+            ctx.font = 'bold 28px ui-monospace, monospace';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(labelText, cv.width/2, cv.height/2);
+            const tex = new THREE.CanvasTexture(cv);
+            const spMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+            const sp = new THREE.Sprite(spMat);
+            sp.position.set(ctr.x, ctr.y, ctr.z + sz.z * 0.55 + 0.10);
+            sp.scale.set(0.6, 0.15, 1);
+            entry.label = sp;
+            scene.add(sp);
+
+            entry.data = obj;
+        }
+        // GC removed objects
+        for (const [id, entry] of [...objectMeshes.entries()]) {
+            if (incomingIds.has(id)) continue;
+            if (entry.points)    scene.remove(entry.points);
+            if (entry.bboxLines) scene.remove(entry.bboxLines);
+            if (entry.label)     scene.remove(entry.label);
+            if (entry.pickGroup) scene.remove(entry.pickGroup);
+            objectMeshes.delete(id);
+        }
+        // Rebuild pickables list
+        pickables.length = 0;
+        for (const e of objectMeshes.values()) if (e.pickGroup) pickables.push(e.pickGroup);
+        document.getElementById('hud-stats').textContent =
+            `objects: ${snapshot.objects.length} · points: ${totalPts}`;
+        document.getElementById('foot-time').textContent =
+            new Date(snapshot.stamp_unix * 1000).toLocaleTimeString();
+    }
+
+    async function poll() {
+        try {
+            const r = await fetch('/api/objects3d', {cache: 'no-store'});
+            const j = await r.json();
+            rebuild(j);
+        } catch (e) { console.warn('poll failed', e); }
+    }
+    poll();
+    setInterval(poll, 1000);
+
+    // ── WASD fly mode (camera-relative motion) ─────────────────────────
+    const keys = new Set();
+    window.addEventListener('keydown', e => {
+        if (e.target && e.target.tagName === 'INPUT') return;
+        keys.add(e.key.toLowerCase());
+        if (e.key === 'r' || e.key === 'R') resetView();
+        if (e.key === 'g' || e.key === 'G') { grid.visible = !grid.visible; }
+    });
+    window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+    function resetView() {
+        camera.position.set(4, 4, 4);
+        controls.target.set(0, 0, 0.5);
+        controls.update();
+    }
+
+    function tickFly(dt) {
+        // Speed in m/s. Shift accelerates.
+        let speed = 1.5 * dt;
+        if (keys.has('shift')) speed *= 3;
+        const fwd = new THREE.Vector3();
+        camera.getWorldDirection(fwd);
+        const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
+        const up = camera.up.clone();
+        const move = new THREE.Vector3();
+        if (keys.has('w')) move.addScaledVector(fwd, speed);
+        if (keys.has('s')) move.addScaledVector(fwd, -speed);
+        if (keys.has('d')) move.addScaledVector(right, speed);
+        if (keys.has('a')) move.addScaledVector(right, -speed);
+        if (keys.has('e')) move.addScaledVector(up, speed);
+        if (keys.has('q')) move.addScaledVector(up, -speed);
+        if (move.lengthSq() > 0) {
+            camera.position.add(move);
+            controls.target.add(move);
+        }
+    }
+
+    // ── Click pick ─────────────────────────────────────────────────────
+    function onClick(ev) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const mouse = new THREE.Vector2(
+            ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+            -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObjects(pickables, false);
+        if (highlighted) {
+            // Restore highlight
+            const prev = objectMeshes.get(highlighted);
+            if (prev && prev.bboxLines) prev.bboxLines.material.linewidth = 2;
+            highlighted = null;
+        }
+        if (hits.length === 0) {
+            const panel = document.getElementById('panel');
+            panel.classList.add('empty');
+            panel.innerHTML = 'click an object';
+            return;
+        }
+        const top = hits[0].object;
+        const data = top.userData.data;
+        highlighted = data.id;
+        const entry = objectMeshes.get(data.id);
+        if (entry && entry.bboxLines) entry.bboxLines.material.linewidth = 4;
+        const panel = document.getElementById('panel');
+        panel.classList.remove('empty');
+        const c = data.center;
+        panel.innerHTML = `
+          <h3>${data.cls}</h3>
+          <div class="row"><span class="k">id</span><span>${data.id.slice(0,12)}…</span></div>
+          <div class="row"><span class="k">center (m)</span><span>${c[0].toFixed(2)}, ${c[1].toFixed(2)}, ${c[2].toFixed(2)}</span></div>
+          <div class="row"><span class="k">observations</span><span>${data.num_detections}</span></div>
+          <div class="row"><span class="k">points</span><span>${data.n_points}</span></div>
+          <div class="row"><span class="k">conf (mean)</span><span>${data.conf_mean.toFixed(2)}</span></div>
+        `;
+    }
+    renderer.domElement.addEventListener('click', onClick);
+
+    // ── Resize ─────────────────────────────────────────────────────────
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // ── HUD collapse toggle ───────────────────────────────────────────
+    // Default: collapsed (just the ▸ arrow). Click to expand and reveal
+    // title + keymap; the arrow flips to ▾. Persists in localStorage.
+    const hudEl = document.getElementById('hud');
+    const hudHead = document.getElementById('hud-head');
+    const hudToggle = document.getElementById('hud-toggle');
+    const HUD_KEY = 'scene3dHud.expanded';
+    function setHud(expanded) {
+      hudEl.classList.toggle('expanded', expanded);
+      hudToggle.textContent = expanded ? '▾' : '▸';
+      try { localStorage.setItem(HUD_KEY, expanded ? '1' : '0'); } catch (_) {}
+    }
+    setHud(localStorage.getItem(HUD_KEY) === '1');
+    hudHead.addEventListener('click', () => setHud(!hudEl.classList.contains('expanded')));
+
+    // ── Render loop ────────────────────────────────────────────────────
+    let last = performance.now();
+    function loop(now) {
+        const dt = Math.min(0.1, (now - last) / 1000);
+        last = now;
+        tickFly(dt);
+        controls.update();
+        renderer.render(scene, camera);
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
