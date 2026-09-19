@@ -1,27 +1,43 @@
-# scene webui — 未决问题（2026-09-19 收工记录）
+# scene webui — 进展与未决问题（2026-09-20 凌晨）
 
-## 1. 右侧 dock 仍在刷新，加上过渡后一闪一闪
-现象：面板内容每个 tick 仍有重绘，`transition` 让重绘变成可见的闪烁。
-已做：对象表改为按 id 增量更新（`syncObjects`），relations / robot 两块改为
-      「渲染结果与现值不同才写 innerHTML」。
-仍不够：
-  - `drawChips` 之类每 tick 重建 innerHTML 的地方还没排查完；
-  - 过渡作用在每 tick 都被重新赋值的属性上时会反复触发，
-    应当只对「状态变化」加过渡，而不是对「被重写」加过渡。
-下一步：逐个 pane 审一遍写入点，凡是每 tick 必写的改成 diff；
-      dock 内的 transition 只保留在 hover / active / 选中这类真状态上。
+## 已解决（2026-09-19 夜 ~ 20 日凌晨）
 
-## 2. 按钮风格仍未统一
-已做：`shell.css` 增加共享 `.btn / .field / .tag`；maps 页与 dock 的动作按钮
-      已改用它们。
-仍不统一：
-  - `map_page.html`（regions 编辑页）还是自己那套 `.primary` / `button` 样式，
-    它是 iframe 页，拿不到 shell.css；
-  - `logs.html` 的工具条按钮也还是局部定义。
-下一步：要么把共享控件抽成独立 `controls.css` 并注入到 iframe 页，
-      要么把 regions 页也并入 shell 渲染（它本来就该重构）。
+**dock 闪烁**。真因不是过渡太慢，是过渡**反复重启**：`renderDetail()` 每
+tick 重写整个详情的 `innerHTML`，`.detail` 上的 `dock-in` 淡入于是每秒重放
+两次。改成「选中变了才重建结构，否则只写变化的值」。验证不靠肉眼：页面上
+挂 `MutationObserver` 跑 8 秒，结构重建 0 次、重复文本写入 0 次，剩下的
+childList 变动全部是真实值在动（observation 427→430、位姿末位抖动）；再监听
+`animationstart` / `transitionstart` 10 秒，0 次触发。
 
-## 3. rerun viewer 与启动死锁（二选一，尚未两全）
+**按钮风格**。抽出 `controls.css`，每个变量带兜底值，所以 iframe 页也能用；
+`__CONTROLS__` 占位注入 `map_page.html` 和 `combined.html`（后者是裸返回的，
+原本根本拿不到）。审计发现还有 **13 个按钮**从来没戴上 `.btn`——dock 的
+Rename / Delete 直接渲染成浏览器原生灰按钮。共享文件补了 `.btn.small` 和
+`.btn.icon` 两个尺寸修饰符（这正是当初漏掉它们的原因：没有能放它们的地方），
+三个页面交出各自的局部定义。现在 `grep` 不到任何没有 `.btn` 的按钮。
+
+**插值文案**。表里现在存「带 `{name}` 洞的整句」，`tv()` 填洞；填进去的值
+存在元素上（`data-i18n-vars`），所以切语言是重新填一遍而不是冻结在上一句。
+中文能把 id 放在和英文不同的位置——这正是当初拼接做不到、只能留英文的原因。
+
+**卡片详情**。英文里 `maps.health` 和 `maps.size` 都叫 "artifact"（中文本来
+是分开的），改为 "artifact health" / "artifact size"。两条路径不再是永远的
+`—`：provider 确实不给路径，但 scene 自己每次出预览图都在开这些文件，所以
+改由 `/contents` 汇报，且**文件不存在就不出这一行**。
+
+**regions 页**。它的本职是「圈住一组东西」，而那些东西原本画成 3.5px、60%
+透明、颜色和机器人几乎一样的点——你看得见有东西，看不出是什么，也分不出
+哪个是机器人。2D 图早就把这件事做对了（类别配色 + 常驻标签 + 退火排版），
+于是把那套抽成 `web_assets/labels.js`，两张图共用，而不是在 regions 页再写
+一份更差的。顺带修了配色表：原本 14 个类之外全是同一个灰，而感知实际产出的
+`potted_plant` / `picture_frame` 都不在表里。
+
+**侧边栏概念**。`semantic map` / `2D map` / `regions` 不是 `maps` 的同级——
+前三个是**同一张地图**的三个视图，第四个是另一种东西的库。平铺列出等于说
+机器人有四张地图。现在分组：「当前地图」标题下挂 3D / 2D / 区域，库和仪表
+各自独立。
+
+## 1. rerun viewer 与启动死锁（二选一，尚未两全）
 
 ### 今晚抓到的证据（2026-09-19 深夜）
 一次真实的 CMD_ACTIVATE 超时被完整抓下来了，不再是推测：
@@ -80,7 +96,7 @@ Python 写的看门狗都救不了——它自己也要 GIL。**进程内不存�
 recording id / `application_id` 与 viewer `url` 查询参数不匹配，而不是
 传输本身。
 
-## 4. scene 自己的日志曾经是被销毁的（已修）
+## 2. scene 自己的日志曾经是被销毁的（已修，留档）
 
 排查上面那些问题时最大的阻力：**scene service 的 logging 输出一条也没有**
 ——不在容器 stdout，不在 scribe，logs 页面里除了 scene 自己什么包都有。
@@ -106,7 +122,7 @@ bootstrap 起，scene 的日志既不落盘也不进控制台，是被**销毁**
 通往 scribe 的路。原生部署维持 bridge 原样，不会重复两份。
 现在 `scene.log` 里能看到 17 条 `[scene-service]` 启动日志了。
 
-## 4. 镜像 tag 被两个 worktree 抢（今晚踩到）
+## 3. 镜像 tag 被两个 worktree 抢
 
 `system/scene/scripts/start.sh` 里 `IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"`，
 两个 worktree 默认都用 `robonix-scene` 这一个可变 tag。今晚该 tag 指到了一个
@@ -127,6 +143,6 @@ bootstrap 起，scene 的日志既不落盘也不进控制台，是被**销毁**
 ## 4. 其它
 - 中文地图名：scene 侧已允许，但 `service-map-rbnx` 的 `_sanitize_map_id`
   仍是 ASCII 白名单，`客厅` 落盘成 `__`。跨仓库，待定。
-- 10 条带变量插值的状态文案仍是英文，需要带占位符的翻译机制。
-- 卡片详情里 `artifact path` / `preview path` 为空：`list_maps` 不返回这两个字段。
-- 卡片详情两行标签都叫 `artifact`（健康状态与体积），需要区分。
+- 端口探测曾经比它守护的服务器还严（不带 SO_REUSEADDR 的 bind），
+  一个开着的浏览器标签页就能让 viewer 整场不可用。已改为「问服务器会问的
+  问题」，并对真正还没关完的 listener 给一个共享的短等待。
