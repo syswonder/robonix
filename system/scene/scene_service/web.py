@@ -3714,18 +3714,20 @@ _USER_HTML = r"""<!doctype html>
     body[data-page="maps"] .actions,
     body[data-page="maps"] #region-list { display: none; }
 
-    /* The gate. Region marking is an operation on a specific map, so with
-       nothing bound it is not disabled-looking, it is absent, and what stands
-       in its place says where to go. */
-    #map-gate {
-      display: none; margin: 10px 0 0; padding: 12px;
+    /* A temporary map is still a map: marking and recognition work on it,
+       and the server carries both into the saved map when the session is
+       named (maps_save rebinds the annotation store with carry_current and
+       snapshots the objects). What it lacks is a name and persistence, which
+       is a fact to disclose beside the work rather than a reason to block
+       it. */
+    #map-note {
+      display: none; margin: 10px 0 0; padding: 10px 12px;
       border: 1px solid #3a3320; border-radius: 6px; background: #1d1a10;
-      color: #d9cfae; font-size: 12.5px; line-height: 1.55;
+      color: #d9cfae; font-size: 12px; line-height: 1.55;
     }
-    #map-gate a { color: #f0c050; }
-    body.unbound[data-page="regions"] #map-gate { display: block; }
-    body.unbound[data-page="regions"] .actions,
-    body.unbound[data-page="regions"] #region-list { display: none; }
+    #map-note a { color: #f0c050; }
+    #map-note b { color: #f0c050; }
+    body.unsaved-map #map-note { display: block; }
 
     /* Which map everything on screen is about, stated on both pages. */
     #bound-pill {
@@ -3756,13 +3758,13 @@ _USER_HTML = r"""<!doctype html>
         <div id="map-status"><span id="map-status-msg">Ready.</span><span class="mode-label">Map mode:</span><span id="mode-pill">unknown</span></div>
         <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
       </div>
-      <div id="map-gate">
-        <b>No map is bound.</b><br>
-        A region belongs to a map. There is a live mapping session running,
-        but until it is saved under a name there is nothing for a region to
-        belong to — it would be lost with the session.<br>
-        Go to <a href="/maps">maps</a> to save this session under a name, or
-        to load a map you already have.
+      <div id="map-note">
+        <b>临时地图（未保存） · temporary map</b><br>
+        标记区域和识别物体都照常可用。保存时它们会跟着一起存进去；
+        不保存则随本次会话结束丢失。<br>
+        Marking and recognition work normally here. Saving this session under
+        a name in <a href="/maps">maps</a> keeps the regions and objects with
+        it; without that, they end with the session.
       </div>
       <div class="actions">
         <button class="primary" id="btn-draw">✏ Mark region</button>
@@ -4705,15 +4707,17 @@ async function refresh() {
     const unsavedLive = mb && mb.source === 'default' && !mb.mode;
     // Bound means a named map: an unnamed live session is a session, not a
     // map, and anything marked on it has nothing to belong to afterwards.
-    const bound = !!(mb && mb.map_id && !unsavedLive);
-    document.body.classList.toggle('unbound', !bound);
+    // There is always a map: either a named one or the temporary session.
+    // The distinction the reader needs is whether it persists.
+    const saved = !!(mb && mb.map_id && !unsavedLive);
+    document.body.classList.toggle('unsaved-map', !saved);
     const pill = document.getElementById('bound-pill');
     const pillText = document.getElementById('bound-text');
     if (pill && pillText) {
-      pill.className = bound ? '' : 'none';
-      pillText.textContent = bound
+      pill.className = saved ? '' : 'none';
+      pillText.textContent = saved
         ? `${mb.map_id} · ${mb.mode || 'mode unknown'}`
-        : 'no map bound — live session';
+        : '临时地图 · temporary, unsaved';
     }
     document.getElementById('meta').textContent = mb
         ? (unsavedLive ? 'map: live session · unsaved' : `map: ${mb.map_id} · ${mb.mode || 'mode unknown'}`)

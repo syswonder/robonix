@@ -329,30 +329,38 @@ def test_regions_page_keeps_only_region_marking(page):
     )
 
 
-def test_marking_is_gated_on_a_bound_map(page):
-    """A region belongs to a map. With nothing bound the control is absent,
-    not disabled, and what stands in its place says where to go -- failing at
-    save time is how orphan regions were made."""
+def test_a_temporary_map_can_still_be_marked(page):
+    """A temporary map is still a map.
+
+    Marking regions and recognising objects work on an unnamed live session;
+    what it lacks is a name and persistence. The server agrees -- saving the
+    session rebinds the annotation store with carry_current and snapshots the
+    objects, so the marks come along. An earlier version of this page blocked
+    the marking, which refused something the backend supports and lost the
+    work it would not let you start.
+    """
     _goto(page, "/regions")
     page.wait_for_timeout(2500)
 
     frame = page.frame_locator("iframe")
-    unbound = frame.locator("body.unbound").count() > 0
+    assert frame.locator("#btn-draw").is_visible(), (
+        "region marking is not offered"
+    )
 
-    if unbound:
-        gate = frame.locator("#map-gate")
-        assert gate.is_visible(), "nothing is bound and no gate was shown"
-        assert "maps" in gate.inner_text().lower(), (
-            "the gate does not say where to go"
-        )
-        assert not frame.locator("#btn-draw").is_visible(), (
-            "marking is offered with no map bound"
+    if frame.locator("body.unsaved-map").count() > 0:
+        # Temporary: the one fact a reader cannot see is that it does not
+        # persist, so it is stated beside the work rather than in front of it.
+        note = frame.locator("#map-note")
+        assert note.is_visible(), "temporary map does not say it is temporary"
+        text = note.inner_text().lower()
+        assert "maps" in text, "the note does not say where to save it"
+        assert "session" in text or "会话" in text, (
+            "the note does not say what temporary costs"
         )
     else:
-        assert frame.locator("#btn-draw").is_visible(), (
-            "a map is bound but marking is not offered"
+        assert not frame.locator("#map-note").is_visible(), (
+            "a saved map is being described as temporary"
         )
-
 
 def test_the_bound_map_is_named_on_the_page(page):
     """Which map the thing in front of you describes is never left to be
@@ -362,7 +370,13 @@ def test_the_bound_map_is_named_on_the_page(page):
         page.wait_for_timeout(2000)
         pill = page.frame_locator("iframe").locator("#bound-pill")
         assert pill.is_visible(), f"{path} does not name the bound map"
-        assert pill.inner_text().strip(), f"{path} binding pill is empty"
+        text = pill.inner_text().strip()
+        assert text, f"{path} binding pill is empty"
+        # Either a named map, or the temporary session said in as many words.
+        # "no map bound" was the wrong reading: there is always a map.
+        assert "bound" not in text.lower(), (
+            f"{path} still describes the session as unbound: {text!r}"
+        )
 
 
 # ── The 2D map ─────────────────────────────────────────────────────────────
