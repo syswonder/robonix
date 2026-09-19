@@ -584,6 +584,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     # Sentences that carry a value. The placeholder stays inside the
     # translated sentence so each language can put it where it belongs;
     # Chinese does not order these the way English does.
+    "regions.legend": {"en": 'drag to pan · wheel to zoom', "zh": '拖动平移 · 滚轮缩放'},
     "st.verbSave": {"en": 'Save', "zh": '保存'},
     "st.verbLoad": {"en": 'Load', "zh": '加载'},
     "st.opFailed": {"en": '{verb} {id} failed: {error}', "zh": '{verb}「{id}」失败：{error}'},
@@ -976,6 +977,8 @@ _DOCK_JS = _asset("dock.js")
 
 _SHELL_CSS = _asset("shell.css")
 _CONTROLS_CSS = _asset("controls.css")
+# Shared by both maps: the class palette and the label placer.
+_LABELS_JS = _asset("labels.js")
 
 
 # ── The log view ───────────────────────────────────────────────────────────
@@ -1362,7 +1365,8 @@ def make_app(*, registry: ObjectRegistry,
         # rerun is absent, and stays reachable everywhere: the combined layout
         # embeds it, and a native install has nothing else.
         if _bare(request):
-            return HTMLResponse(_INDEX_HTML)
+            return HTMLResponse(
+                _INDEX_HTML.replace("__LABELS__", _LABELS_JS))
         # Always the built-in renderer. rerun's top-down view is the 3D
         # recording seen from above, point clouds included, and from above a
         # point cloud hides the floor plan it is drawn over.
@@ -2548,6 +2552,7 @@ def _user_html(page: str) -> str:
             # A framed page loads none of the shell's CSS, so the shared
             # controls travel with it rather than being redefined in it.
             .replace("__CONTROLS__", _CONTROLS_CSS)
+            .replace("__LABELS__", _LABELS_JS)
             .replace("__PAGE__", page)
             .replace("__I18N_RUNTIME__", _i18n_js())
             .replace('<h1 id="page-title" data-i18n="page.maps">Maps</h1>',

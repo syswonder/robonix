@@ -113,6 +113,7 @@
 </head>
 <body data-ready="loading" data-page="__PAGE__">
 <style>__CONTROLS__</style>
+<script>__LABELS__</script>
 <script>__I18N_RUNTIME__
 applyLang(langGet());</script>
 <style>
@@ -184,7 +185,7 @@ applyLang(langGet());</script>
       <div id="hint"></div>
       <div id="toast"></div>
       <div id="scene-status" role="status">loading Scene state…</div>
-      <div class="legend">drag to pan · wheel to zoom · hover a dot for its label</div>
+      <div class="legend" data-i18n="regions.legend"></div>
     </div>
   </div>
 </div>
@@ -258,7 +259,6 @@ let occLoadToken = 0;
 let drawMode = false;
 let draft = [];            // in-progress polygon vertices (world coords)
 let mouseWorld = null;     // live cursor position for the rubber-band edge
-let hoverObj = null;
 let selectedId = null;
 let selectedMapId = null;
 let savedMaps = [];
@@ -522,25 +522,52 @@ function draw() {
         ctx.textAlign = 'start';
     }
 
-    // objects — small translucent dots; label only on hover (readability:
-    // the underlay must stay legible, objects are a light overlay).
+    // Objects, named. A region is a boundary drawn around things, so the
+    // things have to be identifiable while you draw it -- anonymous dots in
+    // the robot's own blue asked for a room outline around what could have
+    // been anything, including the robot.
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    const anchors = [];
     for (const o of (state.objects || [])) {
         if (o.cls === 'robot') continue;
         const [px, py] = w2p(o.pose.x, o.pose.y);
-        ctx.globalAlpha = o.missing ? 0.25 : 0.6;
-        ctx.fillStyle = '#9ab8e8';
-        ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
-        ctx.globalAlpha = 1;
+        const colour = classColor(o.cls);
+        const r = 4;
+        ctx.globalAlpha = o.missing ? 0.3 : 0.9;
+        ctx.fillStyle = colour;
+        ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
         ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(14,16,21,0.9)';
         ctx.stroke();
+        ctx.globalAlpha = 1;
+        const text = o.cls;
+        anchors.push({
+            x: px, y: py, r: r, text: text, color: colour,
+            faint: !!o.missing,
+            w: ctx.measureText(text).width, h: 12,
+        });
     }
-    if (hoverObj) {
-        const [px, py] = w2p(hoverObj.pose.x, hoverObj.pose.y);
-        ctx.font = '12px ui-monospace, monospace'; ctx.textBaseline = 'middle';
-        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-        ctx.strokeText(hoverObj.cls, px + 8, py);
-        ctx.fillStyle = '#cfe0ff';
-        ctx.fillText(hoverObj.cls, px + 8, py);
+    if (anchors.length) {
+        // One solve for the set, keyed on the view: the map redraws while
+        // you pan, and a label that crawls is harder to read than one that
+        // overlaps.
+        const viewKey = `${pxPerM.toFixed(3)}:${center[0].toFixed(2)},` +
+                        `${center[1].toFixed(2)}:${c.width}x${c.height}`;
+        const boxes = placedLabels(anchors, c.width, c.height, viewKey);
+        for (let i = 0; i < anchors.length; i++) {
+            const a = anchors[i], b = boxes[i];
+            ctx.globalAlpha = a.faint ? 0.35 : 1.0;
+            drawLeader(ctx, b, a);
+            // A halo rather than a fill: the occupancy behind a label is
+            // white where the floor is free and dark where it is unknown,
+            // and no one fill colour reads on both.
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+            ctx.strokeText(a.text, b.x + LBL.PAD, b.y + b.h / 2);
+            ctx.fillStyle = a.color;
+            ctx.fillText(a.text, b.x + LBL.PAD, b.y + b.h / 2);
+            ctx.globalAlpha = 1;
+        }
     }
 
     // Robot marker: fixed-size, high-contrast body plus a long directional
@@ -1081,11 +1108,11 @@ c.addEventListener('mousemove', (ev) => {
             lastPos = [ev.offsetX, ev.offsetY];
         }
     } else if (!drawMode && state) {
-        hoverObj = null;
+        // (objects carry their own labels now; nothing to reveal on hover)
         for (const o of (state.objects || [])) {
             if (o.cls === 'robot') continue;
             const [px, py] = w2p(o.pose.x, o.pose.y);
-            if ((px - ev.offsetX) ** 2 + (py - ev.offsetY) ** 2 < 100) { hoverObj = o; break; }
+            if ((px - ev.offsetX) ** 2 + (py - ev.offsetY) ** 2 < 100) break;
         }
     }
     draw();
