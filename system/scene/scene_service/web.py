@@ -716,7 +716,8 @@ _INFO_PANEL_CSS = r"""
        to move; click ✕ to dismiss for this session. State is
        remembered in localStorage so refresh keeps your layout. */
     #info-fp {
-      position: fixed; top: 12px; left: 12px; z-index: 200;
+      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
+         navigation and swallowed clicks meant for it */
       width: 320px; max-height: calc(100vh - 24px);
       background: rgba(14, 16, 21, 0.94);
       border: 1px solid #303542; border-radius: 6px;
@@ -772,7 +773,8 @@ _INFO_PANEL_CSS = r"""
     #info-rels .rt { color: #f0c674; }
     /* "Show info" pill that appears once the panel is dismissed. */
     #info-show {
-      position: fixed; top: 12px; left: 12px; z-index: 200;
+      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
+         navigation and swallowed clicks meant for it */
       padding: 4px 10px; font-size: 11px;
       background: rgba(14, 16, 21, 0.94); border: 1px solid #303542;
       border-radius: 4px; color: #889; cursor: pointer;
@@ -2161,7 +2163,8 @@ _COMBINED_HTML = r"""<!doctype html>
        to move; click ✕ to dismiss for this session. State is
        remembered in localStorage so refresh keeps your layout. */
     #info-fp {
-      position: fixed; top: 12px; left: 12px; z-index: 200;
+      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
+         navigation and swallowed clicks meant for it */
       width: 320px; max-height: calc(100vh - 24px);
       background: rgba(14, 16, 21, 0.94);
       border: 1px solid #303542; border-radius: 6px;
@@ -2217,7 +2220,8 @@ _COMBINED_HTML = r"""<!doctype html>
     #info-rels .rt { color: #f0c674; }
     /* "Show info" pill that appears once the panel is dismissed. */
     #info-show {
-      position: fixed; top: 12px; left: 12px; z-index: 200;
+      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
+         navigation and swallowed clicks meant for it */
       padding: 4px 10px; font-size: 11px;
       background: rgba(14, 16, 21, 0.94); border: 1px solid #303542;
       border-radius: 4px; color: #889; cursor: pointer;

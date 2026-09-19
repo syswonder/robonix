@@ -27,6 +27,7 @@ Requires `playwright` and its Chromium download:
 from __future__ import annotations
 
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -48,7 +49,7 @@ pytest.importorskip(
     reason="playwright is not installed; see this module's docstring",
 )
 
-from playwright.sync_api import sync_playwright  # noqa: E402
+from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 
 def _scene_is_up() -> bool:
@@ -128,11 +129,16 @@ def test_camera_shows_both_streams(page):
     """RGB and depth, side by side, each labelled with its own format and the
     stamp they share. One stream alone means the pair fell out of step."""
     _goto(page, "/cam")
-    page.wait_for_timeout(1500)
 
-    body = page.inner_text("body").lower()
-    assert "rgb" in body, "camera page has no RGB panel"
-    assert "depth" in body, "camera page has no depth panel"
+    # The pages are a sidebar shell around an iframe, so the panels are in the
+    # child document: page.inner_text("body") sees the shell and reports an
+    # empty camera page while the camera is plainly running. The panels also
+    # label themselves only once a frame lands, so this waits for the data
+    # rather than for a guessed delay, which would test the simulator's frame
+    # rate instead of the page.
+    inner = page.frame_locator("iframe").locator("body")
+    expect(inner).to_contain_text(re.compile("rgb", re.I), timeout=20000)
+    expect(inner).to_contain_text(re.compile("depth", re.I), timeout=20000)
     assert not page.errors, f"camera page logged console errors: {page.errors[:3]}"
 
 
