@@ -1961,6 +1961,7 @@ async def _run_active(config: dict) -> None:
             ops_lock=map_ops_lock,
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
+            object_mutations=object_mutations,
         )
         web_uv = uvicorn.Config(
             app=web_app,

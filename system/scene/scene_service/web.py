@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from starlette.applications import Starlette
@@ -421,16 +422,42 @@ function draw(state) {
     // a couple of edges existed; relations now read as an explicit text
     // list in the floating info panel (see `info-rels` in _COMBINED_HTML).
 
-    // robot heading arrow
+    // Robot pose: the same disc and arrow the plan view draws, so the same
+    // robot does not look like two different things depending on the page.
+    // Screen pixels, because a heading does not matter less when zoomed out.
     if (robot) {
         const yaw = robot.pose.yaw || 0;
         const [rx, ry] = w2p(robot.pose.x, robot.pose.y);
-        const len = 22;
-        ctx.strokeStyle = classColor('robot'); ctx.lineWidth = 3;
+        const R = 8, TIP = 34, HALF = 7;
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
         ctx.beginPath();
-        ctx.moveTo(rx, ry);
-        ctx.lineTo(rx + Math.cos(yaw) * len, ry - Math.sin(yaw) * len);
+        ctx.moveTo(TIP, 0);
+        ctx.lineTo(R + 2, -HALF);
+        ctx.lineTo(R + 2, HALF);
+        ctx.closePath();
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
         ctx.stroke();
+
+        // A dark ring under the body: the occupancy behind it is white where
+        // the floor is free and near-black where it is unknown.
+        ctx.beginPath();
+        ctx.arc(0, 0, R + 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(8, 11, 17, 0.55)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(0, 0, R, 0, Math.PI * 2);
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
+        ctx.restore();
         ctx.lineWidth = 1;
     }
 
@@ -887,6 +914,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "nav.2d":          {"en": "2D map",       "zh": "平面图"},
     "nav.cam":         {"en": "camera",       "zh": "相机"},
     "nav.regions":     {"en": "regions",      "zh": "区域"},
+    "nav.logs":        {"en": "logs",          "zh": "日志"},
     "nav.lang":        {"en": "中文",          "zh": "English"},
     "nav.lang.title":  {"en": "switch to Chinese", "zh": "switch to English"},
     # the dock
@@ -900,6 +928,23 @@ _STRINGS: dict[str, dict[str, str]] = {
     "dock.robot.hint":     {"en": "where it thinks it is",
                             "zh": "机器人认为自己在哪"},
     "dock.collapse":   {"en": "collapse the dock", "zh": "折叠面板"},
+    "dock.back":       {"en": "back to the list", "zh": "返回列表"},
+    "dock.rename":     {"en": "Rename",  "zh": "重命名"},
+    "dock.delete":     {"en": "Delete",  "zh": "删除"},
+    "dock.class":      {"en": "class",        "zh": "类别"},
+    "dock.id":         {"en": "id",           "zh": "标识"},
+    "dock.conf":       {"en": "confidence",   "zh": "置信度"},
+    "dock.obs":        {"en": "observations", "zh": "观测次数"},
+    "dock.pos":        {"en": "position",     "zh": "位置"},
+    "dock.missing":    {"en": "not seen recently", "zh": "近期未见"},
+    "dock.renamePrompt": {"en": "New name for this object",
+                          "zh": "给这个物体起个新名字"},
+    "dock.deleteAsk":  {"en": "Delete this object from the map?",
+                        "zh": "把这个物体从地图上删除？"},
+    "dock.save":       {"en": "Save",    "zh": "保存"},
+    "dock.cancel":     {"en": "Cancel",  "zh": "取消"},
+    "dock.gone":       {"en": "this object is no longer in the map",
+                        "zh": "这个物体已不在地图里"},
     "dock.resize":     {"en": "drag to resize",    "zh": "拖动改变宽度"},
     "dock.empty.objects":   {"en": "nothing in the registry yet",
                              "zh": "registry 里还没有东西"},
@@ -916,6 +961,66 @@ _STRINGS: dict[str, dict[str, str]] = {
                         "zh": "标记区域和识别物体都照常可用。把本次会话命名保存后，"
                               "区域和物体会一起存进去；不保存则随会话结束丢失。"},
     "note.link":       {"en": "Go to maps", "zh": "前往地图管理"},
+    # the map form
+    "form.mapid":      {"en": "Map ID",        "zh": "地图 ID"},
+    "form.save":       {"en": "Save current",  "zh": "保存当前"},
+    "form.refresh":    {"en": "Refresh",       "zh": "刷新"},
+    "form.pose":       {"en": "Pose estimate", "zh": "位姿估计"},
+    "form.mode":       {"en": "Map mode:",     "zh": "地图模式："},
+    "form.nomaps":     {"en": "No saved maps listed yet.",
+                        "zh": "还没有已保存的地图。"},
+    "status.ready":    {"en": "Ready.", "zh": "就绪。"},
+    # region marking
+    "btn.mark":        {"en": "✏ Mark region",     "zh": "✏ 标记区域"},
+    "btn.cancelDraw":  {"en": "✕ Cancel drawing",  "zh": "✕ 取消绘制"},
+    "regions.empty":   {"en": "No regions yet. Click “Mark region”, then click "
+                              "on the map to outline one (double-click or "
+                              "Enter to finish, Esc to cancel).",
+                        "zh": "还没有区域。点「标记区域」，然后在地图上点击勾出"
+                              "轮廓（双击或回车完成，Esc 取消）。"},
+    # row actions and dialogs
+    "btn.load":        {"en": "Load",        "zh": "加载"},
+    "btn.delete":      {"en": "Delete",      "zh": "删除"},
+    "btn.rename":      {"en": "Rename",      "zh": "重命名"},
+    "btn.stillValid":  {"en": "Still valid", "zh": "仍然有效"},
+    "btn.cancel":      {"en": "Cancel",      "zh": "取消"},
+    "btn.ok":          {"en": "OK",          "zh": "确定"},
+    "btn.close":       {"en": "Close",       "zh": "关闭"},
+    # the log view
+    "logs.title":      {"en": "Logs",     "zh": "日志"},
+    "logs.live":       {"en": "Live",     "zh": "实时"},
+    "logs.paused":     {"en": "Paused",   "zh": "已暂停"},
+    "logs.clear":      {"en": "Clear",    "zh": "清空"},
+    "logs.search":     {"en": "filter text…", "zh": "过滤文本…"},
+    "logs.alltags":    {"en": "all tags", "zh": "全部来源"},
+    "logs.waiting":    {"en": "waiting for lines…", "zh": "等待日志…"},
+    "logs.nodir":      {"en": "This deployment did not set SCRIBE_LOG_DIR, so "
+                              "there is no log directory to read.",
+                        "zh": "本部署没有设置 SCRIBE_LOG_DIR，没有可读的日志目录。"},
+    "logs.hint":       {"en": "levels are counted over what this page has "
+                              "received, not the whole boot",
+                        "zh": "级别计数只统计本页收到的部分，不是整次启动"},
+    # status and progress text the map page writes as it works
+    "st.saveValidate": {"en": 'Validate existing spatial artifact', "zh": '校验已有空间产物'},
+    "st.savePersist": {"en": 'Persist regions and Scene objects', "zh": '保存区域与场景物体'},
+    "st.saveVerify": {"en": 'Verify reusable map entry', "zh": '确认地图条目可复用'},
+    "st.saveSnapshot": {"en": 'Snapshot the live spatial map', "zh": '快照当前空间地图'},
+    "st.saveArtifact": {"en": 'Verify artifact and preview', "zh": '校验产物并生成预览'},
+    "st.updatedFor": {"en": 'Updated scene data for', "zh": '已更新场景数据：'},
+    "st.updated": {"en": 'Scene data updated', "zh": '场景数据已更新'},
+    "st.saveFailed": {"en": 'Save validation failed', "zh": '保存校验失败'},
+    "st.loadValidate": {"en": 'Validate saved spatial artifact', "zh": '校验已保存的空间产物'},
+    "st.loadSwitch": {"en": 'Switch Mapping to localization mode', "zh": '切换建图为定位模式'},
+    "st.loadGrid": {"en": 'Wait for a fresh occupancy grid', "zh": '等待新的占据栅格'},
+    "st.loadRestore": {"en": 'Restore regions and Scene objects', "zh": '恢复区域与场景物体'},
+    "st.poseClick": {"en": 'Click pose on map', "zh": '在地图上点击位姿'},
+    "st.poseSent": {"en": 'Pose estimate sent.', "zh": '位姿估计已发送。'},
+    "st.refreshing": {"en": 'Refreshing maps...', "zh": '正在刷新地图列表…'},
+    "st.refreshed": {"en": 'Map list refreshed.', "zh": '地图列表已刷新。'},
+    "st.drawHint": {"en": 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel', "zh": '点击添加顶点 · 双击或回车完成（≥3）· Esc 取消'},
+    "st.nameRequired": {"en": 'Region name is required.', "zh": '区域名称不能为空。'},
+    "st.liveUnsaved": {"en": 'Live mapping session is not saved yet. Enter a Map ID, then Save current. ', "zh": '当前是未保存的建图会话。填写地图 ID 后点「保存当前」。'},
+    "st.localization": {"en": 'Localization mode is active. Use Pose estimate if the robot pose is off.', "zh": '定位模式已启用。位姿不对时用「位姿估计」。'},
     # page titles
     "page.maps":       {"en": "Maps",    "zh": "地图"},
     "page.regions":    {"en": "Regions", "zh": "区域"},
@@ -948,6 +1053,8 @@ function applyLang(lang, root) {
     el => { el.textContent = t(el.dataset.i18n, lang); });
   d.querySelectorAll('[data-i18n-title]').forEach(
     el => { el.title = t(el.dataset.i18nTitle, lang); });
+  d.querySelectorAll('[data-i18n-ph]').forEach(
+    el => { el.placeholder = t(el.dataset.i18nPh, lang); });
   d.querySelectorAll('[data-i18n-aria]').forEach(
     el => { el.setAttribute('aria-label', t(el.dataset.i18nAria, lang)); });
 }
@@ -983,6 +1090,7 @@ _NAV_LINKS = (
     ("/2d", "2D map", "nav.2d"),
     ("/cam", "camera", "nav.cam"),
     ("/regions", "regions", "nav.regions"),
+    ("/logs", "logs", "nav.logs"),
 )
 
 
@@ -1008,12 +1116,122 @@ _NAV_ICONS = {
     "/cam": _ICON.format(
         '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/>'
         '<circle cx="12" cy="13" r="3.2"/>'),
+    # stacked lines, one short: the log
+    "/logs": _ICON.format(
+        '<path d="M4 6.5h13M4 11h16M4 15.5h11M4 20h7"/>'),
     # an outlined area with a pin: regions
     "/regions": _ICON.format(
         '<path d="M4 6.5 10 4l4 2.5L20 4v13.5L14 20l-4-2.5L4 20z"/>'
         '<circle cx="12" cy="10.5" r="1.6"/>'),
 }
 
+
+
+# ── Scribe log reader ──────────────────────────────────────────────────────
+# One file per tag, one JSON object per line, append-only. That last property
+# is what makes a byte offset a valid cursor and the poll cheap.
+
+# Ordered so "at least warning" is a comparison rather than a set membership.
+_LOG_LEVELS = ("debug", "info", "warn", "error")
+_LOG_LEVEL_INDEX = {name: i for i, name in enumerate(_LOG_LEVELS)}
+
+# How much of each file to show on a first load. Enough to cover a boot's
+# worth of interesting lines, small enough that opening the page is instant.
+_LOG_TAIL_BYTES = 120_000
+# A single poll's ceiling, so a service that suddenly floods cannot make the
+# response unbounded.
+_LOG_MAX_NEW_BYTES = 400_000
+
+
+def _scribe_dir() -> Optional[Path]:
+    """Where rbnx put this deployment's logs, or None if it did not say.
+
+    A native run outside rbnx has no SCRIBE_LOG_DIR, and the honest answer
+    then is that there is nothing to show -- not a guessed path that silently
+    reads someone else's deployment.
+    """
+    raw = (os.environ.get("SCRIBE_LOG_DIR") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_dir() else None
+
+
+def _normalise_level(value: str) -> str:
+    name = str(value or "").strip().lower()
+    if name in ("warning",):
+        return "warn"
+    if name in ("critical", "fatal"):
+        return "error"
+    if name in ("trace",):
+        return "debug"
+    return name if name in _LOG_LEVEL_INDEX else "info"
+
+
+def _read_log_slice(path: Path, offset: Optional[int]) -> tuple[list[dict], int]:
+    """Lines appended since `offset`, and the offset to use next.
+
+    `offset` of None means "first look": take the tail rather than the file,
+    which on a long-running deployment is the difference between a page that
+    opens now and one that ships a hundred megabytes first.
+
+    A file that shrank was rotated or replaced, so the old offset describes a
+    file that no longer exists and the only correct thing is to start over.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], offset or 0
+
+    start = offset
+    if start is None or start > size:
+        start = max(0, size - _LOG_TAIL_BYTES)
+    if size - start > _LOG_MAX_NEW_BYTES:
+        start = size - _LOG_MAX_NEW_BYTES
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            blob = handle.read(size - start)
+    except OSError:
+        return [], size
+
+    # A read can land mid-line at both ends: drop a leading partial whenever
+    # we did not start at a known line boundary, and keep a trailing partial
+    # out of the cursor so the next poll picks the whole line up.
+    consumed = start + len(blob)
+    if blob and not blob.endswith(b"\n"):
+        cut = blob.rfind(b"\n")
+        if cut < 0:
+            return [], start
+        consumed = start + cut + 1
+        blob = blob[:cut + 1]
+    text = blob.decode("utf-8", "replace")
+    lines = text.split("\n")
+    if start > 0 and offset is None and lines:
+        lines = lines[1:]
+
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            # Not every line is scribe's: a package that writes a bare
+            # traceback to stderr lands here too, and dropping it would hide
+            # exactly the thing someone opened this page to find.
+            out.append({"ts": "", "level": "info", "tag": path.stem,
+                        "msg": line, "raw": True})
+            continue
+        out.append({
+            "ts": str(row.get("ts") or ""),
+            "level": _normalise_level(row.get("level")),
+            "tag": str(row.get("tag") or path.stem),
+            "msg": str(row.get("msg") or ""),
+        })
+    return out, consumed
 
 def _nav(active: str) -> str:
     """The sidebar every page shares.
@@ -1109,6 +1327,56 @@ _DOCK_CSS = r"""
     .dock .pane.on { display: block; }
     .dock .empty { color: #555; font-size: 12px; }
 
+    /* A row is a thing you can open, so it says so on hover. */
+    .dock tr.row { cursor: pointer; }
+    .dock tr.row:hover td { background: #1c2230; }
+    /* Name first and large: scanning a list for the one you mean is a
+       reading task, and the name and class are the whole content of it. */
+    .dock td.nm { color: var(--fg); font-family: var(--font-ui);
+                  font-size: 12.5px; white-space: nowrap; }
+
+    .dock .detail { padding: 10px 0 8px; margin-top: 10px;
+                    border-top: 1px solid var(--line); }
+    /* With the detail below rather than over the list, the highlight is the
+       only thing saying which row it describes. */
+    .dock tr.row.sel td { background: #1b2740; }
+    .dock tr.row.sel td.nm { color: var(--acc); }
+    .dock .detail .back {
+      display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px;
+      background: none; border: 0; padding: 0; cursor: pointer;
+      color: var(--muted); font: inherit; font-size: 12px; }
+    .dock .detail .back:hover { color: var(--fg); }
+    .dock .detail h3 { margin: 0 0 2px; font-size: 15px; color: var(--fg);
+                       font-weight: 600; word-break: break-word; }
+    .dock .detail .sub { color: #f0c674; font-size: 12px; margin-bottom: 10px; }
+    .dock .detail dl { margin: 0 0 12px; display: grid;
+                       grid-template-columns: auto 1fr; gap: 4px 12px; }
+    .dock .detail dt { color: var(--muted); font-size: 11.5px; }
+    .dock .detail dd { margin: 0; font-family: var(--font-mono);
+                       font-size: 11.5px; color: var(--fg);
+                       word-break: break-all; }
+    .dock .detail .warn { color: #e0a050; }
+    .dock .detail .acts { display: flex; gap: 8px; }
+    .dock .detail .acts button {
+      flex: 1; padding: 6px 0; border-radius: 5px; cursor: pointer;
+      background: #12161e; border: 1px solid var(--line); color: var(--fg);
+      font: inherit; font-size: 12px; }
+    .dock .detail .acts button:hover { background: #1c2230; }
+    .dock .detail .acts .danger { color: #e5484d; border-color: #452226; }
+    .dock .detail .acts .danger:hover { background: #241417; }
+    .dock .detail .edit { display: flex; gap: 6px; margin-bottom: 10px; }
+    .dock .detail .edit input {
+      flex: 1; min-width: 0; padding: 5px 8px; border-radius: 5px;
+      background: #0e1218; border: 1px solid var(--acc); color: var(--fg);
+      font: inherit; font-size: 13px; }
+    .dock .detail .edit button { padding: 5px 10px; }
+    /* The confirming button is the red one, so the destructive option is
+       never the one the cursor is already resting on. */
+    .dock .detail .acts .confirm { color: #e5484d; border-color: #452226;
+                                   background: #241417; }
+    .dock .detail .said { margin-top: 9px; font-size: 11.5px; color: #e0a050;
+                          min-height: 1em; }
+
     /* Data is where monospace earns its place: these columns line up. */
     .dock table { width: 100%; border-collapse: collapse;
                   font-family: var(--font-mono); font-size: 11px; }
@@ -1189,9 +1457,10 @@ def _dock_html() -> str:
       </div>
       <div class="panes">
         <div class="pane on" data-pane="objects">
-          <table><tbody id="dock-objs">
+          <table class="objs"><tbody id="dock-objs">
             <tr><td class="empty">—</td></tr>
           </tbody></table>
+          <div id="dock-detail" hidden></div>
         </div>
         <div class="pane" data-pane="relations">
           <div id="dock-rels"><span class="empty">—</span></div>
@@ -1282,6 +1551,172 @@ _DOCK_JS = r"""
       show(s.tab || 'objects');
     })();
 
+    // ── The detail view ──
+    // One object, and the two corrections perception makes necessary often
+    // enough that having to leave the panel to apply them is the wrong shape.
+    let lastObjects = [];
+    let lastBinding = null;
+    let selectedId = null;
+    const detail = document.getElementById('dock-detail');
+
+    function openDetail(oid) {
+      // Clicking the open row closes it, so the control is its own undo.
+      selectedId = (selectedId === oid) ? null : oid;
+      renderDetail();
+    }
+    function closeDetail() { selectedId = null; renderDetail(); }
+    function markSelected() {
+      document.querySelectorAll('#dock-objs tr.row').forEach(
+        tr => tr.classList.toggle('sel', tr.dataset.oid === selectedId));
+    }
+    // The 2D map opens objects here too; it is the view we draw ourselves,
+    // so a click on a dot can say which object it was.
+    window.addEventListener('message', e => {
+      const oid = e.data && e.data.sceneSelect;
+      if (oid) { show('objects'); openDetail(oid); }
+    });
+
+    function say(text, el) { el.textContent = text || ''; }
+
+    function detailBusy() {
+      // An open rename field or delete confirmation means the reader owns
+      // this pane until they finish or cancel.
+      return !!(detail.querySelector('.edit')
+                || detail.querySelector('.acts[data-asking]'));
+    }
+
+    function renderDetail(force) {
+      if (!force && detailBusy()) return;
+      markSelected();
+      if (!selectedId) { detail.hidden = true; detail.innerHTML = ''; return; }
+      const o = lastObjects.find(x => x.id === selectedId);
+      detail.hidden = false;
+      if (!o) {
+        // It was deleted, or the map changed under it. Say so rather than
+        // leave a stale card that still offers to rename something gone.
+        // Not an error: objects are re-registered as perception revises
+        // itself, and the honest thing is to say the subject moved on.
+        detail.innerHTML = `<div class="detail">
+          <div class="said">${t('dock.gone')}</div></div>`;
+        applyLang(langGet(), document);
+        return;
+      }
+      const unsure = Number(o.confidence) < UNSURE;
+      detail.innerHTML = `<div class="detail">
+        <h3>${o.short_id}</h3>
+        <div class="sub">${o.cls}${unsure ? ' ?' : ''}</div>
+        <dl>
+          <dt data-i18n="dock.id"></dt><dd>${o.id}</dd>
+          <dt data-i18n="dock.conf"></dt>
+          <dd class="${unsure ? 'warn' : ''}">${fmt(o.confidence)}</dd>
+          <dt data-i18n="dock.obs"></dt><dd>${o.observation_count ?? '—'}</dd>
+          <dt data-i18n="dock.pos"></dt>
+          <dd>${fmt(o.pose.x)}, ${fmt(o.pose.y)}, ${fmt(o.pose.z ?? 0)}</dd>
+          ${o.missing ? `<dt></dt><dd class="warn">${t('dock.missing')}</dd>` : ''}
+        </dl>
+        <div class="acts">
+          <button class="ren" data-i18n="dock.rename"></button>
+          <button class="danger del" data-i18n="dock.delete"></button>
+        </div>
+        <div class="said" id="dock-said"></div>
+      </div>`;
+      const said = detail.querySelector('#dock-said');
+      detail.querySelector('.ren').addEventListener('click',
+        () => rename(o, said));
+      detail.querySelector('.del').addEventListener('click',
+        () => remove(o, said));
+      applyLang(langGet(), document);
+    }
+
+    // The epoch the page rendered travels with the edit, so a correction
+    // aimed at this object cannot land on a different map after a switch.
+    function epoch() {
+      return {
+        expected_map_id: (lastBinding && lastBinding.map_id) || '',
+        expected_generation: (lastBinding && lastBinding.generation) ?? null,
+      };
+    }
+
+    function rename(o, said) {
+      // In place: the browser's prompt() is a different typeface, palette and
+      // button order, and it suspends the page while it is open.
+      const head = detail.querySelector('h3');
+      if (!head || detail.querySelector('.edit')) return;
+      const box = document.createElement('div');
+      box.className = 'edit';
+      box.innerHTML = `<input value="${o.cls}" />
+        <button class="ok" data-i18n="dock.save"></button>
+        <button class="no" data-i18n="dock.cancel"></button>`;
+      head.replaceWith(box);
+      const field = box.querySelector('input');
+      const restore = () => { box.replaceWith(head); };
+      const commit = () => {
+        const label = field.value.trim();
+        if (!label) { restore(); return; }
+        restore();
+        saveLabel(o, label, said);
+      };
+      box.querySelector('.ok').addEventListener('click', commit);
+      box.querySelector('.no').addEventListener('click', restore);
+      field.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        if (e.key === 'Escape') { e.preventDefault(); restore(); }
+      });
+      applyLang(langGet(), document);
+      field.focus();
+      field.select();
+    }
+
+    async function saveLabel(o, label, said) {
+      try {
+        const r = await fetch(`/api/objects/${encodeURIComponent(o.id)}/label`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(Object.assign({label: label}, epoch())),
+        });
+        const d = await r.json();
+        say(d.ok ? '' : (d.detail || 'failed'), said);
+      } catch (e) { say(String(e), said); }
+    }
+
+    function remove(o, said) {
+      // Asks in the panel rather than through the browser, and the confirming
+      // button is the red one.
+      const acts = detail.querySelector('.acts');
+      if (!acts || acts.dataset.asking) return;
+      acts.dataset.asking = '1';
+      const original = acts.innerHTML;
+      say(t('dock.deleteAsk'), said);
+      acts.innerHTML = `<button class="confirm" data-i18n="dock.delete"></button>
+        <button class="no" data-i18n="dock.cancel"></button>`;
+      const undo = () => {
+        acts.innerHTML = original;
+        delete acts.dataset.asking;
+        say('', said);
+        acts.querySelector('.ren').addEventListener('click',
+          () => rename(o, said));
+        acts.querySelector('.del').addEventListener('click',
+          () => remove(o, said));
+        applyLang(langGet(), document);
+      };
+      acts.querySelector('.no').addEventListener('click', undo);
+      acts.querySelector('.confirm').addEventListener('click',
+        () => doDelete(o, said));
+      applyLang(langGet(), document);
+    }
+
+    async function doDelete(o, said) {
+      try {
+        const r = await fetch(`/api/objects/${encodeURIComponent(o.id)}`, {
+          method: 'DELETE',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(epoch()),
+        });
+        const d = await r.json();
+        if (d.ok) { closeDetail(); } else { say(d.detail || 'failed', said); }
+      } catch (e) { say(String(e), said); }
+    }
+
     // ── /api/state → the panes ──
     const fmt = n => Number(n).toFixed(2);
     const shortId = id => String(id).split('.').pop();
@@ -1296,25 +1731,47 @@ _DOCK_JS = r"""
         const r = await fetch('/api/state', {cache: 'no-store'});
         if (r.ok) {
           const s = await r.json();
+          lastBinding = s.map_binding || null;
           const objs = (s.objects || []).slice().sort(
             (a, b) => a.cls.localeCompare(b.cls));
           const edges = (s.scene_graph && s.scene_graph.edges) || [];
           const unsure = objs.filter(o => Number(o.confidence) < UNSURE).length;
 
+          // No timestamp: a unix float tells a reader nothing they can
+          // act on and rewrites itself twice a second, which made the one
+          // line meant to be stable chrome the busiest thing in the panel.
           document.getElementById('dock-stamp').textContent =
-            `${objs.length} obj${unsure ? ' · ' + unsure + '?' : ''}` +
-            ` · ${edges.length} rel · t=${fmt(s.stamp_unix)}`;
+            `${objs.length}${unsure ? ' · ' + unsure + '?' : ''}`;
 
+          lastObjects = objs;
           const tb = document.getElementById('dock-objs');
           tb.innerHTML = objs.length ? objs.map(o => `
-            <tr class="${Number(o.confidence) < UNSURE ? 'unsure' : ''}">
-              <td class="id">${o.short_id}</td>
+            <tr class="row ${Number(o.confidence) < UNSURE ? 'unsure' : ''}"
+                data-oid="${o.id}">
+              <td class="nm">${o.short_id}</td>
               <td class="cls">${o.cls}</td>
               <td class="pp ${o.missing ? 'miss' : ''}">
-                ${fmt(o.pose.x)},${fmt(o.pose.y)} · ${fmt(o.confidence)}
+                ${fmt(o.pose.x)}, ${fmt(o.pose.y)}
               </td>
             </tr>`).join('')
             : `<tr><td class="empty">${t('dock.empty.objects')}</td></tr>`;
+          tb.querySelectorAll('tr.row').forEach(tr => {
+            tr.addEventListener('click', () => openDetail(tr.dataset.oid));
+          });
+          if (selectedId) {
+            // A selection that no longer exists outranks an open edit: the
+            // thing being edited is gone, and the card would otherwise offer
+            // to rename and delete a ghost.
+            const alive = lastObjects.some(x => x.id === selectedId);
+            if (!alive) {
+              detail.querySelectorAll('.edit').forEach(e => e.remove());
+              const acts = detail.querySelector('.acts[data-asking]');
+              if (acts) delete acts.dataset.asking;
+              renderDetail(true);
+            } else if (!detailBusy()) {
+              renderDetail();
+            }
+          }
 
           const rel = document.getElementById('dock-rels');
           rel.innerHTML = edges.length ? edges.map(e => `
@@ -1384,6 +1841,250 @@ _SHELL_CSS = """
   .msg{padding:24px;color:var(--muted);max-width:560px}
   .msg a{color:var(--acc)}
   .msg code{background:#222a3a;padding:.1em .35em;border-radius:3px}
+"""
+
+
+# ── The log view ───────────────────────────────────────────────────────────
+_LOGS_BODY = r"""
+<style>
+  .lg { display:flex; flex-direction:column; height:100%; min-height:0; }
+  .lg-bar { flex:0 0 auto; display:flex; align-items:center; gap:10px;
+            padding:10px 14px; border-bottom:1px solid var(--line);
+            background:var(--panel); flex-wrap:wrap; }
+  .lg-chips { display:flex; gap:6px; }
+  .lg-chip { display:flex; flex-direction:column; gap:3px; min-width:62px;
+             padding:4px 8px 5px; border:1px solid var(--line);
+             border-radius:5px; background:#12161e; cursor:pointer;
+             color:var(--muted); font-size:11px; line-height:1.2; }
+  .lg-chip:hover { background:#1c2230; color:var(--fg); }
+  .lg-chip.on { border-color:currentColor; }
+  .lg-chip .k { display:flex; justify-content:space-between; gap:8px;
+                align-items:baseline; }
+  .lg-chip .c { font-family:var(--font-mono); font-size:11px; color:var(--fg); }
+  /* The share of the received window, so the mix reads without the numbers. */
+  .lg-chip .bar { height:2px; background:#232936; border-radius:2px; }
+  .lg-chip .bar i { display:block; height:2px; border-radius:2px;
+                    background:currentColor; width:0; }
+  .lg-chip.debug { color:#6a7282; }
+  .lg-chip.info  { color:#7aa7ff; }
+  .lg-chip.warn  { color:#e0a050; }
+  .lg-chip.error { color:#e5484d; }
+
+  .lg-bar input, .lg-bar select {
+    background:#12161e; border:1px solid var(--line); border-radius:5px;
+    color:var(--fg); font:inherit; font-size:12px; padding:5px 8px; }
+  .lg-bar input { min-width:180px; }
+  .lg-bar button {
+    background:#12161e; border:1px solid var(--line); border-radius:5px;
+    color:var(--muted); font:inherit; font-size:12px; padding:5px 10px;
+    cursor:pointer; }
+  .lg-bar button:hover { color:var(--fg); background:#1c2230; }
+  .lg-bar button.live { color:#8ef0b7; border-color:#2f4a3a; }
+  .lg-spacer { flex:1; }
+  .lg-note { color:#5a6070; font-size:11px; }
+
+  .lg-body { flex:1; overflow:auto; min-height:0; padding:4px 0 14px; }
+  .lg-row { display:grid; grid-template-columns:82px 52px 108px 1fr;
+            gap:10px; padding:2px 14px; font-family:var(--font-mono);
+            font-size:11.5px; line-height:1.55; }
+  .lg-row:hover { background:#12161e; }
+  .lg-row .t { color:#5a6070; }
+  .lg-row .l { font-weight:600; }
+  .lg-row .g { color:#7d8496; overflow:hidden; text-overflow:ellipsis;
+               white-space:nowrap; }
+  .lg-row .m { color:#c9cedb; white-space:pre-wrap; word-break:break-word; }
+  .lg-row.debug .l { color:#6a7282; }
+  .lg-row.info  .l { color:#7aa7ff; }
+  .lg-row.warn  .l { color:#e0a050; }
+  .lg-row.error .l { color:#e5484d; }
+  .lg-row.warn  .m { color:#e8d3ad; }
+  .lg-row.error .m { color:#ffb4b4; }
+  .lg-empty { padding:26px 16px; color:#555; font-size:12.5px; }
+</style>
+
+<div class="lg">
+  <div class="lg-bar">
+    <div class="lg-chips" id="lg-chips"></div>
+    <select id="lg-tag"><option value="" data-i18n="logs.alltags">all tags</option></select>
+    <input id="lg-q" data-i18n-ph="logs.search" placeholder="filter text…">
+    <button id="lg-live" class="live" data-i18n="logs.live">Live</button>
+    <button id="lg-clear" data-i18n="logs.clear">Clear</button>
+    <div class="lg-spacer"></div>
+    <span class="lg-note" data-i18n="logs.hint"></span>
+  </div>
+  <div class="lg-body" id="lg-body">
+    <div class="lg-empty" id="lg-empty" data-i18n="logs.waiting">waiting for lines…</div>
+  </div>
+</div>
+
+<script>
+  const LEVELS = ['debug', 'info', 'warn', 'error'];
+  const RANK = {debug: 0, info: 1, warn: 2, error: 3};
+  // Enough to scroll back through a boot, bounded so a service that floods
+  // cannot turn the page into a memory leak with a nice view.
+  const MAX_ROWS = 4000;
+
+  let cursor = {};
+  let live = true;
+  let minLevel = 'debug';
+  let rows = [];                       // every line received, unfiltered
+  const counts = {debug: 0, info: 0, warn: 0, error: 0};
+  const knownTags = new Set();
+
+  const body = document.getElementById('lg-body');
+  const empty = document.getElementById('lg-empty');
+  const chips = document.getElementById('lg-chips');
+  const tagSel = document.getElementById('lg-tag');
+  const qBox = document.getElementById('lg-q');
+
+  function drawChips() {
+    const total = LEVELS.reduce((a, l) => a + counts[l], 0) || 1;
+    chips.innerHTML = LEVELS.map(l => `
+      <div class="lg-chip ${l} ${minLevel === l ? 'on' : ''}" data-level="${l}"
+           title="${l}">
+        <div class="k"><span>${l}</span><span class="c">${counts[l]}</span></div>
+        <div class="bar"><i style="width:${(counts[l] / total * 100).toFixed(1)}%"></i></div>
+      </div>`).join('');
+    chips.querySelectorAll('.lg-chip').forEach(el => {
+      el.addEventListener('click', () => {
+        // Clicking the level you are already on clears the floor, so the
+        // control is its own undo rather than needing an "all" button.
+        minLevel = (minLevel === el.dataset.level) ? 'debug' : el.dataset.level;
+        drawChips(); render();
+      });
+    });
+  }
+
+  function shown() {
+    const needle = qBox.value.trim().toLowerCase();
+    const tag = tagSel.value;
+    const floor = RANK[minLevel] || 0;
+    return rows.filter(r =>
+      (RANK[r.level] || 1) >= floor
+      && (!tag || r.tag === tag)
+      && (!needle || r.msg.toLowerCase().includes(needle)
+          || r.tag.toLowerCase().includes(needle)));
+  }
+
+  // How many of `rows` are already on screen. A poll appends what arrived;
+  // only a filter change, which can alter any row's visibility, rebuilds.
+  let drawn = 0;
+
+  function rowHtml(r) {
+    const esc = x => x.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+    return `
+      <div class="lg-row ${r.level}">
+        <span class="t">${esc((r.ts || '').slice(11, 23))}</span>
+        <span class="l">${r.level}</span>
+        <span class="g" title="${esc(r.tag)}">${esc(r.tag)}</span>
+        <span class="m">${esc(r.msg)}</span>
+      </div>`;
+  }
+
+  function passes(r) {
+    const needle = qBox.value.trim().toLowerCase();
+    const tag = tagSel.value;
+    return (RANK[r.level] || 1) >= (RANK[minLevel] || 0)
+      && (!tag || r.tag === tag)
+      && (!needle || r.msg.toLowerCase().includes(needle)
+          || r.tag.toLowerCase().includes(needle));
+  }
+
+  function append(fresh) {
+    const keep = fresh.filter(passes);
+    drawn = rows.length;
+    if (!keep.length) return;
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    empty.style.display = 'none';
+    body.insertAdjacentHTML('beforeend', keep.map(rowHtml).join(''));
+    // Bound the DOM the same way `rows` is bounded, from the old end: a tail
+    // is about what just happened.
+    const drawnRows = body.querySelectorAll('.lg-row');
+    for (let i = 0; i < drawnRows.length - MAX_ROWS; i++) drawnRows[i].remove();
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+
+  function render() {
+    const list = shown();
+    drawn = rows.length;
+    empty.style.display = list.length ? 'none' : 'block';
+    // Was the reader at the bottom before this draw? If so keep them there;
+    // if they had scrolled up to read something, do not yank them away.
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    // Named `x`, not `t`: `t` is the translation function in scope here,
+    // and shadowing it inside the hot path is a trap for the next edit.
+    const esc = x => x.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+    const frag = list.slice(-MAX_ROWS).map(r => `
+      <div class="lg-row ${r.level}">
+        <span class="t">${esc((r.ts || '').slice(11, 23))}</span>
+        <span class="l">${r.level}</span>
+        <span class="g" title="${esc(r.tag)}">${esc(r.tag)}</span>
+        <span class="m">${esc(r.msg)}</span>
+      </div>`).join('');
+    body.querySelectorAll('.lg-row').forEach(e => e.remove());
+    body.insertAdjacentHTML('beforeend', frag);
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+
+  async function tick() {
+    if (live) {
+      try {
+        const url = '/api/logs?cursor=' + encodeURIComponent(JSON.stringify(cursor));
+        const r = await fetch(url, {cache: 'no-store'});
+        if (r.ok) {
+          const d = await r.json();
+          if (d.ok === false) {
+            empty.textContent = t('logs.nodir');
+            empty.style.display = 'block';
+            live = false;
+          } else {
+            cursor = d.cursor || cursor;
+            for (const tag of (d.tags || [])) {
+              if (!knownTags.has(tag)) {
+                knownTags.add(tag);
+                const o = document.createElement('option');
+                o.value = tag; o.textContent = tag;
+                tagSel.appendChild(o);
+              }
+            }
+            const fresh = d.entries || [];
+            if (fresh.length) {
+              for (const e of fresh) counts[e.level] = (counts[e.level] || 0) + 1;
+              rows = rows.concat(fresh);
+              const trimmed = rows.length > MAX_ROWS * 2;
+              if (trimmed) rows = rows.slice(-MAX_ROWS);
+              drawChips();
+              // Rebuild only when the backlog was trimmed underneath us;
+              // otherwise the cost of a poll is the lines it brought.
+              if (trimmed) render(); else append(fresh);
+            }
+          }
+        }
+      } catch (_) { /* swallow; the next tick retries */ }
+    }
+    setTimeout(tick, 700);
+  }
+
+  document.getElementById('lg-live').addEventListener('click', e => {
+    live = !live;
+    e.target.classList.toggle('live', live);
+    e.target.dataset.i18n = live ? 'logs.live' : 'logs.paused';
+    e.target.textContent = t(e.target.dataset.i18n);
+  });
+  document.getElementById('lg-clear').addEventListener('click', () => {
+    // Clears the view, not the cursor: the point is to stop looking at what
+    // is already understood, not to re-read it from the start.
+    rows = [];
+    drawn = 0;
+    LEVELS.forEach(l => counts[l] = 0);
+    drawChips(); render();
+  });
+  qBox.addEventListener('input', render);
+  tagSel.addEventListener('change', render);
+
+  drawChips();
+  tick();
+</script>
 """
 
 
@@ -1479,6 +2180,7 @@ def make_app(*, registry: ObjectRegistry,
              ops_lock: Optional[asyncio.Lock] = None,
              semantic_hold: Optional[dict] = None,
              robot_geometry: Any = None,
+             object_mutations: Any = None,
              rerun_sink: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
@@ -2471,6 +3173,143 @@ def make_app(*, registry: ObjectRegistry,
             return HTMLResponse(_user_html("regions"))
         return HTMLResponse(_framed("/regions", "scene — regions"))
 
+    def _mutations_or_none():
+        """The coordinator, or None where this deployment has none.
+
+        Reading the map never needed it; correcting does. Saying so beats a
+        traceback that looks like the object was the problem."""
+        return object_mutations
+
+    async def _object_body(request) -> dict:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    async def object_label(request) -> JSONResponse:
+        """Rename one object, or clear a previous rename."""
+        _mut = _mutations_or_none()
+        if _mut is None:
+            return JSONResponse(
+                {"ok": False,
+                 "detail": "this deployment has no object mutation coordinator"},
+                status_code=503)
+        body = await _object_body(request)
+        label = str(body.get("label") or "").strip()
+        clear = bool(body.get("clear_override"))
+        if not label and not clear:
+            return JSONResponse(
+                {"ok": False, "detail": "label must not be empty"},
+                status_code=400)
+        try:
+            obj, persisted, map_id, generation = (
+                await _mut.apply_label_correction(
+                    object_id=request.path_params["object_id"],
+                    label=label,
+                    clear_override=clear,
+                    expected_map_id=str(body.get("expected_map_id") or ""),
+                    expected_generation=body.get("expected_generation"),
+                    note=str(body.get("note") or "renamed from the web UI"),
+                ))
+        except Exception as error:  # noqa: BLE001
+            # A stale epoch and a missing object both arrive as the
+            # coordinator's own message; passing it through beats inventing a
+            # category for it here.
+            return JSONResponse({"ok": False, "detail": str(error)},
+                                status_code=409)
+        return JSONResponse({
+            # SceneObject carries the label as `cls`; an operator override
+            # is recorded in `attributes` and is what should be echoed back
+            # when there is one, so the panel shows what it will now read.
+            "ok": True,
+            "label": str(obj.attributes.get("label_override") or obj.cls),
+            "map_id": map_id, "generation": generation, "persisted": persisted,
+        })
+
+    async def object_delete(request) -> JSONResponse:
+        """Remove one object the perception layer should not have produced."""
+        _mut = _mutations_or_none()
+        if _mut is None:
+            return JSONResponse(
+                {"ok": False,
+                 "detail": "this deployment has no object mutation coordinator"},
+                status_code=503)
+        body = await _object_body(request)
+        try:
+            deleted_id, persisted, map_id, generation = (
+                await _mut.remove_object(
+                    object_id=request.path_params["object_id"],
+                    expected_map_id=str(body.get("expected_map_id") or ""),
+                    expected_generation=body.get("expected_generation"),
+                    note=str(body.get("note") or "deleted from the web UI"),
+                ))
+        except Exception as error:  # noqa: BLE001
+            return JSONResponse({"ok": False, "detail": str(error)},
+                                status_code=409)
+        return JSONResponse({
+            "ok": True, "deleted_id": deleted_id, "map_id": map_id,
+            "generation": generation, "persisted": persisted,
+        })
+
+    async def logs_api(request) -> JSONResponse:
+        """Whatever scribe appended since the caller's cursor.
+
+        `cursor` is a JSON object of {tag: byte offset}, handed back from the
+        previous response. Absent, each file is tailed instead: a log page is
+        opened to see what just happened, and shipping a day of boot history
+        first would only delay that.
+        """
+        directory = _scribe_dir()
+        if directory is None:
+            return JSONResponse({
+                "ok": False,
+                "detail": "SCRIBE_LOG_DIR is not set for this deployment",
+                "entries": [], "cursor": {}, "tags": [],
+            }, status_code=200)
+
+        try:
+            cursor = json.loads(request.query_params.get("cursor") or "{}")
+            if not isinstance(cursor, dict):
+                cursor = {}
+        except ValueError:
+            cursor = {}
+
+        wanted = [t for t in (request.query_params.get("tags") or "").split(",") if t]
+
+        def collect() -> dict:
+            files = sorted(directory.glob("*.log"))
+            entries: list[dict] = []
+            next_cursor: dict[str, int] = {}
+            tags: list[str] = []
+            for path in files:
+                tag = path.stem
+                tags.append(tag)
+                if wanted and tag not in wanted:
+                    # Still advance the cursor for a tag being skipped, or
+                    # re-enabling it would replay the whole gap at once.
+                    try:
+                        next_cursor[tag] = path.stat().st_size
+                    except OSError:
+                        pass
+                    continue
+                offset = cursor.get(tag)
+                rows, consumed = _read_log_slice(
+                    path, int(offset) if isinstance(offset, int) else None)
+                entries.extend(rows)
+                next_cursor[tag] = consumed
+            # Interleaved by time so the correlation this page exists for --
+            # what mapping said while perception went quiet -- reads in order.
+            entries.sort(key=lambda e: e.get("ts") or "")
+            return {"ok": True, "entries": entries, "cursor": next_cursor,
+                    "tags": sorted(tags), "dir": str(directory)}
+
+        return JSONResponse(await asyncio.to_thread(collect))
+
+    async def logs_page(request) -> HTMLResponse:
+        """Scene's log view: scribe's files, tailed live."""
+        return HTMLResponse(_shell_page("/logs", _LOGS_BODY, "scene — logs"))
+
     async def maps_page(request) -> HTMLResponse:
         """Map management: name and save the live session, load a saved map,
         delete one, or re-estimate the pose on the one that is loaded.
@@ -2520,6 +3359,12 @@ def make_app(*, registry: ObjectRegistry,
         Route("/3d", index3d, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
         Route("/maps", maps_page, methods=["GET"]),
+        Route("/logs", logs_page, methods=["GET"]),
+        Route("/api/logs", logs_api, methods=["GET"]),
+        Route("/api/objects/{object_id}/label", object_label,
+              methods=["POST"]),
+        Route("/api/objects/{object_id}", object_delete,
+              methods=["DELETE"]),
         Route("/regions", user_page, methods=["GET"]),
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
@@ -3814,6 +4659,9 @@ _USER_HTML = r"""<!doctype html>
       border-radius: 7px; background: #0f131b; color: var(--fg); padding: 8px 10px;
       font-size: 13px; outline: none; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    /* See the comment on the buttons: OK leads in the DOM so Enter
+       confirms, and is ordered last so it still reads on the right. */
+    #region-modal-ok { order: 2; }
     dialog.report-modal { width: min(720px, calc(100vw - 32px)); }
     .save-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .save-report-preview { width: 100%; max-height: 300px; object-fit: contain; border: 1px solid #33405a; border-radius: 8px; background: #0e1015; }
@@ -3885,34 +4733,31 @@ applyLang(langGet());</script>
   <header>
     <h1 id="page-title" data-i18n="page.maps">Maps</h1>
     <span id="bound-pill" class="none"><span class="dot"></span><span id="bound-text">no map bound</span></span>
-    <span class="meta" id="meta">map: —</span>
     <span class="stale-alert" id="stale-alert">⚠ map was rebuilt — review stale regions</span>
   </header>
   <div id="main">
     <div id="panel">
       <div id="map-tools">
-        <label>Map ID<input id="map-id" placeholder="apartment_demo" /></label>
+        <label><span data-i18n="form.mapid">Map ID</span><input id="map-id" placeholder="apartment_demo" /></label>
         <div id="map-actions">
-          <button class="primary" id="btn-save-map">Save current</button>
-          <button id="btn-refresh-maps">Refresh</button>
-          <button id="btn-pose-estimate">Pose estimate</button>
+          <button class="primary" id="btn-save-map" data-i18n="form.save">Save current</button>
+          <button id="btn-refresh-maps" data-i18n="form.refresh">Refresh</button>
+          <button id="btn-pose-estimate" data-i18n="form.pose">Pose estimate</button>
         </div>
-        <div id="map-status"><span id="map-status-msg">Ready.</span><span class="mode-label">Map mode:</span><span id="mode-pill">unknown</span></div>
-        <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
+        <div id="map-status"><span id="map-status-msg" data-i18n="status.ready">Ready.</span><span class="mode-label" data-i18n="form.mode">Map mode:</span><span id="mode-pill">unknown</span></div>
+        <div id="map-list"><div id="empty" data-i18n="form.nomaps">No saved maps listed yet.</div></div>
       </div>
       <div id="map-note">
         <b data-i18n="note.title">Temporary map</b><br>
         <span data-i18n="note.body">Marking and recognition work normally
         here. Saving this session under a name keeps the regions and objects
         with it; without that, they end with the session.</span><br>
-        <a href="/maps" data-i18n="note.link">Go to maps</a>
+        <a href="/maps" target="_top" data-i18n="note.link">Go to maps</a>
       </div>
       <div class="actions">
-        <button class="primary" id="btn-draw">✏ Mark region</button>
+        <button class="primary" id="btn-draw" data-i18n="btn.mark">✏ Mark region</button>
       </div>
-      <div id="region-list"><div id="empty">No regions yet. Click “Mark region”,
-        then click on the map to outline one (double-click or Enter to finish,
-        Esc to cancel).</div></div>
+      <div id="region-list"><div id="empty" data-i18n="regions.empty">No regions yet. Click “Mark region”, then click on the map to outline one (double-click or Enter to finish, Esc to cancel).</div></div>
     </div>
     <div id="canvas-wrap">
       <canvas id="c"></canvas>
@@ -3929,8 +4774,11 @@ applyLang(langGet());</script>
     <div class="modal-message" id="region-modal-message"></div>
     <input class="modal-input" id="region-modal-input" autocomplete="off" />
     <div class="modal-actions">
-      <button id="region-modal-cancel" value="cancel">Cancel</button>
+      <!-- OK first: `method="dialog"` submits on Enter with the form's first
+           submit button, so DOM order is what decides whether Enter confirms
+           or discards. `order` puts it back on the right visually. -->
       <button class="primary" id="region-modal-ok" value="ok">OK</button>
+      <button id="region-modal-cancel" value="cancel">Cancel</button>
     </div>
   </form>
 </dialog>
@@ -4027,12 +4875,19 @@ function toast(text) {
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { t.style.display = 'none'; }, 4000);
 }
-function setMapStatus(text, kind = '') {
+function setMapStatus(text, kind = '', key = '') {
     const el = document.getElementById('map-status');
     const msg = document.getElementById('map-status-msg');
     if (!el || !msg) return;
     el.className = kind;
-    msg.textContent = text || 'Ready.';
+    // The default carries its key so the comparisons below keep working
+    // in either language -- they were really asking "is this still the
+    // untouched default", not "does it read 'Ready.'".
+    // A key is remembered so the language switch can re-render it; free
+    // text cannot be, because there is nothing to re-render it from.
+    if (key) { msg.dataset.i18n = key; msg.textContent = t(key); }
+    else if (text) { delete msg.dataset.i18n; msg.textContent = text; }
+    else { msg.dataset.i18n = 'status.ready'; msg.textContent = t('status.ready'); }
 }
 function setMapBusy(on, label = '') {
     mapBusy = on;
@@ -4268,17 +5123,21 @@ function draw() {
     if (robot) {
         const [rx, ry] = w2p(robot.x, robot.y);
         const yaw = robot.yaw || 0;
-        // A disc for where it is, a cone for where it faces. Same blue as
-        // the 2D page draws the robot in: one robot, one colour.
-        const R = 8, CONE = 26, SPREAD = 0.38;  // radians either side
+        // A disc for where it is, and an arrow for where it faces. The
+        // arrow is the whole reason this is not a plain dot, so it is drawn
+        // solid and long rather than as a fade that vanishes at map zoom.
+        // Same blue as the 2D page: one robot, one colour.
+        const R = 8, CONE = 40, SPREAD = 0.34;  // radians either side
+        const TIP = 34, HALF = 7;               // arrow reach and half-width
         ctx.save();
         ctx.translate(rx, ry);
         ctx.rotate(-yaw);
 
-        // The cone, fading out along its length so it reads as a direction
-        // of attention rather than as a spike stuck through the robot.
+        // A wide, very faint cone behind the arrow: it adds nothing the arrow
+        // does not say, but gives the eye something to catch across a busy
+        // plan. It is not load-bearing, so it can be this quiet.
         const grad = ctx.createRadialGradient(0, 0, R, 0, 0, CONE);
-        grad.addColorStop(0, 'rgba(122, 167, 255, 0.42)');
+        grad.addColorStop(0, 'rgba(122, 167, 255, 0.26)');
         grad.addColorStop(1, 'rgba(122, 167, 255, 0)');
         ctx.beginPath();
         ctx.moveTo(0, 0);
@@ -4286,6 +5145,20 @@ function draw() {
         ctx.closePath();
         ctx.fillStyle = grad;
         ctx.fill();
+
+        // The arrow. Outlined in near-black because the floor behind it is
+        // white where it is free and near-black where it is unknown, and no
+        // single fill reads on both.
+        ctx.beginPath();
+        ctx.moveTo(TIP, 0);
+        ctx.lineTo(R + 2, -HALF);
+        ctx.lineTo(R + 2, HALF);
+        ctx.closePath();
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
 
         // A soft shadow under the disc: the occupancy behind it is white
         // where the floor is free and near-black where it is unknown, and no
@@ -4303,14 +5176,6 @@ function draw() {
         ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
         ctx.stroke();
 
-        // A short tick on the rim, so heading is still readable when the
-        // cone falls on pale floor and washes out.
-        ctx.beginPath();
-        ctx.moveTo(R - 1, 0);
-        ctx.lineTo(R + 5, 0);
-        ctx.lineWidth = 2.5;
-        ctx.strokeStyle = '#0d1420';
-        ctx.stroke();
         ctx.restore();
     }
 
@@ -4477,8 +5342,8 @@ async function saveCurrentMap() {
             : 'Keep this page open while the spatial map and Scene data are made reusable.',
         status: existing ? `Updating Scene data for ${id}...` : `Saving map ${id}...`,
         steps: existing
-            ? ['Validate existing spatial artifact', 'Persist regions and Scene objects', 'Verify reusable map entry']
-            : ['Snapshot the live spatial map', 'Persist regions and Scene objects', 'Verify artifact and preview'],
+            ? [t('st.saveValidate'), t('st.savePersist'), t('st.saveVerify')]
+            : [t('st.saveSnapshot'), t('st.savePersist'), t('st.saveArtifact')],
     });
     try {
     const result = await mapRequest('/api/maps/save', { map_id: id, note: 'saved from scene user page' });
@@ -4487,12 +5352,12 @@ async function saveCurrentMap() {
         const validation = out.validation || {};
         const ok = validation.spatial_ok !== false && validation.has_preview !== false;
         const semanticOnly = Boolean(out.spatial_unchanged);
-        setMapStatus(`${semanticOnly ? 'Updated scene data for' : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; regions ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
+        setMapStatus(`${semanticOnly ? t('st.updatedFor') : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; regions ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
         toast((semanticOnly ? 'updated scene data for ' : 'saved map ') + (out.map_id || id));
         await loadMaps();
         finishMapOperation({
             ok,
-            title: ok ? (semanticOnly ? 'Scene data updated' : 'Map saved') : 'Save validation failed',
+            title: ok ? (semanticOnly ? t('st.updated') : 'Map saved') : t('st.saveFailed'),
             message: ok
                 ? `${out.map_id || id} is ready to load after a stack restart.`
                 : `${out.map_id || id} was written, but artifact validation did not pass.`,
@@ -4526,7 +5391,7 @@ async function loadSelectedMap(id) {
         title: `Loading ${id}`,
         message: 'The editor is locked until Mapping publishes the loaded occupancy grid and Scene restores the matching semantic data.',
         status: `Loading ${id}; switching Mapping to localization mode...`,
-        steps: ['Validate saved spatial artifact', 'Switch Mapping to localization mode', 'Wait for a fresh occupancy grid', 'Restore regions and Scene objects'],
+        steps: [t('st.loadValidate'), t('st.loadSwitch'), t('st.loadGrid'), t('st.loadRestore')],
     });
     try {
     const result = await mapRequest('/api/maps/load', { map_id: id, mode: 'localization' });
@@ -4577,7 +5442,7 @@ function setPoseEstimateMode(on) {
     const btn = document.getElementById('btn-pose-estimate');
     if (btn) {
         btn.classList.toggle('primary', on);
-        btn.textContent = on ? 'Click pose on map' : 'Pose estimate';
+        btn.textContent = on ? t('st.poseClick') : 'Pose estimate';
     }
     setHint(on ? 'Click the robot position on the map to publish /initialpose. Heading defaults to 0; refine later with orientation UI.' : '');
     c.style.cursor = on ? 'crosshair' : (drawMode ? 'crosshair' : 'grab');
@@ -4595,7 +5460,7 @@ async function sendPoseEstimate(world) {
         `Publishing pose estimate (${x.toFixed(2)}, ${y.toFixed(2)}, ${theta.toFixed(2)})...`,
         () => api('POST', '/api/maps/pose_estimate', { x, y, theta }));
     if (out) {
-        const msg = `${out.detail || 'Pose estimate sent.'}` +
+        const msg = `${out.detail || t('st.poseSent')}` +
             (out.delta_before ? ` · before ${poseDeltaText(out.delta_before)}` : '') +
             (out.delta_after ? ` · after ${poseDeltaText(out.delta_after)}` : '');
         setMapStatus(msg, 'ok');
@@ -4603,7 +5468,7 @@ async function sendPoseEstimate(world) {
     } else setMapStatus(`Pose estimate failed for (${x.toFixed(2)}, ${y.toFixed(2)}).`, 'err');
 }
 document.getElementById('btn-save-map').addEventListener('click', saveCurrentMap);
-document.getElementById('btn-refresh-maps').addEventListener('click', async () => { setMapStatus('Refreshing maps...', 'busy'); await loadMaps(); setMapStatus('Map list refreshed.', 'ok'); });
+document.getElementById('btn-refresh-maps').addEventListener('click', async () => { setMapStatus('', 'busy', 'st.refreshing'); await loadMaps(); setMapStatus('', 'ok', 'st.refreshed'); });
 document.getElementById('btn-pose-estimate').addEventListener('click', () => setPoseEstimateMode(!poseEstimateMode));
 document.getElementById('map-list').addEventListener('click', (ev) => {
     if (mapBusy) return;
@@ -4690,9 +5555,8 @@ function renderPanel() {
     const anyStale = regions.some(a => a.stale);
     document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
     if (!regions.length) {
-        list.innerHTML = '<div id="empty">No regions yet. Click “Mark region”, ' +
-          'then click on the map to outline one (double-click or Enter to ' +
-          'finish, Esc to cancel).</div>';
+        list.innerHTML = '<div id="empty" data-i18n="regions.empty">'
+          + t('regions.empty') + '</div>';
         return;
     }
     list.innerHTML = regions.map(a => `
@@ -4734,9 +5598,10 @@ function setDrawMode(on) {
     drawMode = on;
     draft = [];
     btnDraw.classList.toggle('active', on);
-    btnDraw.textContent = on ? '✕ Cancel drawing' : '✏ Mark region';
+    btnDraw.dataset.i18n = on ? 'btn.cancelDraw' : 'btn.mark';
+    btnDraw.textContent = t(btnDraw.dataset.i18n);
     c.style.cursor = on ? 'crosshair' : 'grab';
-    setHint(on ? 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel' : '');
+    setHint(on ? t('st.drawHint') : '');
     draw();
 }
 btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
@@ -4749,7 +5614,7 @@ async function finishDraft() {
         const points = draft.map(p => [p[0], p[1]]);
         const name = await askRegionName('Create region', '');
         if (name === null) return;          // keep drawing
-        if (!name) { toast('Region name is required.'); return; }
+        if (!name) { toast(t('st.nameRequired')); return; }
         const body = { kind: 'region', name, points };
         draft = [];
         const created = await api('POST', '/api/regions', body);
@@ -4879,9 +5744,6 @@ async function refresh() {
         pillText.textContent = t('map.temporary');
       }
     }
-    document.getElementById('meta').textContent = mb
-        ? (unsavedLive ? 'map: live session · unsaved' : `map: ${mb.map_id} · ${mb.mode || 'mode unknown'}`)
-        : 'map: —';
     const modePill = document.getElementById('mode-pill');
     if (modePill) {
         const mode = unsavedLive ? 'unsaved live' : ((mb && mb.mode) || 'unknown');
@@ -4889,10 +5751,10 @@ async function refresh() {
         modePill.className = unsavedLive ? 'mapping' : mode;
     }
     const msg = document.getElementById('map-status-msg');
-    if (unsavedLive && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
-        setMapStatus('Live mapping session is not saved yet. Enter a Map ID, then Save current. ', 'busy');
-    } else if (mb && mb.mode === 'localization' && msg && (msg.textContent === 'Ready.' || msg.textContent === 'Map list refreshed.')) {
-        setMapStatus('Localization mode is active. Use Pose estimate if the robot pose is off.', 'ok');
+    if (unsavedLive && msg && (msg.dataset.i18n === 'status.ready' || msg.textContent === t('st.refreshed'))) {
+        setMapStatus('', 'busy', 'st.liveUnsaved');
+    } else if (mb && mb.mode === 'localization' && msg && (msg.dataset.i18n === 'status.ready' || msg.textContent === t('st.refreshed'))) {
+        setMapStatus('', 'ok', 'st.localization');
     }
     const mapInput = document.getElementById('map-id');
     if (mapInput && !mapInput.value && mb && mb.map_id && !unsavedLive) mapInput.value = mb.map_id;

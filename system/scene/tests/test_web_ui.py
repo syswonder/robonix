@@ -43,6 +43,7 @@ PAGES = [
     ("/2d", "2D map"),
     ("/cam", "camera"),
     ("/regions", "regions"),
+    ("/logs", "logs"),
 ]
 
 pytest.importorskip(
@@ -105,7 +106,8 @@ def test_page_loads_with_its_own_sidebar(page, path, label):
     assert nav.count() > 0, f"{path} rendered no navigation at all"
 
     body = page.inner_text("body").lower()
-    for entry in ("maps", "semantic map", "2d map", "camera", "regions"):
+    for entry in ("maps", "semantic map", "2d map", "camera", "regions",
+                  "logs"):
         assert entry in body, f"{path} is missing the '{entry}' sidebar entry"
 
     assert not page.errors, f"{path} logged console errors: {page.errors[:3]}"
@@ -252,8 +254,14 @@ def test_dock_lists_the_registry(page):
     _goto(page, "/")
     expect(page.locator("#dock-objs")).to_contain_text(
         re.compile(r"robot|_\d", re.I), timeout=20000)
+    # The header carries the count and nothing else: the unix timestamp it
+    # used to show told a reader nothing they could act on and rewrote itself
+    # twice a second, which made the one stable line the busiest in the panel.
     expect(page.locator("#dock-stamp")).to_contain_text(
-        re.compile(r"\d+ obj"), timeout=20000)
+        re.compile(r"^\s*\d+"), timeout=20000)
+    assert "t=" not in page.locator("#dock-stamp").inner_text(), (
+        "the unix timestamp is back in the dock header"
+    )
 
 
 def test_uncertain_objects_look_uncertain(page):
@@ -491,5 +499,324 @@ def test_nothing_is_printed_in_both_languages(page):
     words = len([w for w in text.split() if w.isascii() and len(w) > 3])
     assert not (han > 8 and words > 8), (
         "the note is printed in both languages at once:\n" + text
+    )
+
+
+def test_the_map_form_switches_language(page):
+    """The form the maps page is built around has to switch too.
+
+    It did not, so choosing Chinese left a Chinese frame around an English
+    panel -- which is worse than either language alone, because it reads as a
+    half-finished translation rather than as a choice.
+    """
+    _goto(page, "/maps")
+    page.wait_for_timeout(1500)
+
+    frame = page.frame_locator("iframe")
+    controls = ["#btn-save-map", "#btn-refresh-maps", "#btn-pose-estimate"]
+    before = [frame.locator(c).inner_text() for c in controls]
+
+    page.locator("#lang-switch").click()
+    page.wait_for_timeout(800)
+    after = [frame.locator(c).inner_text() for c in controls]
+
+    assert before != after, f"the map form kept its language: {before}"
+    for a, b in zip(before, after):
+        assert a.strip() and b.strip(), "a control lost its label entirely"
+
+
+def test_the_status_line_default_survives_translation(page):
+    """The default status text was compared against literally --
+    `msg.textContent === 'Ready.'` decided whether a hint could overwrite it.
+    Translating the text alone breaks that test silently, so the comparison
+    moved onto a data key.
+
+    The invariant is conditional, not absolute: a real status message (a map
+    list refresh, a save result) legitimately replaces the default and clears
+    the key with it. So what must hold is that whenever the line *is* showing
+    the default, it carries the key that identifies it as the default.
+    """
+    _goto(page, "/maps")
+    page.wait_for_timeout(1800)
+
+    msg = page.frame_locator("iframe").locator("#map-status-msg")
+    text = msg.inner_text().strip()
+    key = msg.get_attribute("data-i18n")
+
+    defaults = {"Ready.", "就绪。"}
+    if text in defaults:
+        assert key == "status.ready", (
+            f"the line reads the default {text!r} but carries no key "
+            "-- the comparisons that gate the hint are back to matching "
+            "English text"
+        )
+    elif key:
+        # A keyed non-default message is correct and intended: keys are what
+        # let the language switch re-render text the script wrote. What must
+        # not happen is a key whose translation is not what is on screen.
+        # FrameLocator has no evaluate; the Frame behind it does.
+        frame = next((f for f in page.frames if "bare=1" in (f.url or "")), None)
+        rendered = frame.evaluate(
+            "k => (typeof t === 'function' ? t(k) : '')", key) if frame else ""
+
+        assert not rendered or rendered.strip() == text, (
+            f"the line reads {text!r} but its key {key!r} renders "
+            f"{rendered!r}; a language switch would replace one with the other"
+        )
+
+def test_the_bound_map_is_named_once(page):
+    """It was named twice: the binding pill, and a line beside it repeating the
+    same thing in English regardless of the chosen language."""
+    _goto(page, "/maps")
+    page.wait_for_timeout(1500)
+    frame = page.frame_locator("iframe")
+    assert frame.locator("#meta").count() == 0, (
+        "the duplicated map line is back"
+    )
+    assert frame.locator("#bound-pill").is_visible(), "no binding pill"
+
+
+# ── The log view ───────────────────────────────────────────────────────────
+# Scribe already writes one JSON object per line into a file per tag. The page
+# reads those; it does not keep a second copy of the same records.
+
+
+def test_logs_api_serves_scribe_lines(page):
+    """The endpoint reads scribe's files and hands back a cursor.
+
+    A deployment without SCRIBE_LOG_DIR has nothing to read, and says so
+    rather than guessing a path -- that case is reported, not failed, because
+    a native run outside rbnx is legitimate.
+    """
+    body = page.request.get(BASE_URL + "/api/logs").json()
+
+    if body.get("ok") is False:
+        pytest.skip(f"no scribe directory: {body.get('detail')}")
+
+    assert isinstance(body.get("entries"), list), "no entries array"
+    assert isinstance(body.get("cursor"), dict), "no cursor to poll with"
+    assert body.get("tags"), "no log tags found in the scribe directory"
+    for entry in body["entries"][:20]:
+        assert set(entry) >= {"ts", "level", "tag", "msg"}, (
+            f"entry is missing scribe's fields: {entry}"
+        )
+        assert entry["level"] in ("debug", "info", "warn", "error"), (
+            f"unnormalised level {entry['level']!r}"
+        )
+
+
+def test_logs_cursor_only_returns_what_is_new(page):
+    """The cursor is a byte offset per file, which is what makes the poll
+    cheap: asking again with the cursor just returned must not replay
+    everything. A tail that re-sends its whole window every second is a tail
+    that cannot be left open."""
+    import json as _json
+
+    first = page.request.get(BASE_URL + "/api/logs").json()
+    if first.get("ok") is False:
+        pytest.skip("no scribe directory")
+
+    cursor = _json.dumps(first["cursor"])
+    again = page.request.get(
+        BASE_URL + "/api/logs", params={"cursor": cursor}).json()
+
+    assert len(again["entries"]) < max(1, len(first["entries"])) or \
+        len(first["entries"]) == 0, (
+        f"the cursor replayed {len(again['entries'])} of "
+        f"{len(first['entries'])} lines"
+    )
+
+
+def test_logs_page_streams_scribe(page):
+    """The page itself: level chips, a filter, and rows arriving live."""
+    _goto(page, "/logs")
+    page.wait_for_timeout(2500)
+
+    for level in ("debug", "info", "warn", "error"):
+        assert page.locator(f".lg-chip.{level}").count() == 1, (
+            f"no {level} chip"
+        )
+    assert page.locator("#lg-q").is_visible(), "no text filter"
+    assert page.locator("#lg-live").is_visible(), "no live toggle"
+
+    rows = page.locator(".lg-row")
+    if rows.count() == 0:
+        pytest.skip("the scribe directory is present but empty")
+    assert rows.count() > 0
+
+
+def test_logs_level_filter_narrows_the_view(page):
+    """The chips are the filter as well as the count: clicking a level raises
+    the floor, and clicking it again clears it."""
+    _goto(page, "/logs")
+    page.wait_for_timeout(3000)
+
+    before = page.locator(".lg-row").count()
+    if before == 0:
+        pytest.skip("no lines to filter")
+
+    page.locator(".lg-chip.error").click()
+    page.wait_for_timeout(400)
+    narrowed = page.locator(".lg-row").count()
+    assert narrowed <= before, "raising the level floor showed more lines"
+
+    page.locator(".lg-chip.error").click()
+    page.wait_for_timeout(400)
+    assert page.locator(".lg-row").count() >= narrowed, (
+        "clicking the active level again did not clear the floor"
+    )
+
+
+# ── Object properties ──────────────────────────────────────────────────────
+# Perception here is not accurate: a wrong label and a phantom object are the
+# normal case, so a panel that can only display them sends you elsewhere to
+# fix what you are looking at.
+
+
+def test_clicking_an_object_opens_its_properties(page):
+    """A row opens its detail below the list, and the list stays.
+
+    Replacing the list made every inspection a round trip -- to check the next
+    object you had to go back first. The row it describes is marked, because
+    with the detail underneath nothing else says which one it is.
+    """
+    _goto(page, "/")
+    page.wait_for_timeout(2500)
+
+    rows = page.locator("#dock-objs tr.row")
+    if rows.count() == 0:
+        pytest.skip("the registry is empty; nothing to open")
+
+    rows.first.click()
+    page.wait_for_timeout(300)
+
+    assert page.locator("#dock-detail .detail").count() == 1, (
+        "clicking a row opened no detail"
+    )
+    assert rows.count() > 0, "the list disappeared when the detail opened"
+    assert page.locator("#dock-objs tr.row.sel").count() == 1, (
+        "the detail does not say which row it is about"
+    )
+    for key in ("dock.id", "dock.conf", "dock.pos"):
+        assert page.locator(f'#dock-detail [data-i18n="{key}"]').count() == 1, (
+            f"the detail is missing {key}"
+        )
+    assert page.locator("#dock-detail .ren").count() == 1, "no rename control"
+    assert page.locator("#dock-detail .del").count() == 1, "no delete control"
+
+
+def test_clicking_the_open_row_closes_it(page):
+    """The control is its own undo."""
+    _goto(page, "/")
+    page.wait_for_timeout(2500)
+    rows = page.locator("#dock-objs tr.row")
+    if rows.count() == 0:
+        pytest.skip("the registry is empty")
+
+    rows.first.click()
+    page.wait_for_timeout(250)
+    assert page.locator("#dock-detail .detail").count() == 1
+    rows.first.click()
+    page.wait_for_timeout(250)
+    assert page.locator("#dock-objs tr.row.sel").count() == 0, (
+        "clicking the open row left it selected"
+    )
+
+
+def test_rename_goes_through_the_shared_entry_point(page):
+    """The web API, MCP and gRPC call one function per correction.
+
+    This drives the HTTP surface the panel uses. What it proves about the
+    sharing is indirect -- that the route exists and applies -- but a rename
+    that lands here lands through ObjectMutationCoordinator, which is the only
+    place the mechanism is called from.
+    """
+    state = page.request.get(BASE_URL + "/api/state").json()
+    objs = [o for o in (state.get("objects") or []) if o.get("cls") != "robot"]
+    if not objs:
+        pytest.skip("no non-robot object to rename")
+    obj = objs[0]
+    original = obj["cls"]
+
+    r = page.request.post(
+        f"{BASE_URL}/api/objects/{obj['id']}/label",
+        data={"label": "renamed-by-test",
+              "expected_map_id": (state.get("map_binding") or {}).get("map_id", ""),
+              "expected_generation": (state.get("map_binding") or {}).get("generation")})
+    body = r.json()
+    assert body.get("ok"), f"rename refused: {body.get('detail')}"
+    assert body.get("label") == "renamed-by-test"
+
+    # Put it back, so the run leaves the map as it found it.
+    page.request.post(
+        f"{BASE_URL}/api/objects/{obj['id']}/label",
+        data={"label": original,
+              "expected_map_id": (state.get("map_binding") or {}).get("map_id", ""),
+              "expected_generation": (state.get("map_binding") or {}).get("generation")})
+
+
+def test_rename_edits_in_place_without_a_browser_dialog(page):
+    """The panel asks in its own style, not the browser's.
+
+    `prompt()` and `confirm()` bring a different typeface, palette and button
+    order, and suspend the page while open -- which undoes the point of the
+    panel having one type scale. A dialog appearing here fails the test rather
+    than merely looking wrong.
+    """
+    fired = []
+    page.on("dialog", lambda d: (fired.append(d.type), d.dismiss()))
+
+    _goto(page, "/")
+    page.wait_for_timeout(2500)
+    rows = page.locator("#dock-objs tr.row")
+    if rows.count() == 0:
+        pytest.skip("the registry is empty")
+
+    rows.first.click()
+    page.wait_for_timeout(250)
+    page.locator("#dock-detail .ren").click()
+    page.wait_for_timeout(300)
+
+    assert not fired, f"a browser dialog opened: {fired}"
+    field = page.locator("#dock-detail .edit input")
+    assert field.count() == 1, "rename did not open an inline field"
+    assert field.input_value().strip(), "the field did not start from the name"
+
+    # Escape puts it back, so the edit is abandonable without a round trip.
+    field.press("Escape")
+    page.wait_for_timeout(200)
+    assert page.locator("#dock-detail .edit").count() == 0, (
+        "Escape left the field open"
+    )
+    assert page.locator("#dock-detail h3").count() == 1, (
+        "the heading did not come back"
+    )
+
+
+def test_delete_asks_inside_the_panel(page):
+    """Still asks -- it destroys something and sits beside a button pressed
+    often -- but in the panel, with the confirming button the red one."""
+    fired = []
+    page.on("dialog", lambda d: (fired.append(d.type), d.dismiss()))
+
+    _goto(page, "/")
+    page.wait_for_timeout(2500)
+    rows = page.locator("#dock-objs tr.row")
+    if rows.count() == 0:
+        pytest.skip("the registry is empty")
+
+    rows.first.click()
+    page.wait_for_timeout(250)
+    page.locator("#dock-detail .del").click()
+    page.wait_for_timeout(300)
+
+    assert not fired, f"a browser dialog opened: {fired}"
+    assert page.locator("#dock-detail .acts .confirm").count() == 1, (
+        "delete did not ask in the panel"
+    )
+    page.locator("#dock-detail .acts .no").click()
+    page.wait_for_timeout(250)
+    assert page.locator("#dock-detail .del").count() == 1, (
+        "cancelling the delete did not restore the actions"
     )
 

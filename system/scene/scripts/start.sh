@@ -123,6 +123,14 @@ if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
 
+# Scribe's log directory: rbnx sets SCRIBE_LOG_DIR and pipes every package's
+# output into `<tag>.log` under it. Without this, scene cannot read back what
+# it just wrote and the web UI's log view has nothing to show. Read-only, and
+# at the same path inside as out so the variable needs no translation.
+if [[ -n "${SCRIBE_LOG_DIR:-}" && -d "${SCRIBE_LOG_DIR}" ]]; then
+    EXTRA_MOUNTS+=(-v "${SCRIBE_LOG_DIR}:${SCRIBE_LOG_DIR}:ro")
+fi
+
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
     ZENOH_ARGS=(-e "ROBONIX_ZENOH_ROUTER=${ROBONIX_ZENOH_ROUTER}")
@@ -182,6 +190,7 @@ exec docker run --rm \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
     -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
+    -e SCRIBE_LOG_DIR="${SCRIBE_LOG_DIR:-}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
     -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \
     -e SCENE_CG_MAX_MERGE_DIST_M="${SCENE_CG_MAX_MERGE_DIST_M:-}" \

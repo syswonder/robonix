@@ -35,12 +35,32 @@ log = logging.getLogger("scene.map_binding")
 # squashed to "_"; empty falls back to "default". Every map_id-partitioned
 # store (objects, scene-graph cache, annotations) MUST key on this one rule
 # so the partitions always agree.
-_MAP_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._\-]")
+# What is genuinely unsafe in a directory name and a URL segment: control
+# characters, both path separators, and the set Windows reserves -- a map
+# saved here can be read back over a share. Everything else is allowed,
+# including non-ASCII: 客厅 is a legal filename, and the ASCII allow-list this
+# replaces turned it into "__", which collided with every other two-character
+# name and silently pointed two maps at one partition.
+_MAP_ID_UNSAFE = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]')
 
 
 def sanitize_map_id(raw: Optional[str]) -> str:
+    """A map id safe to use as a directory name and a URL segment.
+
+    Unsafe characters are replaced, not the whole name rejected, so a typo
+    does not lose the map. A name that is only dots is replaced entirely:
+    "." and ".." resolve to a directory instead of naming one, and no amount
+    of character substitution fixes that.
+    """
     cleaned = _MAP_ID_UNSAFE.sub("_", (raw or "").strip())
-    return cleaned or "default"
+    # Leading dots hide the directory; trailing dots and spaces are dropped by
+    # some filesystems, which would make two names resolve to one.
+    cleaned = cleaned.strip(". ")
+    if not cleaned or set(cleaned) <= {"."}:
+        return "default"
+    # A generous ceiling: most filesystems stop at 255 bytes for one segment,
+    # and a name is an identifier here, not a description.
+    return cleaned[:120]
 
 
 @dataclass(frozen=True)

@@ -480,15 +480,19 @@ async def update_object_label(
     """Apply a sticky operator label correction to one derived object."""
     if _OBJECT_MUTATIONS is None:
         raise RuntimeError("Scene object mutation coordinator is unavailable")
-    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_label(
-        object_id=req.object_id,
-        label=req.label,
-        clear_override=req.clear_override,
-        expected_map_id=req.expected_map_id,
-        expected_generation=req.expected_generation,
-        persist_to_snapshot=req.persist_to_snapshot,
-        note=req.note,
-    )
+    # The shared entry point, not the mechanism under it: the web API and
+    # gRPC call the same function, so the three protocols cannot drift on
+    # what a rename does.
+    obj, persisted, map_id, generation = (
+        await _OBJECT_MUTATIONS.apply_label_correction(
+            object_id=req.object_id,
+            label=req.label,
+            clear_override=req.clear_override,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
+        ))
     return UpdateObjectLabel_Response(
         object=_to_idl(obj),
         map_id=map_id,
@@ -533,7 +537,7 @@ async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
     if _OBJECT_MUTATIONS is None:
         raise RuntimeError("Scene object mutation coordinator is unavailable")
     deleted_id, persisted, map_id, generation = (
-        await _OBJECT_MUTATIONS.delete_object(
+        await _OBJECT_MUTATIONS.remove_object(
             object_id=req.object_id,
             expected_map_id=req.expected_map_id,
             expected_generation=req.expected_generation,
