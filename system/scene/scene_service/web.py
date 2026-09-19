@@ -687,6 +687,31 @@ _NAV_LINKS = (
 )
 
 
+# One mark per destination, inline. Stroked rather than filled so they sit at
+# the same visual weight as the label beside them at 15px, and inherit the
+# link's colour so the active state needs no second rule.
+_ICON = ('<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+         ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{}</svg>')
+
+_NAV_ICONS = {
+    # a box in space: the semantic map
+    "/": _ICON.format(
+        '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'
+        '<path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>'),
+    # a folded plan: the 2D map
+    "/2d": _ICON.format(
+        '<path d="M15 6 9 3 3 6v15l6-3 6 3 6-3V3z"/><path d="M9 3v15"/><path d="M15 6v15"/>'),
+    # a lens: the camera
+    "/cam": _ICON.format(
+        '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/>'
+        '<circle cx="12" cy="13" r="3.2"/>'),
+    # an outlined area with a pin: regions
+    "/regions": _ICON.format(
+        '<path d="M4 6.5 10 4l4 2.5L20 4v13.5L14 20l-4-2.5L4 20z"/>'
+        '<circle cx="12" cy="10.5" r="1.6"/>'),
+}
+
+
 def _nav(active: str) -> str:
     """The sidebar every page shares.
 
@@ -697,7 +722,10 @@ def _nav(active: str) -> str:
     items = []
     for href, label in _NAV_LINKS:
         current = ' class="on"' if href == active else ""
-        items.append(f'<a href="{href}"{current}>{label}</a>')
+        icon = _NAV_ICONS.get(href, "")
+        items.append(
+            f'<a href="{href}"{current}>{icon}<span>{label}</span></a>'
+        )
     return "".join(items)
 
 
@@ -708,234 +736,294 @@ def _nav(active: str) -> str:
 # became rerun's -- and rerun draws the map but knows nothing about the
 # registry behind it, so the list went with it. It is shared by both now: a
 # floating panel over whatever view is underneath, fed by /api/state.
-_INFO_PANEL_CSS = r"""
-    /* ── Floating info overlay ──
-       imgui-style draggable panel. Sits in the top-left corner over
-       the 2D map by default (small enough not to swallow the canvas).
-       Click the header to collapse to a single bar; drag the header
-       to move; click ✕ to dismiss for this session. State is
-       remembered in localStorage so refresh keeps your layout. */
-    #info-fp {
-      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
-         navigation and swallowed clicks meant for it */
-      width: 320px; max-height: calc(100vh - 24px);
-      background: rgba(14, 16, 21, 0.94);
-      border: 1px solid #303542; border-radius: 6px;
-      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
-      display: flex; flex-direction: column;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 12px; color: #d8dde6;
-      backdrop-filter: blur(2px);
+_DOCK_CSS = r"""
+    /* ── The dock ──
+       A column on the right, in the layout rather than over it. One panel
+       shows at a time; the tab strip switches them. Collapsed it keeps the
+       strip, so the tabs are both the switch and the way back. Width and
+       tab are remembered per browser; nothing else is state. */
+    .dock {
+      flex: 0 0 var(--dock-w, 300px);
+      display: flex; min-width: 0;
+      background: var(--panel);
+      border-left: 1px solid var(--line);
+      color: var(--fg);
     }
-    #info-fp.collapsed { max-height: 28px; }
-    #info-fp.collapsed #info-body { display: none; }
-    #info-fp.dismissed { display: none; }
-    #info-head {
-      display: flex; align-items: center; gap: 6px;
-      padding: 5px 8px; cursor: move; user-select: none;
-      border-bottom: 1px solid #2a2e38;
-      font-size: 11px; color: #889;
+    .dock.shut { flex-basis: 34px; }
+    /* The grab handle. 5px is the usual target for a resize edge -- wide
+       enough to hit, narrow enough not to read as a gutter. */
+    .dock .grip {
+      flex: 0 0 5px; cursor: col-resize; background: transparent;
     }
-    #info-head .title { color: #f0c050; font-weight: 600;
-                        letter-spacing: 0.04em; }
-    #info-head .stamp { flex: 1; color: #6a6f7a; font-size: 10px;
-                        white-space: nowrap; overflow: hidden;
-                        text-overflow: ellipsis; }
-    #info-head button {
-      background: none; border: 1px solid #303542; color: #889;
-      width: 22px; height: 20px; padding: 0; border-radius: 3px;
-      cursor: pointer; font-size: 11px; line-height: 1;
+    .dock .grip:hover, .dock .grip.live { background: var(--acc); opacity: .5; }
+    .dock.shut .grip { display: none; }
+
+    .dock .tabs {
+      flex: 0 0 34px; display: flex; flex-direction: column;
+      align-items: center; gap: 2px; padding-top: 8px;
+      background: #12161e; border-right: 1px solid var(--line);
     }
-    #info-head button:hover { color: #f0c050; border-color: #5a606e; }
-    #info-body { padding: 8px 10px 10px; overflow: auto; flex: 1; }
-    #info-body h2 {
-      margin: 8px 0 4px 0; font-size: 10px; font-weight: 600;
-      text-transform: uppercase; letter-spacing: 0.06em; color: #6a6f7a;
+    .dock.shut .tabs { border-right: 0; }
+    .dock .tabs button {
+      width: 26px; height: 26px; display: grid; place-items: center;
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      color: var(--muted); cursor: pointer; padding: 0;
     }
-    #info-body h2:first-child { margin-top: 0; }
-    #info-body .pose { color: #7aa7ff; }
-    #info-body table { width: 100%; border-collapse: collapse;
-                       font-size: 11px; }
-    #info-body td { padding: 2px 4px; vertical-align: top;
-                    border-bottom: 1px solid #1a1d24; }
-    #info-body td.id { color: #7aa7ff; white-space: nowrap; }
-    #info-body td.cls { color: #f0c674; white-space: nowrap; }
-    #info-body td.pp { color: #6a6f7a; font-size: 10px; }
-    #info-body td.miss { color: #555; }
-    /* Relation list: one "<source> <predicate> <target>" row per edge,
-       replacing the old on-canvas dashed lines. */
-    #info-rels .rel { display: flex; gap: 6px; align-items: baseline;
-                      padding: 2px 4px; border-bottom: 1px solid #1a1d24;
-                      font-size: 11px; white-space: nowrap;
-                      overflow: hidden; text-overflow: ellipsis; }
-    #info-rels .rs { color: #7aa7ff; }
-    #info-rels .rp { color: #f0c050; font-weight: 600; }
-    #info-rels .rt { color: #f0c674; }
-    /* "Show info" pill that appears once the panel is dismissed. */
-    #info-show {
-      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
-         navigation and swallowed clicks meant for it */
-      padding: 4px 10px; font-size: 11px;
-      background: rgba(14, 16, 21, 0.94); border: 1px solid #303542;
-      border-radius: 4px; color: #889; cursor: pointer;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      display: none;
+    .dock .tabs button:hover { color: var(--fg); background: #1c2230; }
+    .dock .tabs button.on {
+      color: var(--acc); background: #1c2230; border-color: #2c3547;
     }
-    #info-show:hover { color: #f0c050; border-color: #5a606e; }
-    body.info-dismissed #info-show { display: block; }
+    .dock .tabs .sep { height: 6px; }
+    .dock .tabs svg { width: 15px; height: 15px; }
+
+    .dock .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .dock.shut .col { display: none; }
+    .dock .head {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+      padding: 9px 10px 7px; border-bottom: 1px solid var(--line);
+    }
+    .dock .head .name {
+      font-size: 12px; font-weight: 600; letter-spacing: .02em;
+      text-transform: uppercase; color: var(--fg);
+    }
+    .dock .head .stamp {
+      flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 10px;
+      color: var(--muted); text-align: right; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .dock .head .shutbtn {
+      background: none; border: 0; color: var(--muted); cursor: pointer;
+      font-size: 15px; line-height: 1; padding: 0 2px;
+    }
+    .dock .head .shutbtn:hover { color: var(--fg); }
+
+    .dock .panes { flex: 1; overflow: auto; padding: 10px; }
+    .dock .pane { display: none; }
+    .dock .pane.on { display: block; }
+    .dock .empty { color: #555; font-size: 12px; }
+
+    /* Data is where monospace earns its place: these columns line up. */
+    .dock table { width: 100%; border-collapse: collapse;
+                  font-family: var(--font-mono); font-size: 11px; }
+    .dock td { padding: 4px 3px; vertical-align: top;
+               border-bottom: 1px solid #1c2230; }
+    .dock td.id  { color: var(--acc); white-space: nowrap; width: 1%;
+                   overflow: hidden; text-overflow: ellipsis; max-width: 96px; }
+    .dock td.cls { color: #f0c674; font-family: var(--font-ui);
+                   font-size: 12px; padding-left: 8px; }
+    .dock td.pp  { color: var(--muted); font-size: 10px; text-align: right;
+                   white-space: nowrap; width: 1%; }
+    /* Scene is not always right, and the UI should not pretend otherwise:
+       a low-confidence row is dimmed and flagged, so approaching it for a
+       second look reads as the next step rather than as doubt of the list. */
+    .dock tr.unsure td { opacity: .62; }
+    .dock tr.unsure td.cls::after {
+      content: "?"; color: #e0a050; font-weight: 700; margin-left: 4px;
+    }
+    .dock td.miss { color: #555; }
+
+    .dock .rel { display: flex; gap: 6px; align-items: baseline;
+                 padding: 3px 0; border-bottom: 1px solid #1c2230;
+                 font-family: var(--font-mono); font-size: 11px; }
+    .dock .rs { color: var(--acc); }
+    .dock .rp { color: #f0c050; font-weight: 600; font-family: var(--font-ui); }
+    .dock .rt { color: #f0c674; }
+
+    .dock .kv { display: flex; justify-content: space-between; gap: 10px;
+                padding: 4px 0; border-bottom: 1px solid #1c2230;
+                font-size: 12px; }
+    .dock .kv .k { color: var(--muted); }
+    .dock .kv .v { font-family: var(--font-mono); font-size: 11px;
+                   color: var(--acc); }
 """
 
-_INFO_PANEL_HTML = r"""
-  <div id="info-fp">
-    <div id="info-head" title="drag to move; click title to collapse">
-      <span class="title">scene</span>
-      <span class="stamp" id="info-stamp">—</span>
-      <button id="info-collapse" title="collapse / expand">_</button>
-      <button id="info-dismiss" title="hide (click 'show info' to bring back)">×</button>
+_DOCK_TABS = (
+    # (id, label, title, svg path data)
+    ("objects", "Objects", "what the registry holds",
+     '<rect x="3.5" y="3.5" width="7" height="7" rx="1.4"/>'
+     '<rect x="13.5" y="3.5" width="7" height="7" rx="1.4"/>'
+     '<rect x="3.5" y="13.5" width="7" height="7" rx="1.4"/>'
+     '<rect x="13.5" y="13.5" width="7" height="7" rx="1.4"/>'),
+    ("relations", "Relations", "how they sit together",
+     '<circle cx="5.5" cy="6" r="2.5"/><circle cx="18" cy="12" r="2.5"/>'
+     '<circle cx="5.5" cy="18" r="2.5"/>'
+     '<path d="M7.8 7.2 15.7 11M7.8 16.8 15.7 13.2"/>'),
+    ("robot", "Robot", "where it thinks it is",
+     '<rect x="4" y="8" width="16" height="11" rx="2.5"/>'
+     '<path d="M12 8V4.5"/><circle cx="12" cy="3.2" r="1.3"/>'
+     '<path d="M8.5 12.5v2M15.5 12.5v2"/>'),
+)
+
+
+def _dock_html() -> str:
+    """The dock markup: a tab rail, a header, and one pane per tab."""
+    icon = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            ' stroke-width="1.7" stroke-linecap="round"'
+            ' stroke-linejoin="round">{}</svg>')
+    tabs = "".join(
+        f'<button data-tab="{tid}" title="{label} — {hint}"'
+        f' aria-label="{label}">{icon.format(path)}</button>'
+        for tid, label, hint, path in _DOCK_TABS
+    )
+    return f"""
+  <aside class="dock" id="dock">
+    <div class="grip" id="dock-grip" title="drag to resize"></div>
+    <div class="tabs">{tabs}</div>
+    <div class="col">
+      <div class="head">
+        <span class="name" id="dock-name">Objects</span>
+        <span class="stamp" id="dock-stamp">—</span>
+        <button class="shutbtn" id="dock-shut" title="collapse the dock"
+                aria-label="collapse the dock">»</button>
+      </div>
+      <div class="panes">
+        <div class="pane on" data-pane="objects">
+          <table><tbody id="dock-objs">
+            <tr><td class="empty">—</td></tr>
+          </tbody></table>
+        </div>
+        <div class="pane" data-pane="relations">
+          <div id="dock-rels"><span class="empty">—</span></div>
+        </div>
+        <div class="pane" data-pane="robot">
+          <div id="dock-robot"><span class="empty">no fix yet</span></div>
+        </div>
+      </div>
     </div>
-    <div id="info-body">
-      <h2>robot</h2>
-      <div class="pose" id="info-pose">no fix yet</div>
-      <h2>objects</h2>
-      <table>
-        <tbody id="info-objs"><tr><td colspan="3" style="color:#555">—</td></tr></tbody>
-      </table>
-      <h2>relations</h2>
-      <div id="info-rels"><span style="color:#555">—</span></div>
-    </div>
-  </div>
-  <button id="info-show" title="re-open the floating info panel">▸ show info</button>
+  </aside>
 """
 
-_INFO_PANEL_JS = r"""
-    // ── Floating info overlay: drag, collapse, dismiss, fetch loop ──
-    const fp = document.getElementById('info-fp');
-    const fphead = document.getElementById('info-head');
-    const fpcollapse = document.getElementById('info-collapse');
-    const fpdismiss = document.getElementById('info-dismiss');
-    const fpshow = document.getElementById('info-show');
-    const LS_KEY = 'sceneInfoFp.v1';
-    function fpSave() {
+
+_DOCK_JS = r"""
+    // ── The dock: tabs, collapse, resize, and the state poll ──
+    const dock = document.getElementById('dock');
+    const dockName = document.getElementById('dock-name');
+    const LS = 'sceneDock.v2';
+    const LABELS = {objects: 'Objects', relations: 'Relations', robot: 'Robot'};
+
+    function save(patch) {
       try {
-        localStorage.setItem(LS_KEY, JSON.stringify({
-          x: fp.style.left, y: fp.style.top,
-          collapsed: fp.classList.contains('collapsed'),
-          dismissed: document.body.classList.contains('info-dismissed'),
-        }));
+        const s = Object.assign(load(), patch);
+        localStorage.setItem(LS, JSON.stringify(s));
       } catch (_) {}
     }
-    function fpLoad() {
-      try {
-        const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
-        if (s.x) fp.style.left = s.x;
-        if (s.y) fp.style.top = s.y;
-        if (s.collapsed) fp.classList.add('collapsed');
-        if (s.dismissed) document.body.classList.add('info-dismissed');
-      } catch (_) {}
+    function load() {
+      try { return JSON.parse(localStorage.getItem(LS) || '{}'); }
+      catch (_) { return {}; }
     }
-    fpLoad();
-    // Click title (not buttons) to toggle collapse.
-    fphead.addEventListener('click', e => {
-      if (e.target.tagName === 'BUTTON') return;
-      // dragstart suppresses click via a flag; see drag logic.
-      if (fphead._dragged) { fphead._dragged = false; return; }
-      fp.classList.toggle('collapsed');
-      fpSave();
+
+    function show(tab) {
+      dock.querySelectorAll('.tabs button').forEach(
+        b => b.classList.toggle('on', b.dataset.tab === tab));
+      dock.querySelectorAll('.pane').forEach(
+        p => p.classList.toggle('on', p.dataset.pane === tab));
+      dockName.textContent = LABELS[tab] || tab;
+      save({tab: tab});
+    }
+
+    dock.querySelectorAll('.tabs button').forEach(b => {
+      b.addEventListener('click', () => {
+        // Clicking a tab on the collapsed rail opens the dock on that tab:
+        // the strip is both the switch and the way back, so collapsing is
+        // never something you have to undo through a button elsewhere.
+        const wasShut = dock.classList.contains('shut');
+        const same = b.classList.contains('on');
+        if (wasShut) { dock.classList.remove('shut'); save({shut: false}); }
+        else if (same) { dock.classList.add('shut'); save({shut: true}); return; }
+        show(b.dataset.tab);
+      });
     });
-    fpcollapse.addEventListener('click', e => {
-      e.stopPropagation();
-      fp.classList.toggle('collapsed');
-      fpSave();
-    });
-    fpdismiss.addEventListener('click', e => {
-      e.stopPropagation();
-      document.body.classList.add('info-dismissed');
-      fpSave();
-    });
-    fpshow.addEventListener('click', () => {
-      document.body.classList.remove('info-dismissed');
-      fpSave();
-    });
-    // Drag — pointerdown on the header, follow until pointerup.
-    let dragOff = null;
-    fphead.addEventListener('pointerdown', e => {
-      if (e.target.tagName === 'BUTTON') return;
-      const r = fp.getBoundingClientRect();
-      dragOff = { dx: e.clientX - r.left, dy: e.clientY - r.top };
-      fphead.setPointerCapture(e.pointerId);
-      fphead._dragged = false;
-    });
-    fphead.addEventListener('pointermove', e => {
-      if (!dragOff) return;
-      const x = e.clientX - dragOff.dx;
-      const y = e.clientY - dragOff.dy;
-      // Clamp to viewport so the header is always grabbable.
-      const maxX = window.innerWidth  - fp.offsetWidth - 4;
-      const maxY = window.innerHeight - 30;
-      fp.style.left = Math.max(4, Math.min(x, maxX)) + 'px';
-      fp.style.top  = Math.max(4, Math.min(y, maxY)) + 'px';
-      fphead._dragged = true;
-    });
-    fphead.addEventListener('pointerup', e => {
-      dragOff = null;
-      try { fphead.releasePointerCapture(e.pointerId); } catch (_) {}
-      if (fphead._dragged) fpSave();
+    document.getElementById('dock-shut').addEventListener('click', () => {
+      dock.classList.add('shut');
+      save({shut: true});
     });
 
-    // Fetch /api/state and populate the floating panel.
+    // Resize by dragging the inner edge. Bounded so the dock can neither
+    // vanish nor take the view it annotates.
+    const grip = document.getElementById('dock-grip');
+    let drag = null;
+    grip.addEventListener('pointerdown', e => {
+      drag = {x: e.clientX, w: dock.getBoundingClientRect().width};
+      grip.setPointerCapture(e.pointerId);
+      grip.classList.add('live');
+      e.preventDefault();
+    });
+    grip.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const w = Math.max(220, Math.min(drag.w + (drag.x - e.clientX),
+                                       Math.round(window.innerWidth * 0.5)));
+      dock.style.setProperty('--dock-w', w + 'px');
+    });
+    grip.addEventListener('pointerup', e => {
+      if (!drag) return;
+      drag = null;
+      grip.classList.remove('live');
+      try { grip.releasePointerCapture(e.pointerId); } catch (_) {}
+      save({w: dock.style.getPropertyValue('--dock-w')});
+    });
+
+    (function restore() {
+      const s = load();
+      if (s.w) dock.style.setProperty('--dock-w', s.w);
+      if (s.shut) dock.classList.add('shut');
+      show(s.tab || 'objects');
+    })();
+
+    // ── /api/state → the panes ──
     const fmt = n => Number(n).toFixed(2);
-    async function fpTick() {
+    const shortId = id => String(id).split('.').pop();
+    // Below this, an object is a lead rather than a fact. Perception in a
+    // room like this is not accurate enough to present every hit flatly, and
+    // the honest UI marks the doubtful ones so the next step is to go and
+    // look again.
+    const UNSURE = 0.55;
+
+    async function tick() {
       try {
-        const r = await fetch('/api/state', { cache: 'no-store' });
+        const r = await fetch('/api/state', {cache: 'no-store'});
         if (r.ok) {
           const s = await r.json();
           const objs = (s.objects || []).slice().sort(
             (a, b) => a.cls.localeCompare(b.cls));
-          document.getElementById('info-stamp').textContent =
-            `${objs.length} obj · ${(s.relations || []).length} rel · ${(s.scene_graph && s.scene_graph.edges || []).length} sg · t=${fmt(s.stamp_unix)}`;
-          const robotEl = document.getElementById('info-pose');
-          if (s.robot) {
-            robotEl.textContent =
-              `(${fmt(s.robot.x)}, ${fmt(s.robot.y)}, ${fmt(s.robot.z)}) yaw=${fmt(s.robot.yaw)}`;
-          } else {
-            robotEl.textContent = 'no fix yet';
-          }
-          const tbody = document.getElementById('info-objs');
-          if (!objs.length) {
-            tbody.innerHTML = '<tr><td colspan="3" style="color:#555">—</td></tr>';
-          } else {
-            tbody.innerHTML = objs.map(o => `
-              <tr>
-                <td class="id">${o.short_id}</td>
-                <td class="cls">${o.cls}</td>
-                <td class="pp ${o.missing ? 'miss' : ''}">
-                  (${fmt(o.pose.x)}, ${fmt(o.pose.y)}) c=${fmt(o.confidence)}
-                </td>
-              </tr>
-            `).join('');
-          }
-          // Relations as an explicit "<source> <predicate> <target>" list
-          // (replaces the old on-canvas dashed lines). short_id = last
-          // dotted segment of the object id, e.g. scene.object.cup_001 → cup_001.
-          const shortId = id => String(id).split('.').pop();
           const edges = (s.scene_graph && s.scene_graph.edges) || [];
-          const relsEl = document.getElementById('info-rels');
-          if (!edges.length) {
-            relsEl.innerHTML = '<span style="color:#555">none</span>';
-          } else {
-            relsEl.innerHTML = edges.map(e => `
-              <div class="rel">
-                <span class="rs">${shortId(e.source_id)}</span>
-                <span class="rp">${e.relation}</span>
-                <span class="rt">${shortId(e.target_id)}</span>
-              </div>
-            `).join('');
-          }
+          const unsure = objs.filter(o => Number(o.confidence) < UNSURE).length;
+
+          document.getElementById('dock-stamp').textContent =
+            `${objs.length} obj${unsure ? ' · ' + unsure + '?' : ''}` +
+            ` · ${edges.length} rel · t=${fmt(s.stamp_unix)}`;
+
+          const tb = document.getElementById('dock-objs');
+          tb.innerHTML = objs.length ? objs.map(o => `
+            <tr class="${Number(o.confidence) < UNSURE ? 'unsure' : ''}">
+              <td class="id">${o.short_id}</td>
+              <td class="cls">${o.cls}</td>
+              <td class="pp ${o.missing ? 'miss' : ''}">
+                ${fmt(o.pose.x)},${fmt(o.pose.y)} · ${fmt(o.confidence)}
+              </td>
+            </tr>`).join('')
+            : '<tr><td class="empty">nothing in the registry yet</td></tr>';
+
+          const rel = document.getElementById('dock-rels');
+          rel.innerHTML = edges.length ? edges.map(e => `
+            <div class="rel">
+              <span class="rs">${shortId(e.source_id)}</span>
+              <span class="rp">${e.relation}</span>
+              <span class="rt">${shortId(e.target_id)}</span>
+            </div>`).join('')
+            : '<span class="empty">no relations inferred yet</span>';
+
+          const rb = document.getElementById('dock-robot');
+          rb.innerHTML = s.robot ? `
+            <div class="kv"><span class="k">x</span><span class="v">${fmt(s.robot.x)}</span></div>
+            <div class="kv"><span class="k">y</span><span class="v">${fmt(s.robot.y)}</span></div>
+            <div class="kv"><span class="k">z</span><span class="v">${fmt(s.robot.z)}</span></div>
+            <div class="kv"><span class="k">yaw</span><span class="v">${fmt(s.robot.yaw)}</span></div>`
+            : '<span class="empty">no fix yet</span>';
         }
       } catch (_) { /* swallow; next tick will retry */ }
-      setTimeout(fpTick, 500);
+      setTimeout(tick, 500);
     }
-    fpTick();
+    tick();
 """
 
 
@@ -946,17 +1034,29 @@ _SHELL_CSS = """
      for a dark ground, and the annotation view has always been dark. A light
      sidebar around them left every page half lit, with the seam running down
      the middle of the window. */
+  :root{
+    /* Chrome. Han faces included: the UI is going bilingual, and a
+       Latin-only stack leaves the browser to pick the Chinese face. */
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Helvetica Neue", Arial, sans-serif;
+    /* Data whose columns have to line up: ids, coordinates, stamps. */
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
   :root{--bg:#0e1015;--panel:#161a22;--fg:#e8eaed;--muted:#7d828b;
         --line:#232936;--acc:#7aa7ff}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
-            font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
+            font:13px/1.6 var(--font-ui)}
   .wrap{display:flex;height:100%}
-  nav{width:132px;flex:0 0 132px;background:var(--panel);
+  nav{width:150px;flex:0 0 150px;background:var(--panel);
       border-right:1px solid var(--line);
       display:flex;flex-direction:column;padding:10px 0}
-  nav .brand{padding:6px 14px 12px;color:var(--acc);font-weight:600;letter-spacing:.04em}
-  nav a{display:block;padding:7px 14px;color:var(--muted);text-decoration:none;
-        border-left:2px solid transparent}
+  nav .brand{padding:8px 14px 14px;color:var(--acc);font-weight:650;font-size:15px;letter-spacing:.01em}
+  nav a{display:flex;align-items:center;gap:9px;padding:8px 14px;
+        color:var(--muted);text-decoration:none;font-size:13.5px;
+        white-space:nowrap;border-left:2px solid transparent}
+  nav .ico{width:16px;height:16px;flex:0 0 16px;opacity:.85}
+  nav a.on .ico{opacity:1}
   nav a:hover{color:var(--fg);background:#1c2230}
   nav a.on{color:var(--acc);border-left-color:var(--acc);background:#1c2230}
   main{flex:1;position:relative;min-width:0;background:var(--bg)}
@@ -971,19 +1071,20 @@ def _shell_page(active: str, body: str, title: str,
                 info_panel: bool = False) -> str:
     """Wrap page content in the shared sidebar.
 
-    `info_panel` adds the object and relation list over the page. The map
-    pages carry it: rerun draws the map but knows nothing about the registry
-    behind it, and "which objects does scene actually hold" is the question
-    the map is opened to answer.
+    `info_panel` docks the object, relation and robot panels beside the
+    page. The map pages carry it: rerun draws the map but knows nothing about
+    the registry behind it, and "which objects does scene actually hold" is
+    the question the map is opened to answer. It docks rather than floats so
+    the view resizes around it instead of being covered by it.
     """
-    css = _SHELL_CSS + (_INFO_PANEL_CSS if info_panel else "")
-    extra = (_INFO_PANEL_HTML + f"<script>{_INFO_PANEL_JS}</script>"
-             if info_panel else "")
+    css = _SHELL_CSS + (_DOCK_CSS if info_panel else "")
+    dock = _dock_html() if info_panel else ""
+    script = f"<script>{_DOCK_JS}</script>" if info_panel else ""
     return (
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
         f"<title>{title}</title><style>{css}</style></head><body>"
         f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}</nav>'
-        f"<main>{body}</main></div>{extra}</body></html>"
+        f"<main>{body}</main>{dock}</div>{script}</body></html>"
     )
 
 

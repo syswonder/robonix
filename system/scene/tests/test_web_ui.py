@@ -175,3 +175,122 @@ def test_bare_form_renders(page, path, _label):
     keep working or a headless robot has no UI at all."""
     _goto(page, f"{path}?bare=1" if "?" not in path else f"{path}&bare=1")
     assert page.inner_text("body").strip(), f"{path}?bare=1 rendered an empty body"
+
+
+# ── The dock ───────────────────────────────────────────────────────────────
+# Objects, relations and robot pose, in a column beside the view rather than
+# over it. The overlay it replaces had to be moved twice because it covered
+# something; the first test here is the one that would have caught both.
+
+
+def test_dock_docks_rather_than_covers(page):
+    """The dock is in the layout, not over it.
+
+    Its predecessor floated, and twice ended up on top of something meant to
+    be clicked -- the sidebar once, the view under it once. An overlay is
+    always over something, so the property worth testing is geometric: no
+    overlap with the view, and none with the sidebar.
+    """
+    _goto(page, "/")
+    page.wait_for_timeout(1200)
+
+    dock = page.locator("#dock").bounding_box()
+    main = page.locator("main").bounding_box()
+    nav = page.locator("nav").bounding_box()
+    assert dock, "no dock on the semantic map page"
+
+    assert dock["x"] >= main["x"] + main["width"] - 1, (
+        f"dock at x={dock['x']} overlaps the view ending at "
+        f"{main['x'] + main['width']}"
+    )
+    assert dock["x"] >= nav["x"] + nav["width"], "dock overlaps the sidebar"
+
+
+def test_dock_tabs_switch_panes(page):
+    """One pane at a time, and the tab strip is what switches them."""
+    _goto(page, "/")
+    page.wait_for_timeout(1000)
+
+    for tab in ("objects", "relations", "robot"):
+        page.locator(f'.tabs button[data-tab="{tab}"]').click()
+        page.wait_for_timeout(200)
+        shown = page.locator(".dock .pane.on")
+        assert shown.count() == 1, f"{tab}: {shown.count()} panes visible, want 1"
+        assert shown.get_attribute("data-pane") == tab, (
+            f"clicking {tab} showed {shown.get_attribute('data-pane')}"
+        )
+
+
+def test_dock_collapses_and_the_tabs_bring_it_back(page):
+    """Collapsing keeps the tab strip, so reopening is the same click that
+    switches panes. A separate 'show' button parked in a corner is what the
+    old panel needed, and it was easy to lose."""
+    _goto(page, "/")
+    page.wait_for_timeout(1000)
+
+    wide = page.locator("#dock").bounding_box()["width"]
+    page.locator("#dock-shut").click()
+    page.wait_for_timeout(250)
+    shut = page.locator("#dock").bounding_box()["width"]
+    assert shut < wide, f"collapse did not narrow the dock ({shut} vs {wide})"
+    assert page.locator('.tabs button[data-tab="objects"]').is_visible(), (
+        "collapsing hid the tabs, leaving no way back"
+    )
+
+    page.locator('.tabs button[data-tab="relations"]').click()
+    page.wait_for_timeout(250)
+    assert page.locator("#dock").bounding_box()["width"] > shut, (
+        "clicking a tab on the collapsed rail did not reopen the dock"
+    )
+    assert page.locator(".dock .pane.on").get_attribute("data-pane") == "relations"
+
+
+def test_dock_lists_the_registry(page):
+    """The dock exists to say what scene actually holds. The map is drawn by
+    rerun, which knows nothing about the registry behind it."""
+    _goto(page, "/")
+    expect(page.locator("#dock-objs")).to_contain_text(
+        re.compile(r"robot|_\d", re.I), timeout=20000)
+    expect(page.locator("#dock-stamp")).to_contain_text(
+        re.compile(r"\d+ obj"), timeout=20000)
+
+
+def test_uncertain_objects_look_uncertain(page):
+    """Scene's perception is not accurate enough to present every hit flatly.
+    A row below the confidence threshold is marked, so going back for a second
+    look reads as the next step rather than as doubt about the whole list."""
+    _goto(page, "/")
+    page.wait_for_timeout(1500)
+
+    marked = page.evaluate("""() => {
+      const rows = [...document.querySelectorAll('#dock-objs tr')];
+      return rows.map(r => {
+        const pp = r.querySelector('td.pp');
+        const c = pp ? parseFloat((pp.textContent.split('·')[1] || '1')) : null;
+        return {c: c, unsure: r.classList.contains('unsure')};
+      }).filter(r => r.c !== null && !Number.isNaN(r.c));
+    }""")
+    for row in marked:
+        assert row["unsure"] == (row["c"] < 0.55), (
+            f"confidence {row['c']} marked unsure={row['unsure']}"
+        )
+
+
+def test_sidebar_entries_carry_an_icon(page):
+    """Four words in a column give the eye nothing to aim at."""
+    _goto(page, "/")
+    links = page.locator("nav a")
+    assert links.count() >= 4, "sidebar lost its links"
+    for i in range(links.count()):
+        assert links.nth(i).locator("svg.ico").count() == 1, (
+            f"sidebar link {i} has no icon"
+        )
+
+
+def test_the_shell_is_not_monospace(page):
+    """Monospace is for data whose columns line up. Navigation, headings and
+    buttons on a terminal face read as a terminal, not as an interface."""
+    _goto(page, "/regions")
+    face = page.evaluate(
+        "getComputedStyle(document.querySelector('nav a')).fontFamily")
+    assert "mono" not in face.lower(), f"sidebar is still monospace: {face}"
