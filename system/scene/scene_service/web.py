@@ -126,6 +126,142 @@ function isCurrentOccupancyLoad(token, stamp) {
     return token === occLoadToken && stamp === occLoading;
 }
 
+// ── Point-feature label placement ────────────────────────────────────────
+// Simulated annealing over label offsets, after Christensen, Marks & Shieber,
+// "An empirical study of algorithms for point-feature label placement"
+// (ACM Transactions on Graphics 14(3), 1995), which is also what d3-labeler
+// implements. Inline rather than vendored: this runs on a robot with no
+// network, and a library that cannot be fetched when it is needed is not a
+// dependency.
+//
+// Anchors are the object dots; each label starts at the up-right position
+// the old code used and is free to move. Cost is overlap area with other
+// labels, overlap with any dot, and how far the label sits from its own
+// anchor. Annealing accepts a worsening move with probability e^(-dC/T),
+// which is what lets it out of the local minimum a greedy pass settles into
+// when three labels want the same gap.
+const LBL = {
+  // Eight positions around the anchor, in the order a reader prefers them:
+  // up-right first, because that is where a label is expected, then around.
+  CANDIDATES: [
+    [ 1, -1], [ 1,  0], [ 1,  1], [ 0, -1],
+    [ 0,  1], [-1, -1], [-1,  0], [-1,  1],
+  ],
+  PAD: 3,          // px of air around a label box before it counts as touching
+  SWEEPS: 36,      // annealing sweeps; each visits every label once
+  T0: 1.0,         // starting temperature, in units of the cost function
+  COOL: 0.92,
+};
+
+function lblBox(a, pos, mw, mh) {
+  // `pos` is [dx, dy] in units of the anchor's radius plus half the label.
+  const gap = a.r + 4;
+  const x = a.x + pos[0] * (gap + mw / 2) - mw / 2;
+  const y = a.y + pos[1] * (gap + mh / 2) - mh / 2;
+  return {x: x, y: y, w: mw, h: mh};
+}
+
+function lblOverlap(p, q) {
+  const dx = Math.min(p.x + p.w, q.x + q.w) - Math.max(p.x, q.x);
+  const dy = Math.min(p.y + p.h, q.y + q.h) - Math.max(p.y, q.y);
+  return (dx > 0 && dy > 0) ? dx * dy : 0;
+}
+
+function lblCost(boxes, anchors, i, W, H) {
+  const b = boxes[i];
+  let cost = 0;
+  for (let j = 0; j < boxes.length; j++) {
+    if (j === i) continue;
+    // Overlap is normalised by the label's own area so the term is
+    // comparable across font sizes rather than tuned to one.
+    cost += 2.4 * lblOverlap(b, boxes[j]) / (b.w * b.h);
+  }
+  for (let j = 0; j < anchors.length; j++) {
+    const a = anchors[j];
+    // A label sitting on another object's dot hides a thing it does not even
+    // name, which is worse than sitting on another label.
+    if (a.x > b.x - a.r && a.x < b.x + b.w + a.r &&
+        a.y > b.y - a.r && a.y < b.y + b.h + a.r) {
+      cost += (j === i) ? 0 : 1.6;
+    }
+  }
+  // Distance from the anchor, in label-heights: a label far from its dot
+  // needs a leader line, and a leader line is a cost to the reader.
+  const a = anchors[i];
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  cost += 0.55 * Math.hypot(cx - a.x, cy - a.y) / b.h;
+  // Off-canvas is not a placement.
+  if (b.x < 2 || b.y < 2 || b.x + b.w > W - 2 || b.y + b.h > H - 2) cost += 6;
+  return cost;
+}
+
+function placeLabels(anchors, W, H) {
+  // anchors: [{x, y, r, text, w, h}] in canvas pixels.
+  const n = anchors.length;
+  const idx = new Array(n).fill(0);
+  const boxes = anchors.map((a, i) =>
+    lblBox(a, LBL.CANDIDATES[0], a.w + LBL.PAD * 2, a.h + LBL.PAD * 2));
+
+  let T = LBL.T0;
+  for (let sweep = 0; sweep < LBL.SWEEPS; sweep++) {
+    for (let i = 0; i < n; i++) {
+      const before = lblCost(boxes, anchors, i, W, H);
+      const keepIdx = idx[i], keepBox = boxes[i];
+      const cand = LBL.CANDIDATES[
+        (Math.random() * LBL.CANDIDATES.length) | 0];
+      idx[i] = LBL.CANDIDATES.indexOf(cand);
+      boxes[i] = lblBox(anchors[i], cand,
+                        anchors[i].w + LBL.PAD * 2, anchors[i].h + LBL.PAD * 2);
+      const after = lblCost(boxes, anchors, i, W, H);
+      const d = after - before;
+      // Uphill moves are accepted with e^(-d/T): the escape hatch a greedy
+      // pass does not have, and the reason this beats it when labels are
+      // dense.
+      if (d > 0 && Math.random() >= Math.exp(-d / T)) {
+        idx[i] = keepIdx; boxes[i] = keepBox;
+      }
+    }
+    T *= LBL.COOL;
+  }
+  return boxes;
+}
+
+// Placement is not cheap and the map redraws five times a second. It is also
+// not needed that often: it only changes when the objects change or the view
+// moves. A crawling label is harder to read than an overlapping one.
+// Exposed deliberately: the placement is the one part of this page a
+// screenshot cannot check, so the UI test reads the solved boxes.
+let lblCache = {key: '', boxes: null};
+window.lblCache = lblCache;
+function placedLabels(anchors, W, H, viewKey) {
+  const key = viewKey + '|' + anchors.map(
+    a => a.text + ':' + (a.x | 0) + ',' + (a.y | 0)).join(';');
+  if (key !== lblCache.key) {
+    lblCache = {key: key, boxes: placeLabels(anchors, W, H)};
+    window.lblCache = lblCache;
+  }
+  return lblCache.boxes;
+}
+
+function drawLeader(ctx, box, a) {
+  // Only when the label has actually moved away from its dot: a leader to a
+  // label that is already touching it is a line that says nothing.
+  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+  if (Math.hypot(cx - a.x, cy - a.y) < a.r + box.h) return;
+  // From the box edge nearest the anchor, so the line does not cross the
+  // text it belongs to.
+  const ex = Math.max(box.x, Math.min(a.x, box.x + box.w));
+  const ey = Math.max(box.y, Math.min(a.y, box.y + box.h));
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.38)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(a.x, a.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function draw(state) {
     fit();
     ctx.clearRect(0, 0, c.width, c.height);
@@ -202,26 +338,67 @@ function draw(state) {
     // objects — only the cls label on map, with high-contrast outline
     // so it reads against any occupancy background (free / unknown /
     // occupied are all different shades).
-    ctx.font = 'bold 12px ui-monospace, monospace';
+    // Two passes. Placement has to see every label before it can put any of
+    // them down, so the dots go first and the text second -- drawing each
+    // name as its dot was reached is what let a later object print over an
+    // earlier one.
+    //
+    // The face is the UI stack: a class name is a word, not a column.
+    ctx.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", '
+             + '"PingFang SC", "Microsoft YaHei", sans-serif';
     ctx.textBaseline = 'middle';
+
+    // Below this an object is a lead, not a fact -- the same threshold the
+    // dock marks its rows with. A hollow dashed ring says "go and look"
+    // where a filled dot would have said "it is there".
+    const UNSURE = 0.55;
+
+    const anchors = [];
     for (const o of (state.objects || [])) {
         const [px, py] = w2p(o.pose.x, o.pose.y);
         const r = Math.max(4, Math.min(20, (o.bbox.size_x || 0.2) * pxPerM * 0.5));
         const color = classColor(o.cls);
+        const unsure = Number(o.confidence) < UNSURE;
         ctx.globalAlpha = o.missing ? 0.3 : 1.0;
-        ctx.fillStyle = color;
-        ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+        if (unsure) {
+            ctx.save();
+            ctx.setLineDash([3, 3]);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.6;
+            ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+        } else {
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+        }
         ctx.globalAlpha = 1;
-        // Label = just the class. Black halo outline + class-coloured
-        // fill keeps it legible on white free space, dark unknown,
-        // and grey occupied alike.
-        const text = o.cls;
-        const tx = px + r + 5, ty = py;
+        const text = unsure ? o.cls + ' ?' : o.cls;
+        anchors.push({
+            x: px, y: py, r: r, text: text, color: color,
+            faint: !!o.missing, unsure: unsure,
+            w: ctx.measureText(text).width, h: 12,
+        });
+    }
+
+    // One solve for the whole set, cached on the view and the dots -- the map
+    // redraws five times a second and a label that crawls is harder to read
+    // than one that overlaps.
+    const viewKey = `${pxPerM.toFixed(3)}:${center[0].toFixed(2)}:${center[1].toFixed(2)}:${w}x${h}`;
+    const boxes = placedLabels(anchors, w, h, viewKey);
+    for (let i = 0; i < anchors.length; i++) {
+        const a = anchors[i], b = boxes[i];
+        ctx.globalAlpha = a.faint ? 0.35 : 1.0;
+        drawLeader(ctx, b, a);
+        const tx = b.x + LBL.PAD, ty = b.y + b.h / 2;
+        // Black halo under the text: the occupancy behind it is white where
+        // the floor is free, dark where it is unknown and grey where it is
+        // occupied, and no single fill colour reads on all three.
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-        ctx.strokeText(text, tx, ty);
-        ctx.fillStyle = color;
-        ctx.fillText(text, tx, ty);
+        ctx.strokeText(a.text, tx, ty);
+        ctx.fillStyle = a.color;
+        ctx.fillText(a.text, tx, ty);
+        ctx.globalAlpha = 1;
     }
 
     // Relation edges are NOT drawn on the map any more. Overlapping
@@ -679,7 +856,10 @@ def _maps_payload() -> dict:
     return {"ok": bool(out.get("ok")), "detail": out.get("detail", ""), "maps": maps}
 
 
+# Maps first: nothing else can be operated until one is bound, so it is the
+# page a reader starts on and the one they come back to when switching.
 _NAV_LINKS = (
+    ("/maps", "maps"),
     ("/", "semantic map"),
     ("/2d", "2D map"),
     ("/cam", "camera"),
@@ -694,6 +874,10 @@ _ICON = ('<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
          ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{}</svg>')
 
 _NAV_ICONS = {
+    # stacked sheets: the saved maps, one of which is bound
+    "/maps": _ICON.format(
+        '<path d="M4 7.5 12 4l8 3.5-8 3.5z"/><path d="m4 12 8 3.5 8-3.5"/>'
+        '<path d="m4 16.5 8 3.5 8-3.5"/>'),
     # a box in space: the semantic map
     "/": _ICON.format(
         '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'
@@ -1339,11 +1523,12 @@ def make_app(*, registry: ObjectRegistry,
         # embeds it, and a native install has nothing else.
         if _bare(request):
             return HTMLResponse(_INDEX_HTML)
-        if rerun_sink is None or not rerun_sink.ready:
-            return HTMLResponse(_framed("/2d", "scene — 2D map"))
+        # Always the built-in renderer. rerun's top-down view is the 3D
+        # recording seen from above, point clouds included, and from above a
+        # point cloud hides the floor plan it is drawn over.
         return HTMLResponse(_shell_page(
-            "/2d", _viewer_body("url_2d", "/2d?bare=1"), "scene — 2D map",
-            info_panel=True))
+            "/2d", '<iframe src="/2d?bare=1" title="2D map"></iframe>',
+            "scene — 2D map", info_panel=True))
 
     async def state(_request) -> JSONResponse:
         return JSONResponse(
@@ -2130,8 +2315,21 @@ def make_app(*, registry: ObjectRegistry,
 
     async def user_page(request) -> HTMLResponse:
         if _bare(request):
-            return HTMLResponse(_USER_HTML)
+            return HTMLResponse(_user_html("regions"))
         return HTMLResponse(_framed("/regions", "scene — regions"))
+
+    async def maps_page(request) -> HTMLResponse:
+        """Map management: name and save the live session, load a saved map,
+        delete one, or re-estimate the pose on the one that is loaded.
+
+        Its own page because binding a map is the operation every other page
+        depends on, and because it was previously four controls crowded above
+        an unrelated drawing button, which said they were the same kind of
+        thing.
+        """
+        if _bare(request):
+            return HTMLResponse(_user_html("maps"))
+        return HTMLResponse(_framed("/maps", "scene — maps"))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -2168,6 +2366,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/2d", index2d, methods=["GET"]),
         Route("/3d", index3d, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
+        Route("/maps", maps_page, methods=["GET"]),
         Route("/regions", user_page, methods=["GET"]),
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
@@ -3358,6 +3557,20 @@ _INDEX_3D_HTML = r"""<!doctype html>
 # imports from the debug pages' scripts): the two pages evolve independently
 # and a debug-UI tweak must never break the user page. Kept dependency-free
 # like every other page here (no framework, no build step).
+def _user_html(page: str) -> str:
+    """The shared template in one of its two modes.
+
+    `page` is "maps" or "regions"; it lands on <body data-page> and the CSS
+    decides which controls exist. The heading follows it, because a page whose
+    title does not match its controls is the state this split was undoing.
+    """
+    title = "Maps" if page == "maps" else "Regions"
+    return (_USER_HTML
+            .replace("__PAGE__", page)
+            .replace('<h1 id="page-title">Maps</h1>',
+                     f'<h1 id="page-title">{title}</h1>'))
+
+
 _USER_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -3476,10 +3689,43 @@ _USER_HTML = r"""<!doctype html>
       white-space: pre-wrap; max-height: 120px; overflow: auto; display: none; }
   </style>
 </head>
-<body data-ready="loading">
+<body data-ready="loading" data-page="__PAGE__">
+<style>
+    /* ── One template, two pages ──
+       Maps binds a map; regions marks areas on the map that is bound. They
+       share the plan view, the state poll and the renderer -- serving them
+       from two copies is how one thing came to have four names last time. */
+    body[data-page="regions"] #map-tools { display: none; }
+    body[data-page="maps"] .actions,
+    body[data-page="maps"] #region-list { display: none; }
+
+    /* The gate. Region marking is an operation on a specific map, so with
+       nothing bound it is not disabled-looking, it is absent, and what stands
+       in its place says where to go. */
+    #map-gate {
+      display: none; margin: 10px 0 0; padding: 12px;
+      border: 1px solid #3a3320; border-radius: 6px; background: #1d1a10;
+      color: #d9cfae; font-size: 12.5px; line-height: 1.55;
+    }
+    #map-gate a { color: #f0c050; }
+    body.unbound[data-page="regions"] #map-gate { display: block; }
+    body.unbound[data-page="regions"] .actions,
+    body.unbound[data-page="regions"] #region-list { display: none; }
+
+    /* Which map everything on screen is about, stated on both pages. */
+    #bound-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 2px 9px; border-radius: 999px; font-size: 11.5px;
+      border: 1px solid #2f4a2f; background: #17251a; color: #9fd39f;
+    }
+    #bound-pill.none { border-color: #4a3f20; background: #241f10; color: #d9c07a; }
+    #bound-pill .dot { width: 6px; height: 6px; border-radius: 50%;
+                       background: currentColor; }
+</style>
 <div id="app">
   <header>
-    <h1>Map &amp; regions</h1>
+    <h1 id="page-title">Maps</h1>
+    <span id="bound-pill" class="none"><span class="dot"></span><span id="bound-text">no map bound</span></span>
     <span class="meta" id="meta">map: —</span>
     <span class="stale-alert" id="stale-alert">⚠ map was rebuilt — review stale regions</span>
   </header>
@@ -3494,6 +3740,14 @@ _USER_HTML = r"""<!doctype html>
         </div>
         <div id="map-status"><span id="map-status-msg">Ready.</span><span class="mode-label">Map mode:</span><span id="mode-pill">unknown</span></div>
         <div id="map-list"><div id="empty">No saved maps listed yet.</div></div>
+      </div>
+      <div id="map-gate">
+        <b>No map is bound.</b><br>
+        A region belongs to a map. There is a live mapping session running,
+        but until it is saved under a name there is nothing for a region to
+        belong to — it would be lost with the session.<br>
+        Go to <a href="/maps">maps</a> to save this session under a name, or
+        to load a map you already have.
       </div>
       <div class="actions">
         <button class="primary" id="btn-draw">✏ Mark region</button>
@@ -4434,6 +4688,18 @@ async function refresh() {
     state = next;
     const mb = state.map_binding;
     const unsavedLive = mb && mb.source === 'default' && !mb.mode;
+    // Bound means a named map: an unnamed live session is a session, not a
+    // map, and anything marked on it has nothing to belong to afterwards.
+    const bound = !!(mb && mb.map_id && !unsavedLive);
+    document.body.classList.toggle('unbound', !bound);
+    const pill = document.getElementById('bound-pill');
+    const pillText = document.getElementById('bound-text');
+    if (pill && pillText) {
+      pill.className = bound ? '' : 'none';
+      pillText.textContent = bound
+        ? `${mb.map_id} · ${mb.mode || 'mode unknown'}`
+        : 'no map bound — live session';
+    }
     document.getElementById('meta').textContent = mb
         ? (unsavedLive ? 'map: live session · unsaved' : `map: ${mb.map_id} · ${mb.mode || 'mode unknown'}`)
         : 'map: —';

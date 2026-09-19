@@ -38,6 +38,7 @@ BASE_URL = os.environ.get("SCENE_WEB_URL", "http://127.0.0.1:50107").rstrip("/")
 # Every page the sidebar offers, with the text that proves the right one
 # arrived rather than a generic shell.
 PAGES = [
+    ("/maps", "maps"),
     ("/", "semantic map"),
     ("/2d", "2D map"),
     ("/cam", "camera"),
@@ -104,7 +105,7 @@ def test_page_loads_with_its_own_sidebar(page, path, label):
     assert nav.count() > 0, f"{path} rendered no navigation at all"
 
     body = page.inner_text("body").lower()
-    for entry in ("semantic map", "2d map", "camera", "regions"):
+    for entry in ("maps", "semantic map", "2d map", "camera", "regions"):
         assert entry in body, f"{path} is missing the '{entry}' sidebar entry"
 
     assert not page.errors, f"{path} logged console errors: {page.errors[:3]}"
@@ -294,3 +295,116 @@ def test_the_shell_is_not_monospace(page):
     face = page.evaluate(
         "getComputedStyle(document.querySelector('nav a')).fontFamily")
     assert "mono" not in face.lower(), f"sidebar is still monospace: {face}"
+
+
+# ── Map binding ────────────────────────────────────────────────────────────
+# Everything on the other pages is about one map. Which one is never implicit.
+
+
+def test_maps_page_owns_map_management(page):
+    """Naming and saving a map, loading one, and re-estimating the pose are
+    map operations and live on the maps page. They used to sit above the
+    region drawing button, which said they were the same kind of thing."""
+    _goto(page, "/maps")
+    page.wait_for_timeout(900)
+
+    frame = page.frame_locator("iframe")
+    for control in ("#map-id", "#btn-save-map", "#btn-pose-estimate"):
+        assert frame.locator(control).is_visible(), (
+            f"maps page is missing {control}"
+        )
+    assert not frame.locator("#btn-draw").is_visible(), (
+        "the maps page still offers region drawing"
+    )
+
+
+def test_regions_page_keeps_only_region_marking(page):
+    """And the reverse: the regions page does not manage maps."""
+    _goto(page, "/regions")
+    page.wait_for_timeout(900)
+
+    frame = page.frame_locator("iframe")
+    assert not frame.locator("#map-id").is_visible(), (
+        "the regions page still carries the map form"
+    )
+
+
+def test_marking_is_gated_on_a_bound_map(page):
+    """A region belongs to a map. With nothing bound the control is absent,
+    not disabled, and what stands in its place says where to go -- failing at
+    save time is how orphan regions were made."""
+    _goto(page, "/regions")
+    page.wait_for_timeout(2500)
+
+    frame = page.frame_locator("iframe")
+    unbound = frame.locator("body.unbound").count() > 0
+
+    if unbound:
+        gate = frame.locator("#map-gate")
+        assert gate.is_visible(), "nothing is bound and no gate was shown"
+        assert "maps" in gate.inner_text().lower(), (
+            "the gate does not say where to go"
+        )
+        assert not frame.locator("#btn-draw").is_visible(), (
+            "marking is offered with no map bound"
+        )
+    else:
+        assert frame.locator("#btn-draw").is_visible(), (
+            "a map is bound but marking is not offered"
+        )
+
+
+def test_the_bound_map_is_named_on_the_page(page):
+    """Which map the thing in front of you describes is never left to be
+    inferred from the map drawing itself."""
+    for path in ("/maps", "/regions"):
+        _goto(page, path)
+        page.wait_for_timeout(2000)
+        pill = page.frame_locator("iframe").locator("#bound-pill")
+        assert pill.is_visible(), f"{path} does not name the bound map"
+        assert pill.inner_text().strip(), f"{path} binding pill is empty"
+
+
+# ── The 2D map ─────────────────────────────────────────────────────────────
+
+
+def test_2d_map_draws_no_point_cloud(page):
+    """The 2D page is a floor plan, not the 3D recording seen from above.
+
+    It used to be rerun's top-down view, which draws the point clouds; from
+    above a point cloud is a smear over exactly the thing a plan is opened
+    for. The built-in renderer draws the occupancy grid and one dot per
+    object, so the check is that the page is the canvas and not the viewer.
+    """
+    _goto(page, "/2d")
+    page.wait_for_timeout(2500)
+    frame = page.frame_locator("iframe")
+    assert frame.locator("canvas#c").count() == 1, (
+        "the 2D page is not the built-in canvas renderer"
+    )
+
+
+def test_2d_labels_do_not_overlap(page):
+    """Two objects a few centimetres apart -- a cup and a monitor on one table
+    -- printed their names over each other, and neither could be read. The
+    placement pass is annealing over candidate positions (Christensen, Marks &
+    Shieber 1995); this asserts the property it exists to provide."""
+    _goto(page, "/2d")
+    page.wait_for_timeout(4000)
+
+    boxes = page.frame_locator("iframe").locator("canvas#c").evaluate(
+        "() => (window.lblCache && window.lblCache.boxes) || []")
+    if len(boxes) < 2:
+        pytest.skip(f"only {len(boxes)} labels on the map; nothing to collide")
+
+    worst = 0.0
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            dx = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+            dy = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+            if dx > 0 and dy > 0:
+                worst = max(worst, dx * dy / (a["w"] * a["h"]))
+    assert worst < 0.12, (
+        f"labels overlap by {worst:.0%} of a label's area; placement failed"
+    )
+
