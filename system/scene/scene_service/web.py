@@ -495,7 +495,7 @@ def _state_payload(registry: ObjectRegistry,
     geometric slice (``reachable_by`` only, under the VLM-primary graph);
     the "scene_graph" field shows the full composed graph (geometric +
     image-grounded relational/semantic edges). "annotations" carries the
-    user-drawn rooms/POIs (map-frame meters, same coordinates as objects)
+    user-drawn regions/POIs (map-frame meters, same coordinates as objects)
     and "map_binding" the identity scene is bound to — both consumed by
     the /user annotation page."""
     objs_dict, _surfaces = _sync_snapshot(registry)
@@ -683,7 +683,7 @@ _NAV_LINKS = (
     ("/", "semantic map"),
     ("/2d", "2D map"),
     ("/cam", "camera"),
-    ("/user", "regions"),
+    ("/regions", "regions"),
 )
 
 
@@ -1051,12 +1051,12 @@ def make_app(*, registry: ObjectRegistry,
       GET /2d              — 2D top-down map (occupancy grid + objects)
       GET /3d              — 3D scene (point clouds + bbox; three.js)
       GET /cam             — camera stack (live RGB + depth)
-      GET /user            — end-user map page (rooms: draw / rename /
+      GET /user            — end-user map page (regions: draw / rename /
                              confirm-stale / delete; light object overlay)
       GET /api/state       — JSON for the 2D map
       GET /api/objects3d   — JSON for the 3D viz (per-object pcd + bbox)
       GET /api/camera      — JSON: latest RGB + depth frames
-      /api/annotations[..] — user annotation CRUD (see below)
+      /api/regions[..] — user annotation CRUD (see below)
       /api/maps[..]        — scene-owned map library façade over map capabilities
 
     `hub` is the SubscribersHub — passed so the JSON state can include
@@ -1081,13 +1081,13 @@ def make_app(*, registry: ObjectRegistry,
 
     Annotation API contract (STABLE once shipped — any frontend builds on
     it; see system/scene/README.md):
-      GET    /api/annotations       → {ok, annotations: [...]}
-      POST   /api/annotations       body {kind, name, points, theta?}
+      GET    /api/regions       → {ok, annotations: [...]}
+      POST   /api/regions       body {kind, name, points, theta?}
                                     → {ok, annotation}
-      PUT    /api/annotations/{id}  body: any of {name, points, theta,
+      PUT    /api/regions/{id}  body: any of {name, points, theta,
                                     stale:false} → {ok, annotation}
-      DELETE /api/annotations/{id}  → {ok}
-    theta (heading, radians) is poi-only — a room carrying it is a 400.
+      DELETE /api/regions/{id}  → {ok}
+    theta (heading, radians) is poi-only — a region carrying it is a 400.
     On PUT, theta null/absent means "keep"; a set heading cannot be
     cleared, only changed (deliberate until the poi UI exists).
     Errors: 400 invalid body/fields, 404 unknown id, 503 store unavailable;
@@ -1275,7 +1275,7 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse({"ok": True, "annotations": anno_store.list_json()})
 
     async def annotations_create(request) -> JSONResponse:
-        """POST /api/annotations — validate {kind, name, points, theta?}
+        """POST /api/regions — validate {kind, name, points, theta?}
         and persist a new annotation (returned with its generated id)."""
         if anno_store is None:
             return _anno_error(503, "annotation store unavailable")
@@ -1293,7 +1293,7 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse({"ok": True, "annotation": ann.to_json()})
 
     async def annotations_update(request) -> JSONResponse:
-        """PUT /api/annotations/{id} — partial update: any of name /
+        """PUT /api/regions/{id} — partial update: any of name /
         points / theta / stale:false (the user's "confirm still valid").
         Provided fields are validated against the annotation's kind."""
         if anno_store is None:
@@ -1328,7 +1328,7 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse({"ok": True, "annotation": ann.to_json()})
 
     async def annotations_delete(request) -> JSONResponse:
-        """DELETE /api/annotations/{id} — remove the annotation; 404 when
+        """DELETE /api/regions/{id} — remove the annotation; 404 when
         the id is unknown (delete is the user's explicit action, so unlike
         staleness it IS allowed to drop a user asset)."""
         if anno_store is None:
@@ -1378,7 +1378,7 @@ def make_app(*, registry: ObjectRegistry,
             # The store never loaded this map's annotation file (it is bound
             # to another partition — typically the live session). Carrying
             # the live partition over the file would silently destroy
-            # previously saved rooms; a startup binding that happens to name
+            # previously saved regions; a startup binding that happens to name
             # this map (lifecycle broadcast / env) is NOT a load.
             return _anno_error(409, (
                 f"map {map_id} already has saved regions; load it "
@@ -1392,12 +1392,12 @@ def make_app(*, registry: ObjectRegistry,
                 # The artifact was snapshotted at the original Save while the
                 # live frame kept evolving (loop closures) — writing today's
                 # coordinates against that frozen artifact would mis-anchor
-                # every object/room on the next Load.
+                # every object/region on the next Load.
                 return _anno_error(409, (
                     f"map {map_id} was saved from this still-running mapping "
                     "session; its spatial artifact is immutable and the live "
                     "frame has kept drifting since. Load it in localization "
-                    "mode to edit rooms/objects, or delete it and save anew."
+                    "mode to edit regions/objects, or delete it and save anew."
                 ))
             out = {
                 "ok": True,
@@ -1467,7 +1467,7 @@ def make_app(*, registry: ObjectRegistry,
             mode_after_save = current_mode if spatial_exists and current_bound_id == map_id and current_mode else "mapping"
             _set_map_binding(map_id, mode_after_save, "ui_save", generation=gen)
             if object_persist_error is not None:
-                # The public Save contract is geometry + rooms + objects as
+                # The public Save contract is geometry + regions + objects as
                 # ONE unit. With the object snapshot uncommitted the artifact
                 # is incomplete, and a 200/ok here would let the operator
                 # move on without the recovery step — the sidecar still
@@ -1509,7 +1509,7 @@ def make_app(*, registry: ObjectRegistry,
                 "has_preview": bool(saved_map and saved_map.get("has_preview")),
                 "updated": (saved_map or {}).get("updated"),
                 "object_count": int(object_count or 0),
-                "room_count": sum(1 for a in annotations if a.get("kind") == "room"),
+                "room_count": sum(1 for a in annotations if a.get("kind") == "region"),
                 "annotation_count": len(annotations),
                 "paths": {
                     "map_artifact": (saved_map or {}).get("artifact_path") or "not exposed by map provider",
@@ -1565,7 +1565,7 @@ def make_app(*, registry: ObjectRegistry,
             # and PublishMap request. Do not restore semantic state until Scene
             # has actually observed the resulting occupancy grid; otherwise the
             # first click only switches the database and a second click appears
-            # necessary to refresh rooms/objects against the loaded map.
+            # necessary to refresh regions/objects against the loaded map.
             ready_timeout_s = float(os.environ.get("SCENE_MAP_READY_TIMEOUT_S", "20"))
             deadline = time.monotonic() + ready_timeout_s
             occupancy_ready = False
@@ -1632,7 +1632,7 @@ def make_app(*, registry: ObjectRegistry,
                     "object_flush_error": str(e),
                     "detail": (
                         f"{out.get('detail') or 'loaded'}; REGISTRY FLUSH "
-                        f"FAILED: {e} — aborted before rooms/objects were "
+                        f"FAILED: {e} — aborted before regions/objects were "
                         "rebound; retry the load"
                     ),
                 }
@@ -1671,7 +1671,7 @@ def make_app(*, registry: ObjectRegistry,
             if anno_store is not None:
                 # Localization load keeps the saved map's frame epoch, so the
                 # live broadcast (when present) carries the generation the
-                # rooms were saved under; the sidecar's recorded value is the
+                # regions were saved under; the sidecar's recorded value is the
                 # fallback. Either lets rebind() re-judge staleness.
                 anno_gen = gen if gen is not None else (
                     meta.mapping_generation if meta is not None else None
@@ -1691,12 +1691,12 @@ def make_app(*, registry: ObjectRegistry,
                 # renders `detail`), not only in the log.
                 out["detail"] = (
                     f"{out.get('detail') or 'loaded'}; no semantic snapshot "
-                    "for this map — objects not restored (rooms still load; "
+                    "for this map — objects not restored (regions still load; "
                     "re-save the map to snapshot objects)"
                 )
                 log.warning(
                     "[scene-maps] load %s: no semantic sidecar — restoring "
-                    "no objects (rooms still load; re-save the map to "
+                    "no objects (regions still load; re-save the map to "
                     "snapshot current objects)", map_id,
                 )
             _set_map_binding(map_id, "localization", "ui_load", generation=gen)
@@ -2030,7 +2030,7 @@ def make_app(*, registry: ObjectRegistry,
     async def user_page(request) -> HTMLResponse:
         if _bare(request):
             return HTMLResponse(_USER_HTML)
-        return HTMLResponse(_framed("/user", "scene — regions"))
+        return HTMLResponse(_framed("/regions", "scene — regions"))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -2067,7 +2067,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/2d", index2d, methods=["GET"]),
         Route("/3d", index3d, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
-        Route("/user", user_page, methods=["GET"]),
+        Route("/regions", user_page, methods=["GET"]),
         Route("/api/state", state, methods=["GET"]),
         Route("/api/objects3d", objects3d, methods=["GET"]),
         Route("/api/viewer", viewer_url, methods=["GET"]),
@@ -2078,23 +2078,27 @@ def make_app(*, registry: ObjectRegistry,
         # The gRPC-web service path, kept version-tolerant: the package name
         # carries rerun's own version and changes with it, so the route
         # matches any two-segment service call and the handler decides.
-        Route("/{service}/{method}", rerun_grpc, methods=["POST", "OPTIONS"]),
         Route("/re_viewer.js", rerun_asset, methods=["GET"]),
         Route("/re_viewer_bg.wasm", rerun_asset, methods=["GET"]),
         Route("/favicon.svg", rerun_asset, methods=["GET"]),
         Route("/sw.js", rerun_asset, methods=["GET"]),
         Route("/api/camera", camera_state, methods=["GET"]),
-        Route("/api/annotations", annotations_list, methods=["GET"]),
-        Route("/api/annotations", annotations_create, methods=["POST"]),
-        Route("/api/annotations/{annotation_id}", annotations_update,
+        Route("/api/regions", annotations_list, methods=["GET"]),
+        Route("/api/regions", annotations_create, methods=["POST"]),
+        Route("/api/regions/{annotation_id}", annotations_update,
               methods=["PUT"]),
-        Route("/api/annotations/{annotation_id}", annotations_delete,
+        Route("/api/regions/{annotation_id}", annotations_delete,
               methods=["DELETE"]),
         Route("/api/maps", maps_list, methods=["GET"]),
         Route("/api/maps/save", maps_save, methods=["POST"]),
         Route("/api/maps/load", maps_load, methods=["POST"]),
         Route("/api/maps/delete", maps_delete, methods=["POST"]),
         Route("/api/maps/pose_estimate", maps_pose_estimate, methods=["POST"]),
+        # Registered last on purpose: this is a two-segment catch-all, and
+        # Starlette matches in order, so anywhere above here it swallows
+        # every two-segment POST the service has -- POST /api/regions among
+        # them, which returned the proxy's 404 instead of creating a region.
+        Route("/{service}/{method}", rerun_grpc, methods=["POST", "OPTIONS"]),
     ]
     return Starlette(routes=routes)
 
@@ -3248,8 +3252,8 @@ _INDEX_3D_HTML = r"""<!doctype html>
 
 # ── User annotation page (/user) ─────────────────────────────────────────────
 # The end-user map page: SLAM occupancy underlay + LIGHTWEIGHT object overlay
-# + user-drawn room polygons, with a draw-a-room flow talking to the
-# /api/annotations CRUD. Deliberately self-contained (own inline JS, no
+# + user-drawn region polygons, with a draw-a-region flow talking to the
+# /api/regions CRUD. Deliberately self-contained (own inline JS, no
 # imports from the debug pages' scripts): the two pages evolve independently
 # and a debug-UI tweak must never break the user page. Kept dependency-free
 # like every other page here (no framework, no build step).
@@ -3301,19 +3305,19 @@ _USER_HTML = r"""<!doctype html>
     button.primary.active { background: var(--acc); color: #0e1015; }
     button.small { padding: 2px 7px; font-size: 11px; }
     button.danger { border-color: #6b3640; color: var(--danger); }
-    #room-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px 10px;
+    #region-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px 10px;
       overscroll-behavior: contain; scrollbar-gutter: stable; }
-    .room { --room-color: var(--acc); border: 1px solid #232936;
-      border-left: 3px solid var(--room-color); border-radius: 7px; padding: 6px 8px;
+    .region { --region-color: var(--acc); border: 1px solid #232936;
+      border-left: 3px solid var(--region-color); border-radius: 7px; padding: 6px 8px;
       margin-bottom: 6px; font-size: 12px; }
-    .room.selected { border-color: var(--acc); }
-    .room .name { font-weight: 650; }
-    .room .swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px;
-      border-radius: 2px; background: var(--room-color); vertical-align: 1px; }
-    .room .sub { color: var(--muted); font-size: 10px; margin: 2px 0 5px 14px; }
-    .room .badge { color: #0e1015; background: var(--warn); border-radius: 4px;
+    .region.selected { border-color: var(--acc); }
+    .region .name { font-weight: 650; }
+    .region .swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+      border-radius: 2px; background: var(--region-color); vertical-align: 1px; }
+    .region .sub { color: var(--muted); font-size: 10px; margin: 2px 0 5px 14px; }
+    .region .badge { color: #0e1015; background: var(--warn); border-radius: 4px;
       padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 6px; }
-    .room .btns { display: flex; gap: 6px; }
+    .region .btns { display: flex; gap: 6px; }
     #canvas-wrap { position: relative; flex: 1; min-width: 0; }
     canvas { display: block; width: 100%; height: 100%; background: #14171f; }
     #hint { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
@@ -3393,7 +3397,7 @@ _USER_HTML = r"""<!doctype html>
       <div class="actions">
         <button class="primary" id="btn-draw">✏ Mark region</button>
       </div>
-      <div id="room-list"><div id="empty">No regions yet. Click “Mark region”,
+      <div id="region-list"><div id="empty">No regions yet. Click “Mark region”,
         then click on the map to outline one (double-click or Enter to finish,
         Esc to cancel).</div></div>
     </div>
@@ -3519,7 +3523,7 @@ function setMapStatus(text, kind = '') {
 }
 function setMapBusy(on, label = '') {
     mapBusy = on;
-    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #btn-draw, #room-list button')
+    document.querySelectorAll('#map-tools button, #map-tools input, .map-btns button, #btn-draw, #region-list button')
         .forEach(el => el.disabled = on);
     if (!on) {
         renderMaps();
@@ -3607,7 +3611,7 @@ function setMapItemStatus(id, text) {
 // ── rendering ────────────────────────────────────────────────────────────
 function polyCentroid(pts) {
     // Area-weighted polygon centroid. Averaging vertices visibly shifts labels
-    // for irregular rooms because densely sampled edges receive extra weight.
+    // for irregular regions because densely sampled edges receive extra weight.
     let twiceArea = 0, sx = 0, sy = 0;
     for (let i = 0; i < pts.length; i++) {
         const [x0, y0] = pts[i];
@@ -3697,7 +3701,7 @@ function draw() {
         ctx.fillText('no map yet — the SLAM map appears here once mapping publishes it', 20, 30);
     }
 
-    // saved rooms
+    // saved regions
     for (const a of (state.annotations || [])) {
         if (a.kind !== 'region' || a.points.length < 3) continue;
         const pts = a.points.map(p => w2p(p[0], p[1]));
@@ -3824,12 +3828,12 @@ function showSaveReport(out, previewDataUrl) {
         ['Spatial artifact', validation.spatial_ok ? 'ok' : (validation.artifact_detail || 'failed')],
         ['Artifact size', validation.artifact_size ? `${validation.artifact_size} bytes` : '-'],
         ['Objects', validation.object_count ?? out.objects ?? '-'],
-        ['Rooms', validation.room_count ?? '-'],
+        ['Regions', validation.room_count ?? '-'],
         ['Annotations', validation.annotation_count ?? out.annotations ?? '-'],
         ['Updated', validation.updated || '-'],
         ['Artifact path', paths.map_artifact || '-'],
         ['Preview path', paths.preview || '-'],
-        ['Room JSON', paths.scene_annotations || '-'],
+        ['Region JSON', paths.scene_annotations || '-'],
     ];
     kv.innerHTML = rows.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('');
     log.textContent = (validation.log || []).join('\n') || 'no save log returned';
@@ -3942,12 +3946,12 @@ async function saveCurrentMap() {
     beginMapOperation({
         title: existing ? `Updating ${id}` : `Saving ${id}`,
         message: existing
-            ? 'The spatial map already exists. Scene rooms and objects will be updated under the same Map ID.'
+            ? 'The spatial map already exists. Scene regions and objects will be updated under the same Map ID.'
             : 'Keep this page open while the spatial map and Scene data are made reusable.',
         status: existing ? `Updating Scene data for ${id}...` : `Saving map ${id}...`,
         steps: existing
-            ? ['Validate existing spatial artifact', 'Persist rooms and Scene objects', 'Verify reusable map entry']
-            : ['Snapshot the live spatial map', 'Persist rooms and Scene objects', 'Verify artifact and preview'],
+            ? ['Validate existing spatial artifact', 'Persist regions and Scene objects', 'Verify reusable map entry']
+            : ['Snapshot the live spatial map', 'Persist regions and Scene objects', 'Verify artifact and preview'],
     });
     try {
     const result = await mapRequest('/api/maps/save', { map_id: id, note: 'saved from scene user page' });
@@ -3956,7 +3960,7 @@ async function saveCurrentMap() {
         const validation = out.validation || {};
         const ok = validation.spatial_ok !== false && validation.has_preview !== false;
         const semanticOnly = Boolean(out.spatial_unchanged);
-        setMapStatus(`${semanticOnly ? 'Updated scene data for' : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; rooms ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
+        setMapStatus(`${semanticOnly ? 'Updated scene data for' : 'Saved'} ${out.map_id || id}; spatial artifact ${ok ? 'ok' : 'failed'}; regions ${validation.room_count ?? '-'}.`, ok ? 'ok' : 'err');
         toast((semanticOnly ? 'updated scene data for ' : 'saved map ') + (out.map_id || id));
         await loadMaps();
         finishMapOperation({
@@ -3995,7 +3999,7 @@ async function loadSelectedMap(id) {
         title: `Loading ${id}`,
         message: 'The editor is locked until Mapping publishes the loaded occupancy grid and Scene restores the matching semantic data.',
         status: `Loading ${id}; switching Mapping to localization mode...`,
-        steps: ['Validate saved spatial artifact', 'Switch Mapping to localization mode', 'Wait for a fresh occupancy grid', 'Restore rooms and Scene objects'],
+        steps: ['Validate saved spatial artifact', 'Switch Mapping to localization mode', 'Wait for a fresh occupancy grid', 'Restore regions and Scene objects'],
     });
     try {
     const result = await mapRequest('/api/maps/load', { map_id: id, mode: 'localization' });
@@ -4009,7 +4013,7 @@ async function loadSelectedMap(id) {
         finishMapOperation({
             ok: true,
             title: 'Map loaded',
-            message: `${id} is active in localization mode. Rooms and Scene objects now use the same Map ID.`,
+            message: `${id} is active in localization mode. Regions and Scene objects now use the same Map ID.`,
             detail: [
                 out.detail || '',
                 occupancy.width ? `occupancy ${occupancy.width} × ${occupancy.height}` : '',
@@ -4146,7 +4150,7 @@ function askModal({ title, message = '', defaultValue = '', input = true, okText
     });
 }
 
-function askRoomName(title, defaultValue = '') {
+function askRegionName(title, defaultValue = '') {
     return askModal({ title, defaultValue, input: true, okText: 'Save' });
 }
 
@@ -4154,19 +4158,19 @@ function askConfirm(title, message, okText = 'Delete') {
     return askModal({ title, message, input: false, okText, danger: true });
 }
 function renderPanel() {
-    const rooms = (state && state.annotations || []).filter(a => a.kind === 'region');
-    const list = document.getElementById('room-list');
-    const anyStale = rooms.some(a => a.stale);
+    const regions = (state && state.annotations || []).filter(a => a.kind === 'region');
+    const list = document.getElementById('region-list');
+    const anyStale = regions.some(a => a.stale);
     document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
-    if (!rooms.length) {
+    if (!regions.length) {
         list.innerHTML = '<div id="empty">No regions yet. Click “Mark region”, ' +
           'then click on the map to outline one (double-click or Enter to ' +
           'finish, Esc to cancel).</div>';
         return;
     }
-    list.innerHTML = rooms.map(a => `
+    list.innerHTML = regions.map(a => `
       <div class="region ${a.annotation_id === selectedId ? 'selected' : ''}"
-           data-id="${a.annotation_id}" style="--room-color:${roomColor(a).stroke}">
+           data-id="${a.annotation_id}" style="--region-color:${roomColor(a).stroke}">
         <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || '(unnamed)')}</span>
         ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">STALE</span>' : ''}
         <div class="sub">${a.points.length} corners</div>
@@ -4177,23 +4181,23 @@ function renderPanel() {
         </div>
       </div>`).join('');
 }
-document.getElementById('room-list').addEventListener('click', async (ev) => {
+document.getElementById('region-list').addEventListener('click', async (ev) => {
     if (mapBusy) return;
     const roomEl = ev.target.closest('.region');
     if (!roomEl) return;
     const id = roomEl.dataset.id;
     const act = ev.target.dataset && ev.target.dataset.act;
     if (!act) { selectedId = (selectedId === id) ? null : id; renderPanel(); draw(); return; }
-    const room = (state.annotations || []).find(a => a.annotation_id === id);
-    if (!room) return;
+    const region = (state.annotations || []).find(a => a.annotation_id === id);
+    if (!region) return;
     if (act === 'rename') {
-        const name = await askRoomName('Rename region', room.name);
-        if (name !== null && name) await api('PUT', '/api/annotations/' + id, { name });
+        const name = await askRegionName('Rename region', region.name);
+        if (name !== null && name) await api('PUT', '/api/regions/' + id, { name });
     } else if (act === 'confirm') {
-        await api('PUT', '/api/annotations/' + id, { stale: false });
+        await api('PUT', '/api/regions/' + id, { stale: false });
     } else if (act === 'delete') {
-        if (await askConfirm('Delete region', `Delete region “${room.name}”?`))
-            await api('DELETE', '/api/annotations/' + id);
+        if (await askConfirm('Delete region', `Delete region “${region.name}”?`))
+            await api('DELETE', '/api/regions/' + id);
     }
 });
 
@@ -4216,12 +4220,12 @@ async function finishDraft() {
     draftSubmitting = true;
     try {
         const points = draft.map(p => [p[0], p[1]]);
-        const name = await askRoomName('Create room', '');
+        const name = await askRegionName('Create region', '');
         if (name === null) return;          // keep drawing
-        if (!name) { toast('Room name is required.'); return; }
+        if (!name) { toast('Region name is required.'); return; }
         const body = { kind: 'region', name, points };
         draft = [];
-        const created = await api('POST', '/api/annotations', body);
+        const created = await api('POST', '/api/regions', body);
         if (created) setDrawMode(false);
         else { draft = points; draw(); }
     } finally {

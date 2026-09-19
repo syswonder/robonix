@@ -27,7 +27,7 @@ def test_map_operations_have_one_blocking_dialog_and_retry_path():
     assert "function finishMapOperation" in html
     assert "if (mapBusy) ev.preventDefault()" in html
     assert "Wait for a fresh occupancy grid" in html
-    assert "Restore rooms and Scene objects" in html
+    assert "Restore regions and Scene objects" in html
     assert "retry: () => loadSelectedMap(id)" in html
 
 

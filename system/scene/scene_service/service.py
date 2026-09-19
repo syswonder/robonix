@@ -1607,7 +1607,7 @@ async def _run_active(config: dict) -> None:
             )
             obj_store = None
 
-    # User annotations (rooms / POIs) — user-authored semantics on the same
+    # User annotations (regions / POIs) — user-authored semantics on the same
     # map_id partition rule as the object store; validity is additionally
     # tracked against mapping's generation epoch (annotations only — the
     # object store has no epoch concept). A failure here disables the
@@ -1684,7 +1684,7 @@ async def _run_active(config: dict) -> None:
         mcp_tools.list_regions,
         mcp_tools.get_robot_context,
         mcp_tools.goal_near,
-        mcp_tools.goal_room,
+        mcp_tools.goal_region,
         mcp_tools.get_scene_graph,
         mcp_tools.get_object_context,
         mcp_tools.list_relations,
@@ -2016,7 +2016,7 @@ async def _run() -> None:
     scene_tools = (
         mcp_tools.list_objects,
         mcp_tools.goal_near,
-        mcp_tools.goal_room,
+        mcp_tools.goal_region,
         mcp_tools.get_scene_graph,
         mcp_tools.get_object_context,
         mcp_tools.get_robot_context,

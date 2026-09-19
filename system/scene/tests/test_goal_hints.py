@@ -4,10 +4,10 @@ from scene_service import mcp_tools
 
 
 class _Store:
-    def __init__(self, rooms=None):
-        self._rooms = rooms or [
-            SimpleNamespace(annotation_id="anno.315", kind="room", name="room 315"),
-            SimpleNamespace(annotation_id="anno.100", kind="room", name="room 100"),
+    def __init__(self, regions=None):
+        self._rooms = regions or [
+            SimpleNamespace(annotation_id="anno.315", kind="region", name="region 315"),
+            SimpleNamespace(annotation_id="anno.100", kind="region", name="region 100"),
         ]
 
     def list(self):
@@ -20,11 +20,11 @@ def _object(object_id: str, label: str):
 
 def test_room_hint_lists_names_and_exact_ids():
     mcp_tools.attach_annotation_store(_Store())
-    hint = mcp_tools._room_id_hint()
-    assert "room 315" in hint
-    assert "scene.room.anno.315" in hint
-    assert "room 100" in hint
-    assert "scene.room.anno.100" in hint
+    hint = mcp_tools._region_id_hint()
+    assert "region 315" in hint
+    assert "scene.region.anno.315" in hint
+    assert "region 100" in hint
+    assert "scene.region.anno.100" in hint
 
 
 def test_object_hint_ranks_similar_label_first():
@@ -42,19 +42,19 @@ def test_object_hint_ranks_similar_label_first():
 
 def test_room_reference_resolves_stable_id_name_and_short_alias():
     mcp_tools.attach_annotation_store(_Store())
-    for reference in ("scene.room.anno.315", "room 315", "ROOM   315", "315"):
-        room, ambiguous = mcp_tools._resolve_room_target(reference)
-        assert room is not None
-        assert room.annotation_id == "anno.315"
+    for reference in ("scene.region.anno.315", "region 315", "ROOM   315", "315"):
+        region, ambiguous = mcp_tools._resolve_region_target(reference)
+        assert region is not None
+        assert region.annotation_id == "anno.315"
         assert ambiguous == []
 
 
 def test_room_reference_reports_ambiguous_aliases_without_guessing():
-    rooms = [
-        SimpleNamespace(annotation_id="anno.a", kind="room", name="room 315"),
-        SimpleNamespace(annotation_id="anno.b", kind="room", name="315"),
+    regions = [
+        SimpleNamespace(annotation_id="anno.a", kind="region", name="region 315"),
+        SimpleNamespace(annotation_id="anno.b", kind="region", name="315"),
     ]
-    mcp_tools.attach_annotation_store(_Store(rooms))
-    room, ambiguous = mcp_tools._resolve_room_target("315")
-    assert room is None
+    mcp_tools.attach_annotation_store(_Store(regions))
+    region, ambiguous = mcp_tools._resolve_region_target("315")
+    assert region is None
     assert [item.annotation_id for item in ambiguous] == ["anno.a", "anno.b"]

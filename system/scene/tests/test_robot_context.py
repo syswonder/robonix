@@ -23,7 +23,7 @@ class Annotations:
         return [
             SimpleNamespace(
                 annotation_id="315",
-                kind="room",
+                kind="region",
                 name="room 315",
                 points=[[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0]],
             ),
@@ -64,8 +64,8 @@ def test_robot_context_combines_pose_room_area_and_nearby_objects():
 
     assert response.pose_known and not response.stale
     assert response.map_id == "floor-3"
-    assert response.room_id == "scene.room.315"
-    assert response.room_name == "room 315"
+    assert response.region_id == "scene.region.315"
+    assert response.region_name == "room 315"
     assert response.containing_area_names == ["open area", "room 315"]
     assert [item.id for item in response.nearby_objects] == [
         "scene.object.banana_001"

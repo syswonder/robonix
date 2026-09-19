@@ -41,7 +41,7 @@ PAGES = [
     ("/", "semantic map"),
     ("/2d", "2D map"),
     ("/cam", "camera"),
-    ("/user", "regions"),
+    ("/regions", "regions"),
 ]
 
 pytest.importorskip(
@@ -159,7 +159,7 @@ def test_semantic_map_mounts_the_viewer(page):
 def test_regions_page_offers_marking(page):
     """The regions page is where a region gets its name, so the control that
     starts that has to be on it."""
-    _goto(page, "/user")
+    _goto(page, "/regions")
     page.wait_for_timeout(800)
 
     body = page.inner_text("body").lower()
