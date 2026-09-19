@@ -61,11 +61,46 @@ from .state import (
 from .state.object_registry import now_unix
 from .web_binding import resolve_web_host
 
+# `force` because this runs after the package imports above, and a library
+# that configured the root logger first turns basicConfig into a silent
+# no-op. That is what had happened: SCENE_LOG_LEVEL was documented, passed
+# through docker, and did nothing -- the service emitted not one line of its
+# own, so a background task reporting its own failure reported it to nobody.
+_LOG_LEVEL = os.environ.get("SCENE_LOG_LEVEL", "INFO").upper()
+# `force` because this runs after the package imports above, and a library
+# that configured the root logger first turns basicConfig into a no-op.
 logging.basicConfig(
-    level=os.environ.get("SCENE_LOG_LEVEL", "INFO").upper(),
+    level=_LOG_LEVEL,
     format="[scene-service] %(levelname)s %(message)s",
+    force=True,
 )
 log = logging.getLogger("scene-service")
+# And again on this logger, because scribe installs its bridge on the root
+# logger at bootstrap -- after this module is imported -- and sets root's
+# level as it does, which silently undid the line above. Between the two,
+# SCENE_LOG_LEVEL had no effect at all and the service logged nothing
+# anywhere, so a background task that reports its own failure reported it
+# to nobody. A level set here is this logger's own and outranks whatever
+# root becomes later.
+log.setLevel(_LOG_LEVEL)
+# And a sink that survives bootstrap. Scribe's bridge installs itself on the
+# *root* logger with replace_existing_handlers=True, which removes the
+# console handler basicConfig just put there; inside the container its own
+# writes then go where nothing can read them, because SCRIBE_LOG_DIR is
+# mounted read-only. Measured, not assumed: at import the root logger has a
+# StreamHandler and an INFO line reaches the container output; by activation
+# the root logger has only the bridge and the same call produces nothing.
+# The service's logging was being destroyed from bootstrap onward.
+#
+# This handler is on scene's own logger, which the bridge does not touch,
+# and only in a container -- where rbnx already pipes our output into
+# scribe, so the console is the path to scribe. A native install keeps the
+# bridge's behaviour and does not get a second copy.
+if Path("/.dockerenv").exists():
+    _console = logging.StreamHandler()
+    _console.setFormatter(
+        logging.Formatter("[scene-service] %(levelname)s %(message)s"))
+    log.addHandler(_console)
 
 
 _lifecycle = SceneLifecycleRuntime(log)

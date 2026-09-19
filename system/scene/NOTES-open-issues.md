@@ -61,8 +61,50 @@ Python 写的看门狗都救不了——它自己也要 GIL。**进程内不存�
   `rec.log()`）经 scene 代理与子进程自带 viewer 均为空白。
 - 当前取舍仍是：数据面留在进程内（viewer 可用），死锁靠重启绕过。
 
-下一步：查清子进程模式下数据为何送不达——优先怀疑 recording id /
-`application_id` 与 viewer `url` 查询参数不匹配，而不是传输本身。
+### 又缩小了一圈（同晚稍后）
+- 再抓到一次，这次卡在**第二个** feed 的 `serve_grpc`，而且 9876/9877
+  **都已经 LISTEN**：端口绑定成功之后才卡住。所以和端口占用无关。
+- 「一个进程里连着调两次 serve_grpc」本身没问题：在空容器里连跑 12 次，
+  12/12 都是 1ms 返回，0 次 hang。
+- 所以触发条件还是「进程里同时有很多活跃线程」。结合「睡着但持有 GIL」
+  这一点，最像的机制是 **Rust 侧在持有某个自己的锁时回调进 Python 取
+  GIL**，而另一个线程正拿着那个锁等 GIL——空进程里没有竞争者，所以永远
+  不会发生。这个还没证实。
+
+### 可以先做、成本很低的一招
+把 viewer 的 bring-up 挪到进程还安静的时候（rclpy / CUDA / milvus 起来
+之前），而不是放在激活阶段。空进程里是 0/12，越安静越不容易撞上。这不
+解决根因，但能把概率压下去，而且本身就说得通：数据汇应该先于数据存在。
+
+下一步（真正的解法）：查清子进程模式下数据为何送不达——优先怀疑
+recording id / `application_id` 与 viewer `url` 查询参数不匹配，而不是
+传输本身。
+
+## 4. scene 自己的日志曾经是被销毁的（已修）
+
+排查上面那些问题时最大的阻力：**scene service 的 logging 输出一条也没有**
+——不在容器 stdout，不在 scribe，logs 页面里除了 scene 自己什么包都有。
+`SCENE_LOG_LEVEL` 一路透传进 docker，其实毫无作用。
+
+用探针抓到了确凿证据：
+
+| 时刻 | root.handlers | 一条 INFO 是否出现 |
+| --- | --- | --- |
+| import 时 | `[StreamHandler]` | 出现 |
+| 激活时 | `[_StdlibBridgeHandler]` | 消失 |
+
+即 scribe 的 bridge 在 bootstrap 时装到 **root logger** 上，且
+`replace_existing_handlers=True` 把 `basicConfig` 刚装的 console handler
+删掉；而它自己在容器里写不出去（`SCRIBE_LOG_DIR` 是 `:ro` 挂载）。于是从
+bootstrap 起，scene 的日志既不落盘也不进控制台，是被**销毁**而不是被过滤。
+
+后果不只是不方便：`[scene-rerun] publish failed` 这种「后台任务自报死亡」
+的日志，报给了空气。
+
+修法：把 handler 装在 scene 自己的 logger 上（bridge 只动 root），且只在
+容器里装——容器里 rbnx 本来就把我们的输出接进 scribe，所以控制台**就是**
+通往 scribe 的路。原生部署维持 bridge 原样，不会重复两份。
+现在 `scene.log` 里能看到 17 条 `[scene-service]` 启动日志了。
 
 ## 4. 镜像 tag 被两个 worktree 抢（今晚踩到）
 

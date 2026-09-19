@@ -271,17 +271,25 @@ def test_uncertain_objects_look_uncertain(page):
     _goto(page, "/")
     page.wait_for_timeout(1500)
 
-    marked = page.evaluate("""() => {
-      const rows = [...document.querySelectorAll('#dock-objs tr')];
-      return rows.map(r => {
-        const pp = r.querySelector('td.pp');
-        const c = pp ? parseFloat((pp.textContent.split('·')[1] || '1')) : null;
-        return {c: c, unsure: r.classList.contains('unsure')};
-      }).filter(r => r.c !== null && !Number.isNaN(r.c));
+    # The row shows coordinates, not confidence -- the number lives only in
+    # the data the dock is built from, so that is where it is read. Matching
+    # by id rather than by position keeps this honest if the list reorders.
+    marked = page.evaluate("""async () => {
+      const live = await fetch('/api/state', {cache: 'no-store'})
+        .then(r => r.json());
+      const conf = new Map((live.objects || []).map(o => [o.id, o.confidence]));
+      return [...document.querySelectorAll('#dock-objs tr.row')]
+        .map(r => ({
+          id: r.dataset.oid,
+          c: conf.has(r.dataset.oid) ? conf.get(r.dataset.oid) : null,
+          unsure: r.classList.contains('unsure'),
+        }))
+        .filter(r => typeof r.c === 'number');
     }""")
+    assert marked, "no rows carried a confidence to check"
     for row in marked:
         assert row["unsure"] == (row["c"] < 0.55), (
-            f"confidence {row['c']} marked unsure={row['unsure']}"
+            f"{row['id']}: confidence {row['c']} marked unsure={row['unsure']}"
         )
 
 

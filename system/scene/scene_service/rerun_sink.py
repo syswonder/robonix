@@ -27,6 +27,7 @@ import logging
 import math
 import os
 import threading
+import time
 import urllib.parse
 from typing import Any, Iterable, Optional, Sequence
 
@@ -63,7 +64,11 @@ _COLOUR_ROBOT = (255, 166, 54)
 
 # How long to wait for the viewer to bind its three ports before
 # giving up on it and serving the built-in pages.
-_START_TIMEOUT_S = 20.0
+_START_TIMEOUT_S = 30.0
+# How long the three ports may collectively take to come free. A previous
+# run's listener closes in about a second; anything longer is somebody else's
+# server, and waiting will not help.
+_PORT_WAIT_S = 8.0
 
 _APP_3D = "robonix-scene"
 _APP_2D = "robonix-scene-2d"
@@ -315,11 +320,17 @@ def _port_is_free(port: int) -> bool:
     inside Python can recover from that -- a watchdog thread never gets
     scheduled to fire -- so the only defence is to not make the call.
 
-    That puts the weight on this check being right. Binding with SO_REUSEADDR
-    was not: it is meant for restarting a listener over a socket that is
-    winding down, and it succeeds in exactly the case this exists to catch.
-    A connection attempt is the direct question -- is anybody listening --
-    and a strict bind then catches a socket still on its way out.
+    That puts the weight on this check being right -- and right means
+    matching the server, not exceeding it. A connection attempt answers the
+    dangerous question directly: is anybody listening. The bind that follows
+    answers only the remaining one, can a server bind here, and so it sets
+    SO_REUSEADDR because the server does.
+
+    Without that option the check also refused a port whose listener was
+    already gone and whose accepted connections were merely in TIME_WAIT --
+    a browser tab left open on the previous run was enough -- and the viewer
+    then stayed off for the entire session over a socket state that harms
+    nothing.
     """
     import socket
 
@@ -328,6 +339,7 @@ def _port_is_free(port: int) -> bool:
         if probe.connect_ex(("127.0.0.1", port)) == 0:
             return False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("0.0.0.0", port))
         except OSError:
@@ -457,15 +469,24 @@ class RerunSink:
             # say so rather than leave the web UI unreachable forever.
             outcome: dict[str, Any] = {}
 
-            def claim(port: int) -> None:
-                """Refuse a port that was taken since the first check.
+            # One deadline for all three claims, so a slow release cannot
+            # multiply into the start timeout.
+            patience = time.monotonic() + _PORT_WAIT_S
 
-                Seconds pass between that check and here -- importing rerun is
-                not cheap -- and a previous run finishing its exit inside that
-                window is the whole failure this guards.
+            def claim(port: int) -> None:
+                """Take a port, waiting briefly for a previous run to let go.
+
+                Seconds pass between the first check and here -- importing
+                rerun is not cheap -- and a previous run finishing its exit
+                inside that window is the whole failure this guards. That
+                exit takes a moment, not a session, so it is waited out:
+                refusing instantly turned a two-second overlap into a viewer
+                that stayed off until the next restart.
                 """
-                if not _port_is_free(port):
-                    raise OSError(f"port {port} is in use")
+                while not _port_is_free(port):
+                    if time.monotonic() >= patience:
+                        raise OSError(f"port {port} is in use")
+                    time.sleep(0.25)
 
             def bring_up() -> None:
                 try:
