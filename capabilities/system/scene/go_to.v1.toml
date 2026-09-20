@@ -1,0 +1,11 @@
+# Take the robot to something named, resolving the reference and driving
+# there in one call, or returning the question that would disambiguate it.
+[contract]
+id      = "robonix/system/scene/go_to"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/GoTo.srv"
+description = "Navigate to an object described in natural language; asks which one when the reference is ambiguous rather than picking."
+
+[mode]
+type = "rpc"

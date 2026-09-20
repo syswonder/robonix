@@ -1,0 +1,51 @@
+# robonix/system/scene/go_to — take the robot to something named, or say
+# which of several was meant.
+#
+# The whole operation, not a fragment of one. Before this, reaching an object
+# meant list_objects → pick → goal_near → navigate, with the caller carrying
+# a pose between the last two steps; with eight chairs in the room the
+# picking step had nothing to pick on and chose one anyway.
+#
+# Scene resolves the reference itself (see robonix/system/scene/find),
+# computes the approach pose, and calls robonix/service/navigation/navigate.
+# Advertised only while that navigation capability is reachable: a contract
+# that cannot do what it says should not be offered.
+
+# What to go to, described the way a person would. Same fields as find.
+string text
+string cls
+string region
+RelationConstraint[] relations
+string predicate
+# Skip resolution entirely and go to this object. Use when acting on a
+# choice a person already confirmed.
+string object_id
+# Answering a previous go_to that came back needs_clarification: the query it
+# returned, and which candidate was chosen.
+string query_id
+string chosen_object_id
+# Try the next candidate when navigation fails on the first. 0 → service
+# default (2). Perception is not accurate enough for one attempt to be the
+# whole answer.
+int32 max_attempts
+---
+# arrived | unreachable | needs_clarification | nav_offline | not_found
+string status
+# What it went to, when it went somewhere.
+string object_id
+string label
+# Where it stopped, in the map frame.
+float64 x
+float64 y
+float64 yaw
+# When needs_clarification: the candidates and a question naming what
+# separates them. Ask it; do not pick.
+Candidate[] candidates
+string question
+# Hand back with the chosen object to continue without re-resolving. The
+# scene moves, so resolving twice can produce a different set than the one
+# the person was shown.
+string query_id
+# Which candidates were tried and why each failed, when it did.
+string[] attempts
+string detail

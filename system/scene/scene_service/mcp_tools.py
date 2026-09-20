@@ -63,6 +63,8 @@ from semantic_map_mcp import (  # type: ignore
     Candidate as CandidateIDL,
     Find_Request,
     Find_Response,
+    GoTo_Request,
+    GoTo_Response,
     ListRegions_Request,
     ListRegions_Response,
     ListRelations_Request,
@@ -75,6 +77,7 @@ from semantic_map_mcp import (  # type: ignore
 )
 
 from . import find as find_impl
+from . import go_to as go_to_impl
 
 from mcp.server.fastmcp import FastMCP
 from robonix_api import mcp_contract
@@ -596,6 +599,87 @@ def _annotation_to_region(a: "Annotation") -> Region:
     )
 
 
+NAVIGATE_CONTRACT = "robonix/service/navigation/navigate"
+
+# Questions asked and not yet answered, held so a person's choice lands on
+# the object they were shown rather than on whatever a second resolution
+# would return.
+_PENDING_QUERIES = go_to_impl.PendingQueries()
+
+
+def _navigator():
+    """A callable that drives to a map-frame pose, or None when navigation
+    is not reachable.
+
+    Resolved per call rather than cached: navigation can come and go while
+    scene stays up, and a stale handle would fail halfway through a task
+    instead of before it starts.
+    """
+    try:
+        import grpc
+        import navigation_pb2  # type: ignore
+        import robonix_contracts_pb2_grpc as contracts_grpc  # type: ignore
+        from robonix_api import ATLAS
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        capability = ATLAS.find_unique_capability(
+            contract_id=NAVIGATE_CONTRACT, transport="grpc")
+    except Exception:  # noqa: BLE001
+        return None
+
+    def navigate(x: float, y: float, yaw: float):
+        channel_ref = ATLAS.connect_capability(
+            consumer_id="scene",
+            provider_id=capability.provider_id,
+            contract_id=NAVIGATE_CONTRACT,
+            transport="grpc")
+        try:
+            endpoint = str(channel_ref.endpoint or "").strip()
+            if not endpoint:
+                return False, "Atlas returned an empty navigation endpoint"
+            qx, qy, qz, qw = go_to_impl.yaw_to_quaternion(yaw)
+            request = navigation_pb2.Navigate_Request()
+            goal = request.goal
+            goal.header.frame_id = "map"
+            goal.pose.position.x = float(x)
+            goal.pose.position.y = float(y)
+            goal.pose.position.z = 0.0
+            goal.pose.orientation.x = qx
+            goal.pose.orientation.y = qy
+            goal.pose.orientation.z = qz
+            goal.pose.orientation.w = qw
+            with grpc.insecure_channel(endpoint) as grpc_channel:
+                stub = contracts_grpc.RobonixServiceNavigationNavigateStub(
+                    grpc_channel)
+                # Generous: this is a robot crossing a room, and a timeout
+                # here reads as a navigation failure and burns a candidate.
+                response = stub.Navigate(request, timeout=300.0)
+            state = str(getattr(response, "state", "") or "")
+            detail = str(getattr(response, "detail", "") or "")
+            return state.upper() == "SUCCEEDED", detail or state
+        except Exception as error:  # noqa: BLE001
+            return False, f"navigation call failed: {error!r}"
+        finally:
+            channel_ref.close()
+
+    return navigate
+
+
+async def _approach_pose(object_id: str) -> "go_to_impl.Approach":
+    """goal_near's own answer, called rather than handed on.
+
+    The hand-off is what this contract exists to remove: a caller carrying a
+    pose between two calls is a caller that can carry the wrong one.
+    """
+    response = await goal_near(GoalNear_Request(object_id=object_id))
+    return go_to_impl.Approach(
+        reachable=bool(response.reachable),
+        x=float(response.x), y=float(response.y), yaw=float(response.yaw),
+        reason=str(response.reason or ""))
+
+
 @mcp_contract(mcp, contract_id="robonix/system/scene/find")
 async def find(req: Find_Request) -> Find_Response:
     """Resolve a natural-language reference to the objects it could mean.
@@ -693,6 +777,128 @@ async def find(req: Find_Request) -> Find_Response:
         detail=result.detail,
         map_id=map_id,
         stamp_unix=time.time(),
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/go_to")
+async def go_to(req: GoTo_Request) -> GoTo_Response:
+    """Take the robot to something named. Resolves the reference, finds an
+    approach pose and drives there, all inside Scene.
+
+    Do not pair this with goal_near and navigate -- it is those, plus the
+    choosing. Pass what the person said; do not pass a pose.
+
+    `status`:
+
+    * ``arrived`` — there now, at (x, y, yaw).
+    * ``needs_clarification`` — several things match. `question` names what
+      separates them and `query_id` continues this request: ask, then call
+      again with `query_id` and `chosen_object_id`. Nothing has moved.
+    * ``unreachable`` — candidates were tried and none worked; `attempts`
+      says which and why.
+    * ``nav_offline`` — navigation is not available and nothing was tried.
+    * ``not_found`` — nothing matched, or the choice offered is stale.
+
+    Contract: robonix/system/scene/go_to."""
+    if _REGISTRY is None:
+        raise RuntimeError("scene mcp_tools.attach_state was never called")
+
+    objects, _surfaces = await _REGISTRY.snapshot()
+
+    regions: list = []
+    if _ANNO_STORE is not None:
+        try:
+            regions = [
+                {"name": a.get("name") or a.get("id"), "points": a.get("points")}
+                for a in _ANNO_STORE.list_json()
+                if a.get("kind") == "region"
+            ]
+        except Exception:  # noqa: BLE001
+            regions = []
+
+    edges: list = []
+    if _SG_STORE is not None:
+        try:
+            snapshot = _SG_STORE.get_snapshot()
+            edges = list(snapshot.edges) if snapshot else []
+        except Exception:  # noqa: BLE001
+            edges = []
+
+    robot_xy = None
+    for obj in objects.values():
+        if (getattr(obj, "attributes", None) or {}).get("is_robot"):
+            robot_xy = (float(obj.pose.x), float(obj.pose.y))
+            break
+
+    query = None
+    if not (req.object_id or req.query_id):
+        query = find_impl.Query(
+            text=req.text or "",
+            cls=req.cls or "",
+            region=req.region or "",
+            relations=tuple(
+                find_impl.RelationConstraint(r.relation, r.anchor)
+                for r in (req.relations or [])
+            ),
+            predicate=req.predicate or "",
+        )
+
+    # Resolved here rather than inside the orchestration: it reads registry
+    # state guarded by an asyncio lock, so it belongs on this loop and not
+    # in the worker thread below.
+    forwarded = ""
+    if req.object_id and req.object_id not in objects:
+        async with _REGISTRY.lock():
+            live, _departure = _REGISTRY.resolve_id(
+                req.object_id, follow_inferred=False)
+        forwarded = live or ""
+
+    loop = asyncio.get_running_loop()
+    navigate = _navigator()
+
+    def approach_of(object_id: str):
+        # `go_to` is synchronous so its decisions can be tested without a
+        # loop, and goal_near is a coroutine. The orchestration runs in a
+        # worker thread and each approach is scheduled back here.
+        return asyncio.run_coroutine_threadsafe(
+            _approach_pose(object_id), loop).result()
+
+    result = await asyncio.to_thread(
+        go_to_impl.go_to,
+        query=query,
+        object_id=forwarded or (req.object_id or ""),
+        query_id=req.query_id or "",
+        chosen_object_id=req.chosen_object_id or "",
+        objects=objects,
+        regions=regions,
+        edges=edges,
+        robot_xy=robot_xy,
+        approach_of=approach_of,
+        navigate=navigate,
+        pending=_PENDING_QUERIES,
+        max_attempts=int(req.max_attempts or 0) or go_to_impl.DEFAULT_ATTEMPTS,
+    )
+
+    return GoTo_Response(
+        status=result.status,
+        object_id=result.object_id,
+        label=result.label,
+        x=result.x, y=result.y, yaw=result.yaw,
+        candidates=[
+            CandidateIDL(
+                object_id=c.object_id, cls=c.cls, label=c.label,
+                score=round(float(c.score), 4), region=c.region,
+                distance_m=-1.0 if c.distance_m is None else float(c.distance_m),
+                last_seen_s=-1.0 if c.last_seen_s is None else float(c.last_seen_s),
+                stale=bool(c.stale),
+                matched=list(c.matched), missed=list(c.missed),
+            )
+            for c in result.candidates
+        ],
+        question=result.question,
+        query_id=result.query_id,
+        attempts=list(result.attempts),
+        detail=result.detail,
     )
 
 
