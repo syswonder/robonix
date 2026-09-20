@@ -704,6 +704,151 @@ class ObjectRegistry:
         self._surfaces[sid] = s
         return s
 
+    # ── duplicate collapse ─────────────────────────────────────────────────
+    # Association answers "which object is this detection?" and never "are
+    # these two objects the same?", so a detection that lands outside the
+    # gate mints a second record for one thing and nothing ever puts them
+    # back together. Both the operator's list and `find`'s candidate set
+    # then carry copies that neither a person nor a ranker can tell apart.
+
+    def merge_duplicates(
+        self,
+        now: float,
+        *,
+        xy_m: float = 0.35,
+        z_m: float = 1.20,
+        max_merges: int = 64,
+    ) -> list[tuple[str, str]]:
+        """Fold same-class records that describe one object into one record.
+
+        Returns the `(absorbed_id, survivor_id)` pairs applied, so a caller
+        can log or publish them. Each absorbed id is recorded as departed and
+        superseded, which is what keeps a stale reference working: a request
+        naming the absorbed id resolves to the survivor.
+
+        Gating is deliberately tighter across the floor than association's --
+        a wrong merge erases a real distinction, and that is worse than one
+        object showing twice. Height is gated loosely for the same reason
+        association's is: a single camera's depth estimate is the least
+        reliable number in the record, and letting it decide is what produced
+        the duplicates in the first place.
+
+        `max_merges` bounds one pass. A registry that has drifted badly is
+        repaired over several ticks rather than in one long hold of the lock.
+
+        Caller must hold the lock.
+        """
+        if xy_m <= 0.0:
+            return []
+        merged: list[tuple[str, str]] = []
+        # Most evidence first, so the survivor of each pair is settled before
+        # anything is folded into it and a chain cannot form mid-pass.
+        candidates = [
+            obj for obj in self._objects.values()
+            if not obj.attributes.get("is_robot")
+        ]
+        candidates.sort(key=lambda o: (-self._merge_rank(o), o.object_id))
+
+        absorbed: set[str] = set()
+        for survivor in candidates:
+            if survivor.object_id in absorbed:
+                continue
+            for other in candidates:
+                if len(merged) >= max_merges:
+                    return merged
+                if other.object_id in absorbed or other is survivor:
+                    continue
+                if not self._same_thing(survivor, other, xy_m, z_m):
+                    continue
+                # An operator-touched record is never absorbed: a human
+                # looked at this object and said something about it, and
+                # perception's opinion does not outrank that.
+                if self._operator_touched(other) and not self._operator_touched(
+                        survivor):
+                    continue
+                self._absorb(survivor, other, now)
+                absorbed.add(other.object_id)
+                merged.append((other.object_id, survivor.object_id))
+
+        for object_id in absorbed:
+            self._objects.pop(object_id, None)
+        return merged
+
+    @staticmethod
+    def _merge_rank(obj: "SceneObject") -> float:
+        """How much this record deserves to be the survivor.
+
+        Observations first, because that is accumulated evidence. An
+        operator-touched record outranks any amount of it -- a human's
+        statement about an object is not something a detector count
+        overrides -- and a live record outranks a missing one, since the
+        survivor should be the one perception can still confirm.
+        """
+        rank = float(obj.observation_count)
+        if obj.missing:
+            rank -= 1e6
+        if obj.attributes.get("operator_geometry") or obj.attributes.get(
+                "operator_label"):
+            rank += 1e9
+        return rank
+
+    @staticmethod
+    def _operator_touched(obj: "SceneObject") -> bool:
+        return bool(obj.attributes.get("operator_geometry")
+                    or obj.attributes.get("operator_label"))
+
+    @staticmethod
+    def _same_thing(
+        a: "SceneObject", b: "SceneObject", xy_m: float, z_m: float,
+    ) -> bool:
+        """Whether two records are close enough to be one object.
+
+        Same class and same frame, then separately gated across the floor
+        and in height. Coordinates from different frames are not comparable
+        however near their numbers look.
+        """
+        if a.cls != b.cls:
+            return False
+        frame_a = str(a.pose.frame_id or "").strip()
+        frame_b = str(b.pose.frame_id or "").strip()
+        if not frame_a or frame_a != frame_b:
+            return False
+        if math.hypot(a.pose.x - b.pose.x, a.pose.y - b.pose.y) > xy_m:
+            return False
+        return abs(a.pose.z - b.pose.z) <= z_m
+
+    def _absorb(
+        self, survivor: "SceneObject", other: "SceneObject", now: float,
+    ) -> None:
+        """Move what `other` knew onto `survivor` and retire its id.
+
+        The survivor's pose stands: it was chosen for having more evidence
+        behind it, and averaging in a pose that was wrong enough to create a
+        duplicate would drag it off the object. What does transfer is the
+        observation count -- those sightings were of this object, and a
+        survivor that under-reports them looks less established than it is --
+        and first_seen, which is when the object was actually first seen
+        whichever record happened to hold it.
+        """
+        survivor.observation_count += max(0, other.observation_count)
+        survivor.first_seen = min(survivor.first_seen, other.first_seen)
+        survivor.last_seen = max(survivor.last_seen, other.last_seen)
+        if not survivor.missing:
+            pass
+        elif not other.missing:
+            # The survivor was only missing because this record held the
+            # recent sightings.
+            survivor.missing = False
+        survivor.confidence = max(survivor.confidence, other.confidence)
+        self._record_departure(
+            other, "merged_duplicate",
+            superseded_by=survivor.object_id,
+            # Decided by proximity, like every other succession this table
+            # records. A caller acting on a human's confirmed choice can
+            # still decline to follow it.
+            inferred=True,
+        )
+
     def stats(self) -> dict[str, int]:
         return {
             "objects": len(self._objects),

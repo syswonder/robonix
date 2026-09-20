@@ -2328,6 +2328,13 @@ class ConceptGraphsDetector:
                             if old_uuid and old_uuid != u:
                                 self._uuid_to_oid.pop(old_uuid, None)
                             existing.attributes["cg_uuid"] = u
+                            # This record's absence is decided by projecting
+                            # its cloud into the depth image, not by the
+                            # clock. Saying so is what stops mark_stale from
+                            # flagging it `missing` five seconds after it
+                            # leaves the frame.
+                            existing.attributes["observation_lifecycle"] = (
+                                "visibility")
                             self._uuid_to_oid[u] = existing.object_id
                 if existing is not None:
                     # Update in place. Preserve oid + first_seen. The count is
@@ -2358,6 +2365,7 @@ class ConceptGraphsDetector:
                     # registry-owned from here (see the += 1 on re-sighting).
                     if u:
                         obj.attributes["cg_uuid"] = u
+                        obj.attributes["observation_lifecycle"] = "visibility"
                         self._uuid_to_oid[u] = obj.object_id
                     adopted_oids.add(obj.object_id)
 

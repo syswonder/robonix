@@ -502,15 +502,76 @@ class _SelfTracker:
                     )
 
 
-# ── Stale-tick: flip missing flag after grace period ───────────────────────
+# ── Stale-tick: flip missing flag, and collapse duplicates ─────────────────
+
+# How often the duplicate collapse runs, as a multiple of the stale period.
+# Far less often than the staleness check: merging is a repair for something
+# that should not have happened, not a step in normal operation, and it walks
+# every object against every other.
+_MERGE_EVERY_N_TICKS = 10
+
+
+def _merge_gate_from_env() -> tuple[float, float]:
+    """Floor and height gates for the duplicate collapse, in metres.
+
+    Overridable because the right value depends on the sensor: a deployment
+    whose depth is trustworthy wants a tighter height gate than one driving
+    a single camera. Zero on the floor gate disables the collapse outright,
+    which is the escape hatch if a merge ever proves worse than the
+    duplicates it removes.
+    """
+    def _read(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "").strip() or default)
+        except ValueError:
+            return default
+
+    return (_read("SCENE_MERGE_XY_M", 0.35), _read("SCENE_MERGE_Z_M", 1.20))
+
+
+def declarable_scene_tools() -> list:
+    """Every `@mcp_contract` handler in mcp_tools, ordered by contract id.
+
+    Walked rather than listed. The list that used to live here was a second
+    place to remember a tool, and `find` and `go_to` shipped implemented,
+    contracted and tested but uncallable because nobody added the line --
+    a failure that shows up as a missing capability, not as an error.
+
+    Sorted so the declaration order, and the log line counting them, do not
+    move with Python's definition order.
+    """
+    seen: dict[str, Any] = {}
+    for name in dir(mcp_tools):
+        if name.startswith("_"):
+            continue
+        fn = getattr(mcp_tools, name, None)
+        cid = getattr(fn, "_robonix_contract_id", None)
+        if not cid or not callable(fn):
+            continue
+        # A handler re-exported under a second name is one tool, and
+        # declaring it twice would have atlas hold two rows for it.
+        seen.setdefault(str(cid), fn)
+    return [seen[cid] for cid in sorted(seen)]
 
 
 async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> None:
+    merge_xy, merge_z = _merge_gate_from_env()
+    tick = 0
     while True:
+        tick += 1
         async with registry.lock():
             flipped = registry.mark_stale(now_unix())
+            merged = []
+            if merge_xy > 0.0 and tick % _MERGE_EVERY_N_TICKS == 0:
+                merged = registry.merge_duplicates(
+                    now_unix(), xy_m=merge_xy, z_m=merge_z)
         if flipped:
             log.debug("marked %d object(s) missing (grace expired)", flipped)
+        for absorbed, survivor in merged:
+            # At info, not debug: an id the operator or Pilot may be holding
+            # just stopped being the name of that object, and the departure
+            # table is the only other place that is written down.
+            log.info("merged duplicate %s into %s", absorbed, survivor)
         await asyncio.sleep(period_s)
 
 
@@ -1838,20 +1899,7 @@ async def _run_active(config: dict) -> None:
     # Declare each scene MCP tool on atlas. Each handler has
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
     # description / JSON schema stay in sync with the codegen types.
-    for fn in (
-        mcp_tools.list_objects,
-        mcp_tools.list_regions,
-        mcp_tools.get_robot_context,
-        mcp_tools.goal_near,
-        mcp_tools.goal_region,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.list_relations,
-        mcp_tools.update_object_label,
-        mcp_tools.update_object_geometry,
-        mcp_tools.delete_object,
-        mcp_tools.flush_objects,
-    ):
+    for fn in declarable_scene_tools():
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
             log.warning(
@@ -1866,7 +1914,11 @@ async def _run_active(config: dict) -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 12 MCP tools at %s", scene.mcp_endpoint)
+    log.info(
+        "scene declared %d MCP tools at %s",
+        len(declarable_scene_tools()),
+        scene.mcp_endpoint,
+    )
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -2156,15 +2208,7 @@ async def _run() -> None:
 
     # These tools are decorated on the FastMCP app rather than through
     # @scene.mcp(), so declare their existing metadata after bootstrap.
-    scene_tools = (
-        mcp_tools.list_objects,
-        mcp_tools.goal_near,
-        mcp_tools.goal_region,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.get_robot_context,
-        mcp_tools.list_relations,
-    )
+    scene_tools = declarable_scene_tools()
     for fn in scene_tools:
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:

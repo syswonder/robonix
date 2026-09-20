@@ -81,6 +81,60 @@ def _angular_gap(a: float, b: float) -> float:
     return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
 
 
+# Context around the box, as a fraction of its larger side. A crop cut
+# exactly at the object's outline is harder to place than one that shows a
+# hand's width of what it is sitting on.
+_CROP_MARGIN_FRAC = 0.12
+# The longest a crop may be relative to its short side before it stops
+# reading as a picture of a thing and starts reading as a strip. Projected
+# boxes of flat objects -- a tabletop from across it, a frame edge-on --
+# land far past this.
+_MAX_CROP_ASPECT = 2.2
+
+
+def pad_rect(
+    rect: tuple[int, int, int, int], img_w: int, img_h: int,
+    *, margin_frac: float = _CROP_MARGIN_FRAC,
+    max_aspect: float = _MAX_CROP_ASPECT,
+) -> tuple[int, int, int, int]:
+    """Grow `rect` into a crop worth looking at, without leaving the image.
+
+    Two steps, both centred on the original box so the object stays in the
+    middle of the picture: a margin for context, then the short side grown
+    until the aspect ratio is within `max_aspect`.
+
+    Clamping wins over both. A box against the image edge keeps whatever
+    room exists on the other side rather than being shifted off the object
+    to satisfy a ratio -- an off-centre object is still recognisable, a
+    differently-framed one is not.
+    """
+    u0, v0, u1, v1 = rect
+    w, h = max(1, u1 - u0), max(1, v1 - v0)
+
+    margin = int(round(max(w, h) * max(0.0, margin_frac)))
+    u0, v0 = u0 - margin, v0 - margin
+    u1, v1 = u1 + margin, v1 + margin
+    w, h = u1 - u0, v1 - v0
+
+    if max_aspect >= 1.0:
+        # Rounded up on both the target and the split. Flooring either loses
+        # up to a pixel a side, which leaves the result a hair outside the
+        # ratio it was grown to satisfy -- close enough to look fine and
+        # wrong enough to fail the rule it exists for.
+        if w > h * max_aspect:
+            want = math.ceil(w / max_aspect)
+            grow = math.ceil((want - h) / 2)
+            v0, v1 = v0 - grow, v1 + grow
+        elif h > w * max_aspect:
+            want = math.ceil(h / max_aspect)
+            grow = math.ceil((want - w) / 2)
+            u0, u1 = u0 - grow, u1 + grow
+
+    u0, v0 = max(0, u0), max(0, v0)
+    u1, v1 = min(img_w, u1), min(img_h, v1)
+    return (u0, v0, u1, v1)
+
+
 def crop_quality(
     rect: tuple[int, int, int, int], img_w: int, img_h: int,
 ) -> float:
@@ -97,7 +151,12 @@ def crop_quality(
     # twice as wide should read as twice as good, not four times.
     area = math.sqrt((w * h) / float(max(1, img_w * img_h)))
     touches_edge = u0 <= 0 or v0 <= 0 or u1 >= img_w or v1 >= img_h
-    return min(1.0, area) * (0.45 if touches_edge else 1.0)
+    # A crop still shaped like a strip after padding is one against an image
+    # edge with nowhere to grow. It should not take a slot from a crop that
+    # shows the whole object, however much area the strip covers.
+    aspect = max(w, h) / float(max(1, min(w, h)))
+    shape = 1.0 if aspect <= _MAX_CROP_ASPECT else _MAX_CROP_ASPECT / aspect
+    return min(1.0, area) * (0.45 if touches_edge else 1.0) * shape
 
 
 class ObjectViewStore:
@@ -205,6 +264,10 @@ class ObjectViewStore:
         Returns whether it was stored. Never raises into the perception tick:
         a missing encoder or an unwritable directory costs pictures, not
         tracking."""
+        # Padded here rather than at the call site: every picture this store
+        # keeps is for the same purpose, so the shape rule belongs with the
+        # store and not with each thing that projects a box.
+        rect = pad_rect(rect, img_w, img_h)
         quality = crop_quality(rect, img_w, img_h)
         if quality <= 0.0:
             return False
