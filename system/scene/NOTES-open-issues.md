@@ -96,6 +96,60 @@ Python 写的看门狗都救不了——它自己也要 GIL。**进程内不存�
 recording id / `application_id` 与 viewer `url` 查询参数不匹配，而不是
 传输本身。
 
+### 进程外方案：五个实验，断点已定位（2026-09-20）
+
+"移出进程" 这条路以前只留下一句 "viewer 空白" 就停了。这次查到底了。
+
+**先说结论**：进程外**确实消除了死锁**（连续 5 次启动 5/5，对照：改动前
+约 2/3、把拉起提前后 4/6）。但 **viewer 收不到数据**，断点在
+`rerun --serve-grpc` 的 server 与 0.37.1 web viewer 之间，不在我们的管道里。
+所以**已回退**——拿死锁换一个死掉的 viewer 不是修复，是换一种坏法。
+
+| # | 实验 | 结果 |
+| --- | --- | --- |
+| 1 | 子进程 `rerun --serve-web`，SDK `connect_grpc` 连上去 | `connect_grpc` **0.14s 返回**（对照 `serve_grpc` 会无限期持 GIL） |
+| 2 | 浏览器开子进程自带的 web viewer | 空白 |
+| 3 | 浏览器用 **scene 自己那份能用的 viewer 资源**，经 scene `/proxy` 转发到子进程 | 空白 |
+| 4 | 同上但**绕开 scene 的转发**，直连子进程端口 | 空白 → **不是 scene 转发的问题** |
+| 5 | 看子进程 RSS | 起初**完全不动**（24s 内恒为 90812 kB） |
+
+实验 5 挖出一个**独立的真 bug**：`rerun_sink` **从来不 flush**
+（`grep -c flush` = 0）。服务器在本进程内时这是免费的——log 直接交给它；
+一旦变成网络发送，SDK 会攒批。补上每 tick 一次 flush 后，子进程 RSS
+开始增长（75588 → 77636 kB / 14s），**数据确实进了子进程**。
+
+但 viewer 仍然空白。所以断点被夹到了最后一段：**子进程 → viewer**。
+
+**关键证据是浏览器控制台里两条不同的代码路径**，同一个 URL、同一份 viewer：
+
+```
+进程内（能用）: re_grpc_client::read: Loading via gRPC… → Streaming messages
+进程外（空白）: re_viewer_context::open_url: RedapProxy(...) → Web app started.
+              re_auth::credentials::oauth: ... → 然后没有了
+```
+
+viewer 把 CLI 托管的 server 当成 **redap 端点**（走认证流程），而不是当成
+它认识的那种 live proxy。SDK 内嵌的 server 和 CLI 的 server 不是一回事。
+
+| 6 | 把 **SDK 自己的 `serve_grpc`** 放进子进程（参数和进程内那次完全一致），scene 端 `connect_grpc` | **也是空白** |
+
+实验 6 否定了「CLI 和 SDK 的 server 实现不同」这个假设。所有失败情形的
+共同点变成了一件事：**recording 在一个进程、server 在另一个进程**。能用的
+那次两者在同一进程里。字节确实到达了 server（RSS 增长可证），但 viewer
+取不到——所以问题在「经 `connect_grpc` 进来的数据如何对 viewer 可见」，
+而不在传输本身。
+
+**下一步该从哪开始**（不要再重复上面六个实验）：
+- 查 0.37.1 里 `re_grpc_client::read` 与 `RedapProxy` 两条路径的分叉条件——
+  大概率取决于 server 在首次调用时返回什么。
+- ~~在子进程里跑 Python 的 `serve_grpc`~~ —— 已试（实验 6），同样空白。
+- 真正该问的问题变成了：**一个通过 `connect_grpc` 送进 proxy 的 recording，
+  viewer 要怎样才能订阅到它？** 怀疑方向是 recording id / store id 的可见性
+  ——viewer 可能只订阅了 server 自己那条 recording，而不是转发进来的那条。
+  可以用 `rerun rrd print <url>` 或第二个 SDK 客户端去读，确认到底存在几条
+  recording、各自的 id 是什么。
+- 需要读 0.37.1 的 `re_grpc_server` 源码，这不是黑盒能试出来的。
+
 ## 2. scene 自己的日志曾经是被销毁的（已修，留档）
 
 排查上面那些问题时最大的阻力：**scene service 的 logging 输出一条也没有**
