@@ -1,0 +1,12 @@
+# Resolve a natural-language object reference against the scene, returning a
+# few candidates and — when they cannot be told apart — the question that
+# would separate them, rather than a guess.
+[contract]
+id      = "robonix/system/scene/find"
+version = "1"
+kind    = "service"
+idl     = "semantic_map/srv/Find.srv"
+description = "Resolve a natural-language reference to scene objects, with an explicit ambiguous verdict instead of an arbitrary pick."
+
+[mode]
+type = "rpc"

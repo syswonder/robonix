@@ -60,6 +60,9 @@ from semantic_map_mcp import (  # type: ignore
     UpdateObjectGeometry_Response,
     UpdateObjectLabel_Request,
     UpdateObjectLabel_Response,
+    Candidate as CandidateIDL,
+    Find_Request,
+    Find_Response,
     ListRegions_Request,
     ListRegions_Response,
     ListRelations_Request,
@@ -70,6 +73,8 @@ from semantic_map_mcp import (  # type: ignore
     SceneGraphEdge as SceneGraphEdgeIDL,
     SceneGraphNode as SceneGraphNodeIDL,
 )
+
+from . import find as find_impl
 
 from mcp.server.fastmcp import FastMCP
 from robonix_api import mcp_contract
@@ -588,6 +593,106 @@ def _annotation_to_region(a: "Annotation") -> Region:
         stale=bool(a.stale),
         stale_reason=a.stale_reason or "",
         updated_at_unix=float(a.updated_at or 0.0),
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/find")
+async def find(req: Find_Request) -> Find_Response:
+    """Resolve a natural-language reference to the objects it could mean.
+
+    Use instead of list_objects when looking for something. list_objects
+    returns the whole registry -- 13.9 KB for a single room with
+    thirty-four objects on this stack -- and leaves the choosing to the
+    caller, which is how eight indistinguishable chairs became one picked
+    at random.
+
+    `verdict` is the part to branch on:
+
+    * ``unique`` — one candidate stands out; act on candidates[0].
+    * ``ambiguous`` — the top candidates cannot be separated by the
+      evidence. `question` names what actually differs between them and is
+      phrased to be asked. Ask it; do not pick.
+    * ``empty`` — nothing matched. `narrowed_by` says which constraint
+      emptied the set and `detail` says where the near-misses are.
+
+    Contract: robonix/system/scene/find."""
+    if _REGISTRY is None:
+        raise RuntimeError("scene mcp_tools.attach_state was never called")
+
+    # The same source the other tools read, so a candidate and a correction
+    # aimed at it agree about which map they are talking about.
+    if _OBJECT_MUTATIONS is not None:
+        objects, map_id, _generation, _supported = (
+            await _OBJECT_MUTATIONS.snapshot_objects())
+    else:
+        objects, _surfaces = await _REGISTRY.snapshot()
+        map_id = ""
+
+    regions: list = []
+    if _ANNO_STORE is not None:
+        try:
+            regions = [
+                {"name": a.get("name") or a.get("id"), "points": a.get("points")}
+                for a in _ANNO_STORE.list_json()
+                if a.get("kind") == "region"
+            ]
+        except Exception:  # noqa: BLE001
+            regions = []
+
+    edges: list = []
+    if _SG_STORE is not None:
+        try:
+            snapshot = _SG_STORE.get_snapshot()
+            edges = list(snapshot.edges) if snapshot else []
+        except Exception:  # noqa: BLE001
+            edges = []
+
+    robot_xy = None
+    for obj in objects.values():
+        if (getattr(obj, "attributes", None) or {}).get("is_robot"):
+            robot_xy = (float(obj.pose.x), float(obj.pose.y))
+            break
+
+    query = find_impl.Query(
+        text=req.text or "",
+        cls=req.cls or "",
+        region=req.region or "",
+        relations=tuple(
+            find_impl.RelationConstraint(r.relation, r.anchor)
+            for r in (req.relations or [])
+        ),
+        predicate=req.predicate or "",
+        min_confidence=float(req.min_confidence or 0.0),
+        k=int(req.k or 0) or 5,
+    )
+    result = find_impl.find(
+        query, objects, regions=regions, edges=edges, robot_xy=robot_xy)
+
+    return Find_Response(
+        verdict=result.verdict,
+        candidates=[
+            CandidateIDL(
+                object_id=c.object_id,
+                cls=c.cls,
+                label=c.label,
+                score=round(float(c.score), 4),
+                region=c.region,
+                # -1 rather than 0: zero metres away is a real answer and
+                # "the robot pose is unknown" is not the same claim.
+                distance_m=-1.0 if c.distance_m is None else float(c.distance_m),
+                last_seen_s=-1.0 if c.last_seen_s is None else float(c.last_seen_s),
+                stale=bool(c.stale),
+                matched=list(c.matched),
+                missed=list(c.missed),
+            )
+            for c in result.candidates
+        ],
+        margin=round(float(result.margin), 4),
+        question=result.question,
+        narrowed_by=result.narrowed_by,
+        detail=result.detail,
+        map_id=map_id,
+        stamp_unix=time.time(),
     )
 
 

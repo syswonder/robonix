@@ -1,0 +1,50 @@
+# robonix/system/scene/find — resolve a natural-language reference to the
+# object or objects it could mean, or say it cannot.
+#
+# Replaces the list-everything-and-pick pattern. Measured on this stack,
+# list_objects went from 921 B with two objects to 13.9 KB with thirty-four,
+# and with eight chairs present the planner picked one on no basis and drove
+# there. This returns at most `k` short rows and, when they cannot be
+# separated, a question instead of a choice.
+#
+# Constraints are not blended. `cls` is a vocabulary match, `region` is a
+# point-in-polygon test, and each relation is a lookup in the scene graph
+# Scene already maintains — so "in the kitchen" is answered yes or no rather
+# than scored, and cannot be outweighed by wording.
+
+# Free-form residue: whatever the description says that the structured
+# fields below do not capture. May be empty.
+string text
+# Optional class filter, e.g. "chair". Matched against the detector's
+# vocabulary and any operator label.
+string cls
+# Optional region name. Resolved against the saved polygons.
+string region
+# Optional relations the target must stand in, e.g. near/sofa. Only
+# relations Scene maintains are accepted; anything else is refused rather
+# than silently dropped, because dropping a constraint changes the answer.
+RelationConstraint[] relations
+# Optional set predicate over the survivors: "closest" or "farthest".
+# Cannot be a relation — a superlative depends on the candidate set, which
+# depends on the query.
+string predicate
+# Reject candidates below this detection confidence. 0 disables.
+float64 min_confidence
+# Maximum candidates to return. 0 → service default (5).
+int32 k
+---
+# unique | ambiguous | empty
+string verdict
+Candidate[] candidates
+# Score gap between the top two. 1.0 when there is only one candidate.
+float64 margin
+# When ambiguous: a question naming what actually separates the candidates,
+# phrased to be spoken. Empty otherwise.
+string question
+# Which constraint emptied the set, when one did: cls | region | relation |
+# confidence. Lets a caller say "none in the kitchen; there are two in the
+# bedroom" instead of "not found".
+string narrowed_by
+string detail
+string map_id
+float64 stamp_unix
