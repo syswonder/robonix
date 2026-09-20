@@ -1432,6 +1432,19 @@ pub async fn run_turn(
                 correction.as_deref(),
             );
 
+            // // Temporary debugging: print the exact system prompt sent to the VLM.
+            // if let Some(system_message) = messages.first()
+            //     && let Some(content) = system_message.content.as_deref()
+            // {
+            //     info!(
+            //         "[pilot/prompt/full] round={}\n{}",
+            //         round,
+            //         content
+            //     );
+            // }
+
+            let planning_revision = forest_revision.load(Ordering::Acquire);
+
             let planning_revision = forest_revision.load(Ordering::Acquire);
             let mut vlm_attempt = 0_u8;
             let (content, raw_tool_calls) = loop {
