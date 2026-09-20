@@ -22,6 +22,9 @@
         b => b.classList.toggle('on', b.dataset.tab === tab));
       dock.querySelectorAll('.pane').forEach(
         p => p.classList.toggle('on', p.dataset.pane === tab));
+      // The head is shared by every tab, so a control that belongs to
+      // one of them says which: flush is about objects.
+      dock.dataset.tab = tab;
       dockName.dataset.i18n = TAB_KEY[tab] || '';
       dockName.textContent = t(TAB_KEY[tab] || tab);
       save({tab: tab});
@@ -71,6 +74,7 @@
     (function restore() {
       const s = load();
       if (s.w) dock.style.setProperty('--dock-w', s.w);
+      if (s.dh) dock.style.setProperty('--detail-h', s.dh);
       if (s.shut) dock.classList.add('shut');
       show(s.tab || 'objects');
     })();
@@ -88,6 +92,43 @@
       }
     }
 
+    // Objects the robot no longer sees are kept out of the list by default
+    // and offered as a count. Session-only on purpose: this is about the
+    // list being readable right now, not a preference worth remembering
+    // into a session where the map may be entirely different.
+    let showMissing = false;
+
+    function renderMissingToggle(count) {
+      const host = document.getElementById('dock-gone');
+      if (!host) return;
+      if (!count && !showMissing) {
+        host.hidden = true;
+        return;
+      }
+      host.hidden = false;
+      setText(host, showMissing
+        ? t('dock.goneHide')
+        : tv('dock.goneShow', {n: count}));
+    }
+
+    (function wireMissingToggle() {
+      const host = document.getElementById('dock-gone');
+      if (!host) return;
+      host.addEventListener('click', () => {
+        showMissing = !showMissing;
+        // Redraw from what the last poll already delivered rather
+        // than waiting for the next one: the reader just clicked,
+        // and the rows they asked for are already in hand.
+        const shown = showMissing
+          ? lastObjects
+          : lastObjects.filter(
+              o => !o.missing || o.id === selectedId);
+        syncObjects(document.getElementById('dock-objs'), shown);
+        renderMissingToggle(lastObjects.filter(
+          o => o.missing && o.id !== selectedId).length);
+      });
+    })();
+
     function objectRow(o) {
       const tr = document.createElement('tr');
       tr.className = 'row';
@@ -104,6 +145,7 @@
       setText(tr.children[1], o.cls);
       setText(tr.children[2], `${fmt(o.pose.x)}, ${fmt(o.pose.y)}`);
       setClass(tr.children[2], 'miss', !!o.missing);
+      setClass(tr, 'gone', !!o.missing);
     }
 
     // Keyed by object id: what stayed is updated, what arrived is inserted,
@@ -309,6 +351,82 @@
       applyLang(langGet(), document);
     }
 
+    // The split between the list and the detail. Same pointer capture as
+    // the width grip above: the pointer leaves the strip immediately, and
+    // without capture the drag would stop the moment it does.
+    const split = document.getElementById('dock-split');
+    let sdrag = null;
+    if (split) {
+      const objPane = split.parentElement;
+      split.addEventListener('pointerdown', e => {
+        sdrag = true;
+        split.setPointerCapture(e.pointerId);
+        split.classList.add('live');
+        e.preventDefault();
+      });
+      split.addEventListener('pointermove', e => {
+        if (!sdrag) return;
+        // Measured from the bottom, because that is the edge the detail is
+        // pinned to. Both ends clamp, so neither half can be dragged away.
+        const box = objPane.getBoundingClientRect();
+        const h = Math.max(120, Math.min(box.bottom - e.clientY,
+                                         Math.round(box.height - 80)));
+        dock.style.setProperty('--detail-h', Math.round(h) + 'px');
+      });
+      const sdone = () => {
+        if (!sdrag) return;
+        sdrag = null;
+        split.classList.remove('live');
+        save({dh: dock.style.getPropertyValue('--detail-h')});
+      };
+      split.addEventListener('pointerup', sdone);
+      split.addEventListener('pointercancel', sdone);
+    }
+
+    // ── flush: drop every perceived object and start the set over ──────
+    const flushBtn = document.getElementById('dock-flush');
+    if (flushBtn) {
+      let armed = null;
+      const disarm = () => {
+        clearTimeout(armed);
+        armed = null;
+        flushBtn.classList.remove('confirm');
+        flushBtn.textContent = t('dock.flush');
+      };
+      flushBtn.addEventListener('click', async () => {
+        const count = lastObjects.length;
+        if (!armed) {
+          // In place, like delete: this discards the whole object set, and
+          // the page does not ask anything through a browser dialog.
+          flushBtn.classList.add('confirm');
+          flushBtn.textContent = tv('dock.flushAsk', {n: count});
+          armed = setTimeout(disarm, 4000);
+          return;
+        }
+        clearTimeout(armed);
+        armed = null;
+        flushBtn.classList.remove('confirm');
+        flushBtn.disabled = true;
+        try {
+          const r = await fetch('/api/objects/flush', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(epoch()),
+          });
+          const out = await r.json().catch(() => ({}));
+          flushBtn.textContent = r.ok
+            ? tv('dock.flushDone', {n: out.deleted ?? count})
+            : (out.detail || String(r.status));
+        } catch (err) {
+          flushBtn.textContent = String(err);
+        }
+        setTimeout(() => {
+          flushBtn.disabled = false;
+          flushBtn.textContent = t('dock.flush');
+        }, 2500);
+      });
+    }
+
     // The epoch the page rendered travels with the edit, so a correction
     // aimed at this object cannot land on a different map after a switch.
     function epoch() {
@@ -425,7 +543,16 @@
             `${objs.length}${unsure ? ' · ' + unsure + '?' : ''}`);
 
           lastObjects = objs;
-          syncObjects(document.getElementById('dock-objs'), objs);
+          // A row for something last seen a minute ago cannot be acted on,
+          // and when most rows are those the useful ones are unfindable.
+          // The selected object stays visible whatever its state: it went
+          // missing while the reader was looking at it, and yanking the row
+          // out from under them is worse than the row.
+          const gone = objs.filter(o => o.missing && o.id !== selectedId);
+          const shownObjs = showMissing
+            ? objs : objs.filter(o => !o.missing || o.id === selectedId);
+          syncObjects(document.getElementById('dock-objs'), shownObjs);
+          renderMissingToggle(gone.length);
           if (selectedId) {
             // A selection that no longer exists outranks an open edit: the
             // thing being edited is gone, and the card would otherwise offer

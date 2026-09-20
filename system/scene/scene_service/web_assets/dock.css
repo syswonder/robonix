@@ -59,9 +59,60 @@
     }
     .dock .head .shutbtn:hover { color: var(--fg); }
 
-    .dock .panes { flex: 1; overflow: auto; padding: 10px; }
+    /* The panes box no longer scrolls as a whole: its children do. A
+       single scroller meant the detail panel sat below however long the
+       object list happened to be, which with 35 objects put it off the
+       bottom of the window entirely. */
+    .dock .panes { flex: 1; overflow: hidden; padding: 10px; min-height: 0; }
     .dock .pane { display: none; }
     .dock .pane.on { display: block; }
+    /* The objects pane is a column: list, divider, detail. */
+    .dock .pane[data-pane="objects"].on {
+      display: flex; flex-direction: column; height: 100%; min-height: 0;
+    }
+    .dock .objs-scroll {
+      flex: 1 1 auto; overflow-y: auto; min-height: 48px;
+    }
+    /* Drag to decide how much list versus how much detail. Same affordance
+       as the dock's own width handle. */
+    /* Sized down for the head strip, which is a row of labels rather
+     * than a toolbar. */
+    .dock .btn.small { padding: 3px 8px; font-size: 11.5px; }
+    /* Flush empties the object set, so it appears with that tab and
+     * not over the relations or robot panes. */
+    .dock:not([data-tab="objects"]) #dock-flush { display: none; }
+
+    /* The count of what is being kept out of the list. Quiet, and
+     * clickable along its whole width -- it is the only way back to the
+     * rows it is hiding. */
+    .dock .gone {
+      font-size: 11px; color: var(--muted, #7d828b); cursor: pointer;
+      padding: 4px 2px 6px; border-bottom: 1px solid var(--line, #232936);
+      margin-bottom: 4px;
+    }
+    .dock .gone:hover { color: var(--fg, #e8eaed); }
+    /* A row that is only there because the reader asked to see it. */
+    .dock tr.row.gone .nm, .dock tr.row.gone .cls { opacity: .55; }
+
+    .dock .split {
+      flex: 0 0 7px; margin: 4px -10px; cursor: row-resize;
+      background: transparent; position: relative;
+    }
+    .dock .split::after {
+      content: ""; position: absolute; left: 10px; right: 10px; top: 3px;
+      height: 1px; background: var(--line);
+    }
+    .dock .split:hover::after, .dock .split.live::after {
+      background: var(--acc); height: 2px;
+    }
+    .dock #dock-detail {
+      flex: 0 0 var(--detail-h, 340px); overflow-y: auto; min-height: 0;
+    }
+    /* The pane has no detail to show until something is selected; without
+       this the divider and an empty box sit there claiming space. */
+    .dock #dock-detail[hidden] { display: none; }
+    .dock .pane[data-pane="objects"].on:not(:has(#dock-detail:not([hidden])))
+      .split { display: none; }
     .dock .empty { color: #555; font-size: 12px; }
 
     /* A row is a thing you can open, so it says so on hover. */
@@ -105,7 +156,45 @@
     /* Fixed height and `contain`: switching between a tall crop and a wide
      * one must not make the panel jump, and neither may be stretched into
      * proportions the object does not have. */
+    /* ── scrollbars ─────────────────────────────────────────────────────
+       Three scrollers in this panel -- the object list, the detail pane and
+       the thumbnail strip -- each drawn by the platform in a different width
+       and a colour picked for a light page. Styled once here so they read as
+       part of the panel rather than as three separate widgets on top of it.
+
+       Firefox takes the two-property form and nothing else; the WebKit
+       pseudo-elements below cover Chrome and Safari. Both are given, and a
+       browser that honours neither still scrolls. */
+    .dock .objs-scroll, .dock #dock-detail, .dock .detail .strip {
+      scrollbar-width: thin;
+      scrollbar-color: #2b3242 transparent;
+    }
+    .dock .objs-scroll::-webkit-scrollbar,
+    .dock #dock-detail::-webkit-scrollbar,
+    .dock .detail .strip::-webkit-scrollbar { width: 8px; height: 8px; }
+    .dock .objs-scroll::-webkit-scrollbar-track,
+    .dock #dock-detail::-webkit-scrollbar-track,
+    .dock .detail .strip::-webkit-scrollbar-track { background: transparent; }
+    .dock .objs-scroll::-webkit-scrollbar-thumb,
+    .dock #dock-detail::-webkit-scrollbar-thumb,
+    .dock .detail .strip::-webkit-scrollbar-thumb {
+      background: #2b3242; border-radius: 4px;
+      /* Inset by the border so the thumb reads as floating in the gutter
+         rather than filling it edge to edge. */
+      border: 2px solid transparent; background-clip: padding-box;
+    }
+    .dock .objs-scroll:hover::-webkit-scrollbar-thumb,
+    .dock #dock-detail:hover::-webkit-scrollbar-thumb,
+    .dock .detail .strip:hover::-webkit-scrollbar-thumb { background: #3a435a;
+      background-clip: padding-box; }
+    .dock .objs-scroll::-webkit-scrollbar-corner,
+    .dock #dock-detail::-webkit-scrollbar-corner { background: transparent; }
+
     .dock .detail .hero {
+      /* border-box, or the 1px border puts this two pixels past its
+         container and the detail pane grows a horizontal scrollbar for
+         two pixels nobody can scroll to. */
+      box-sizing: border-box;
       width: 100%; height: 190px; display: flex;
       align-items: center; justify-content: center;
       border: 1px solid var(--line); border-radius: 5px;

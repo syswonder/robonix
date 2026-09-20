@@ -144,15 +144,48 @@ function placeLabels(anchors, W, H) {
 // moves. A crawling label is harder to read than an overlapping one.
 // Exposed deliberately: the placement is the one part of this page a
 // screenshot cannot check, so the UI test reads the solved boxes.
-let lblCache = {key: '', boxes: null};
+let lblCache = {key: '', boxes: null, shape: '', at: null};
 window.lblCache = lblCache;
-function placedLabels(anchors, W, H, viewKey) {
+
+// The identity of the label set, independent of where the view puts it. Two
+// frames of the same pan share it; renaming or adding an object does not.
+function labelShape(anchors) {
+  return anchors.map(a => a.text).join(';');
+}
+
+function placedLabels(anchors, W, H, viewKey, frozen) {
   const key = viewKey + '|' + anchors.map(
     a => a.text + ':' + (a.x | 0) + ',' + (a.y | 0)).join(';');
-  if (key !== lblCache.key) {
-    lblCache = {key: key, boxes: placeLabels(anchors, W, H)};
+  if (key === lblCache.key) return lblCache.boxes;
+
+  const shape = labelShape(anchors);
+  // While the pointer is down, translate rather than re-solve. Placement is
+  // an annealing solve and is not continuous in its input: nudging every
+  // anchor two pixels does not nudge the layout two pixels, it produces a
+  // different one, and at five frames a second that reads as the labels
+  // scattering. Under a pan every anchor moves by the same offset, so the
+  // previous layout shifted by it is both correct and stable.
+  if (frozen && lblCache.boxes && lblCache.at
+      && shape === lblCache.shape
+      && lblCache.at.length === anchors.length
+      && anchors.length > 0) {
+    const dx = anchors[0].x - lblCache.at[0].x;
+    const dy = anchors[0].y - lblCache.at[0].y;
+    const boxes = lblCache.boxes.map(
+      b => Object.assign({}, b, {x: b.x + dx, y: b.y + dy}));
+    lblCache = {key: key, boxes: boxes, shape: shape,
+                at: anchors.map(a => ({x: a.x, y: a.y}))};
     window.lblCache = lblCache;
+    return boxes;
   }
+
+  lblCache = {
+    key: key,
+    boxes: placeLabels(anchors, W, H),
+    shape: shape,
+    at: anchors.map(a => ({x: a.x, y: a.y})),
+  };
+  window.lblCache = lblCache;
   return lblCache.boxes;
 }
 

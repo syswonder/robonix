@@ -495,6 +495,17 @@ _STRINGS: dict[str, dict[str, str]] = {
     "dock.noViews":    {"en": "no pictures of this one yet",
                         "zh": "还没有这个物体的照片"},
     "dock.viewOf":     {"en": "seen from", "zh": "拍摄角度"},
+    "dock.goneShow": {"en": "{n} not currently seen — show",
+                     "zh": "{n} 个当前看不到 — 显示"},
+    "dock.goneHide": {"en": "hide the ones not currently seen",
+                     "zh": "隐藏当前看不到的"},
+    "dock.flush":      {"en": "flush", "zh": "清空物体"},
+    "dock.flushTitle": {"en": "drop every perceived object and start the set over; regions are kept",
+                        "zh": "丢弃所有已感知物体，重新开始识别；区域保留"},
+    "dock.flushAsk":   {"en": "drop all {n} objects?",
+                        "zh": "确定丢弃全部 {n} 个物体？"},
+    "dock.flushDone":  {"en": "dropped {n}", "zh": "已丢弃 {n} 个"},
+    "dock.splitDrag":  {"en": "drag to resize", "zh": "拖动调整高度"},
     "dock.rename":     {"en": "Rename",  "zh": "重命名"},
     "dock.delete":     {"en": "Delete",  "zh": "删除"},
     "dock.class":      {"en": "class",        "zh": "类别"},
@@ -969,15 +980,25 @@ def _dock_html() -> str:
       <div class="head">
         <span class="name" id="dock-name" data-i18n="dock.objects">Objects</span>
         <span class="stamp" id="dock-stamp">—</span>
+        <button class="btn small danger" id="dock-flush"
+                data-i18n="dock.flush"
+                data-i18n-title="dock.flushTitle"></button>
         <button class="shutbtn" id="dock-shut" data-i18n-title="dock.collapse"
                 data-i18n-aria="dock.collapse" title="collapse the dock"
                 aria-label="collapse the dock">»</button>
       </div>
       <div class="panes">
         <div class="pane on" data-pane="objects">
-          <table class="objs"><tbody id="dock-objs">
-            <tr><td class="empty">—</td></tr>
-          </tbody></table>
+          <div class="objs-scroll">
+            <div class="gone" id="dock-gone" hidden></div>
+            <table class="objs"><tbody id="dock-objs">
+              <tr><td class="empty">—</td></tr>
+            </tbody></table>
+          </div>
+          <div class="split" id="dock-split" role="separator"
+               aria-orientation="horizontal"
+               data-i18n-title="dock.splitDrag"
+               title="drag to resize"></div>
           <div id="dock-detail" hidden></div>
         </div>
         <div class="pane" data-pane="relations">
@@ -1159,16 +1180,22 @@ def _viewer_body(field: str, fallback: str) -> str:
     )
 
 
-def _framed(path: str, title: str) -> str:
+def _framed(path: str, title: str, info_panel: bool = False) -> str:
     """A sub-page rendered inside the shared sidebar.
 
     The standalone pages are kept exactly as they are and embedded, so each one
     stays individually addressable for debugging while the sidebar is present
     everywhere. `?bare=1` is what stops the embedded copy from drawing a second
     sidebar inside itself.
+
+    `info_panel` is passed through rather than dropped: the map pages ask for
+    the object panel, and which branch happens to render them is an
+    implementation detail of whether rerun is present -- not a reason for the
+    landing page to lose the panel it is opened to read.
     """
     return _shell_page(
-        path, f'<iframe src="{path}?bare=1" title="{title}"></iframe>', title)
+        path, f'<iframe src="{path}?bare=1" title="{title}"></iframe>', title,
+        info_panel=info_panel)
 
 
 def _bare(request) -> bool:
@@ -1376,7 +1403,8 @@ def make_app(*, registry: ObjectRegistry,
             return HTMLResponse(
                 _COMBINED_HTML.replace("__CONTROLS__", _CONTROLS_CSS))
         if rerun_sink is None or not rerun_sink.ready:
-            return HTMLResponse(_framed("/", "scene — semantic map"))
+            return HTMLResponse(
+                _framed("/", "scene — semantic map", info_panel=True))
         body = _viewer_body("url", "/3d")
         return HTMLResponse(_shell_page("/", body, "scene — semantic map",
                                         info_panel=True))
@@ -1993,7 +2021,12 @@ def make_app(*, registry: ObjectRegistry,
         # and this is the only 3D view it has.
         if _bare(request):
             return HTMLResponse(_INDEX_3D_HTML)
-        return HTMLResponse(_framed("/3d", "scene — built-in 3D"))
+        # The 3D view is where the point clouds and boxes are inspected,
+        # which is the same question the object panel answers from the
+        # registry side. Reading one without the other means changing
+        # pages to find out what the box you are looking at is called.
+        return HTMLResponse(
+            _framed("/3d", "scene — built-in 3D", info_panel=True))
 
     # rerun serves the viewer application on one port and each page's log
     # stream on another, and the embedded frame pointed straight at them. That
@@ -2438,6 +2471,41 @@ def make_app(*, registry: ObjectRegistry,
             # look at that side arrives, so it must not be cached hard.
             headers={"Cache-Control": "no-cache"})
 
+    async def objects_flush(request) -> JSONResponse:
+        """Drop every perceived object and start the set over.
+
+        Through the same coordinator call the MCP tool makes: what a flush
+        means -- derived objects go, the robot and the regions stay -- is
+        decided in one place regardless of who asked for it.
+
+        Persisting defaults to on. A flush is for a detection set that is
+        wrong, and leaving the wrong one in the snapshot to come back at the
+        next boot is not what anyone pressing this meant.
+        """
+        _mut = _mutations_or_none()
+        if _mut is None:
+            return JSONResponse(
+                {"ok": False,
+                 "detail": "this deployment has no object mutation coordinator"},
+                status_code=503)
+        body = await _object_body(request)
+        persist = body.get("persist_to_snapshot")
+        try:
+            deleted_count, persisted, map_id, generation = (
+                await _mut.flush_objects(
+                    expected_map_id=str(body.get("expected_map_id") or ""),
+                    expected_generation=body.get("expected_generation"),
+                    persist_to_snapshot=True if persist is None else bool(persist),
+                    note=str(body.get("note") or "flushed from the web UI"),
+                ))
+        except Exception as error:  # noqa: BLE001
+            return JSONResponse({"ok": False, "detail": str(error)},
+                                status_code=409)
+        return JSONResponse({
+            "ok": True, "deleted": deleted_count, "persisted": persisted,
+            "map_id": map_id, "generation": generation,
+        })
+
     async def logs_api(request) -> JSONResponse:
         """Whatever scribe appended since the caller's cursor.
 
@@ -2558,6 +2626,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/logs", logs_api, methods=["GET"]),
         Route("/api/maps/{map_id}/preview", map_preview, methods=["GET"]),
         Route("/api/maps/{map_id}/contents", map_contents, methods=["GET"]),
+        Route("/api/objects/flush", objects_flush, methods=["POST"]),
         Route("/api/objects/{object_id}/views", object_views_list,
               methods=["GET"]),
         Route("/api/objects/{object_id}/views/{index}.jpg",

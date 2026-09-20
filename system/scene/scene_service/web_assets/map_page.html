@@ -256,6 +256,9 @@ function p2w(px, py) {
 let state = null;          // last /api/state payload
 let occImg = null, occMeta = null, occStamp = 0, occLoading = 0;
 let occLoadToken = 0;
+// Read by `draw` to freeze label placement during a pan; see
+// placedLabels in labels.js.
+let dragging = false, dragMoved = false, lastPos = null;
 let drawMode = false;
 let draft = [];            // in-progress polygon vertices (world coords)
 let mouseWorld = null;     // live cursor position for the rubber-band edge
@@ -553,7 +556,8 @@ function draw() {
         // overlaps.
         const viewKey = `${pxPerM.toFixed(3)}:${center[0].toFixed(2)},` +
                         `${center[1].toFixed(2)}:${c.width}x${c.height}`;
-        const boxes = placedLabels(anchors, c.width, c.height, viewKey);
+        const boxes = placedLabels(anchors, c.width, c.height, viewKey,
+                                   dragging && dragMoved);
         for (let i = 0; i < anchors.length; i++) {
             const a = anchors[i], b = boxes[i];
             ctx.globalAlpha = a.faint ? 0.35 : 1.0;
@@ -1091,13 +1095,22 @@ async function finishDraft() {
 }
 
 // ── canvas input: pan / zoom / vertex clicks / hover ─────────────────────
-let dragging = false, dragMoved = false, lastPos = null;
 c.style.cursor = 'grab';
 c.addEventListener('mousedown', (ev) => {
     if (mapBusy) return;
     dragging = true; dragMoved = false; lastPos = [ev.offsetX, ev.offsetY];
 });
-window.addEventListener('mouseup', () => { dragging = false; });
+window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    // One solve now that the view has stopped moving. The cache key has
+    // not changed since the last frozen frame, so it has to be dropped
+    // explicitly or the translated boxes would simply be returned again --
+    // and those were never checked against the labels that scrolled in
+    // from off-screen during the pan.
+    if (window.lblCache) window.lblCache.key = '';
+    draw();
+});
 c.addEventListener('mousemove', (ev) => {
     mouseWorld = p2w(ev.offsetX, ev.offsetY);
     if (dragging && lastPos) {
