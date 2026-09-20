@@ -100,10 +100,13 @@ def test_map_id_partition_isolation_and_sanitize():
         assert AnnotationStore(base, map_id="lab_b", generation=1).list() == []
         assert len(AnnotationStore(base, map_id="lab_a", generation=1).list()) == 1
 
-        # Hostile map_id chars are squashed to "_" — same rule as the
-        # object store, so the two partitions always agree on the key.
+        # Characters that would let a name escape its directory are squashed
+        # to "_" — same rule as the object store, so the two partitions always
+        # agree on the key. A space is not one of them: the sanitiser exists to
+        # keep a name safe, not to rewrite it, and silently turning "客厅 2F"
+        # into "客厅_2F" is the same mangling that motivated widening it.
         s_evil = AnnotationStore(base, map_id="we ird/../id", generation=1)
-        assert s_evil.map_id == "we_ird_.._id"
+        assert s_evil.map_id == "we ird_.._id"
         assert s_evil.path.parent == s_a.path.parent  # no path escape
     print("  [PASS] test_map_id_partition_isolation_and_sanitize")
 

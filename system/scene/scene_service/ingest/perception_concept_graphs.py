@@ -2403,7 +2403,11 @@ class ConceptGraphsDetector:
             # stale one, so soft eviction does not resurrect duplicates.
             for obj in doomed:
                 self._registry.soft_evict(obj)
-            self._registry.prune_expired(now, self._object_ttl_s)
+            # The same gate re-adoption uses, so a forwarding address is
+            # never guessed on looser evidence than a merge would need.
+            self._registry.prune_expired(
+                now, self._object_ttl_s,
+                merge_dist_m=float(self.cfg.get("max_merge_dist_m", 1.5)))
 
     # ── operator mutation hooks ─────────────────────────────────────────
     # Called by ObjectMutationCoordinator (asyncio thread). The CG map is

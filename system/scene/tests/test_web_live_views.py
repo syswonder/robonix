@@ -155,7 +155,10 @@ def test_live_map_pages_expose_first_paint_readiness_and_errors():
     """Expose visible first-paint state and guard both image callbacks."""
     web = _web_module()
     for html in (web._INDEX_HTML, web._USER_HTML):
-        assert '<body data-ready="loading">' in html
+        # `data-ready` is the contract -- the first-paint state this test
+        # is about. The tag also names the page it renders now, so the
+        # attribute is read rather than the whole tag matched.
+        assert 'data-ready="loading"' in html
         assert 'role="status"' in html
         assert "document.body.dataset.ready = value" in html
         assert "c.clientWidth > 0 && c.clientHeight > 0" in html
@@ -248,13 +251,13 @@ def test_every_navigation_target_is_a_page_with_the_sidebar():
     web = _web_module()
     app = web.make_app(registry=_registry_with_no_objects(), hub=None)
     client = TestClient(app)
-    for href, label in web._NAV_LINKS:
+    for href, label, _key in web._NAV_LINKS:
         response = client.get(href)
         assert response.status_code == 200, href
         assert label in response.text, href
         # Every link is present on every page, so any page reaches any other.
-        for _, other in web._NAV_LINKS:
-            assert other in response.text, (href, other)
+        for other_href, _label, _k in web._NAV_LINKS:
+            assert f'href="{other_href}"' in response.text, (href, other_href)
 
 
 def test_the_bare_query_serves_the_built_in_page_without_the_shell():
@@ -266,7 +269,9 @@ def test_the_bare_query_serves_the_built_in_page_without_the_shell():
     client = TestClient(app)
     bare = client.get("/2d?bare=1")
     assert bare.status_code == 200
-    assert bare.text == web._INDEX_HTML
+    # Served with its placeholders filled, so compare against the asset
+    # after the route's own substitution rather than against the raw file.
+    assert bare.text == web._INDEX_HTML.replace("__LABELS__", web._LABELS_JS)
 
 
 def test_the_viewer_endpoint_says_why_there_is_no_viewer():
@@ -377,6 +382,9 @@ def test_the_map_pages_carry_the_object_and_relation_list():
     client = _proxy_client()
     for href in ("/", "/2d"):
         page = client.get(href).text
-        assert 'id="info-objs"' in page, href
-        assert 'id="info-rels"' in page, href
+        # The lists moved from the floating info panel into the docked
+        # one when the landing page became the viewer's; the question they
+        # answer is the same, so this asks for either.
+        assert ('id="dock-objs"' in page or 'id="info-objs"' in page), href
+        assert ('id="dock-rels"' in page or 'id="info-rels"' in page), href
         assert "/api/state" in page, href

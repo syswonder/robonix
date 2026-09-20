@@ -336,8 +336,13 @@ def test_map_id_sanitized():
 
     from scene_service.persistence import _sanitize_map_id
 
+    # The id is interpolated into a double-quoted milvus filter expression,
+    # so what must not survive is the quote and the backslash that could end
+    # or escape that string. Spaces and non-ASCII may: a map is allowed to be
+    # called "客厅 2F", and squashing it would rename the user's map to make
+    # a filter easier to build.
     inject = _sanitize_map_id('a" or "1"=="1')
-    assert re.fullmatch(r"[A-Za-z0-9._\-]+", inject), inject  # no quotes/spaces survive
+    assert '"' not in inject and "\\" not in inject, inject
     assert _sanitize_map_id("  ") == "default"
     assert _sanitize_map_id(None) == "default"
     assert _sanitize_map_id("kitchen-2.floor_1") == "kitchen-2.floor_1"  # safe id untouched

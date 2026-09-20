@@ -53,9 +53,13 @@ def sanitize_map_id(raw: Optional[str]) -> str:
     of character substitution fixes that.
     """
     cleaned = _MAP_ID_UNSAFE.sub("_", (raw or "").strip())
-    # Leading dots hide the directory; trailing dots and spaces are dropped by
-    # some filesystems, which would make two names resolve to one.
-    cleaned = cleaned.strip(". ")
+    # Trailing dots and spaces only: some filesystems drop them, which would
+    # make two names resolve to one. A *leading* dot is left alone -- scene's
+    # own reserved partitions are named `.live*`, and the reserved-id check
+    # recognises a user's attempt at that shape by exactly this character, so
+    # removing it here both renamed scene's internals and made that check
+    # unreachable.
+    cleaned = cleaned.rstrip(". ")
     if not cleaned or set(cleaned) <= {"."}:
         return "default"
     # A generous ceiling: most filesystems stop at 255 bytes for one segment,
