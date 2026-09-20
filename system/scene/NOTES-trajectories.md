@@ -7,6 +7,23 @@
 记录每一轮的 plan、能力调用、返回、墙钟时间。原始记录在
 `/tmp/baseline-grounding/*.jsonl`。
 
+### 测量环境（2026-09-20）
+
+| | |
+| --- | --- |
+| 规划模型 | `gpt-5.6-terra`（经 `https://api.ofox.io/v1`） |
+| robonix | `418b79a1`，分支 `scene-248-work`（#248），基于 `dev@addb97dc` |
+| scene 镜像 | `robonix-scene-248` = `6e7f1a8f710d`（带 rerun 的那个；共用 tag `robonix-scene` 当时指向一个没有 rerun 的镜像） |
+| 运行时 | Python 3.10.12 · torch 2.7.1+cu128 · rerun 0.37.1 |
+| 感知 | ConceptGraphs（YOLO + MobileSAM + open_clip `ViT-B-32`） |
+| 仿真 | Webots，TIAGo；房间内感知物体数在探索中由 2 增至 34 |
+| 编排 | `rbnx 0.1.0`；六个系统二进制由本 worktree 源码重编（见第四点五节） |
+
+**口径**：`rbnx ask --json <中文指令>` → pilot → executor(RTDL) → 各能力，
+逐轮记录 plan / 能力调用 / 返回 / 墙钟时间。五条探针按顺序跑在**同一个
+会话**里，机器人会在前几条中移动并探索，所以后面几条面对的物体数更多——
+这是刻意的，歧义正是这样长出来的。
+
 ---
 
 ## 一、现状（实测）

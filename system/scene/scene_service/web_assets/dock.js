@@ -177,6 +177,56 @@
     let renderedId = null;
 
 
+    // Which object the evidence on screen belongs to, so a slow response
+    // that arrives after the reader has moved on is dropped instead of
+    // painting the previous object's pictures under the current one's name.
+    let evidenceFor = null;
+
+    async function loadViews(objectId) {
+      evidenceFor = objectId;
+      const strip = detail.querySelector('#dock-strip');
+      if (!strip) return;
+      let rows = [];
+      try {
+        const r = await fetch(
+          `/api/objects/${encodeURIComponent(objectId)}/views`,
+          {cache: 'no-store'});
+        if (r.ok) rows = (await r.json()).views || [];
+      } catch (_) { /* no pictures is a state, not an error */ }
+      if (evidenceFor !== objectId) return;
+      const hero = detail.querySelector('#dock-hero');
+      if (!rows.length) {
+        // Said plainly rather than left blank: an empty frame reads as a
+        // panel that failed, and "not photographed yet" is information --
+        // the robot has not been round the other side of it.
+        if (hero) hero.innerHTML = `<div class="none" data-i18n="dock.noViews"></div>`;
+        strip.innerHTML = '';
+        applyLang(langGet(), document);
+        return;
+      }
+
+      function show(row) {
+        if (!hero) return;
+        hero.innerHTML = `<img src="${row.url}" alt="">`;
+      }
+
+      // Only when there is a choice to make. One picture needs no selector,
+      // and a row of one is furniture.
+      strip.innerHTML = rows.length > 1 ? rows.map((v, i) =>
+        `<button class="shot${i ? '' : ' on'}" data-url="${v.url}"
+                 title="${t('dock.viewOf')} ${(v.bearing * 57.3).toFixed(0)}°">
+           <img src="${v.url}" alt="">
+         </button>`).join('') : '';
+      strip.querySelectorAll('.shot').forEach((btn, i) => {
+        btn.addEventListener('click', () => {
+          strip.querySelectorAll('.shot').forEach(b => setClass(b, 'on', false));
+          setClass(btn, 'on', true);
+          show(rows[i]);
+        });
+      });
+      show(rows[0]);
+    }
+
     function updateDetail(o) {
       // Only the four values that move. Everything else -- the id, the
       // buttons, the labels -- was correct when it was built and rewriting
@@ -238,12 +288,19 @@
           <dd>${fmt(o.pose.x)}, ${fmt(o.pose.y)}, ${fmt(o.pose.z ?? 0)}</dd>
           ${o.missing ? `<dt></dt><dd class="warn">${t('dock.missing')}</dd>` : ''}
         </dl>
+        <div class="evidence">
+          <div class="hero" id="dock-hero"></div>
+          <div class="strip" id="dock-strip"></div>
+        </div>
         <div class="acts">
           <button class="btn ren" data-i18n="dock.rename"></button>
           <button class="btn danger del" data-i18n="dock.delete"></button>
         </div>
         <div class="said" id="dock-said"></div>
       </div>`;
+      // Once per selection, not per tick: the panel polls, and this is a
+      // network read.
+      loadViews(o.id);
       const said = detail.querySelector('#dock-said');
       detail.querySelector('.ren').addEventListener('click',
         () => rename(o, said));

@@ -96,6 +96,42 @@
                        font-size: 11.5px; color: var(--fg);
                        word-break: break-all; }
     .dock .detail .warn { color: #e0a050; }
+    /* ── Evidence: what the object actually looks like.
+     * The one thing on this card that answers "is this what I meant", so it
+     * gets the room. The point cloud that used to sit here is drawn properly
+     * on the 3D page at a size where it can be read; a small bad copy of it
+     * was worth less than the space it took from the photograph. */
+    .dock .detail .evidence { margin: 10px 0 12px; }
+    /* Fixed height and `contain`: switching between a tall crop and a wide
+     * one must not make the panel jump, and neither may be stretched into
+     * proportions the object does not have. */
+    .dock .detail .hero {
+      width: 100%; height: 190px; display: flex;
+      align-items: center; justify-content: center;
+      border: 1px solid var(--line); border-radius: 5px;
+      background: #0b0e13; overflow: hidden;
+    }
+    .dock .detail .hero img {
+      max-width: 100%; max-height: 100%; object-fit: contain; display: block;
+    }
+    .dock .detail .hero .none {
+      color: var(--muted); font-size: 11.5px; text-align: center; padding: 0 12px;
+    }
+    .dock .detail .strip {
+      display: flex; gap: 6px; overflow-x: auto; margin-top: 6px;
+    }
+    .dock .detail .shot {
+      flex: 0 0 auto; width: 44px; height: 44px; padding: 0;
+      border: 1px solid var(--line); border-radius: 4px;
+      background: #0e1218; cursor: pointer; overflow: hidden;
+      transition: border-color var(--t) var(--ease);
+    }
+    .dock .detail .shot img {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .dock .detail .shot:hover { border-color: #39415a; }
+    .dock .detail .shot.on { border-color: var(--acc); }
+
     .dock .detail .acts { display: flex; gap: 8px; }
     .dock .detail .acts .btn { flex: 1; }
     .dock .detail .edit .field { flex: 1; min-width: 0; }

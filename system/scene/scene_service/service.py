@@ -1588,8 +1588,71 @@ async def _lifecycle_watch(
 
 
 # ── active runtime ─────────────────────────────────────────────────────────
+def _web_port_from(config: dict) -> int:
+    """The port the web UI will bind, or 0 when it is switched off.
+
+    Read in two places now -- the viewer starts before the server is built --
+    and a fallback chain duplicated is a fallback chain that can disagree
+    with itself about whether the UI exists.
+    """
+    raw = config.get("web_port")
+    if raw is not None and raw != "":
+        return int(int(raw) or 0)
+    return int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
+
+
 async def _run_active(config: dict) -> None:
     """Start Scene resources after Driver(INIT) and Driver(ACTIVATE)."""
+    # ── The map viewer, first ────────────────────────────────────────────
+    # Before anything else in this function, because `serve_grpc` hangs
+    # holding the interpreter lock when the process is busy and nothing in
+    # Python can recover from that -- a watchdog would need the lock the
+    # stuck thread is holding. In a bare container the call returns in
+    # 1.5 ms, twelve times out of twelve; it only wedges once rclpy, CUDA,
+    # milvus and the gRPC servers are up. So it happens while none of them
+    # are. This lowers the odds; it does not remove them.
+    rerun_sink = None
+    viewer_choice = "builtin"
+    web_host = ""
+    web_port_early = _web_port_from(config)
+    if web_port_early > 0:
+        web_host = resolve_web_host(config)
+        # Which viewer renders the 3D map. `auto` uses rerun when it is
+        # installed and the built-in page when it is not, so a native
+        # deployment that never installed it behaves exactly as before and a
+        # docker image that ships it gets the better view without being told.
+        # `rerun` and `builtin` force one either way.
+        viewer_choice = str(
+            config.get("web_viewer")
+            or os.environ.get("SCENE_WEB_VIEWER", "auto")
+        ).strip().lower()
+        if viewer_choice not in ("auto", "rerun", "builtin"):
+            raise ValueError(
+                f"scene web_viewer must be auto, rerun or builtin, "
+                f"not {viewer_choice!r}"
+            )
+        if viewer_choice != "builtin":
+            from .rerun_sink import RerunSink
+
+            # Distinct names from Scene's own `web_port`: binding uvicorn to
+            # the viewer's port is a port clash that kills the service after
+            # the map has already started publishing, which reads as a rerun
+            # crash rather than as the shadowed variable it is.
+            viewer_grpc_port = int(
+                os.environ.get("SCENE_RERUN_GRPC_PORT", "9876"))
+            viewer_web_port = int(
+                os.environ.get("SCENE_RERUN_WEB_PORT", "9090"))
+            # The 2D page is a second recording on its own gRPC port. Both
+            # pages are served by the one web viewer, so a deployment forwards
+            # the two data ports and the one viewer port.
+            rerun_sink = RerunSink(
+                grpc_port=viewer_grpc_port,
+                web_port=viewer_web_port,
+                grpc_port_2d=viewer_grpc_port + 1,
+                web_host=web_host if web_host != "0.0.0.0" else "127.0.0.1",
+            )
+            rerun_sink.start()
+
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
     robot_geometry = RobotGeometryState()
@@ -1966,53 +2029,18 @@ async def _run_active(config: dict) -> None:
     )
     mcp_tools.attach_object_mutations(object_mutations)
 
-    # SCENE_WEB_HOST are environment fallbacks; an explicit Scene config file
-    # can set web_host: 127.0.0.1 to keep this operator surface local-only.
-    web_port = int(
-        int(config.get("web_port") or "0")
-        if config.get("web_port") is not None and config.get("web_port") != ""
-        else int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
-    )
+    # SCENE_WEB_HOST is the environment fallback; an explicit Scene config file
+    # can set web_host. Both default to loopback — see web_binding.
+    web_port = _web_port_from(config)
     web_task = None
     web_server: uvicorn.Server | None = None
     if web_port > 0:
-        web_host = resolve_web_host(config)
-        # Which viewer renders the 3D map. `auto` uses rerun when it is
-        # installed and the built-in page when it is not, so a native
-        # deployment that never installed it behaves exactly as before and a
-        # docker image that ships it gets the better view without being told.
-        # `rerun` and `builtin` force one either way.
-        viewer_choice = str(
-            config.get("web_viewer")
-            or os.environ.get("SCENE_WEB_VIEWER", "auto")
-        ).strip().lower()
-        if viewer_choice not in ("auto", "rerun", "builtin"):
-            raise ValueError(
-                f"scene web_viewer must be auto, rerun or builtin, not {viewer_choice!r}"
-            )
-
-        rerun_sink = None
+        # `web_host`, `viewer_choice` and `rerun_sink` were settled at the top
+        # of this function -- the viewer has to come up before the rest of the
+        # service makes the interpreter busy. What is left here is the wiring
+        # that needs the state built in between.
         if viewer_choice != "builtin":
-            from .rerun_sink import RerunSink
-
-            # Distinct names from Scene's own `web_port`: binding uvicorn to
-            # the viewer's port is a port clash that kills the service after
-            # the map has already started publishing, which reads as a rerun
-            # crash rather than as the shadowed variable it is.
-            viewer_grpc_port = int(
-                os.environ.get("SCENE_RERUN_GRPC_PORT", "9876"))
-            viewer_web_port = int(
-                os.environ.get("SCENE_RERUN_WEB_PORT", "9090"))
-            # The 2D page is a second recording on its own gRPC port. Both
-            # pages are served by the one web viewer, so a deployment forwards
-            # the two data ports and the one viewer port.
-            rerun_sink = RerunSink(
-                grpc_port=viewer_grpc_port,
-                web_port=viewer_web_port,
-                grpc_port_2d=viewer_grpc_port + 1,
-                web_host=web_host if web_host != "0.0.0.0" else "127.0.0.1",
-            )
-            if rerun_sink.start():
+            if rerun_sink is not None and rerun_sink.ready:
                 # Registered like every other background task: this one is
                 # appended after the loop that installs the exit callback, so
                 # it has to install its own or its death goes unreported.
