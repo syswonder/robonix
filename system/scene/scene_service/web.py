@@ -25,6 +25,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any, Optional
 
 from starlette.applications import Starlette
@@ -1181,6 +1182,7 @@ def make_app(*, registry: ObjectRegistry,
              semantic_hold: Optional[dict] = None,
              robot_geometry: Any = None,
              object_mutations: Any = None,
+             object_views: Any = None,
              rerun_sink: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
@@ -2361,6 +2363,78 @@ def make_app(*, registry: ObjectRegistry,
 
         return JSONResponse(await asyncio.to_thread(collect))
 
+    async def _resolve_object(object_id: str):
+        """A live object for a possibly-stale id, plus what became of it.
+
+        Returns `(object, live_id, departure)`. A guessed forwarding address
+        is not followed: these views are what someone confirms a choice
+        against, and a confidently wrong picture is worse than none.
+        """
+        async with registry.lock():
+            live_id, departure = registry.resolve_id(
+                object_id, follow_inferred=False)
+            obj = registry._objects.get(live_id) if live_id else None
+        return obj, live_id, departure
+
+    def _views_unavailable() -> JSONResponse:
+        return JSONResponse(
+            {"ok": False,
+             "detail": "object views are not configured for this deployment; "
+                       "set SCENE_OBJECT_VIEWS_DIR to store them"},
+            status_code=503)
+
+    async def object_views_list(request) -> JSONResponse:
+        """What pictures exist of one object, best-looking first."""
+        if object_views is None:
+            return _views_unavailable()
+        requested = request.path_params["object_id"]
+        obj, live_id, departure = await _resolve_object(requested)
+        if obj is None:
+            return JSONResponse(
+                {"ok": False, "object_id": requested,
+                 "detail": (f"object is gone ({departure.get('reason')})"
+                            if departure else "unknown object"),
+                 "departure": departure},
+                status_code=404)
+        map_id = str((map_binding or {}).get("map_id") or "default")
+        rows = await asyncio.to_thread(object_views.views, map_id, live_id)
+        return JSONResponse({
+            "ok": True,
+            "object_id": live_id,
+            # Says so when the caller's id was not the one that answered, so
+            # a UI can show that it followed a rename rather than silently
+            # swapping what it is displaying.
+            "requested_id": requested,
+            "views": [
+                {**row,
+                 "url": f"/api/objects/{quote(live_id, safe='')}"
+                        f"/views/{int(row.get('index', 0))}.jpg"}
+                for row in rows
+            ],
+        })
+
+    async def object_view_image(request):
+        """One stored view, as the JPEG it was written as."""
+        if object_views is None:
+            return PlainTextResponse("object views are not configured", 503)
+        obj, live_id, _departure = await _resolve_object(
+            request.path_params["object_id"])
+        if obj is None:
+            return PlainTextResponse("unknown object", status_code=404)
+        try:
+            index = int(request.path_params["index"])
+        except (TypeError, ValueError):
+            return PlainTextResponse("view index must be a number", 400)
+        map_id = str((map_binding or {}).get("map_id") or "default")
+        data = await asyncio.to_thread(object_views.read, map_id, live_id, index)
+        if not data:
+            return PlainTextResponse("no such view", status_code=404)
+        return Response(
+            data, media_type="image/jpeg",
+            # The file for a given index is replaced in place when a better
+            # look at that side arrives, so it must not be cached hard.
+            headers={"Cache-Control": "no-cache"})
+
     async def logs_api(request) -> JSONResponse:
         """Whatever scribe appended since the caller's cursor.
 
@@ -2481,6 +2555,10 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/logs", logs_api, methods=["GET"]),
         Route("/api/maps/{map_id}/preview", map_preview, methods=["GET"]),
         Route("/api/maps/{map_id}/contents", map_contents, methods=["GET"]),
+        Route("/api/objects/{object_id}/views", object_views_list,
+              methods=["GET"]),
+        Route("/api/objects/{object_id}/views/{index}.jpg",
+              object_view_image, methods=["GET"]),
         Route("/api/objects/{object_id}/label", object_label,
               methods=["POST"]),
         Route("/api/objects/{object_id}", object_delete,

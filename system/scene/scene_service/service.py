@@ -59,6 +59,7 @@ from .state import (
     Pose3D,
 )
 from .state.object_registry import now_unix
+from .object_views import bearing_of as _view_bearing, store_from_env
 from .web_binding import resolve_web_host
 
 # `force` because this runs after the package imports above, and a library
@@ -511,6 +512,66 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
         if flipped:
             log.debug("marked %d object(s) missing (grace expired)", flipped)
         await asyncio.sleep(period_s)
+
+
+async def _object_views_tick(
+    store, detector, registry, map_binding, *, period_s: float = 4.0,
+) -> None:
+    """Offer the camera's current look at each visible object to the store.
+
+    Deliberately slow. The store keeps crops that show *different sides*, and
+    a new side only exists because the robot moved; sampling faster would
+    mostly produce the same angle again and be refused, at the cost of doing
+    the projection work to find that out.
+
+    Reads the frame without the perception lock, the same trade the
+    scene-graph builder's image pass makes: a one-tick mismatch between frame
+    and transform moves a crop by centimetres, and a crop is a picture, not a
+    measurement.
+    """
+    from .scene_graph.image_relations import project_box
+
+    while True:
+        await asyncio.sleep(period_s)
+        try:
+            bundle = detector.latest_frame_bundle()
+            if bundle is None:
+                continue
+            rgb, K, T_cam_map = bundle
+            height, width = int(rgb.shape[0]), int(rgb.shape[1])
+            # Where the camera is in the map frame -- the translation column
+            # of the inverse transform -- which is what the bearing is
+            # measured from.
+            import numpy as np
+
+            T_map_cam = np.linalg.inv(T_cam_map)
+            cam_xy = (float(T_map_cam[0, 3]), float(T_map_cam[1, 3]))
+
+            objects, _surfaces = await registry.snapshot()
+            map_id = str((map_binding or {}).get("map_id") or "default")
+            for obj in objects.values():
+                if obj.missing or obj.attributes.get("is_robot"):
+                    continue
+                rect = project_box(
+                    T_cam_map, K,
+                    (obj.pose.x, obj.pose.y, obj.pose.z),
+                    (obj.bbox.size_x, obj.bbox.size_y, obj.bbox.size_z),
+                    obj.bbox.yaw, width, height,
+                )
+                if rect is None:
+                    continue
+                bearing = _view_bearing(
+                    cam_xy, (float(obj.pose.x), float(obj.pose.y)))
+                await asyncio.to_thread(
+                    store.offer,
+                    map_id=map_id, object_id=obj.object_id, image_bgr=rgb,
+                    rect=rect, bearing=bearing, img_w=width, img_h=height,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # A picture is never worth taking the service down for.
+            log.exception("[scene-views] capture failed")
 
 
 async def _rerun_tick(sink, registry, detector, hub, sg_store=None,
@@ -1983,6 +2044,23 @@ async def _run_active(config: dict) -> None:
                     "web_viewer: builtin"
                 )
 
+        # Absent configuration means no pictures, which is a supported
+        # state: the service still tracks objects, it just cannot show you
+        # one. Nothing below is conditional on it beyond that.
+        object_views = store_from_env()
+        if object_views is not None and perception is not None:
+            views_task = asyncio.create_task(
+                _object_views_tick(
+                    object_views, perception, registry, live_binding),
+                name="scene-views")
+            views_task.add_done_callback(_log_bg_task_exit)
+            bg_tasks.append(views_task)
+            log.info("[scene-views] storing object views under %s (max %d each)",
+                     object_views.root, object_views.max_views)
+        else:
+            log.info("[scene-views] not storing object views "
+                     "(SCENE_OBJECT_VIEWS_DIR unset)")
+
         web_app = web_ui.make_app(
             registry=registry,
             hub=hub,
@@ -1997,6 +2075,7 @@ async def _run_active(config: dict) -> None:
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
             object_mutations=object_mutations,
+            object_views=object_views,
         )
         web_uv = uvicorn.Config(
             app=web_app,
