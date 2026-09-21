@@ -19,7 +19,7 @@ import math
 import os
 import time
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from typing import TYPE_CHECKING
 
@@ -87,6 +87,10 @@ log = logging.getLogger(__name__)
 
 # ── Module-level state pointers, set by service.py at startup ──────────────
 _REGISTRY: ObjectRegistry | None = None
+# Scene's own world frame, read per call. Nothing here may name a frame:
+# "map" is what this deployment happens to call it, not what every
+# deployment calls it.
+_WORLD_FRAME_FN = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
@@ -255,12 +259,20 @@ def attach_state(
     registry: ObjectRegistry,
     hub=None,
     robot_geometry: RobotGeometryState | None = None,
+    world_frame_fn: "Callable[[], str] | None" = None,
 ) -> None:
-    """Attach live Scene dependencies used by read-only MCP handlers."""
-    global _REGISTRY, _HUB, _ROBOT_GEOMETRY
+    """Attach live Scene dependencies used by read-only MCP handlers.
+
+    `world_frame_fn` reads the frame Scene resolved for this deployment. A
+    callable rather than a value: it is empty until the first transform
+    arrives, and a value captured here would be that emptiness for ever.
+    """
+    global _REGISTRY, _HUB, _ROBOT_GEOMETRY, _WORLD_FRAME_FN
     _REGISTRY = registry
     _HUB = hub
     _ROBOT_GEOMETRY = robot_geometry
+    if world_frame_fn is not None:
+        _WORLD_FRAME_FN = world_frame_fn
 
 
 def attach_scene_graph_store(store: SceneGraphStore) -> None:
@@ -639,10 +651,17 @@ def _navigator():
             endpoint = str(channel_ref.endpoint or "").strip()
             if not endpoint:
                 return False, "Atlas returned an empty navigation endpoint"
+            frame = str(_WORLD_FRAME_FN() if _WORLD_FRAME_FN else "").strip()
+            if not frame:
+                # Refused rather than guessed. A goal sent in the wrong frame
+                # is a robot driving to the wrong place, and the frame is
+                # knowable -- it is simply not resolved yet.
+                return False, ("Scene has no world frame yet; "
+                               "no transform has arrived")
             qx, qy, qz, qw = go_to_impl.yaw_to_quaternion(yaw)
             request = navigation_pb2.Navigate_Request()
             goal = request.goal
-            goal.header.frame_id = "map"
+            goal.header.frame_id = frame
             goal.pose.position.x = float(x)
             goal.pose.position.y = float(y)
             goal.pose.position.z = 0.0

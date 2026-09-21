@@ -1920,6 +1920,7 @@ async def _run_active(config: dict) -> None:
     mcp_tools.attach_state(
         registry=registry,
         robot_geometry=robot_geometry,
+        world_frame_fn=lambda: self_tracker.world_frame_id,
     )
     mcp_tools.attach_annotation_store(anno_store)
 
@@ -1972,6 +1973,7 @@ async def _run_active(config: dict) -> None:
         registry=registry,
         hub=hub,
         robot_geometry=robot_geometry,
+        world_frame_fn=lambda: self_tracker.world_frame_id,
     )
 
     # Wire the persistence embedder to perception's loaded CLIP text encoder
