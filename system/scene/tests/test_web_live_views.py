@@ -304,6 +304,10 @@ class _FakeSink:
     """A sink that is up, with recognisable ports and nothing behind them."""
 
     ready = True
+    # Layout asks `available` (does this deployment have a viewer at all) and
+    # only the forwarding routes ask `ready` (is one running). A sink that is
+    # up is both. See `RerunSink.available`.
+    available = True
     web_port = 55550
     detail = ""
 

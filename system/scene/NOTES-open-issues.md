@@ -37,6 +37,74 @@ Rename / Delete 直接渲染成浏览器原生灰按钮。共享文件补了 `.b
 机器人有四张地图。现在分组：「当前地图」标题下挂 3D / 2D / 区域，库和仪表
 各自独立。
 
+## 0. 先读这条：「viewer 空白」大部分是测量假象（2026-09-21 查清）
+
+下面第 1 节记了六个实验、一次自我推翻，全都围绕「viewer 画不出东西」。
+**其中关于「空白」的部分基本作废。** 真因不在 rerun、不在进程内外、不在
+`connect_grpc`，而在**做检查的那个浏览器标签页是隐藏的**。
+
+证据，一次就够：
+
+| 量什么 | 值 |
+| --- | --- |
+| `document.visibilityState` | `hidden` |
+| 1.5 秒内 `requestAnimationFrame` 触发次数 | **0** |
+| 此时 `canvas.width/height` | `300x150`（HTML 默认值） |
+| 截图强制出一帧之后，同一个 canvas | **`3308x1882`** |
+
+隐藏标签页里 RAF 不排程，eframe 于是一帧都不画，canvas 的 backing store
+停在 300×150。而 rerun 是**在更新循环里**才去建 gRPC 连接的，所以连
+`/proxy` 的请求都不会发出——这正好长得像「数据没送到 viewer」。
+
+**因此以下三个信号在自动化标签页里全部无效**，不要再拿它们下结论：
+
+- `canvas.width === 300 && canvas.height === 150`（"没在画"）
+- 控制台停在 `open_url: Opening URL: RedapProxy(...)` 之后没有下文
+- 网络里没有任何 `/proxy` 请求
+
+**有效的做法**：量 DOM 尺寸（`#host`、canvas 的 `getBoundingClientRect`）——
+布局与可见性无关；需要确认真的画出来了，就先截一次图强制出帧，再读
+`canvas.width/height`。判断"画得对不对"只能靠人在可见窗口里看。
+
+第 1 节里**仍然成立**的部分：`serve_grpc` 在进程繁忙时持 GIL 睡死是真的
+（py-spy 栈 + 容器 1.3% CPU 可证），懒启动把概率压下去也是真的。作废的只是
+「viewer 空白」这一条线索及由它推出的结论。
+
+## 0.1 尺寸：真正的缺陷，已修
+
+用户一直说的是 size，不是空白。两处，各自都不报错，只是画小：
+
+1. `#host` 原本 `position: absolute; inset: 0`。viewer 启动时会把
+   `position: relative` 写成**内联样式**，盖过样式表，`inset` 随即失效，
+   host 塌回由内容撑高——969×**364**。改为 `width/height: 100%`，不依赖
+   position。
+2. canvas 上有 `@rerun-io/web-viewer` 写的内联 `width: 640px; height: 360px`，
+   内联同样压过样式表。加 `#host > canvas { width/height: 100% !important }`。
+
+修完实测：host 969×902、canvas CSS 969×902（填满）、backing 1937×1804
+（=×dpr 2）。`tests/test_rerun_host_css.py` 盯住这两条规则。
+
+## 0.2 另一个自造的死锁：页面按 `ready` 选布局
+
+`/` 只在 `rerun_sink.ready` 为真时才渲染 rerun 的 iframe；而 `ready` 只有
+在 `/rerun` 被打开后才为真；`/rerun` 只由那个 iframe 加载。懒启动之后这个
+条件**恒假**，落地页永远是内置画布，且无任何日志说明。
+
+拆法是把一个问题分成两个：`available`（这套部署有没有 viewer，只探
+`find_spec`，不绑端口）用于选布局，`ready`（是不是已经在跑）留给真正需要
+转发到活服务器的路由。`tests/test_viewer_gate.py` 盯住它。
+
+## 0.3 环境坑已固化进脚本，不要再手工绕
+
+`scripts/dev-up.sh`。四个每次都要重查一遍的问题，现在启动前一次性检查：
+
+| 问题 | 以前的症状 | 现在 |
+| --- | --- | --- |
+| 镜像 tag 被抢（第 3 节记过，又犯一次） | `robonix-scene-248` 指到了没有 rerun 的镜像，页面静默退回内置画布 | 镜像按 **ID** 钉在 `scripts/dev-image.pin`，import 不到 rerun 就**拒绝启动**并说明原因 |
+| `rbnx` 源码树指向别处 | `~/.robonix/config.yaml` 是全局共享的，曾指向 `/tmp/cleanrobonix`，boot 跑的是别人的 scene，只表现为路由 404 | 每个 worktree 用自己的 `ROBONIX_HOME`，启动前校验 `rbnx path root`，**不碰共享配置** |
+| 陈留 boot 堆积 | 一次发现 13 个，最老 1 天 7 小时，占着端口 | 只清本 worktree 的；`robonix-lab`、`scene-243` 一律不动 |
+| ssh 断开掀掉服务 | `nohup` 不够，boot 收到 SIGHUP 自行拆除 | `setsid` |
+
 ## 1. rerun viewer 与启动死锁（二选一，尚未两全）
 
 ### 今晚抓到的证据（2026-09-19 深夜）

@@ -29,10 +29,12 @@ from urllib.parse import quote
 from typing import Any, Optional
 
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
+from starlette.staticfiles import StaticFiles
 from starlette.responses import (HTMLResponse, JSONResponse,
                                  PlainTextResponse, Response,
                                  StreamingResponse)
-from starlette.routing import Route
+from starlette.routing import Route, Mount
 
 from robonix_api import ATLAS
 
@@ -51,6 +53,28 @@ from .state import ObjectRegistry
 # Read once at import: they do not change while the service runs, and a
 # per-request read would put a filesystem call in the path of every page.
 _ASSET_DIR = Path(__file__).resolve().parent / "web_assets"
+
+
+
+class _ExtensionlessJs(StaticFiles):
+    """StaticFiles that also answers `foo` with `foo.js`.
+
+    The rerun viewer package is published for bundlers and imports its wasm
+    shim without an extension. Browsers take a module specifier literally, so
+    the request arrives for a path that is not a file. Rather than patch the
+    vendored bundle -- an edit that would have to be re-applied every time it
+    is fetched -- the one convention it relies on is honoured here.
+    """
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except HTTPException as missing:
+            # StaticFiles raises for a miss rather than returning one, so the
+            # retry has to be on the exception path.
+            if missing.status_code != 404 or Path(path).suffix:
+                raise
+            return await super().get_response(path + ".js", scope)
 
 
 def _asset(name: str) -> str:
@@ -1014,6 +1038,7 @@ def _dock_html() -> str:
 
 
 _DOCK_JS = _asset("dock.js")
+_RERUN_HOST_HTML = _asset("rerun_host.html")
 
 
 _SHELL_CSS = _asset("shell.css")
@@ -1396,16 +1421,27 @@ def make_app(*, registry: ObjectRegistry,
         # A deployment whose viewer is the built-in one keeps the page it had.
         # Native installs do not ship rerun and must not be handed a broken
         # frame in place of a working layout.
+        #
+        # The question here is whether this deployment *has* a viewer, not
+        # whether one is already running -- `ready` would be a deadlock, since
+        # it only turns true once `/rerun` is opened and only this frame opens
+        # it. See `RerunSink.available`.
         if _bare(request):
             # Served raw rather than through the shell, so the
             # shared controls travel with it the same way the
             # framed map page receives them.
             return HTMLResponse(
                 _COMBINED_HTML.replace("__CONTROLS__", _CONTROLS_CSS))
-        if rerun_sink is None or not rerun_sink.ready:
+        if rerun_sink is None or not rerun_sink.available:
             return HTMLResponse(
                 _framed("/", "scene — semantic map", info_panel=True))
-        body = _viewer_body("url", "/3d")
+        # The viewer is embedded through a page of our own rather than
+        # pointed at directly. Loaded as a bare frame it reports nothing; as
+        # a module it hands back `selection_change`, which is what lets a
+        # click in the 3D view select the same object in the panel -- and the
+        # panel's own clicks reach it back through /api/viewer/focus.
+        body = ('<iframe id="v" src="/rerun?view=3d" '
+                'title="scene viewer"></iframe>')
         return HTMLResponse(_shell_page("/", body, "scene — semantic map",
                                         info_panel=True))
 
@@ -2616,10 +2652,60 @@ def make_app(*, registry: ObjectRegistry,
             camera_preview_completed_s = loop.time()
             return Response(payload, media_type="application/json")
 
+    async def viewer_focus(request):
+        """Point the viewer's camera at one object.
+
+        The reverse direction of the panel↔viewer link. rerun has no API for
+        being told what to select, so this resends the blueprint with the
+        object's position as the eye's target; the viewer redraws looking at
+        it. A miss is reported rather than swallowed: silently doing nothing
+        is how a control ends up feeling broken.
+        """
+        if rerun_sink is None:
+            return JSONResponse({"ok": False, "why": "no viewer"}, status_code=409)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        object_id = str(body.get("object_id") or "")
+        if not object_id:
+            return JSONResponse({"ok": False, "why": "no object"}, status_code=400)
+        objects, _ = await registry.snapshot()
+        obj = objects.get(object_id)
+        if obj is None:
+            return JSONResponse({"ok": False, "why": "unknown object"},
+                                status_code=404)
+        ok = rerun_sink.look_at(
+            (float(obj.pose.x), float(obj.pose.y), float(obj.pose.z)))
+        return JSONResponse({"ok": bool(ok)})
+
+    async def rerun_host(_request) -> HTMLResponse:
+        """The page that runs the rerun viewer as a module.
+
+        Opening it is what starts the viewer: the bring-up is off the boot
+        path, so the first reader pays for it and a deployment nobody looks at
+        never pays at all.
+        """
+        if rerun_sink is not None:
+            await asyncio.to_thread(rerun_sink.ensure_started)
+        return HTMLResponse(_RERUN_HOST_HTML)
+
     routes = [
+        # The rerun viewer as a module. Served from disk rather than inlined:
+        # it is a 48 MB wasm bundle, and `_asset` returns strings.
+        #
+        # `_ExtensionlessJs` is here because the package is published for a
+        # bundler: its entry does `import("./re_viewer")` with no extension,
+        # which a bundler resolves and a browser does not. Rewriting the
+        # vendored file would mean re-applying the edit on every fetch, so the
+        # server answers the specifier the package actually uses.
+        Mount("/assets/rerun",
+              app=_ExtensionlessJs(directory=str(_ASSET_DIR / "rerun")),
+              name="rerun-assets"),
         Route("/", index, methods=["GET"]),
         Route("/2d", index2d, methods=["GET"]),
         Route("/3d", index3d, methods=["GET"]),
+        Route("/rerun", rerun_host, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
         Route("/maps", maps_page, methods=["GET"]),
         Route("/logs", logs_page, methods=["GET"]),
@@ -2627,6 +2713,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/api/maps/{map_id}/preview", map_preview, methods=["GET"]),
         Route("/api/maps/{map_id}/contents", map_contents, methods=["GET"]),
         Route("/api/objects/flush", objects_flush, methods=["POST"]),
+        Route("/api/viewer/focus", viewer_focus, methods=["POST"]),
         Route("/api/objects/{object_id}/views", object_views_list,
               methods=["GET"]),
         Route("/api/objects/{object_id}/views/{index}.jpg",

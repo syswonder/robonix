@@ -26,6 +26,7 @@ import hashlib
 import logging
 import math
 import os
+import importlib.util
 import threading
 import time
 import urllib.parse
@@ -139,7 +140,23 @@ def instance_colour(object_id: str) -> tuple[int, int, int]:
     return (round(red * 255), round(green * 255), round(blue * 255))
 
 
-def _blueprint_3d():
+def _blueprint_3d(look_target=None):
+    """One 3D view over `/map`, on a flat background.
+
+    `look_target` aims the camera at a point in map coordinates. rerun's
+    viewer has no API for setting the selection from the host page, but the
+    blueprint decides where the eye looks -- so "show me this object" is a
+    blueprint resent with a new target, not a call into the viewer.
+    """
+    import rerun.blueprint as rrb
+
+    eye = None
+    if look_target is not None:
+        eye = rrb.EyeControls3D(look_target=[float(v) for v in look_target])
+    return _blueprint_3d_inner(eye)
+
+
+def _blueprint_3d_inner(eye_controls=None):
     """One 3D view over `/map`, on a flat background.
 
     The viewer is one page of Scene's UI, not the UI: it draws the annotated
@@ -159,6 +176,7 @@ def _blueprint_3d():
             origin="/map",
             name="semantic map",
             background=_VIEW_BACKGROUND,
+            eye_controls=eye_controls,
             # The occupancy grid is drawn as a real floor, so rerun's own
             # infinite grid adds a second, larger floor at the same height and
             # the map reads as a small patch floating on it.
@@ -392,6 +410,7 @@ class RerunSink:
         self._map3d = _Feed(grpc_port, _APP_3D)
         self._map2d = _Feed(grpc_port_2d, _APP_2D)
         self._detail = "the viewer has not been started"
+        self._available: bool | None = None
         # What was drawn last tick. An entity logged once stays in the
         # recording forever: without this an object the registry evicted, or a
         # relation that stopped holding, keeps being drawn and a stale map is
@@ -419,10 +438,80 @@ class RerunSink:
         # floor plans.
         self._history = (os.environ.get("SCENE_RERUN_HISTORY", "changes")
                          .strip().lower())
+        # Two pages opened at once must not both try to bind the ports.
+        self._start_lock = threading.Lock()
+
+    def ensure_started(self) -> bool:
+        """Bring the viewer up if it is not already, and say whether it is.
+
+        Called when someone opens the viewer, not when scene boots. Binding
+        rerun's three gRPC ports is heavy enough that doing it during
+        activation starved the Atlas channel -- grpc answered our keepalive
+        pings with GOAWAY "too_many_pings", the driver channel dropped, and
+        CMD_ACTIVATE timed out at ninety seconds while the service itself was
+        perfectly healthy. The viewer is a debugging aid; it has no business
+        on the boot path, and nobody is looking at it until they open it.
+
+        Idempotent and cheap once up: the first caller pays, the rest read a
+        flag. Serialised, so two pages opened together do not both try to bind
+        the same ports.
+        """
+        if self._ready:
+            return True
+        with self._start_lock:
+            if self._ready:
+                return True
+            return bool(self.start())
+
+    def look_at(self, point) -> bool:
+        """Aim the 3D view's camera at a point in map coordinates.
+
+        Resending the blueprint is the whole mechanism. The viewer exposes no
+        way to be told what to select or where to look -- but the blueprint
+        owns the eye, and the viewer redraws when a new one arrives. So "show
+        me this object" is a blueprint with a new target, not a call into the
+        viewer. Returns whether the viewer was up to receive it.
+        """
+        if not self._ready or self._map3d.recording is None:
+            return False
+        try:
+            import rerun as rr
+
+            rr.send_blueprint(
+                _blueprint_3d(point), make_active=True, make_default=False,
+                recording=self._map3d.recording,
+            )
+            return True
+        except Exception as error:  # noqa: BLE001
+            log.debug("[scene-rerun] look_at failed: %r", error)
+            return False
 
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def available(self) -> bool:
+        """Whether this deployment *has* a viewer, not whether it is running.
+
+        The two questions became different when bring-up moved off the boot
+        path. A page that picks its layout from `ready` can never show the
+        viewer: `ready` only turns true once someone opens `/rerun`, and
+        `/rerun` is only opened by the frame that such a page declines to
+        render. The landing page went on serving the built-in canvas for ever.
+
+        So layout asks this, and only the routes that forward to a running
+        server ask `ready`. A deployment with rerun installed but not yet
+        started renders the frame, the frame starts it, and a failure to start
+        is reported by the frame itself -- which can say why, where a silent
+        fall back to the built-in page cannot.
+
+        Cached: `find_spec` walks the path and this is asked once per page
+        load. It does not import rerun and it binds no ports.
+        """
+        if self._available is None:
+            self._available = importlib.util.find_spec("rerun") is not None
+        return self._available
 
     @property
     def detail(self) -> str:

@@ -191,7 +191,62 @@
       // Clicking the open row closes it, so the control is its own undo.
       selectedId = (selectedId === oid) ? null : oid;
       renderDetail();
+      if (selectedId) focusViewer(selectedId);
     }
+
+    // ── the link to the rerun viewer ────────────────────────────────────
+    //
+    // Two directions, and they work by different means, because the viewer
+    // offers an event but no setter.
+    //
+    //   viewer → panel   it fires `selection_change` with the entity path,
+    //                    which the host page relays up to us
+    //   panel → viewer   there is no API to select or aim, so scene resends
+    //                    the blueprint with the object's position as the
+    //                    camera target; the viewer redraws looking at it
+
+    /** The object id inside a logged entity path, or null. */
+    function objectIdFromPath(path) {
+      // Logged as `/map/objects/<kind>/<object id>`; the id is the last
+      // segment and carries its own dots, so split on slashes only.
+      if (!path) return null;
+      const parts = String(path).split('/').filter(Boolean);
+      if (parts.length < 2 || parts[0] !== 'map' || parts[1] !== 'objects') {
+        return null;
+      }
+      const last = parts[parts.length - 1];
+      return last.startsWith('scene.object.') ? last : null;
+    }
+
+    function focusViewer(oid) {
+      // Addressed to whichever frame holds the viewer. A page without one
+      // just has no listener, which is why this is fire-and-forget.
+      document.querySelectorAll('iframe').forEach((f) => {
+        try {
+          f.contentWindow.postMessage(
+            { source: 'scene-shell', type: 'focus', object_id: oid },
+            location.origin);
+        } catch (_) { /* a frame we do not own; not ours to talk to */ }
+      });
+    }
+
+    window.addEventListener('message', (ev) => {
+      if (ev.origin !== location.origin) return;
+      const m = ev.data;
+      if (!m || m.source !== 'scene-rerun' || m.type !== 'selection') return;
+      const oid = objectIdFromPath(m.entity_path);
+      if (!oid) return;
+      // Set rather than toggle: a click in the 3D view means "this one", and
+      // toggling would deselect when the viewer re-fires for the same object
+      // -- which it does, on every click within one entity.
+      if (selectedId !== oid) {
+        selectedId = oid;
+        renderDetail();
+      }
+      const row = document.querySelector(
+        `#dock-objs tr.row[data-oid="${CSS.escape(oid)}"]`);
+      if (row) row.scrollIntoView({ block: 'nearest' });
+    });
     function closeDetail() { selectedId = null; renderDetail(); }
     function markSelected() {
       document.querySelectorAll('#dock-objs tr.row').forEach(

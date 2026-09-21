@@ -14,3 +14,12 @@ docker/_weights/
 
 # Container-side editable install cache that scene's build.sh uses.
 .uv-cache/
+
+# The rerun web viewer, vendored at build time. 48 MB of wasm does not belong
+# in the history; scripts/fetch_viewer.sh puts it back.
+scene_service/web_assets/rerun/
+
+# Which image `scripts/dev-up.sh` boots, pinned by ID. Machine-local: the ID
+# names an image in one host's docker, and pinning is the point -- a shared
+# tag is what kept getting stolen. Recreate with `scripts/dev-up.sh --pin`.
+scripts/dev-image.pin

@@ -59,7 +59,11 @@ from .state import (
     Pose3D,
 )
 from .state.object_registry import now_unix
-from .object_views import bearing_of as _view_bearing, store_from_env
+from .object_views import (
+    bearing_of as _view_bearing,
+    looks_like as _view_looks_like,
+    store_from_env,
+)
 from .web_binding import resolve_web_host
 
 # `force` because this runs after the package imports above, and a library
@@ -576,7 +580,8 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
 
 
 async def _object_views_tick(
-    store, detector, registry, map_binding, *, period_s: float = 4.0,
+    store, detector, registry, map_binding, *, ephemeral_id: str,
+    period_s: float = 4.0,
 ) -> None:
     """Offer the camera's current look at each visible object to the store.
 
@@ -600,6 +605,15 @@ async def _object_views_tick(
                 continue
             rgb, K, T_cam_map = bundle
             height, width = int(rgb.shape[0]), int(rgb.shape[1])
+            # A box projects into frame whenever the geometry says it would be
+            # visible -- occluded or not. Without depth to check against, a
+            # shelf behind a wall gets photographed as the wall, which is how
+            # one object came to hold five pictures of five different things.
+            depth_m = None
+            try:
+                depth_m = detector.latest_depth_metres()
+            except Exception:  # noqa: BLE001
+                depth_m = None
             # Where the camera is in the map frame -- the translation column
             # of the inverse transform -- which is what the bearing is
             # measured from.
@@ -609,7 +623,13 @@ async def _object_views_tick(
             cam_xy = (float(T_map_cam[0, 3]), float(T_map_cam[1, 3]))
 
             objects, _surfaces = await registry.snapshot()
-            map_id = str((map_binding or {}).get("map_id") or "default")
+            # An unsaved session has no map_id, and object ids restart at _001
+            # every boot -- so filing its pictures under a fixed name put
+            # yesterday's shelf_002 and today's in the same directory, and an
+            # object ended up showing five photographs of five different
+            # things. A session that cannot be named still has to be kept
+            # apart from the next one.
+            map_id = str((map_binding or {}).get("map_id") or "") or ephemeral_id
             for obj in objects.values():
                 if obj.missing or obj.attributes.get("is_robot"):
                     continue
@@ -620,6 +640,14 @@ async def _object_views_tick(
                     obj.bbox.yaw, width, height,
                 )
                 if rect is None:
+                    continue
+                # How far the object is from the camera, in the camera's own
+                # frame: the z of the centre after the map→camera transform.
+                centre = np.array(
+                    [float(obj.pose.x), float(obj.pose.y),
+                     float(obj.pose.z), 1.0])
+                expected_m = float((T_cam_map @ centre)[2])
+                if not _view_looks_like(depth_m, rect, expected_m):
                     continue
                 bearing = _view_bearing(
                     cam_xy, (float(obj.pose.x), float(obj.pose.y)))
@@ -1712,7 +1740,13 @@ async def _run_active(config: dict) -> None:
                 grpc_port_2d=viewer_grpc_port + 1,
                 web_host=web_host if web_host != "0.0.0.0" else "127.0.0.1",
             )
-            rerun_sink.start()
+            # Not started here. Binding rerun's three gRPC ports is heavy
+            # enough that doing it alongside activation starved the Atlas
+            # channel: grpc answered our keepalive pings with GOAWAY
+            # "too_many_pings", the driver channel dropped, and CMD_ACTIVATE
+            # timed out at ninety seconds with the service otherwise healthy.
+            # `ensure_started` runs on the first request for the viewer, which
+            # is also the first moment anyone can see it.
 
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
@@ -2092,7 +2126,13 @@ async def _run_active(config: dict) -> None:
         # service makes the interpreter busy. What is left here is the wiring
         # that needs the state built in between.
         if viewer_choice != "builtin":
-            if rerun_sink is not None and rerun_sink.ready:
+            # Not `and rerun_sink.ready`. The viewer is brought up when someone
+            # opens it, so at this point it never is -- and gating the
+            # publisher on it meant the viewer started, connected, and then sat
+            # empty forever because nothing was writing to it. The task itself
+            # checks readiness every tick and costs nothing while there is no
+            # viewer to publish to.
+            if rerun_sink is not None:
                 # Registered like every other background task: this one is
                 # appended after the loop that installs the exit callback, so
                 # it has to install its own or its death goes unreported.
@@ -2128,10 +2168,22 @@ async def _run_active(config: dict) -> None:
         # state: the service still tracks objects, it just cannot show you
         # one. Nothing below is conditional on it beyond that.
         object_views = store_from_env()
+        # One name per run, for the sessions that have no name of their own.
+        ephemeral_session_id = "session-" + time.strftime(
+            "%Y%m%dT%H%M%SZ", time.gmtime())
+        if object_views is not None:
+            # Last run's unsaved pictures describe a map this one has never
+            # seen. Keeping them would only offer the operator a photograph of
+            # somewhere else.
+            dropped = object_views.forget_stale_sessions(ephemeral_session_id)
+            if dropped:
+                log.info("[scene-views] discarded %d unsaved session(s) from "
+                         "a previous run", dropped)
         if object_views is not None and perception is not None:
             views_task = asyncio.create_task(
                 _object_views_tick(
-                    object_views, perception, registry, live_binding),
+                    object_views, perception, registry, live_binding,
+                    ephemeral_id=ephemeral_session_id),
                 name="scene-views")
             views_task.add_done_callback(_log_bg_task_exit)
             bg_tasks.append(views_task)
@@ -2165,6 +2217,12 @@ async def _run_active(config: dict) -> None:
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
+        # The one background task that had no exit callback, which is why its
+        # death was invisible: uvicorn binds the port before it serves, so the
+        # socket stayed open and connections queued behind a server that was
+        # no longer there. From the outside that looks like a hang, not a
+        # crash, and the log said the UI had started.
+        web_task.add_done_callback(_log_bg_task_exit)
         log.info("web UI on http://%s:%d", web_host, web_port)
 
     log.info(

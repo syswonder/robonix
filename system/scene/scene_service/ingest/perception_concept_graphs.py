@@ -920,6 +920,23 @@ class ConceptGraphsDetector:
         return {"objects": out, "stamp_unix": time.time()}
 
     # ── frame bundle (for the scene-graph image relation pass) ────────
+    def latest_depth_metres(self):
+        """The current depth image in metres, or None.
+
+        Offered beside ``latest_frame_bundle`` so a caller that projects a box
+        into the image can check that what is at those pixels is actually at
+        the object's distance. Read without the inference lock, the same trade
+        the frame bundle makes.
+        """
+        msg = self._depth_msg()
+        if msg is None:
+            return None
+        try:
+            return _depth_msg_to_metres(msg)
+        except Exception as error:  # noqa: BLE001
+            log.debug("[scene-cg] depth decode failed: %r", error)
+            return None
+
     def latest_frame_bundle(self):
         """Return ``(rgb_bgr, K, T_cam_map)`` for projecting map-frame points
         into the current camera image, or None when any piece is unavailable.

@@ -135,6 +135,59 @@ def pad_rect(
     return (u0, v0, u1, v1)
 
 
+# How far the measured depth may sit in front of the object before the crop is
+# treated as showing something else. Half a metre covers pose error and the
+# near face of a big object; a wall between camera and object is metres out.
+_OCCLUSION_TOLERANCE_M = 0.5
+# Fraction of the crop that must carry a usable depth reading for the check to
+# mean anything. Below this the depth image tells us nothing and the crop is
+# refused rather than guessed at.
+_MIN_DEPTH_COVERAGE = 0.15
+
+
+def looks_like(depth_m, rect, expected_m: float) -> bool:
+    """Does what the camera sees at ``rect`` sit where the object does?
+
+    A box projects into the image whenever the geometry says it would be in
+    frame -- whether or not anything is in the way. Without this the store
+    happily kept a picture of the wall in front of a shelf, and an object
+    ended up with five photographs of five different things, every one of them
+    geometrically correct.
+
+    The test is deliberately loose: the nearest surface in the crop has to be
+    within `_OCCLUSION_TOLERANCE_M` of the object's own distance. A wall in
+    between fails it by metres. Missing or sparse depth returns False -- a
+    picture we cannot vouch for is not worth keeping, and there will be
+    another frame along shortly.
+    """
+    if expected_m <= 0.0:
+        return False
+    # No depth at all is not evidence against the crop -- a deployment without
+    # a depth stream would otherwise lose every picture. Only a depth image
+    # that contradicts the object's distance refuses one.
+    if depth_m is None:
+        return True
+    u0, v0, u1, v1 = rect
+    if u1 <= u0 or v1 <= v0:
+        return False
+    try:
+        import numpy as np
+
+        patch = np.asarray(depth_m[v0:v1, u0:u1], dtype="float32")
+        if patch.size == 0:
+            return False
+        valid = patch[np.isfinite(patch) & (patch > 0.05)]
+        if valid.size < max(4, int(patch.size * _MIN_DEPTH_COVERAGE)):
+            # Too few readings to disagree with. Not evidence either way.
+            return True
+        # The 10th percentile rather than the minimum: a handful of stray near
+        # pixels at a depth edge should not condemn an otherwise clear view.
+        nearest = float(np.percentile(valid, 10))
+    except Exception:  # noqa: BLE001
+        return False
+    return nearest >= expected_m - _OCCLUSION_TOLERANCE_M
+
+
 def crop_quality(
     rect: tuple[int, int, int, int], img_w: int, img_h: int,
 ) -> float:
@@ -336,6 +389,33 @@ class ObjectViewStore:
             return count
         except OSError:
             return 0
+
+    def forget_stale_sessions(self, keep: str) -> int:
+        """Drop every unsaved session's pictures except ``keep``.
+
+        A saved map keeps its own name and its pictures stay: they describe a
+        place that still exists. An unsaved session is named per run, so one
+        left behind belongs to a map nothing can re-anchor to -- its pictures
+        can only mislead. Returns how many were removed.
+        """
+        import shutil
+
+        dropped = 0
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            return 0
+        for entry in entries:
+            if not entry.is_dir() or not entry.name.startswith("session-"):
+                continue
+            if entry.name == _sanitize_segment(keep):
+                continue
+            try:
+                shutil.rmtree(entry)
+                dropped += 1
+            except OSError as error:  # noqa: BLE001
+                log.debug("[object-views] could not drop %s: %r", entry, error)
+        return dropped
 
     def forget_map(self, map_id: str) -> None:
         """Drop every view on one map, for when the map itself is deleted."""
