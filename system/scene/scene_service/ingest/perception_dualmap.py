@@ -532,7 +532,16 @@ class DualMapDetector(ConceptGraphsDetector):
 
         def _drop() -> None:
             with self._inference_lock:
-                self._lm.local_map = [o for o in self._lm.local_map if str(getattr(o, "uid", "")) not in uuids]
+                self._lm.local_map = [o for o in self._lm.local_map
+                                      if str(getattr(o, "uid", "")) not in uuids]
+                # The global map too. `_tick_locked` rebuilds the scene from the
+                # union of both maps, and promotion keeps the uid, so a track
+                # that had become stable would be dropped from the local map and
+                # then reinstated from the global one on the very next tick --
+                # the operator deletes it and it comes back.
+                if self._gm is not None:
+                    self._gm.global_map = [o for o in self._gm.global_map
+                                           if str(getattr(o, "uid", "")) not in uuids]
                 self._map_objects = [o for o in self._map_objects if o["id"] not in uuids]
 
         await asyncio.get_running_loop().run_in_executor(None, _drop)
@@ -547,6 +556,10 @@ class DualMapDetector(ConceptGraphsDetector):
         def _reset() -> None:
             with self._inference_lock:
                 self._lm.local_map = []
+                # Emptying only the local map leaves every promoted track in
+                # place, and a flush that keeps objects is not a flush.
+                if self._gm is not None:
+                    self._gm.global_map = []
                 self._map_objects = []
 
         await asyncio.get_running_loop().run_in_executor(None, _reset)

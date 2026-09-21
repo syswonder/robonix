@@ -316,3 +316,62 @@ def test_a_long_thin_copy_is_absorbed_even_on_little_overlap():
     ], dropped)
     assert dropped["overlapping"] == 1 and len(kept) == 1
     print("  [PASS] test_a_long_thin_copy_is_absorbed_even_on_little_overlap")
+
+
+# ── operator hooks reach both maps ───────────────────────────────────────────
+# DualMap keeps two: the local map holds what the robot is looking at, and a
+# track that becomes stable is *promoted* to the global map, keeping its uid.
+# `_tick_locked` rebuilds the scene from the union. So an operator hook that
+# edits only the local map is a no-op for anything already promoted: delete an
+# object and the next tick reinstates it from the global map; flush and the
+# promoted objects stay. `global_map` is an opt-in setting, so this is only
+# reachable on a deployment that turned it on -- which is exactly the one where
+# nobody would think to look.
+
+class _Map:
+    def __init__(self, objs):
+        self.local_map = list(objs)
+        self.global_map = list(objs)
+
+
+def _promoted_detector(uids):
+    p = _detector()
+    objs = [_obj(u, 0) for u in uids]
+    p._lm = _Map(objs)
+    p._gm = _Map(objs)
+    p._map_objects = [{"id": u} for u in uids]
+    p._uuid_to_oid = {u: f"obj_{u}" for u in uids}
+    return p
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.run(coro)
+
+
+def test_delete_reaches_the_global_map():
+    p = _promoted_detector(["a", "b"])
+    _run(p.delete_object("obj_a"))
+    assert [o.uid for o in p._lm.local_map] == ["b"]
+    assert [o.uid for o in p._gm.global_map] == ["b"], (
+        "a promoted track left in the global map is reinstated on the next "
+        "tick, so the delete does not stick")
+    assert [o["id"] for o in p._map_objects] == ["b"]
+
+
+def test_flush_empties_the_global_map_too():
+    p = _promoted_detector(["a", "b"])
+    _run(p.reset_derived_state())
+    assert p._lm.local_map == []
+    assert p._gm.global_map == [], "a flush that keeps objects is not a flush"
+    assert p._map_objects == []
+
+
+def test_operator_hooks_work_without_a_global_map():
+    """The default: `global_map` off, `_gm` is None, nothing to clear."""
+    p = _promoted_detector(["a"])
+    p._gm = None
+    _run(p.delete_object("obj_a"))
+    assert p._lm.local_map == []
+    _run(p.reset_derived_state())
+    assert p._lm.local_map == []
