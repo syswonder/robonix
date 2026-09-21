@@ -11,13 +11,15 @@ description = "Memgraph MCP server — structured CKG memory (Scribe Mem, parall
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
-    "mcp",
-    "fastmcp",
+    # Pinned: mcp 2.x renamed FastMCP to MCPServer and moved its import
+    # path, and every caller still imports mcp.server.fastmcp.
+    "mcp>=1.27,<2",
+    "fastmcp>=3,<5",
     # Must match the runtime grpcio the rest of the workspace pins, or
     # RegisterService fails on a version skew.
     "grpcio==1.80.0",
-    "grpcio-tools==1.80.0",
-    "protobuf",
+    "grpcio-tools==1.76.0",
+    "protobuf==6.33.6",
     "uvicorn",
     "robonix-api",
     "pyyaml>=6.0",

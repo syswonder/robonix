@@ -19,11 +19,14 @@ def test_explicit_config_host_wins_over_environment():
 
 
 def test_environment_host_is_supported_for_launcher_compatibility():
-    assert resolve_web_host({}, {"SCENE_WEB_HOST": "127.0.0.1"}) == "127.0.0.1"
+    assert resolve_web_host({}, {"SCENE_WEB_HOST": "0.0.0.0"}) == "0.0.0.0"
 
 
-def test_existing_deployments_keep_legacy_default():
-    assert resolve_web_host({}, {}) == "0.0.0.0"
+def test_the_ui_is_local_unless_someone_opens_it():
+    # The UI has no authentication and its annotation endpoints write map
+    # data, so the default is loopback. Exposing it is a decision; a
+    # deployment that wants it sets web_host or SCENE_WEB_HOST.
+    assert resolve_web_host({}, {}) == "127.0.0.1"
 
 
 @pytest.mark.parametrize(
@@ -61,11 +64,20 @@ def test_explicit_blank_values_do_not_fall_back_to_all_interfaces():
 
 
 def test_launchers_preserve_blank_values_for_runtime_rejection():
+    # `${VAR-default}` and not `${VAR:-default}`: an operator who exports an
+    # empty SCENE_WEB_HOST has made a mistake, and it should reach
+    # resolve_web_host to be rejected rather than be replaced silently.
     root = Path(__file__).resolve().parents[1]
-    docker_launcher = (root / "scripts" / "start.sh").read_text(encoding="utf-8")
-    native_launcher = (root / "scripts" / "start_native.sh").read_text(
-        encoding="utf-8"
-    )
-    expected = "SCENE_WEB_HOST=\"${SCENE_WEB_HOST-0.0.0.0}\""
-    assert expected in docker_launcher
-    assert expected in native_launcher
+    for name in ("start.sh", "start_native.sh"):
+        launcher = (root / "scripts" / name).read_text(encoding="utf-8")
+        assert 'SCENE_WEB_HOST="${SCENE_WEB_HOST-' in launcher, name
+        assert 'SCENE_WEB_HOST="${SCENE_WEB_HOST:-' not in launcher, name
+
+
+def test_launchers_default_the_ui_to_loopback():
+    # The library default is loopback; a launcher that passed 0.0.0.0 would
+    # override it and put the unauthenticated UI back on every interface.
+    root = Path(__file__).resolve().parents[1]
+    for name in ("start.sh", "start_native.sh"):
+        launcher = (root / "scripts" / name).read_text(encoding="utf-8")
+        assert 'SCENE_WEB_HOST="${SCENE_WEB_HOST-127.0.0.1}"' in launcher, name

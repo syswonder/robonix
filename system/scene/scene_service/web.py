@@ -32,6 +32,8 @@ from starlette.routing import Route
 
 from robonix_api import ATLAS
 
+from .message_shape import image_is_well_formed, occupancy_grid_is_well_formed
+
 from .annotations import validate_annotation_fields
 from .map_binding import sanitize_map_id as _sanitize_map_id
 from .map_meta import make_meta
@@ -325,7 +327,18 @@ def _occupancy_payload(hub: Any) -> Optional[dict]:
         return None
     info = msg.info
     w, h = int(info.width), int(info.height)
-    if w == 0 or h == 0:
+    # A publisher is not required to be honest. `data` is sized by whoever
+    # published it, and a grid whose length disagrees with width * height is
+    # type-valid ROS 2 — nothing upstream rejects it. Reshaping it raises, and
+    # an exception here becomes a 500 on /api/state for as long as that message
+    # stays the latest one, which takes the whole debug UI down. Dropping the
+    # frame keeps the rest of the page working and lets the next well-formed
+    # grid recover it.
+    if not occupancy_grid_is_well_formed(w, h, len(msg.data)):
+        log.warning(
+            "occupancy_grid dropped: %d cells for a %dx%d grid",
+            len(msg.data), w, h,
+        )
         return None
     # nav_msgs/OccupancyGrid data is row-major bottom-up int8 in
     # [-1, 100]: -1 unknown, 0 free, 100 occupied. Render as grayscale:
@@ -366,9 +379,16 @@ def _image_to_png_b64(msg: Any, *, kind: str) -> Optional[dict]:
     except ImportError:
         return None
     h, w = int(msg.height), int(msg.width)
-    if h == 0 or w == 0:
-        return None
     enc = (msg.encoding or "").lower()
+    # Same reasoning as the occupancy grid above: the buffer is sized by the
+    # publisher, and one that disagrees with the declared size makes reshape
+    # raise, which surfaces as a 500 on /api/camera.
+    if not image_is_well_formed(w, h, enc, len(msg.data)):
+        log.warning(
+            "%s image dropped: %d bytes for a %dx%d %s frame",
+            kind, len(msg.data), w, h, enc,
+        )
+        return None
     arr: Any = None
     out_mode = "RGB"
     if kind == "rgb":

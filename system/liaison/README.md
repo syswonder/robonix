@@ -30,6 +30,7 @@ User
       robonix/system/liaison/voice
         │
         ├─ robonix/primitive/audio/mic_stream
+        │    ▲ robonix/system/liaison/voice/finish ends capture early
         ├─ robonix/service/speech/asr_stream
         ├─ robonix/service/voiceprint/identify
         ├─ voice access gate before Pilot/TTS/action
@@ -48,8 +49,24 @@ User
   `PilotEvent` responses back to the caller.
 - `robonix/system/liaison/voice`: starts a voice session and streams
   `VoiceEvent` state, ASR, voiceprint, Pilot, and TTS progress.
+- `robonix/system/liaison/voice/finish`: ends microphone capture for an
+  in-flight voice session and submits the transcript recognized so far.
 
-Both contracts are registered by the `liaison` provider id.
+All three contracts are registered by the `liaison` provider id.
+
+A voice turn normally ends on the ASR backend's own end-of-utterance
+detection. Continuous background noise can keep that from ever firing, which
+strands the speaker until `record_seconds` expires, so `voice/finish` offers
+the manual equivalent: capture stops, the ASR request stream is flushed, and
+the turn continues down the normal submission path. It is not an abort —
+dropping the `StartVoiceSession` stream is what discards a turn. Calling it
+for a session that already ended returns `ok=false`, which callers should
+treat as a benign race rather than an error.
+
+Clients should discover `voice/finish` through Atlas before offering a
+finish-capture control: a Liaison older than this contract simply never
+registers it, and the control belongs hidden rather than failing with
+`UNIMPLEMENTED`.
 
 ## Identity and access
 

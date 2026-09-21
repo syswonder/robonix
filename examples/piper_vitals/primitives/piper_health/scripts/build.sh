@@ -7,5 +7,6 @@ PKG_ROOT="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 FLAGS=(--mcp)
 [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
 
+# RBNX_CODEGEN_POLICY_EXEMPT: generates and runs against the same host interpreter (start.sh execs `python3 -m piper_health.driver`), so the gencode and the runtime are one install and cannot disagree.
 rbnx codegen -p "$PKG_ROOT" "${FLAGS[@]}"
 echo "[piper_health/build] done."

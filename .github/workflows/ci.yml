@@ -58,6 +58,17 @@ jobs:
           system/scene/tests/test_perception_vlm_geometry.py
           system/scene/tests/test_image_relations.py
 
+      # The goal planner and the message-shape rule are pure and import neither
+      # robonix_api nor the generated MCP types, so they run under the same
+      # lightweight dependency set. Without them here nothing on a pull request
+      # exercises the guards against a malformed occupancy grid, which is how
+      # those guards came to be missing in the first place.
+      - name: Test Scene goal planning and upstream message validation
+        run: >-
+          python3 -m pytest -q
+          system/scene/tests/test_goal_planner.py
+          system/scene/tests/test_malformed_grid_inputs.py
+
   check:
     name: Rust (fmt + clippy + build + tests)
     runs-on: ubuntu-22.04

@@ -1,0 +1,11 @@
+# Manually end microphone capture for a running voice session and submit the
+# transcript recognized so far. Companion to `robonix/system/liaison/voice`.
+[contract]
+id      = "robonix/system/liaison/voice/finish"
+version = "1"
+kind    = "service"
+idl     = "liaison/srv/FinishVoiceCapture.srv"
+description = "Stop recording for an in-flight voice session and submit the transcript recognized so far."
+
+[mode]
+type = "rpc"

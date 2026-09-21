@@ -4,9 +4,10 @@
 // Executor config — same three-source resolution as pilot:
 //   compiled defaults < YAML at $ROBONIX_CONFIG_PATH < CLI flags / env.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_EXECUTOR_PROVIDER_ID: &str = "executor";
@@ -19,6 +20,32 @@ pub struct ExecutorConfig {
     pub atlas_endpoint: String,
     pub listen: String,
     pub id: String,
+    pub verification: VerificationConfig,
+}
+
+/// Executor-wide verification timing plus capability-specific routes.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct VerificationConfig {
+    /// Allow capability execution to continue while matched rules verify.
+    #[serde(default)]
+    pub overlap: bool,
+    #[serde(default)]
+    pub rules: Vec<VerificationRule>,
+}
+
+/// Route one completed capability call to a verifier provider.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct VerificationRule {
+    pub target_contract_id: String,
+    #[serde(default)]
+    pub target_provider_id: Option<String>,
+    pub verifier_provider_id: String,
+    #[serde(default = "empty_json_object")]
+    pub verifier_args: serde_json::Value,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 #[derive(Parser, Debug)]
@@ -66,14 +93,33 @@ struct FileConfig {
     listen: Option<String>,
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    verification: Option<VerificationConfig>,
+}
+
+#[derive(Default, Deserialize)]
+struct ManifestConfig {
+    #[serde(default)]
+    verification: Option<VerificationConfig>,
 }
 
 impl ExecutorConfig {
+    /// Resolve connection settings from the existing CLI/env/YAML sources and
+    /// verification rules from the manifest block, falling back to YAML.
     pub fn resolve(args: Args) -> Result<Self> {
         let file_cfg: FileConfig = match &args.config {
             Some(path) => load_yaml(path)?,
             None => FileConfig::default(),
         };
+        let manifest_cfg: ManifestConfig = match args.config_json.as_deref() {
+            Some(raw) => serde_json::from_str(raw).context("parse Executor --config-json")?,
+            None => ManifestConfig::default(),
+        };
+        let mut verification = manifest_cfg
+            .verification
+            .or(file_cfg.verification)
+            .unwrap_or_default();
+        verification.rules = validate_verification_rules(verification.rules)?;
         Ok(Self {
             atlas_endpoint: args
                 .atlas
@@ -88,8 +134,51 @@ impl ExecutorConfig {
                 .id
                 .or(file_cfg.id)
                 .unwrap_or_else(|| DEFAULT_EXECUTOR_PROVIDER_ID.to_string()),
+            verification,
         })
     }
+}
+
+/// Normalize identifiers and reject ambiguous rules before Executor starts.
+fn validate_verification_rules(rules: Vec<VerificationRule>) -> Result<Vec<VerificationRule>> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(rules.len());
+    for mut rule in rules {
+        rule.target_contract_id = rule.target_contract_id.trim().to_string();
+        rule.verifier_provider_id = rule.verifier_provider_id.trim().to_string();
+        rule.target_provider_id = rule
+            .target_provider_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if rule.target_contract_id.is_empty() {
+            bail!("verification target_contract_id must not be empty");
+        }
+        if rule.verifier_provider_id.is_empty() {
+            bail!(
+                "verification verifier_provider_id must not be empty for '{}'",
+                rule.target_contract_id
+            );
+        }
+        if !rule.verifier_args.is_object() {
+            bail!(
+                "verification verifier_args must be a JSON object for '{}'",
+                rule.target_contract_id
+            );
+        }
+        let key = (
+            rule.target_contract_id.clone(),
+            rule.target_provider_id.clone(),
+        );
+        if !seen.insert(key) {
+            bail!(
+                "duplicate verification rule for contract '{}' and provider '{}'",
+                rule.target_contract_id,
+                rule.target_provider_id.as_deref().unwrap_or("*")
+            );
+        }
+        normalized.push(rule);
+    }
+    Ok(normalized)
 }
 
 /// Read the `ROBONIX_ATLAS` env var as an atlas-endpoint alias.
@@ -114,4 +203,97 @@ fn load_yaml(path: &Path) -> Result<FileConfig> {
         .with_context(|| format!("read executor config '{}'", path.display()))?;
     serde_yaml::from_str(&raw)
         .with_context(|| format!("parse executor config '{}'", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(config_json: Option<&str>) -> Args {
+        Args {
+            atlas: None,
+            listen: None,
+            id: None,
+            config: None,
+            log: None,
+            config_json: config_json.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn parses_manifest_verification_rules() {
+        let cfg = ExecutorConfig::resolve(args(Some(
+            r#"{
+                "verification": {
+                    "overlap": true,
+                    "rules": [{
+                        "target_contract_id": "robonix/service/navigation/navigate",
+                        "verifier_provider_id": "scene_verifier",
+                        "verifier_args": {"scene_provider_id": "scene"}
+                    }]
+                }
+            }"#,
+        )))
+        .unwrap();
+        assert_eq!(cfg.verification.rules.len(), 1);
+        assert!(cfg.verification.overlap);
+        assert_eq!(
+            cfg.verification.rules[0].verifier_args["scene_provider_id"],
+            "scene"
+        );
+    }
+
+    /// Verification configs that omit overlap retain synchronous behavior.
+    #[test]
+    fn verification_overlap_defaults_to_false() {
+        let cfg = ExecutorConfig::resolve(args(Some(
+            r#"{
+                "verification": {
+                    "rules": [{
+                        "target_contract_id": "cap/a",
+                        "verifier_provider_id": "verifier"
+                    }]
+                }
+            }"#,
+        )))
+        .unwrap();
+
+        assert!(!cfg.verification.overlap);
+    }
+
+    #[test]
+    fn explicit_empty_manifest_rules_disable_defaults() {
+        let cfg =
+            ExecutorConfig::resolve(args(Some(r#"{"verification": {"rules": []}}"#))).unwrap();
+        assert!(cfg.verification.rules.is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_rules_at_the_same_specificity() {
+        let error = ExecutorConfig::resolve(args(Some(
+            r#"{
+                "verification": {"rules": [
+                    {"target_contract_id":"cap/a","verifier_provider_id":"v1"},
+                    {"target_contract_id":"cap/a","verifier_provider_id":"v2"}
+                ]}
+            }"#,
+        )))
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate verification rule"));
+    }
+
+    #[test]
+    fn rejects_non_object_verifier_args() {
+        let error = ExecutorConfig::resolve(args(Some(
+            r#"{
+                "verification": {"rules": [{
+                    "target_contract_id":"cap/a",
+                    "verifier_provider_id":"v1",
+                    "verifier_args": ["bad"]
+                }]}
+            }"#,
+        )))
+        .unwrap_err();
+        assert!(error.to_string().contains("must be a JSON object"));
+    }
 }
