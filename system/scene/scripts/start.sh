@@ -184,6 +184,10 @@ if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
     fi
 fi
 
+# SCENE_WEB_HOST below defaults to loopback. The container runs with
+# --network host, so what the service binds is what the host exposes, and the
+# web UI has no authentication while its annotation endpoints write map data.
+# Set SCENE_WEB_HOST=0.0.0.0 to reach it from another machine.
 exec docker run --rm \
     --name "$CT" \
     --entrypoint /scene/docker/entrypoint.sh \
@@ -196,7 +200,7 @@ exec docker run --rm \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
-    -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
+    -e SCENE_WEB_HOST="${SCENE_WEB_HOST-127.0.0.1}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
     -e SCRIBE_LOG_DIR="${SCRIBE_LOG_DIR:-}" \
     -e SCENE_MAP_PREVIEW_DIR="${SCENE_MAP_PREVIEW_DIR:-}" \
