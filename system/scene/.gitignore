@@ -23,3 +23,8 @@ scene_service/web_assets/rerun/
 # names an image in one host's docker, and pinning is the point -- a shared
 # tag is what kept getting stolen. Recreate with `scripts/dev-up.sh --pin`.
 scripts/dev-image.pin
+
+# Working notes. They are scratch: Chinese, long, and about what was tried on a
+# particular evening -- none of which belongs in a repository whose code and
+# docs are English. Kept on disk, out of the history.
+NOTES-*.md

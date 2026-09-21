@@ -339,8 +339,8 @@ def test_map_id_sanitized():
     # The id is interpolated into a double-quoted milvus filter expression,
     # so what must not survive is the quote and the backslash that could end
     # or escape that string. Spaces and non-ASCII may: a map is allowed to be
-    # called "客厅 2F", and squashing it would rename the user's map to make
-    # a filter easier to build.
+    # written in the operator's own language, and squashing it would rename
+    # the user's map to make a filter easier to build.
     inject = _sanitize_map_id('a" or "1"=="1')
     assert '"' not in inject and "\\" not in inject, inject
     assert _sanitize_map_id("  ") == "default"

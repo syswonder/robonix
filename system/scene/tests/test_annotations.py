@@ -103,8 +103,9 @@ def test_map_id_partition_isolation_and_sanitize():
         # Characters that would let a name escape its directory are squashed
         # to "_" — same rule as the object store, so the two partitions always
         # agree on the key. A space is not one of them: the sanitiser exists to
-        # keep a name safe, not to rewrite it, and silently turning "客厅 2F"
-        # into "客厅_2F" is the same mangling that motivated widening it.
+        # keep a name safe, not to rewrite it. Silently turning a name that
+        # contains a space into one that contains an underscore is the same
+        # mangling that motivated widening the allow-list in the first place.
         s_evil = AnnotationStore(base, map_id="we ird/../id", generation=1)
         assert s_evil.map_id == "we ird_.._id"
         assert s_evil.path.parent == s_a.path.parent  # no path escape

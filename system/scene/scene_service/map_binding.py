@@ -38,8 +38,9 @@ log = logging.getLogger("scene.map_binding")
 # What is genuinely unsafe in a directory name and a URL segment: control
 # characters, both path separators, and the set Windows reserves -- a map
 # saved here can be read back over a share. Everything else is allowed,
-# including non-ASCII: 客厅 is a legal filename, and the ASCII allow-list this
-# replaces turned it into "__", which collided with every other two-character
+# including non-ASCII: a room name in the operator's own language is a legal
+# filename, and the ASCII allow-list this replaces turned a two-character
+# one into "__", which collided with every other two-character
 # name and silently pointed two maps at one partition.
 _MAP_ID_UNSAFE = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]')
 
