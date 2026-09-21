@@ -212,7 +212,11 @@ def test_global_objects_shape_like_local_ones():
     g = types.SimpleNamespace(uid="g1", class_id=0, pcd=_Pcd(40), bbox=None, clip_ft=[0.3])
     m = d._to_map_object(g)
     assert m["id"] == "g1" and m["class_name"] == "chair"
-    assert m["num_detections"] == 1 and m["conf"] == [0.5] and m["stable"] is True
+    # 0.0, not the old 0.5 fallback: a GlobalObject carries no `max_prob`,
+    # no `class_probs` and no observation score, so nothing has said
+    # anything about this label yet and 0.0 is the honest answer. The
+    # fallback changed with the confidence fix; this assertion did not.
+    assert m["num_detections"] == 1 and m["conf"] == [0.0] and m["stable"] is True
     assert m["bbox"] == "aabb"          # fell back to the point cloud's own box
     print("  [PASS] test_global_objects_shape_like_local_ones")
 
