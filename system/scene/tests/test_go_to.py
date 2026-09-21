@@ -17,13 +17,15 @@ from scene_service.go_to import (
 
 
 class _Obj:
-    def __init__(self, oid, cls, x, y, label=None):
+    def __init__(self, oid, cls, x, y, caption=""):
         self.object_id = oid
         self.cls = cls
         self.confidence = 0.9
         self.last_seen = 1000.0
         self.pose = type("P", (), {"x": x, "y": y, "z": 0.0})()
-        self.attributes = {"label_override": label} if label else {}
+        self.caption = caption
+        self.display_name = f"{cls}_{oid}"
+        self.attributes = {}
 
 
 def _scene(*objs):
@@ -128,7 +130,7 @@ def test_an_unreachable_first_candidate_does_not_end_the_task():
     # A label makes one of them the clear answer; the other stays behind it
     # as the fallback. Two identical chairs would be ambiguous instead, and
     # asking is the right answer there.
-    objs = _scene(_Obj("chair_1", "chair", 1, 0, label="reading chair"),
+    objs = _scene(_Obj("chair_1", "chair", 1, 0, caption="reading chair"),
                   _Obj("chair_2", "chair", 9, 0))
     tried = []
 
@@ -146,7 +148,7 @@ def test_an_unreachable_first_candidate_does_not_end_the_task():
 
 
 def test_navigation_failing_moves_on_to_the_next_candidate():
-    objs = _scene(_Obj("chair_1", "chair", 1, 0, label="reading chair"),
+    objs = _scene(_Obj("chair_1", "chair", 1, 0, caption="reading chair"),
                   _Obj("chair_2", "chair", 9, 0))
     calls = []
 
@@ -165,7 +167,7 @@ def test_navigation_failing_moves_on_to_the_next_candidate():
 def test_running_out_of_candidates_says_what_was_tried():
     """"Could not get there" without saying which things were tried leaves
     the caller nothing to widen."""
-    objs = _scene(_Obj("chair_1", "chair", 1, 0, label="reading chair"),
+    objs = _scene(_Obj("chair_1", "chair", 1, 0, caption="reading chair"),
                   _Obj("chair_2", "chair", 9, 0))
     got = go_to(query=find_impl.Query(text="reading", cls="chair"),
                 objects=objs, approach_of=_reachable, navigate=_refuses,

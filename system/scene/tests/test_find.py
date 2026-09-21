@@ -19,16 +19,20 @@ from scene_service.find import (
 
 
 class _Obj:
-    def __init__(self, oid, cls, x, y, *, label=None, conf=0.9,
+    def __init__(self, oid, cls, x, y, *, caption="", conf=0.9,
                  last_seen=1000.0, is_robot=False):
         self.object_id = oid
         self.cls = cls
         self.confidence = conf
         self.last_seen = last_seen
         self.pose = type("P", (), {"x": x, "y": y, "z": 0.0})()
+        # The operator's own words for this one. Written to
+        # `attributes["label_override"]` here for a long time -- a key the
+        # production code never wrote, so these tests were exercising a field
+        # that existed only in the fixture.
+        self.caption = caption
+        self.display_name = f"{cls}_{oid}"
         self.attributes = {}
-        if label:
-            self.attributes["label_override"] = label
         if is_robot:
             self.attributes["is_robot"] = True
 
@@ -181,7 +185,7 @@ def test_an_object_not_seen_for_a_while_is_marked_rather_than_hidden():
 
 
 def test_an_operator_label_is_what_the_object_is_called():
-    objs = _scene(_Obj("chair_1", "chair", 1, 1, label="grandma's chair"))
+    objs = _scene(_Obj("chair_1", "chair", 1, 1, caption="grandma's chair"))
     got = find(Query(text="grandma"), objs, now=1000.0)
     assert got.candidates[0].label == "grandma's chair"
     assert got.candidates[0].score > 0

@@ -43,19 +43,39 @@ def _close(a: float, b: float, tol: float = 1e-3) -> bool:
 
 
 def test_restore_object_counter_collision():
-    """A new object of a restored class numbers after the highest restored id,
-    never reusing or colliding with it."""
+    """A new object numbers after the highest restored id, never reusing it."""
     reg = ObjectRegistry()
-    reg.restore_object(_make_obj("scene.object.cup_005", "cup"))
-    reg.restore_object(_make_obj("scene.object.cup_002", "cup"))
+    reg.restore_object(_make_obj("scene.object.0005", "cup"))
+    reg.restore_object(_make_obj("scene.object.0002", "cup"))
 
     new = reg.insert_object(
         "cup", Pose3D(0, 0, 0), BBox3D(), 0.5, now=1.0
     )
-    assert new.object_id == "scene.object.cup_006", new.object_id
+    assert new.object_id == "scene.object.0006", new.object_id
     # Restored objects are still present and addressable.
-    assert reg.get_object("scene.object.cup_005") is not None
-    print("  [PASS] test_restore_object_counter_collision")
+    assert reg.get_object("scene.object.0005") is not None
+
+
+def test_a_corrected_class_cannot_free_an_id_to_be_minted_twice():
+    """The regression that motivated dropping the class from the id.
+
+    Ids used to be `<cls>_<NNN>`, minted from a per-class counter, and
+    `restore_object` bumped the counter for the class the object has *now*.
+    Correct a restored sink into a cabinet and the sink counter never learned
+    that 003 was taken: three new sinks later, `sink_003` was minted a second
+    time and the restored object was silently overwritten in the registry.
+
+    With one counter and no class in the id there is no wrong bucket to bump.
+    """
+    reg = ObjectRegistry()
+    restored = _make_obj("scene.object.0003", "sink")
+    restored.cls = "cabinet"          # the operator corrected it before saving
+    reg.restore_object(restored)
+
+    minted = [reg.insert_object("sink", Pose3D(0, 0, 0), BBox3D(), 0.5, now=1.0)
+              .object_id for _ in range(3)]
+    assert "scene.object.0003" not in minted, minted
+    assert reg.get_object("scene.object.0003").cls == "cabinet"
 
 
 def test_restore_object_unparseable_id():
@@ -63,8 +83,18 @@ def test_restore_object_unparseable_id():
     reg = ObjectRegistry()
     reg.restore_object(_make_obj("scene.object.weird", "thing"))
     new = reg.insert_object("thing", Pose3D(0, 0, 0), BBox3D(), 0.5, now=1.0)
-    assert new.object_id == "scene.object.thing_001", new.object_id
-    print("  [PASS] test_restore_object_unparseable_id")
+    assert new.object_id == "scene.object.0001", new.object_id
+
+
+def test_an_id_minted_before_the_scheme_changed_still_restores():
+    """Old maps hold `scene.object.cup_005`; nothing reads an id but the keys."""
+    reg = ObjectRegistry()
+    reg.restore_object(_make_obj("scene.object.cup_005", "cup"))
+    assert reg.get_object("scene.object.cup_005") is not None
+    # The trailing number is read whatever precedes it, so the counter is
+    # still advanced past it and a fresh id cannot collide.
+    assert reg.insert_object("cup", Pose3D(0, 0, 0), BBox3D(), 0.5,
+                             now=1.0).object_id == "scene.object.0006"
 
 
 def test_restore_object_clears_cg_uuid_and_flags_restored():

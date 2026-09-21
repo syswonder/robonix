@@ -107,6 +107,12 @@ class BBox3D:
         return self.size_z * 0.5
 
 
+# A sentence or two. The persistence column is 4096 and the embedding is
+# computed over this text, so the cap is about what stays readable in a
+# panel rather than about storage.
+_MAX_CAPTION_LEN = 512
+
+
 @dataclass
 class SceneObject:
     """Stable object record. id format: `scene.object.<cls>_<NNN>`.
@@ -125,7 +131,37 @@ class SceneObject:
     last_seen: float
     observation_count: int = 1
     missing: bool = False
+    # One sentence about this object, in a person's words. Written by the
+    # captioner and editable by whoever is looking at the map, which is why
+    # it lives here rather than on the scene-graph node it used to: a graph
+    # node is rebuilt from the registry every pass, so an edit made there
+    # survived until the next one.
+    #
+    # Distinct from `cls` on purpose. "my favourite desk" is not a category,
+    # and writing it into `cls` -- which is what the label correction does --
+    # stops the thing being a desk to `find`, to the relation loop and to
+    # goal_near.
+    caption: str = ""
+    caption_updated_at: float = 0.0
+    caption_source: str = ""      # "model" | "operator" | "" (none yet)
     attributes: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def display_name(self) -> str:
+        """The short heading for one row: class plus this object's number.
+
+        Built rather than stored, so it follows a class correction. An object
+        minted while the detector said `sink` and corrected to `cabinet`
+        reads `cabinet_0003`, not `sink_0003` -- the number is this object's
+        identity, not a count of cabinets.
+
+        Deliberately not the caption. A caption is a sentence and a row needs
+        a heading; the sentence belongs where there is room to read it.
+        """
+        import re as _re
+
+        m = _re.search(r"(\d+)$", self.object_id)
+        return f"{self.cls}_{m.group(1)}" if m else (self.cls or self.object_id)
 
 
 @dataclass
@@ -155,7 +191,9 @@ class ObjectRegistry:
         self._lock = asyncio.Lock()
         self._objects: dict[str, SceneObject] = {}
         self._surfaces: dict[str, SceneSurface] = {}
-        self._counters: dict[str, int] = {}
+        # One counter, not one per class: an object id must not encode
+        # anything that can change. See `_alloc_id`.
+        self._object_counter: int = 0
         self._surface_counter: int = 0
         # Ids that have left, and where they went. Insertion-ordered so the
         # bound evicts the oldest forwarding address first.
@@ -262,10 +300,25 @@ class ObjectRegistry:
         return best
 
     # ── id allocation ──────────────────────────────────────────────────────
-    def _alloc_id(self, cls: str) -> str:
-        n = self._counters.get(cls, 0) + 1
-        self._counters[cls] = n
-        return f"scene.object.{cls}_{n:03d}"
+    def _alloc_id(self) -> str:
+        """An opaque, stable id. It encodes nothing about the object.
+
+        Ids used to read `scene.object.<cls>_<NNN>`, which put the detector's
+        first guess into a permanent name. Correct the class and the id went
+        on saying the old one for ever -- `sink_003` after it turned out to be
+        a cabinet. It also broke the collision guard in `restore_object`,
+        which bumped the counter for the object's *current* class while the
+        suffix had come from the class it was minted under, leaving the
+        original class free to mint that number a second time and overwrite
+        the restored object.
+
+        What a person reads is the display name, which is built from the
+        current class (or the name they gave it) and this number. Readability
+        belongs there, where it can follow a correction; an identifier's job
+        is to stay the same.
+        """
+        self._object_counter += 1
+        return f"scene.object.{self._object_counter:04d}"
 
     def _alloc_surface_id(self) -> str:
         self._surface_counter += 1
@@ -315,6 +368,38 @@ class ObjectRegistry:
         # not as unknown.
         self._record_departure(obj, "operator_deleted")
         del self._objects[object_id]
+        return obj
+
+    def set_object_caption(self, object_id: str, caption: str, *,
+                           source: str, now: float) -> SceneObject:
+        """Describe one object, or clear the description with an empty string.
+
+        A caption is not a class correction and does not touch `cls`: the
+        thing stays a table to `find`, to the relation loop and to goal_near
+        while being "my favourite desk" to whoever wrote that. Correcting a
+        misdetection is `update_object_label`, a different operation with
+        different consequences.
+
+        `source` records who wrote it. An operator's sentence is not
+        overwritten by the captioner on its next pass -- a description a
+        person took the trouble to write is not a cache entry.
+        """
+        obj = self._objects.get(object_id)
+        if obj is None:
+            raise KeyError(f"unknown Scene object {object_id!r}")
+        if source not in ("model", "operator"):
+            raise ValueError(f"caption source must be model or operator, got {source!r}")
+        if (source == "model" and obj.caption_source == "operator"
+                and obj.caption):
+            return obj
+        cleaned = " ".join(str(caption or "").split())
+        if len(cleaned) > _MAX_CAPTION_LEN:
+            raise ValueError(
+                f"a caption is at most {_MAX_CAPTION_LEN} characters, "
+                f"got {len(cleaned)}")
+        obj.caption = cleaned
+        obj.caption_updated_at = float(now)
+        obj.caption_source = source if cleaned else ""
         return obj
 
     def update_object_label(self, object_id: str, label: str) -> SceneObject:
@@ -469,7 +554,7 @@ class ObjectRegistry:
         source: str = "perception",
     ) -> SceneObject:
         """Allocate a new SceneObject. Caller must hold `self._lock`."""
-        oid = self._alloc_id(cls)
+        oid = self._alloc_id()
         attrs = dict(DEFAULT_ATTRIBUTES)
         attrs.update(_CLASS_ATTRIBUTE_DEFAULTS.get(cls, {}))
         attrs["source"] = source
@@ -494,12 +579,18 @@ class ObjectRegistry:
         """Re-insert a persisted object verbatim under its existing
         `object_id` (warm restore at boot). Caller must hold `self._lock`.
 
-        Advances the per-class id counter past the restored numeric suffix so
-        a later `_alloc_id(cls)` can never collide with — or reuse — a restored
-        id. A new object of the same class therefore continues numbering after
-        the highest restored one. Objects with an unparseable id (not the
-        `scene.object.<cls>_<NNN>` shape) are still stored; only the counter
-        bump is skipped for them.
+        Advances the id counter past the restored numeric suffix so a later
+        `_alloc_id` can neither collide with nor reuse a restored id. There is
+        one counter and the id encodes no class, so the bump cannot land on
+        the wrong one -- which is what happened while ids carried a class: the
+        suffix was minted under the class the object had then, the bump was
+        keyed on the class it has now, and a correction between the two left
+        the original class free to mint that number again.
+
+        Ids from before that change (`scene.object.<cls>_<NNN>`) restore
+        verbatim and still bump the counter: the trailing number is read
+        whatever precedes it. They keep their old spelling for ever, which is
+        the point of an opaque id -- nothing reads it but the keys.
 
         The restored object is a *remembered-but-unseen* record: its persisted
         `cg_uuid` belonged to a now-dead perception process and is meaningless
@@ -510,11 +601,11 @@ class ObjectRegistry:
         obj.attributes.pop("cg_uuid", None)
         obj.attributes["restored"] = True
         self._objects[obj.object_id] = obj
-        m = re.search(r"_(\d+)$", obj.object_id)
+        m = re.search(r"(\d+)$", obj.object_id)
         if m:
             n = int(m.group(1))
-            if n > self._counters.get(obj.cls, 0):
-                self._counters[obj.cls] = n
+            if n > self._object_counter:
+                self._object_counter = n
 
     def get_object(self, oid: str) -> Optional[SceneObject]:
         return self._objects.get(oid)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 Point = tuple[float, float]
 
@@ -71,3 +71,18 @@ def disc_inside_polygon(
         )
         for i in range(samples)
     )
+
+def region_of(x: float, y: float, regions: Iterable[dict]) -> str:
+    """The name of the first region containing this point, or "".
+
+    Which room a thing is in is the one piece of place that Scene can already
+    answer, and it was being computed inside `find` and thrown away -- so the
+    interface, which has the regions and the objects side by side, could not
+    group by room. First match wins: regions are operator-drawn and expected
+    not to overlap, and a point in two of them has no better answer than one
+    of the two.
+    """
+    for r in regions or []:
+        if point_in_polygon(x, y, r.get("points") or ()):
+            return str(r.get("name") or r.get("id") or "")
+    return ""

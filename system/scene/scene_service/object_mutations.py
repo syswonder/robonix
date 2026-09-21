@@ -333,6 +333,62 @@ class ObjectMutationCoordinator:
             self._invalidate_graph(object_id)
             return updated, persisted, map_id, generation
 
+    async def set_caption(
+        self,
+        *,
+        object_id: str,
+        caption: str,
+        source: str = "operator",
+        expected_map_id: str,
+        expected_generation: int,
+        persist_to_snapshot: bool,
+        note: str = "",
+    ) -> tuple[SceneObject, bool, str, int]:
+        """Describe one object, or clear the description with an empty string.
+
+        Nothing is told about it but the store. A caption is not a class
+        correction: the detector goes on tracking a table as a table, the
+        relation loop and goal_near go on seeing a table, and only a reader
+        -- or someone asking for "my favourite desk" -- sees the sentence.
+        That is why there is no detector call here and `update_label` has two.
+        """
+        async with self.ops_lock:
+            map_id, generation = self._assert_epoch(
+                expected_map_id,
+                expected_generation,
+            )
+            partition = (
+                self._snapshot_partition(map_id)
+                if persist_to_snapshot
+                else None
+            )
+            async with self.registry.lock():
+                current = self.registry.get_object(object_id)
+                if current is None:
+                    raise KeyError(f"unknown Scene object {object_id!r}")
+                old_caption = current.caption
+                old_source = current.caption_source
+                old_at = current.caption_updated_at
+                updated = self.registry.set_object_caption(
+                    object_id, caption, source=source, now=time.time())
+
+            persisted = False
+            if partition is not None:
+                try:
+                    await self._persist_one(updated, partition)
+                except Exception as exc:
+                    async with self.registry.lock():
+                        updated.caption = old_caption
+                        updated.caption_source = old_source
+                        updated.caption_updated_at = old_at
+                    raise RuntimeError(
+                        "failed to persist the caption; runtime state was "
+                        "rolled back"
+                    ) from exc
+                persisted = True
+
+            return updated, persisted, map_id, generation
+
     async def update_geometry(
         self,
         *,

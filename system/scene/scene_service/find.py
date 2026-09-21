@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import math
 import re
+
+from . import geometry
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
@@ -127,38 +129,29 @@ def _tokens(text: str) -> set[str]:
     return {t for t in _WORD_SPLIT.split(_norm(text)) if t}
 
 
-def _label_of(obj: Any) -> str:
-    """What a person would call this: their correction if they made one."""
-    attrs = getattr(obj, "attributes", None) or {}
-    return str(attrs.get("label_override") or getattr(obj, "cls", "") or "")
+def _describes(obj: Any) -> str:
+    """Every word this object answers to: its class and its description.
 
+    Both, not one or the other. "take me to my favourite desk" has to reach
+    the desk somebody described that way, and "the desk" has to keep reaching
+    it too -- a description does not stop the thing being a desk, which is
+    the whole reason a caption is not a class correction.
 
-def _point_in_polygon(x: float, y: float, pts: Iterable) -> bool:
-    """Ray casting. Exact, unlike everything else here -- a region is a
-    polygon and "in the living room" has an answer, not a score."""
-    poly = [(float(p[0]), float(p[1])) for p in pts or []]
-    if len(poly) < 3:
-        return False
-    inside = False
-    j = len(poly) - 1
-    for i, (xi, yi) in enumerate(poly):
-        xj, yj = poly[j]
-        if (yi > y) != (yj > y):
-            xint = (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi
-            if x < xint:
-                inside = not inside
-        j = i
-    return inside
+    (An earlier version read `attributes["label_override"]`, a field no code
+    ever wrote: the matching side was built for a person's words years before
+    the storing side had anywhere to put them.)
+    """
+    return " ".join(
+        p for p in (str(getattr(obj, "cls", "") or ""),
+                    str(getattr(obj, "caption", "") or "")) if p)
 
 
 def _region_of(obj: Any, regions: list[dict]) -> str:
+    """Which region this object stands in. See `geometry.region_of`."""
     pose = getattr(obj, "pose", None)
     if pose is None:
         return ""
-    for r in regions or []:
-        if _point_in_polygon(float(pose.x), float(pose.y), r.get("points")):
-            return str(r.get("name") or r.get("id") or "")
-    return ""
+    return geometry.region_of(float(pose.x), float(pose.y), regions)
 
 
 def _edge_holds(
@@ -193,7 +186,7 @@ def _anchor_ids(objects: dict, anchor: str) -> set[str]:
     want = _tokens(anchor)
     out = set()
     for oid, obj in objects.items():
-        if want & (_tokens(getattr(obj, "cls", "")) | _tokens(_label_of(obj))):
+        if want & _tokens(_describes(obj)):
             out.add(oid)
     return out
 
@@ -208,7 +201,7 @@ def _text_score(query_text: str, obj: Any) -> float:
     want = _tokens(query_text)
     if not want:
         return 0.5           # nothing said: everything fits equally
-    have = _tokens(_label_of(obj)) | _tokens(getattr(obj, "cls", ""))
+    have = _tokens(_describes(obj))
     if not have:
         return 0.0
     return len(want & have) / float(len(want))
@@ -250,7 +243,7 @@ def find(
     if query.cls:
         want = _tokens(query.cls)
         nxt = {o: ob for o, ob in stage.items()
-               if want & (_tokens(getattr(ob, "cls", "")) | _tokens(_label_of(ob)))}
+               if want & _tokens(_describes(ob))}
         if not nxt:
             return FindResult(
                 "empty", narrowed_by="cls",
@@ -320,7 +313,12 @@ def find(
         rows.append(Candidate(
             object_id=oid,
             cls=str(getattr(obj, "cls", "")),
-            label=_label_of(obj),
+            # What to show when asking which one. The caption is the thing
+            # that discriminates -- "grandma's chair" tells the two chairs
+            # apart and `chair_0007` does not -- so it wins when there is one.
+            label=str(getattr(obj, "caption", "")
+                      or getattr(obj, "display_name", "")
+                      or getattr(obj, "cls", "")),
             region=region_of.get(oid, ""),
             distance_m=None if d is None else round(d, 3),
             last_seen_s=None if age is None else round(age, 1),

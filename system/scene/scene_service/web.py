@@ -40,6 +40,7 @@ from robonix_api import ATLAS
 
 from .message_shape import image_is_well_formed, occupancy_grid_is_well_formed
 
+from . import geometry
 from .annotations import validate_annotation_fields
 from .map_binding import sanitize_map_id as _sanitize_map_id
 from .map_meta import make_meta
@@ -325,21 +326,43 @@ def _state_payload(registry: ObjectRegistry,
     the /user annotation page."""
     objs_dict, _surfaces = _sync_snapshot(registry)
     geo_edges = sg_store.get_geometric_edges() if sg_store is not None else []
+    # Which room each object stands in. Scene could always work this out --
+    # `find` did it per query and dropped it -- so the one page that has the
+    # regions and the objects side by side could not group by room.
+    regions = anno_store.list_json() if anno_store is not None else []
     out_objects: list[dict[str, Any]] = []
     robot_pose: Optional[dict[str, float]] = None
     for o in objs_dict.values():
         out_objects.append({
             "id": o.object_id,
             "short_id": _shorten_id(o.object_id),
+            # ── the semantic map: what this object is, and where ──────
+            # A heading, a sentence, a class and a room. This is what a
+            # reader and a model are shown; everything below the line is
+            # how Scene arrived at it.
+            "display_name": o.display_name,
+            "caption": o.caption,
+            "caption_source": o.caption_source,
             "cls": o.cls,
+            "region": geometry.region_of(
+                float(o.pose.x), float(o.pose.y), regions),
             "pose": {"x": o.pose.x, "y": o.pose.y, "z": o.pose.z, "yaw": o.pose.yaw},
             "bbox": {
                 "size_x": o.bbox.size_x, "size_y": o.bbox.size_y, "size_z": o.bbox.size_z,
                 "yaw": o.bbox.yaw,
             },
+            # ── how it got here ───────────────────────────────────────
+            # Internal tracking state, in the registry's own words (see
+            # DEFAULT_ATTRIBUTES, "not semantic object properties"). The
+            # interface shows these only in its debug view: a confidence and
+            # an observation count are how you check perception, not what
+            # the map says is in the room.
+            "settled": (not o.missing
+                        and not bool(o.attributes.get("label_provisional", False))),
             "confidence": o.confidence,
             "observation_count": o.observation_count,
             "missing": o.missing,
+            "provisional": bool(o.attributes.get("label_provisional", False)),
         })
         if o.attributes.get("is_robot"):
             robot_pose = {"x": o.pose.x, "y": o.pose.y, "z": o.pose.z, "yaw": o.pose.yaw}
@@ -377,7 +400,7 @@ def _state_payload(registry: ObjectRegistry,
             else None
         ),
         "occupancy": _occupancy_payload(hub),
-        "annotations": anno_store.list_json() if anno_store is not None else [],
+        "annotations": regions,
         "map_binding": map_binding,
         "stamp_unix": time.time(),
     }
