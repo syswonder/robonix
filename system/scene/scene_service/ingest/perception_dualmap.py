@@ -662,7 +662,7 @@ class DualMapDetector(ConceptGraphsDetector):
                 bbox = pcd.get_axis_aligned_bounding_box()
             except Exception:  # noqa: BLE001
                 return None
-        conf = float(getattr(o, "max_prob", 0.0) or 0.0)
+        conf = _track_confidence(o)
         uid = str(getattr(o, "uid", ""))
         clip_ft = getattr(o, "clip_ft", None)
         return {
@@ -670,7 +670,11 @@ class DualMapDetector(ConceptGraphsDetector):
             "class_name": name,
             "pcd": pcd,
             "bbox": bbox,
-            "conf": [conf if conf > 0 else 0.5],
+            # No flat placeholder: a fabricated 0.5 is indistinguishable
+            # from a measured 0.5 and sorts in the middle of everything.
+            # _track_confidence returns 0.0 when nothing informative exists,
+            # which reads as "no evidence" rather than "medium".
+            "conf": [conf],
             "num_detections": int(getattr(o, "observed_num", 1) or 1),
             "n_points": int(n_points),
             "inst_color": _inst_color(uid),
@@ -927,3 +931,51 @@ class DualMapDetector(ConceptGraphsDetector):
                 feat = (tf / tf.norm(dim=-1, keepdim=True))[0].cpu().numpy().astype(np.float32)
         self._export_cache[label] = feat
         return feat
+
+
+def _track_confidence(track: Any) -> float:
+    """How much DualMap actually believes this track's label.
+
+    Three sources, in decreasing authority, first informative one wins:
+
+      1. ``max_prob`` -- the Bayesian class filter's winning probability.
+         Initialised to 0.0 and only written once the filter has updated
+         that track, so zero means "not yet", not "no confidence".
+      2. ``class_probs`` -- the same distribution read directly. Its initial
+         value is the uniform prior (1/num_classes), which is not a
+         measurement; a distribution still at the prior is skipped rather
+         than reported as a very small confidence.
+      3. the latest observation's own detector score -- unfused, but real,
+         and present from the first sighting.
+
+    Returns 0.0 when none of them say anything, which is the honest answer:
+    the label is a guess with no evidence behind it yet.
+    """
+    prob = float(getattr(track, "max_prob", 0.0) or 0.0)
+    if prob > 0.0:
+        return min(1.0, prob)
+
+    probs = getattr(track, "class_probs", None)
+    if probs is not None:
+        try:
+            import numpy as _np
+
+            arr = _np.asarray(probs, dtype=float)
+            if arr.size:
+                top = float(arr.max())
+                # Uniform means untouched: every entry equals the prior.
+                if top > (1.0 / arr.size) + 1e-6:
+                    return min(1.0, top)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        latest = track.get_latest_observation()
+        score = float(getattr(latest, "conf", 0.0) or 0.0)
+        if score > 0.0:
+            return min(1.0, score)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return 0.0
+

@@ -167,7 +167,22 @@ def test_perception_backend_selection():
     assert cfg.backend == "dualmap" and cfg.dualmap["classes"] == ["chair", "table"]
     assert cfg.ignored_keys == ()
     assert perception_config({}, env={"SCENE_PERCEPTION_BACKEND": "dualmap"}).backend == "dualmap"
-    assert perception_config({}, env={}).backend == "concept_graphs"
+    # The silent default follows the image rather than a constant: DualMap where
+    # the image carries a checkout, ConceptGraphs where it does not. Asserted
+    # both ways round, because leaving it to whatever the test machine happens
+    # to have under /opt is how this passes in CI and surprises someone on a
+    # workstation that has built the dualmap layer.
+    # Patched on `_mod`, the module this file loaded by path -- the package
+    # module of the same name is a different object and patching it would not
+    # touch the perception_config called here.
+    _real_available = _mod.dualmap_available
+    try:
+        _mod.dualmap_available = lambda: False
+        assert perception_config({}, env={}).backend == "concept_graphs"
+        _mod.dualmap_available = lambda: True
+        assert perception_config({}, env={}).backend == "dualmap"
+    finally:
+        _mod.dualmap_available = _real_available
     assert resolve_backend(" DualMap ") == "dualmap"
     for bad in ({"perception": {"backend": "dual_map"}}, {"perception": {"dualmap": "chair"}}):
         try:
