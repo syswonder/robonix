@@ -37,6 +37,13 @@ function applyLang(lang, root) {
     el.textContent = vars ? tv(el.dataset.i18n, vars, lang)
                           : t(el.dataset.i18n, lang);
   });
+  // The language switch offers the language you are not in, so it is
+  // labelled from the other table. Keeping each `strings_<lang>.json` to
+  // its own language is the point: a translator opens one file and sees
+  // only the language they speak.
+  d.querySelectorAll('[data-i18n-other]').forEach(el => {
+    el.textContent = t(el.dataset.i18nOther, lang === 'zh' ? 'en' : 'zh');
+  });
   d.querySelectorAll('[data-i18n-title]').forEach(
     el => { el.title = t(el.dataset.i18nTitle, lang); });
   d.querySelectorAll('[data-i18n-ph]').forEach(

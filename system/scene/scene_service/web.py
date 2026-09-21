@@ -504,216 +504,37 @@ def _maps_payload() -> dict:
     return {"ok": bool(out.get("ok")), "detail": out.get("detail", ""), "maps": maps}
 
 
-# Maps first: nothing else can be operated until one is bound, so it is the
-# page a reader starts on and the one they come back to when switching.
-# ── Interface language ─────────────────────────────────────────────────────
-# One table, two documents: the shell and the view inside its iframe both read
-# the same key, and the choice lives in localStorage so it survives a reload
-# and is shared across the frame boundary without a server round trip.
+# The interface copy, one data file per language under `web_assets/`.
+#
+# Out of this module on purpose. Translations are content, not code: they are
+# edited by whoever speaks the language, they carry no logic, and a repository
+# whose source is English should not have a second language threaded through
+# its source lines. `strings_<lang>.json` is also what the docs check
+# recognises as a translation rather than as prose that slipped in.
 #
 # Keys, not English text. Matching on the English means a typo fix silently
 # drops the translation, and it makes the table impossible to audit for gaps.
-_STRINGS: dict[str, dict[str, str]] = {
-    # the sidebar
-    "nav.group.live":  {"en": "current map",  "zh": "当前地图"},
-    "nav.maps":        {"en": "map library",  "zh": "地图库"},
-    "nav.semantic":    {"en": "3D",           "zh": "3D"},
-    "nav.2d":          {"en": "2D",           "zh": "2D"},
-    "nav.cam":         {"en": "camera",       "zh": "相机"},
-    "nav.regions":     {"en": "regions",      "zh": "区域"},
-    "nav.logs":        {"en": "logs",          "zh": "日志"},
-    "nav.lang":        {"en": "中文",          "zh": "English"},
-    "nav.lang.title":  {"en": "switch to Chinese", "zh": "switch to English"},
-    # the dock
-    "dock.objects":    {"en": "Objects",   "zh": "物体"},
-    "dock.relations":  {"en": "Relations", "zh": "关系"},
-    "dock.robot":      {"en": "Robot",     "zh": "机器人"},
-    "dock.objects.hint":   {"en": "what the registry holds",
-                            "zh": "registry 里有什么"},
-    "dock.relations.hint": {"en": "how they sit together",
-                            "zh": "它们彼此怎么摆"},
-    "dock.robot.hint":     {"en": "where it thinks it is",
-                            "zh": "机器人认为自己在哪"},
-    "dock.collapse":   {"en": "collapse the dock", "zh": "折叠面板"},
-    "dock.back":       {"en": "back to the list", "zh": "返回列表"},
-    "dock.noViews":    {"en": "no pictures of this one yet",
-                        "zh": "还没有这个物体的照片"},
-    "dock.viewOf":     {"en": "seen from", "zh": "拍摄角度"},
-    "dock.goneShow": {"en": "{n} not currently seen — show",
-                     "zh": "{n} 个当前看不到 — 显示"},
-    "dock.goneHide": {"en": "hide the ones not currently seen",
-                     "zh": "隐藏当前看不到的"},
-    "dock.flush":      {"en": "flush", "zh": "清空物体"},
-    "dock.flushTitle": {"en": "drop every perceived object and start the set over; regions are kept",
-                        "zh": "丢弃所有已感知物体，重新开始识别；区域保留"},
-    "dock.flushAsk":   {"en": "drop all {n} objects?",
-                        "zh": "确定丢弃全部 {n} 个物体？"},
-    "dock.flushDone":  {"en": "dropped {n}", "zh": "已丢弃 {n} 个"},
-    "dock.splitDrag":  {"en": "drag to resize", "zh": "拖动调整高度"},
-    "dock.rename":     {"en": "Rename",  "zh": "重命名"},
-    "dock.delete":     {"en": "Delete",  "zh": "删除"},
-    "dock.class":      {"en": "class",        "zh": "类别"},
-    "dock.id":         {"en": "id",           "zh": "标识"},
-    "dock.conf":       {"en": "confidence",   "zh": "置信度"},
-    "dock.obs":        {"en": "observations", "zh": "观测次数"},
-    "dock.pos":        {"en": "position",     "zh": "位置"},
-    "dock.missing":    {"en": "not seen recently", "zh": "近期未见"},
-    "dock.renamePrompt": {"en": "New name for this object",
-                          "zh": "给这个物体起个新名字"},
-    "dock.deleteAsk":  {"en": "Delete this object from the map?",
-                        "zh": "把这个物体从地图上删除？"},
-    "dock.save":       {"en": "Save",    "zh": "保存"},
-    "dock.cancel":     {"en": "Cancel",  "zh": "取消"},
-    "dock.gone":       {"en": "this object is no longer in the map",
-                        "zh": "这个物体已不在地图里"},
-    "dock.resize":     {"en": "drag to resize",    "zh": "拖动改变宽度"},
-    "dock.empty.objects":   {"en": "nothing in the registry yet",
-                             "zh": "registry 里还没有东西"},
-    "dock.empty.relations": {"en": "no relations inferred yet",
-                             "zh": "还没有推断出关系"},
-    "dock.empty.robot":     {"en": "no fix yet", "zh": "还没有定位"},
-    # map binding
-    "map.temporary":   {"en": "temporary, unsaved", "zh": "临时地图，未保存"},
-    "note.title":      {"en": "Temporary map", "zh": "临时地图（未保存）"},
-    "note.body":       {"en": "Marking and recognition work normally here. "
-                              "Saving this session under a name keeps the "
-                              "regions and objects with it; without that, "
-                              "they end with the session.",
-                        "zh": "标记区域和识别物体都照常可用。把本次会话命名保存后，"
-                              "区域和物体会一起存进去；不保存则随会话结束丢失。"},
-    "note.link":       {"en": "Go to maps", "zh": "前往地图管理"},
-    # the map form
-    "form.mapid":      {"en": "Map ID",        "zh": "地图 ID"},
-    "form.save":       {"en": "Save current",  "zh": "保存当前"},
-    "form.refresh":    {"en": "Refresh",       "zh": "刷新"},
-    "form.pose":       {"en": "Pose estimate", "zh": "位姿估计"},
-    "form.mode":       {"en": "Map mode:",     "zh": "地图模式："},
-    "form.nomaps":     {"en": "No saved maps listed yet.",
-                        "zh": "还没有已保存的地图。"},
-    "status.ready":    {"en": "Ready.", "zh": "就绪。"},
-    # region marking
-    "btn.mark":        {"en": "✏ Mark region",     "zh": "✏ 标记区域"},
-    "btn.cancelDraw":  {"en": "✕ Cancel drawing",  "zh": "✕ 取消绘制"},
-    "regions.empty":   {"en": "No regions yet. Click “Mark region”, then click "
-                              "on the map to outline one (double-click or "
-                              "Enter to finish, Esc to cancel).",
-                        "zh": "还没有区域。点「标记区域」，然后在地图上点击勾出"
-                              "轮廓（双击或回车完成，Esc 取消）。"},
-    # row actions and dialogs
-    "btn.load":        {"en": "Load",        "zh": "加载"},
-    "btn.delete":      {"en": "Delete",      "zh": "删除"},
-    "btn.rename":      {"en": "Rename",      "zh": "重命名"},
-    "btn.stillValid":  {"en": "Still valid", "zh": "仍然有效"},
-    "btn.cancel":      {"en": "Cancel",      "zh": "取消"},
-    "btn.ok":          {"en": "OK",          "zh": "确定"},
-    "btn.close":       {"en": "Close",       "zh": "关闭"},
-    # the log view
-    "logs.title":      {"en": "Logs",     "zh": "日志"},
-    "logs.live":       {"en": "Live",     "zh": "实时"},
-    "logs.paused":     {"en": "Paused",   "zh": "已暂停"},
-    "logs.clear":      {"en": "Clear",    "zh": "清空"},
-    "logs.search":     {"en": "filter text…", "zh": "过滤文本…"},
-    "logs.alltags":    {"en": "all tags", "zh": "全部来源"},
-    "logs.waiting":    {"en": "waiting for lines…", "zh": "等待日志…"},
-    "logs.nodir":      {"en": "This deployment did not set SCRIBE_LOG_DIR, so "
-                              "there is no log directory to read.",
-                        "zh": "本部署没有设置 SCRIBE_LOG_DIR，没有可读的日志目录。"},
-    "logs.hint":       {"en": "levels are counted over what this page has "
-                              "received, not the whole boot",
-                        "zh": "级别计数只统计本页收到的部分，不是整次启动"},
-    # status and progress text the map page writes as it works
-    "st.saveValidate": {"en": 'Validate existing spatial artifact', "zh": '校验已有空间产物'},
-    "st.savePersist": {"en": 'Persist regions and Scene objects', "zh": '保存区域与场景物体'},
-    "st.saveVerify": {"en": 'Verify reusable map entry', "zh": '确认地图条目可复用'},
-    "st.saveSnapshot": {"en": 'Snapshot the live spatial map', "zh": '快照当前空间地图'},
-    "st.saveArtifact": {"en": 'Verify artifact and preview', "zh": '校验产物并生成预览'},
-    "st.updatedFor": {"en": 'Updated scene data for', "zh": '已更新场景数据：'},
-    "st.updated": {"en": 'Scene data updated', "zh": '场景数据已更新'},
-    "st.saveFailed": {"en": 'Save validation failed', "zh": '保存校验失败'},
-    "st.loadValidate": {"en": 'Validate saved spatial artifact', "zh": '校验已保存的空间产物'},
-    "st.loadSwitch": {"en": 'Switch Mapping to localization mode', "zh": '切换建图为定位模式'},
-    "st.loadGrid": {"en": 'Wait for a fresh occupancy grid', "zh": '等待新的占据栅格'},
-    "st.loadRestore": {"en": 'Restore regions and Scene objects', "zh": '恢复区域与场景物体'},
-    "st.poseClick": {"en": 'Click pose on map', "zh": '在地图上点击位姿'},
-    "st.poseSent": {"en": 'Pose estimate sent.', "zh": '位姿估计已发送。'},
-    "st.refreshing": {"en": 'Refreshing maps...', "zh": '正在刷新地图列表…'},
-    "st.refreshed": {"en": 'Map list refreshed.', "zh": '地图列表已刷新。'},
-    "st.drawHint": {"en": 'Click to add corners · double-click or Enter to finish (≥3) · Esc to cancel', "zh": '点击添加顶点 · 双击或回车完成（≥3）· Esc 取消'},
-    "st.nameRequired": {"en": 'Region name is required.', "zh": '区域名称不能为空。'},
-    "st.liveUnsaved": {"en": 'Live mapping session is not saved yet. Enter a Map ID, then Save current. ', "zh": '当前是未保存的建图会话。填写地图 ID 后点「保存当前」。'},
-    # Sentences that carry a value. The placeholder stays inside the
-    # translated sentence so each language can put it where it belongs;
-    # Chinese does not order these the way English does.
-    "regions.legend": {"en": 'drag to pan · wheel to zoom', "zh": '拖动平移 · 滚轮缩放'},
-    "st.verbSave": {"en": 'Save', "zh": '保存'},
-    "st.verbLoad": {"en": 'Load', "zh": '加载'},
-    "st.opFailed": {"en": '{verb} {id} failed: {error}', "zh": '{verb}「{id}」失败：{error}'},
-    "st.opFailedTitle": {"en": '{verb} failed', "zh": '{verb}失败'},
-    "st.unexpected": {"en": 'Unexpected error; the editor has been unlocked.', "zh": '发生意外错误；编辑器已解锁。'},
-    "st.saved": {"en": 'Saved', "zh": '已保存'},
-    "st.mapSaved": {"en": 'Map saved', "zh": '地图已保存'},
-    "st.savedReport": {"en": '{what} {id}; spatial artifact {artifact}; regions {regions}.', "zh": '{what}「{id}」；空间地图{artifact}；区域 {regions} 个。'},
-    "st.artifactOk": {"en": 'ok', "zh": '正常'},
-    "st.artifactBad": {"en": 'failed', "zh": '失败'},
-    "st.saveFailedFor": {"en": 'Save {id} failed: {detail}', "zh": '保存「{id}」失败：{detail}'},
-    "st.loadedHint": {"en": 'Loaded {id}. Mapping requested localization mode; use Pose estimate if the robot pose is off.', "zh": '已加载「{id}」。已请求建图切到定位模式；若机器人位姿不对，用「位姿估计」修正。'},
-    "st.loadFailedFor": {"en": 'Load {id} failed: {detail}', "zh": '加载「{id}」失败：{detail}'},
-    "st.deletedFor": {"en": 'Deleted {id}.', "zh": '已删除「{id}」。'},
-    "st.deleteFailedFor": {"en": 'Delete {id} failed.', "zh": '删除「{id}」失败。'},
-    "st.poseFailedAt": {"en": 'Pose estimate failed for ({x}, {y}).', "zh": '在 ({x}, {y}) 处位姿估计失败。'},
-    "st.selectedHint": {"en": 'Selected {id}. Click Load to enter localization mode.', "zh": '已选中「{id}」。点击「加载」进入定位模式。'},
-    "st.notLoadable": {"en": 'Map {id} is not loadable: {detail}', "zh": '地图「{id}」无法加载：{detail}'},
-    "st.invalidArtifact": {"en": 'invalid spatial artifact', "zh": '空间地图无效'},
-    "st.localization": {"en": 'Localization mode is active. Use Pose estimate if the robot pose is off.', "zh": '定位模式已启用。位姿不对时用「位姿估计」。'},
-    # the status bar every page carries
-    "bar.mapping":     {"en": "building the map", "zh": "正在建图"},
-    "bar.localizing":  {"en": "localizing",       "zh": "定位中"},
-    "bar.idle":        {"en": "mode unknown",     "zh": "模式未知"},
-    "bar.mode":        {"en": "robot",            "zh": "机器人"},
-    "bar.map":         {"en": "active map",       "zh": "当前地图"},
-    "bar.temporary":   {"en": "temporary, not saved",
-                        "zh": "临时会话，未保存"},
-    "bar.viewer":       {"en": "viewer",   "zh": "可视化"},
-    "bar.viewerRerun":  {"en": "rerun",    "zh": "rerun"},
-    "bar.viewerBuiltin": {"en": "built-in", "zh": "内置"},
-    "bar.viewerFailed": {"en": "rerun did not start:",
-                         "zh": "rerun 未能启动："},
-    "bar.offline":     {"en": "scene is not responding",
-                        "zh": "scene 无响应"},
-    # the maps library
-    "maps.newName":    {"en": "Name for this session", "zh": "给本次会话命名"},
-    "maps.save":       {"en": "Save current session",  "zh": "保存当前会话"},
-    "maps.refresh":    {"en": "Refresh",   "zh": "刷新"},
-    "maps.load":       {"en": "Load",      "zh": "加载"},
-    "maps.delete":     {"en": "Delete",    "zh": "删除"},
-    "maps.cancel":     {"en": "Cancel",    "zh": "取消"},
-    "maps.saved":      {"en": "saved",     "zh": "保存于"},
-    "maps.size":       {"en": "artifact size",   "zh": "产物大小"},
-    "maps.inUse":      {"en": "in use",    "zh": "使用中"},
-    "maps.broken":     {"en": "cannot be loaded", "zh": "无法加载"},
-    "maps.noPreview":  {"en": "no preview", "zh": "没有预览图"},
-    "maps.working":    {"en": "working…",   "zh": "处理中…"},
-    "maps.saving":     {"en": "saving…",    "zh": "保存中…"},
-    "maps.failed":     {"en": "failed",     "zh": "失败"},
-    "maps.nameRequired": {"en": "Give this session a name first.",
-                          "zh": "先给这次会话起个名字。"},
-    "maps.details":    {"en": "Details", "zh": "详情"},
-    "maps.back":       {"en": "Back",    "zh": "返回"},
-    "maps.regions":    {"en": "regions", "zh": "区域"},
-    "maps.objects":    {"en": "objects", "zh": "物体"},
-    "maps.nothing":    {"en": "none",    "zh": "无"},
-    "maps.health":     {"en": "artifact health", "zh": "产物状态"},
-    "maps.healthy":    {"en": "integrity check passed", "zh": "完整性校验通过"},
-    "maps.id":         {"en": "id",        "zh": "标识"},
-    "maps.artifactPath": {"en": "artifact path", "zh": "产物路径"},
-    "maps.previewPath":  {"en": "preview path",  "zh": "预览图路径"},
-    "maps.empty":      {"en": "No saved maps yet. Explore, then save this "
-                              "session under a name.",
-                        "zh": "还没有保存过地图。先探索，再把这次会话命名保存。"},
-    # page titles
-    "page.maps":       {"en": "Maps",    "zh": "地图"},
-    "page.regions":    {"en": "Regions", "zh": "区域"},
-}
+_LANGS = ("en", "zh")
+
+
+def _load_strings() -> dict[str, dict[str, str]]:
+    """`{key: {lang: text}}`, composed from one file per language.
+
+    English is the reference: a key it does not have is a key nothing asked
+    for, and a key a translation is missing simply falls back to English at
+    render time rather than showing a raw key to the reader.
+    """
+    import json
+
+    per_lang = {lang: json.loads(_asset(f"strings_{lang}.json"))
+                for lang in _LANGS}
+    keys = per_lang["en"]
+    return {key: {lang: table[key]
+                  for lang, table in per_lang.items() if key in table}
+            for key in keys}
+
+
+_STRINGS: dict[str, dict[str, str]] = _load_strings()
 
 _I18N_JS = _asset("i18n.js")
 
@@ -1190,8 +1011,9 @@ def _shell_page(active: str, body: str, title: str,
         f"<title>{title}</title><style>{css}</style></head><body>"
         f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}'
         '<div class="spacer"></div>'
-        '<button class="lang" id="lang-switch" data-i18n="nav.lang"'
-        ' data-i18n-title="nav.lang.title">中文</button></nav>'
+        '<button class="lang" id="lang-switch"'
+        ' data-i18n-other="nav.lang.self"'
+        ' data-i18n-title="nav.lang.title">English</button></nav>'
         f"<main>{_STATUS_BAR}{body}</main>{dock}</div>{script}</body></html>"
     )
 

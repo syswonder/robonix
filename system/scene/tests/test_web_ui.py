@@ -58,6 +58,17 @@ pytest.importorskip(
 from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 
+def _copy(lang: str, key: str) -> str:
+    """One string from `web_assets/strings_<lang>.json`."""
+    import json
+    import pathlib
+
+    path = (pathlib.Path(__file__).resolve().parents[1]
+            / "scene_service" / "web_assets" / f"strings_{lang}.json")
+    return json.loads(path.read_text(encoding="utf-8"))[key]
+
+
+
 def _scene_is_up() -> bool:
     try:
         with urllib.request.urlopen(BASE_URL + "/", timeout=3) as r:
@@ -393,7 +404,8 @@ def test_a_temporary_map_can_still_be_marked(page):
         assert note.is_visible(), "temporary map does not say it is temporary"
         text = note.inner_text().lower()
         assert "maps" in text, "the note does not say where to save it"
-        assert "session" in text or "会话" in text, (
+        assert any(_copy(lang, "map.note.temporary").lower() in text
+                   for lang in ("en", "zh")), (
             "the note does not say what temporary costs"
         )
     else:
@@ -576,7 +588,10 @@ def test_the_status_line_default_survives_translation(page):
     text = msg.inner_text().strip()
     key = msg.get_attribute("data-i18n")
 
-    defaults = {"Ready.", "就绪。"}
+    # Read from the copy files rather than restated here: a test that
+    # hardcodes interface text is a second place the wording lives, and the
+    # two drift.
+    defaults = {_copy(lang, "status.ready") for lang in ("en", "zh")}
     if text in defaults:
         assert key == "status.ready", (
             f"the line reads the default {text!r} but carries no key "

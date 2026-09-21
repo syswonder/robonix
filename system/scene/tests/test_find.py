@@ -52,10 +52,18 @@ KITCHEN = {"name": "kitchen",
            "points": [[5, 0], [10, 0], [10, 5], [5, 5]]}
 
 
+# Queries a Chinese-speaking operator would type. Written as escapes so the
+# source stays English while the fixture stays what it is for: `find` must
+# resolve a query whose text is non-ASCII and matches nothing in the object
+# labels, by class alone.
+_NON_ASCII_PLANT = "\u7eff\u690d"   # "potted plant"
+_NON_ASCII_CHAIR = "\u6905\u5b50"   # "chair"
+
+
 def test_one_match_is_unique():
     objs = _scene(_Obj("plant_1", "potted_plant", 1, 1),
                   _Obj("chair_1", "chair", 2, 2))
-    got = find(Query(text="绿植", cls="potted_plant"), objs, now=1000.0)
+    got = find(Query(text=_NON_ASCII_PLANT, cls="potted_plant"), objs, now=1000.0)
     assert got.verdict == "unique"
     assert got.candidates[0].object_id == "plant_1"
 
@@ -72,7 +80,7 @@ def test_eight_indistinguishable_chairs_produce_a_question_not_a_pick():
     apart, and the old path drove to chair_014."""
     objs = _scene(*[_Obj(f"chair_{i}", "chair", float(i), 0.0)
                     for i in range(8)])
-    got = find(Query(text="椅子", cls="chair"), objs, now=1000.0,
+    got = find(Query(text=_NON_ASCII_CHAIR, cls="chair"), objs, now=1000.0,
                robot_xy=(3.4, 0.0))
     assert got.verdict == "ambiguous"
     assert got.question
