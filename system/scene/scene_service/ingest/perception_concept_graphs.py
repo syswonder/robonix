@@ -896,8 +896,14 @@ class ConceptGraphsDetector:
                     inst_color = [0.5, 0.5, 0.5]
                 else:
                     inst_color = [float(v) for v in inst_color]
+                uuid = str(obj.get("id", f"obj_{obj_idx}"))
                 out.append({
-                    "id": str(obj.get("id", f"obj_{obj_idx}")),
+                    "id": uuid,
+                    # The id the registry and the viewer both use. Without it
+                    # the consumer falls back to the uuid above, which is not
+                    # what the viewer draws under, and the object's points are
+                    # filed under a key nothing looks up.
+                    "object_id": (live_uuids or {}).get(uuid),
                     "cls": obj.get("class_name", "object"),
                     "num_detections": int(obj.get("num_detections", 1)),
                     "n_points": int(obj.get("n_points", pts.shape[0])),
@@ -914,6 +920,23 @@ class ConceptGraphsDetector:
         return {"objects": out, "stamp_unix": time.time()}
 
     # ── frame bundle (for the scene-graph image relation pass) ────────
+    def latest_depth_metres(self):
+        """The current depth image in metres, or None.
+
+        Offered beside ``latest_frame_bundle`` so a caller that projects a box
+        into the image can check that what is at those pixels is actually at
+        the object's distance. Read without the inference lock, the same trade
+        the frame bundle makes.
+        """
+        msg = self._depth_msg()
+        if msg is None:
+            return None
+        try:
+            return _depth_msg_to_metres(msg)
+        except Exception as error:  # noqa: BLE001
+            log.debug("[scene-cg] depth decode failed: %r", error)
+            return None
+
     def latest_frame_bundle(self):
         """Return ``(rgb_bgr, K, T_cam_map)`` for projecting map-frame points
         into the current camera image, or None when any piece is unavailable.
@@ -1107,10 +1130,25 @@ class ConceptGraphsDetector:
                 confidence=confs.astype(np.float32),
             )
             sv_dets.mask = masks
+            # concept-graphs does `classes[class_id]`, and class_id is the
+            # detector's own id -- not a position in Scene's vocabulary. The
+            # two lists are different lengths (YOLO-World returned id 71
+            # against 55 Scene classes), so every tick died in IndexError.
+            #
+            # The ids are renumbered densely rather than the name list being
+            # stretched to cover them: a list built as range(max_id + 1) is
+            # correct for the ids a model actually emits and unbounded for
+            # anything else, and this runs inside the perception tick.
+            present = sorted({int(c) for c in cls_idx})
+            dense_id = {c: i for i, c in enumerate(present)}
+            clip_classes = [str(names.get(c, f"class_{c}")) for c in present]
+            sv_dets.class_id = np.array(
+                [dense_id[int(c)] for c in cls_idx], dtype=int
+            )
             _, image_feats, _ = self._cg["compute_clip_features_batched"](
                 rgb_for_clip, sv_dets,
                 self._clip_model, self._clip_preprocess, self._clip_tokenizer,
-                self._classes, self._device,
+                clip_classes, self._device,
             )
         except Exception as e:  # noqa: BLE001
             # First failure: dump full traceback so we know which list
@@ -2307,6 +2345,13 @@ class ConceptGraphsDetector:
                             if old_uuid and old_uuid != u:
                                 self._uuid_to_oid.pop(old_uuid, None)
                             existing.attributes["cg_uuid"] = u
+                            # This record's absence is decided by projecting
+                            # its cloud into the depth image, not by the
+                            # clock. Saying so is what stops mark_stale from
+                            # flagging it `missing` five seconds after it
+                            # leaves the frame.
+                            existing.attributes["observation_lifecycle"] = (
+                                "visibility")
                             self._uuid_to_oid[u] = existing.object_id
                 if existing is not None:
                     # Update in place. Preserve oid + first_seen. The count is
@@ -2337,6 +2382,7 @@ class ConceptGraphsDetector:
                     # registry-owned from here (see the += 1 on re-sighting).
                     if u:
                         obj.attributes["cg_uuid"] = u
+                        obj.attributes["observation_lifecycle"] = "visibility"
                         self._uuid_to_oid[u] = obj.object_id
                     adopted_oids.add(obj.object_id)
 
@@ -2382,7 +2428,11 @@ class ConceptGraphsDetector:
             # stale one, so soft eviction does not resurrect duplicates.
             for obj in doomed:
                 self._registry.soft_evict(obj)
-            self._registry.prune_expired(now, self._object_ttl_s)
+            # The same gate re-adoption uses, so a forwarding address is
+            # never guessed on looser evidence than a merge would need.
+            self._registry.prune_expired(
+                now, self._object_ttl_s,
+                merge_dist_m=float(self.cfg.get("max_merge_dist_m", 1.5)))
 
     # ── operator mutation hooks ─────────────────────────────────────────
     # Called by ObjectMutationCoordinator (asyncio thread). The CG map is

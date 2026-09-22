@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Structural checks for the blocking Save/Load operation dialog."""
 
+import re
 import os
 import shutil
 import subprocess
@@ -26,8 +27,11 @@ def test_map_operations_have_one_blocking_dialog_and_retry_path():
     assert "function beginMapOperation" in html
     assert "function finishMapOperation" in html
     assert "if (mapBusy) ev.preventDefault()" in html
-    assert "Wait for a fresh occupancy grid" in html
-    assert "Restore rooms and Scene objects" in html
+    # The literal moved into the shared string table so it can be
+    # translated. This one is a step label built in script rather than
+    # marked up, so the key is read through the lookup that selects it.
+    assert "t('st.loadGrid')" in html
+    assert "t('st.loadRestore')" in html
     assert "retry: () => loadSelectedMap(id)" in html
 
 
@@ -45,7 +49,19 @@ def test_embedded_user_script_is_valid_javascript():
 
 def test_robot_marker_is_high_contrast_and_directional():
     html = _user_html()
-    assert "const robotMarkerNose = 24" in html
+    # Directional: the canvas turns with the robot, and the marker reaches
+    # well past its own body so the heading reads at a glance. Asserted as a
+    # relation between the two constants rather than as their values, which
+    # is what the property actually is -- the nose was once a single length
+    # called robotMarkerNose and is now a cone plus an arrow.
     assert "ctx.rotate(-yaw)" in html
-    assert "ctx.strokeStyle = '#ffffff'" in html
-    assert "ctx.fillStyle = '#ff5a1f'" in html
+    body = re.search(r"const R = (\d+)", html)
+    reach = re.search(r"const TIP = (\d+)", html)
+    assert body and reach, "robot marker has no body radius / reach constants"
+    assert int(reach.group(1)) > 2 * int(body.group(1)), (
+        f"reach {reach.group(1)} is not clearly longer than body {body.group(1)}"
+    )
+    # High contrast: a dark halo under a light body, so it survives both the
+    # white free space and the dark unknown region of the occupancy underlay.
+    assert "rgba(8, 11, 17, 0.55)" in html
+    assert "#7aa7ff" in html

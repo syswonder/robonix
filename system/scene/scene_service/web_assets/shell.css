@@ -1,0 +1,136 @@
+
+  /* Dark throughout, on the annotation page's palette. The shell frames
+     pages that are themselves dark -- the rerun viewer's chrome cannot be
+     made light (0.37 ignores SetTheme on the web backend), the map is drawn
+     for a dark ground, and the annotation view has always been dark. A light
+     sidebar around them left every page half lit, with the seam running down
+     the middle of the window. */
+  :root{
+    /* Chrome. Han faces included: the UI is going bilingual, and a
+       Latin-only stack leaves the browser to pick the Chinese face. */
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Helvetica Neue", Arial, sans-serif;
+    /* Data whose columns have to line up: ids, coordinates, stamps. */
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  :root{--bg:#0e1015;--panel:#161a22;--fg:#e8eaed;--muted:#7d828b;
+        --line:#232936;--acc:#7aa7ff}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+            font:13px/1.6 var(--font-ui)}
+  .wrap{display:flex;height:100%}
+  nav{width:150px;flex:0 0 150px;background:var(--panel);
+      border-right:1px solid var(--line);
+      display:flex;flex-direction:column;padding:10px 0}
+  nav .brand{padding:8px 14px 14px;color:var(--acc);font-weight:650;font-size:15px;letter-spacing:.01em}
+  /* A heading, not a destination: smaller, quieter, and not clickable, so
+   * the three links under it read as views of one thing. */
+  .nav-group{margin-bottom:10px}
+  .nav-head{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+            color:#5f6673;padding:6px 14px 4px}
+  .nav-group nav a,.nav-group a{padding-left:24px}
+  nav a{display:flex;align-items:center;gap:9px;padding:8px 14px;
+        color:var(--muted);text-decoration:none;font-size:13.5px;
+        white-space:nowrap;border-left:2px solid transparent}
+  nav .ico{width:16px;height:16px;flex:0 0 16px;opacity:.85}
+  /* The switch sits at the foot of the sidebar, away from the destinations:
+     it changes how the interface reads, not where you are in it. */
+  nav .spacer{flex:1}
+  nav .lang{margin:0 10px 6px;padding:5px 0;background:none;cursor:pointer;
+            border:1px solid var(--line);border-radius:5px;
+            color:var(--muted);font:inherit;font-size:12px}
+  nav .lang:hover{color:var(--fg);border-color:#39415260;background:#1c2230}
+  nav a.on .ico{opacity:1}
+  nav a:hover{color:var(--fg);background:#1c2230}
+  nav a.on{color:var(--acc);border-left-color:var(--acc);background:#1c2230}
+  main{flex:1;position:relative;min-width:0;background:var(--bg)}
+  iframe{border:0;width:100%;height:100%;display:block}
+  .msg{padding:24px;color:var(--muted);max-width:560px}
+  .msg a{color:var(--acc)}
+  .msg code{background:#222a3a;padding:.1em .35em;border-radius:3px}
+
+  /* ── Motion ──
+     One duration and one curve for the whole shell, so controls do not each
+     move at their own speed. Colour and position only: never width, height or
+     anything else that reflows, because the dock is draggable and the log
+     list grows while it is read, and an animation there fights the thing it
+     is animating. */
+  :root{ --t: 120ms; --ease: cubic-bezier(.2,.7,.35,1) }
+
+  nav a{transition: color var(--t) var(--ease),
+                    background var(--t) var(--ease),
+                    border-color var(--t) var(--ease)}
+  nav .ico{transition: opacity var(--t) var(--ease)}
+  /* The active item's marker grows from the top rather than appearing: the
+     eye follows the movement to where it landed. */
+  nav a{position:relative}
+  nav a::before{content:"";position:absolute;left:-2px;top:0;bottom:0;width:2px;
+                background:var(--acc);transform:scaleY(0);transform-origin:top;
+                transition:transform var(--t) var(--ease)}
+  nav a.on::before{transform:scaleY(1)}
+  nav a.on{border-left-color:transparent}
+  nav .lang{transition: color var(--t) var(--ease),
+                        background var(--t) var(--ease),
+                        border-color var(--t) var(--ease)}
+  nav .lang:active{transform:translateY(1px)}
+
+  /* A pressed control should say so under the finger, which is the one place
+     a transform is right: it moves the control, not the layout. */
+  button{transition: color var(--t) var(--ease),
+                     background var(--t) var(--ease),
+                     border-color var(--t) var(--ease),
+                     transform 60ms var(--ease)}
+
+  @media (prefers-reduced-motion: reduce) {
+    /* Asked for less movement at the system level, which includes here. */
+    :root{ --t: 0ms }
+    nav a::before{transition:none}
+    button{transition:none}
+  }
+
+
+  /* ── Status strip ──
+     A region of the window, not a line of text: fixed height at the top of
+     the content column, the page below it. `main` is a column so the page
+     gets the rest rather than sharing the space. */
+  main{display:flex;flex-direction:column}
+  .sbar{flex:0 0 auto;display:flex;align-items:center;gap:14px;
+        padding:0 16px;height:38px;background:#12161e;
+        border-bottom:1px solid var(--line)}
+  .sbar > :last-child{margin-right:0}
+  main > :not(.sbar){flex:1;min-height:0}
+
+  .sb-block{display:flex;align-items:baseline;gap:8px}
+  /* A label is small and grey so it can be skipped after the first read; a
+     value is not. */
+  .sb-k{font-size:10.5px;color:#6a7282;text-transform:uppercase;
+        letter-spacing:.06em}
+  .sb-rule{width:1px;align-self:stretch;margin:8px 0;background:var(--line)}
+
+  .sb-mode{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;
+           font-weight:600;transition:color var(--t) var(--ease)}
+  .sb-mode .dot{width:7px;height:7px;border-radius:50%;
+                background:currentColor;flex:0 0 7px}
+  /* Amber while the map is still being built, green once it is being
+     localised against, grey when mapping has not said, red when scene
+     cannot be reached. */
+  .sb-mode.map{color:#e0a050}
+  .sb-mode.loc{color:#8ef0b7}
+  .sb-mode.idle{color:#6a7282}
+  .sb-mode.down{color:#e5484d}
+  /* The one moving part: a map still being built is a live process, and the
+     dot is the only thing on screen that says it is still happening. */
+  .sb-mode.map .dot{animation:sb-pulse 1.6s ease-in-out infinite}
+  @keyframes sb-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  .sb-map{font-family:var(--font-mono);font-size:12.5px;color:var(--fg)}
+  .sb-map.temp{color:#d9c07a;font-family:var(--font-ui);font-size:12px}
+  /* Which viewer is drawing. Grey is the normal reading either way -- an
+   * install without rerun is not degraded -- and amber means rerun was
+   * expected and did not arrive, with the reason on hover. */
+  .sb-viewer{font-size:12.5px;color:var(--fg)}
+  .sb-viewer.fell-back{color:#d9c07a;cursor:help}
+
+  @media (prefers-reduced-motion: reduce){
+    .sb-mode.map .dot{animation:none}
+  }

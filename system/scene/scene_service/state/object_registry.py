@@ -157,6 +157,9 @@ class ObjectRegistry:
         self._surfaces: dict[str, SceneSurface] = {}
         self._counters: dict[str, int] = {}
         self._surface_counter: int = 0
+        # Ids that have left, and where they went. Insertion-ordered so the
+        # bound evicts the oldest forwarding address first.
+        self._departed: dict[str, dict] = {}
         self.grace_period_s = grace_period_s
 
     # ── locking ────────────────────────────────────────────────────────────
@@ -168,6 +171,95 @@ class ObjectRegistry:
         not copied — callers must NOT mutate returned values."""
         async with self._lock:
             return dict(self._objects), dict(self._surfaces)
+
+    # ── departures ─────────────────────────────────────────────────────────
+    # Bounded so a long session cannot grow this without limit; oldest first,
+    # because a forwarding address matters most while something still holds
+    # the old id.
+    _MAX_DEPARTURES = 5000
+
+    def _record_departure(
+        self,
+        obj: "SceneObject",
+        reason: str,
+        *,
+        superseded_by: Optional[str] = None,
+        inferred: bool = False,
+    ) -> None:
+        """Note that `obj`'s id has left, and where it went if anywhere.
+
+        `inferred` marks a successor we decided by proximity rather than were
+        told. Callers that must not be wrong -- a user's confirmed choice --
+        can look at it and decline to follow."""
+        if len(self._departed) >= self._MAX_DEPARTURES:
+            self._departed.pop(next(iter(self._departed)))
+        self._departed[obj.object_id] = {
+            "object_id": obj.object_id,
+            "cls": obj.cls,
+            "reason": reason,
+            "at": obj.last_seen,
+            "superseded_by": superseded_by,
+            "inferred": bool(inferred and superseded_by),
+        }
+
+    def resolve_id(
+        self, object_id: str, *, follow_inferred: bool = True,
+    ) -> tuple[Optional[str], Optional[dict]]:
+        """Map a possibly-stale id to the live id that now stands for it.
+
+        Returns `(live_id, departure)`. A live id resolves to itself with no
+        departure. A superseded one follows the chain; a tombstone resolves to
+        None and hands back the record saying what happened, which is the
+        answer a caller needs to tell "never existed" from "existed, gone".
+
+        `follow_inferred=False` stops at a successor that was guessed rather
+        than known -- the right setting when acting on a human's confirmation,
+        where going to the wrong object is worse than admitting the id is
+        stale. Caller must hold the lock."""
+        if object_id in self._objects:
+            return object_id, None
+        seen: set[str] = set()
+        current = object_id
+        record: Optional[dict] = None
+        while current in self._departed and current not in seen:
+            seen.add(current)
+            record = self._departed[current]
+            nxt = record.get("superseded_by")
+            if not nxt:
+                return None, record
+            if record.get("inferred") and not follow_inferred:
+                return None, record
+            if nxt in self._objects:
+                return nxt, record
+            current = nxt
+        return None, record
+
+    def departures(self) -> dict[str, dict]:
+        """Every recorded departure, newest last. Caller must hold the lock."""
+        return dict(self._departed)
+
+    def _successor_for(
+        self, obj: "SceneObject", max_d: float,
+    ) -> Optional["SceneObject"]:
+        """The live record most likely to be what `obj` was folded into.
+
+        Same class, still observed, nearest within `max_d` -- the same gate
+        re-adoption uses, pointed forwards instead of backwards. It is a
+        guess, and is recorded as one."""
+        if max_d <= 0.0:
+            return None
+        best: Optional[SceneObject] = None
+        best_d = max_d
+        for other in self._objects.values():
+            if other.object_id == obj.object_id or other.cls != obj.cls:
+                continue
+            if other.missing or other.attributes.get("is_robot"):
+                continue
+            d = _dist3(other.pose, obj.pose)
+            if d <= best_d:
+                best_d = d
+                best = other
+        return best
 
     # ── id allocation ──────────────────────────────────────────────────────
     def _alloc_id(self, cls: str) -> str:
@@ -189,6 +281,10 @@ class ObjectRegistry:
         across the flush (restored/old ids never collide with new ones).
         Returns the number of objects dropped."""
         n = len(self._objects)
+        for obj in self._objects.values():
+            # No successor by construction: the frame these were anchored in
+            # is gone, so nothing in the new one stands for them.
+            self._record_departure(obj, "epoch_flush")
         self._objects.clear()
         self._surfaces.clear()
         return n
@@ -202,6 +298,7 @@ class ObjectRegistry:
             if not obj.attributes.get("is_robot")
         ]
         for oid in doomed:
+            self._record_departure(self._objects[oid], "derived_cleared")
             del self._objects[oid]
         self._surfaces.clear()
         return len(doomed)
@@ -213,6 +310,10 @@ class ObjectRegistry:
             raise KeyError(f"unknown Scene object {object_id!r}")
         if obj.attributes.get("is_robot"):
             raise ValueError("the robot self-object cannot be deleted")
+        # A person said this is not a thing. It has no successor, and saying
+        # so is the point: a later reference to it should read as deleted,
+        # not as unknown.
+        self._record_departure(obj, "operator_deleted")
         del self._objects[object_id]
         return obj
 
@@ -531,7 +632,9 @@ class ObjectRegistry:
         obj.attributes["missing_reason"] = "cg_orphan"
         obj.attributes.pop("cg_uuid", None)
 
-    def prune_expired(self, now: float, ttl_s: float) -> list[str]:
+    def prune_expired(
+        self, now: float, ttl_s: float, *, merge_dist_m: float = 0.0,
+    ) -> list[str]:
         """Hard-delete `missing` perception records whose `last_seen` is older
         than `ttl_s`; returns the deleted object_ids. Bounds growth of
         soft-evicted records — dedup survivors' stale twins and objects that
@@ -551,6 +654,16 @@ class ObjectRegistry:
             and (now - o.last_seen) > ttl_s
         ]
         for oid in doomed:
+            obj = self._objects[oid]
+            # This is the moment a merge's loser finally goes, and the
+            # survivor has had a full TTL to settle, so it is the best point
+            # to guess where the id went. Recorded as a guess.
+            successor = self._successor_for(obj, merge_dist_m)
+            self._record_departure(
+                obj, "ttl_pruned",
+                superseded_by=successor.object_id if successor else None,
+                inferred=successor is not None,
+            )
             del self._objects[oid]
         return doomed
 
@@ -590,6 +703,151 @@ class ObjectRegistry:
         )
         self._surfaces[sid] = s
         return s
+
+    # ── duplicate collapse ─────────────────────────────────────────────────
+    # Association answers "which object is this detection?" and never "are
+    # these two objects the same?", so a detection that lands outside the
+    # gate mints a second record for one thing and nothing ever puts them
+    # back together. Both the operator's list and `find`'s candidate set
+    # then carry copies that neither a person nor a ranker can tell apart.
+
+    def merge_duplicates(
+        self,
+        now: float,
+        *,
+        xy_m: float = 0.35,
+        z_m: float = 1.20,
+        max_merges: int = 64,
+    ) -> list[tuple[str, str]]:
+        """Fold same-class records that describe one object into one record.
+
+        Returns the `(absorbed_id, survivor_id)` pairs applied, so a caller
+        can log or publish them. Each absorbed id is recorded as departed and
+        superseded, which is what keeps a stale reference working: a request
+        naming the absorbed id resolves to the survivor.
+
+        Gating is deliberately tighter across the floor than association's --
+        a wrong merge erases a real distinction, and that is worse than one
+        object showing twice. Height is gated loosely for the same reason
+        association's is: a single camera's depth estimate is the least
+        reliable number in the record, and letting it decide is what produced
+        the duplicates in the first place.
+
+        `max_merges` bounds one pass. A registry that has drifted badly is
+        repaired over several ticks rather than in one long hold of the lock.
+
+        Caller must hold the lock.
+        """
+        if xy_m <= 0.0:
+            return []
+        merged: list[tuple[str, str]] = []
+        # Most evidence first, so the survivor of each pair is settled before
+        # anything is folded into it and a chain cannot form mid-pass.
+        candidates = [
+            obj for obj in self._objects.values()
+            if not obj.attributes.get("is_robot")
+        ]
+        candidates.sort(key=lambda o: (-self._merge_rank(o), o.object_id))
+
+        absorbed: set[str] = set()
+        for survivor in candidates:
+            if survivor.object_id in absorbed:
+                continue
+            for other in candidates:
+                if len(merged) >= max_merges:
+                    return merged
+                if other.object_id in absorbed or other is survivor:
+                    continue
+                if not self._same_thing(survivor, other, xy_m, z_m):
+                    continue
+                # An operator-touched record is never absorbed: a human
+                # looked at this object and said something about it, and
+                # perception's opinion does not outrank that.
+                if self._operator_touched(other) and not self._operator_touched(
+                        survivor):
+                    continue
+                self._absorb(survivor, other, now)
+                absorbed.add(other.object_id)
+                merged.append((other.object_id, survivor.object_id))
+
+        for object_id in absorbed:
+            self._objects.pop(object_id, None)
+        return merged
+
+    @staticmethod
+    def _merge_rank(obj: "SceneObject") -> float:
+        """How much this record deserves to be the survivor.
+
+        Observations first, because that is accumulated evidence. An
+        operator-touched record outranks any amount of it -- a human's
+        statement about an object is not something a detector count
+        overrides -- and a live record outranks a missing one, since the
+        survivor should be the one perception can still confirm.
+        """
+        rank = float(obj.observation_count)
+        if obj.missing:
+            rank -= 1e6
+        if obj.attributes.get("operator_geometry") or obj.attributes.get(
+                "operator_label"):
+            rank += 1e9
+        return rank
+
+    @staticmethod
+    def _operator_touched(obj: "SceneObject") -> bool:
+        return bool(obj.attributes.get("operator_geometry")
+                    or obj.attributes.get("operator_label"))
+
+    @staticmethod
+    def _same_thing(
+        a: "SceneObject", b: "SceneObject", xy_m: float, z_m: float,
+    ) -> bool:
+        """Whether two records are close enough to be one object.
+
+        Same class and same frame, then separately gated across the floor
+        and in height. Coordinates from different frames are not comparable
+        however near their numbers look.
+        """
+        if a.cls != b.cls:
+            return False
+        frame_a = str(a.pose.frame_id or "").strip()
+        frame_b = str(b.pose.frame_id or "").strip()
+        if not frame_a or frame_a != frame_b:
+            return False
+        if math.hypot(a.pose.x - b.pose.x, a.pose.y - b.pose.y) > xy_m:
+            return False
+        return abs(a.pose.z - b.pose.z) <= z_m
+
+    def _absorb(
+        self, survivor: "SceneObject", other: "SceneObject", now: float,
+    ) -> None:
+        """Move what `other` knew onto `survivor` and retire its id.
+
+        The survivor's pose stands: it was chosen for having more evidence
+        behind it, and averaging in a pose that was wrong enough to create a
+        duplicate would drag it off the object. What does transfer is the
+        observation count -- those sightings were of this object, and a
+        survivor that under-reports them looks less established than it is --
+        and first_seen, which is when the object was actually first seen
+        whichever record happened to hold it.
+        """
+        survivor.observation_count += max(0, other.observation_count)
+        survivor.first_seen = min(survivor.first_seen, other.first_seen)
+        survivor.last_seen = max(survivor.last_seen, other.last_seen)
+        if not survivor.missing:
+            pass
+        elif not other.missing:
+            # The survivor was only missing because this record held the
+            # recent sightings.
+            survivor.missing = False
+        survivor.confidence = max(survivor.confidence, other.confidence)
+        self._record_departure(
+            other, "merged_duplicate",
+            superseded_by=survivor.object_id,
+            # Decided by proximity, like every other succession this table
+            # records. A caller acting on a human's confirmed choice can
+            # still decline to follow it.
+            inferred=True,
+        )
 
     def stats(self) -> dict[str, int]:
         return {

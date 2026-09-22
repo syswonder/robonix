@@ -293,13 +293,13 @@ def test_mapping_mode_resave_refused():
 
 def test_save_refuses_overwriting_unloaded_annotations():
     """Bound-is-not-loaded: a live session must not carry its (possibly
-    empty) annotation partition over a map's previously saved rooms."""
+    empty) annotation partition over a map's previously saved regions."""
     if _unavailable():
         return
     with tempfile.TemporaryDirectory() as tmp:
-        # Pre-save rooms under labx from an earlier "session".
+        # Pre-save regions under labx from an earlier "session".
         earlier = AnnotationStore(os.path.join(tmp, "anno"), map_id="labx")
-        earlier.create(kind="room", name="kitchen", points=ROOM_PTS)
+        earlier.create(kind="region", name="kitchen", points=ROOM_PTS)
         web_mod, app, env = _make_env(
             tmp, binding={"map_id": "labx", "mode": "", "generation": None,
                           "source": "lifecycle"},
@@ -310,7 +310,7 @@ def test_save_refuses_overwriting_unloaded_annotations():
         with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
             status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
         assert status == 409, (status, body)
-        # The saved rooms survived untouched.
+        # The saved regions survived untouched.
         kept = AnnotationStore(os.path.join(tmp, "anno"), map_id="labx")
         assert [a.name for a in kept.list()] == ["kitchen"]
     print("  [PASS] test_save_refuses_overwriting_unloaded_annotations")
@@ -342,7 +342,7 @@ def test_save_excludes_self_robot_object():
 def test_failed_snapshot_keeps_previous_sidecar_and_fails_the_save():
     """An incomplete object write must leave the sidecar at the previous,
     still-consistent snapshot (and not purge it) — and the Save must report
-    an explicit failure, not 200/ok: geometry + rooms + objects commit as
+    an explicit failure, not 200/ok: geometry + regions + objects commit as
     one unit, so an operator must retry rather than trust the artifact."""
     if _unavailable():
         return

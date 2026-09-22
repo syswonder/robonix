@@ -2,7 +2,7 @@
 """User annotations — user-authored semantics anchored to the SLAM map.
 
 An annotation is a named geometric mark the user draws on the map canvas:
-a `room` (polygon + name) or a `poi` (single point, optional heading).
+a `region` (polygon + name) or a `poi` (single point, optional heading).
 Annotations share the same foundation as perceived objects: coordinates
 are map-frame meters, storage is partitioned by `map_id`, and validity is
 judged by mapping's `generation` epoch (see map_binding.py). Unlike
@@ -33,17 +33,20 @@ log = logging.getLogger(__name__)
 
 # The kind whitelist lives here (single source); every consumer checks it
 # through validate_annotation_fields below. `poi` is model-reserved: the
-# store handles it, the first UI iteration only draws rooms.
-VALID_KINDS = ("room", "poi")
+# store handles it, the first UI iteration only draws regions.
+# "region" is still accepted from files written before the rename and is
+# normalised to "region" on load -- see Annotation.from_json.
+VALID_KINDS = ("region", "poi")
+LEGACY_KINDS = {"region": "region"}
 MAX_NAME_LEN = 128
 
 
 def _annotation_identity(kind: str, name: str) -> tuple[str, str]:
-    """Stable user-facing identity for idempotent room creation.
+    """Stable user-facing identity for idempotent region creation.
 
     The UI may submit the same completed polygon twice when double-click or
-    Enter events race. Rooms are named user assets, so a repeated create with
-    the same normalized name updates that room instead of minting a second UUID.
+    Enter events race. Regions are named user assets, so a repeated create with
+    the same normalized name updates that region instead of minting a second UUID.
     POIs keep append semantics.
     """
     normalized = " ".join(str(name).strip().split()).casefold()
@@ -61,9 +64,9 @@ def validate_annotation_fields(
 
     Rules: `kind` must be whitelisted; `name` a string ≤ MAX_NAME_LEN;
     `points` a list of finite [x, y] number pairs — exactly 1 for a poi,
-    ≥3 for a room (a polygon needs three vertices); `theta` (a heading)
+    ≥3 for a region (a polygon needs three vertices); `theta` (a heading)
     only applies to a poi and must be None or a finite number — a region
-    has no heading, so a room carrying theta is rejected rather than
+    has no heading, so a region carrying theta is rejected rather than
     silently stored. NaN/inf anywhere is rejected so bad JSON can never
     poison the stored file."""
     if kind not in VALID_KINDS:
@@ -84,8 +87,8 @@ def validate_annotation_fields(
             return "each point must be a finite [x, y] number pair"
     if kind == "poi" and len(points) != 1:
         return "a poi takes exactly one point"
-    if kind == "room" and len(points) < 3:
-        return "a room polygon needs at least 3 points"
+    if kind == "region" and len(points) < 3:
+        return "a region polygon needs at least 3 points"
     if theta is not None:
         if kind != "poi":
             return "theta (heading) only applies to a poi"
@@ -100,10 +103,10 @@ class Annotation:
     the map's generation changed after this was drawn — geometry may no
     longer line up, and the user must confirm or redraw (never auto-deleted)."""
     annotation_id: str
-    kind: str                       # "room" | "poi" (see VALID_KINDS)
+    kind: str                       # "region" | "poi" (see VALID_KINDS)
     name: str
     points: list[list[float]] = field(default_factory=list)   # [[x, y], ...]
-    # Optional poi heading, radians (rooms never carry one — validated).
+    # Optional poi heading, radians (regions never carry one — validated).
     # API semantics: theta=None on update means "keep"; a set heading
     # cannot be cleared, only changed. Revisit if/when the poi UI lands.
     theta: Optional[float] = None
@@ -120,7 +123,10 @@ class Annotation:
         """Rebuild from a stored dict, dropping unknown keys so a file
         written by a newer scene still loads (forward-tolerant)."""
         known = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in d.items() if k in known})
+        fields = {k: v for k, v in d.items() if k in known}
+        # A map saved before the rename calls its polygons "region".
+        fields["kind"] = LEGACY_KINDS.get(fields.get("kind"), fields.get("kind"))
+        return cls(**fields)
 
 
 class AnnotationStore:
@@ -168,7 +174,7 @@ class AnnotationStore:
 
         Guards the Save path: `rebind(carry_current=True)` onto a partition
         this store never loaded would OVERWRITE that file with the live
-        session's annotations — silently destroying previously saved rooms
+        session's annotations — silently destroying previously saved regions
         (user assets). Callers refuse the save instead (load first)."""
         return (self._base / f"{sanitize_map_id(map_id)}.json").exists()
 
@@ -177,7 +183,7 @@ class AnnotationStore:
         """Switch this store to another map partition.
 
         `carry_current=True` is used by scene's Save Map UI path: the user
-        just named the live spatial map, so the rooms they drew in the live
+        just named the live spatial map, so the regions they drew in the live
         session must be written under the same map_id before future loads.
         `carry_current=False` is used by Load Map: discard the in-memory
         partition and load the target map's annotation JSON.
@@ -202,7 +208,7 @@ class AnnotationStore:
         """Delete exactly one persisted annotation partition.
 
         Map deletion is an explicit user action. Unlike a map-generation
-        change, it intentionally removes the matching room/POI JSON asset;
+        change, it intentionally removes the matching region/POI JSON asset;
         unrelated map partitions remain untouched. Clearing the current
         in-memory partition keeps the user page consistent when the deleted
         map is presently selected.
@@ -315,18 +321,18 @@ class AnnotationStore:
                theta: Optional[float] = None) -> Annotation:
         """Create + persist an annotation and return it.
 
-        Room creation is idempotent by normalized room name: the user page can
+        Region creation is idempotent by normalized region name: the user page can
         legitimately re-enter this endpoint once when double-click or Enter
         browser events race around the async name dialog. In that case we keep
         the existing annotation id and update its polygon instead of creating
-        two visually identical rooms. POIs remain append-style assets. Fields
+        two visually identical regions. POIs remain append-style assets. Fields
         must already be validated (validate_annotation_fields).
         """
         now = time.time()
         norm_points = [[float(x), float(y)] for x, y in points]
         norm_theta = None if theta is None else float(theta)
         with self._lock:
-            if kind == "room":
+            if kind == "region":
                 target = _annotation_identity(kind, name)
                 for existing in self._annotations.values():
                     if _annotation_identity(existing.kind, existing.name) == target:

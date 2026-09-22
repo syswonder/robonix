@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>scene — robonix</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%;
+                 background: #08090c; color: #d8dde6; overflow: hidden;
+                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* 3-column layout: 2D | 3D | cam (rgb stacked over depth). 2D and
+       3D get the bulk of the width so they're usable on a 1440-wide
+       laptop; cam is narrower since the camera frames aren't the
+       headline view (you mostly check it when detections look wrong). */
+    #grid { display: grid; grid-template-columns: 5fr 5fr 2fr;
+            height: 100vh; gap: 1px; background: #1a1d24; }
+    /* Windows-style chrome: titlebar is its OWN row at the top of the
+       panel, NOT an overlay floating over the iframe. iframe gets the
+       clean remainder. The previous absolute-positioned head + ⛶
+       button always covered the iframe content beneath them no matter
+       how small they were. */
+    .panel { background: #08090c;
+             min-width: 0; min-height: 0; overflow: hidden;
+             display: flex; flex-direction: column; }
+    .panel .titlebar {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 6px 0 10px; height: 24px;
+      background: #14171f; border-bottom: 1px solid #303542;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; line-height: 1; user-select: none;
+    }
+    .panel .titlebar .badge { color: #f0c050; font-weight: 600;
+                              letter-spacing: 0.04em; }
+    .panel .titlebar .desc { flex: 1; color: #6a6f7a;
+                             white-space: nowrap; overflow: hidden;
+                             text-overflow: ellipsis; }
+    /* Look comes from the shared controls; only the fact that it must
+     * not stretch in the header flexbox belongs to this page. */
+    .panel button.expand { flex: 0 0 auto; }
+    .panel iframe { flex: 1 1 auto;
+                    width: 100%; min-height: 0;
+                    border: 0; display: block; background: #08090c; }
+    .panel.expanded {
+      position: fixed; inset: 0; z-index: 99;
+      grid-column: unset; grid-row: unset;
+    }
+    body.has-expanded #grid > .panel:not(.expanded) { display: none; }
+    /* ── Floating info overlay ──
+       imgui-style draggable panel. Sits in the top-left corner over
+       the 2D map by default (small enough not to swallow the canvas).
+       Click the header to collapse to a single bar; drag the header
+       to move; click ✕ to dismiss for this session. State is
+       remembered in localStorage so refresh keeps your layout. */
+    #info-fp {
+      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
+         navigation and swallowed clicks meant for it */
+      width: 320px; max-height: calc(100vh - 24px);
+      background: rgba(14, 16, 21, 0.94);
+      border: 1px solid #303542; border-radius: 6px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+      display: flex; flex-direction: column;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; color: #d8dde6;
+      backdrop-filter: blur(2px);
+    }
+    #info-fp.collapsed { max-height: 28px; }
+    #info-fp.collapsed #info-body { display: none; }
+    #info-fp.dismissed { display: none; }
+    #info-head {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 8px; cursor: move; user-select: none;
+      border-bottom: 1px solid #2a2e38;
+      font-size: 11px; color: #889;
+    }
+    #info-head .title { color: #f0c050; font-weight: 600;
+                        letter-spacing: 0.04em; }
+    #info-head .stamp { flex: 1; color: #6a6f7a; font-size: 10px;
+                        white-space: nowrap; overflow: hidden;
+                        text-overflow: ellipsis; }
+    #info-body { padding: 8px 10px 10px; overflow: auto; flex: 1; }
+    #info-body h2 {
+      margin: 8px 0 4px 0; font-size: 10px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: #6a6f7a;
+    }
+    #info-body h2:first-child { margin-top: 0; }
+    #info-body .pose { color: #7aa7ff; }
+    #info-body table { width: 100%; border-collapse: collapse;
+                       font-size: 11px; }
+    #info-body td { padding: 2px 4px; vertical-align: top;
+                    border-bottom: 1px solid #1a1d24; }
+    #info-body td.id { color: #7aa7ff; white-space: nowrap; }
+    #info-body td.cls { color: #f0c674; white-space: nowrap; }
+    #info-body td.pp { color: #6a6f7a; font-size: 10px; }
+    #info-body td.miss { color: #555; }
+    /* Relation list: one "<source> <predicate> <target>" row per edge,
+       replacing the old on-canvas dashed lines. */
+    #info-rels .rel { display: flex; gap: 6px; align-items: baseline;
+                      padding: 2px 4px; border-bottom: 1px solid #1a1d24;
+                      font-size: 11px; white-space: nowrap;
+                      overflow: hidden; text-overflow: ellipsis; }
+    #info-rels .rs { color: #7aa7ff; }
+    #info-rels .rp { color: #f0c050; font-weight: 600; }
+    #info-rels .rt { color: #f0c674; }
+    /* "Show info" pill that appears once the panel is dismissed. */
+    #info-show {
+      position: fixed; top: 12px; left: 144px; z-index: 200;  /* clears the 132px sidebar: at 12px this panel sat on top of the
+         navigation and swallowed clicks meant for it */
+      /* Only what makes it a floating pill; the rest is shared. */
+      background: rgba(14, 16, 21, 0.94);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      display: none;
+    }
+    body.info-dismissed #info-show { display: block; }
+  </style>
+<style>__CONTROLS__</style>
+</head>
+<body>
+  <div id="grid">
+    <div class="panel" id="panel-2d">
+      <div class="titlebar">
+        <span class="badge">2D</span>
+        <span class="desc">map · occupancy grid + tracked objects · 5 Hz</span>
+        <button class="btn icon expand" title="expand">⛶</button>
+      </div>
+      <iframe src="/2d?bare=1" loading="eager"></iframe>
+    </div>
+    <div class="panel" id="panel-3d">
+      <div class="titlebar">
+        <span class="badge">3D</span>
+        <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
+        <button class="btn icon expand" title="expand">⛶</button>
+      </div>
+      <iframe src="/3d?bare=1" loading="eager"></iframe>
+    </div>
+    <div class="panel" id="panel-cam">
+      <div class="titlebar">
+        <span class="badge">cam</span>
+        <span class="desc">live RGB + depth · perception input</span>
+        <button class="btn icon expand" title="expand">⛶</button>
+      </div>
+      <iframe src="/cam?bare=1" loading="eager"></iframe>
+    </div>
+  </div>
+  <div id="info-fp">
+    <div id="info-head" title="drag to move; click title to collapse">
+      <span class="title">scene</span>
+      <span class="stamp" id="info-stamp">—</span>
+      <button id="info-collapse" class="btn icon" title="collapse / expand">_</button>
+      <button id="info-dismiss" class="btn icon" title="hide (click 'show info' to bring back)">×</button>
+    </div>
+    <div id="info-body">
+      <h2>robot</h2>
+      <div class="pose" id="info-pose">no fix yet</div>
+      <h2>objects</h2>
+      <table>
+        <tbody id="info-objs"><tr><td colspan="3" style="color:#555">—</td></tr></tbody>
+      </table>
+      <h2>relations</h2>
+      <div id="info-rels"><span style="color:#555">—</span></div>
+    </div>
+  </div>
+  <button id="info-show" class="btn" title="re-open the floating info panel">▸ show info</button>
+  <script>
+    function setExpanded(id) {
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('expanded'));
+      if (id) {
+        const p = document.getElementById('panel-' + id);
+        if (p) p.classList.add('expanded');
+        document.body.classList.add('has-expanded');
+        location.hash = '#' + id;
+      } else {
+        document.body.classList.remove('has-expanded');
+        location.hash = '';
+      }
+    }
+    document.querySelectorAll('button.expand').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const panel = btn.closest('.panel');
+        const id = panel.id.replace('panel-', '');
+        if (panel.classList.contains('expanded')) setExpanded(null);
+        else setExpanded(id);
+        btn.textContent = panel.classList.contains('expanded') ? '×' : '⛶';
+      });
+    });
+    // Restore from hash
+    const h = location.hash.replace('#', '');
+    if (h === '2d' || h === '3d' || h === 'cam') {
+      setExpanded(h);
+      const btn = document.querySelector('#panel-' + h + ' button.expand');
+      if (btn) btn.textContent = '×';
+    }
+
+    // ── Floating info overlay: drag, collapse, dismiss, fetch loop ──
+    const fp = document.getElementById('info-fp');
+    const fphead = document.getElementById('info-head');
+    const fpcollapse = document.getElementById('info-collapse');
+    const fpdismiss = document.getElementById('info-dismiss');
+    const fpshow = document.getElementById('info-show');
+    const LS_KEY = 'sceneInfoFp.v1';
+    function fpSave() {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+          x: fp.style.left, y: fp.style.top,
+          collapsed: fp.classList.contains('collapsed'),
+          dismissed: document.body.classList.contains('info-dismissed'),
+        }));
+      } catch (_) {}
+    }
+    function fpLoad() {
+      try {
+        const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+        if (s.x) fp.style.left = s.x;
+        if (s.y) fp.style.top = s.y;
+        if (s.collapsed) fp.classList.add('collapsed');
+        if (s.dismissed) document.body.classList.add('info-dismissed');
+      } catch (_) {}
+    }
+    fpLoad();
+    // Click title (not buttons) to toggle collapse.
+    fphead.addEventListener('click', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      // dragstart suppresses click via a flag; see drag logic.
+      if (fphead._dragged) { fphead._dragged = false; return; }
+      fp.classList.toggle('collapsed');
+      fpSave();
+    });
+    fpcollapse.addEventListener('click', e => {
+      e.stopPropagation();
+      fp.classList.toggle('collapsed');
+      fpSave();
+    });
+    fpdismiss.addEventListener('click', e => {
+      e.stopPropagation();
+      document.body.classList.add('info-dismissed');
+      fpSave();
+    });
+    fpshow.addEventListener('click', () => {
+      document.body.classList.remove('info-dismissed');
+      fpSave();
+    });
+    // Drag — pointerdown on the header, follow until pointerup.
+    let dragOff = null;
+    fphead.addEventListener('pointerdown', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      const r = fp.getBoundingClientRect();
+      dragOff = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      fphead.setPointerCapture(e.pointerId);
+      fphead._dragged = false;
+    });
+    fphead.addEventListener('pointermove', e => {
+      if (!dragOff) return;
+      const x = e.clientX - dragOff.dx;
+      const y = e.clientY - dragOff.dy;
+      // Clamp to viewport so the header is always grabbable.
+      const maxX = window.innerWidth  - fp.offsetWidth - 4;
+      const maxY = window.innerHeight - 30;
+      fp.style.left = Math.max(4, Math.min(x, maxX)) + 'px';
+      fp.style.top  = Math.max(4, Math.min(y, maxY)) + 'px';
+      fphead._dragged = true;
+    });
+    fphead.addEventListener('pointerup', e => {
+      dragOff = null;
+      try { fphead.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (fphead._dragged) fpSave();
+    });
+
+    // Fetch /api/state and populate the floating panel.
+    const fmt = n => Number(n).toFixed(2);
+    async function fpTick() {
+      try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (r.ok) {
+          const s = await r.json();
+          const objs = (s.objects || []).slice().sort(
+            (a, b) => a.cls.localeCompare(b.cls));
+          document.getElementById('info-stamp').textContent =
+            `${objs.length} obj · ${(s.relations || []).length} rel · ${(s.scene_graph && s.scene_graph.edges || []).length} sg · t=${fmt(s.stamp_unix)}`;
+          const robotEl = document.getElementById('info-pose');
+          if (s.robot) {
+            robotEl.textContent =
+              `(${fmt(s.robot.x)}, ${fmt(s.robot.y)}, ${fmt(s.robot.z)}) yaw=${fmt(s.robot.yaw)}`;
+          } else {
+            robotEl.textContent = 'no fix yet';
+          }
+          const tbody = document.getElementById('info-objs');
+          if (!objs.length) {
+            tbody.innerHTML = '<tr><td colspan="3" style="color:#555">—</td></tr>';
+          } else {
+            tbody.innerHTML = objs.map(o => `
+              <tr>
+                <td class="id">${o.short_id}</td>
+                <td class="cls">${o.cls}</td>
+                <td class="pp ${o.missing ? 'miss' : ''}">
+                  (${fmt(o.pose.x)}, ${fmt(o.pose.y)}) c=${fmt(o.confidence)}
+                </td>
+              </tr>
+            `).join('');
+          }
+          // Relations as an explicit "<source> <predicate> <target>" list
+          // (replaces the old on-canvas dashed lines). short_id = last
+          // dotted segment of the object id, e.g. scene.object.cup_001 → cup_001.
+          const shortId = id => String(id).split('.').pop();
+          const edges = (s.scene_graph && s.scene_graph.edges) || [];
+          const relsEl = document.getElementById('info-rels');
+          if (!edges.length) {
+            relsEl.innerHTML = '<span style="color:#555">none</span>';
+          } else {
+            relsEl.innerHTML = edges.map(e => `
+              <div class="rel">
+                <span class="rs">${shortId(e.source_id)}</span>
+                <span class="rp">${e.relation}</span>
+                <span class="rt">${shortId(e.target_id)}</span>
+              </div>
+            `).join('');
+          }
+        }
+      } catch (_) { /* swallow; next tick will retry */ }
+      setTimeout(fpTick, 500);
+    }
+    fpTick();
+    // Esc to restore split view
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && document.querySelector('.panel.expanded')) {
+        setExpanded(null);
+        document.querySelectorAll('button.expand').forEach(b => b.textContent = '⛶');
+      }
+    });
+  </script>
+</body>
+</html>

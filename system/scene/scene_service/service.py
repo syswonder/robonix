@@ -59,13 +59,53 @@ from .state import (
     Pose3D,
 )
 from .state.object_registry import now_unix
+from .object_views import (
+    bearing_of as _view_bearing,
+    looks_like as _view_looks_like,
+    store_from_env,
+)
 from .web_binding import resolve_web_host
 
+# `force` because this runs after the package imports above, and a library
+# that configured the root logger first turns basicConfig into a silent
+# no-op. That is what had happened: SCENE_LOG_LEVEL was documented, passed
+# through docker, and did nothing -- the service emitted not one line of its
+# own, so a background task reporting its own failure reported it to nobody.
+_LOG_LEVEL = os.environ.get("SCENE_LOG_LEVEL", "INFO").upper()
+# `force` because this runs after the package imports above, and a library
+# that configured the root logger first turns basicConfig into a no-op.
 logging.basicConfig(
-    level=os.environ.get("SCENE_LOG_LEVEL", "INFO").upper(),
+    level=_LOG_LEVEL,
     format="[scene-service] %(levelname)s %(message)s",
+    force=True,
 )
 log = logging.getLogger("scene-service")
+# And again on this logger, because scribe installs its bridge on the root
+# logger at bootstrap -- after this module is imported -- and sets root's
+# level as it does, which silently undid the line above. Between the two,
+# SCENE_LOG_LEVEL had no effect at all and the service logged nothing
+# anywhere, so a background task that reports its own failure reported it
+# to nobody. A level set here is this logger's own and outranks whatever
+# root becomes later.
+log.setLevel(_LOG_LEVEL)
+# And a sink that survives bootstrap. Scribe's bridge installs itself on the
+# *root* logger with replace_existing_handlers=True, which removes the
+# console handler basicConfig just put there; inside the container its own
+# writes then go where nothing can read them, because SCRIBE_LOG_DIR is
+# mounted read-only. Measured, not assumed: at import the root logger has a
+# StreamHandler and an INFO line reaches the container output; by activation
+# the root logger has only the bridge and the same call produces nothing.
+# The service's logging was being destroyed from bootstrap onward.
+#
+# This handler is on scene's own logger, which the bridge does not touch,
+# and only in a container -- where rbnx already pipes our output into
+# scribe, so the console is the path to scribe. A native install keeps the
+# bridge's behaviour and does not get a second copy.
+if Path("/.dockerenv").exists():
+    _console = logging.StreamHandler()
+    _console.setFormatter(
+        logging.Formatter("[scene-service] %(levelname)s %(message)s"))
+    log.addHandler(_console)
 
 
 _lifecycle = SceneLifecycleRuntime(log)
@@ -466,15 +506,254 @@ class _SelfTracker:
                     )
 
 
-# ── Stale-tick: flip missing flag after grace period ───────────────────────
+# ── Stale-tick: flip missing flag, and collapse duplicates ─────────────────
+
+# How often the duplicate collapse runs, as a multiple of the stale period.
+# Far less often than the staleness check: merging is a repair for something
+# that should not have happened, not a step in normal operation, and it walks
+# every object against every other.
+_MERGE_EVERY_N_TICKS = 10
+
+
+def _merge_gate_from_env() -> tuple[float, float]:
+    """Floor and height gates for the duplicate collapse, in metres.
+
+    Overridable because the right value depends on the sensor: a deployment
+    whose depth is trustworthy wants a tighter height gate than one driving
+    a single camera. Zero on the floor gate disables the collapse outright,
+    which is the escape hatch if a merge ever proves worse than the
+    duplicates it removes.
+    """
+    def _read(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "").strip() or default)
+        except ValueError:
+            return default
+
+    return (_read("SCENE_MERGE_XY_M", 0.35), _read("SCENE_MERGE_Z_M", 1.20))
+
+
+def declarable_scene_tools() -> list:
+    """Every `@mcp_contract` handler in mcp_tools, ordered by contract id.
+
+    Walked rather than listed. The list that used to live here was a second
+    place to remember a tool, and `find` and `go_to` shipped implemented,
+    contracted and tested but uncallable because nobody added the line --
+    a failure that shows up as a missing capability, not as an error.
+
+    Sorted so the declaration order, and the log line counting them, do not
+    move with Python's definition order.
+    """
+    seen: dict[str, Any] = {}
+    for name in dir(mcp_tools):
+        if name.startswith("_"):
+            continue
+        fn = getattr(mcp_tools, name, None)
+        cid = getattr(fn, "_robonix_contract_id", None)
+        if not cid or not callable(fn):
+            continue
+        # A handler re-exported under a second name is one tool, and
+        # declaring it twice would have atlas hold two rows for it.
+        seen.setdefault(str(cid), fn)
+    return [seen[cid] for cid in sorted(seen)]
 
 
 async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> None:
+    merge_xy, merge_z = _merge_gate_from_env()
+    tick = 0
     while True:
+        tick += 1
         async with registry.lock():
             flipped = registry.mark_stale(now_unix())
+            merged = []
+            if merge_xy > 0.0 and tick % _MERGE_EVERY_N_TICKS == 0:
+                merged = registry.merge_duplicates(
+                    now_unix(), xy_m=merge_xy, z_m=merge_z)
         if flipped:
             log.debug("marked %d object(s) missing (grace expired)", flipped)
+        for absorbed, survivor in merged:
+            # At info, not debug: an id the operator or Pilot may be holding
+            # just stopped being the name of that object, and the departure
+            # table is the only other place that is written down.
+            log.info("merged duplicate %s into %s", absorbed, survivor)
+        await asyncio.sleep(period_s)
+
+
+async def _object_views_tick(
+    store, detector, registry, map_binding, *, ephemeral_id: str,
+    period_s: float = 4.0,
+) -> None:
+    """Offer the camera's current look at each visible object to the store.
+
+    Deliberately slow. The store keeps crops that show *different sides*, and
+    a new side only exists because the robot moved; sampling faster would
+    mostly produce the same angle again and be refused, at the cost of doing
+    the projection work to find that out.
+
+    Reads the frame without the perception lock, the same trade the
+    scene-graph builder's image pass makes: a one-tick mismatch between frame
+    and transform moves a crop by centimetres, and a crop is a picture, not a
+    measurement.
+    """
+    from .scene_graph.image_relations import project_box
+
+    while True:
+        await asyncio.sleep(period_s)
+        try:
+            bundle = detector.latest_frame_bundle()
+            if bundle is None:
+                continue
+            rgb, K, T_cam_map = bundle
+            height, width = int(rgb.shape[0]), int(rgb.shape[1])
+            # A box projects into frame whenever the geometry says it would be
+            # visible -- occluded or not. Without depth to check against, a
+            # shelf behind a wall gets photographed as the wall, which is how
+            # one object came to hold five pictures of five different things.
+            depth_m = None
+            try:
+                depth_m = detector.latest_depth_metres()
+            except Exception:  # noqa: BLE001
+                depth_m = None
+            # Where the camera is in the map frame -- the translation column
+            # of the inverse transform -- which is what the bearing is
+            # measured from.
+            import numpy as np
+
+            T_map_cam = np.linalg.inv(T_cam_map)
+            cam_xy = (float(T_map_cam[0, 3]), float(T_map_cam[1, 3]))
+
+            objects, _surfaces = await registry.snapshot()
+            # An unsaved session has no map_id, and object ids restart at _001
+            # every boot -- so filing its pictures under a fixed name put
+            # yesterday's shelf_002 and today's in the same directory, and an
+            # object ended up showing five photographs of five different
+            # things. A session that cannot be named still has to be kept
+            # apart from the next one.
+            map_id = str((map_binding or {}).get("map_id") or "") or ephemeral_id
+            for obj in objects.values():
+                if obj.missing or obj.attributes.get("is_robot"):
+                    continue
+                rect = project_box(
+                    T_cam_map, K,
+                    (obj.pose.x, obj.pose.y, obj.pose.z),
+                    (obj.bbox.size_x, obj.bbox.size_y, obj.bbox.size_z),
+                    obj.bbox.yaw, width, height,
+                )
+                if rect is None:
+                    continue
+                # How far the object is from the camera, in the camera's own
+                # frame: the z of the centre after the map→camera transform.
+                centre = np.array(
+                    [float(obj.pose.x), float(obj.pose.y),
+                     float(obj.pose.z), 1.0])
+                expected_m = float((T_cam_map @ centre)[2])
+                if not _view_looks_like(depth_m, rect, expected_m):
+                    continue
+                bearing = _view_bearing(
+                    cam_xy, (float(obj.pose.x), float(obj.pose.y)))
+                await asyncio.to_thread(
+                    store.offer,
+                    map_id=map_id, object_id=obj.object_id, image_bgr=rgb,
+                    rect=rect, bearing=bearing, img_w=width, img_h=height,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # A picture is never worth taking the service down for.
+            log.exception("[scene-views] capture failed")
+
+
+async def _rerun_tick(sink, registry, detector, hub, sg_store=None,
+                      robot_geometry=None, *, period_s: float = 1.0) -> None:
+    """Publish the annotated map to the rerun viewer.
+
+    Runs on its own period rather than inside perception: the viewer should
+    keep showing the map while a tick is busy, and a slow log must never delay
+    a detection. Reads a snapshot under the registry lock and nothing else, so
+    it cannot affect object persistence, annotations or the map lifecycle.
+    """
+    from . import web as web_ui
+    from .rerun_sink import relation_edges
+
+    ticks = 0
+    started = time.time()
+    while True:
+        try:
+            # `snapshot()` takes the registry lock itself and asyncio locks are
+            # not reentrant: wrapping this call in `async with registry.lock()`
+            # blocks the task on its first iteration, with no error and no data
+            # — the viewer just stays empty.
+            objects, _surfaces = await registry.snapshot()
+            live = list(objects.values())
+            clouds: dict[str, list] = {}
+            colours: dict[str, list] = {}
+            if detector is not None and hasattr(detector, "export_3d_snapshot"):
+                try:
+                    snapshot = detector.export_3d_snapshot()
+                    for entry in snapshot.get("objects") or []:
+                        # The snapshot is keyed by the perception layer's own
+                        # uuid and carries the registry id alongside it. The
+                        # registry id is what the viewer draws under, so it is
+                        # preferred; the uuid is the fallback for a backend
+                        # that has not projected the object yet.
+                        key = entry.get("object_id") or entry.get("id")
+                        if not key:
+                            continue
+                        clouds[key] = entry.get("points") or []
+                        point_colours = entry.get("point_colors")
+                        if point_colours:
+                            colours[key] = point_colours
+                except Exception:  # noqa: BLE001
+                    # Not debug: a perception backend whose export keeps
+                    # failing produces a permanently object-less map, and at
+                    # debug level nothing in the log would say so.
+                    log.warning(
+                        "[scene-rerun] the point-cloud export failed; objects "
+                        "will have no points this tick", exc_info=True)
+            # One timeline point per tick: with it the viewer replays the map
+            # filling in as the robot drove, which is how a reader separates a
+            # detection that persisted from one that flickered for a frame.
+            sink.set_time(time.time() - started)
+            occupancy = web_ui.occupancy_payload(hub)
+            sink.log_occupancy(occupancy)
+            sink.log_objects(live, clouds, colours)
+            positions = {
+                o.object_id: (o.pose.x, o.pose.y, o.pose.z) for o in live
+            }
+            edges = relation_edges(sg_store)
+            sink.log_relations(edges, positions)
+            robot = next(
+                (o for o in live if o.attributes.get("is_robot")), None)
+            pose = None
+            # Soma's real polygon, which the registry object does not carry:
+            # the robot's own entry has a pose and a bounding box, and drawing
+            # a box where the machine is would say nothing about which way it
+            # faces or how much floor it needs.
+            shape = robot_geometry.current() if robot_geometry else None
+            footprint = [list(point) for point in shape.points] if shape else []
+            if robot is not None:
+                pose = (robot.pose.x, robot.pose.y, robot.pose.yaw)
+                sink.log_robot(pose, footprint)
+            sink.log_map2d(occupancy, live, clouds, edges, pose, footprint)
+            # An empty viewer and a viewer nobody is feeding look identical in
+            # the browser, so the tick says what it published: on the first
+            # pass, and once a minute after that.
+            if ticks % 60 == 0:
+                # Counts what was drawn, not what was available: an id that
+                # does not join is the difference between a map with objects
+                # in it and an empty one, and a count taken from the export
+                # would report healthy in exactly that case.
+                log.info(
+                    "[scene-rerun] tick %d: %d objects, %d with points, "
+                    "%d with colour, robot=%s, %d edges", ticks, len(live),
+                    sum(1 for o in live if clouds.get(o.object_id)),
+                    sum(1 for o in live if colours.get(o.object_id)),
+                    pose is not None, len(edges))
+            ticks += 1
+        except Exception:  # noqa: BLE001
+            # The viewer is a debugging aid. A failure here must not take the
+            # service with it, and must not retry in a tight loop.
+            log.exception("[scene-rerun] publish failed")
         await asyncio.sleep(period_s)
 
 
@@ -1398,8 +1677,77 @@ async def _lifecycle_watch(
 
 
 # ── active runtime ─────────────────────────────────────────────────────────
+def _web_port_from(config: dict) -> int:
+    """The port the web UI will bind, or 0 when it is switched off.
+
+    Read in two places now -- the viewer starts before the server is built --
+    and a fallback chain duplicated is a fallback chain that can disagree
+    with itself about whether the UI exists.
+    """
+    raw = config.get("web_port")
+    if raw is not None and raw != "":
+        return int(int(raw) or 0)
+    return int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
+
+
 async def _run_active(config: dict) -> None:
     """Start Scene resources after Driver(INIT) and Driver(ACTIVATE)."""
+    # ── The map viewer, first ────────────────────────────────────────────
+    # Before anything else in this function, because `serve_grpc` hangs
+    # holding the interpreter lock when the process is busy and nothing in
+    # Python can recover from that -- a watchdog would need the lock the
+    # stuck thread is holding. In a bare container the call returns in
+    # 1.5 ms, twelve times out of twelve; it only wedges once rclpy, CUDA,
+    # milvus and the gRPC servers are up. So it happens while none of them
+    # are. This lowers the odds; it does not remove them.
+    rerun_sink = None
+    viewer_choice = "builtin"
+    web_host = ""
+    web_port_early = _web_port_from(config)
+    if web_port_early > 0:
+        web_host = resolve_web_host(config)
+        # Which viewer renders the 3D map. `auto` uses rerun when it is
+        # installed and the built-in page when it is not, so a native
+        # deployment that never installed it behaves exactly as before and a
+        # docker image that ships it gets the better view without being told.
+        # `rerun` and `builtin` force one either way.
+        viewer_choice = str(
+            config.get("web_viewer")
+            or os.environ.get("SCENE_WEB_VIEWER", "auto")
+        ).strip().lower()
+        if viewer_choice not in ("auto", "rerun", "builtin"):
+            raise ValueError(
+                f"scene web_viewer must be auto, rerun or builtin, "
+                f"not {viewer_choice!r}"
+            )
+        if viewer_choice != "builtin":
+            from .rerun_sink import RerunSink
+
+            # Distinct names from Scene's own `web_port`: binding uvicorn to
+            # the viewer's port is a port clash that kills the service after
+            # the map has already started publishing, which reads as a rerun
+            # crash rather than as the shadowed variable it is.
+            viewer_grpc_port = int(
+                os.environ.get("SCENE_RERUN_GRPC_PORT", "9876"))
+            viewer_web_port = int(
+                os.environ.get("SCENE_RERUN_WEB_PORT", "9090"))
+            # The 2D page is a second recording on its own gRPC port. Both
+            # pages are served by the one web viewer, so a deployment forwards
+            # the two data ports and the one viewer port.
+            rerun_sink = RerunSink(
+                grpc_port=viewer_grpc_port,
+                web_port=viewer_web_port,
+                grpc_port_2d=viewer_grpc_port + 1,
+                web_host=web_host if web_host != "0.0.0.0" else "127.0.0.1",
+            )
+            # Not started here. Binding rerun's three gRPC ports is heavy
+            # enough that doing it alongside activation starved the Atlas
+            # channel: grpc answered our keepalive pings with GOAWAY
+            # "too_many_pings", the driver channel dropped, and CMD_ACTIVATE
+            # timed out at ninety seconds with the service otherwise healthy.
+            # `ensure_started` runs on the first request for the viewer, which
+            # is also the first moment anyone can see it.
+
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
     robot_geometry = RobotGeometryState()
@@ -1513,7 +1861,7 @@ async def _run_active(config: dict) -> None:
             )
             obj_store = None
 
-    # User annotations (rooms / POIs) — user-authored semantics on the same
+    # User annotations (regions / POIs) — user-authored semantics on the same
     # map_id partition rule as the object store; validity is additionally
     # tracked against mapping's generation epoch (annotations only — the
     # object store has no epoch concept). A failure here disables the
@@ -1572,6 +1920,7 @@ async def _run_active(config: dict) -> None:
     mcp_tools.attach_state(
         registry=registry,
         robot_geometry=robot_geometry,
+        world_frame_fn=lambda: self_tracker.world_frame_id,
     )
     mcp_tools.attach_annotation_store(anno_store)
 
@@ -1585,20 +1934,7 @@ async def _run_active(config: dict) -> None:
     # Declare each scene MCP tool on atlas. Each handler has
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
     # description / JSON schema stay in sync with the codegen types.
-    for fn in (
-        mcp_tools.list_objects,
-        mcp_tools.list_regions,
-        mcp_tools.get_robot_context,
-        mcp_tools.goal_near,
-        mcp_tools.goal_room,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.list_relations,
-        mcp_tools.update_object_label,
-        mcp_tools.update_object_geometry,
-        mcp_tools.delete_object,
-        mcp_tools.flush_objects,
-    ):
+    for fn in declarable_scene_tools():
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
             log.warning(
@@ -1613,7 +1949,11 @@ async def _run_active(config: dict) -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 12 MCP tools at %s", scene.mcp_endpoint)
+    log.info(
+        "scene declared %d MCP tools at %s",
+        len(declarable_scene_tools()),
+        scene.mcp_endpoint,
+    )
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -1633,6 +1973,7 @@ async def _run_active(config: dict) -> None:
         registry=registry,
         hub=hub,
         robot_geometry=robot_geometry,
+        world_frame_fn=lambda: self_tracker.world_frame_id,
     )
 
     # Wire the persistence embedder to perception's loaded CLIP text encoder
@@ -1778,19 +2119,87 @@ async def _run_active(config: dict) -> None:
 
     # SCENE_WEB_HOST is the environment fallback; an explicit Scene config file
     # can set web_host. Both default to loopback — see web_binding.
-    web_port = int(
-        int(config.get("web_port") or "0")
-        if config.get("web_port") is not None and config.get("web_port") != ""
-        else int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
-    )
+    web_port = _web_port_from(config)
     web_task = None
     web_server: uvicorn.Server | None = None
     if web_port > 0:
-        web_host = resolve_web_host(config)
+        # `web_host`, `viewer_choice` and `rerun_sink` were settled at the top
+        # of this function -- the viewer has to come up before the rest of the
+        # service makes the interpreter busy. What is left here is the wiring
+        # that needs the state built in between.
+        if viewer_choice != "builtin":
+            # Not `and rerun_sink.ready`. The viewer is brought up when someone
+            # opens it, so at this point it never is -- and gating the
+            # publisher on it meant the viewer started, connected, and then sat
+            # empty forever because nothing was writing to it. The task itself
+            # checks readiness every tick and costs nothing while there is no
+            # viewer to publish to.
+            if rerun_sink is not None:
+                # Registered like every other background task: this one is
+                # appended after the loop that installs the exit callback, so
+                # it has to install its own or its death goes unreported.
+                # The publish period is the viewer's frame rate, and a
+                # reader watching a robot drive over a forwarded connection
+                # wants a slower one than a reader sitting at the machine.
+                # Every tick now costs only what actually changed, so this is
+                # a latency knob rather than a volume one.
+                try:
+                    viewer_period = float(
+                        os.environ.get("SCENE_RERUN_PERIOD_S", "") or 1.0)
+                except ValueError:
+                    log.warning(
+                        "[scene-rerun] SCENE_RERUN_PERIOD_S=%r is not a "
+                        "number; publishing once a second",
+                        os.environ.get("SCENE_RERUN_PERIOD_S"))
+                    viewer_period = 1.0
+                viewer_task = asyncio.create_task(
+                    _rerun_tick(rerun_sink, registry, perception, hub,
+                                sg_store, robot_geometry,
+                                period_s=max(0.1, viewer_period)),
+                    name="scene-rerun")
+                viewer_task.add_done_callback(_log_bg_task_exit)
+                bg_tasks.append(viewer_task)
+            elif viewer_choice == "rerun":
+                raise RuntimeError(
+                    "scene web_viewer is set to 'rerun' but the viewer could "
+                    f"not start: {rerun_sink.detail}. Fix that or set "
+                    "web_viewer: builtin"
+                )
+
+        # Absent configuration means no pictures, which is a supported
+        # state: the service still tracks objects, it just cannot show you
+        # one. Nothing below is conditional on it beyond that.
+        object_views = store_from_env()
+        # One name per run, for the sessions that have no name of their own.
+        ephemeral_session_id = "session-" + time.strftime(
+            "%Y%m%dT%H%M%SZ", time.gmtime())
+        if object_views is not None:
+            # Last run's unsaved pictures describe a map this one has never
+            # seen. Keeping them would only offer the operator a photograph of
+            # somewhere else.
+            dropped = object_views.forget_stale_sessions(ephemeral_session_id)
+            if dropped:
+                log.info("[scene-views] discarded %d unsaved session(s) from "
+                         "a previous run", dropped)
+        if object_views is not None and perception is not None:
+            views_task = asyncio.create_task(
+                _object_views_tick(
+                    object_views, perception, registry, live_binding,
+                    ephemeral_id=ephemeral_session_id),
+                name="scene-views")
+            views_task.add_done_callback(_log_bg_task_exit)
+            bg_tasks.append(views_task)
+            log.info("[scene-views] storing object views under %s (max %d each)",
+                     object_views.root, object_views.max_views)
+        else:
+            log.info("[scene-views] not storing object views "
+                     "(SCENE_OBJECT_VIEWS_DIR unset)")
+
         web_app = web_ui.make_app(
             registry=registry,
             hub=hub,
             detector=perception,
+            rerun_sink=rerun_sink,
             sg_store=sg_store,
             anno_store=anno_store,
             object_store=obj_store,
@@ -1799,6 +2208,8 @@ async def _run_active(config: dict) -> None:
             ops_lock=map_ops_lock,
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
+            object_mutations=object_mutations,
+            object_views=object_views,
         )
         web_uv = uvicorn.Config(
             app=web_app,
@@ -1808,18 +2219,13 @@ async def _run_active(config: dict) -> None:
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
+        # The one background task that had no exit callback, which is why its
+        # death was invisible: uvicorn binds the port before it serves, so the
+        # socket stayed open and connections queued behind a server that was
+        # no longer there. From the outside that looks like a hang, not a
+        # crash, and the log said the UI had started.
+        web_task.add_done_callback(_log_bg_task_exit)
         log.info("web UI on http://%s:%d", web_host, web_port)
-        # Loopback is the default. Anything else was asked for, and is worth
-        # one line in the log because this surface has no authentication and
-        # its annotation endpoints write map data — whoever reaches it can
-        # change what the robot believes about its world.
-        if web_host not in ("127.0.0.1", "::1", "localhost"):
-            log.warning(
-                "web UI is bound to %s, not loopback, and has no "
-                "authentication: anyone who can reach %s:%d may read and "
-                "modify map annotations.",
-                web_host, web_host, web_port,
-            )
 
     log.info(
         "scene up; cap=%s mcp=%s observations=%d",
@@ -1862,15 +2268,7 @@ async def _run() -> None:
 
     # These tools are decorated on the FastMCP app rather than through
     # @scene.mcp(), so declare their existing metadata after bootstrap.
-    scene_tools = (
-        mcp_tools.list_objects,
-        mcp_tools.goal_near,
-        mcp_tools.goal_room,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.get_robot_context,
-        mcp_tools.list_relations,
-    )
+    scene_tools = declarable_scene_tools()
     for fn in scene_tools:
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:

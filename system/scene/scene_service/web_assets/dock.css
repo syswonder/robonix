@@ -1,0 +1,287 @@
+
+    /* ── The dock ──
+       A column on the right, in the layout rather than over it. One panel
+       shows at a time; the tab strip switches them. Collapsed it keeps the
+       strip, so the tabs are both the switch and the way back. Width and
+       tab are remembered per browser; nothing else is state. */
+    .dock {
+      flex: 0 0 var(--dock-w, 300px);
+      display: flex; min-width: 0;
+      background: var(--panel);
+      border-left: 1px solid var(--line);
+      color: var(--fg);
+    }
+    .dock.shut { flex-basis: 34px; }
+    /* The grab handle. 5px is the usual target for a resize edge -- wide
+       enough to hit, narrow enough not to read as a gutter. */
+    .dock .grip {
+      flex: 0 0 5px; cursor: col-resize; background: transparent;
+    }
+    .dock .grip:hover, .dock .grip.live { background: var(--acc); opacity: .5; }
+    .dock.shut .grip { display: none; }
+
+    .dock .tabs {
+      flex: 0 0 34px; display: flex; flex-direction: column;
+      align-items: center; gap: 2px; padding-top: 8px;
+      background: #12161e; border-right: 1px solid var(--line);
+    }
+    .dock.shut .tabs { border-right: 0; }
+    .dock .tabs button {
+      width: 26px; height: 26px; display: grid; place-items: center;
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      color: var(--muted); cursor: pointer; padding: 0;
+    }
+    .dock .tabs button:hover { color: var(--fg); background: #1c2230; }
+    .dock .tabs button.on {
+      color: var(--acc); background: #1c2230; border-color: #2c3547;
+    }
+    .dock .tabs .sep { height: 6px; }
+    .dock .tabs svg { width: 15px; height: 15px; }
+
+    .dock .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .dock.shut .col { display: none; }
+    .dock .head {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+      padding: 9px 10px 7px; border-bottom: 1px solid var(--line);
+    }
+    .dock .head .name {
+      font-size: 12px; font-weight: 600; letter-spacing: .02em;
+      text-transform: uppercase; color: var(--fg);
+    }
+    .dock .head .stamp {
+      flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 10px;
+      color: var(--muted); text-align: right; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .dock .head .shutbtn {
+      background: none; border: 0; color: var(--muted); cursor: pointer;
+      font-size: 15px; line-height: 1; padding: 0 2px;
+    }
+    .dock .head .shutbtn:hover { color: var(--fg); }
+
+    /* The panes box no longer scrolls as a whole: its children do. A
+       single scroller meant the detail panel sat below however long the
+       object list happened to be, which with 35 objects put it off the
+       bottom of the window entirely. */
+    .dock .panes { flex: 1; overflow: hidden; padding: 10px; min-height: 0; }
+    .dock .pane { display: none; }
+    .dock .pane.on { display: block; }
+    /* The objects pane is a column: list, divider, detail. */
+    .dock .pane[data-pane="objects"].on {
+      display: flex; flex-direction: column; height: 100%; min-height: 0;
+    }
+    .dock .objs-scroll {
+      flex: 1 1 auto; overflow-y: auto; min-height: 48px;
+    }
+    /* Drag to decide how much list versus how much detail. Same affordance
+       as the dock's own width handle. */
+    /* Sized down for the head strip, which is a row of labels rather
+     * than a toolbar. */
+    .dock .btn.small { padding: 3px 8px; font-size: 11.5px; }
+    /* Flush empties the object set, so it appears with that tab and
+     * not over the relations or robot panes. */
+    .dock:not([data-tab="objects"]) #dock-flush { display: none; }
+
+    /* The count of what is being kept out of the list. Quiet, and
+     * clickable along its whole width -- it is the only way back to the
+     * rows it is hiding. */
+    .dock .gone {
+      font-size: 11px; color: var(--muted, #7d828b); cursor: pointer;
+      padding: 4px 2px 6px; border-bottom: 1px solid var(--line, #232936);
+      margin-bottom: 4px;
+    }
+    .dock .gone:hover { color: var(--fg, #e8eaed); }
+    /* A row that is only there because the reader asked to see it. */
+    .dock tr.row.gone .nm, .dock tr.row.gone .cls { opacity: .55; }
+
+    .dock .split {
+      flex: 0 0 7px; margin: 4px -10px; cursor: row-resize;
+      background: transparent; position: relative;
+    }
+    .dock .split::after {
+      content: ""; position: absolute; left: 10px; right: 10px; top: 3px;
+      height: 1px; background: var(--line);
+    }
+    .dock .split:hover::after, .dock .split.live::after {
+      background: var(--acc); height: 2px;
+    }
+    .dock #dock-detail {
+      flex: 0 0 var(--detail-h, 340px); overflow-y: auto; min-height: 0;
+    }
+    /* The pane has no detail to show until something is selected; without
+       this the divider and an empty box sit there claiming space. */
+    .dock #dock-detail[hidden] { display: none; }
+    .dock .pane[data-pane="objects"].on:not(:has(#dock-detail:not([hidden])))
+      .split { display: none; }
+    .dock .empty { color: #555; font-size: 12px; }
+
+    /* A row is a thing you can open, so it says so on hover. */
+    .dock tr.row { cursor: pointer; }
+    .dock tr.row:hover td { background: #1c2230; }
+    /* Name first and large: scanning a list for the one you mean is a
+       reading task, and the name and class are the whole content of it. */
+    .dock td.nm { color: var(--fg); font-family: var(--font-ui);
+                  font-size: 12.5px; white-space: nowrap; }
+
+        /* Same UA-rule trap as the maps page: an author `display` beats
+       `[hidden]`, so the attribute needs help to mean anything. */
+    #dock-detail[hidden] { display: none; }
+    .dock .detail { padding: 10px 0 8px; margin-top: 10px;
+                    border-top: 1px solid var(--line); }
+    /* With the detail below rather than over the list, the highlight is the
+       only thing saying which row it describes. */
+    .dock tr.row.sel td { background: #1b2740; }
+    .dock tr.row.sel td.nm { color: var(--acc); }
+    .dock .detail .back {
+      display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px;
+      background: none; border: 0; padding: 0; cursor: pointer;
+      color: var(--muted); font: inherit; font-size: 12px; }
+    .dock .detail .back:hover { color: var(--fg); }
+    .dock .detail h3 { margin: 0 0 2px; font-size: 15px; color: var(--fg);
+                       font-weight: 600; word-break: break-word; }
+    .dock .detail .sub { color: #f0c674; font-size: 12px; margin-bottom: 10px; }
+    .dock .detail dl { margin: 0 0 12px; display: grid;
+                       grid-template-columns: auto 1fr; gap: 4px 12px; }
+    .dock .detail dt { color: var(--muted); font-size: 11.5px; }
+    .dock .detail dd { margin: 0; font-family: var(--font-mono);
+                       font-size: 11.5px; color: var(--fg);
+                       word-break: break-all; }
+    .dock .detail .warn { color: #e0a050; }
+    /* ── Evidence: what the object actually looks like.
+     * The one thing on this card that answers "is this what I meant", so it
+     * gets the room. The point cloud that used to sit here is drawn properly
+     * on the 3D page at a size where it can be read; a small bad copy of it
+     * was worth less than the space it took from the photograph. */
+    .dock .detail .evidence { margin: 10px 0 12px; }
+    /* Fixed height and `contain`: switching between a tall crop and a wide
+     * one must not make the panel jump, and neither may be stretched into
+     * proportions the object does not have. */
+    /* ── scrollbars ─────────────────────────────────────────────────────
+       Three scrollers in this panel -- the object list, the detail pane and
+       the thumbnail strip -- each drawn by the platform in a different width
+       and a colour picked for a light page. Styled once here so they read as
+       part of the panel rather than as three separate widgets on top of it.
+
+       Firefox takes the two-property form and nothing else; the WebKit
+       pseudo-elements below cover Chrome and Safari. Both are given, and a
+       browser that honours neither still scrolls. */
+    .dock .objs-scroll, .dock #dock-detail, .dock .detail .strip {
+      scrollbar-width: thin;
+      scrollbar-color: #2b3242 transparent;
+    }
+    .dock .objs-scroll::-webkit-scrollbar,
+    .dock #dock-detail::-webkit-scrollbar,
+    .dock .detail .strip::-webkit-scrollbar { width: 8px; height: 8px; }
+    .dock .objs-scroll::-webkit-scrollbar-track,
+    .dock #dock-detail::-webkit-scrollbar-track,
+    .dock .detail .strip::-webkit-scrollbar-track { background: transparent; }
+    .dock .objs-scroll::-webkit-scrollbar-thumb,
+    .dock #dock-detail::-webkit-scrollbar-thumb,
+    .dock .detail .strip::-webkit-scrollbar-thumb {
+      background: #2b3242; border-radius: 4px;
+      /* Inset by the border so the thumb reads as floating in the gutter
+         rather than filling it edge to edge. */
+      border: 2px solid transparent; background-clip: padding-box;
+    }
+    .dock .objs-scroll:hover::-webkit-scrollbar-thumb,
+    .dock #dock-detail:hover::-webkit-scrollbar-thumb,
+    .dock .detail .strip:hover::-webkit-scrollbar-thumb { background: #3a435a;
+      background-clip: padding-box; }
+    .dock .objs-scroll::-webkit-scrollbar-corner,
+    .dock #dock-detail::-webkit-scrollbar-corner { background: transparent; }
+
+    .dock .detail .hero {
+      /* border-box, or the 1px border puts this two pixels past its
+         container and the detail pane grows a horizontal scrollbar for
+         two pixels nobody can scroll to. */
+      box-sizing: border-box;
+      width: 100%; height: 190px; display: flex;
+      align-items: center; justify-content: center;
+      border: 1px solid var(--line); border-radius: 5px;
+      background: #0b0e13; overflow: hidden;
+    }
+    .dock .detail .hero img {
+      max-width: 100%; max-height: 100%; object-fit: contain; display: block;
+    }
+    .dock .detail .hero .none {
+      color: var(--muted); font-size: 11.5px; text-align: center; padding: 0 12px;
+    }
+    .dock .detail .strip {
+      display: flex; gap: 6px; overflow-x: auto; margin-top: 6px;
+    }
+    .dock .detail .shot {
+      flex: 0 0 auto; width: 44px; height: 44px; padding: 0;
+      border: 1px solid var(--line); border-radius: 4px;
+      background: #0e1218; cursor: pointer; overflow: hidden;
+      transition: border-color var(--t) var(--ease);
+    }
+    .dock .detail .shot img {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .dock .detail .shot:hover { border-color: #39415a; }
+    .dock .detail .shot.on { border-color: var(--acc); }
+
+    .dock .detail .acts { display: flex; gap: 8px; }
+    .dock .detail .acts .btn { flex: 1; }
+    .dock .detail .edit .field { flex: 1; min-width: 0; }
+    .dock .detail .edit { display: flex; gap: 6px; margin-bottom: 10px; }
+    /* The confirming button is the red one, so the destructive option is
+       never the one the cursor is already resting on. */
+    .dock .detail .said { margin-top: 9px; font-size: 11.5px; color: #e0a050;
+                          min-height: 1em; }
+
+    /* Data is where monospace earns its place: these columns line up. */
+    .dock table { width: 100%; border-collapse: collapse;
+                  font-family: var(--font-mono); font-size: 11px; }
+    .dock td { padding: 4px 3px; vertical-align: top;
+               border-bottom: 1px solid #1c2230; }
+    .dock td.id  { color: var(--acc); white-space: nowrap; width: 1%;
+                   overflow: hidden; text-overflow: ellipsis; max-width: 96px; }
+    .dock td.cls { color: #f0c674; font-family: var(--font-ui);
+                   font-size: 12px; padding-left: 8px; }
+    .dock td.pp  { color: var(--muted); font-size: 10px; text-align: right;
+                   white-space: nowrap; width: 1%; }
+    /* Scene is not always right, and the UI should not pretend otherwise:
+       a low-confidence row is dimmed and flagged, so approaching it for a
+       second look reads as the next step rather than as doubt of the list. */
+    .dock tr.unsure td { opacity: .62; }
+    .dock tr.unsure td.cls::after {
+      content: "?"; color: #e0a050; font-weight: 700; margin-left: 4px;
+    }
+    .dock td.miss { color: #555; }
+
+    .dock .rel { display: flex; gap: 6px; align-items: baseline;
+                 padding: 3px 0; border-bottom: 1px solid #1c2230;
+                 font-family: var(--font-mono); font-size: 11px; }
+    .dock .rs { color: var(--acc); }
+    .dock .rp { color: #f0c050; font-weight: 600; font-family: var(--font-ui); }
+    .dock .rt { color: #f0c674; }
+
+    .dock .kv { display: flex; justify-content: space-between; gap: 10px;
+                padding: 4px 0; border-bottom: 1px solid #1c2230;
+                font-size: 12px; }
+    .dock .kv .k { color: var(--muted); }
+    .dock .kv .v { font-family: var(--font-mono); font-size: 11px;
+                   color: var(--acc); }
+
+    /* Same duration and curve as the shell: the dock is part of it, not a
+       separate thing with its own timing. Width is deliberately excluded --
+       the grip drags it, and a transition there lags the pointer. */
+    .dock .tabs button { transition: color var(--t) var(--ease),
+                                     background var(--t) var(--ease),
+                                     border-color var(--t) var(--ease); }
+    .dock .grip { transition: background var(--t) var(--ease),
+                              opacity var(--t) var(--ease); }
+    .dock tr.row td { transition: background var(--t) var(--ease),
+                                  color var(--t) var(--ease); }
+    .dock .detail .acts button,
+    .dock .head .shutbtn { transition: color var(--t) var(--ease),
+                                       background var(--t) var(--ease),
+                                       border-color var(--t) var(--ease); }
+    /* The detail opens with the content, not with the box: fading is a
+       colour change, so it does not reflow the list above it. */
+    .dock .detail { animation: dock-in var(--t) var(--ease); }
+    @keyframes dock-in { from { opacity: 0 } to { opacity: 1 } }
+    @media (prefers-reduced-motion: reduce) {
+      .dock .detail { animation: none; }
+    }

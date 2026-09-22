@@ -53,8 +53,17 @@ dependencies = [
     "robonix-api",
 ]
 
-# This package is the service itself; `uv sync` only needs to install
-# dependencies into a venv, not build/install scene_service as a wheel.
+# The 3D viewer, an extra so a port to a new board can bring Scene up without it.
+#
+# rerun-sdk declares numpy>=2 and the perception stack requires numpy<2. That
+# upper bound of rerun's is conservative: docker/requirements/scene-viewer.txt
+# records 0.37.1 verified in this image against numpy 1.26.4. The workspace root
+# carries an override saying so, which is what keeps the shared lock solvable --
+# uv's lockfile covers every member's extras, so an extra that cannot co-resolve
+# with its own package's dependencies breaks `uv sync` for unrelated members too.
+[project.optional-dependencies]
+viewer = ["rerun-sdk>=0.37,<0.38"]
+
 [tool.uv]
 package = false
 

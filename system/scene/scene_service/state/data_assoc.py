@@ -34,10 +34,10 @@ from .object_registry import (
 log = logging.getLogger(__name__)
 
 
-# Per-class gating radius in metres. Below this distance, an existing
-# object is considered as a candidate for the incoming detection. Tune
-# per-class because a "table" reasonably moves 1m frame-to-frame
-# (camera shifted) while a "cup" should not.
+# Per-class gating radius in metres, across the floor. Below this distance
+# an existing object is considered as a candidate for the incoming
+# detection. Tuned per-class because a "table" reasonably moves 1m
+# frame-to-frame (camera shifted) while a "cup" should not.
 _GATE_RADIUS_M: dict[str, float] = {
     "cup": 0.30,
     "bottle": 0.30,
@@ -50,6 +50,19 @@ _GATE_RADIUS_M: dict[str, float] = {
     "robot": 1.00,
 }
 _DEFAULT_GATE_RADIUS_M = 0.50
+
+# Height is gated separately, and loosely. The distance was one 3D radius,
+# which let the least reliable axis decide: a single camera's depth estimate
+# for a wall-mounted monitor moves far more between viewing angles than the
+# monitor's position on the floor does, so a z error alone was enough to
+# make the same monitor a second monitor -- and nothing merges two records
+# once they exist. Wide enough to absorb that error, still narrow enough to
+# keep a tabletop object from matching one on the floor beneath it.
+_GATE_Z_M: dict[str, float] = {
+    "person": 1.50,
+    "door": 2.00,
+}
+_DEFAULT_GATE_Z_M = 1.20
 
 # Cost = ||D.pose - O.pose|| + alpha * (1 - D.confidence)
 # Higher alpha penalises low-confidence matches harder, biasing toward
@@ -73,8 +86,17 @@ def _gate_radius(cls: str) -> float:
     return _GATE_RADIUS_M.get(cls, _DEFAULT_GATE_RADIUS_M)
 
 
+def _gate_z(cls: str) -> float:
+    return _GATE_Z_M.get(cls, _DEFAULT_GATE_Z_M)
+
+
 def _euclid(p: Pose3D, q: Pose3D) -> float:
     return math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2 + (p.z - q.z) ** 2)
+
+
+def _floor_dist(p: Pose3D, q: Pose3D) -> float:
+    """Separation across the floor, which is the axis worth trusting."""
+    return math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2)
 
 
 def associate(
@@ -136,6 +158,7 @@ def associate(
     for (cls, frame_id), dets in by_key_dets.items():
         objs = by_key.get((cls, frame_id), [])
         gate = _gate_radius(cls)
+        gate_z = _gate_z(cls)
         if not objs:
             for d in dets:
                 obj = registry.insert_object(
@@ -160,9 +183,14 @@ def associate(
         cost = np.full((M, N), big, dtype=np.float64)
         for i, d in enumerate(dets):
             for j, o in enumerate(objs):
-                dist = _euclid(d.pose, o.pose)
-                if dist > gate:
+                if _floor_dist(d.pose, o.pose) > gate:
                     continue
+                if abs(d.pose.z - o.pose.z) > gate_z:
+                    continue
+                # Ranking still uses the full 3D distance: within the gate,
+                # a candidate that agrees on height as well is the better
+                # match, and the solver should prefer it.
+                dist = _euclid(d.pose, o.pose)
                 cost[i, j] = dist + _COST_ALPHA * (1.0 - max(0.0, min(1.0, d.confidence)))
 
         # Pad to square so linear_sum_assignment can solve. Pad with
