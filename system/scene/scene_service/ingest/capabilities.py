@@ -275,6 +275,59 @@ def plan_perception(
     )
 
 
+# Every knob the ConceptGraphs backend reads, mirroring `_CFG_DEFAULTS` in
+# `perception_concept_graphs`. Declared here rather than imported because that
+# module pulls in torch: a list is cheap and `test_capabilities` pins it to the
+# source of truth, so it cannot drift silently.
+#
+# The merge group is the one deployments reach for. A run of office shelving
+# comes back as several objects when the association gates are too tight for
+# the pose error between views, and the detector's own comment on these says
+# what they are for: "the desk chair/table split and object dedup ... tuned
+# live on a running robot without a rebuild".
+CONCEPT_GRAPHS_KEYS: frozenset[str] = frozenset({
+    "assoc_feat_weight",
+    "assoc_geo_weight",
+    "assoc_threshold",
+    "assoc_voxel_size_m",
+    "association",
+    "cross_class_centroid_max_m",
+    "cross_class_iou_thresh",
+    "cross_class_merge_interval_ticks",
+    "cross_class_overlap_thresh",
+    "dbscan_eps",
+    "dbscan_min_points",
+    "dbscan_remove_noise",
+    "denoise_interval_ticks",
+    "downsample_voxel_size",
+    "feature_area_ratio",
+    "feature_bank_size",
+    "floor_z_m",
+    "label_vote",
+    "match_method",
+    "max_merge_dist_m",
+    "merge_overlap_interval_ticks",
+    "merge_overlap_thresh",
+    "merge_text_sim_thresh",
+    "merge_threshold",
+    "merge_visual_sim_thresh",
+    "min_points_threshold",
+    "obj_min_detections",
+    "obj_min_points",
+    "obj_pcd_max_points",
+    "per_detection_dbscan",
+    "phys_bias",
+    "representative_by_text",
+    "same_class_merge_dist_m",
+    "same_class_merge_interval_ticks",
+    "spatial_sim_type",
+    "visibility_depth_margin_m",
+    "visibility_min_clear_fraction",
+    "visibility_min_clear_samples",
+    "visibility_miss_ticks",
+})
+
+
 PERCEPTION_KEYS: frozenset[str] = frozenset({
     "profile", "backend", "period_s", "confidence_threshold", "max_detections",
     "concept_graphs", "dualmap",
@@ -317,6 +370,17 @@ def perception_config(config: dict, env: Optional[dict] = None) -> PerceptionCon
     cg = raw.get("concept_graphs") or {}
     if not isinstance(cg, dict):
         raise ValueError("scene.config.perception.concept_graphs must be a mapping")
+    # Checked, like the DualMap block. These were accepted silently: a manifest
+    # that misspelled `same_class_merge_dist_m` got the default, changed
+    # nothing, and said nothing -- and these are the knobs somebody reaches for
+    # when objects are splitting, so a silent no-op costs an afternoon of
+    # tuning that never took effect.
+    unknown_cg = sorted(k for k in cg if k not in CONCEPT_GRAPHS_KEYS)
+    if unknown_cg:
+        raise ValueError(
+            f"scene.config.perception.concept_graphs has unknown keys "
+            f"{unknown_cg}; accepted: {', '.join(sorted(CONCEPT_GRAPHS_KEYS))}"
+        )
     dm = raw.get("dualmap") or {}
     if not isinstance(dm, dict):
         raise ValueError("scene.config.perception.dualmap must be a mapping")

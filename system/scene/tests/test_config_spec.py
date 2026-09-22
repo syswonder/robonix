@@ -73,3 +73,47 @@ def test_the_four_required_keys_are_the_ones_marked_required():
                               _text()))
     assert required == {"classes", "stable_num",
                         "keyframe_translation_m", "keyframe_rotation_deg"}, required
+
+
+# ── the ConceptGraphs backend's own knobs ────────────────────────────────────
+# They are the default backend's, there are more of them than DualMap's, and
+# until now nothing documented or checked them.
+
+def test_concept_graphs_keys_mirror_the_detector_defaults():
+    """`CONCEPT_GRAPHS_KEYS` is a second copy of `_CFG_DEFAULTS`, declared to
+    avoid importing torch at config time. A second copy drifts unless it is
+    pinned, and the cost of drift is a key the manifest rejects and the
+    detector would have read."""
+    import ast
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "scene_service" / "ingest" / "perception_concept_graphs.py"
+           ).read_text(encoding="utf-8")
+    block = re.search(r"_CFG_DEFAULTS\s*=\s*\{(.*?)^\}", src, re.S | re.M).group(1)
+    literal = "\n".join(l.split("#")[0] for l in block.split("\n"))
+    defaults = set(ast.literal_eval("{" + literal.strip().rstrip(",") + "}"))
+
+    from scene_service.ingest.capabilities import CONCEPT_GRAPHS_KEYS
+    assert set(CONCEPT_GRAPHS_KEYS) == defaults, {
+        "declared but not a real default": sorted(set(CONCEPT_GRAPHS_KEYS) - defaults),
+        "a real default nobody declared": sorted(defaults - set(CONCEPT_GRAPHS_KEYS)),
+    }
+
+
+def test_a_misspelled_concept_graphs_key_fails_rather_than_doing_nothing():
+    import pytest
+
+    from scene_service.ingest.capabilities import perception_config
+    with pytest.raises(ValueError, match="same_class_merge_dist_metres"):
+        perception_config({"perception": {
+            "concept_graphs": {"same_class_merge_dist_metres": 0.4}}})
+
+
+def test_every_concept_graphs_key_is_documented():
+    from scene_service.ingest.capabilities import CONCEPT_GRAPHS_KEYS
+    text = _text()
+    missing = sorted(k for k in CONCEPT_GRAPHS_KEYS
+                     if not re.search(rf"\b{k}\b", text))
+    assert not missing, missing

@@ -100,10 +100,74 @@ config:
   #   max_detections: integer, backend default.
   #     Upper bound on detections carried from one frame.
   #
-  #   concept_graphs: mapping, default {}.
-  #     Passed to the ConceptGraphs backend. Keys are not validated here: an
-  #     unrecognised one reaches that detector's own defaults rather than
-  #     failing the boot.
+  # perception.concept_graphs: mapping, default {}. The default backend's own
+  # knobs --- thirty-nine of them, more than DualMap has. An unknown key fails
+  # the boot naming it, the same way the DualMap block does. Env fallbacks for
+  # the most-tuned ones are SCENE_CG_*.
+  #
+  #   Merge and identity. Reach for these first: a run of office shelving
+  #   coming back as several objects means the association gates are tighter
+  #   than the pose error between views, and these are what the detector's own
+  #   comment calls the knobs for "the desk chair/table split and object
+  #   dedup", tunable on a running robot without a rebuild.
+  #
+  #     merge_threshold: 0.85           point overlap two objects need to merge
+  #     max_merge_dist_m: 1.5           centroid gate on the per-tick merge
+  #     merge_overlap_thresh: 0.5       the periodic pass's overlap gate
+  #     merge_visual_sim_thresh: 0.65   ...and its visual-similarity gate
+  #     merge_text_sim_thresh: 0.0      ...and its text-similarity gate
+  #     same_class_merge_dist_m: 0.4    two of one class this close are one
+  #     same_class_merge_interval_ticks: 10
+  #     cross_class_centroid_max_m: 0.5 two of different classes, likewise
+  #     cross_class_iou_thresh: 0.3
+  #     cross_class_overlap_thresh: 0.5
+  #     cross_class_merge_interval_ticks: 10
+  #     denoise_interval_ticks: 10      cadence of the denoise pass
+  #     merge_overlap_interval_ticks: 10
+  #
+  #   Association --- how a detection is matched to an existing object.
+  #
+  #     association: voxel_vote         or the older sim-sum path
+  #     assoc_voxel_size_m: 0.04        must exceed the pose error between views
+  #     assoc_geo_weight: 0.8           geometry's share of the score
+  #     assoc_feat_weight: 0.2          the feature's share
+  #     assoc_threshold: 0.4            score to join rather than start new
+  #     spatial_sim_type: iou           iou | giou | overlap and the oriented
+  #                                     variants; 'overlap' is concept-graphs's
+  #                                     canonical choice
+  #     match_method: sim_sum
+  #     phys_bias: 0.0
+  #
+  #   Point clouds --- what geometry an object is allowed to be made of.
+  #
+  #     downsample_voxel_size: 0.025    Open3D voxel size, metres
+  #     min_points_threshold: 50        a detection with fewer is dropped
+  #     obj_min_points: 20              an object with fewer is dropped
+  #     obj_pcd_max_points: 5000        per-object cap; the cloud is
+  #                                     downsampled once it is passed
+  #     obj_min_detections: 1           detections before an object is real
+  #     floor_z_m: 0.0                  where the floor plane is
+  #     dbscan_remove_noise: true       drop sparse outlier points
+  #     dbscan_eps: 0.1                 cluster radius, metres
+  #     dbscan_min_points: 10
+  #     per_detection_dbscan: false     denoise each detection, not each object
+  #
+  #   Labels and features.
+  #
+  #     label_vote: true                vote a label across observations rather
+  #                                     than taking the latest
+  #     feature_bank_size: 32           CLIP features kept per object
+  #     feature_area_ratio: 0.5         mask area share a view needs to count
+  #     representative_by_text: true    pick the representative view by text
+  #                                     similarity rather than by size
+  #
+  #   Visibility --- whether a miss means gone or means occluded.
+  #
+  #     visibility_depth_margin_m: 0.1  measured surface must be this far
+  #                                     behind the object to count as a miss
+  #     visibility_min_clear_samples: 3
+  #     visibility_min_clear_fraction: 0.6
+  #     visibility_miss_ticks: 3        misses before an object goes missing
   #
   # perception.dualmap, continued. These are DualMap's own defaults and are
   # worth reading before changing:

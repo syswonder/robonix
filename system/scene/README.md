@@ -198,6 +198,38 @@ ROBONIX_SCENE_IMAGE=robonix-scene-dualmap SCENE_PERCEPTION_BACKEND=dualmap bash 
 docker run --rm --entrypoint bash <image> -lc 'ls /opt/dualmap/config >/dev/null && python3 -c "import rerun"'
 ```
 
+### Both backends take knobs, and the default one takes more
+
+`perception.concept_graphs` and `perception.dualmap` are each a mapping passed
+to the backend that reads them. An unknown key in either fails the boot naming
+it, so what they accept is a closed set: 39 keys for `concept_graphs`, 19 for
+`dualmap`. `config.spec` documents every one of them, grouped by what it does;
+this section covers the group most deployments actually reach for.
+
+**When one object comes back as several.** A run of office shelving reported as
+`cabinet_0006`, `shelf_0009`, `cabinet_0012` is the association gates being
+tighter than the pose error between the views that saw it. The merge criterion
+is point-cloud overlap, and two adjacent segments of one long object do not
+overlap each other, so the distance gate never gets a say. For
+`concept_graphs`:
+
+| key | default | what to try |
+|---|---|---|
+| `merge_threshold` | 0.85 | the per-tick overlap gate. 0.85 asks for near-identical clouds |
+| `same_class_merge_dist_m` | 0.4 | two of one class closer than this are one object |
+| `cross_class_centroid_max_m` | 0.5 | likewise across classes -- the cabinet/shelf case |
+| `merge_overlap_thresh` | 0.5 | the periodic pass's gate, which is where cross-view merging happens |
+| `max_merge_dist_m` | 1.5 | a hard centroid gate; it only bounds the above, it does not cause merging |
+
+These are also `SCENE_CG_*` environment variables, which is the point: the
+detector exposes them so the split can be tuned on a running robot without a
+rebuild.
+
+For `dualmap` the equivalent is `merge_sim_threshold` (0.9 upstream, which
+never fires under a robot's pose error) with `merge_every_keyframes`, and
+`global_map: true`, whose abstract map merges across classes by top-down 2D
+overlap.
+
 ### Every `perception.dualmap` key
 
 Unknown keys fail at load rather than being ignored, so this list is the whole surface.
