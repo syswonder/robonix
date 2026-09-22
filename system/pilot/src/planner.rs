@@ -25,7 +25,7 @@ use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info, warn};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::ffi::os_str::Display;
+// use std::ffi::os_str::Display;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1442,9 +1442,6 @@ pub async fn run_turn(
             //         content
             //     );
             // }
-
-            let planning_revision = forest_revision.load(Ordering::Acquire);
-
             let planning_revision = forest_revision.load(Ordering::Acquire);
             let mut vlm_attempt = 0_u8;
             let (content, raw_tool_calls) = loop {
@@ -3206,7 +3203,6 @@ mod tests {
         assert_eq!(super::plan_call_count(&plan), 3);
         assert_eq!(plan.round, 1);
     }
-    #[test]
     #[test]
     fn compact_aliases_map_one_to_one_to_canonical_capabilities() {
         let capabilities = vec![
