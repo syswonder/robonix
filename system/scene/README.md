@@ -190,12 +190,72 @@ system:
 ROBONIX_SCENE_IMAGE=robonix-scene-dualmap SCENE_PERCEPTION_BACKEND=dualmap bash scripts/start.sh
 ```
 
-Measured on Replica (ConceptGraphs scorer, mAcc / F-mIoU, n_exclude=1, 8 scenes): Scene lite
-19.4 / 4.3, DualMap with its general vocabulary 26.7 / 20.3, DualMap with the dataset
-vocabulary 29.3 / 15.2 (n=6: 35.1 / 54.5), the offline paper-recipe ConceptGraphs 39.8 / 21.4
-(4 scenes). Relations on ReplicaSSG (relationship R@1): lite 0.02, DualMap 0.23, paper
-ConceptGraphs 0.26. The vocabulary is part of the accuracy: give each deployment the object
-names it cares about.
+**The image must carry DualMap's source.** `docker/Dockerfile.dualmap` clones it to
+`/opt/dualmap`; an image built without that step starts and then fails activation with
+`DualMap root /opt/dualmap has no config/ directory`. Check before booting:
+
+```bash
+docker run --rm --entrypoint bash <image> -lc 'ls /opt/dualmap/config >/dev/null && python3 -c "import rerun"'
+```
+
+### Every `perception.dualmap` key
+
+Unknown keys fail at load rather than being ignored, so this list is the whole surface.
+The four in bold are the ones a deployment usually has to set; the defaults of the rest
+come from DualMap's own configuration and are sized for a dataset replay.
+
+| key | default | what it does |
+|---|---|---|
+| **`classes`** | DualMap's 101-name domestic list | YOLO-World vocabulary. A detector can only answer with a name it was given: on the office world the domestic list cost 0.41 label accuracy against 0.82 with a 40-name office list. |
+| **`stable_num`** | 8 | observations before a track counts as stable. Sized for a replay that maps every frame; a robot at walking pace sees each object a handful of times, and at 8 one 180 s office run went from 65 tracks to 1. |
+| `active_window_size` | 10 | how many recent frames count as active. A track that leaves this window without becoming stable is dropped. |
+| `max_pending_count` | 5 | rounds an unstable track survives outside that window. Raising it also delays promotion to the global map. |
+| **`keyframe_translation_m`** | 0.1 | map a frame only after this much travel |
+| **`keyframe_rotation_deg`** | 3.0 | …or this much turn |
+| `keyframe_time_s` | 5.0 | …or this long since the last mapped frame |
+| `sim_threshold` | 1.2 | an observation joins a track when cos(CLIP) + point overlap exceeds this |
+| `downsample_voxel_size` | 0.02 | the radius "overlap" counts within. Must exceed the SLAM pose error between keyframes or nothing ever associates and every keyframe starts a new track. |
+| `merge_every_keyframes` | 20 | self-merge cadence for the local map; 0 disables |
+| `merge_sim_threshold` | 0.9 | point overlap two tracks need to be merged. Upstream's 0.9 never fires under a robot's pose error; 0.3 does. |
+| `global_map` | `false` | run DualMap's abstract map as well. It merges across classes by top-down 2D overlap — the mechanism aimed at one workstation reported as tv + speaker + desk — but keeps only low-mobility anchors and drops every other stable track once it leaves view. An inventory wants it off; a navigation memory wants it on. |
+| `min_observations` | 1 | keyframes a track must be seen in to enter the registry |
+| `stable_only` | `false` | additionally require DualMap's own stable flag |
+| `keep_unknown` | `false` | keep FastSAM segments YOLO-World could not name |
+| `use_fastsam` | follows `keep_unknown` | FastSAM only adds unnamed segments |
+| `floor_gate` | `false` | drop tracks whose points all lie within 5 cm of the floor. Off because it also drops rugs and carpets. |
+| `floor_z_m` | 0.0 | where that floor is |
+| `device` | `cuda` | torch device for DualMap's models |
+
+### Measured
+
+Office world, only `perception.backend` changed, medians over n rounds against the 51
+ground-truth objects the robot saw:
+
+| backend | n | P | R | F1 | label acc | TP | dup | ghost |
+|---|---|---|---|---|---|---|---|---|
+| `concept_graphs` | 2 | 0.813 | 0.480 | 0.603 | 0.714 | 24 | 3 | 2 |
+| `dualmap` + office list | 3 | 0.620 | 0.608 | 0.614 | 0.700 | 31 | 5 | 11 |
+
+The two are level on F1 — the two `concept_graphs` rounds differ from each other by 0.079,
+which is the size of the gap. They trade: `concept_graphs` is the more precise and finds
+fewer objects, `dualmap` finds more and pays in ghosts.
+
+What separates them is cost. CPU 24% against 94% of a core, because DualMap runs detection,
+segmentation and encoding only after 0.15 m of travel or 5 degrees of turn rather than every
+tick. Steady container memory 2.3 GB against 2.8 GB. And on one tour the in-repo backend's
+resident set stepped from 2.8 GB to 22.0 GB within a single sampling interval, held two and a
+half minutes, and fell to 0.9 GB as the container restarted; DualMap stayed flat on the same
+route. That is a property of the pipeline rather than of this deployment — ConceptGraphs
+retains each object's full point cloud because its association measure is a nearest-neighbour
+ratio between clouds, and DualMap's own paper reports a 23.5 GB peak for it on Replica
+against 4.6 GB for itself.
+
+Wrapping either pipeline in Scene costs nothing measurable: over four Replica scenes the
+difference between upstream and wrapped is −0.91 mIoU for ConceptGraphs and +1.43 for
+DualMap, with the per-scene signs disagreeing in both cases.
+
+The vocabulary is a larger lever than the backend. Give each deployment the object names it
+cares about.
 
 ## Relations (`scene_graph/`)
 
