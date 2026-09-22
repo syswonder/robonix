@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
+use crate::capabilities_alias::alias_for_index;
 use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
-use crate::capabilities_alias::alias_for_index;
 use crate::pb::contracts::robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient;
 use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
 use crate::pb::contracts::robonix_system_executor_list_active_plans_client::RobonixSystemExecutorListActivePlansClient;
@@ -2007,7 +2007,7 @@ fn build_display_capabilities<'a>(
     cap_list: &'a [(String, atlas_pb::Capability)],
     non_llm_callable_contract_ids: &HashSet<String>,
 ) -> Vec<DisplayCapability<'a>> {
-    // step 1: 
+    // step 1:
     // Keep only capacbilities that are allowed to be exposed to LLM.
     let mut visible = cap_list
         .iter()
@@ -2017,7 +2017,7 @@ fn build_display_capabilities<'a>(
         })
         .collect::<Vec<_>>();
 
-    // step2: 
+    // step2:
     // Make the ordering determinstic.
     // Atlas discovery order is NOT used for alias assignment.
     //  Instead, capabilities are ordered using their canonical Robonix identity:
@@ -2025,22 +2025,23 @@ fn build_display_capabilities<'a>(
     // contract_id second.
     visible.sort_by(|left, right| {
         left.0
-        .cmp(&right.0)
-        .then_with(|| left.1.contract_id.cmp(&right.1.contract_id))
+            .cmp(&right.0)
+            .then_with(|| left.1.contract_id.cmp(&right.1.contract_id))
     });
     // step3:
     // Assign c0, c1, c2, ... according to the determinstic order.
     visible
-    .into_iter()
-    .enumerate()
-    .map(|(index,entry)| {
-        let (provider_id, cap) = entry;
-        DisplayCapability {
-            display_name: alias_for_index(index),
-            provider_id: provider_id.as_str(),
-            cap,
-        }
-    }).collect()
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let (provider_id, cap) = entry;
+            DisplayCapability {
+                display_name: alias_for_index(index),
+                provider_id: provider_id.as_str(),
+                cap,
+            }
+        })
+        .collect()
 }
 
 fn is_legacy_plan_control_contract(contract_id: &str) -> bool {
@@ -2058,10 +2059,7 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
     for cap in display_caps {
         out.insert(
             cap.display_name.clone(),
-            (
-                cap.provider_id.to_string(),
-                cap.cap.contract_id.clone(),
-            ),
+            (cap.provider_id.to_string(), cap.cap.contract_id.clone()),
         );
     }
     out
@@ -3209,7 +3207,7 @@ mod tests {
         assert_eq!(plan.round, 1);
     }
     #[test]
-#[test]
+    #[test]
     fn compact_aliases_map_one_to_one_to_canonical_capabilities() {
         let capabilities = vec![
             test_capability("camera", "snapshot"),
@@ -3217,8 +3215,7 @@ mod tests {
             test_capability("scene", "list_regions"),
         ];
 
-        let display =
-            build_display_capabilities(&capabilities, &HashSet::new());
+        let display = build_display_capabilities(&capabilities, &HashSet::new());
 
         assert_eq!(display.len(), 3);
 
@@ -3270,11 +3267,9 @@ mod tests {
             test_capability("camera", "snapshot"),
         ];
 
-        let first_display =
-            build_display_capabilities(&first, &HashSet::new());
+        let first_display = build_display_capabilities(&first, &HashSet::new());
 
-        let second_display =
-            build_display_capabilities(&second, &HashSet::new());
+        let second_display = build_display_capabilities(&second, &HashSet::new());
 
         let first_mapping: Vec<_> = first_display
             .iter()
