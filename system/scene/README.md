@@ -119,7 +119,7 @@ Scene spends and which mapper does the work:
 
 | key | values | meaning |
 |---|---|---|
-| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the 2060-class set (~4 GB), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, mounted from `SCENE_MODELS_DIR`), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
+| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the small set (~4 GB of video memory), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, mounted from `SCENE_MODELS_DIR`), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
 | `backend` | `concept_graphs` (default), `dualmap` | which open-vocabulary mapper runs on the RGB-D stream. Env fallback `SCENE_PERCEPTION_BACKEND`. |
 
 Both backends take the same inputs (RGB, depth, intrinsics, camera→map transform)
@@ -128,7 +128,7 @@ the web UI / persistence / the Replica export do not change.
 
 `dualmap` runs DualMap's detector and local map ([Eku127/DualMap](https://github.com/Eku127/DualMap),
 RA-L 2025, Apache-2.0: YOLO-World + FastSAM/MobileSAM + MobileCLIP-S2 with a Bayesian
-class filter) at 0.4-0.7 s per frame in 2.3 GB of GPU memory on an RTX 2060. It needs the
+class filter) at 0.4-0.7 s per frame in 2.3 GB of video memory. It needs the
 image built from `docker/Dockerfile.dualmap` (DualMap source at a pinned commit plus its
 two extra weights) and is selected per deployment:
 

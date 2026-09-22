@@ -15,7 +15,7 @@ WEBOTS_DIR="$(cd .. && pwd -P)"
 
 # Kill only the processes that belong to THIS webots deployment. A plain
 # `pkill -f robonix-atlas` also took down every other Robonix stack on the
-# host (the lab deployment under ~/robonix-lab/deploy was killed by every
+# host (another deployment on the same machine was killed by every
 # benchmark world and every CI run). A process is ours when its working
 # directory or command line is under this checkout's examples/webots, or an
 # ancestor's is (children of `rbnx boot` inherit the deployment cwd; python
