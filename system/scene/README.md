@@ -226,6 +226,30 @@ come from DualMap's own configuration and are sized for a dataset replay.
 | `floor_z_m` | 0.0 | where that floor is |
 | `device` | `cuda` | torch device for DualMap's models |
 
+### How these numbers were produced
+
+The scorer and the ground-truth extraction are in this repository:
+
+| | |
+|---|---|
+| `testing/export_webots_scene_truth.py` | reads a Webots `.wbt`, resolves the named fixtures, and writes the truth file |
+| `testing/scene_quality_ground_truth.py` | the extraction and the metrics behind it |
+| `testing/evaluate_webots_scene.py` | scores a live Scene (or a saved `/api/state`) against that truth |
+| `testing/judge_scene_labels.py` | asks a model whether two category names mean the same kind of object, so `tv` against `television` is not counted as a recognition error |
+
+**The runner that drove them is not.** Scoring a round needs one more piece: a
+sweep that drives the tour, records which truth objects were physically
+visible, and resolves the transform between the simulator's world frame and
+the map Scene built. `evaluate_webots_scene.py` takes that last part --
+`truth_alignment` -- from the sweep's output file. Without it the truth stays
+in world coordinates while Scene's objects are in map coordinates, nothing
+matches, and the score is not a measurement of anything.
+
+That sweep, the motion and visibility helpers, and the report renderer were
+taken out to keep this change to the backend and what scores it. So the tables
+below are not reproducible from this branch alone. They were measured with the
+harness on `scene-benchmark-harness`, which is where it lives.
+
 ### Measured
 
 Office world, only `perception.backend` changed, medians over n rounds against the 51
