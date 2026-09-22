@@ -11,10 +11,18 @@ system:
     # not require tearing down a robot somebody else is using, so the
     # evaluation deployment moves aside instead.
     listen: 127.0.0.1:50191
+    # The reader runs inside the simulator's container, so the container has to
+    # be named -- the same literal `robonix_manifest.yaml` uses, and the default
+    # `ROBONIX_SIM_CONTAINER` carries on the shell side (sim/runtime_state.sh).
+    # Not `${ROBONIX_SIM_CONTAINER}`: rbnx expands an unset variable to an empty
+    # string, so a forgotten export would run `docker exec "" bash` and fail
+    # with something about docker rather than about the manifest. A deployment
+    # running the simulator under another name, or not under docker at all,
+    # replaces this whole command rather than editing a name buried in it.
     runtime_reader_command:
       - docker
       - exec
-      - robonix_tiago_sim_scene177
+      - robonix_tiago_sim
       - bash
       - -lc
       - source /opt/ros/humble/setup.bash && exec python3 -u /robonix_runtime/soma/soma_runtime_ros.py /robonix_runtime/soma/soma_runtime_sources.json
@@ -22,12 +30,12 @@ system:
     manifest: package_manifest.yaml
     config:
       perception:
-        # DualMap variant of the Scene benchmark manifest; everything else is identical.
-        # The backend also has to be known when the image is built -- DualMap
-        # brings its own checkout and weights -- so build and boot with
-        # SCENE_PERCEPTION_BACKEND=dualmap, the same way SPEECH_BACKEND selects
-        # the speech service's. Starting with a mismatched image fails loudly.
-        backend: dualmap
+        # No `backend` here on purpose. SCENE_PERCEPTION_BACKEND
+        # selects it, and it has to be set anyway: the image is built
+        # per backend -- DualMap brings its own checkout and weights --
+        # so a manifest that pinned one would be a second place to
+        # disagree with the image. Defaults to concept_graphs, which
+        # ignores the dualmap block below.
         # DualMap associates by point overlap between consecutive views of an
         # object, and its class vote needs several observations; at 2 s per
         # tick a robot at 0.15 m/s saw most objects once (54 of 57 exported
@@ -147,6 +155,11 @@ service:
     url: https://github.com/syswonder/service-map-rbnx
     # Test branch: adds the `localizer` slot (particle filter on the saved grid
     # with global relocalization). Point back at main once it merges.
+    # An unmerged branch of the mapping service, not main. Every number this
+    # deployment produced was measured against it: it carries the fix for
+    # unexplored cells being served to nav2 as free floor
+    # (syswonder/service-map-rbnx#24), without which both perception backends
+    # score against a wrong world model. Move this to main once it lands.
     branch: feat/map-localizer
     config:
       use_sim_time: true
