@@ -40,12 +40,11 @@ Robonix ships with these benefits:
 ## Design of Robonix
 
 <p align="center">
-  <img src="images/robonix-architecture.svg" alt="Robonix architecture" width="720" />
+  <img src="images/robonix-architecture.svg" alt="Robonix architecture" width="95%" />
 </p>
 
 
-
-The figure shows the overall architecture of Robonix. A **task** is what the user asks for, stated in natural language. Under it are the layers that make the task executable: **services** that hold shared state and drive the run, a **skill library** of reusable behaviors, **primitives** that expose single hardware functions, and the robot hardware itself.
+​	The figure shows the overall architecture of Robonix. The user talks to **Liaison**, which hands the **task** to **Pilot**; Pilot plans it with the model and passes the plan to **Executor**, which **Sentinel** monitors, while **Scene** keeps the state of the world. Below these services sit six core components, and below them **Soma**, the body abstraction: its **skill library** of reusable behaviors calls the **primitives**, each of which exposes a single hardware function, and the primitives drive the robot hardware.
 
 | Abstraction | Definition |
 | --- | --- |
