@@ -60,8 +60,9 @@ Pilot resolves the capacity in this order:
 2. A provider-specific extension on `GET /models/{id}` or `GET /models` for
    the exact selected id, when it exposes a context field.
 3. An exact built-in direct-provider match listed below.
-4. Otherwise Pilot refuses to start. It does not guess and later compact at an
-   unsafe limit.
+4. Otherwise Pilot starts in `learning` mode without pre-emptive history
+   compaction. A manual declaration remains the operator override for a
+   predictable long-running deployment.
 
 | Exact model names | Registered context | Meaning |
 | --- | ---: | --- |
@@ -94,7 +95,7 @@ inference-server launch/configuration (`max_model_len`, `max_seq_len`, or the
 vendor equivalent), or the provider's model page. Use the smaller effective
 limit when these disagree. At `rbnx boot`, the Pilot line prints either
 `context=… (manual)` or `context=… (auto: …; verify/override if proxied)`;
-unknown models fail preflight before processes are spawned. The Pilot log emits
+unknown models are marked `context=learning` at boot. The Pilot log emits
 the corresponding JSON `context_window_source` and `registry_match` fields.
 
 ## Prompt assets

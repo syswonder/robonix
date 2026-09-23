@@ -207,8 +207,8 @@ async fn main() -> Result<()> {
     let cfg = PilotConfig::resolve(parsed)?;
 
     // Resolve capacity before registering an Atlas capability. An unknown
-    // window is unsafe for a long-lived planner: it would otherwise accept a
-    // task and later hit a provider limit with no correct compaction point.
+    // window starts without pre-emptive compaction; it is never replaced by a
+    // guessed generic value.
     let vlm = vlm::VlmClient::new(&cfg.vlm);
     let context_window = vlm.context_window_info().await;
     let history_budget = planner::HistoryBudget::new(
@@ -239,11 +239,8 @@ async fn main() -> Result<()> {
         );
     }
     if history_budget.context_window_tokens.is_none() {
-        anyhow::bail!(
-            "[pilot/context_budget] no context window for model '{}'. Set \\
-             ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) \\
-             from the model card or inference-server configuration; Pilot refuses \\
-             to start without a safe compaction budget.",
+        warn!(
+            "[pilot/context_budget] model '{}' has no declared capacity; starting without pre-emptive compaction. Set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS to enable predictable history compaction.",
             cfg.vlm.model
         );
     }

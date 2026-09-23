@@ -452,7 +452,7 @@ soma_endpoint: 127.0.0.1:50091
     }
 
     #[test]
-    fn pilot_context_preflight_requires_manual_unknown_and_marks_manual_override() {
+    fn pilot_context_preflight_allows_learning_unknown_and_marks_manual_override() {
         let known = vec![
             "--vlm-upstream".into(),
             "https://api.example/v1".into(),
@@ -465,7 +465,7 @@ soma_endpoint: 127.0.0.1:50091
 
         let mut unknown = known.clone();
         unknown[5] = "private-local-planner".into();
-        assert!(require_system_args("pilot", &unknown).is_err());
+        assert!(require_system_args("pilot", &unknown).is_ok());
         unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
         assert!(require_system_args("pilot", &unknown).is_ok());
         assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
@@ -2084,29 +2084,7 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
         ));
     }
 
-    let model = flag_value(args, "--vlm-model").unwrap_or_default();
-    if flag_value(args, "--vlm-context-window-tokens")
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|tokens| tokens > 0)
-    {
-        return Ok(());
-    }
-    if builtin_pilot_context_window(model).is_some() {
-        return Ok(());
-    }
-    Err(format!(
-        "Pilot model '{model}' has no checked built-in context profile and rbnx \
-         boot cannot safely infer one from an OpenAI-compatible endpoint. Set \
-         system.pilot.vlm.context_window_tokens from the provider model card or \
-         inference-server limit before booting."
-    ))
-}
-
-fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|arg| arg == flag)
-        .and_then(|index| args.get(index + 1))
-        .map(String::as_str)
+    Ok(())
 }
 
 /// Mirrors Pilot's intentionally exact direct-provider registry. This small
@@ -2181,7 +2159,8 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
         } else if let Some((rule, tokens)) = builtin_pilot_context_window(model) {
             format!("context={tokens} (auto: {rule}; verify/override if proxied)")
         } else {
-            "context=missing (manual declaration required)".to_string()
+            "context=learning (numeric provider rejection can be adopted; manual override optional)"
+                .to_string()
         };
         format!("{port}  vlm={model}@{host}  {capacity}")
     } else {
