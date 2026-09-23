@@ -19,6 +19,7 @@
 //   3. Serves RobonixSystemPilot on `listen`. Executor address is discovered
 //      through atlas at every Stream RPC, not configured statically.
 
+mod capabilities_alias;
 mod config;
 mod discovery;
 mod history;

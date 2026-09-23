@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
+use crate::capabilities_alias::alias_for_index;
 use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
@@ -24,6 +25,7 @@ use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info, warn};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+// use std::ffi::os_str::Display;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1430,6 +1432,16 @@ pub async fn run_turn(
                 correction.as_deref(),
             );
 
+            // // Temporary debugging: print the exact system prompt sent to the VLM.
+            // if let Some(system_message) = messages.first()
+            //     && let Some(content) = system_message.content.as_deref()
+            // {
+            //     info!(
+            //         "[pilot/prompt/full] round={}\n{}",
+            //         round,
+            //         content
+            //     );
+            // }
             let planning_revision = forest_revision.load(Ordering::Acquire);
             let mut vlm_attempt = 0_u8;
             let (content, raw_tool_calls) = loop {
@@ -1974,26 +1986,59 @@ pub async fn run_turn(
     Ok(())
 }
 
-/// Convert Atlas rows to provider-qualified model names and sort them so an
-/// unchanged catalog remains byte-identical even if discovery order varies.
+/// Convert Atlas capabilities into the compact names exposed to the LLM.
+///
+/// Canonical capability identity remains:
+///
+///     (provider_id, contract_id)
+///
+/// Only the presentation at the Pilot <-> LLM boundary is replaced by
+/// a short alias:
+///
+///     c0, c1, c2, ...
+///
+/// Capabilities are sorted by their canonical identity before aliases
+/// are assigned. Therefore the same capability catalog always produces
+/// the same aliases regardless of Atlas discovery order.
 fn build_display_capabilities<'a>(
     cap_list: &'a [(String, atlas_pb::Capability)],
     non_llm_callable_contract_ids: &HashSet<String>,
 ) -> Vec<DisplayCapability<'a>> {
-    let mut display = cap_list
+    // step 1:
+    // Keep only capacbilities that are allowed to be exposed to LLM.
+    let mut visible = cap_list
         .iter()
         .filter(|(_, cap)| {
             !is_legacy_plan_control_contract(&cap.contract_id)
                 && !non_llm_callable_contract_ids.contains(&cap.contract_id)
         })
-        .map(|(provider_id, cap)| DisplayCapability {
-            display_name: format!("{}.{}", provider_id, llm_name(&cap.contract_id)),
-            provider_id: provider_id.as_str(),
-            cap,
-        })
         .collect::<Vec<_>>();
-    display.sort_by(|left, right| left.display_name.cmp(&right.display_name));
-    display
+
+    // step2:
+    // Make the ordering determinstic.
+    // Atlas discovery order is NOT used for alias assignment.
+    //  Instead, capabilities are ordered using their canonical Robonix identity:
+    // provider_id first,
+    // contract_id second.
+    visible.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.contract_id.cmp(&right.1.contract_id))
+    });
+    // step3:
+    // Assign c0, c1, c2, ... according to the determinstic order.
+    visible
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let (provider_id, cap) = entry;
+            DisplayCapability {
+                display_name: alias_for_index(index),
+                provider_id: provider_id.as_str(),
+                cap,
+            }
+        })
+        .collect()
 }
 
 fn is_legacy_plan_control_contract(contract_id: &str) -> bool {
@@ -2702,7 +2747,11 @@ fn compact_tool_result(contract_id: &str, value: &str, max_chars: usize) -> Stri
     }
 }
 
-/// Recover the LLM-facing capability name from an expanded capability call.
+/// Build a short human-readable capability name for logs.
+///
+/// This is deliberately different from the compact LLM alias. The LLM
+/// sees names such as `c0`, while developer-facing logs retain a readable
+/// provider-qualified name such as `nav2.navigation_navigate`.
 fn call_display_name(call: &CapabilityCall) -> String {
     format!("{}.{}", call.provider_id, llm_name(&call.contract_id))
 }
@@ -3144,9 +3193,9 @@ mod tests {
             "op_id": 0,
             "description": "observe, remember, then report",
             "children": [
-                {"op":"do","op_id":0,"description":"observe","cap":"demo.test_observe","args":{"observe":"room"}},
-                {"op":"do","op_id":0,"description":"remember","cap":"demo.test_remember","args":{"remember":"room"}},
-                {"op":"do","op_id":0,"description":"report","cap":"demo.test_report","args":{"report":"room"}}
+                {"op":"do","op_id":0,"description":"observe","cap":"c0","args":{"observe":"room"}},
+                {"op":"do","op_id":0,"description":"remember","cap":"c1","args":{"remember":"room"}},
+                {"op":"do","op_id":0,"description":"report","cap":"c2","args":{"report":"room"}}
             ]
         });
         let plan =
@@ -3154,7 +3203,94 @@ mod tests {
         assert_eq!(super::plan_call_count(&plan), 3);
         assert_eq!(plan.round, 1);
     }
+    #[test]
+    fn compact_aliases_map_one_to_one_to_canonical_capabilities() {
+        let capabilities = vec![
+            test_capability("camera", "snapshot"),
+            test_capability("nav2", "navigate"),
+            test_capability("scene", "list_regions"),
+        ];
 
+        let display = build_display_capabilities(&capabilities, &HashSet::new());
+
+        assert_eq!(display.len(), 3);
+
+        assert_eq!(display[0].display_name, "c0");
+        assert_eq!(display[1].display_name, "c1");
+        assert_eq!(display[2].display_name, "c2");
+
+        let targets = build_capability_target_map(&display);
+
+        // If two aliases collided, HashMap insertion would overwrite one
+        // entry and this length would become smaller than display.len().
+        assert_eq!(targets.len(), display.len());
+
+        assert_eq!(
+            targets.get("c0"),
+            Some(&(
+                "camera".to_string(),
+                "robonix/service/test/snapshot".to_string()
+            ))
+        );
+
+        assert_eq!(
+            targets.get("c1"),
+            Some(&(
+                "nav2".to_string(),
+                "robonix/service/test/navigate".to_string()
+            ))
+        );
+
+        assert_eq!(
+            targets.get("c2"),
+            Some(&(
+                "scene".to_string(),
+                "robonix/service/test/list_regions".to_string()
+            ))
+        );
+    }
+    #[test]
+    fn alias_assignment_does_not_depend_on_discovery_order() {
+        let first = vec![
+            test_capability("scene", "list_regions"),
+            test_capability("camera", "snapshot"),
+            test_capability("nav2", "navigate"),
+        ];
+
+        let second = vec![
+            test_capability("nav2", "navigate"),
+            test_capability("scene", "list_regions"),
+            test_capability("camera", "snapshot"),
+        ];
+
+        let first_display = build_display_capabilities(&first, &HashSet::new());
+
+        let second_display = build_display_capabilities(&second, &HashSet::new());
+
+        let first_mapping: Vec<_> = first_display
+            .iter()
+            .map(|cap| {
+                (
+                    cap.display_name.clone(),
+                    cap.provider_id.to_string(),
+                    cap.cap.contract_id.clone(),
+                )
+            })
+            .collect();
+
+        let second_mapping: Vec<_> = second_display
+            .iter()
+            .map(|cap| {
+                (
+                    cap.display_name.clone(),
+                    cap.provider_id.to_string(),
+                    cap.cap.contract_id.clone(),
+                )
+            })
+            .collect();
+
+        assert_eq!(first_mapping, second_mapping);
+    }
     #[test]
     fn contract_metadata_excludes_capability_from_model_catalog() {
         let capabilities = vec![
