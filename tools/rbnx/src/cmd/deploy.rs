@@ -2087,28 +2087,6 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
     Ok(())
 }
 
-/// Mirrors Pilot's intentionally exact direct-provider registry. This small
-/// boot-time copy prevents rbnx from starting a known-unsafe unknown model;
-/// Pilot remains the runtime authority and logs the matching rule again.
-fn builtin_pilot_context_window(model: &str) -> Option<(&'static str, usize)> {
-    match model {
-        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => {
-            Some(("openai:gpt-5.6 exact aliases", 1_050_000))
-        }
-        "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => {
-            Some(("openai:gpt-4.1 exact aliases", 1_000_000))
-        }
-        "gpt-4o" | "gpt-4o-mini" => Some(("openai:gpt-4o exact aliases", 128_000)),
-        "gemini-2.5-pro" | "gemini-2.5-flash" => {
-            Some(("google:gemini-2.5 exact aliases", 1_048_576))
-        }
-        "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929" => {
-            Some(("anthropic:claude-sonnet-4.5 exact aliases", 200_000))
-        }
-        _ => None,
-    }
-}
-
 fn system_boot_detail(name: &str, args: &[String]) -> String {
     let mut listen: Option<&str> = None;
     let mut vlm_upstream: Option<&str> = None;
@@ -2156,11 +2134,8 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
         let model = vlm_model.unwrap_or("?");
         let capacity = if let Some(tokens) = context_window_tokens {
             format!("context={tokens} (manual)")
-        } else if let Some((rule, tokens)) = builtin_pilot_context_window(model) {
-            format!("context={tokens} (auto: {rule}; verify/override if proxied)")
         } else {
-            "context=learning (numeric provider rejection can be adopted; manual override optional)"
-                .to_string()
+            "context=auto (Pilot resolves provider /models, then its full offline registry; inspect Pilot's context_budget log)".to_string()
         };
         format!("{port}  vlm={model}@{host}  {capacity}")
     } else {

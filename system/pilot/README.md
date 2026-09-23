@@ -32,9 +32,8 @@ Common configuration:
 - `--vlm-upstream` / `ROBONIX_VLM_UPSTREAM`: OpenAI-compatible API base URL.
 - `--vlm-api-key` / `ROBONIX_VLM_API_KEY`: VLM API key.
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
-- `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: total
-  context capacity for this deployed model. Required for a model that Pilot
-  cannot identify from provider metadata or its checked built-in registry.
+- `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional
+  operator override for the deployed model's total context capacity.
 - `--vlm-reserved-output-tokens` / `ROBONIX_VLM_RESERVED_OUTPUT_TOKENS`:
   capacity retained for the next planner reply (default: 4096).
 - `--vlm-context-safety-tokens` / `ROBONIX_VLM_CONTEXT_SAFETY_TOKENS`:
@@ -45,38 +44,37 @@ Common configuration:
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
 
-## Context capacity: required, visible, and reviewable
+## Context capacity: automatic, visible, and overrideable
 
 Pilot compacts history before the next request would exceed the model's total
 context capacity. This is not the same thing as `max_tokens`: it is the full
-input + output budget. An OpenAI-compatible `/models` endpoint normally
-returns only a model id and owner, so Pilot cannot safely infer this number for
-an arbitrary proxy, local model, or provider alias.
+input + output budget.
 
 Pilot resolves the capacity in this order:
 
 1. A manual deployment value (`vlm.context_window_tokens`, the environment
    variable, or the CLI flag). This is authoritative.
-2. A provider-specific extension on `GET /models/{id}` or `GET /models` for
-   the exact selected id, when it exposes a context field.
-3. An exact built-in direct-provider match listed below.
-4. Otherwise Pilot starts in `learning` mode without pre-emptive history
-   compaction. A manual declaration remains the operator override for a
-   predictable long-running deployment.
+2. Provider metadata from `GET /models/{id}`.
+3. Provider metadata from `GET /models`: first the exact id, then a unique
+   canonical terminal name. This handles a gateway advertising
+   `anthropic/claude-opus-5.5` when the deployment configured
+   `claude-opus-5.5`. Two different providers with the same terminal name are
+   intentionally treated as ambiguous, never guessed.
+4. The checked offline OFOX catalogue: all 135 entries that advertised a
+   non-zero `context_length` in the 2026-09-23 catalogue snapshot. This is a
+   fallback for a gateway that does not expose metadata at runtime.
+5. Otherwise Pilot starts without pre-emptive history compaction. A manual
+   declaration enables predictable compaction for an unknown/private model.
 
-| Exact model names | Registered context | Meaning |
-| --- | ---: | --- |
-| `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | 1,050,000 | OpenAI direct-provider profile |
-| `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano` | 1,000,000 | OpenAI direct-provider profile |
-| `gpt-4o`, `gpt-4o-mini` | 128,000 | OpenAI direct-provider profile |
-| `gemini-2.5-pro`, `gemini-2.5-flash` | 1,048,576 | Published input limit used conservatively |
-| `claude-sonnet-4-5`, `claude-sonnet-4-5-20250929` | 200,000 | Direct API / Bedrock profile |
+The startup `[pilot/context_budget]` JSON record includes the configured model,
+the selected provider id when a canonical match was used, capacity, and source.
+Canonical and offline-registry matches emit a warning asking the operator to
+verify the gateway route. At `rbnx boot`, `context=... (manual)` means an
+operator override; otherwise `context=auto` means Pilot will resolve and log
+the real source after startup.
 
-The registry is deliberately exact-name only. A gateway may call a smaller,
-quantized, or differently capped backend `gpt-4o`; a built-in match therefore
-logs `source=builtin_registry` and a prominent **verify/override** warning.
-For any gateway, local server, custom deployment, or mismatched alias, set the
-real server limit explicitly:
+Set a manual value only when the route is private, metadata is missing or
+ambiguous, or the gateway has a smaller server cap:
 
 ```yaml
 system:
@@ -90,13 +88,8 @@ system:
       context_safety_tokens: 2048
 ```
 
-Find that number in the model card's **context length/window** field, the
-inference-server launch/configuration (`max_model_len`, `max_seq_len`, or the
-vendor equivalent), or the provider's model page. Use the smaller effective
-limit when these disagree. At `rbnx boot`, the Pilot line prints either
-`context=… (manual)` or `context=… (auto: …; verify/override if proxied)`;
-unknown models are marked `context=learning` at boot. The Pilot log emits
-the corresponding JSON `context_window_source` and `registry_match` fields.
+Use the smaller effective limit when a model card and an inference-server
+setting (such as `max_model_len` or `max_seq_len`) disagree.
 
 ## Prompt assets
 

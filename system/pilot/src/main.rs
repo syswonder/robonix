@@ -223,6 +223,7 @@ async fn main() -> Result<()> {
             "model": cfg.vlm.model,
             "context_window_tokens": history_budget.context_window_tokens,
             "context_window_source": history_budget.context_window_source,
+            "matched_model_id": context_window.matched_model_id,
             "registry_match": context_window.registry_match,
             "reserved_output_tokens": history_budget.reserved_output_tokens,
             "safety_tokens": history_budget.safety_tokens,
@@ -236,6 +237,16 @@ async fn main() -> Result<()> {
             context_window
                 .registry_match
                 .unwrap_or("unknown registry rule")
+        );
+    }
+    if context_window.source == "provider_model_list_canonical_metadata" {
+        warn!(
+            "[pilot/context_budget] configured model '{}' was matched by canonical name to provider id '{}'. Verify that this is the intended gateway route; set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) to override its capacity.",
+            cfg.vlm.model,
+            context_window
+                .matched_model_id
+                .as_deref()
+                .unwrap_or("unknown")
         );
     }
     if history_budget.context_window_tokens.is_none() {

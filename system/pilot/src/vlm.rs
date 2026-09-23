@@ -265,6 +265,8 @@ pub struct VlmUsage {
 pub struct ContextWindowInfo {
     pub tokens: Option<usize>,
     pub source: &'static str,
+    /// Provider model id selected by an exact or canonical list match.
+    pub matched_model_id: Option<String>,
     /// Exact built-in registry rule, when `source == "builtin_registry"`.
     /// A deployment should review this because a proxy can reuse a public
     /// model name while applying a smaller server-side limit.
@@ -292,20 +294,57 @@ fn context_window_from_metadata(value: &Value) -> Option<usize> {
     })
 }
 
-/// Read an optional capacity from a non-standard `/models` list extension.
-/// The OpenAI-compatible standard itself only guarantees identity metadata;
-/// providers that add a limit do so per model record.  Match the selected id
-/// exactly rather than trusting the first model the endpoint returns.
-fn context_window_from_model_list(value: &Value, model: &str) -> Option<usize> {
-    value
-        .get("data")
-        .and_then(Value::as_array)
-        .and_then(|models| {
-            models
-                .iter()
-                .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(model))
+#[derive(Debug, PartialEq, Eq)]
+struct ModelListContextMatch {
+    tokens: usize,
+    matched_model_id: String,
+    canonical: bool,
+}
+
+/// Middleboxes commonly namespace a provider model (`openai/gpt-5.6-terra`)
+/// while deployment configuration names only the model (`gpt-5.6-terra`).
+/// Canonicalization removes one namespace and normalizes separators; it never
+/// removes dates/version suffixes, which could hide a capacity change.
+fn canonical_model_name(model: &str) -> String {
+    model
+        .trim()
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+}
+
+fn context_window_match_from_model_list(
+    value: &Value,
+    model: &str,
+) -> Option<ModelListContextMatch> {
+    let models = value.get("data")?.as_array()?;
+    let match_entry = |candidate: &Value, canonical: bool| {
+        Some(ModelListContextMatch {
+            tokens: context_window_from_metadata(candidate)?,
+            matched_model_id: candidate.get("id")?.as_str()?.to_string(),
+            canonical,
         })
-        .and_then(context_window_from_metadata)
+    };
+    if let Some(exact) = models
+        .iter()
+        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(model))
+        .and_then(|candidate| match_entry(candidate, false))
+    {
+        return Some(exact);
+    }
+    let canonical = canonical_model_name(model);
+    let mut matches = models.iter().filter_map(|candidate| {
+        (candidate
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| canonical_model_name(id) == canonical))
+        .then(|| match_entry(candidate, true))
+        .flatten()
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 /// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
@@ -458,13 +497,14 @@ impl VlmClient {
     ///
     /// A deployment setting is authoritative. Then prefer provider metadata,
     /// then an extension on the provider's model list, then the checked
-    /// direct-provider registry. Unknown is returned as unknown; startup makes
-    /// it a configuration error rather than compacting against a guess.
+    /// offline registry. Unknown is returned as unknown and starts without
+    /// pre-emptive compaction rather than compacting against a guess.
     pub async fn context_window_info(&self) -> ContextWindowInfo {
         if let Some(tokens) = self.configured_context_window_tokens {
             return ContextWindowInfo {
                 tokens: Some(tokens),
                 source: "deployment_config",
+                matched_model_id: None,
                 registry_match: None,
             };
         }
@@ -478,6 +518,7 @@ impl VlmClient {
                 } else {
                     "unavailable"
                 },
+                matched_model_id: None,
                 registry_match: profile.map(|profile| profile.matcher),
             };
         };
@@ -499,18 +540,24 @@ impl VlmClient {
             return ContextWindowInfo {
                 tokens: Some(tokens),
                 source: "provider_model_metadata",
+                matched_model_id: None,
                 registry_match: None,
             };
         }
-        if let Some(tokens) = self
+        if let Some(matched) = self
             .get_model_metadata(list_url)
             .await
             .as_ref()
-            .and_then(|value| context_window_from_model_list(value, &self.model))
+            .and_then(|value| context_window_match_from_model_list(value, &self.model))
         {
             return ContextWindowInfo {
-                tokens: Some(tokens),
-                source: "provider_model_list_metadata",
+                tokens: Some(matched.tokens),
+                source: if matched.canonical {
+                    "provider_model_list_canonical_metadata"
+                } else {
+                    "provider_model_list_metadata"
+                },
+                matched_model_id: Some(matched.matched_model_id),
                 registry_match: None,
             };
         }
@@ -521,6 +568,7 @@ impl VlmClient {
             } else {
                 "unavailable"
             },
+            matched_model_id: None,
             registry_match: profile.map(|profile| profile.matcher),
         }
     }
@@ -740,9 +788,9 @@ impl VlmClient {
 mod tests {
     use super::{
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
-        context_window_from_metadata, context_window_from_model_list, downgrade_response_format,
-        open_retry_delay, parse_usage, process_stream_line, rejects_optional_request_fields,
-        response_format_for,
+        context_window_from_metadata, context_window_match_from_model_list,
+        downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
+        rejects_optional_request_fields, response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -771,10 +819,41 @@ mod tests {
             {"id": "planner", "capabilities": {"context_length": 131_072}}
         ]});
         assert_eq!(
-            context_window_from_model_list(&metadata, "planner"),
+            context_window_match_from_model_list(&metadata, "planner")
+                .map(|matched| matched.tokens),
             Some(131_072)
         );
-        assert_eq!(context_window_from_model_list(&metadata, "absent"), None);
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "absent"),
+            None
+        );
+    }
+
+    #[test]
+    fn uniquely_matches_a_namespaced_provider_model_by_canonical_name() {
+        let metadata = json!({"data": [
+            {"id": "openai/gpt-5.6-terra", "context_length": 1_050_000}
+        ]});
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "gpt-5.6-terra"),
+            Some(super::ModelListContextMatch {
+                tokens: 1_050_000,
+                matched_model_id: "openai/gpt-5.6-terra".to_string(),
+                canonical: true,
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_guess_when_canonical_model_names_are_ambiguous() {
+        let metadata = json!({"data": [
+            {"id": "provider-a/planner", "context_length": 128_000},
+            {"id": "provider-b/planner", "context_length": 64_000}
+        ]});
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "planner"),
+            None
+        );
     }
 
     #[test]

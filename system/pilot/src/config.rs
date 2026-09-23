@@ -37,40 +37,181 @@ pub struct BuiltinModelProfile {
     pub context_window_tokens: usize,
 }
 
-/// Return a published direct-provider context capacity for a known exact model
-/// name. Keep this list exact rather than using a broad family prefix: aliases
-/// at a proxy are deployment-specific and must be set manually.
+/// Offline fallback copied from the OFOX `/models` catalogue on 2026-09-23.
+/// It contains every catalogue entry that declared a non-zero context length
+/// (135 at the time of capture), not just a short list of familiar models.
+/// Runtime provider metadata remains authoritative because gateways can change.
+const OFOX_CONTEXT_WINDOWS_20260923: &[(&str, usize)] = &[
+    ("anthropic/claude-fable-5", 1_000_000),
+    ("anthropic/claude-fable-5.1", 1_000_000),
+    ("anthropic/claude-haiku-4.5", 200_000),
+    ("anthropic/claude-opus-4.6", 1_000_000),
+    ("anthropic/claude-opus-4.7", 1_000_000),
+    ("anthropic/claude-opus-4.8", 1_000_000),
+    ("anthropic/claude-opus-5", 1_000_000),
+    ("anthropic/claude-opus-5.5", 1_000_000),
+    ("anthropic/claude-sonnet-4.6", 1_000_000),
+    ("anthropic/claude-sonnet-5", 1_000_000),
+    ("deepseek/deepseek-v3.2", 128_000),
+    ("deepseek/deepseek-v4-flash-0423", 1_000_000),
+    ("deepseek/deepseek-v4-flash-0731", 1_000_000),
+    ("deepseek/deepseek-v4-pro-0423", 1_000_000),
+    ("deepseek/deepseek-v4-pro-0813", 1_000_000),
+    ("deepseek/deepseek-v4.1-flash", 1_000_000),
+    ("google/gemini-2.5-flash", 1_048_576),
+    ("google/gemini-2.5-flash-image", 32_000),
+    ("google/gemini-2.5-flash-lite", 1_048_576),
+    ("google/gemini-2.5-pro", 1_048_576),
+    ("google/gemini-3-flash-preview", 1_048_576),
+    ("google/gemini-3-pro-image", 66_000),
+    ("google/gemini-3.1-flash-image", 131_000),
+    ("google/gemini-3.1-flash-lite", 1_000_000),
+    ("google/gemini-3.1-flash-lite-image", 66_000),
+    ("google/gemini-3.1-pro-preview", 1_048_576),
+    ("google/gemini-3.5-flash", 1_000_000),
+    ("google/gemini-3.5-flash-lite", 1_000_000),
+    ("google/gemini-3.6-flash", 1_000_000),
+    ("google/gemini-3.7-flash", 1_000_000),
+    ("google/gemini-3.8-flash", 1_000_000),
+    ("microsoft/mai-image-2.5", 4_100),
+    ("microsoft/mai-image-2.5-flash", 4_100),
+    ("microsoft/mai-image-2.5-pro", 4_100),
+    ("minimax/m2-her", 200_000),
+    ("minimax/minimax-m2", 204_800),
+    ("minimax/minimax-m2.1", 204_800),
+    ("minimax/minimax-m2.1-lightning", 204_800),
+    ("minimax/minimax-m2.5", 200_000),
+    ("minimax/minimax-m2.5-lightning", 200_000),
+    ("minimax/minimax-m2.7", 200_000),
+    ("minimax/minimax-m2.7-highspeed", 200_000),
+    ("minimax/minimax-m3", 1_131_000),
+    ("moonshotai/kimi-k2.6", 262_144),
+    ("moonshotai/kimi-k2.7-code", 262_144),
+    ("moonshotai/kimi-k2.7-code-highspeed", 262_144),
+    ("moonshotai/kimi-k3", 1_048_576),
+    ("openai/gpt-4.1", 1_047_576),
+    ("openai/gpt-4.1-mini", 1_047_576),
+    ("openai/gpt-4o", 128_000),
+    ("openai/gpt-4o-mini", 128_000),
+    ("openai/gpt-4o-mini-transcribe", 128_000),
+    ("openai/gpt-4o-transcribe-diarize", 128_000),
+    ("openai/gpt-5", 256_000),
+    ("openai/gpt-5-mini", 256_000),
+    ("openai/gpt-5-nano", 128_000),
+    ("openai/gpt-5.1", 256_000),
+    ("openai/gpt-5.1-codex-max", 256_000),
+    ("openai/gpt-5.1-codex-mini", 256_000),
+    ("openai/gpt-5.2", 512_000),
+    ("openai/gpt-5.2-codex", 512_000),
+    ("openai/gpt-5.3-codex", 512_000),
+    ("openai/gpt-5.4", 1_050_000),
+    ("openai/gpt-5.4-mini", 400_000),
+    ("openai/gpt-5.4-nano", 400_000),
+    ("openai/gpt-5.4-pro", 1_050_000),
+    ("openai/gpt-5.5", 1_050_000),
+    ("openai/gpt-5.6-luna", 1_050_000),
+    ("openai/gpt-5.6-sol", 1_050_000),
+    ("openai/gpt-5.6-terra", 1_050_000),
+    ("openai/gpt-6-astra", 1_050_000),
+    ("openai/gpt-6-luna", 1_050_000),
+    ("openai/gpt-6-sol", 1_050_000),
+    ("openai/gpt-transcribe", 128_000),
+    ("openai/text-embedding-3-large", 8_200),
+    ("openai/text-embedding-3-small", 8_200),
+    ("qwen/qwen-flash", 1_000_000),
+    ("qwen/qwen-image-3.0", 100_000),
+    ("qwen/qwen-image-3.0-pro", 100_000),
+    ("qwen/qwen-max", 32_000),
+    ("qwen/qwen-plus", 1_000_000),
+    ("qwen/qwen-turbo", 128_000),
+    ("qwen/qwen-vl-max", 128_000),
+    ("qwen/qwen3-coder-flash", 1_000_000),
+    ("qwen/qwen3-coder-next", 256_000),
+    ("qwen/qwen3-coder-plus", 1_000_000),
+    ("qwen/qwen3-max", 256_000),
+    ("qwen/qwen3.5-122b-a10b", 256_000),
+    ("qwen/qwen3.5-27b", 256_000),
+    ("qwen/qwen3.5-35b-a3b", 256_000),
+    ("qwen/qwen3.5-397b-a17b", 256_000),
+    ("qwen/qwen3.5-flash", 1_000_000),
+    ("qwen/qwen3.5-plus", 1_000_000),
+    ("qwen/qwen3.6-27b", 256_000),
+    ("qwen/qwen3.6-flash", 1_000_000),
+    ("qwen/qwen3.6-max-preview", 256_000),
+    ("qwen/qwen3.6-plus", 1_000_000),
+    ("qwen/qwen3.7-max", 1_064_000),
+    ("qwen/qwen3.7-plus", 1_064_000),
+    ("qwen/qwen3.8-27b", 1_131_072),
+    ("qwen/qwen3.8-flash", 1_131_072),
+    ("qwen/qwen3.8-max", 1_131_072),
+    ("qwen/qwen3.8-max-0902", 1_000_000),
+    ("qwen/text-embedding-v4", 8_192),
+    ("volcengine/doubao-seed-1-6", 256_000),
+    ("volcengine/doubao-seed-1-6-flash", 256_000),
+    ("volcengine/doubao-seed-1-6-vision", 256_000),
+    ("volcengine/doubao-seed-1-8", 256_000),
+    ("volcengine/doubao-seed-2.0-code", 256_000),
+    ("volcengine/doubao-seed-2.0-lite", 256_000),
+    ("volcengine/doubao-seed-2.0-mini", 256_000),
+    ("volcengine/doubao-seed-2.0-pro", 256_000),
+    ("volcengine/doubao-seed-2.1-pro", 256_000),
+    ("volcengine/doubao-seed-2.1-turbo", 256_000),
+    ("volcengine/doubao-seed-character", 256_000),
+    ("volcengine/doubao-seed-evolving", 256_000),
+    ("volcengine/doubao-seedream-4.5", 100_000),
+    ("volcengine/doubao-seedream-5.0-lite", 100_000),
+    ("volcengine/doubao-seedream-5.0-pro", 100_000),
+    ("x-ai/grok-4.1-fast", 2_000_000),
+    ("x-ai/grok-4.20", 2_000_000),
+    ("x-ai/grok-4.3", 1_000_000),
+    ("x-ai/grok-4.5", 500_000),
+    ("x-ai/grok-4.6", 500_000),
+    ("x-ai/grok-4.7", 500_000),
+    ("z-ai/glm-4.6", 200_000),
+    ("z-ai/glm-4.7", 200_000),
+    ("z-ai/glm-4.7-flashx", 200_000),
+    ("z-ai/glm-5", 200_000),
+    ("z-ai/glm-5-turbo", 200_000),
+    ("z-ai/glm-5.1", 200_000),
+    ("z-ai/glm-5.2", 1_048_576),
+    ("z-ai/glm-5.3", 1_048_576),
+    ("z-ai/glm-5.3-flash", 1_048_576),
+    ("z-ai/glm-5v-turbo", 200_000),
+];
+
+fn canonical_model_name(model: &str) -> String {
+    model
+        .trim()
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+}
+
+/// Return a context capacity from the complete pinned OFOX catalogue.
+/// Exact full IDs win. A bare model name is used only when its canonical
+/// terminal name appears once, so a namespace collision never selects a model
+/// silently. The live `/models` response is checked before this fallback.
 pub fn builtin_model_profile(model: &str) -> Option<BuiltinModelProfile> {
-    let profile = match model {
-        // OpenAI frontier models (1.05M total context).
-        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => BuiltinModelProfile {
-            matcher: "openai:gpt-5.6 exact aliases",
-            context_window_tokens: 1_050_000,
-        },
-        // OpenAI GPT-4.1 family (1M context).
-        "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => BuiltinModelProfile {
-            matcher: "openai:gpt-4.1 exact aliases",
-            context_window_tokens: 1_000_000,
-        },
-        // OpenAI GPT-4o family (128k context).
-        "gpt-4o" | "gpt-4o-mini" => BuiltinModelProfile {
-            matcher: "openai:gpt-4o exact aliases",
-            context_window_tokens: 128_000,
-        },
-        // Gemini 2.5 published input limit. We conservatively use it as the
-        // usable conversation capacity rather than inventing a larger total.
-        "gemini-2.5-pro" | "gemini-2.5-flash" => BuiltinModelProfile {
-            matcher: "google:gemini-2.5 exact aliases",
-            context_window_tokens: 1_048_576,
-        },
-        // Claude Sonnet 4.5 direct API / Bedrock published context.
-        "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929" => BuiltinModelProfile {
-            matcher: "anthropic:claude-sonnet-4.5 exact aliases",
-            context_window_tokens: 200_000,
-        },
-        _ => return None,
+    let exact = OFOX_CONTEXT_WINDOWS_20260923
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(model.trim()));
+    let matched = match exact {
+        Some(entry) => entry,
+        None => {
+            let canonical = canonical_model_name(model);
+            let mut entries = OFOX_CONTEXT_WINDOWS_20260923
+                .iter()
+                .filter(|(id, _)| canonical_model_name(id) == canonical);
+            let first = entries.next()?;
+            entries.next().is_none().then_some(first)?
+        }
     };
-    Some(profile)
+    Some(BuiltinModelProfile {
+        matcher: "ofox_catalogue_2026-09-23",
+        context_window_tokens: matched.1,
+    })
 }
 
 /// Fully-resolved settings the pilot binary runs against.
@@ -316,10 +457,15 @@ mod tests {
     use super::builtin_model_profile;
 
     #[test]
-    fn builtins_are_exact_names_not_proxy_prefixes() {
+    fn builtins_cover_current_ofox_catalogue_and_reject_unknown_suffixes() {
         assert_eq!(
             builtin_model_profile("gpt-5.6-terra").map(|profile| profile.context_window_tokens),
             Some(1_050_000)
+        );
+        assert_eq!(
+            builtin_model_profile("anthropic/claude-opus-5.5")
+                .map(|profile| profile.context_window_tokens),
+            Some(1_000_000)
         );
         assert!(builtin_model_profile("gpt-5.6-terra-via-small-proxy").is_none());
     }
