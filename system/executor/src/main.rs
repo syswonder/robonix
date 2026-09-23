@@ -14,6 +14,7 @@
 
 mod config;
 mod dispatch;
+mod execute_stream;
 mod pb;
 mod plan_runtime;
 mod rtdl_wire;
@@ -27,6 +28,7 @@ use dispatch::builtin::BUILTINS;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
+use pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStreamServer;
 use pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealthServer;
 use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlansServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
@@ -79,6 +81,20 @@ async fn main() -> Result<()> {
                 "capabilities/system/executor/execute.v1.toml",
                 "robonix.contracts.RobonixSystemExecutorExecute",
                 "/robonix.contracts.RobonixSystemExecutorExecute/Execute",
+            ),
+        )
+        .await?;
+
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/execute_stream",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/execute_stream.v1.toml",
+                "robonix.contracts.RobonixSystemExecutorExecuteStream",
+                "/robonix.contracts.RobonixSystemExecutorExecuteStream/ExecuteStream",
             ),
         )
         .await?;
@@ -210,6 +226,7 @@ async fn main() -> Result<()> {
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorExecuteStreamServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))

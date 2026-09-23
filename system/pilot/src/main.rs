@@ -25,9 +25,11 @@ mod history;
 mod memory;
 mod pb;
 mod planner;
+mod rtdl_stream;
 mod service;
 mod soma_context;
 mod state_context;
+mod stream_execution;
 mod vlm;
 
 use anyhow::{Context, Result};

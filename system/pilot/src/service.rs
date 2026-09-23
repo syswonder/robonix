@@ -564,7 +564,25 @@ async fn build_executor_conn(
             "Executor execute/control/active capabilities resolved to different providers: {executor_provider_id} vs {control_provider_id} vs {active_provider_id}"
         );
     }
+    let (_, endpoint, _) = atlas
+        .connect_capability(
+            consumer_id,
+            &executor_provider_id,
+            "robonix/system/executor/execute_stream",
+            robonix_atlas::pb::Transport::Grpc,
+        )
+        .await
+        .context("connect same Executor execute_stream (required)")?;
+    let uri = if endpoint.starts_with("http") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
+    };
+    let stream_ch = tonic::transport::Endpoint::from_shared(uri)?
+        .connect()
+        .await?;
     Ok(ExecutorConn {
+        streaming: crate::pb::contracts::robonix_system_executor_execute_stream_client::RobonixSystemExecutorExecuteStreamClient::new(stream_ch),
         graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
         control: RobonixSystemExecutorControlPlanClient::new(control_ch),
         active: RobonixSystemExecutorListActivePlansClient::new(active_ch),
