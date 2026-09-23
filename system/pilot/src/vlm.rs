@@ -7,13 +7,14 @@ use crate::config::VlmConfig;
 use anyhow::{Context, Result, bail};
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
-    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
-    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestDeveloperMessageArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionTools,
+    CreateChatCompletionRequestArgs, FunctionCall, FunctionObject, FunctionObjectArgs, ImageDetail,
+    ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,7 @@ fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> b
         "stream_options",
         "include_usage",
         "prompt_cache_key",
+        "prompt_cache_options",
         "response_format",
         "json_schema",
     ]
@@ -82,7 +84,8 @@ fn open_retry_delay(
 /// One message in an OpenAI Chat Completions conversation.
 /// Spec: https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages
 ///
-/// One struct, four roles (`system` / `user` / `assistant` / `tool`); each
+/// One struct, five roles (`system` / `developer` / `user` / `assistant` /
+/// `tool`); each
 /// role uses a different subset of the optional fields. `skip_serializing_if`
 /// on every Option prunes irrelevant fields at serialization, so the wire
 /// JSON for each role only carries what OpenAI expects:
@@ -178,6 +181,16 @@ impl Message {
             image_base64: None,
         }
     }
+    pub fn developer(content: &str) -> Self {
+        Self {
+            role: "developer".into(),
+            name: None,
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            image_base64: None,
+        }
+    }
     pub fn user(content: &str) -> Self {
         Self {
             role: "user".into(),
@@ -241,6 +254,39 @@ pub struct VlmUsage {
     pub cached_tokens: Option<u64>,
 }
 
+/// A context-window limit discovered for the configured deployment.
+///
+/// OpenAI-compatible `/models` metadata is optional and proxies frequently do
+/// not expose it. Callers must distinguish an explicit deployment declaration
+/// from a metadata probe and from an unknown limit; treating a guessed number
+/// as a provider guarantee would make compaction unsafe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextWindowInfo {
+    pub tokens: Option<usize>,
+    pub source: &'static str,
+}
+
+fn context_window_from_metadata(value: &Value) -> Option<usize> {
+    let candidates = [
+        Some(value),
+        value.get("data"),
+        value.get("model"),
+        value.get("capabilities"),
+    ];
+    candidates.into_iter().flatten().find_map(|candidate| {
+        [
+            "context_window",
+            "context_length",
+            "max_context_length",
+            "input_token_limit",
+        ]
+        .iter()
+        .find_map(|field| candidate.get(*field).and_then(Value::as_u64))
+        .and_then(|tokens| usize::try_from(tokens).ok())
+        .filter(|tokens| *tokens > 0)
+    })
+}
+
 /// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
 /// Cheap to clone — `async_openai::Client` wraps a `reqwest::Client` (an
 /// `Arc<...>` internally). No mutex needed when sharing across tasks.
@@ -250,6 +296,7 @@ pub struct VlmClient {
     api_base: String,
     api_key: String,
     model: String,
+    configured_context_window_tokens: Option<usize>,
 }
 
 /// What the caller wants back from one completion.
@@ -370,6 +417,51 @@ impl VlmClient {
             api_base: cfg.upstream.trim_end_matches('/').to_string(),
             api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
+            configured_context_window_tokens: cfg.context_window_tokens,
+        }
+    }
+
+    /// Resolve the usable context-window limit at process start.
+    ///
+    /// A deployment setting is authoritative. Otherwise, probe the optional
+    /// OpenAI-compatible `GET /models/{id}` shape. Unknown means exactly that:
+    /// Pilot leaves automatic compaction disabled and logs the condition rather
+    /// than applying a fictional generic-model limit.
+    pub async fn context_window_info(&self) -> ContextWindowInfo {
+        if let Some(tokens) = self.configured_context_window_tokens {
+            return ContextWindowInfo {
+                tokens: Some(tokens),
+                source: "deployment_config",
+            };
+        }
+
+        let Ok(mut url) = reqwest::Url::parse(&format!("{}/models", self.api_base)) else {
+            return ContextWindowInfo {
+                tokens: None,
+                source: "unavailable",
+            };
+        };
+        let Ok(mut segments) = url.path_segments_mut() else {
+            return ContextWindowInfo {
+                tokens: None,
+                source: "unavailable",
+            };
+        };
+        segments.push(&self.model);
+        drop(segments);
+
+        let metadata = match self.inner.get(url).bearer_auth(&self.api_key).send().await {
+            Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+            Ok(_) | Err(_) => None,
+        };
+        let tokens = metadata.as_ref().and_then(context_window_from_metadata);
+        ContextWindowInfo {
+            tokens,
+            source: if tokens.is_some() {
+                "provider_model_metadata"
+            } else {
+                "unavailable"
+            },
         }
     }
 
@@ -411,6 +503,15 @@ impl VlmClient {
             .context("build chat completion request")?;
         let mut request_body = serde_json::to_value(request)
             .context("serialize chat completion request for transport")?;
+        // GPT-5.6 understands these OpenAI cache controls. Keep the stable
+        // developer prefix alive through the interactive task; compatibility
+        // fallback below removes this optional field if a proxy rejects it.
+        if let Some(body) = request_body.as_object_mut() {
+            body.insert(
+                "prompt_cache_options".to_string(),
+                serde_json::json!({"mode": "implicit", "ttl": "30m"}),
+            );
+        }
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
@@ -440,7 +541,7 @@ impl VlmClient {
                 let downgraded = downgrade_response_format(&mut request_body);
                 let mut dropped: Vec<&str> = Vec::new();
                 if let Some(body) = request_body.as_object_mut() {
-                    for field in ["stream_options", "prompt_cache_key"] {
+                    for field in ["stream_options", "prompt_cache_key", "prompt_cache_options"] {
                         if body.remove(field).is_some() {
                             dropped.push(field);
                         }
@@ -572,12 +673,28 @@ impl VlmClient {
 mod tests {
     use super::{
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
-        downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
-        rejects_optional_request_fields, response_format_for,
+        context_window_from_metadata, downgrade_response_format, open_retry_delay, parse_usage,
+        process_stream_line, rejects_optional_request_fields, response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Duration;
+
+    #[test]
+    fn reads_context_window_from_common_provider_metadata_shapes() {
+        assert_eq!(
+            context_window_from_metadata(&json!({"context_window": 131_072})),
+            Some(131_072)
+        );
+        assert_eq!(
+            context_window_from_metadata(&json!({"data": {"context_length": 32_768}})),
+            Some(32_768)
+        );
+        assert_eq!(
+            context_window_from_metadata(&json!({"object": "list", "data": []})),
+            None
+        );
+    }
 
     #[test]
     fn transient_open_errors_use_bounded_backoff() {
@@ -825,6 +942,10 @@ fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionReque
     for m in messages {
         let msg = match m.role.as_str() {
             "system" => ChatCompletionRequestSystemMessageArgs::default()
+                .content(m.content.clone().unwrap_or_default())
+                .build()?
+                .into(),
+            "developer" => ChatCompletionRequestDeveloperMessageArgs::default()
                 .content(m.content.clone().unwrap_or_default())
                 .build()?
                 .into(),

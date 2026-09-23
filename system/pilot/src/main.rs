@@ -281,12 +281,37 @@ async fn main() -> Result<()> {
     info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
 
     let vlm = vlm::VlmClient::new(&cfg.vlm);
-    info!(
-        "VLM upstream='{}' model='{}'",
-        cfg.vlm.upstream, cfg.vlm.model
+    let context_window = vlm.context_window_info().await;
+    let history_budget = planner::HistoryBudget::new(
+        context_window.tokens,
+        context_window.source,
+        cfg.vlm.reserved_output_tokens,
+        cfg.vlm.context_safety_tokens,
     );
+    info!(
+        "[pilot/context_budget] {}",
+        serde_json::json!({
+            "model": cfg.vlm.model,
+            "context_window_tokens": history_budget.context_window_tokens,
+            "context_window_source": history_budget.context_window_source,
+            "reserved_output_tokens": history_budget.reserved_output_tokens,
+            "safety_tokens": history_budget.safety_tokens,
+            "automatic_compaction_enabled": history_budget.context_window_tokens.is_some(),
+        })
+    );
+    if history_budget.context_window_tokens.is_none() {
+        warn!(
+            "[pilot/context_budget] provider did not expose a context window; automatic history compaction is disabled. Set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS in the deployment manifest."
+        );
+    }
 
-    let svc = PilotServiceImpl::new(atlas.clone(), cfg.id.clone(), vlm, soma_prompt_block);
+    let svc = PilotServiceImpl::new(
+        atlas.clone(),
+        cfg.id.clone(),
+        vlm,
+        history_budget,
+        soma_prompt_block,
+    );
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
     let mut server_task = tokio::spawn(async move {

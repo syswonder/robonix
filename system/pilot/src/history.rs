@@ -112,12 +112,20 @@ fn is_authoritative_record(message: &Message) -> bool {
         return false;
     };
     [
+        // Original user intent. Losing either would let a summary silently
+        // weaken a task constraint or ignore a later correction.
         "User task (authoritative):",
         "User steer (authoritative):",
+        // Canonical lifecycle and dispatch facts. These establish which RTDL
+        // work exists and whether an operation was ever sent to Executor.
         "Pilot task-state update (authoritative state",
         "Pilot harness dispatch record",
+        // Out-of-band cancellation / stop decisions are facts, not ordinary
+        // conversational narration; retaining them prevents re-dispatch.
         "Pilot plan-control result:",
         "Pilot plan-control failure:",
+        // Executor observations bind a result to one concrete RTDL tree.
+        // They must survive so a completed action is not planned again.
         "Executor feedback scope:",
         "Executor feedback for the current RTDL leaf",
     ]

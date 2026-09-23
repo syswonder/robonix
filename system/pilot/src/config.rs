@@ -39,6 +39,16 @@ pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
+    /// Context limit declared by the deployment. This wins over a best-effort
+    /// OpenAI-compatible model-metadata probe because a proxy may expose a
+    /// logical model name while routing to a smaller physical context window.
+    pub context_window_tokens: Option<usize>,
+    /// Capacity reserved for the next planner completion when deciding whether
+    /// the conversation can continue without compaction.
+    pub reserved_output_tokens: usize,
+    /// Extra token headroom for provider framing, tokenizer drift, and
+    /// reasoning tokens that are not visible to the chat-completions client.
+    pub context_safety_tokens: usize,
     /// Wire dialect. Currently only "openai" is implemented; checked at
     /// `resolve` time, kept on the struct for diagnostics / future routing.
     #[allow(dead_code)]
@@ -74,6 +84,20 @@ pub struct Args {
     /// LLM model identifier.
     #[arg(long, env = "ROBONIX_VLM_MODEL")]
     pub vlm_model: Option<String>,
+
+    /// Deployment-specific total context window. When omitted Pilot probes
+    /// OpenAI-compatible model metadata; if unavailable, it disables automatic
+    /// history compaction rather than guessing a limit.
+    #[arg(long, env = "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS")]
+    pub vlm_context_window_tokens: Option<usize>,
+
+    /// Tokens reserved for the next planning response while budgeting history.
+    #[arg(long, env = "ROBONIX_VLM_RESERVED_OUTPUT_TOKENS")]
+    pub vlm_reserved_output_tokens: Option<usize>,
+
+    /// Conservative headroom for provider framing and hidden reasoning tokens.
+    #[arg(long, env = "ROBONIX_VLM_CONTEXT_SAFETY_TOKENS")]
+    pub vlm_context_safety_tokens: Option<usize>,
 
     /// LLM API dialect ("openai" only for now).
     #[arg(long, env = "ROBONIX_VLM_FORMAT")]
@@ -121,7 +145,16 @@ struct FileVlmConfig {
     model: Option<String>,
     #[serde(default)]
     api_format: Option<String>,
+    #[serde(default)]
+    context_window_tokens: Option<usize>,
+    #[serde(default)]
+    reserved_output_tokens: Option<usize>,
+    #[serde(default)]
+    context_safety_tokens: Option<usize>,
 }
+
+const DEFAULT_RESERVED_OUTPUT_TOKENS: usize = 4_096;
+const DEFAULT_CONTEXT_SAFETY_TOKENS: usize = 2_048;
 
 impl PilotConfig {
     /// Build the resolved config from CLI args (which already pulled env
@@ -171,6 +204,19 @@ impl PilotConfig {
             .or(file_vlm.model)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
+        let context_window_tokens = args
+            .vlm_context_window_tokens
+            .or(file_vlm.context_window_tokens)
+            .filter(|tokens| *tokens > 0);
+        let reserved_output_tokens = args
+            .vlm_reserved_output_tokens
+            .or(file_vlm.reserved_output_tokens)
+            .filter(|tokens| *tokens > 0)
+            .unwrap_or(DEFAULT_RESERVED_OUTPUT_TOKENS);
+        let context_safety_tokens = args
+            .vlm_context_safety_tokens
+            .or(file_vlm.context_safety_tokens)
+            .unwrap_or(DEFAULT_CONTEXT_SAFETY_TOKENS);
 
         Ok(Self {
             atlas_endpoint,
@@ -180,6 +226,9 @@ impl PilotConfig {
                 upstream,
                 api_key,
                 model,
+                context_window_tokens,
+                reserved_output_tokens,
+                context_safety_tokens,
                 api_format,
             },
         })

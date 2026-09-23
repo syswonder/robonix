@@ -16,7 +16,7 @@ use crate::pb::module_health::{
 use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
-use crate::planner::{self, ExecutorConn, TaskState};
+use crate::planner::{self, ExecutorConn, HistoryBudget, TaskState};
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
@@ -173,6 +173,7 @@ pub struct PilotServiceImpl {
     /// the executor.
     provider_id: String,
     vlm: VlmClient,
+    history_budget: HistoryBudget,
     soma_prompt_block: Arc<String>,
     histories: Histories,
     /// Harness-owned standing goal per session. It survives a transport turn
@@ -200,12 +201,14 @@ impl PilotServiceImpl {
         atlas: AtlasClient,
         provider_id: String,
         vlm: VlmClient,
+        history_budget: HistoryBudget,
         soma_prompt_block: String,
     ) -> Self {
         Self {
             atlas,
             provider_id,
             vlm,
+            history_budget,
             soma_prompt_block: Arc::new(soma_prompt_block),
             histories: Arc::new(Mutex::new(HashMap::new())),
             task_states: Arc::new(Mutex::new(HashMap::new())),
@@ -433,6 +436,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
         let vlm = self.vlm.clone();
+        let history_budget = self.history_budget.clone();
         let soma_prompt_block = Arc::clone(&self.soma_prompt_block);
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
@@ -486,6 +490,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 steer_rx,
                 plan_seq,
                 soma_prompt_block.as_str(),
+                &history_budget,
             )
             .await
             {

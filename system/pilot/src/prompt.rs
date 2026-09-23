@@ -32,7 +32,12 @@ pub(crate) struct UsageTotals {
 }
 
 impl UsageTotals {
-    pub(crate) fn record(&mut self, round: u32, usage: &VlmUsage) -> serde_json::Value {
+    pub(crate) fn record(
+        &mut self,
+        round: u32,
+        cache_epoch: u64,
+        usage: &VlmUsage,
+    ) -> serde_json::Value {
         self.requests_with_usage = self.requests_with_usage.saturating_add(1);
         self.input_tokens = self.input_tokens.saturating_add(usage.prompt_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.completion_tokens);
@@ -62,6 +67,7 @@ impl UsageTotals {
         serde_json::json!({
             "event": "vlm_usage",
             "round": round,
+            "cache_epoch": cache_epoch,
             "input_tokens": usage.prompt_tokens,
             "output_tokens": usage.completion_tokens,
             "total_tokens": usage.prompt_tokens.saturating_add(usage.completion_tokens),
@@ -148,7 +154,11 @@ pub(crate) fn assemble_planning_messages(
     );
 
     let mut messages = Vec::with_capacity(sanitized_history.len() + 2);
-    messages.push(Message::system(&system));
+    // Preserve the system-level semantics while using OpenAI's developer role
+    // on the wire: GPT-5.6 can place a stable cache breakpoint at the end of
+    // the initial developer block. Runtime state still remains ordered user
+    // history after it.
+    messages.push(Message::developer(&system));
     messages.extend(sanitized_history);
     close_trailing_assistant(&mut messages);
     messages

@@ -123,6 +123,62 @@ fn configured_vlm_idle_timeout(value: Option<&str>) -> Duration {
 
 const MAX_HISTORY: usize = 200;
 
+/// Token budget used to decide when a long-running Pilot history must move to
+/// a new compacted cache epoch. The context window comes from deployment
+/// configuration or a best-effort provider metadata probe; it is never guessed.
+#[derive(Clone, Debug)]
+pub struct HistoryBudget {
+    pub context_window_tokens: Option<usize>,
+    pub context_window_source: &'static str,
+    pub reserved_output_tokens: usize,
+    pub safety_tokens: usize,
+}
+
+impl HistoryBudget {
+    pub fn new(
+        context_window_tokens: Option<usize>,
+        context_window_source: &'static str,
+        reserved_output_tokens: usize,
+        safety_tokens: usize,
+    ) -> Self {
+        Self {
+            context_window_tokens,
+            context_window_source,
+            reserved_output_tokens,
+            safety_tokens,
+        }
+    }
+
+    fn projected_tokens(&self, history: &[Message], non_history_tokens: usize) -> Option<usize> {
+        self.context_window_tokens.map(|_| {
+            history
+                .iter()
+                .map(|message| message.content.as_deref().map_or(0, str::len).div_ceil(4))
+                .sum::<usize>()
+                .saturating_add(non_history_tokens)
+                .saturating_add(self.reserved_output_tokens)
+                .saturating_add(self.safety_tokens)
+        })
+    }
+
+    fn must_compact(&self, history: &[Message], non_history_tokens: usize) -> bool {
+        self.context_window_tokens.is_some_and(|limit| {
+            self.projected_tokens(history, non_history_tokens)
+                .is_some_and(|projected| projected >= limit)
+        })
+    }
+
+    /// Keep a recent tail based on token capacity, rather than an arbitrary
+    /// message count: a single camera/tool observation can be larger than a
+    /// dozen short chat turns. Retain at most one eighth of the context window,
+    /// capped so the compacted epoch still has room to grow.
+    fn recent_tail_tokens(&self) -> usize {
+        self.context_window_tokens
+            .map(|limit| (limit / 8).clamp(1_024, 8_192))
+            .unwrap_or(0)
+    }
+}
+
 /// Harness-owned state for the latest user interaction. Long-running work is
 /// represented independently by the RTDL forest; it must not keep older user
 /// text welded into the current goal forever.
@@ -792,34 +848,43 @@ fn apply_task_update(
     *state != before
 }
 
-/// Approx history size (in chars; ~4 chars/token) past which we compact. Tuned
-/// to keep the working window small without compacting on every short turn.
-const HISTORY_COMPACT_TRIGGER_CHARS: usize = 24_000;
-/// Most recent messages always kept verbatim through a compaction.
-const HISTORY_KEEP_RECENT: usize = 12;
-
-/// Claude-Code-style rolling compaction. When the running history grows past
-/// `HISTORY_COMPACT_TRIGGER_CHARS`, summarize everything except the most recent
-/// `HISTORY_KEEP_RECENT` messages into a single summary note (preserving goal,
-/// decisions, observations, and current state), retain authoritative task and
-/// executor records verbatim, and keep the recent turns verbatim. The summary
-/// shrinks disposable narration; it is never the only copy of a user task or
-/// execution outcome.
-///
-/// Best-effort: any VLM error leaves history untouched. Ordinary narration is
-/// still bounded by `MAX_HISTORY`, while authoritative records remain present.
-/// Self-limiting: after compaction the total normally drops below the trigger,
-/// so it won't fire again until history regrows.
-async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
-    let total: usize = history
-        .iter()
-        .map(|m| m.content.as_deref().map_or(0, str::len))
-        .sum();
-    if total < HISTORY_COMPACT_TRIGGER_CHARS || history.len() <= HISTORY_KEEP_RECENT + 4 {
-        return;
+/// Token-budgeted rolling compaction. A successful compaction deliberately
+/// starts a new provider cache epoch because earlier message bytes change.
+/// When the deployment cannot expose a context limit, automatic compaction is
+/// disabled rather than guessing a generic model window.
+async fn compact_history(
+    history: &mut Vec<Message>,
+    vlm: &VlmClient,
+    budget: &HistoryBudget,
+    non_history_tokens: usize,
+    cache_epoch: u64,
+) -> bool {
+    let Some(limit) = budget.context_window_tokens else {
+        return false;
+    };
+    let Some(projected_tokens) = budget.projected_tokens(history, non_history_tokens) else {
+        return false;
+    };
+    if !budget.must_compact(history, non_history_tokens) || history.len() <= 4 {
+        return false;
     }
 
-    let split = history.len() - HISTORY_KEEP_RECENT;
+    let tail_budget = budget.recent_tail_tokens();
+    let mut retained_tokens = 0usize;
+    let mut split = history.len();
+    while split > 0 && retained_tokens < tail_budget {
+        split -= 1;
+        retained_tokens = retained_tokens.saturating_add(
+            history[split]
+                .content
+                .as_deref()
+                .map_or(0, str::len)
+                .div_ceil(4),
+        );
+    }
+    if split == 0 {
+        return false;
+    }
     let mut msgs = vec![Message::system(
         "You compact a robot agent's working memory. Summarize the conversation so far \
          into a concise but COMPLETE note that preserves: the user's goal(s) and any \
@@ -830,41 +895,76 @@ async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
     msgs.extend(history::sanitize_for_vlm(&history[..split]));
     msgs.push(Message::user("Summarize the above conversation now."));
 
-    let summary = match collect_vlm_text(vlm, &msgs).await {
-        Some(s) if !s.trim().is_empty() => s,
-        _ => return,
+    let completion = match collect_vlm_text(vlm, &msgs).await {
+        Some(completion) if !completion.text.trim().is_empty() => completion,
+        _ => return false,
     };
 
     let before = history.len();
+    let before_tokens: usize = history
+        .iter()
+        .map(|m| m.content.as_deref().map_or(0, str::len).div_ceil(4))
+        .sum();
     let authoritative = history::authoritative_records(&history[..split]);
-    let mut compacted = Vec::with_capacity(HISTORY_KEEP_RECENT + 1 + authoritative.len());
+    let mut compacted = Vec::with_capacity(history.len() - split + 1 + authoritative.len());
     compacted.push(Message::user(&format!(
         "[summary of earlier conversation — treat as established context]\n{}",
-        summary.trim()
+        completion.text.trim()
     )));
     compacted.extend(authoritative);
     compacted.extend_from_slice(&history[split..]);
     *history = compacted;
+    let after_tokens: usize = history
+        .iter()
+        .map(|m| m.content.as_deref().map_or(0, str::len).div_ceil(4))
+        .sum();
     info!(
-        "[pilot] compacted history {before} -> {} messages (was ~{total} chars)",
-        history.len()
+        "[pilot/compaction] {}",
+        serde_json::json!({
+            "event": "history_compaction",
+            "cache_epoch_before": cache_epoch,
+            "cache_epoch_after": cache_epoch.saturating_add(1),
+            "context_window_tokens": limit,
+            "context_window_source": budget.context_window_source,
+            "projected_tokens_before": projected_tokens,
+            "non_history_tokens": non_history_tokens,
+            "reserved_output_tokens": budget.reserved_output_tokens,
+            "safety_tokens": budget.safety_tokens,
+            "recent_tail_tokens_budget": tail_budget,
+            "history_messages_before": before,
+            "history_messages_after": history.len(),
+            "history_tokens_before_estimate": before_tokens,
+            "history_tokens_after_estimate": after_tokens,
+            "summary_input_tokens": completion.usage.as_ref().map(|usage| usage.prompt_tokens),
+            "summary_output_tokens": completion.usage.as_ref().map(|usage| usage.completion_tokens),
+            "summary_cached_input_tokens": completion.usage.as_ref().and_then(|usage| usage.cached_tokens),
+        })
     );
+    true
 }
 
-/// Run one non-streaming VLM completion and return the full text (drains the
-/// stream). Returns `None` on any stream error.
-async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<String> {
+struct VlmTextCompletion {
+    text: String,
+    usage: Option<crate::vlm::VlmUsage>,
+}
+
+/// Run one non-streaming VLM completion and retain provider usage for the
+/// compaction ledger. Best-effort: callers keep source history if it fails.
+async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<VlmTextCompletion> {
     let mut stream = vlm
         .chat_stream(messages, &[], None, ReplyShape::Text)
         .await
         .ok()?;
     let mut text = String::new();
+    let mut usage = None;
     while let Some(item) = stream.next().await {
-        if let Ok(VlmStreamItem::TextDelta(d)) = item {
-            text.push_str(&d);
+        match item.ok()? {
+            VlmStreamItem::TextDelta(d) => text.push_str(&d),
+            VlmStreamItem::Usage(value) => usage = Some(value),
+            VlmStreamItem::ToolCall(_) | VlmStreamItem::Finish => {}
         }
     }
-    Some(text)
+    Some(VlmTextCompletion { text, usage })
 }
 
 /// Feed finalized leaf results into LLM history.
@@ -947,6 +1047,7 @@ pub async fn run_turn(
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
     soma_prompt_block: &str,
+    history_budget: &HistoryBudget,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
     // Keep the provider's prefix-cache routing stable across planning rounds
@@ -1132,6 +1233,7 @@ pub async fn run_turn(
     let mut should_plan = true;
     let mut capability_prompt_cache = CapabilityPromptCache::default();
     let mut usage_totals = UsageTotals::default();
+    let mut cache_epoch = 0_u64;
     // Last user-facing narration; surfaced as FinalText when the turn ends.
     let mut last_content = String::new();
 
@@ -1308,10 +1410,6 @@ pub async fn run_turn(
         // previous VLM stream) so this round plans with the latest user input.
         drain_steers(&mut steer_rx, history, standing_task);
 
-        // Roll up old history into a summary once it gets large, so the rest of
-        // the turn plans against a compact window instead of the full transcript.
-        compact_history(history, vlm).await;
-
         // Re-discover capabilities from atlas every round so providers that
         // registered mid-turn are visible in the next call.
         let cap_list = discovery::discover(atlas)
@@ -1324,12 +1422,42 @@ pub async fn run_turn(
 
         let display_caps = build_display_capabilities(&cap_list, &non_llm_callable_contract_ids);
         let target_map = build_capability_target_map(&display_caps);
-        let protocol_prompt = rtdl_protocol(round == 0);
+        // The RTDL protocol is part of the cacheable system prefix. Starting
+        // with its compact form avoids the old full-on-round-zero rewrite that
+        // made the second provider request cold.
+        let protocol_prompt = rtdl_protocol(false);
         let (capability_prompt, capability_cache_hit) =
             capability_prompt_cache.render(&display_caps);
 
         let forest_block = build_forest_block(&forest, &cancel_requested);
         let executor_active_block = fetch_executor_active_block(executor).await;
+        let compaction_non_history_tokens = [
+            standing_prompt.as_str(),
+            protocol_prompt,
+            capability_prompt,
+            soma_prompt_block,
+            memory_prompt.as_str(),
+            capability_docs_prompt.as_str(),
+            voice_prompt,
+            forest_block.as_str(),
+            executor_active_block.as_str(),
+            embodiment_block.as_str(),
+            environment_block.as_str(),
+        ]
+        .into_iter()
+        .map(|section| section.len().div_ceil(4))
+        .sum();
+        if compact_history(
+            history,
+            vlm,
+            history_budget,
+            compaction_non_history_tokens,
+            cache_epoch,
+        )
+        .await
+        {
+            cache_epoch = cache_epoch.saturating_add(1);
+        }
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -1485,7 +1613,7 @@ pub async fn run_turn(
                                 VlmStreamItem::ToolCall(tc) => tool_calls.push(tc),
                                 VlmStreamItem::Usage(usage) => info!(
                                     "[pilot/prompt] {}",
-                                    usage_totals.record(round, &usage)
+                                    usage_totals.record(round, cache_epoch, &usage)
                                 ),
                                 VlmStreamItem::Finish => {}
                             }
@@ -3069,7 +3197,7 @@ Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION,
+        CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, HistoryBudget,
         MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptSection, RTDL_DO, RTDL_PARALLEL,
         RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, UsageTotals,
         append_request_context, append_steer, append_task_state_record, apply_task_update,
@@ -3096,6 +3224,18 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn history_budget_waits_for_the_declared_context_limit() {
+        let budget = HistoryBudget::new(Some(32_768), "deployment_config", 4_096, 2_048);
+        let history = vec![Message::user(&"x".repeat(24_000))];
+        assert!(!budget.must_compact(&history, 2_000));
+        assert!(budget.must_compact(&history, 21_000));
+        assert_eq!(budget.recent_tail_tokens(), 4_096);
+
+        let unknown = HistoryBudget::new(None, "unavailable", 4_096, 2_048);
+        assert!(!unknown.must_compact(&history, 100_000));
+    }
+
+    #[test]
     fn vlm_idle_timeout_is_bounded_and_has_a_responsive_default() {
         assert_eq!(configured_vlm_idle_timeout(None), Duration::from_secs(30));
         assert_eq!(
@@ -3117,6 +3257,7 @@ mod tests {
         let mut totals = UsageTotals::default();
         let first = totals.record(
             0,
+            0,
             &VlmUsage {
                 prompt_tokens: 1_200,
                 completion_tokens: 80,
@@ -3128,9 +3269,11 @@ mod tests {
         assert_eq!(first["cached_input_tokens"], 900);
         assert_eq!(first["uncached_input_tokens"], 300);
         assert_eq!(first["cache_hit"], true);
+        assert_eq!(first["cache_epoch"], 0);
         assert_eq!(first["cumulative"]["cache_hit_requests"], 1);
 
         let second = totals.record(
+            1,
             1,
             &VlmUsage {
                 prompt_tokens: 800,
@@ -4247,7 +4390,7 @@ mod tests {
         }];
         let messages = assemble_planning_messages(1, true, &stable, &history, &live);
         let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+        assert_eq!(roles, vec!["developer", "user", "assistant", "user"]);
         assert_eq!(messages[0].content.as_deref(), Some("standing rules"));
         assert_eq!(messages[3].content.as_deref(), Some("plan 7 is running"));
     }
