@@ -41,7 +41,7 @@ pub struct BuiltinModelProfile {
 /// It contains every catalogue entry that declared a non-zero context length
 /// (135 at the time of capture), not just a short list of familiar models.
 /// Runtime provider metadata remains authoritative because gateways can change.
-const OFOX_CONTEXT_WINDOWS_20260923: &[(&str, usize)] = &[
+const FALLBACK_MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
     ("anthropic/claude-fable-5", 1_000_000),
     ("anthropic/claude-fable-5.1", 1_000_000),
     ("anthropic/claude-haiku-4.5", 200_000),
@@ -194,14 +194,14 @@ fn canonical_model_name(model: &str) -> String {
 /// terminal name appears once, so a namespace collision never selects a model
 /// silently. The live `/models` response is checked before this fallback.
 pub fn builtin_model_profile(model: &str) -> Option<BuiltinModelProfile> {
-    let exact = OFOX_CONTEXT_WINDOWS_20260923
+    let exact = FALLBACK_MODEL_CONTEXT_WINDOWS
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(model.trim()));
     let matched = match exact {
         Some(entry) => entry,
         None => {
             let canonical = canonical_model_name(model);
-            let mut entries = OFOX_CONTEXT_WINDOWS_20260923
+            let mut entries = FALLBACK_MODEL_CONTEXT_WINDOWS
                 .iter()
                 .filter(|(id, _)| canonical_model_name(id) == canonical);
             let first = entries.next()?;
