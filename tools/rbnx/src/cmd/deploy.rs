@@ -450,6 +450,26 @@ soma_endpoint: 127.0.0.1:50091
         );
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn pilot_context_preflight_requires_manual_unknown_and_marks_manual_override() {
+        let known = vec![
+            "--vlm-upstream".into(),
+            "https://api.example/v1".into(),
+            "--vlm-api-key".into(),
+            "test-key".into(),
+            "--vlm-model".into(),
+            "gpt-4o".into(),
+        ];
+        assert!(require_system_args("pilot", &known).is_ok());
+
+        let mut unknown = known.clone();
+        unknown[5] = "private-local-planner".into();
+        assert!(require_system_args("pilot", &unknown).is_err());
+        unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
+        assert!(require_system_args("pilot", &unknown).is_ok());
+        assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -2055,15 +2075,59 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
             _ => missing.push(label),
         }
     }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !missing.is_empty() {
+        return Err(format!(
             "missing required pilot config: {}. Set in manifest under \
              system: pilot: vlm: {{...}} or via env (source your .zshrc / \
              inline-prepend VLM_BASE_URL=… VLM_API_KEY=… VLM_MODEL=…)",
             missing.join(", "),
-        ))
+        ));
+    }
+
+    let model = flag_value(args, "--vlm-model").unwrap_or_default();
+    if flag_value(args, "--vlm-context-window-tokens")
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|tokens| tokens > 0)
+    {
+        return Ok(());
+    }
+    if builtin_pilot_context_window(model).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "Pilot model '{model}' has no checked built-in context profile and rbnx \
+         boot cannot safely infer one from an OpenAI-compatible endpoint. Set \
+         system.pilot.vlm.context_window_tokens from the provider model card or \
+         inference-server limit before booting."
+    ))
+}
+
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
+/// Mirrors Pilot's intentionally exact direct-provider registry. This small
+/// boot-time copy prevents rbnx from starting a known-unsafe unknown model;
+/// Pilot remains the runtime authority and logs the matching rule again.
+fn builtin_pilot_context_window(model: &str) -> Option<(&'static str, usize)> {
+    match model {
+        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => {
+            Some(("openai:gpt-5.6 exact aliases", 1_050_000))
+        }
+        "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => {
+            Some(("openai:gpt-4.1 exact aliases", 1_000_000))
+        }
+        "gpt-4o" | "gpt-4o-mini" => Some(("openai:gpt-4o exact aliases", 128_000)),
+        "gemini-2.5-pro" | "gemini-2.5-flash" => {
+            Some(("google:gemini-2.5 exact aliases", 1_048_576))
+        }
+        "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929" => {
+            Some(("anthropic:claude-sonnet-4.5 exact aliases", 200_000))
+        }
+        _ => None,
     }
 }
 
@@ -2071,6 +2135,7 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
     let mut listen: Option<&str> = None;
     let mut vlm_upstream: Option<&str> = None;
     let mut vlm_model: Option<&str> = None;
+    let mut context_window_tokens: Option<&str> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -2086,6 +2151,10 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             }
             ("--vlm-model", Some(v)) => {
                 vlm_model = Some(v);
+                i += 2;
+            }
+            ("--vlm-context-window-tokens", Some(v)) => {
+                context_window_tokens = Some(v);
                 i += 2;
             }
             _ => {
@@ -2107,7 +2176,14 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             })
             .unwrap_or("?");
         let model = vlm_model.unwrap_or("?");
-        format!("{port}  vlm={model}@{host}")
+        let capacity = if let Some(tokens) = context_window_tokens {
+            format!("context={tokens} (manual)")
+        } else if let Some((rule, tokens)) = builtin_pilot_context_window(model) {
+            format!("context={tokens} (auto: {rule}; verify/override if proxied)")
+        } else {
+            "context=missing (manual declaration required)".to_string()
+        };
+        format!("{port}  vlm={model}@{host}  {capacity}")
     } else {
         port
     }
@@ -2194,6 +2270,13 @@ fn system_cli_args(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     };
+    let nested_tokens = |outer: &str, inner: &str| -> Option<String> {
+        map.and_then(|m| m.get(serde_yaml::Value::String(outer.into())))
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| m.get(serde_yaml::Value::String(inner.into())))
+            .and_then(|v| v.as_u64())
+            .map(|tokens| tokens.to_string())
+    };
     let push_pair = |out: &mut Vec<String>, flag: &str, val: Option<String>| {
         if let Some(v) = val {
             out.push(flag.into());
@@ -2235,6 +2318,11 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
             push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
+            push_pair(
+                &mut out,
+                "--vlm-context-window-tokens",
+                nested_tokens("vlm", "context_window_tokens"),
+            );
         }
         "liaison" => {
             push_pair(&mut out, "--listen", s("listen"));

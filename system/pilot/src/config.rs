@@ -25,6 +25,54 @@ pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50071";
 pub const DEFAULT_VLM_FORMAT: &str = "openai";
 
+/// One direct-provider model-family capacity built into Pilot.
+///
+/// This is a convenience fallback, not evidence about an arbitrary
+/// OpenAI-compatible proxy. Callers must inspect the `builtin_registry` log
+/// source and override it when their deployment has a smaller model, a server
+/// cap, or an alias with different routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinModelProfile {
+    pub matcher: &'static str,
+    pub context_window_tokens: usize,
+}
+
+/// Return a published direct-provider context capacity for a known exact model
+/// name. Keep this list exact rather than using a broad family prefix: aliases
+/// at a proxy are deployment-specific and must be set manually.
+pub fn builtin_model_profile(model: &str) -> Option<BuiltinModelProfile> {
+    let profile = match model {
+        // OpenAI frontier models (1.05M total context).
+        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => BuiltinModelProfile {
+            matcher: "openai:gpt-5.6 exact aliases",
+            context_window_tokens: 1_050_000,
+        },
+        // OpenAI GPT-4.1 family (1M context).
+        "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => BuiltinModelProfile {
+            matcher: "openai:gpt-4.1 exact aliases",
+            context_window_tokens: 1_000_000,
+        },
+        // OpenAI GPT-4o family (128k context).
+        "gpt-4o" | "gpt-4o-mini" => BuiltinModelProfile {
+            matcher: "openai:gpt-4o exact aliases",
+            context_window_tokens: 128_000,
+        },
+        // Gemini 2.5 published input limit. We conservatively use it as the
+        // usable conversation capacity rather than inventing a larger total.
+        "gemini-2.5-pro" | "gemini-2.5-flash" => BuiltinModelProfile {
+            matcher: "google:gemini-2.5 exact aliases",
+            context_window_tokens: 1_048_576,
+        },
+        // Claude Sonnet 4.5 direct API / Bedrock published context.
+        "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929" => BuiltinModelProfile {
+            matcher: "anthropic:claude-sonnet-4.5 exact aliases",
+            context_window_tokens: 200_000,
+        },
+        _ => return None,
+    };
+    Some(profile)
+}
+
 /// Fully-resolved settings the pilot binary runs against.
 #[derive(Debug, Clone)]
 pub struct PilotConfig {
@@ -39,9 +87,9 @@ pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
-    /// Context limit declared by the deployment. This wins over a best-effort
-    /// OpenAI-compatible model-metadata probe because a proxy may expose a
-    /// logical model name while routing to a smaller physical context window.
+    /// Context limit declared by the deployment. This wins over provider
+    /// metadata and the built-in registry because a proxy may expose a logical
+    /// model name while routing to a smaller physical context window.
     pub context_window_tokens: Option<usize>,
     /// Capacity reserved for the next planner completion when deciding whether
     /// the conversation can continue without compaction.
@@ -85,9 +133,8 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VLM_MODEL")]
     pub vlm_model: Option<String>,
 
-    /// Deployment-specific total context window. When omitted Pilot probes
-    /// OpenAI-compatible model metadata; if unavailable, it disables automatic
-    /// history compaction rather than guessing a limit.
+    /// Deployment-specific total context window. Required when Pilot cannot
+    /// obtain a capacity from provider metadata or the built-in model registry.
     #[arg(long, env = "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS")]
     pub vlm_context_window_tokens: Option<usize>,
 
@@ -262,4 +309,18 @@ fn missing_field(yaml_path: &str, env_var: &str, flag: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "missing required field '{yaml_path}': set it in --config YAML, env {env_var}, or pass {flag}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::builtin_model_profile;
+
+    #[test]
+    fn builtins_are_exact_names_not_proxy_prefixes() {
+        assert_eq!(
+            builtin_model_profile("gpt-5.6-terra").map(|profile| profile.context_window_tokens),
+            Some(1_050_000)
+        );
+        assert!(builtin_model_profile("gpt-5.6-terra-via-small-proxy").is_none());
+    }
 }

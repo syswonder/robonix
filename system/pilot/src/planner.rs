@@ -35,7 +35,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tonic::Request;
 use tonic::transport::Channel;
-use uuid::Uuid;
 
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
@@ -1050,9 +1049,6 @@ pub async fn run_turn(
     history_budget: &HistoryBudget,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
-    // Keep the provider's prefix-cache routing stable across planning rounds
-    // without exposing the user-visible or harness-visible session identifier.
-    let prompt_cache_key = Uuid::new_v4().simple().to_string();
 
     macro_rules! return_interrupted {
         ($forest:expr) => {{
@@ -1556,7 +1552,7 @@ pub async fn run_turn(
                     vlm.chat_stream(
                         &messages,
                         &[],
-                        Some(&prompt_cache_key),
+                        Some(vlm.prompt_cache_key()),
                         ReplyShape::RtdlEnvelope,
                     ),
                 )

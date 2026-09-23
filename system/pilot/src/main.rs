@@ -206,6 +206,48 @@ async fn main() -> Result<()> {
 
     let cfg = PilotConfig::resolve(parsed)?;
 
+    // Resolve capacity before registering an Atlas capability. An unknown
+    // window is unsafe for a long-lived planner: it would otherwise accept a
+    // task and later hit a provider limit with no correct compaction point.
+    let vlm = vlm::VlmClient::new(&cfg.vlm);
+    let context_window = vlm.context_window_info().await;
+    let history_budget = planner::HistoryBudget::new(
+        context_window.tokens,
+        context_window.source,
+        cfg.vlm.reserved_output_tokens,
+        cfg.vlm.context_safety_tokens,
+    );
+    info!(
+        "[pilot/context_budget] {}",
+        serde_json::json!({
+            "model": cfg.vlm.model,
+            "context_window_tokens": history_budget.context_window_tokens,
+            "context_window_source": history_budget.context_window_source,
+            "registry_match": context_window.registry_match,
+            "reserved_output_tokens": history_budget.reserved_output_tokens,
+            "safety_tokens": history_budget.safety_tokens,
+            "automatic_compaction_enabled": history_budget.context_window_tokens.is_some(),
+        })
+    );
+    if context_window.source == "builtin_registry" {
+        warn!(
+            "[pilot/context_budget] auto-matched model '{}' with '{}'. Verify this direct-provider capacity against the actual deployment; set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) for an alias, proxy, quantized model, or server cap.",
+            cfg.vlm.model,
+            context_window
+                .registry_match
+                .unwrap_or("unknown registry rule")
+        );
+    }
+    if history_budget.context_window_tokens.is_none() {
+        anyhow::bail!(
+            "[pilot/context_budget] no context window for model '{}'. Set \\
+             ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) \\
+             from the model card or inference-server configuration; Pilot refuses \\
+             to start without a safe compaction budget.",
+            cfg.vlm.model
+        );
+    }
+
     info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
@@ -279,31 +321,6 @@ async fn main() -> Result<()> {
         )
         .await?;
     info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
-
-    let vlm = vlm::VlmClient::new(&cfg.vlm);
-    let context_window = vlm.context_window_info().await;
-    let history_budget = planner::HistoryBudget::new(
-        context_window.tokens,
-        context_window.source,
-        cfg.vlm.reserved_output_tokens,
-        cfg.vlm.context_safety_tokens,
-    );
-    info!(
-        "[pilot/context_budget] {}",
-        serde_json::json!({
-            "model": cfg.vlm.model,
-            "context_window_tokens": history_budget.context_window_tokens,
-            "context_window_source": history_budget.context_window_source,
-            "reserved_output_tokens": history_budget.reserved_output_tokens,
-            "safety_tokens": history_budget.safety_tokens,
-            "automatic_compaction_enabled": history_budget.context_window_tokens.is_some(),
-        })
-    );
-    if history_budget.context_window_tokens.is_none() {
-        warn!(
-            "[pilot/context_budget] provider did not expose a context window; automatic history compaction is disabled. Set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS in the deployment manifest."
-        );
-    }
 
     let svc = PilotServiceImpl::new(
         atlas.clone(),

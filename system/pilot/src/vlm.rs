@@ -3,7 +3,7 @@
 //
 // Embedded OpenAI-compatible chat-completions client.
 // TODO: maybe we will support Google/Anthropic/etc. in the future :D
-use crate::config::VlmConfig;
+use crate::config::{VlmConfig, builtin_model_profile};
 use anyhow::{Context, Result, bail};
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
@@ -22,6 +22,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::time::Duration;
+use uuid::Uuid;
 
 const MAX_OPEN_RETRIES: usize = 3;
 
@@ -264,16 +265,14 @@ pub struct VlmUsage {
 pub struct ContextWindowInfo {
     pub tokens: Option<usize>,
     pub source: &'static str,
+    /// Exact built-in registry rule, when `source == "builtin_registry"`.
+    /// A deployment should review this because a proxy can reuse a public
+    /// model name while applying a smaller server-side limit.
+    pub registry_match: Option<&'static str>,
 }
 
 fn context_window_from_metadata(value: &Value) -> Option<usize> {
-    let candidates = [
-        Some(value),
-        value.get("data"),
-        value.get("model"),
-        value.get("capabilities"),
-    ];
-    candidates.into_iter().flatten().find_map(|candidate| {
+    let tokens_at = |candidate: &Value| {
         [
             "context_window",
             "context_length",
@@ -284,7 +283,29 @@ fn context_window_from_metadata(value: &Value) -> Option<usize> {
         .find_map(|field| candidate.get(*field).and_then(Value::as_u64))
         .and_then(|tokens| usize::try_from(tokens).ok())
         .filter(|tokens| *tokens > 0)
+    };
+    tokens_at(value).or_else(|| {
+        ["data", "model", "capabilities"]
+            .iter()
+            .filter_map(|field| value.get(*field))
+            .find_map(tokens_at)
     })
+}
+
+/// Read an optional capacity from a non-standard `/models` list extension.
+/// The OpenAI-compatible standard itself only guarantees identity metadata;
+/// providers that add a limit do so per model record.  Match the selected id
+/// exactly rather than trusting the first model the endpoint returns.
+fn context_window_from_model_list(value: &Value, model: &str) -> Option<usize> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(model))
+        })
+        .and_then(context_window_from_metadata)
 }
 
 /// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
@@ -297,6 +318,10 @@ pub struct VlmClient {
     api_key: String,
     model: String,
     configured_context_window_tokens: Option<usize>,
+    /// One routing key for the lifetime of this Pilot process. A per-task key
+    /// would defeat reuse between independent tasks with the same standing
+    /// prompt. It is opaque and is not derived from a user/session id.
+    prompt_cache_key: String,
 }
 
 /// What the caller wants back from one completion.
@@ -418,50 +443,92 @@ impl VlmClient {
             api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
             configured_context_window_tokens: cfg.context_window_tokens,
+            prompt_cache_key: Uuid::new_v4().simple().to_string(),
         }
+    }
+
+    /// Stable cache-routing key for this running Pilot deployment. It spans
+    /// task/session boundaries so unchanged prefixes keep a consistent route
+    /// until a restart or provider cache expiry.
+    pub fn prompt_cache_key(&self) -> &str {
+        &self.prompt_cache_key
     }
 
     /// Resolve the usable context-window limit at process start.
     ///
-    /// A deployment setting is authoritative. Otherwise, probe the optional
-    /// OpenAI-compatible `GET /models/{id}` shape. Unknown means exactly that:
-    /// Pilot leaves automatic compaction disabled and logs the condition rather
-    /// than applying a fictional generic-model limit.
+    /// A deployment setting is authoritative. Then prefer provider metadata,
+    /// then an extension on the provider's model list, then the checked
+    /// direct-provider registry. Unknown is returned as unknown; startup makes
+    /// it a configuration error rather than compacting against a guess.
     pub async fn context_window_info(&self) -> ContextWindowInfo {
         if let Some(tokens) = self.configured_context_window_tokens {
             return ContextWindowInfo {
                 tokens: Some(tokens),
                 source: "deployment_config",
+                registry_match: None,
             };
         }
 
-        let Ok(mut url) = reqwest::Url::parse(&format!("{}/models", self.api_base)) else {
+        let profile = builtin_model_profile(&self.model);
+        let Ok(list_url) = reqwest::Url::parse(&format!("{}/models", self.api_base)) else {
             return ContextWindowInfo {
-                tokens: None,
-                source: "unavailable",
+                tokens: profile.map(|profile| profile.context_window_tokens),
+                source: if profile.is_some() {
+                    "builtin_registry"
+                } else {
+                    "unavailable"
+                },
+                registry_match: profile.map(|profile| profile.matcher),
             };
         };
-        let Ok(mut segments) = url.path_segments_mut() else {
+        let mut detail_url = list_url.clone();
+        let detail_url_ok = match detail_url.path_segments_mut() {
+            Ok(mut segments) => {
+                segments.push(&self.model);
+                true
+            }
+            Err(_) => false,
+        };
+        if detail_url_ok
+            && let Some(tokens) = self
+                .get_model_metadata(detail_url)
+                .await
+                .as_ref()
+                .and_then(context_window_from_metadata)
+        {
             return ContextWindowInfo {
-                tokens: None,
-                source: "unavailable",
+                tokens: Some(tokens),
+                source: "provider_model_metadata",
+                registry_match: None,
             };
-        };
-        segments.push(&self.model);
-        drop(segments);
-
-        let metadata = match self.inner.get(url).bearer_auth(&self.api_key).send().await {
-            Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
-            Ok(_) | Err(_) => None,
-        };
-        let tokens = metadata.as_ref().and_then(context_window_from_metadata);
+        }
+        if let Some(tokens) = self
+            .get_model_metadata(list_url)
+            .await
+            .as_ref()
+            .and_then(|value| context_window_from_model_list(value, &self.model))
+        {
+            return ContextWindowInfo {
+                tokens: Some(tokens),
+                source: "provider_model_list_metadata",
+                registry_match: None,
+            };
+        }
         ContextWindowInfo {
-            tokens,
-            source: if tokens.is_some() {
-                "provider_model_metadata"
+            tokens: profile.map(|profile| profile.context_window_tokens),
+            source: if profile.is_some() {
+                "builtin_registry"
             } else {
                 "unavailable"
             },
+            registry_match: profile.map(|profile| profile.matcher),
+        }
+    }
+
+    async fn get_model_metadata(&self, url: reqwest::Url) -> Option<Value> {
+        match self.inner.get(url).bearer_auth(&self.api_key).send().await {
+            Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+            Ok(_) | Err(_) => None,
         }
     }
 
@@ -673,8 +740,9 @@ impl VlmClient {
 mod tests {
     use super::{
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
-        context_window_from_metadata, downgrade_response_format, open_retry_delay, parse_usage,
-        process_stream_line, rejects_optional_request_fields, response_format_for,
+        context_window_from_metadata, context_window_from_model_list, downgrade_response_format,
+        open_retry_delay, parse_usage, process_stream_line, rejects_optional_request_fields,
+        response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -694,6 +762,19 @@ mod tests {
             context_window_from_metadata(&json!({"object": "list", "data": []})),
             None
         );
+    }
+
+    #[test]
+    fn reads_only_the_selected_model_from_a_provider_model_list() {
+        let metadata = json!({"data": [
+            {"id": "small", "context_window": 8_192},
+            {"id": "planner", "capabilities": {"context_length": 131_072}}
+        ]});
+        assert_eq!(
+            context_window_from_model_list(&metadata, "planner"),
+            Some(131_072)
+        );
+        assert_eq!(context_window_from_model_list(&metadata, "absent"), None);
     }
 
     #[test]
