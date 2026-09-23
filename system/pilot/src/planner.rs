@@ -14,6 +14,9 @@ use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode, RtdlNodeState,
     SessionStatusEvent, Task, TaskStateEvent,
 };
+use crate::prompt::{
+    PromptSection, UsageTotals, assemble_planning_messages, render_context_sections,
+};
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
 use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
@@ -62,11 +65,6 @@ struct CapabilityPromptCache {
     initialized: bool,
 }
 
-struct PromptSection<'a> {
-    name: &'static str,
-    content: &'a str,
-}
-
 impl CapabilityPromptCache {
     /// Reuse the rendered catalog while Atlas reports the same provider,
     /// contract, description, and input-schema data. Discovery still runs on
@@ -83,123 +81,21 @@ impl CapabilityPromptCache {
     }
 }
 
-fn estimated_text_tokens(bytes: usize) -> usize {
-    bytes.div_ceil(4)
-}
-
-/// Assemble one request while emitting a bounded, machine-readable breakdown
-/// of every prompt section. Section token counts are explicit four-byte
-/// estimates; the provider-reported total is logged separately when available.
-/// Build one planning request.
-///
-/// The split between `sections` and `live_sections` is what makes the request
-/// cacheable. Providers cache a prompt by its prefix, so everything before the
-/// first byte that changed this round is all that can be reused. With live
-/// state inside the system message the prefix ends at the first such block,
-/// and the accumulated history behind it is re-read at full price every round
-/// however long it grows. `sections` therefore holds only what is stable for
-/// the turn, and `live_sections` goes after the history, where the growing
-/// prefix is stable by construction.
-fn assemble_planning_messages(
-    round: u32,
-    capability_cache_hit: bool,
-    sections: &[PromptSection<'_>],
-    live_sections: &[PromptSection<'_>],
-    history_messages: &[Message],
-    observation: Option<Message>,
+/// Persist exactly the user-side suffix sent for a completed planning request.
+/// This makes the next request an extension of the actual prior prompt:
+/// `system -> history -> runtime context -> assistant -> new runtime context`.
+fn append_request_context(
+    history: &mut Vec<Message>,
+    runtime_context: &str,
     correction: Option<&str>,
-) -> Vec<Message> {
-    let system_bytes = sections.iter().map(|section| section.content.len()).sum();
-    let mut system = String::with_capacity(system_bytes);
-    for section in sections {
-        system.push_str(section.content);
-    }
-    let live_bytes: usize = live_sections
-        .iter()
-        .map(|section| section.content.len())
-        .sum();
-    let mut live = String::with_capacity(live_bytes);
-    for section in live_sections {
-        live.push_str(section.content);
-    }
-    let sanitized_history = history::sanitize_for_vlm(history_messages);
-    let history_bytes: usize = sanitized_history
-        .iter()
-        .map(|message| message.content.as_deref().map_or(0, str::len))
-        .sum();
-    let correction_bytes = correction.map_or(0, str::len);
-    let prompt_bytes = system.len() + history_bytes + live.len() + correction_bytes;
-    let mut section_metrics = sections
-        .iter()
-        .chain(live_sections.iter())
-        .map(|section| {
-            serde_json::json!({
-                "name": section.name,
-                "bytes": section.content.len(),
-                "estimated_tokens": estimated_text_tokens(section.content.len()),
-            })
-        })
-        .collect::<Vec<_>>();
-    section_metrics.push(serde_json::json!({
-        "name": "history",
-        "bytes": history_bytes,
-        "estimated_tokens": estimated_text_tokens(history_bytes),
-    }));
-    section_metrics.push(serde_json::json!({
-        "name": "correction",
-        "bytes": correction_bytes,
-        "estimated_tokens": estimated_text_tokens(correction_bytes),
-    }));
-    info!(
-        "[pilot/prompt] {}",
-        serde_json::json!({
-            "round": round,
-            "prompt_text_bytes": prompt_bytes,
-            "estimated_input_tokens": estimated_text_tokens(prompt_bytes),
-            "history_bytes": history_bytes,
-            "correction_bytes": correction_bytes,
-            "capability_catalog_render_cache_hit": capability_cache_hit,
-            "cacheable_prefix_bytes": system.len(),
-            "sections": section_metrics,
-        })
-    );
-
-    let mut messages = Vec::with_capacity(sanitized_history.len() + 4);
-    messages.push(Message::system(&system));
-    messages.extend(sanitized_history);
-    if !live.is_empty() {
-        messages.push(Message::user(&live));
-    }
-    // After the history, so the current view is the most recent image the
-    // model sees, and before any correction, which is about the reply rather
-    // than about the world.
-    if let Some(observation) = observation {
-        messages.push(observation);
+) {
+    if !runtime_context.is_empty() {
+        history.push(Message::user(runtime_context));
     }
     if let Some(correction) = correction {
-        messages.push(Message::user(correction));
+        history.push(Message::user(correction));
     }
-    close_trailing_assistant(&mut messages);
-    messages
-}
-
-/// The narration a planning round records lands in the history as an
-/// `assistant` message, so a round that narrates without calling a tool leaves
-/// the next request ending on that message. Some providers read a trailing
-/// assistant message as a prefill to continue and reject it outright, which
-/// aborts the task rather than degrading it. Close the turn with an explicit
-/// instruction to continue: this keeps the request valid everywhere and says
-/// what the next round is actually for.
-fn close_trailing_assistant(messages: &mut Vec<Message>) {
-    let trailing_assistant = messages
-        .last()
-        .is_some_and(|message| message.role == "assistant");
-    if trailing_assistant {
-        messages.push(Message::user(
-            "Continue from the state above. Take the next action, \
-             or give your final answer if the task is complete.",
-        ));
-    }
+    history::trim(history, MAX_HISTORY);
 }
 
 fn max_tool_rounds() -> usize {
@@ -247,15 +143,22 @@ impl TaskState {
     fn is_done(&self) -> bool {
         self.status == "done"
     }
+}
 
-    /// Render the latest interaction separately from the in-flight forest.
-    fn prompt_block(&self) -> String {
-        format!(
-            "\n\n## Current user interaction\n- instruction: {}\n\
-             - success_criterion: {}\n- status: {}\n",
-            self.goal, self.success_criterion, self.status
-        )
-    }
+/// Task and steer messages already enter conversation history as user turns.
+/// When the model changes the tracked success criterion or lifecycle state,
+/// retain that authoritative update in the same history rather than duplicating
+/// a mutable task block in the system prompt.
+fn append_task_state_record(history: &mut Vec<Message>, state: &TaskState) {
+    let record = serde_json::json!({
+        "goal": state.goal,
+        "success_criterion": state.success_criterion,
+        "status": state.status,
+    });
+    history.push(Message::user(&format!(
+        "Pilot task-state update (authoritative state, not a new user instruction): {record}"
+    )));
+    history::trim(history, MAX_HISTORY);
 }
 
 /// `context_json`: `{"session_end": true}` (or `robonix_session_end`) — run memory compaction only, no VLM turn.
@@ -416,7 +319,7 @@ async fn drive_plan(
                         } else if ns.state != RtdlNodeStateEnum::Succeeded as u32 {
                             any_failed = true;
                         }
-                        results.push(ns);
+                        upsert_terminal_result(&mut results, ns);
                     }
                 }
             }
@@ -438,6 +341,18 @@ async fn drive_plan(
             canceled,
         })
         .await;
+}
+
+/// Keep one latest terminal state per RTDL node so verification can correct it.
+fn upsert_terminal_result(results: &mut Vec<RtdlNodeState>, state: RtdlNodeState) {
+    if let Some(existing) = results
+        .iter_mut()
+        .find(|existing| existing.node_index == state.node_index)
+    {
+        *existing = state;
+    } else {
+        results.push(state);
+    }
 }
 
 /// Cancel every real task tree owned by this turn before reporting the Pilot
@@ -802,7 +717,9 @@ fn append_steer(
         return false;
     }
     info!("[pilot/steer] mid-task input: {text}");
-    history.push(Message::user(text));
+    history.push(Message::user(&format!(
+        "User steer (authoritative): {text}"
+    )));
     *current_task = Some(TaskState {
         goal: text.to_string(),
         success_criterion: DEFAULT_SUCCESS_CRITERION.to_string(),
@@ -884,13 +801,15 @@ const HISTORY_KEEP_RECENT: usize = 12;
 /// Claude-Code-style rolling compaction. When the running history grows past
 /// `HISTORY_COMPACT_TRIGGER_CHARS`, summarize everything except the most recent
 /// `HISTORY_KEEP_RECENT` messages into a single summary note (preserving goal,
-/// decisions, observations, and current state) and keep the recent turns
-/// verbatim. This shrinks the per-round prompt for the rest of the turn instead
-/// of re-shipping the full transcript every round.
+/// decisions, observations, and current state), retain authoritative task and
+/// executor records verbatim, and keep the recent turns verbatim. The summary
+/// shrinks disposable narration; it is never the only copy of a user task or
+/// execution outcome.
 ///
-/// Best-effort: any VLM error leaves history untouched (the `MAX_HISTORY` trim
-/// still bounds it). Self-limiting: after compaction the total drops below the
-/// trigger, so it won't fire again until history regrows.
+/// Best-effort: any VLM error leaves history untouched. Ordinary narration is
+/// still bounded by `MAX_HISTORY`, while authoritative records remain present.
+/// Self-limiting: after compaction the total normally drops below the trigger,
+/// so it won't fire again until history regrows.
 async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
     let total: usize = history
         .iter()
@@ -917,11 +836,13 @@ async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
     };
 
     let before = history.len();
-    let mut compacted = Vec::with_capacity(HISTORY_KEEP_RECENT + 1);
+    let authoritative = history::authoritative_records(&history[..split]);
+    let mut compacted = Vec::with_capacity(HISTORY_KEEP_RECENT + 1 + authoritative.len());
     compacted.push(Message::user(&format!(
         "[summary of earlier conversation — treat as established context]\n{}",
         summary.trim()
     )));
+    compacted.extend(authoritative);
     compacted.extend_from_slice(&history[split..]);
     *history = compacted;
     info!(
@@ -946,8 +867,7 @@ async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<Strin
     Some(text)
 }
 
-/// Feed one finished tree's terminal results into the LLM history, mirroring
-/// the per-round feedback the blocking loop used to produce.
+/// Feed finalized leaf results into LLM history.
 fn feed_results_into_history(
     history: &mut Vec<Message>,
     plan_id: &str,
@@ -959,7 +879,7 @@ fn feed_results_into_history(
          Attribute the following results only to this tree. A failure here blocks dependent \
          steps in this tree, but does not cancel or invalidate other in-flight trees."
     )));
-    let mut deferred_followups: Vec<Message> = Vec::new();
+    let mut deferred_followups = Vec::new();
     for r in results {
         let mut bounded = r.clone();
         if !history::is_image_output(&bounded.output) {
@@ -1080,19 +1000,10 @@ pub async fn run_turn(
         .await
         .map_err(|e| anyhow::anyhow!("atlas contract discovery failed: {e}"))?;
 
-    // Build the stable system-prompt sections once per turn. Both queries run
-    // first because the standing prompt covers only the capability families
-    // this deployment registered AND lets the planning model call: a family the
-    // model may not reach is one the prompt has no reason to describe.
-    let standing_prompt = build_system_prompt(
-        load_agent_soul().as_deref(),
-        PromptScope::from_contract_ids(
-            initial_caps
-                .iter()
-                .map(|(_, cap)| cap.contract_id.as_str())
-                .filter(|contract_id| !non_llm_callable_contract_ids.contains(*contract_id)),
-        ),
-    );
+    // Build deployment-independent system instructions once per turn.
+    // Provider-specific semantics belong to the discovered capability catalog
+    // and lazily loaded provider documentation, not Pilot's standing prefix.
+    let standing_prompt = build_system_prompt(load_agent_soul().as_deref());
     // Pilot binds to the canonical contract_id, not the LLM-facing tool
     // name: the latter is just the contract_id leaf and a provider could
     // rename it freely. contract_id is the stable identity.
@@ -1177,8 +1088,13 @@ pub async fn run_turn(
         ""
     };
 
-    // 2. Add user message to history
-    history.push(Message::user(&task.text));
+    // 2. Preserve the user goal verbatim in the ordered history. The label is
+    // also an explicit retention anchor: bounded working history may discard
+    // stale narration, but never this task record.
+    history.push(Message::user(&format!(
+        "User task (authoritative): {}",
+        task.text
+    )));
     history::trim(history, MAX_HISTORY);
     start_or_resume_task(standing_task, &task.text);
     if let Some(state) = standing_task.as_ref() {
@@ -1215,6 +1131,7 @@ pub async fn run_turn(
     let forest_revision = Arc::new(AtomicU64::new(0));
     let mut should_plan = true;
     let mut capability_prompt_cache = CapabilityPromptCache::default();
+    let mut usage_totals = UsageTotals::default();
     // Last user-facing narration; surfaced as FinalText when the turn ends.
     let mut last_content = String::new();
 
@@ -1288,15 +1205,10 @@ pub async fn run_turn(
                             // this too, but be explicit so the live view always
                             // correlates with the Plan already sent).
                             ns.plan_id = plan_id.clone();
-                            // Feed every node's result into context the moment it
-                            // reaches a terminal state, using names rather than
-                            // numeric RTDL state codes in logs. Successful nodes wait
-                            // for PlanDone before replanning; non-success terminal
-                            // nodes replan immediately below. The tree-level feed in
-                            // PlanDone is dropped to avoid double-feeding — every
-                            // leaf result already arrives here.
-                            const TERMINAL: [u32; 4] = [2, 3, 4, 5];
-                            if TERMINAL.contains(&ns.state)
+                            // VERIFYING is deliberately non-terminal. Feed only a
+                            // leaf's post-verification final state so history never
+                            // contains an optimistic result that must be corrected.
+                            if is_terminal_executor_state(ns.state)
                                 && let Some(r) = ns.leaf_result.as_ref()
                             {
                                 let description = forest
@@ -1349,8 +1261,7 @@ pub async fn run_turn(
                                 )));
                                 history::trim(history, MAX_HISTORY);
                             }
-                            // Leaf results were already fed per-node (see above);
-                            // only surface the batch to the chat UI here.
+                            // Leaf results were already upserted per node event.
                             log_plan_complete(&plan_id, &results, any_failed);
                             let batch = BatchResult {
                                 plan_id: plan_id.clone(),
@@ -1417,10 +1328,6 @@ pub async fn run_turn(
         let (capability_prompt, capability_cache_hit) =
             capability_prompt_cache.render(&display_caps);
 
-        let task_block = standing_task
-            .as_ref()
-            .map(TaskState::prompt_block)
-            .unwrap_or_default();
         let forest_block = build_forest_block(&forest, &cancel_requested);
         let executor_active_block = fetch_executor_active_block(executor).await;
         let _ = tx
@@ -1439,12 +1346,30 @@ pub async fn run_turn(
         // recovery plan) instead of crashing the whole turn. The loop yields a
         // valid (narration, tree label, plan, id) tuple for the forest dispatch.
         let mut correction: Option<String> = None;
+        let mut completed_request_context: String;
         let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_update, recovered) = loop {
+            // Keep role-defining RTDL rules and the current callable catalog
+            // in the system message, before all user/history content. Body,
+            // task, and runtime context go after history because they are not
+            // system instructions and may change from round to round.
             let sections = [
                 PromptSection {
                     name: "standing_system",
                     content: &standing_prompt,
                 },
+                PromptSection {
+                    name: "rtdl_protocol",
+                    content: protocol_prompt,
+                },
+                PromptSection {
+                    name: "capability_catalog",
+                    content: capability_prompt,
+                },
+            ];
+            // Every section below is current context, not an instruction that
+            // may redefine the standing system role. Current user task and
+            // steering already live in the conversation history.
+            let live_sections = [
                 PromptSection {
                     name: "embodiment_static",
                     content: soma_prompt_block,
@@ -1462,27 +1387,6 @@ pub async fn run_turn(
                     content: voice_prompt,
                 },
                 PromptSection {
-                    name: "rtdl_protocol",
-                    content: protocol_prompt,
-                },
-                PromptSection {
-                    name: "capability_catalog",
-                    content: capability_prompt,
-                },
-                PromptSection {
-                    name: "task",
-                    content: &task_block,
-                },
-            ];
-            // Recomputed every round from live state, so they cannot sit in
-            // the system message: a block that changes each round ends the
-            // provider's cached prefix at its own offset, and everything after
-            // it — including the whole accumulated history — is then re-read at
-            // full price every round. Sent after the history instead, where
-            // they also read as what they are: observations of the current
-            // state rather than standing instructions.
-            let live_sections = [
-                PromptSection {
                     name: "in_flight_trees",
                     content: &forest_block,
                 },
@@ -1499,18 +1403,21 @@ pub async fn run_turn(
                     content: &environment_block,
                 },
             ];
-            // Captured per round, not per turn: the robot moves between
-            // rounds, so a frame taken once at the start of the turn would
-            // describe a place the planner has already left.
-            let observation = state_context::collect_visual_observation(executor, &cap_list).await;
+            let runtime_context = render_context_sections(&live_sections);
+            completed_request_context = runtime_context.clone();
+            let mut request_history = history.clone();
+            if !runtime_context.is_empty() {
+                request_history.push(Message::user(&runtime_context));
+            }
+            if let Some(correction) = correction.as_deref() {
+                request_history.push(Message::user(correction));
+            }
             let messages = assemble_planning_messages(
                 round,
                 capability_cache_hit,
                 &sections,
+                &request_history,
                 &live_sections,
-                history,
-                observation,
-                correction.as_deref(),
             );
 
             let planning_revision = forest_revision.load(Ordering::Acquire);
@@ -1578,12 +1485,7 @@ pub async fn run_turn(
                                 VlmStreamItem::ToolCall(tc) => tool_calls.push(tc),
                                 VlmStreamItem::Usage(usage) => info!(
                                     "[pilot/prompt] {}",
-                                    serde_json::json!({
-                                        "round": round,
-                                        "provider_prompt_tokens": usage.prompt_tokens,
-                                        "provider_completion_tokens": usage.completion_tokens,
-                                        "provider_cached_tokens": usage.cached_tokens,
-                                    })
+                                    usage_totals.record(round, &usage)
                                 ),
                                 VlmStreamItem::Finish => {}
                             }
@@ -1763,6 +1665,13 @@ pub async fn run_turn(
             }
         };
 
+        // A completed VLM request becomes part of the canonical conversation
+        // before its reply. In particular, do not regenerate its runtime
+        // observation as an ephemeral tail next round: that would put the
+        // assistant reply in a position where this request had the observation
+        // and break provider prefix reuse.
+        append_request_context(history, &completed_request_context, correction.as_deref());
+
         // RTDL recovery gave up after a retry: surface the user-facing message
         // once and END the turn. Without this the empty recovery plan would fall
         // through to "no new tree this round" and re-plan forever.
@@ -1804,7 +1713,7 @@ pub async fn run_turn(
                 continue 'supervisor;
             }
 
-            if let Some(updated) = task_update {
+            let task_state_changed = if let Some(updated) = task_update {
                 let changed = apply_task_update(standing_task, updated, false);
                 if changed && let Some(state) = standing_task.as_ref() {
                     let _ = tx
@@ -1818,7 +1727,10 @@ pub async fn run_turn(
                         )))
                         .await;
                 }
-            }
+                changed
+            } else {
+                false
+            };
             if !assistant_content.trim().is_empty() {
                 history.push(Message::assistant(&assistant_content));
                 history::trim(history, MAX_HISTORY);
@@ -1829,6 +1741,9 @@ pub async fn run_turn(
                         PilotStreamBody::TextChunk(assistant_content),
                     )))
                     .await;
+            }
+            if task_state_changed && let Some(state) = standing_task.as_ref() {
+                append_task_state_record(history, state);
             }
 
             cancel_requested.extend(targets.iter().cloned());
@@ -1906,7 +1821,7 @@ pub async fn run_turn(
         // Apply progress only after the harness knows whether this response can
         // safely finish. A model cannot mark a task done while it is also
         // dispatching work or while an older tree remains in flight.
-        if let Some(updated) = task_update {
+        let task_state_changed = if let Some(updated) = task_update {
             info!(
                 "[pilot/rtdl] task_update goal='{}' status='{}'",
                 updated.goal, updated.status
@@ -1924,7 +1839,10 @@ pub async fn run_turn(
                     )))
                     .await;
             }
-        }
+            changed
+        } else {
+            false
+        };
 
         log_plan_start(&graph, &rtdl_description, round, calls);
 
@@ -1934,6 +1852,9 @@ pub async fn run_turn(
         if !assistant_content.is_empty() {
             history.push(Message::assistant(&assistant_content));
             last_content = assistant_content.clone();
+        }
+        if task_state_changed && let Some(state) = standing_task.as_ref() {
+            append_task_state_record(history, state);
         }
 
         round += 1;
@@ -2721,6 +2642,7 @@ fn rtdl_state_name(state: u32) -> String {
         Ok(RtdlNodeStateEnum::Canceled) => "Canceled".to_string(),
         Ok(RtdlNodeStateEnum::Timeout) => "Timeout".to_string(),
         Ok(RtdlNodeStateEnum::Paused) => "Paused".to_string(),
+        Ok(RtdlNodeStateEnum::Verifying) => "Verifying".to_string(),
         Err(_) => format!("Unknown({state})"),
     }
 }
@@ -3037,37 +2959,7 @@ fn load_agent_soul() -> Option<String> {
     None
 }
 
-/// Which optional capability families the running deployment registered.
-///
-/// Prompt sections that instruct the model about a family are emitted only when
-/// that family is present. A prompt documenting capabilities the body does not
-/// have spends context on every planning call and misleads the planner about
-/// what it can do.
-#[derive(Clone, Copy, Default)]
-struct PromptScope {
-    scene: bool,
-    memory: bool,
-    chassis: bool,
-}
-
-impl PromptScope {
-    /// Derive the scope from the contract ids atlas reported for this turn.
-    ///
-    /// Matching is on the contract id rather than the provider name because the
-    /// contract is the stable identity: a provider may be renamed freely, and
-    /// several providers may serve the same family.
-    fn from_contract_ids<'a>(contract_ids: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut scope = Self::default();
-        for id in contract_ids {
-            scope.scene |= id.contains("/scene/");
-            scope.memory |= id.contains("/memory/");
-            scope.chassis |= id.contains("/chassis/");
-        }
-        scope
-    }
-}
-
-fn build_system_prompt(soul: Option<&str>, scope: PromptScope) -> String {
+fn build_system_prompt(soul: Option<&str>) -> String {
     let mut p = String::new();
     if let Some(s) = soul {
         let t = s.trim();
@@ -3095,16 +2987,6 @@ by planning capability calls available to you.
 - Do NOT claim missing capabilities unless verified from the current capability list/results.
 ",
     );
-    // Long-term memory is a deployment choice, not a given: a body without memory
-    // capabilities should not be told it has them.
-    if scope.memory {
-        p.push_str(
-            "\
-  - If `memory_search` / `memory_save` / `memory_compact` capabilities are available,
-    treat long-term memory as available via those capabilities.
-",
-        );
-    }
     p.push_str(
         "\
 - Prefer structured output; report capability results concisely.
@@ -3125,31 +3007,6 @@ by planning capability calls available to you.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 ",
     );
-    // Scene resolution rules describe capabilities that only some deployments
-    // register; on a body without Scene they name tools that do not exist.
-    if scope.scene {
-        p.push_str(
-            "\
-- For semantic navigation, resolve names through Scene before calling navigation:
-  - call Scene `list_regions` first to discover the stable ID for a named room
-    or region, and call `list_objects` for a physical object; pass that exact
-    full ID to the goal tool, never its label, room number, or a guessed ID;
-    use `get_scene_graph` only when object relationships are needed;
-  - named rooms or regions MUST use Scene `goal_room`; never use `goal_near`,
-    Memory coordinates, or guessed coordinates for a room destination;
-  - physical objects MUST use Scene `goal_near` to obtain an approach pose;
-  - call navigation only when Scene returns `reachable=true`.
-- Long-term Memory is historical context, not live spatial state. It may help
-  recall what the user called a place, but it never replaces current Scene
-  resolution for a named destination and never turns a task-specific grasp or
-  observation pose into a room goal.
-- After navigation, relate the result to the resolved requested destination.
-  A transport/action status of `SUCCEEDED` does not by itself prove that the
-  requested movement occurred: if the submitted pose was already the current
-  pose, state that the robot was already there instead of claiming it moved.
-",
-        );
-    }
     p.push_str(
         "\
 - Some later messages may be labelled `Executor feedback for the current task`.
@@ -3193,18 +3050,6 @@ Concretely:
   as a reflex after each call.
 ",
     );
-    // Chassis burst physics applies to velocity-controlled bodies. On a body whose
-    // movement capability is a single discrete navigation action it is not merely
-    // unused, it is wrong: one call does finish the move.
-    if scope.chassis {
-        p.push_str(
-            "\
-- A single short chassis movement burst typically rotates ~0.4–0.8 rad
-  (≈ 25–45°) or translates ~0.1–0.2 m. To turn 180° you need MULTIPLE
-  bursts; do not assume one call finishes the rotation.
-",
-        );
-    }
     p.push_str(
         "\
 - Only mark `status: \"done\"` once the criterion is met OR you've exhausted
@@ -3225,21 +3070,26 @@ Concretely:
 mod tests {
     use super::{
         CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION,
-        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptScope, PromptSection, RTDL_DO,
-        RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep,
-        append_steer, apply_task_update, assemble_planning_messages, build_capability_target_map,
-        build_display_capabilities, build_executor_active_block, build_forest_block,
-        build_system_prompt, close_trailing_assistant, compact_tool_result,
+        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptSection, RTDL_DO, RTDL_PARALLEL,
+        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, UsageTotals,
+        append_request_context, append_steer, append_task_state_record, apply_task_update,
+        assemble_planning_messages, build_capability_target_map, build_display_capabilities,
+        build_executor_active_block, build_forest_block, compact_tool_result,
         configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, mixes_control_inspection_with_action,
-        parse_meta_plan_op, parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
-        should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
-        summarize_description, task_is_session_end,
+        is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
+        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
+        parse_task_update, plan_call_signatures, record_dispatched_plan, rtdl_node_kind_name,
+        rtdl_recovery_final_text, rtdl_state_name, should_replan_after_plan_done,
+        skip_memory_prefetch, start_or_resume_task, summarize_description, task_is_session_end,
+        upsert_terminal_result,
     };
-    use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode, Task};
-    use crate::vlm::Message;
+    use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
+    use crate::pb::pilot::{
+        CapabilityCall, CapabilityCallResult, Plan, RtdlNode, RtdlNodeState, Task,
+    };
+    use crate::prompt::close_trailing_assistant;
+    use crate::vlm::{Message, VlmUsage};
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -3260,6 +3110,62 @@ mod tests {
             configured_vlm_idle_timeout(Some("bad")),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn usage_log_carries_per_request_and_cumulative_cache_metrics() {
+        let mut totals = UsageTotals::default();
+        let first = totals.record(
+            0,
+            &VlmUsage {
+                prompt_tokens: 1_200,
+                completion_tokens: 80,
+                cached_tokens: Some(900),
+            },
+        );
+        assert_eq!(first["input_tokens"], 1_200);
+        assert_eq!(first["output_tokens"], 80);
+        assert_eq!(first["cached_input_tokens"], 900);
+        assert_eq!(first["uncached_input_tokens"], 300);
+        assert_eq!(first["cache_hit"], true);
+        assert_eq!(first["cumulative"]["cache_hit_requests"], 1);
+
+        let second = totals.record(
+            1,
+            &VlmUsage {
+                prompt_tokens: 800,
+                completion_tokens: 20,
+                cached_tokens: Some(0),
+            },
+        );
+        assert_eq!(second["cumulative"]["requests_with_usage"], 2);
+        assert_eq!(second["cumulative"]["input_tokens"], 2_000);
+        assert_eq!(second["cumulative"]["output_tokens"], 100);
+        assert_eq!(second["cumulative"]["cached_input_tokens"], 900);
+        assert_eq!(second["cumulative"]["uncached_input_tokens"], 1_100);
+        assert_eq!(second["cumulative"]["cache_hit_requests"], 1);
+    }
+
+    /// Repeated final events retain only the latest node result defensively.
+    #[test]
+    fn repeated_terminal_state_replaces_the_prior_result() {
+        let mut results = vec![RtdlNodeState {
+            node_index: 4,
+            state: RtdlNodeStateEnum::Succeeded as u32,
+            ..Default::default()
+        }];
+
+        upsert_terminal_result(
+            &mut results,
+            RtdlNodeState {
+                node_index: 4,
+                state: RtdlNodeStateEnum::Failed as u32,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, RtdlNodeStateEnum::Failed as u32);
     }
 
     fn test_capability(provider: &str, leaf: &str) -> (String, atlas_pb::Capability) {
@@ -3384,36 +3290,6 @@ mod tests {
         assert!(!crate::history::is_image_output(&original));
         let compact = compact_tool_result("camera/snapshot", &original, 4096);
         assert!(compact.chars().count() <= 4096);
-    }
-
-    #[test]
-    fn a_body_without_scene_or_chassis_is_told_about_neither() {
-        // These sections name tools that do not exist on such a body, and the
-        // chassis burst figures are wrong for one whose only movement
-        // capability is a single discrete navigation action.
-        let scope = PromptScope::from_contract_ids([
-            "robonix/skill/embodiedbench/habitat_step",
-            "robonix/system/executor/builtin_read_capability_doc",
-        ]);
-        let prompt = build_system_prompt(None, scope);
-        assert!(!prompt.contains("list_regions"));
-        assert!(!prompt.contains("chassis movement burst"));
-        assert!(!prompt.contains("memory_search"));
-        // The core planning rules survive the trim.
-        assert!(prompt.contains("COMPOSE multi-step RTDL trees"));
-    }
-
-    #[test]
-    fn a_body_with_scene_memory_and_a_chassis_keeps_all_three_sections() {
-        let scope = PromptScope::from_contract_ids([
-            "robonix/service/scene/list_regions",
-            "robonix/service/memory/search",
-            "robonix/primitive/chassis/twist_in",
-        ]);
-        let prompt = build_system_prompt(None, scope);
-        assert!(prompt.contains("list_regions"));
-        assert!(prompt.contains("chassis movement burst"));
-        assert!(prompt.contains("memory_search"));
     }
 
     #[test]
@@ -3627,11 +3503,8 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             history[0].content.as_deref(),
-            Some("change of plan: stop after step A")
+            Some("User steer (authoritative): change of plan: stop after step A")
         );
-        let prompt = state.prompt_block();
-        assert!(prompt.contains("Current user interaction"));
-        assert!(!prompt.contains("user_instruction_history"));
     }
 
     #[test]
@@ -3984,7 +3857,11 @@ mod tests {
         assert_eq!(rtdl_state_name(3), "Failed");
         assert_eq!(rtdl_state_name(4), "Canceled");
         assert_eq!(rtdl_state_name(5), "Timeout");
+        assert_eq!(rtdl_state_name(7), "Verifying");
         assert_eq!(rtdl_state_name(999), "Unknown(999)");
+        assert!(!is_terminal_executor_state(
+            RtdlNodeStateEnum::Verifying as u32
+        ));
     }
 
     #[test]
@@ -4351,66 +4228,14 @@ mod tests {
     }
 
     #[test]
-    fn the_current_observation_is_the_last_thing_before_a_correction() {
-        // Ordering is the whole point: the history may carry older frames, so
-        // the current view has to arrive after them, and the correction is
-        // about the previous reply rather than about the world.
-        let history = vec![
-            Message::user("do the task"),
-            Message::assistant("first attempt"),
-        ];
-        let messages = assemble_planning_messages(
-            1,
-            true,
-            &[],
-            &[],
-            &history,
-            Some(Message::user_with_image("current view", "AAAA".into())),
-            Some("that reply did not parse"),
-        );
-        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["system", "user", "assistant", "user", "user"]);
-        assert_eq!(
-            messages[3].content.as_deref(),
-            Some("current view"),
-            "the observation must sit between the history and the correction"
-        );
-        assert_eq!(
-            messages[4].content.as_deref(),
-            Some("that reply did not parse")
-        );
-    }
-
-    #[test]
-    fn an_observation_already_closes_a_trailing_assistant_turn() {
-        // The observation is a user message, so a round that narrated without
-        // calling a tool no longer needs the synthetic continue prompt.
-        let history = vec![Message::assistant("thinking about it")];
-        let messages = assemble_planning_messages(
-            1,
-            true,
-            &[],
-            &[],
-            &history,
-            Some(Message::user_with_image("current view", "AAAA".into())),
-            None,
-        );
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages.last().unwrap().role, "user");
-        assert_eq!(
-            messages.last().unwrap().content.as_deref(),
-            Some("current view")
-        );
-    }
-
-    #[test]
-    fn live_state_follows_the_history_so_the_prefix_stays_cacheable() {
+    fn persisted_runtime_state_follows_the_history_so_the_prefix_stays_cacheable() {
         // The system message must contain nothing that changes between rounds:
         // whatever changes ends the provider's cached prefix, and the history
         // behind it is then re-read at full price.
         let history = vec![
             Message::user("do the task"),
             Message::assistant("first attempt"),
+            Message::user("plan 7 is running"),
         ];
         let stable = [PromptSection {
             name: "standing_system",
@@ -4420,7 +4245,7 @@ mod tests {
             name: "executor_state",
             content: "plan 7 is running",
         }];
-        let messages = assemble_planning_messages(1, true, &stable, &live, &history, None, None);
+        let messages = assemble_planning_messages(1, true, &stable, &history, &live);
         let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
         assert_eq!(messages[0].content.as_deref(), Some("standing rules"));
@@ -4428,17 +4253,150 @@ mod tests {
     }
 
     #[test]
+    fn system_and_history_keep_the_provider_message_order() {
+        let history = vec![
+            Message::user("earlier user request"),
+            Message::assistant("I will inspect it."),
+            Message::user("steer: stop after inspection"),
+            Message::user("current runtime observation"),
+        ];
+        let stable = [
+            PromptSection {
+                name: "standing_system",
+                content: "universal Pilot rules",
+            },
+            PromptSection {
+                name: "rtdl_protocol",
+                content: "round-specific protocol",
+            },
+            PromptSection {
+                name: "capability_catalog",
+                content: "current provider catalog",
+            },
+        ];
+        let dynamic = [
+            PromptSection {
+                name: "embodiment_static",
+                content: "this robot's Soma body",
+            },
+            PromptSection {
+                name: "memory",
+                content: "task-specific memory",
+            },
+            PromptSection {
+                name: "capability_docs",
+                content: "current provider docs",
+            },
+            PromptSection {
+                name: "executor_state",
+                content: "current executor state",
+            },
+        ];
+
+        let messages = assemble_planning_messages(1, true, &stable, &history, &dynamic);
+        let system = messages[0].content.as_deref().unwrap();
+        assert!(system.contains("universal Pilot rules"));
+        assert!(system.contains("round-specific protocol"));
+        assert!(system.contains("current provider catalog"));
+        assert_eq!(messages[1].content.as_deref(), Some("earlier user request"));
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(
+            messages[3].content.as_deref(),
+            Some("steer: stop after inspection")
+        );
+        assert_eq!(
+            messages[4].content.as_deref(),
+            Some("current runtime observation")
+        );
+        for expected in [
+            "this robot's Soma body",
+            "task-specific memory",
+            "current provider docs",
+            "current executor state",
+        ] {
+            assert!(!system.contains(expected));
+        }
+    }
+
+    #[test]
+    fn task_state_updates_are_appended_to_history() {
+        let state = TaskState {
+            goal: "finish inspection".to_string(),
+            success_criterion: "report is returned".to_string(),
+            status: "in_progress".to_string(),
+        };
+        let mut history = vec![Message::user("inspect room")];
+        append_task_state_record(&mut history, &state);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].role, "user");
+        let record = history[1].content.as_deref().unwrap();
+        assert!(record.contains("authoritative state"));
+        assert!(record.contains("finish inspection"));
+        assert!(record.contains("report is returned"));
+    }
+
+    #[test]
+    fn completed_request_context_is_retained_before_its_reply() {
+        let mut history = vec![Message::user("inspect room")];
+        append_request_context(
+            &mut history,
+            "runtime: camera sees a doorway",
+            Some("Pilot validation feedback: emit valid RTDL"),
+        );
+        history.push(Message::assistant("I will navigate to the doorway."));
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.as_deref().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user", "inspect room"),
+                ("user", "runtime: camera sees a doorway"),
+                ("user", "Pilot validation feedback: emit valid RTDL"),
+                ("assistant", "I will navigate to the doorway."),
+            ]
+        );
+    }
+
+    #[test]
+    fn next_request_extends_the_previous_provider_prefix() {
+        let stable = [PromptSection {
+            name: "system",
+            content: "standing system and RTDL contract",
+        }];
+        let mut history = vec![Message::user("User task (authoritative): inspect room")];
+        append_request_context(&mut history, "runtime round 0", None);
+        let first = assemble_planning_messages(0, true, &stable, &history, &[]);
+
+        history.push(Message::assistant("I will inspect the room."));
+        append_task_state_record(
+            &mut history,
+            &TaskState {
+                goal: "inspect room".to_string(),
+                success_criterion: "inspection result returned".to_string(),
+                status: "in_progress".to_string(),
+            },
+        );
+        append_request_context(&mut history, "runtime round 1", None);
+        let second = assemble_planning_messages(1, true, &stable, &history, &[]);
+
+        let first_wire = serde_json::to_string(&first).unwrap();
+        let second_prefix_wire = serde_json::to_string(&second[..first.len()]).unwrap();
+        assert_eq!(first_wire, second_prefix_wire);
+    }
+
+    #[test]
     fn with_no_live_state_the_request_carries_no_empty_turn() {
         let history = vec![Message::user("do the task")];
-        let messages = assemble_planning_messages(1, true, &[], &[], &history, None, None);
+        let messages = assemble_planning_messages(1, true, &[], &history, &[]);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].content.as_deref(), Some("do the task"));
     }
 
     #[test]
-    fn without_an_observation_the_request_is_what_it_was() {
+    fn a_trailing_assistant_gets_a_continue_turn() {
         let history = vec![Message::assistant("thinking about it")];
-        let messages = assemble_planning_messages(1, true, &[], &[], &history, None, None);
+        let messages = assemble_planning_messages(1, true, &[], &history, &[]);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages.last().unwrap().role, "user");
         assert!(

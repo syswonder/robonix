@@ -25,6 +25,7 @@ mod history;
 mod memory;
 mod pb;
 mod planner;
+mod prompt;
 mod service;
 mod soma_context;
 mod state_context;

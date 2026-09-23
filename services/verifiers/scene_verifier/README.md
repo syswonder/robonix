@@ -18,12 +18,14 @@ Merge the service entry and verification rule below into the existing
 system:
   executor:
     verification:
-      - target_contract_id: robonix/service/navigation/navigate
-        target_provider_id: nav2
-        verifier_provider_id: scene_verifier
-        verifier_args:
-          scene_provider_id: scene
-          check_yaw: true
+      overlap: true
+      rules:
+        - target_contract_id: robonix/service/navigation/navigate
+          target_provider_id: nav2
+          verifier_provider_id: scene_verifier
+          verifier_args:
+            scene_provider_id: scene
+            check_yaw: true
 
 service:
   - name: scene_verifier

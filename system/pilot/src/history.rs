@@ -7,7 +7,8 @@
 //      images on `tool` role, so when a tool returns an image we keep the
 //      tool result textual and append a synthetic `user` vision message.
 //   2. Pre-flight cleanup of `Vec<Message>` before we hand it to the LLM:
-//      trim to MAX_HISTORY and drop tool messages whose preceding assistant
+//      retain authoritative task and executor records when bounding the
+//      working window, and drop tool messages whose preceding assistant
 //      tool_call was already evicted (which would otherwise be rejected).
 
 use crate::vlm::Message;
@@ -99,12 +100,69 @@ pub fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory
     }
 }
 
-/// Drop the oldest messages so `history.len() <= max`. No-op if already short.
-pub fn trim(history: &mut Vec<Message>, max: usize) {
-    if history.len() > max {
-        let remove = history.len() - max;
-        history.drain(0..remove);
+/// Whether a user-side record is an authoritative fact that must survive a
+/// bounded working window. Pilot writes these labels; keeping them verbatim is
+/// safer than hoping a later free-form summary reproduces a task instruction or
+/// executor outcome exactly.
+fn is_authoritative_record(message: &Message) -> bool {
+    if message.role != "user" {
+        return false;
     }
+    let Some(content) = message.content.as_deref() else {
+        return false;
+    };
+    [
+        "User task (authoritative):",
+        "User steer (authoritative):",
+        "Pilot task-state update (authoritative state",
+        "Pilot harness dispatch record",
+        "Pilot plan-control result:",
+        "Pilot plan-control failure:",
+        "Executor feedback scope:",
+        "Executor feedback for the current RTDL leaf",
+    ]
+    .iter()
+    .any(|prefix| content.starts_with(prefix))
+}
+
+/// Clone authoritative facts for a rolling compaction. This deliberately
+/// retains the source records alongside the generated prose summary: a summary
+/// is useful navigation, but is not evidence that a user instruction or an
+/// executor result has been preserved correctly.
+pub fn authoritative_records(history: &[Message]) -> Vec<Message> {
+    history
+        .iter()
+        .filter(|message| is_authoritative_record(message))
+        .cloned()
+        .collect()
+}
+
+/// Bound disposable conversational material without silently evicting user
+/// tasks, lifecycle records, dispatches, or executor results. If those
+/// authoritative records alone exceed `max`, keep them all; a later explicit
+/// compaction can replace them only with a verified durable summary.
+pub fn trim(history: &mut Vec<Message>, max: usize) {
+    let mut remove = history.len().saturating_sub(max);
+    if remove == 0 {
+        return;
+    }
+
+    let mut drop = vec![false; history.len()];
+    for (index, message) in history.iter().enumerate() {
+        if remove == 0 {
+            break;
+        }
+        if !is_authoritative_record(message) {
+            drop[index] = true;
+            remove -= 1;
+        }
+    }
+    let mut index = 0;
+    history.retain(|_| {
+        let keep = !drop[index];
+        index += 1;
+        keep
+    });
 }
 
 /// Filter `history` to a form OpenAI-compatible endpoints accept:
@@ -141,4 +199,56 @@ pub fn sanitize_for_vlm(history: &[Message]) -> Vec<Message> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{authoritative_records, trim};
+    use crate::vlm::Message;
+
+    #[test]
+    fn trim_keeps_tasks_and_executor_outcomes_verbatim() {
+        let mut history = vec![
+            Message::user("User task (authoritative): inspect the loading dock"),
+            Message::assistant("I will inspect it."),
+            Message::user(
+                "Executor feedback for the current RTDL leaf (not a new user request): succeeded",
+            ),
+            Message::assistant("The inspection is complete."),
+        ];
+        trim(&mut history, 2);
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0].content.as_deref(),
+            Some("User task (authoritative): inspect the loading dock")
+        );
+        assert_eq!(
+            history[1].content.as_deref(),
+            Some("Executor feedback for the current RTDL leaf (not a new user request): succeeded")
+        );
+    }
+
+    #[test]
+    fn trim_allows_authoritative_records_to_exceed_the_nominal_cap() {
+        let mut history = vec![
+            Message::user("User task (authoritative): inspect the loading dock"),
+            Message::user("User steer (authoritative): stop at the doorway"),
+            Message::user("Executor feedback scope: plan_id=1"),
+        ];
+        trim(&mut history, 1);
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn authoritative_records_excludes_disposable_narration() {
+        let history = vec![
+            Message::user("User task (authoritative): inspect the loading dock"),
+            Message::assistant("I will inspect it."),
+            Message::user("Executor feedback scope: plan_id=1"),
+        ];
+        let retained = authoritative_records(&history);
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].content, history[0].content);
+        assert_eq!(retained[1].content, history[2].content);
+    }
 }

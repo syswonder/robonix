@@ -206,7 +206,6 @@ tree (the steps are known up front, so do not split them across rounds):
     "status": "in_progress"
   }
 }
-
 Example — split across rounds ONLY when the next step needs the previous result.
 Here you must see the snapshot before deciding where to go, so this round emits
 just the observation:
@@ -248,4 +247,3 @@ Example — overall task finished (no new tree, mark done):
     "status": "done"
   }
 }
-

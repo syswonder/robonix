@@ -152,9 +152,18 @@ class ViewerHandler(SimpleHTTPRequestHandler):
                 b"    if (url.startsWith('https://raw.githubusercontent.com/'))\n      url = window.location.origin + '/github/' + url.substring('https://raw.githubusercontent.com/'.length);\n    if (typeof prefix !== 'undefined' && !url.startsWith('http')) {",
             )
         if relative == "MeshLoader.js":
+            # Same /github/ redirect ImageLoader.js gets: a mesh fetched straight
+            # from raw.githubusercontent.com times out and Parser.js then aborts
+            # the whole scene, leaving the viewer on its splash screen.
             return content.replace(
                 b"worldsPath = MeshLoader.currentWorld;\n      worldsPath = worldsPath.substring(0, worldsPath.lastIndexOf('/')) + '/';",
                 b"worldsPath = MeshLoader.currentWorld;\n      worldsPath = typeof worldsPath !== 'undefined' ? worldsPath.substring(0, worldsPath.lastIndexOf('/')) + '/' : '';",
+            ).replace(
+                b"url = url.replace('webots://', 'https://raw.githubusercontent.com/' + MeshLoader.repository + '/webots/' + MeshLoader.branch + '/');",
+                b"url = url.replace('webots://', window.location.origin + '/github/' + MeshLoader.repository + '/webots/' + MeshLoader.branch + '/');",
+            ).replace(
+                b"    if (typeof prefix !== 'undefined' && !url.startsWith('http'))\n      url = prefix + worldsPath + url;",
+                b"    if (url.startsWith('https://raw.githubusercontent.com/'))\n      url = window.location.origin + '/github/' + url.substring('https://raw.githubusercontent.com/'.length);\n    if (typeof prefix !== 'undefined' && !url.startsWith('http'))\n      url = prefix + worldsPath + url;",
             )
         if relative == "Toolbar.js":
             return content.replace(
@@ -176,9 +185,10 @@ class ViewerHandler(SimpleHTTPRequestHandler):
                 if len(parts) == 4:
                     owner, repository, reference, path = parts
                     urls = [
+                        f"https://gh-proxy.com/{GITHUB_RAW}{relative}",
+                        f"https://ghfast.top/{GITHUB_RAW}{relative}",
                         f"{GITHUB_CDN}{owner}/{repository}@{reference}/{path}",
                         f"https://cdn.jsdelivr.net/gh/{owner}/{repository}@{reference}/{path}",
-                        f"https://gh-proxy.com/{GITHUB_RAW}{relative}",
                     ]
                 last_error: Exception | None = None
                 for url in urls:
