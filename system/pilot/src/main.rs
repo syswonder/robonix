@@ -224,21 +224,11 @@ async fn main() -> Result<()> {
             "context_window_tokens": history_budget.context_window_tokens,
             "context_window_source": history_budget.context_window_source,
             "matched_model_id": context_window.matched_model_id,
-            "registry_match": context_window.registry_match,
             "reserved_output_tokens": history_budget.reserved_output_tokens,
             "safety_tokens": history_budget.safety_tokens,
             "automatic_compaction_enabled": history_budget.context_window_tokens.is_some(),
         })
     );
-    if context_window.source == "builtin_registry" {
-        warn!(
-            "[pilot/context_budget] auto-matched model '{}' with '{}'. Verify this direct-provider capacity against the actual deployment; set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) for an alias, proxy, quantized model, or server cap.",
-            cfg.vlm.model,
-            context_window
-                .registry_match
-                .unwrap_or("unknown registry rule")
-        );
-    }
     if context_window.source == "provider_model_list_canonical_metadata" {
         warn!(
             "[pilot/context_budget] configured model '{}' was matched by canonical name to provider id '{}'. Verify that this is the intended gateway route; set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) to override its capacity.",

@@ -3,7 +3,7 @@
 //
 // Embedded OpenAI-compatible chat-completions client.
 // TODO: maybe we will support Google/Anthropic/etc. in the future :D
-use crate::config::{VlmConfig, builtin_model_profile};
+use crate::config::VlmConfig;
 use anyhow::{Context, Result, bail};
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
@@ -267,10 +267,6 @@ pub struct ContextWindowInfo {
     pub source: &'static str,
     /// Provider model id selected by an exact or canonical list match.
     pub matched_model_id: Option<String>,
-    /// Exact built-in registry rule, when `source == "builtin_registry"`.
-    /// A deployment should review this because a proxy can reuse a public
-    /// model name while applying a smaller server-side limit.
-    pub registry_match: Option<&'static str>,
 }
 
 fn context_window_from_metadata(value: &Value) -> Option<usize> {
@@ -496,8 +492,7 @@ impl VlmClient {
     /// Resolve the usable context-window limit at process start.
     ///
     /// A deployment setting is authoritative. Then prefer provider metadata,
-    /// then an extension on the provider's model list, then the checked
-    /// offline registry. Unknown is returned as unknown and starts without
+    /// then an extension on the provider's model list. Unknown starts without
     /// pre-emptive compaction rather than compacting against a guess.
     pub async fn context_window_info(&self) -> ContextWindowInfo {
         if let Some(tokens) = self.configured_context_window_tokens {
@@ -505,21 +500,14 @@ impl VlmClient {
                 tokens: Some(tokens),
                 source: "deployment_config",
                 matched_model_id: None,
-                registry_match: None,
             };
         }
 
-        let profile = builtin_model_profile(&self.model);
         let Ok(list_url) = reqwest::Url::parse(&format!("{}/models", self.api_base)) else {
             return ContextWindowInfo {
-                tokens: profile.map(|profile| profile.context_window_tokens),
-                source: if profile.is_some() {
-                    "builtin_registry"
-                } else {
-                    "unavailable"
-                },
+                tokens: None,
+                source: "unavailable",
                 matched_model_id: None,
-                registry_match: profile.map(|profile| profile.matcher),
             };
         };
         let mut detail_url = list_url.clone();
@@ -541,7 +529,6 @@ impl VlmClient {
                 tokens: Some(tokens),
                 source: "provider_model_metadata",
                 matched_model_id: None,
-                registry_match: None,
             };
         }
         if let Some(matched) = self
@@ -558,18 +545,12 @@ impl VlmClient {
                     "provider_model_list_metadata"
                 },
                 matched_model_id: Some(matched.matched_model_id),
-                registry_match: None,
             };
         }
         ContextWindowInfo {
-            tokens: profile.map(|profile| profile.context_window_tokens),
-            source: if profile.is_some() {
-                "builtin_registry"
-            } else {
-                "unavailable"
-            },
+            tokens: None,
+            source: "unavailable",
             matched_model_id: None,
-            registry_match: profile.map(|profile| profile.matcher),
         }
     }
 

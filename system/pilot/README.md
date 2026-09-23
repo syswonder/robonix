@@ -60,18 +60,15 @@ Pilot resolves the capacity in this order:
    `anthropic/claude-opus-5.5` when the deployment configured
    `claude-opus-5.5`. Two different providers with the same terminal name are
    intentionally treated as ambiguous, never guessed.
-4. The checked offline OFOX catalogue: all 135 entries that advertised a
-   non-zero `context_length` in the 2026-09-23 catalogue snapshot. This is a
-   fallback for a gateway that does not expose metadata at runtime.
-5. Otherwise Pilot starts without pre-emptive history compaction. A manual
+4. Otherwise Pilot starts without pre-emptive history compaction. A manual
    declaration enables predictable compaction for an unknown/private model.
 
 The startup `[pilot/context_budget]` JSON record includes the configured model,
 the selected provider id when a canonical match was used, capacity, and source.
-Canonical and offline-registry matches emit a warning asking the operator to
-verify the gateway route. At `rbnx boot`, `context=... (manual)` means an
-operator override; otherwise `context=auto` means Pilot will resolve and log
-the real source after startup.
+Canonical matches emit a warning asking the operator to verify the gateway
+route. At `rbnx boot`, `context=... (manual)` means an operator override;
+otherwise `context=auto` means Pilot will resolve and log the real source after
+startup.
 
 Set a manual value only when the route is private, metadata is missing or
 ambiguous, or the gateway has a smaller server cap:
