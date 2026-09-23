@@ -1,0 +1,10 @@
+# Lifecycle contract: rbnx boot starts the driver via Driver(CMD_INIT).
+[contract]
+id      = "robonix/primitive/drone/driver"
+version = "1"
+kind    = "primitive"
+idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle management for the dji_msdk drone primitive."
+
+[mode]
+type = "rpc"
