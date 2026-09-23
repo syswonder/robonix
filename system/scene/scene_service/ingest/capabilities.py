@@ -30,11 +30,139 @@ object output instead of silently guessing K.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 Tier = Literal["metric", "visual", "geometric"]
-Detector = Optional[Literal["concept_graphs", "vlm"]]
+Detector = Optional[Literal["concept_graphs", "dualmap", "vlm"]]
+
+# Perception profile: the operator's statement of how much compute this
+# deployment gives Scene. It is orthogonal to the tier (which the wiring
+# decides): the profile picks the model set and turns object recognition
+# off entirely for machines that have no accelerator.
+#
+#   lite      small models (YOLO-World + MobileSAM + CLIP ViT-B-32), ~4 GB VRAM
+#   full      paper-tier models (SAM-L + CLIP ViT-H-14), 16 GB+ VRAM or
+#             Jetson Orin/Thor unified memory
+#   annotate  no recognition at all; only manual regions/annotations and
+#             the geometric queries (occupancy grid, goal_near) — the
+#             profile for boards without a usable GPU.
+Profile = Literal["lite", "full", "annotate"]
+PROFILES: tuple[str, ...] = ("lite", "full", "annotate")
+DEFAULT_PROFILE: Profile = "lite"
+
+# Perception backend: which open-vocabulary mapper implements the metric tier.
+#
+#   concept_graphs  Scene's ConceptGraphs-derived pipeline (the fallback)
+#   dualmap         DualMap (Eku127/DualMap): preferred wherever the image has
+#                   it; YOLO-World + FastSAM/MobileSAM +
+#                   MobileCLIP with a Bayesian class filter; online, ~4 GB VRAM
+Backend = Literal["concept_graphs", "dualmap"]
+BACKENDS: tuple[str, ...] = ("concept_graphs", "dualmap")
+
+# The backend a deployment gets when it asks for none is resolved, not fixed.
+#
+# DualMap arrives as a layer on top of the scene image (docker/Dockerfile.dualmap),
+# so an image either carries its checkout and weights or it does not, and there is
+# no DualMap build for Jetson at all. A hard default of "dualmap" would leave every
+# plain image failing at boot on a backend it cannot import; a hard default of
+# "concept_graphs" leaves the better mapper switched off on the images built to
+# carry it, which is the whole point of building them. So the default is whichever
+# one is actually present, and which one that was is logged at startup.
+FALLBACK_BACKEND: Backend = "concept_graphs"
+PREFERRED_BACKEND: Backend = "dualmap"
+
+# Kept for callers that import it; equal to the fallback, since a module-level
+# constant cannot describe a choice that depends on the image it runs in.
+DEFAULT_BACKEND: Backend = FALLBACK_BACKEND
+
+
+def dualmap_available() -> bool:
+    """True when this image carries a DualMap checkout the detector can import.
+
+    The same location scripts/start.sh mounts and Dockerfile.dualmap clones
+    into. Checked by path rather than by importing DualMap, because the import
+    pulls in torch and the weights and is far too expensive to run just to
+    answer which backend to pick.
+    """
+    root = os.environ.get("SCENE_DUALMAP_ROOT") or "/opt/dualmap"
+    return os.path.isdir(os.path.join(root, "utils"))
+
+
+def default_backend() -> Backend:
+    """The backend to use when config and environment both stay silent."""
+    return PREFERRED_BACKEND if dualmap_available() else FALLBACK_BACKEND
+
+
+# Knobs accepted under `scene.config.perception.dualmap`; anything else is a typo
+# and fails at boot like the sibling keys.
+DUALMAP_KEYS: frozenset[str] = frozenset({
+    "classes", "keep_unknown", "use_fastsam", "device",
+    # keyframe gate: a frame is mapped only when the camera moved this much or
+    # this long has passed since the last mapped frame (DualMap's own rule)
+    "keyframe_translation_m", "keyframe_rotation_deg", "keyframe_time_s",
+    # run DualMap's own local-map merge (tracker matching of the map against
+    # itself) every N mapped keyframes; 0 disables it
+    "merge_every_keyframes",
+    # registry filters: tracks seen in fewer keyframes than min_observations
+    # (default 2) or, with stable_only, not yet marked stable by DualMap stay out
+    "stable_only", "min_observations",
+    # drop tracks whose points lie on the floor plane (depth noise); off by
+    # default because it also drops rugs and carpets
+    "floor_gate", "floor_z_m",
+    # DualMap object lifecycle, sized for its dataset replay by default: how many
+    # observations make a track stable, how many recent frames count as active,
+    # and how many rounds an unstable track survives outside that window
+    "stable_num", "active_window_size", "max_pending_count",
+    # DualMap association: an observation joins an existing track when
+    # cos(CLIP) + point-overlap exceeds sim_threshold, and "overlap" counts the
+    # points whose nearest map point lies within downsample_voxel_size. The
+    # voxel therefore has to exceed the pose error between keyframes, or two
+    # views of one object never overlap and every keyframe starts a new track.
+    "downsample_voxel_size", "sim_threshold",
+    # DualMap's own local-map self-merge (merge_every_keyframes) joins two tracks
+    # whose point overlap exceeds merge_sim_threshold; its default of 0.9 assumes
+    # ground-truth poses and never fires under a robot's pose error
+    "merge_sim_threshold",
+    # run DualMap's global map too (navigation memory of low-mobility anchors;
+    # drops every other stable track once it leaves view). Off = the local-only
+    # mode DualMap's own Replica evaluation uses, which keeps every stable track
+    "global_map",
+})
+
+
+def resolve_backend(value: Any) -> Backend:
+    """Validate a backend name from config/env; blank means the default.
+
+    Blank resolves to DualMap on an image that carries it and to ConceptGraphs
+    on one that does not -- see default_backend().
+
+    Raises ValueError naming the accepted values so a manifest typo fails
+    at boot instead of silently running the default mapper.
+    """
+    name = str(value or "").strip().lower()
+    if not name:
+        return default_backend()
+    if name not in BACKENDS:
+        raise ValueError(
+            f"unknown perception backend {value!r}; expected one of {', '.join(BACKENDS)}"
+        )
+    return name  # type: ignore[return-value]
+
+
+def resolve_profile(value: Any) -> Profile:
+    """Validate a profile name from config/env; blank means the default.
+
+    Raises ValueError naming the accepted values, so a typo in the manifest
+    fails at boot instead of silently running the wrong model set.
+    """
+    name = str(value or "").strip().lower() or DEFAULT_PROFILE
+    if name not in PROFILES:
+        raise ValueError(
+            f"unknown perception profile {name!r}; expected one of {', '.join(PROFILES)}"
+        )
+    return name  # type: ignore[return-value]
 
 
 CAMERA_KINDS = frozenset({"rgb", "depth", "intrinsics", "camera_extrinsics"})
@@ -72,6 +200,7 @@ class PerceptionPlan:
     has_intrinsics: bool
     has_pose: bool
     has_extrinsics: bool
+    profile: Profile = DEFAULT_PROFILE
 
     @property
     def grounding(self) -> Literal["metric", "degraded", "n/a"]:
@@ -94,12 +223,15 @@ class PerceptionPlan:
             if present
         ) or "none"
         return (
-            f"tier={self.tier} detector={self.detector or 'none'} "
+            f"profile={self.profile} tier={self.tier} "
+            f"detector={self.detector or 'none'} "
             f"grounding={self.grounding} inputs=[{inputs}]"
         )
 
 
-def plan_perception(hub: Any) -> PerceptionPlan:
+def plan_perception(
+    hub: Any, profile: Profile = DEFAULT_PROFILE, backend: Backend = DEFAULT_BACKEND,
+) -> PerceptionPlan:
     """Probe `hub` for wired observation kinds and pick the perception tier.
 
     Pure with respect to the hub snapshot: reads `hub.has(kind)` only, no
@@ -108,6 +240,12 @@ def plan_perception(hub: Any) -> PerceptionPlan:
     → geometric (no detector). `hub.has(kind)` reflects whether a provider
     advertised the contract (the kind was subscribed), matching the gate
     `service.py` used before this module existed.
+
+    `profile` is the operator's compute budget. `annotate` forces the
+    geometric tier regardless of wiring: no detector is started, the
+    cameras stay subscribed only for the web preview. `lite` and `full`
+    do not change the routing; they change which model set the metric
+    detector loads.
     """
     has_rgb = hub.has("rgb")
     has_depth = hub.has("depth")
@@ -115,9 +253,11 @@ def plan_perception(hub: Any) -> PerceptionPlan:
     has_pose = hub.has("pose")
     has_extrinsics = hub.has("camera_extrinsics")
 
-    if has_rgb and has_depth:
-        tier: Tier = "metric"
-        detector: Detector = "concept_graphs"
+    if profile == "annotate":
+        tier: Tier = "geometric"
+        detector: Detector = None
+    elif has_rgb and has_depth:
+        tier, detector = "metric", backend
     elif has_rgb:
         tier, detector = "visual", "vlm"
     else:
@@ -131,4 +271,142 @@ def plan_perception(hub: Any) -> PerceptionPlan:
         has_intrinsics=has_intrinsics,
         has_pose=has_pose,
         has_extrinsics=has_extrinsics,
+        profile=profile,
+    )
+
+
+# Every knob the ConceptGraphs backend reads, mirroring `_CFG_DEFAULTS` in
+# `perception_concept_graphs`. Declared here rather than imported because that
+# module pulls in torch: a list is cheap and `test_capabilities` pins it to the
+# source of truth, so it cannot drift silently.
+#
+# The merge group is the one deployments reach for. A run of office shelving
+# comes back as several objects when the association gates are too tight for
+# the pose error between views, and the detector's own comment on these says
+# what they are for: "the desk chair/table split and object dedup ... tuned
+# live on a running robot without a rebuild".
+CONCEPT_GRAPHS_KEYS: frozenset[str] = frozenset({
+    "assoc_feat_weight",
+    "assoc_geo_weight",
+    "assoc_threshold",
+    "assoc_voxel_size_m",
+    "association",
+    "cross_class_centroid_max_m",
+    "cross_class_iou_thresh",
+    "cross_class_merge_interval_ticks",
+    "cross_class_overlap_thresh",
+    "dbscan_eps",
+    "dbscan_min_points",
+    "dbscan_remove_noise",
+    "denoise_interval_ticks",
+    "downsample_voxel_size",
+    "feature_area_ratio",
+    "feature_bank_size",
+    "floor_z_m",
+    "label_vote",
+    "match_method",
+    "max_merge_dist_m",
+    "merge_overlap_interval_ticks",
+    "merge_overlap_thresh",
+    "merge_text_sim_thresh",
+    "merge_threshold",
+    "merge_visual_sim_thresh",
+    "min_points_threshold",
+    "obj_min_detections",
+    "obj_min_points",
+    "obj_pcd_max_points",
+    "per_detection_dbscan",
+    "phys_bias",
+    "representative_by_text",
+    "same_class_merge_dist_m",
+    "same_class_merge_interval_ticks",
+    "spatial_sim_type",
+    "visibility_depth_margin_m",
+    "visibility_min_clear_fraction",
+    "visibility_min_clear_samples",
+    "visibility_miss_ticks",
+})
+
+
+PERCEPTION_KEYS: frozenset[str] = frozenset({
+    "profile", "backend", "period_s", "confidence_threshold", "max_detections",
+    "concept_graphs", "dualmap",
+})
+
+
+@dataclass(frozen=True)
+class PerceptionConfig:
+    """The validated `scene.config.perception` block.
+
+    `ignored_keys` lists manifest keys nobody reads; the caller logs them so
+    an operator can see that a knob is not wired rather than assume it is.
+    """
+
+    profile: Profile
+    backend: Backend = DEFAULT_BACKEND
+    period_s: Optional[float] = None
+    confidence_threshold: Optional[float] = None
+    max_detections: Optional[int] = None
+    concept_graphs: dict = field(default_factory=dict)
+    dualmap: dict = field(default_factory=dict)
+    ignored_keys: tuple[str, ...] = ()
+
+
+def perception_config(config: dict, env: Optional[dict] = None) -> PerceptionConfig:
+    """Parse and validate `config["perception"]`.
+
+    Precedence for the profile: manifest value, then `SCENE_PROFILE` in
+    `env` (the process environment by default), then `lite`; the backend
+    follows the same order with `SCENE_PERCEPTION_BACKEND` and defaults to
+    `concept_graphs`. Numeric knobs are coerced so a manifest typo fails at
+    boot. `concept_graphs` and `dualmap` must be mappings of backend knob
+    overrides (the former uses the SCENE_CG_* names) and are passed through
+    untouched to the backend that reads them.
+    """
+    env = os.environ if env is None else env
+    raw = config.get("perception") or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"scene.config.perception must be a mapping, got {type(raw).__name__}")
+    cg = raw.get("concept_graphs") or {}
+    if not isinstance(cg, dict):
+        raise ValueError("scene.config.perception.concept_graphs must be a mapping")
+    # Checked, like the DualMap block. These were accepted silently: a manifest
+    # that misspelled `same_class_merge_dist_m` got the default, changed
+    # nothing, and said nothing -- and these are the knobs somebody reaches for
+    # when objects are splitting, so a silent no-op costs an afternoon of
+    # tuning that never took effect.
+    unknown_cg = sorted(k for k in cg if k not in CONCEPT_GRAPHS_KEYS)
+    if unknown_cg:
+        raise ValueError(
+            f"scene.config.perception.concept_graphs has unknown keys "
+            f"{unknown_cg}; accepted: {', '.join(sorted(CONCEPT_GRAPHS_KEYS))}"
+        )
+    dm = raw.get("dualmap") or {}
+    if not isinstance(dm, dict):
+        raise ValueError("scene.config.perception.dualmap must be a mapping")
+    unknown = sorted(k for k in dm if k not in DUALMAP_KEYS)
+    if unknown:
+        raise ValueError(
+            f"scene.config.perception.dualmap has unknown keys {unknown}; "
+            f"accepted: {', '.join(sorted(DUALMAP_KEYS))}"
+        )
+
+    def _num(key: str, cast):
+        value = raw.get(key)
+        if value is None or value == "":
+            return None
+        try:
+            return cast(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"scene.config.perception.{key}={value!r} is not a number") from exc
+
+    return PerceptionConfig(
+        profile=resolve_profile(raw.get("profile") or env.get("SCENE_PROFILE") or ""),
+        backend=resolve_backend(raw.get("backend") or env.get("SCENE_PERCEPTION_BACKEND") or ""),
+        period_s=_num("period_s", float),
+        confidence_threshold=_num("confidence_threshold", float),
+        max_detections=_num("max_detections", int),
+        concept_graphs=dict(cg),
+        dualmap=dict(dm),
+        ignored_keys=tuple(sorted(k for k in raw if k not in PERCEPTION_KEYS)),
     )

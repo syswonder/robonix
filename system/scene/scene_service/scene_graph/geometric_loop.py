@@ -24,7 +24,7 @@ from typing import Iterable, Optional
 
 from ..state.object_registry import Pose3D, SceneObject
 from .builder import _is_stable, _object_to_node
-from .geometry import CONF_MED
+from .geometry import CONF_MED, strict_geometric_relations
 from .store import SceneGraphStore
 from .types import SceneGraphEdge
 
@@ -48,6 +48,12 @@ def _env_int(key: str, default: int) -> int:
 # Reachability v1: pure gripper→object distance (real IK waits for Soma).
 # Ported from the retired RelationEngine. TODO(soma-kinematics).
 _REACHABLE_RADIUS_M = 1.0
+# Deterministic object↔object relations (ThinkGraphs/BBQ style: geometry
+# decides, no LLM in the loop). `near` is capped per object so a crowded room
+# does not become a complete graph.
+_RELATIONS_MODE = os.environ.get("SCENE_RELATIONS", "geometric").strip().lower()  # geometric | reachable_only
+_NEAR_MAX_PER_OBJECT = _env_int("SCENE_NEAR_MAX_PER_OBJECT", 3)
+_NEAR_RADIUS_M = _env_float("SCENE_NEAR_RADIUS_M", 1.5)
 _GRIPPER_OBJECT_PREFIX = "robot.right_gripper"  # canonical self-tracker name
 
 
@@ -163,6 +169,8 @@ class GeometricRelationLoop:
         # builder) owns them now. `near` was already a proximity query, not an
         # edge. This loop still publishes the node set.
         raw = self._reachable_edges(objects, stable)
+        if _RELATIONS_MODE == "geometric":
+            raw.extend(self._object_relations(nodes))
         emitted = self._debounce(raw)
         self.store.set_geometric(nodes, emitted)
 
@@ -186,6 +194,40 @@ class GeometricRelationLoop:
                     confidence=CONF_MED,
                     method="geometric",
                     reason="geometry: within gripper reach radius (distance-only)",
+                ))
+        return out
+
+    def _object_relations(self, nodes) -> list[SceneGraphEdge]:
+        """Pairwise deterministic relations between stable objects.
+
+        Support/containment edges are emitted in both directions (the
+        vocabulary has explicit inverses). `near` edges are kept only for
+        each object's closest `_NEAR_MAX_PER_OBJECT` neighbours within
+        `_NEAR_RADIUS_M`, and only when no stronger relation links the pair.
+        """
+        out: list[SceneGraphEdge] = []
+        near_candidates: dict[str, list[tuple[float, str]]] = {}
+        for i, a in enumerate(nodes):
+            for b in nodes[i + 1:]:
+                for rel, conf, dist in strict_geometric_relations(a, b, _NEAR_RADIUS_M):
+                    if rel == "near":
+                        near_candidates.setdefault(a.object_id, []).append((dist, b.object_id))
+                        near_candidates.setdefault(b.object_id, []).append((dist, a.object_id))
+                        continue
+                    reason = f"geometry: {rel} (centre distance {dist:.2f} m)"
+                    out.append(SceneGraphEdge(a.object_id, b.object_id, rel, conf, "geometric", reason))
+                    inv = {"on_top_of": "under", "under": "on_top_of", "inside": "contains", "contains": "inside"}[rel]
+                    out.append(SceneGraphEdge(b.object_id, a.object_id, inv, conf, "geometric", reason))
+        seen: set[tuple[str, str]] = set()
+        for src, cands in near_candidates.items():
+            for dist, dst in sorted(cands)[:_NEAR_MAX_PER_OBJECT]:
+                key = (src, dst)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(SceneGraphEdge(
+                    src, dst, "near", CONF_MED, "geometric",
+                    f"geometry: within {_NEAR_RADIUS_M:.1f} m (centre distance {dist:.2f} m)",
                 ))
         return out
 

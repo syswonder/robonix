@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "description": "Cross-world Scene semantic benchmark. Coordinates are always resolved from the checked-in WBT; this file contains only taxonomy, approximate visibility extents, and association tolerances.",
+  "worlds": [
+    {
+      "id": "office",
+      "world": "examples/webots/sim/ros_ws/src/eaios_webots/worlds/office.wbt",
+      "robot": {"node_type": "TiagoLite", "name": "my_robot"},
+      "map_ground_z_world_m": 0.0
+    },
+    {
+      "id": "break_room",
+      "world": "examples/webots/sim/ros_ws/src/eaios_webots/worlds/break_room.wbt",
+      "robot": {"node_type": "TiagoLite", "name": "my_robot"},
+      "map_ground_z_world_m": 0.0
+    },
+    {
+      "id": "kitchen",
+      "world": "examples/webots/sim/ros_ws/src/eaios_webots/worlds/kitchen.wbt",
+      "robot": {"node_type": "TiagoLite", "name": "my_robot"},
+      "map_ground_z_world_m": 0.0
+    },
+    {
+      "id": "apartment",
+      "world": "examples/webots/sim/ros_ws/src/eaios_webots/worlds/apartment.wbt",
+      "robot": {"node_type": "TiagoLite", "name": "my_robot"},
+      "map_ground_z_world_m": 0.0
+    },
+    {
+      "id": "complete_apartment",
+      "world": "examples/webots/sim/ros_ws/src/eaios_webots/worlds/complete_apartment.wbt",
+      "robot": {"node_type": "TiagoLite", "name": "my_robot"},
+      "map_ground_z_world_m": 0.0
+    }
+  ],
+  "semantic_types": {
+    "Door": {"label": "door", "size_m": [0.2, 1.0, 2.4], "center_offset_m": [0.0, 0.0, 1.2], "association_radius_m": 0.8},
+    "Window": {"label": "window", "size_m": [0.15, 1.0, 2.4], "association_radius_m": 0.9},
+    "CeilingLight": {"label": "lamp", "size_m": [0.5, 0.5, 0.15], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.6},
+    "CeilingSpotLight": {"label": "lamp", "size_m": [0.25, 0.25, 0.25], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.5},
+    "FloorLight": {"label": "lamp", "size_m": [0.45, 0.45, 1.6], "association_radius_m": 0.7},
+    "Sofa": {"label": "couch", "size_m": [2.0, 0.9, 0.85], "association_radius_m": 1.0},
+    "Armchair": {"label": "chair", "size_m": [0.9, 0.9, 1.0], "association_radius_m": 0.75},
+    "Chair": {"label": "chair", "size_m": [0.55, 0.55, 0.95], "association_radius_m": 0.65},
+    "WoodenChair": {"label": "chair", "size_m": [0.5, 0.5, 0.95], "association_radius_m": 0.65},
+    "OfficeChair": {"label": "chair", "size_m": [0.56, 0.55, 0.99], "association_radius_m": 0.65},
+    "Table": {"label": "table", "size_m": [1.2, 0.8, 0.74], "center_offset_m": [0.0, 0.0, 0.37], "association_radius_m": 0.85},
+    "RoundTable": {"label": "table", "size_m": [1.0, 1.0, 0.75], "association_radius_m": 0.8},
+    "Desk": {"label": "desk", "size_m": [1.4, 0.7, 0.75], "association_radius_m": 0.9},
+    "Cabinet": {"label": "cabinet", "size_m": [0.55, 1.0, 0.8], "association_radius_m": 0.85},
+    "PottedTree": {"label": "potted_plant", "size_m": [0.6, 0.6, 1.35], "association_radius_m": 0.8},
+    "BunchOfSunFlowers": {"label": "plant", "size_m": [0.45, 0.45, 0.8], "association_radius_m": 0.65},
+    "Monitor": {"label": "monitor", "size_m": [0.14, 0.47, 0.35], "center_offset_m": [0.01, 0.0, 0.17], "association_radius_m": 0.45},
+    "Keyboard": {"label": "keyboard", "size_m": [0.14, 0.42, 0.03], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.35},
+    "ComputerMouse": {"label": "mouse", "size_m": [0.12, 0.07, 0.04], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "DesktopComputer": {"label": "computer_tower", "size_m": [0.5, 0.22, 0.5], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.55},
+    "Laptop": {"label": "laptop", "size_m": [0.35, 0.28, 0.25], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.45},
+    "Television": {"label": "television", "size_m": [0.12, 1.0, 0.65], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.65},
+    "Fridge": {"label": "refrigerator", "size_m": [0.75, 0.75, 1.9], "association_radius_m": 0.9},
+    "Oven": {"label": "oven", "size_m": [0.65, 0.65, 0.9], "association_radius_m": 0.75},
+    "Worktop": {"label": "counter", "size_m": [1.0, 0.65, 0.12], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.75},
+    "Sink": {"label": "sink", "size_m": [0.65, 0.5, 0.25], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.65},
+    "BathroomSink": {"label": "sink", "size_m": [0.65, 0.5, 0.8], "association_radius_m": 0.7},
+    "HotPlate": {"label": "stove", "size_m": [0.6, 0.5, 0.08], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.55},
+    "WashingMachine": {"label": "washing_machine", "size_m": [0.65, 0.65, 0.9], "association_radius_m": 0.75},
+    "Bathtube": {"label": "bathtub", "size_m": [1.7, 0.8, 0.6], "association_radius_m": 1.0},
+    "Toilet": {"label": "toilet", "size_m": [0.75, 0.5, 0.8], "association_radius_m": 0.75},
+    "Bed": {"label": "bed", "size_m": [2.0, 1.4, 0.65], "association_radius_m": 1.1},
+    "Radiator": {"label": "radiator", "size_m": [0.2, 1.0, 0.8], "association_radius_m": 0.75},
+    "FireExtinguisher": {"label": "fire_extinguisher", "size_m": [0.25, 0.25, 0.65], "association_radius_m": 0.5},
+    "Clock": {"label": "clock", "size_m": [0.08, 0.35, 0.35], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.45},
+    "OfficeTelephone": {"label": "telephone", "size_m": [0.25, 0.2, 0.12], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.35},
+    "PortraitPainting": {"label": "picture_frame", "size_m": [0.06, 0.6, 0.9], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.6},
+    "LandscapePainting": {"label": "picture_frame", "size_m": [0.06, 0.9, 0.6], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.6},
+    "Book": {"label": "book", "size_m": [0.24, 0.18, 0.05], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "FruitBowl": {"label": "bowl", "size_m": [0.3, 0.3, 0.18], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.35},
+    "Apple": {"label": "apple", "size_m": [0.09, 0.09, 0.09], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.22},
+    "Orange": {"label": "orange", "size_m": [0.09, 0.09, 0.09], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.22},
+    "Can": {"label": "can", "size_m": [0.07, 0.07, 0.13], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.22},
+    "WaterBottle": {"label": "water_bottle", "size_m": [0.09, 0.09, 0.28], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "BeerBottle": {"label": "bottle", "size_m": [0.08, 0.08, 0.26], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "Carafe": {"label": "carafe", "size_m": [0.15, 0.15, 0.3], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "Plate": {"label": "plate", "size_m": [0.25, 0.25, 0.03], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "Glass": {"label": "glass", "size_m": [0.08, 0.08, 0.14], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.22},
+    "Wineglass": {"label": "wineglass", "size_m": [0.09, 0.09, 0.2], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.24},
+    "Knife": {"label": "knife", "size_m": [0.25, 0.03, 0.02], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "Fork": {"label": "fork", "size_m": [0.2, 0.03, 0.02], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "Spoon": {"label": "spoon", "size_m": [0.2, 0.04, 0.02], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "WoodenSpoon": {"label": "spoon", "size_m": [0.3, 0.06, 0.03], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "Cookware": {"label": "pan", "size_m": [0.4, 0.3, 0.15], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.4},
+    "Lid": {"label": "lid", "size_m": [0.3, 0.3, 0.05], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "CerealBox": {"label": "cereal_box", "size_m": [0.2, 0.08, 0.3], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "BiscuitBox": {"label": "box", "size_m": [0.2, 0.12, 0.08], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.3},
+    "CardboardBox": {"label": "box", "size_m": [0.5, 0.5, 0.5], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.55},
+    "HoneyJar": {"label": "jar", "size_m": [0.1, 0.1, 0.16], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.24},
+    "JamJar": {"label": "jar", "size_m": [0.1, 0.1, 0.14], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.24},
+    "RubberDuck": {"label": "toy", "size_m": [0.16, 0.1, 0.14], "center_offset_m": [0.0, 0.0, 0.0], "association_radius_m": 0.25},
+    "Barbecue": {"label": "barbecue", "size_m": [1.0, 0.7, 1.1], "association_radius_m": 0.85}
+  },
+  "association": {
+    "description": "Map-plane radius and bbox volume are hard admissibility gates. Among admissible one-to-one assignments, maximize detection cardinality, then exact or explicitly equivalent labels, then minimize normalized XY distance. A wrong label remains a detection when no semantically correct candidate exists.",
+    "min_volume_ratio": 0.03,
+    "prefer_semantic_labels": true,
+    "semantic_equivalence_groups": [
+      ["sofa", "couch"]
+    ]
+  },
+  "score_gates": {
+    "min_detection_precision": 0.75,
+    "min_detection_recall": 0.7,
+    "min_detection_f1": 0.72,
+    "min_label_accuracy": 0.8,
+    "max_duplicate_rate": 0.1,
+    "max_ghost_rate": 0.05
+  }
+}

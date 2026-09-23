@@ -1,0 +1,42 @@
+# Scene image + the DualMap perception backend (Eku127/DualMap, RA-L 2025, Apache-2.0).
+#
+# Scene's own code is bind-mounted at run time (see scripts/start.sh), so this layer only
+# adds DualMap's source at a pinned commit, its Python dependencies and the two weights the
+# base image does not already carry (FastSAM-s and the MobileCLIP-S2 OpenCLIP checkpoint;
+# YOLO-World and MobileSAM are shared with the ConceptGraphs backend).
+#
+#   docker build --network host -f docker/Dockerfile.dualmap -t robonix-scene-dualmap \
+#       --build-arg BASE_IMAGE=robonix-scene --build-arg PROXY=http://127.0.0.1:7897 docker/
+#   ROBONIX_SCENE_IMAGE=robonix-scene-dualmap SCENE_PERCEPTION_BACKEND=dualmap bash scripts/start.sh
+#
+# PROXY is only used at build time (GitHub, Hugging Face); leave it empty on a host with
+# direct access. supervision is raised to 0.25 (DualMap's API); the ConceptGraphs backend
+# in this image still runs, its use of sv.Detections is compatible.
+ARG BASE_IMAGE=robonix-scene
+FROM ${BASE_IMAGE}
+ARG PROXY=
+ARG DUALMAP_COMMIT=157235e
+ARG DUALMAP_REPO=https://github.com/Eku127/DualMap.git
+ARG MOBILECLIP_REPO=https://github.com/apple/ml-mobileclip.git
+
+RUN set -e; export https_proxy=$PROXY http_proxy=$PROXY; \
+    git clone --filter=blob:none ${DUALMAP_REPO} /opt/dualmap \
+ && cd /opt/dualmap && git checkout --quiet ${DUALMAP_COMMIT} \
+ && git -c submodule.3rdparty/mobileclip.url=${MOBILECLIP_REPO} submodule update --init 3rdparty/mobileclip \
+ && rm -rf /opt/dualmap/.git /opt/dualmap/3rdparty/mobileclip/.git
+
+RUN set -e; export https_proxy=$PROXY http_proxy=$PROXY; \
+    pip install -q --no-cache-dir "supervision==0.25.1" distinctipy plyfile pympler dill tabulate \
+        "rerun-sdk==0.22.1" "numpy==1.26.4" \
+ && pip install -q --no-deps -e /opt/dualmap/3rdparty/mobileclip \
+ && python3 -c "import sys; sys.path.insert(0, '/opt/dualmap'); import dualmap, utils.object_detector, utils.local_map_manager; print('dualmap import ok')"
+
+RUN set -e; export https_proxy=$PROXY http_proxy=$PROXY; mkdir -p /opt/models/dualmap; \
+    curl -fsSL -o /opt/models/dualmap/FastSAM-s.pt \
+        https://github.com/ultralytics/assets/releases/download/v8.3.0/FastSAM-s.pt \
+ && curl -fsSL -o /opt/models/dualmap/mobileclip_s2_datacompdr.bin \
+        https://huggingface.co/apple/MobileCLIP-S2-OpenCLIP/resolve/main/open_clip_pytorch_model.bin \
+ && test "$(stat -c %s /opt/models/dualmap/mobileclip_s2_datacompdr.bin)" = 398202800 \
+ && test "$(stat -c %s /opt/models/dualmap/FastSAM-s.pt)" = 23851578
+
+ENV PYTHONPATH=/opt/dualmap:${PYTHONPATH}

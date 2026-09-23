@@ -140,6 +140,76 @@ def geometric_relation(
     return None
 
 
+def _footprint_overlap_ratio(a: SceneGraphNode, b: SceneGraphNode) -> float:
+    """Fraction of `a`'s XY footprint covered by `b`'s footprint (0..1)."""
+    ahx, ahy, _ = _half(a)
+    bhx, bhy, _ = _half(b)
+    ax, ay = a.bbox_center[0], a.bbox_center[1]
+    bx, by = b.bbox_center[0], b.bbox_center[1]
+    ix = max(0.0, min(ax + ahx, bx + bhx) - max(ax - ahx, bx - bhx))
+    iy = max(0.0, min(ay + ahy, by + bhy) - max(ay - ahy, by - bhy))
+    area_a = max(1e-6, 4.0 * ahx * ahy)
+    return (ix * iy) / area_a
+
+
+def _volume(n: SceneGraphNode) -> float:
+    e = n.bbox_extent
+    return max(1e-9, e[0] * e[1] * e[2])
+
+
+# Strict thresholds for the deterministic loop. They exist because the plain
+# AABB tests above misfire on full-volume boxes (a pillow "inside" a bed) and
+# on same-surface neighbours (two mugs on one table read as stacked).
+_SUPPORT_FOOTPRINT_MIN = 0.5      # ≥ half of the top object's footprint over the base
+_SUPPORT_MAX_SIZE_RATIO = 1.0     # the supported object may not be larger than the base
+_CONTAIN_MAX_VOLUME_RATIO = 0.5   # an inside object is at most half the container's volume
+_NEAR_STRICT_RADIUS_M = 1.5
+
+
+def strict_geometric_relations(
+    a: SceneGraphNode, b: SceneGraphNode, near_radius_m: float = _NEAR_STRICT_RADIUS_M,
+) -> list[tuple[str, float, float]]:
+    """Deterministic relations from ``a`` to ``b`` for the geometric loop.
+
+    Returns ``[(relation, confidence, distance_m)]`` — usually one entry,
+    empty when the boxes say nothing. Unlike ``geometric_relation`` this
+    never defers to an LLM and applies the strict gates:
+
+      * ``on_top_of``: a's bottom within the contact gap of b's top, at
+        least half of a's footprint over b, and a's footprint no larger
+        than b's.
+      * ``under``: the mirror of the above.
+      * ``inside``: a's center inside b's box and a's volume at most half of
+        b's (so a bed does not "contain" its pillow).
+      * ``contains``: the mirror.
+      * ``near``: centers within ``near_radius_m`` (soft, medium
+        confidence) when nothing stronger holds.
+    """
+    dist = _l2(a.bbox_center, b.bbox_center)
+
+    def _supports(top: SceneGraphNode, base: SceneGraphNode) -> bool:
+        if not _rests_on(top, base):
+            return False
+        if _footprint_overlap_ratio(top, base) < _SUPPORT_FOOTPRINT_MIN:
+            return False
+        th, bh = _half(top), _half(base)
+        return (th[0] * th[1]) <= _SUPPORT_MAX_SIZE_RATIO * (bh[0] * bh[1])
+
+    if _supports(a, b):
+        return [("on_top_of", CONF_HIGH, dist)]
+    if _supports(b, a):
+        return [("under", CONF_HIGH, dist)]
+    a_in_b = _center_inside(a, b) and _volume(a) <= _CONTAIN_MAX_VOLUME_RATIO * _volume(b)
+    b_in_a = _center_inside(b, a) and _volume(b) <= _CONTAIN_MAX_VOLUME_RATIO * _volume(a)
+    if a_in_b and not b_in_a:
+        return [("inside", CONF_HIGH, dist)]
+    if b_in_a and not a_in_b:
+        return [("contains", CONF_HIGH, dist)]
+    if dist <= near_radius_m:
+        return [("near", CONF_MED, dist)]
+    return []
+
+
 # Defensive: relation names produced above must be valid wire values.
 assert all(r in RELATION_TYPES for r in
            ("on_top_of", "under", "inside", "contains", "near"))

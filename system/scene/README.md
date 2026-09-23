@@ -27,7 +27,8 @@ system/scene/
 │   ├── ingest/
 │   │   ├── ros_subscribers.py   rclpy hub: /tf2 + topic slots (rgb/depth/lidar/...)
 │   │   ├── capabilities.py      hardware probe → perception tier (metric/visual/geometric)
-│   │   ├── perception_concept_graphs.py  perception pipeline (this file)
+│   │   ├── perception_concept_graphs.py  ConceptGraphs backend (default)
+│   │   ├── perception_dualmap.py         DualMap backend (perception.backend: dualmap)
 │   │   └── perception_vlm.py    VLM fallback (no-depth deploys only)
 ```
 
@@ -110,6 +111,207 @@ ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
 > `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
 > the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set
 > `ROBONIX_FORCE_CPU=1` to skip CUDA.
+
+## Perception profiles and backends
+
+Two manifest keys under `system.scene.config.perception` decide how much compute
+Scene spends and which mapper does the work:
+
+| key | values | meaning |
+|---|---|---|
+| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the small set (~4 GB of video memory), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, mounted from `SCENE_MODELS_DIR`), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
+| `backend` | `concept_graphs` (default), `dualmap` | which open-vocabulary mapper runs on the RGB-D stream. Env fallback `SCENE_PERCEPTION_BACKEND`. |
+
+Both backends take the same inputs (RGB, depth, intrinsics, camera→map transform)
+and feed the same `ObjectRegistry`, so `list_objects` / `goal_near` / relations /
+the web UI / persistence / the Replica export do not change.
+
+`dualmap` runs DualMap's detector and local map ([Eku127/DualMap](https://github.com/Eku127/DualMap),
+RA-L 2025, Apache-2.0: YOLO-World + FastSAM/MobileSAM + MobileCLIP-S2 with a Bayesian
+class filter) at 0.4-0.7 s per frame in 2.3 GB of video memory. It needs the
+image built from `docker/Dockerfile.dualmap` (DualMap source at a pinned commit plus its
+two extra weights) and is selected per deployment:
+
+```yaml
+system:
+  scene:
+    config:
+      perception:
+        backend: dualmap
+        # DualMap's local ("concrete") map associates observations by geometry
+        # + CLIP and keeps every stable track; that is the mode its own Replica
+        # evaluation runs in and the default here. Its global ("abstract") map
+        # is a navigation memory: it keeps only low-mobility anchors, merged
+        # across classes by top-down 2D overlap, and drops every other stable
+        # track once it leaves view. Turn it on with global_map: true when the
+        # deployment wants that memory rather than an inventory.
+        dualmap:
+          # YOLO-World vocabulary for this deployment; omit for DualMap's general indoor list.
+          classes: [chair, table, sofa, bed, door, window, lamp, tv, shelf, plant]
+          keep_unknown: false     # keep FastSAM segments YOLO-World could not name
+          use_fastsam: false      # defaults to keep_unknown: FastSAM only adds unnamed segments
+          # keyframe gate (DualMap's rule): a frame is mapped only after the camera
+          # moved this far / turned this much, or this long passed. Feeding every
+          # frame fragments objects; on a robot a frame without motion adds nothing.
+          keyframe_translation_m: 0.1
+          keyframe_rotation_deg: 3.0
+          keyframe_time_s: 5.0
+          merge_every_keyframes: 20   # DualMap's local-map self-merge cadence (0 = off)
+          min_observations: 1         # tracks seen in fewer keyframes stay out of the registry
+          stable_only: false          # additionally require DualMap's own stable flag
+          # Optional floor gate: drop tracks whose points all lie within 5 cm
+          # of the floor. Off by default — it also drops rugs and carpets.
+          floor_gate: false
+          floor_z_m: 0.0
+          # DualMap's object lifecycle, passed through to its own config. A
+          # track needs stable_num observations to become stable (default 8,
+          # sized for a dataset replay that maps every frame); one that leaves
+          # the active_window_size most recent frames without getting there is
+          # deleted after max_pending_count rounds, and one that IS stable is
+          # promoted to the global map after the same count. A robot mapping
+          # keyframes at walking pace sees each object a handful of times, so
+          # stable_num has to match the observation rate or the map empties out
+          # behind the robot. Leave the other two alone: raising
+          # max_pending_count also delays promotion, and the global map is
+          # where objects reported under several labels get merged.
+          stable_num: 3
+          # Association: an observation joins a track when cos(CLIP) + point
+          # overlap > sim_threshold (1.2), and overlap counts points within
+          # downsample_voxel_size (0.02) of the track. The voxel must exceed
+          # the SLAM pose error between keyframes or nothing ever associates.
+          downsample_voxel_size: 0.05
+          # DualMap's own duplicate merge (every merge_every_keyframes) joins
+          # tracks whose point overlap exceeds merge_sim_threshold (0.9 by
+          # default — never fires under a robot's pose error).
+          merge_sim_threshold: 0.3
+```
+
+```bash
+ROBONIX_SCENE_IMAGE=robonix-scene-dualmap SCENE_PERCEPTION_BACKEND=dualmap bash scripts/start.sh
+```
+
+**The image must carry DualMap's source.** `docker/Dockerfile.dualmap` clones it to
+`/opt/dualmap`; an image built without that step starts and then fails activation with
+`DualMap root /opt/dualmap has no config/ directory`. Check before booting:
+
+```bash
+docker run --rm --entrypoint bash <image> -lc 'ls /opt/dualmap/config >/dev/null && python3 -c "import rerun"'
+```
+
+### Both backends take knobs, and the default one takes more
+
+`perception.concept_graphs` and `perception.dualmap` are each a mapping passed
+to the backend that reads them. An unknown key in either fails the boot naming
+it, so what they accept is a closed set: 39 keys for `concept_graphs`, 19 for
+`dualmap`. `config.spec` documents every one of them, grouped by what it does;
+this section covers the group most deployments actually reach for.
+
+**When one object comes back as several.** A run of office shelving reported as
+`cabinet_0006`, `shelf_0009`, `cabinet_0012` is the association gates being
+tighter than the pose error between the views that saw it. The merge criterion
+is point-cloud overlap, and two adjacent segments of one long object do not
+overlap each other, so the distance gate never gets a say. For
+`concept_graphs`:
+
+| key | default | what to try |
+|---|---|---|
+| `merge_threshold` | 0.85 | the per-tick overlap gate. 0.85 asks for near-identical clouds |
+| `same_class_merge_dist_m` | 0.4 | two of one class closer than this are one object |
+| `cross_class_centroid_max_m` | 0.5 | likewise across classes -- the cabinet/shelf case |
+| `merge_overlap_thresh` | 0.5 | the periodic pass's gate, which is where cross-view merging happens |
+| `max_merge_dist_m` | 1.5 | a hard centroid gate; it only bounds the above, it does not cause merging |
+
+These are also `SCENE_CG_*` environment variables, which is the point: the
+detector exposes them so the split can be tuned on a running robot without a
+rebuild.
+
+For `dualmap` the equivalent is `merge_sim_threshold` (0.9 upstream, which
+never fires under a robot's pose error) with `merge_every_keyframes`, and
+`global_map: true`, whose abstract map merges across classes by top-down 2D
+overlap.
+
+### Every `perception.dualmap` key
+
+Unknown keys fail at load rather than being ignored, so this list is the whole surface.
+The four in bold are the ones a deployment usually has to set; the defaults of the rest
+come from DualMap's own configuration and are sized for a dataset replay.
+
+| key | default | what it does |
+|---|---|---|
+| **`classes`** | DualMap's 101-name domestic list | YOLO-World vocabulary. A detector can only answer with a name it was given: on the office world the domestic list cost 0.41 label accuracy against 0.82 with a 40-name office list. |
+| **`stable_num`** | 8 | observations before a track counts as stable. Sized for a replay that maps every frame; a robot at walking pace sees each object a handful of times, and at 8 one 180 s office run went from 65 tracks to 1. |
+| `active_window_size` | 10 | how many recent frames count as active. A track that leaves this window without becoming stable is dropped. |
+| `max_pending_count` | 5 | rounds an unstable track survives outside that window. Raising it also delays promotion to the global map. |
+| **`keyframe_translation_m`** | 0.1 | map a frame only after this much travel |
+| **`keyframe_rotation_deg`** | 3.0 | …or this much turn |
+| `keyframe_time_s` | 5.0 | …or this long since the last mapped frame |
+| `sim_threshold` | 1.2 | an observation joins a track when cos(CLIP) + point overlap exceeds this |
+| `downsample_voxel_size` | 0.02 | the radius "overlap" counts within. Must exceed the SLAM pose error between keyframes or nothing ever associates and every keyframe starts a new track. |
+| `merge_every_keyframes` | 20 | self-merge cadence for the local map; 0 disables |
+| `merge_sim_threshold` | 0.9 | point overlap two tracks need to be merged. Upstream's 0.9 never fires under a robot's pose error; 0.3 does. |
+| `global_map` | `false` | run DualMap's abstract map as well. It merges across classes by top-down 2D overlap — the mechanism aimed at one workstation reported as tv + speaker + desk — but keeps only low-mobility anchors and drops every other stable track once it leaves view. An inventory wants it off; a navigation memory wants it on. |
+| `min_observations` | 1 | keyframes a track must be seen in to enter the registry |
+| `stable_only` | `false` | additionally require DualMap's own stable flag |
+| `keep_unknown` | `false` | keep FastSAM segments YOLO-World could not name |
+| `use_fastsam` | follows `keep_unknown` | FastSAM only adds unnamed segments |
+| `floor_gate` | `false` | drop tracks whose points all lie within 5 cm of the floor. Off because it also drops rugs and carpets. |
+| `floor_z_m` | 0.0 | where that floor is |
+| `device` | `cuda` | torch device for DualMap's models |
+
+### How these numbers were produced
+
+The scorer and the ground-truth extraction are in this repository:
+
+| | |
+|---|---|
+| `testing/export_webots_scene_truth.py` | reads a Webots `.wbt`, resolves the named fixtures, and writes the truth file |
+| `testing/scene_quality_ground_truth.py` | the extraction and the metrics behind it |
+| `testing/evaluate_webots_scene.py` | scores a live Scene (or a saved `/api/state`) against that truth |
+| `testing/judge_scene_labels.py` | asks a model whether two category names mean the same kind of object, so `tv` against `television` is not counted as a recognition error |
+
+**The runner that drove them is not.** Scoring a round needs one more piece: a
+sweep that drives the tour, records which truth objects were physically
+visible, and resolves the transform between the simulator's world frame and
+the map Scene built. `evaluate_webots_scene.py` takes that last part --
+`truth_alignment` -- from the sweep's output file. Without it the truth stays
+in world coordinates while Scene's objects are in map coordinates, nothing
+matches, and the score is not a measurement of anything.
+
+That sweep, the motion and visibility helpers, and the report renderer were
+taken out to keep this change to the backend and what scores it. So the tables
+below are not reproducible from this branch alone. They were measured with the
+harness on `scene-benchmark-harness`, which is where it lives.
+
+### Measured
+
+Office world, only `perception.backend` changed, medians over n rounds against the 51
+ground-truth objects the robot saw:
+
+| backend | n | P | R | F1 | label acc | TP | dup | ghost |
+|---|---|---|---|---|---|---|---|---|
+| `concept_graphs` | 2 | 0.813 | 0.480 | 0.603 | 0.714 | 24 | 3 | 2 |
+| `dualmap` + office list | 3 | 0.620 | 0.608 | 0.614 | 0.700 | 31 | 5 | 11 |
+
+The two are level on F1 — the two `concept_graphs` rounds differ from each other by 0.079,
+which is the size of the gap. They trade: `concept_graphs` is the more precise and finds
+fewer objects, `dualmap` finds more and pays in ghosts.
+
+What separates them is cost. CPU 24% against 94% of a core, because DualMap runs detection,
+segmentation and encoding only after 0.15 m of travel or 5 degrees of turn rather than every
+tick. Steady container memory 2.3 GB against 2.8 GB. And on one tour the in-repo backend's
+resident set stepped from 2.8 GB to 22.0 GB within a single sampling interval, held two and a
+half minutes, and fell to 0.9 GB as the container restarted; DualMap stayed flat on the same
+route. That is a property of the pipeline rather than of this deployment — ConceptGraphs
+retains each object's full point cloud because its association measure is a nearest-neighbour
+ratio between clouds, and DualMap's own paper reports a 23.5 GB peak for it on Replica
+against 4.6 GB for itself.
+
+Wrapping either pipeline in Scene costs nothing measurable: over four Replica scenes the
+difference between upstream and wrapped is −0.91 mIoU for ConceptGraphs and +1.43 for
+DualMap, with the per-scene signs disagreeing in both cases.
+
+The vocabulary is a larger lever than the backend. Give each deployment the object names it
+cares about.
 
 ## Relations (`scene_graph/`)
 
@@ -342,6 +544,11 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_MAP_BINDING_WAIT_S` | `3.0` | how long the startup probe waits for the lifecycle contract to appear on atlas before falling back to static binding; `0` disables the probe |
 | `SCENE_ANNOTATIONS_DIR` | `/data/robonix/scene_annotations` | per-map JSON files holding user annotations (rooms / POIs); host-mounted like the object DB |
 | `VLM_REASONING_EFFORT` | `` (unset) | opt-in, forwarded to all scene VLM/LLM calls (relation inference + VLM perception): `minimal`\|`low`\|`medium`\|`high`. **Unset → the field is omitted**, so non-reasoning models and strict endpoints are unaffected. Set `minimal` (= no thinking) to keep a reasoning `VLM_MODEL` (e.g. `doubao-seed-2-1-pro`) answering in ~2 s instead of timing out |
+| `SCENE_PROFILE` | `lite` | perception profile when the manifest does not set `perception.profile` (`lite` / `full` / `annotate`) |
+| `SCENE_PERCEPTION_BACKEND` | `concept_graphs` | perception backend when the manifest does not set `perception.backend` (`concept_graphs` / `dualmap`) |
+| `SCENE_DUALMAP_CLASSES` | (unset) | host file with one YOLO-World class name per line for the DualMap backend; `start.sh` mounts it read-only. The manifest's `perception.dualmap.classes` list takes precedence |
+| `SCENE_DUALMAP_ROOT` | `/opt/dualmap` | DualMap checkout inside the container (`docker/Dockerfile.dualmap` puts it there) |
+| `ROBONIX_SCENE_IMAGE` | `robonix-scene` | image `start.sh` runs; use `robonix-scene-dualmap` for the DualMap backend |
 
 ## Object memory (Save/Load snapshots)
 

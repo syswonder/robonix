@@ -497,6 +497,60 @@ def test_geometric_relation():
     print("  [PASS] test_geometric_relation")
 
 
+def test_strict_geometric_relations():
+    """The geometric loop's predicates reject the two classic AABB misfires:
+    a small object 'contained' by a big box it merely overlaps, and two
+    same-surface neighbours read as stacked."""
+    from scene_service.scene_graph.geometry import strict_geometric_relations
+    from scene_service.scene_graph.types import SceneGraphNode
+
+    cup = SceneGraphNode("cup", "cup", (1.0, 0.5, 0.5), (0.1, 0.1, 0.15))
+    table = SceneGraphNode("table", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05))
+    assert strict_geometric_relations(cup, table)[0][0] == "on_top_of"
+    assert strict_geometric_relations(table, cup)[0][0] == "under"
+
+    # a pillow whose centre lies inside a bed's full-volume box is NOT inside it:
+    # its volume is small, but the bed's box centre-inside test is one-directional
+    # and the pillow rests on the bed top → on_top_of wins over inside.
+    bed = SceneGraphNode("bed", "bed", (0.0, 0.0, 0.3), (2.0, 1.6, 0.6))
+    pillow = SceneGraphNode("pillow", "pillow", (0.5, 0.4, 0.65), (0.5, 0.3, 0.1))
+    assert strict_geometric_relations(pillow, bed)[0][0] == "on_top_of"
+
+    # same-size boxes touching top-to-bottom but the top one hangs off the
+    # side (footprint overlap < 50%) → not supported, only near.
+    a = SceneGraphNode("a", "box", (0.0, 0.0, 0.5), (0.4, 0.4, 0.4))
+    b = SceneGraphNode("b", "box", (0.35, 0.0, 0.9), (0.4, 0.4, 0.4))
+    assert strict_geometric_relations(b, a)[0][0] == "near"
+
+    # a big object cannot be 'inside' a small one even if centres coincide
+    big = SceneGraphNode("big", "sofa", (0.0, 0.0, 0.4), (2.0, 0.9, 0.8))
+    small = SceneGraphNode("small", "cushion", (0.0, 0.0, 0.4), (0.4, 0.4, 0.2))
+    rels = {r for r, _, _ in strict_geometric_relations(big, small)}
+    assert "inside" not in rels and "contains" in rels
+
+    far = SceneGraphNode("far", "cup", (5.0, 0.0, 0.5), (0.1, 0.1, 0.1))
+    assert strict_geometric_relations(cup, far) == []
+    print("  [PASS] test_strict_geometric_relations")
+
+
+def test_geometric_loop_object_relations():
+    """Pairwise relations come out with inverses, and `near` is capped per object."""
+    from scene_service.scene_graph.geometric_loop import GeometricRelationLoop
+    from scene_service.scene_graph.types import SceneGraphNode
+
+    loop = GeometricRelationLoop.__new__(GeometricRelationLoop)
+    cup = SceneGraphNode("cup", "cup", (1.0, 0.5, 0.5), (0.1, 0.1, 0.15))
+    table = SceneGraphNode("table", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05))
+    chairs = [SceneGraphNode(f"chair{i}", "chair", (1.0 + 0.3 * i, 1.4, 0.4), (0.4, 0.4, 0.8)) for i in range(6)]
+    edges = loop._object_relations([cup, table] + chairs)
+    rels = {(e.source_id, e.target_id, e.relation) for e in edges}
+    assert ("cup", "table", "on_top_of") in rels and ("table", "cup", "under") in rels
+    near_from_chair0 = [e for e in edges if e.source_id == "chair0" and e.relation == "near"]
+    assert 0 < len(near_from_chair0) <= 3
+    assert all(e.method == "geometric" for e in edges)
+    print("  [PASS] test_geometric_loop_object_relations")
+
+
 def test_compute_geometric_edges():
     """compute_geometric_edges emits contact/containment edges only."""
     from scene_service.scene_graph.geometry import compute_geometric_edges

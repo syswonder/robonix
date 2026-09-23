@@ -96,6 +96,13 @@ def _make_detector(reg):
     # _apply_snapshot now also touches.
     p._object_ttl_s = 30.0
     p._merge_class_group = {}
+    # The occupancy gate this backend borrowed from DualMap: an object
+    # standing on ground the map has never observed cannot have been seen
+    # there. `None` disables it, which is what these tests want -- they are
+    # about re-binding ids, and a gate would need a hub and a live map to
+    # answer at all.
+    p._known_gate = None
+    p._min_mapped_fraction = 0.5
     return p
 
 
