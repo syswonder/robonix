@@ -44,7 +44,7 @@ Robonix ships with these benefits:
 </p>
 
 
-​	The figure shows the overall architecture of Robonix. The user talks to **Liaison**, which hands the **task** to **Pilot**; Pilot plans it with the model and passes the plan to **Executor**, which **Sentinel** monitors, while **Scene** keeps the state of the world. Below these services sit six core components, and below them **Soma**, the body abstraction: its **skill library** of reusable behaviors calls the **primitives**, each of which exposes a single hardware function, and the primitives drive the robot hardware.
+The figure shows the overall architecture of Robonix. The user talks to **Liaison**, which hands the **task** to **Pilot**; Pilot plans it with the model and passes the plan to **Executor**, which **Sentinel** monitors, while **Scene** keeps the state of the world. Below these services sit six core components, and below them **Soma**, the body abstraction: its **skill library** of reusable behaviors calls the **primitives**, each of which exposes a single hardware function, and the primitives drive the robot hardware.
 
 | Abstraction | Definition |
 | --- | --- |
