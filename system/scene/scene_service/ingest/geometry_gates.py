@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Things the world cannot be, decided by the map rather than by a threshold.
-
+"""
 Both perception backends produce objects that could not exist where they are
 claimed to be. The checks that reject them belong to neither backend: they
 are statements about the world -- a robot cannot have seen an object in a cell
