@@ -7,7 +7,7 @@
 use crate::discovery::CapDoc;
 use crate::history;
 use crate::vlm::{Message, VlmUsage};
-use robonix_scribe::info;
+use robonix_scribe::{debug, info};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -144,7 +144,27 @@ pub(crate) fn assemble_planning_messages(
     messages.push(Message::developer(&system));
     messages.extend(sanitized_history);
     close_trailing_assistant(&mut messages);
+    debug!(
+        "[pilot/prompt/messages] {}",
+        serde_json::json!({ "round": round, "messages": debug_view(&messages) })
+    );
     messages
+}
+
+/// The exact request messages for the debug log, with inline images reduced to
+/// their size. The `info` record above carries only section sizes and token
+/// estimates; this one carries the full text and is written only at debug level.
+fn debug_view(messages: &[Message]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut value = serde_json::to_value(message).unwrap_or_default();
+            if let Some(image) = message.image_base64.as_deref() {
+                value["image_base64"] = serde_json::json!(format!("<{} bytes>", image.len()));
+            }
+            value
+        })
+        .collect()
 }
 
 pub(crate) fn render_context_sections(sections: &[PromptSection<'_>]) -> String {
