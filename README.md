@@ -2,7 +2,7 @@
   <img src="images/robonix-logo.svg" alt="Robonix" width="420" />
 </p>
 
-<h3 align="center">Robonix — The Embodied AI Operating System</h3>
+<h3 align="center">Robonix — An Agentic Operating System for Embodied AI</h3>
 
 <p align="center">
   <em>A system substrate for building embodied intelligence across heterogeneous robots.</em>
@@ -29,13 +29,11 @@
 </p>
 <br />
 
-**Robonix** is an *agentic* operating system for embodied artificial intelligence (AI). It exposes a robot's hardware, services, and skills as typed capabilities. A large language model (LLM) translates a natural-language task into a program that orchestrates those capabilities; Robonix validates that program and then executes it under its supervision. The planning model is configurable — GPT, Qwen, etc., or one you host yourself.
+**Robonix** is a general-purpose agentic operating system designed for embodied artificial intelligence. It employs large language models (LLMs) and vision-language models (VLMs) to convert natural-language tasks into Robot Task Description Language (RTDL) programs, which are then executed to complete the specified tasks. The primary advantages of Robonix include the following:
 
-Robonix ships with these benefits:
-
-* **Simple Integration.** A body is integrated by implementing contracts for the hardware it exposes; everything above programs against capabilities rather than vendor APIs. A skill or task can transfer to another body that offers compatible contracts and meets the physical preconditions.
-* **Skill Composition.** Long-horizon behavior is assembled from independently tested skills instead of learned end to end, so a failed step can be retried or replaced without restarting the run.
-* **Observable Plans.** Plans are explicit and typed: what the model proposed, what the runtime admitted, which provider executed each call, and where it failed. Every system component writes structured logs, so a run leaves a machine-readable trail on disk.
+- **(1) Hardware–software decoupling.** Robonix utilizes layered capability abstractions *(Task, Skill, Service, Primitive)*  to separate software functionality from robot-specific hardware. These abstractions establish standard interface definition language (IDL) interfaces, enabling the reuse of compatible primitives, services, and skills across different robotic platforms.
+- **(2) Adaptability to diverse user tasks, robot capabilities, and environments.** Robonix leverages LLMs and VLMs to generate *RTDL programs* tailored to each user's task, the robot's capabilities, registered skills, environmental conditions, and body state. This approach enables Robonix to accommodate a wide range of natural language tasks, robotic hardware, and operational environments.
+- **(3) Observable and verifiable execution.** Robonix explicitly represents the model's program in RTDL, allowing for inspection of its structure. The system performs program validation prior to execution and can verify specified outcomes upon completion.
 
 ## Design of Robonix
 
@@ -44,20 +42,18 @@ Robonix ships with these benefits:
 </p>
 
 
-The figure shows the overall architecture of Robonix. The user talks to **Liaison**, which hands the **task** to **Pilot**; Pilot plans it with the model and passes the plan to **Executor**, which **Sentinel** monitors, while **Scene** keeps the state of the world. Below these services sit six core components, and below them **Soma**, the body abstraction: its **skill library** of reusable behaviors calls the **primitives**, each of which exposes a single hardware function, and the primitives drive the robot hardware.
+The figure illustrates the overall architecture of Robonix. The user interacts with **Liaison**, which delegates the **task** to **Pilot.** Pilot formulates a plan using the model and forwards it to **Executor**. **Sentinel** monitors Executor, while **Scene** maintains the semantic objects and relations of the outer world. The skill library provides reusable behaviors. Beneath the skill library, six system components are present. And **Soma** manages the robot's body description and state, the **primitives** expose hardware functions and interface with the robot's hardware.
 
-| Abstraction | Definition |
-| --- | --- |
+| Abstraction   | Definition                                                   |
+| ------------- | ------------------------------------------------------------ |
 | **primitive** | A single hardware function — sensing or actuation — behind a software interface. |
-| **service** | Shared functionality or state that tasks and skills draw on: scene, map, memory, navigation. |
-| **skill** | A learned model or an algorithmic procedure, packaged as a reusable executable unit. |
-| **task** | A goal, its constraints, and the conditions that count as completion. |
+| **service**   | Reusable software that implements a Robonix interface, such as planning, execution, interaction and scene management. |
+| **skill**     | A learned model or an algorithmic procedure, packaged as a reusable executable unit. |
+| **task**      | A goal, its constraints, and the conditions that count as completion. |
 
-Each primitive, service, and skill declares what it offers in a versioned **contract**, and announces itself to [Atlas](system/atlas/) at startup. Callers bind to the contract rather than the implementation behind it, which lets a task transfer to another body and an implementation be replaced without changing its callers.
+Each primitive, service, and skill specifies its offerings in a versioned contract and registers with [Atlas](http://system/atlas/) at startup. Callers bind to the contract rather than the underlying implementation, enabling task transfer to another body and allowing implementations to be replaced without modifying callers.
 
-***The agent loop:*** [Pilot](system/pilot/) sends the model the goal, the capabilities currently available, and the state of the world; the model responds with an **RTDL** program—a graph whose nodes are capability calls, run in sequence or concurrently. Pilot validates that program and hands a plan to [Executor](system/executor/), which runs it and returns typed results step by step until the task is done. Branching and loops are in development.
-
-The [System Architecture](#system-architecture) section below introduces the other components, such as Atlas, Liaison, Vitals, and Scribe.
+The subsequent [System Architecture](http://#system-architecture) section introduces additional components.
 
 ## Quick Start
 
@@ -212,9 +208,9 @@ Capability providers that use ROS 2 are built and tested against [ROS 2 Humble](
 
 ## System Architecture
 
-Six components form the core. A deployment cannot replace them; everything else is built on top.
+The **system** layer provides Robonix's shared runtime infrastructure. Its six built-in components handle capability registration, communication, identity and configuration, time, logging, and health monitoring:
 
-| Core | Responsibility |
+| System component | Responsibility |
 | --- | --- |
 | **[atlas](system/atlas/)** | Capability catalog — every running provider and its contract |
 | **[nexus](system/nexus/)** | Communication over gRPC, the Model Context Protocol (MCP), and ROS 2 |
@@ -223,7 +219,7 @@ Six components form the core. A deployment cannot replace them; everything else 
 | **[scribe](system/scribe/)** | Structured logging |
 | **[vitals](system/vitals/)** | Onboard health: temperatures, voltage, joint motors |
 
-Everything above the core is a service, and a deployment can replace any of it. Robonix ships a default implementation for the ones below, and for others such as navigation and mapping.
+Services are reusable software components that implement Robonix interfaces. Robonix provides the planning, execution, interaction, scene, and embodiment services below, alongside other services such as navigation and mapping. The skill library is a separate architectural layer. Soma launches deployed skills, Pilot discovers them through Atlas, and Executor invokes them.
 
 | Service | Responsibility |
 | --- | --- |
@@ -234,7 +230,7 @@ Everything above the core is a service, and a deployment can replace any of it. 
 | **[sentinel](system/sentinel/)** | Decides whether a capability call is allowed |
 | **[liaison](system/liaison/)** | User input — text and voice |
 
-Every contract lives in [`capabilities/`](capabilities/), whether a core component, a service, or a package implements it. Primitives and skills live in their own repositories. Some services still sit under `system/` in the source tree, and some capability interface names still carry their old spelling; both will migrate soon.
+Every contract lives in [`capabilities/`](capabilities/), whether a system component, a service, or a package implements it. Primitives and skills live in their own repositories. Currently, all 12 components are under the `system` directory for historical reasons.
 
 ## Documentation
 
