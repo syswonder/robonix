@@ -144,7 +144,6 @@
 <text class="it" x="762.0" y="469.0" text-anchor="middle">query</text>
 <rect class="b" stroke="#24a148" data-l="skill" x="144" y="523.0" width="1034" height="88" rx="8"/>
 <text class="lbc" data-l="skill" fill="#24a148" x="160" y="542.0">SKILL LIBRARY</text>
-<text class="s" x="1162" y="542.0" text-anchor="end">packages · providers + capabilities in Atlas</text>
 <rect class="bi bn" stroke="#24a148" data-l="skill" x="160.0" y="553.0" width="243.0" height="50" rx="8"/>
 <g fill="#24a148" data-l="skill" transform="translate(211.0,568.0) scale(0.875)"><path d="M18 2.01 6 2c-1.11 0-2 .89-2 2v16c0 1.11.89 2 2 2h12c1.11 0 2-.89 2-2V4c0-1.11-.89-1.99-2-1.99zM18 20H6L5.99 4H18v16z"/><circle cx="8" cy="6" r="1"/><circle cx="11" cy="6" r="1"/><path d="M12 19c2.76 0 5-2.24 5-5s-2.24-5-5-5-5 2.24-5 5 2.24 5 5 5zm2.36-7.36c1.3 1.3 1.3 3.42 0 4.72-1.3 1.3-3.42 1.3-4.72 0l4.72-4.72z"/></g>
 <text class="h2" x="244.0" y="584.0">fold laundry</text>
