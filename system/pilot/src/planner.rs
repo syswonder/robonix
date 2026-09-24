@@ -14,9 +14,7 @@ use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode, RtdlNodeState,
     SessionStatusEvent, Task, TaskStateEvent,
 };
-use crate::prompt::{
-    PromptSection, UsageTotals, assemble_planning_messages, render_context_sections,
-};
+use crate::prompt::{UsageTotals, assemble_planning_messages, render_context_sections};
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
 use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
@@ -122,9 +120,7 @@ fn configured_vlm_idle_timeout(value: Option<&str>) -> Duration {
 
 const MAX_HISTORY: usize = 200;
 
-/// Token budget used to decide when a long-running Pilot history must move to
-/// a new compacted cache epoch. The context window comes from deployment
-/// configuration or a best-effort provider metadata probe; it is never guessed.
+/// Compaction budget using a configured or provider-reported context window.
 #[derive(Clone, Debug)]
 pub struct HistoryBudget {
     pub context_window_tokens: Option<usize>,
@@ -134,6 +130,7 @@ pub struct HistoryBudget {
 }
 
 impl HistoryBudget {
+    /// Preserve the resolved limit, provenance, and completion reserves.
     pub fn new(
         context_window_tokens: Option<usize>,
         context_window_source: &'static str,
@@ -148,6 +145,7 @@ impl HistoryBudget {
         }
     }
 
+    /// Estimate history, pending context, and reserves when a limit is known.
     fn projected_tokens(&self, history: &[Message], non_history_tokens: usize) -> Option<usize> {
         self.context_window_tokens.map(|_| {
             history
@@ -167,10 +165,7 @@ impl HistoryBudget {
         })
     }
 
-    /// Keep a recent tail based on token capacity, rather than an arbitrary
-    /// message count: a single camera/tool observation can be larger than a
-    /// dozen short chat turns. Retain at most one eighth of the context window,
-    /// capped so the compacted epoch still has room to grow.
+    /// Reserve one eighth of the context for recent messages, within bounds.
     fn recent_tail_tokens(&self) -> usize {
         self.context_window_tokens
             .map(|limit| (limit / 8).clamp(1_024, 8_192))
@@ -200,10 +195,7 @@ impl TaskState {
     }
 }
 
-/// Task and steer messages already enter conversation history as user turns.
-/// When the model changes the tracked success criterion or lifecycle state,
-/// retain that authoritative update in the same history rather than duplicating
-/// a mutable task block in the system prompt.
+/// Persist authoritative task updates without changing the system prefix.
 fn append_task_state_record(history: &mut Vec<Message>, state: &TaskState) {
     let record = serde_json::json!({
         "goal": state.goal,
@@ -491,11 +483,7 @@ fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<MetaPlanOp>> {
     let Some(op) = obj.get("op").and_then(|value| value.as_str()) else {
         return Ok(None);
     };
-    // A plan id and an op id are identifiers, and JSON spells an identifier
-    // either 1 or "1" depending on which the model reached for. Both name the
-    // same plan, and Pilot puts it back on the wire as a string regardless, so
-    // rejecting the unquoted form only costs a planning round: it did so four
-    // times in thirty-five rounds of one deepseek-v3.2 episode.
+    // Normalize quoted and numeric identifiers to strings for Executor.
     let string = |key: &str| -> Result<String> {
         let value = obj
             .get(key)
@@ -1427,22 +1415,28 @@ pub async fn run_turn(
 
         let forest_block = build_forest_block(&forest, &cancel_requested);
         let executor_active_block = fetch_executor_active_block(executor).await;
-        let compaction_non_history_tokens = [
-            standing_prompt.as_str(),
-            protocol_prompt,
-            capability_prompt,
-            soma_prompt_block,
-            memory_prompt.as_str(),
-            capability_docs_prompt.as_str(),
-            voice_prompt,
-            forest_block.as_str(),
-            executor_active_block.as_str(),
-            embodiment_block.as_str(),
-            environment_block.as_str(),
-        ]
-        .into_iter()
-        .map(|section| section.len().div_ceil(4))
-        .sum();
+        // Stable instructions precede history; current observations follow it.
+        let sections = [
+            ("standing_system", standing_prompt.as_str()),
+            ("rtdl_protocol", protocol_prompt),
+            ("capability_catalog", capability_prompt),
+        ];
+        let live_sections = [
+            ("embodiment_static", soma_prompt_block),
+            ("memory", memory_prompt.as_str()),
+            ("capability_docs", capability_docs_prompt.as_str()),
+            ("voice", voice_prompt),
+            ("in_flight_trees", forest_block.as_str()),
+            ("executor_state", executor_active_block.as_str()),
+            ("embodiment_live", embodiment_block.as_str()),
+            ("environment_live", environment_block.as_str()),
+        ];
+        let runtime_context = render_context_sections(&live_sections);
+        let compaction_non_history_tokens = sections
+            .iter()
+            .chain(&live_sections)
+            .map(|(_, content)| content.len().div_ceil(4))
+            .sum();
         if compact_history(
             history,
             vlm,
@@ -1470,65 +1464,7 @@ pub async fn run_turn(
         // recovery plan) instead of crashing the whole turn. The loop yields a
         // valid (narration, tree label, plan, id) tuple for the forest dispatch.
         let mut correction: Option<String> = None;
-        let mut completed_request_context: String;
         let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_update, recovered) = loop {
-            // Keep role-defining RTDL rules and the current callable catalog
-            // in the system message, before all user/history content. Body,
-            // task, and runtime context go after history because they are not
-            // system instructions and may change from round to round.
-            let sections = [
-                PromptSection {
-                    name: "standing_system",
-                    content: &standing_prompt,
-                },
-                PromptSection {
-                    name: "rtdl_protocol",
-                    content: protocol_prompt,
-                },
-                PromptSection {
-                    name: "capability_catalog",
-                    content: capability_prompt,
-                },
-            ];
-            // Every section below is current context, not an instruction that
-            // may redefine the standing system role. Current user task and
-            // steering already live in the conversation history.
-            let live_sections = [
-                PromptSection {
-                    name: "embodiment_static",
-                    content: soma_prompt_block,
-                },
-                PromptSection {
-                    name: "memory",
-                    content: &memory_prompt,
-                },
-                PromptSection {
-                    name: "capability_docs",
-                    content: &capability_docs_prompt,
-                },
-                PromptSection {
-                    name: "voice",
-                    content: voice_prompt,
-                },
-                PromptSection {
-                    name: "in_flight_trees",
-                    content: &forest_block,
-                },
-                PromptSection {
-                    name: "executor_state",
-                    content: &executor_active_block,
-                },
-                PromptSection {
-                    name: "embodiment_live",
-                    content: &embodiment_block,
-                },
-                PromptSection {
-                    name: "environment_live",
-                    content: &environment_block,
-                },
-            ];
-            let runtime_context = render_context_sections(&live_sections);
-            completed_request_context = runtime_context.clone();
             let mut request_history = history.clone();
             if !runtime_context.is_empty() {
                 request_history.push(Message::user(&runtime_context));
@@ -1789,12 +1725,8 @@ pub async fn run_turn(
             }
         };
 
-        // A completed VLM request becomes part of the canonical conversation
-        // before its reply. In particular, do not regenerate its runtime
-        // observation as an ephemeral tail next round: that would put the
-        // assistant reply in a position where this request had the observation
-        // and break provider prefix reuse.
-        append_request_context(history, &completed_request_context, correction.as_deref());
+        // Persist the sent context before its reply to preserve prefix reuse.
+        append_request_context(history, &runtime_context, correction.as_deref());
 
         // RTDL recovery gave up after a retry: surface the user-facing message
         // once and END the turn. Without this the empty recovery plan would fall
@@ -2199,33 +2131,19 @@ fn capability_prompt_fingerprint(display_caps: &[DisplayCapability<'_>]) -> u64 
     hasher.finish()
 }
 
-/// Render the complete capability catalog in a compact, deterministic shape.
-/// Names remain on their own line for the CI fake VLM and descriptions are
-/// JSON-escaped so embedded whitespace cannot inflate or corrupt the catalog.
-/// Longest capability description the catalogue prints inline.
-///
-/// A description past this is a manual, not a summary. The catalogue keeps its
-/// opening paragraph and points the model at `read_capability_doc` for the
-/// rest, so one verbose provider cannot tax every planning call for the whole
-/// system: the catalogue ships on every request, the manual only when the model
-/// decides it needs that provider.
+/// Maximum inline description length; full documentation is loaded on demand.
 const MAX_INLINE_DESCRIPTION_CHARS: usize = 300;
 
-/// Opening paragraph of `description`, bounded by `MAX_INLINE_DESCRIPTION_CHARS`.
-///
-/// Returns the summary and whether anything was left behind, so the caller can
-/// tell the model where to read the remainder. Truncation is on a character
-/// boundary, never a byte offset, so multi-byte text survives intact.
+/// Return a character-bounded opening paragraph and whether text was omitted.
 fn summarize_description(description: &str) -> (String, bool) {
     let full = description.trim();
     let first = full.split("\n\n").next().unwrap_or(full).trim();
-    if first.chars().count() <= MAX_INLINE_DESCRIPTION_CHARS {
-        return (first.to_string(), first.len() < full.len());
-    }
-    let cut: String = first.chars().take(MAX_INLINE_DESCRIPTION_CHARS).collect();
-    (cut, true)
+    let summary: String = first.chars().take(MAX_INLINE_DESCRIPTION_CHARS).collect();
+    let truncated = summary.len() < full.len();
+    (summary, truncated)
 }
 
+/// Render deterministic capability entries with escaped descriptions and schemas.
 fn render_capability_prompt(display_caps: &[DisplayCapability<'_>]) -> String {
     let mut prompt = String::from("\n## Available capabilities\n\n");
     for cap in display_caps {
@@ -3083,6 +3001,7 @@ fn load_agent_soul() -> Option<String> {
     None
 }
 
+/// Prepend optional deployment instructions to the stable planning rules.
 fn build_system_prompt(soul: Option<&str>) -> String {
     let mut p = String::new();
     if let Some(s) = soul {
@@ -3109,10 +3028,6 @@ by planning capability calls available to you.
   RTDL. Emitting one single-node tree per round (ReAct-style drip) is wrong
   UNLESS the next step genuinely needs to see the previous step's result.
 - Do NOT claim missing capabilities unless verified from the current capability list/results.
-",
-    );
-    p.push_str(
-        "\
 - Prefer structured output; report capability results concisely.
 - Scope every result to the `plan_id` and independent RTDL tree named in its
   Executor feedback. If a capability fails, times out, returns success=false,
@@ -3129,10 +3044,6 @@ by planning capability calls available to you.
   Use `on_complete` for 'after step X' and `on_enter` for 'before step X'.
   Bind X itself; never substitute X's predecessor or successor.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
-",
-    );
-    p.push_str(
-        "\
 - Some later messages may be labelled `Executor feedback for the current task`.
   Treat those as results of capability calls you already planned, not as new
   user requests.
@@ -3172,10 +3083,6 @@ Concretely:
   literally every action. Re-observe and re-plan when the NEXT step depends on
   what you'd see (e.g. you must confirm an object moved before grasping it), not
   as a reflex after each call.
-",
-    );
-    p.push_str(
-        "\
 - Only mark `status: \"done\"` once the criterion is met OR you've exhausted
   reasonable attempts and need to report a blocker. 'Done.' with no
   verification is wrong — verify first.
@@ -3194,14 +3101,14 @@ Concretely:
 mod tests {
     use super::{
         CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, HistoryBudget,
-        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, PromptSection, RTDL_DO, RTDL_PARALLEL,
-        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, UsageTotals,
-        append_request_context, append_steer, append_task_state_record, apply_task_update,
-        assemble_planning_messages, build_capability_target_map, build_display_capabilities,
-        build_executor_active_block, build_forest_block, compact_tool_result,
-        configured_vlm_idle_timeout, duplicate_in_flight_signature, expand_rtdl_to_plan,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
+        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, RTDL_DO, RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER,
+        RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, UsageTotals, append_request_context,
+        append_steer, append_task_state_record, apply_task_update, assemble_planning_messages,
+        build_capability_target_map, build_display_capabilities, build_executor_active_block,
+        build_forest_block, compact_tool_result, configured_vlm_idle_timeout,
+        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        is_legacy_plan_control_contract, is_terminal_executor_state,
         mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
         parse_task_update, plan_call_signatures, record_dispatched_plan, rtdl_node_kind_name,
         rtdl_recovery_final_text, rtdl_state_name, should_replan_after_plan_done,
@@ -3212,7 +3119,6 @@ mod tests {
     use crate::pb::pilot::{
         CapabilityCall, CapabilityCallResult, Plan, RtdlNode, RtdlNodeState, Task,
     };
-    use crate::prompt::close_trailing_assistant;
     use crate::vlm::{Message, VlmUsage};
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
@@ -4342,170 +4248,30 @@ mod tests {
         assert!(err.to_string().contains("unknown operator"));
     }
 
+    /// Request history preserves corrections, authoritative state, and prefix bytes.
     #[test]
-    fn trailing_assistant_message_is_closed_with_a_user_turn() {
-        let mut messages = vec![
-            Message::system("s"),
-            Message::user("do the task"),
-            Message::assistant("thinking about it"),
-        ];
-        close_trailing_assistant(&mut messages);
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages.last().unwrap().role, "user");
-    }
-
-    #[test]
-    fn a_request_already_ending_in_user_is_left_alone() {
-        let mut messages = vec![
-            Message::system("s"),
-            Message::assistant("thinking about it"),
-            Message::user("keep going"),
-        ];
-        let before = messages.len();
-        close_trailing_assistant(&mut messages);
-        assert_eq!(messages.len(), before);
-    }
-
-    #[test]
-    fn persisted_runtime_state_follows_the_history_so_the_prefix_stays_cacheable() {
-        // The system message must contain nothing that changes between rounds:
-        // whatever changes ends the provider's cached prefix, and the history
-        // behind it is then re-read at full price.
-        let history = vec![
-            Message::user("do the task"),
-            Message::assistant("first attempt"),
-            Message::user("plan 7 is running"),
-        ];
-        let stable = [PromptSection {
-            name: "standing_system",
-            content: "standing rules",
-        }];
-        let live = [PromptSection {
-            name: "executor_state",
-            content: "plan 7 is running",
-        }];
-        let messages = assemble_planning_messages(1, true, &stable, &history, &live);
-        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["developer", "user", "assistant", "user"]);
-        assert_eq!(messages[0].content.as_deref(), Some("standing rules"));
-        assert_eq!(messages[3].content.as_deref(), Some("plan 7 is running"));
-    }
-
-    #[test]
-    fn system_and_history_keep_the_provider_message_order() {
-        let history = vec![
-            Message::user("earlier user request"),
-            Message::assistant("I will inspect it."),
-            Message::user("steer: stop after inspection"),
-            Message::user("current runtime observation"),
-        ];
-        let stable = [
-            PromptSection {
-                name: "standing_system",
-                content: "universal Pilot rules",
-            },
-            PromptSection {
-                name: "rtdl_protocol",
-                content: "round-specific protocol",
-            },
-            PromptSection {
-                name: "capability_catalog",
-                content: "current provider catalog",
-            },
-        ];
-        let dynamic = [
-            PromptSection {
-                name: "embodiment_static",
-                content: "this robot's Soma body",
-            },
-            PromptSection {
-                name: "memory",
-                content: "task-specific memory",
-            },
-            PromptSection {
-                name: "capability_docs",
-                content: "current provider docs",
-            },
-            PromptSection {
-                name: "executor_state",
-                content: "current executor state",
-            },
-        ];
-
-        let messages = assemble_planning_messages(1, true, &stable, &history, &dynamic);
-        let system = messages[0].content.as_deref().unwrap();
-        assert!(system.contains("universal Pilot rules"));
-        assert!(system.contains("round-specific protocol"));
-        assert!(system.contains("current provider catalog"));
-        assert_eq!(messages[1].content.as_deref(), Some("earlier user request"));
-        assert_eq!(messages[2].role, "assistant");
-        assert_eq!(
-            messages[3].content.as_deref(),
-            Some("steer: stop after inspection")
-        );
-        assert_eq!(
-            messages[4].content.as_deref(),
-            Some("current runtime observation")
-        );
-        for expected in [
-            "this robot's Soma body",
-            "task-specific memory",
-            "current provider docs",
-            "current executor state",
-        ] {
-            assert!(!system.contains(expected));
-        }
-    }
-
-    #[test]
-    fn task_state_updates_are_appended_to_history() {
-        let state = TaskState {
-            goal: "finish inspection".to_string(),
-            success_criterion: "report is returned".to_string(),
-            status: "in_progress".to_string(),
-        };
-        let mut history = vec![Message::user("inspect room")];
-        append_task_state_record(&mut history, &state);
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[1].role, "user");
-        let record = history[1].content.as_deref().unwrap();
-        assert!(record.contains("authoritative state"));
-        assert!(record.contains("finish inspection"));
-        assert!(record.contains("report is returned"));
-    }
-
-    #[test]
-    fn completed_request_context_is_retained_before_its_reply() {
-        let mut history = vec![Message::user("inspect room")];
+    fn planning_requests_preserve_context_and_extend_the_provider_prefix() {
+        let stable = [("system", "standing system and RTDL contract")];
+        let live = [("executor_state", "runtime round 0"), ("voice", "")];
+        let mut history = vec![Message::user("User task (authoritative): inspect room")];
         append_request_context(
             &mut history,
-            "runtime: camera sees a doorway",
+            &crate::prompt::render_context_sections(&live),
             Some("Pilot validation feedback: emit valid RTDL"),
         );
-        history.push(Message::assistant("I will navigate to the doorway."));
+        let first = assemble_planning_messages(0, true, &stable, &history, &live);
         assert_eq!(
-            history
+            first
                 .iter()
-                .map(|message| (message.role.as_str(), message.content.as_deref().unwrap()))
+                .map(|m| (m.role.as_str(), m.content.as_deref().unwrap()))
                 .collect::<Vec<_>>(),
             vec![
-                ("user", "inspect room"),
-                ("user", "runtime: camera sees a doorway"),
+                ("developer", "standing system and RTDL contract"),
+                ("user", "User task (authoritative): inspect room"),
+                ("user", "runtime round 0"),
                 ("user", "Pilot validation feedback: emit valid RTDL"),
-                ("assistant", "I will navigate to the doorway."),
-            ]
+            ],
         );
-    }
-
-    #[test]
-    fn next_request_extends_the_previous_provider_prefix() {
-        let stable = [PromptSection {
-            name: "system",
-            content: "standing system and RTDL contract",
-        }];
-        let mut history = vec![Message::user("User task (authoritative): inspect room")];
-        append_request_context(&mut history, "runtime round 0", None);
-        let first = assemble_planning_messages(0, true, &stable, &history, &[]);
 
         history.push(Message::assistant("I will inspect the room."));
         append_task_state_record(
@@ -4516,35 +4282,57 @@ mod tests {
                 status: "in_progress".to_string(),
             },
         );
-        append_request_context(&mut history, "runtime round 1", None);
-        let second = assemble_planning_messages(1, true, &stable, &history, &[]);
-
-        let first_wire = serde_json::to_string(&first).unwrap();
-        let second_prefix_wire = serde_json::to_string(&second[..first.len()]).unwrap();
-        assert_eq!(first_wire, second_prefix_wire);
-    }
-
-    #[test]
-    fn with_no_live_state_the_request_carries_no_empty_turn() {
-        let history = vec![Message::user("do the task")];
-        let messages = assemble_planning_messages(1, true, &[], &history, &[]);
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].content.as_deref(), Some("do the task"));
-    }
-
-    #[test]
-    fn a_trailing_assistant_gets_a_continue_turn() {
-        let history = vec![Message::assistant("thinking about it")];
-        let messages = assemble_planning_messages(1, true, &[], &history, &[]);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages.last().unwrap().role, "user");
-        assert!(
-            messages
+        let record = history.last().unwrap();
+        assert_eq!(record.role, "user");
+        assert_eq!(
+            crate::history::authoritative_records(&history)
                 .last()
                 .unwrap()
-                .content
-                .as_deref()
-                .is_some_and(|text| text.starts_with("Continue from the state above"))
+                .content,
+            record.content,
         );
+        let record = record.content.as_deref().unwrap();
+        let (_, json) = record.split_once(": ").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            json!({
+                "goal": "inspect room",
+                "success_criterion": "inspection result returned",
+                "status": "in_progress",
+            })
+        );
+        append_request_context(&mut history, "runtime round 1", None);
+        let second = assemble_planning_messages(1, true, &stable, &history, &[]);
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second[..first.len()]).unwrap(),
+        );
+    }
+
+    /// Empty context adds no turn; a trailing assistant requires a user continuation.
+    #[test]
+    fn planning_requests_close_only_a_trailing_assistant() {
+        for message in [Message::user("do the task"), Message::assistant("thinking")] {
+            let mut history = vec![message];
+            append_request_context(&mut history, "", None);
+            assert_eq!(history.len(), 1);
+            let messages = assemble_planning_messages(1, true, &[], &history, &[]);
+            let needs_continue = history[0].role == "assistant";
+            assert_eq!(messages.len(), if needs_continue { 3 } else { 2 });
+            assert_eq!(messages.last().unwrap().role, "user");
+            if needs_continue {
+                assert!(
+                    messages
+                        .last()
+                        .unwrap()
+                        .content
+                        .as_deref()
+                        .unwrap()
+                        .starts_with("Continue from the state above")
+                );
+            } else {
+                assert_eq!(messages[1].content, history[0].content);
+            }
+        }
     }
 }

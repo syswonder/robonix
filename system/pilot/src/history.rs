@@ -151,25 +151,13 @@ pub fn authoritative_records(history: &[Message]) -> Vec<Message> {
 /// compaction can replace them only with a verified durable summary.
 pub fn trim(history: &mut Vec<Message>, max: usize) {
     let mut remove = history.len().saturating_sub(max);
-    if remove == 0 {
-        return;
-    }
-
-    let mut drop = vec![false; history.len()];
-    for (index, message) in history.iter().enumerate() {
-        if remove == 0 {
-            break;
-        }
-        if !is_authoritative_record(message) {
-            drop[index] = true;
+    history.retain(|message| {
+        if remove > 0 && !is_authoritative_record(message) {
             remove -= 1;
+            false
+        } else {
+            true
         }
-    }
-    let mut index = 0;
-    history.retain(|_| {
-        let keep = !drop[index];
-        index += 1;
-        keep
     });
 }
 

@@ -10,15 +10,9 @@ use robonix_scribe::info;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub(crate) struct PromptSection<'a> {
-    pub(crate) name: &'static str,
-    pub(crate) content: &'a str,
-}
+pub(crate) type PromptSection<'a> = (&'static str, &'a str);
 
-/// Provider-reported token accounting for one Pilot interaction. Pricing is
-/// deliberately not embedded here because a proxy may route the same model
-/// name to differently priced backends. The raw input/output/cache totals are
-/// sufficient for an operator to apply the configured provider's price sheet.
+/// Provider-reported token and cache totals for one Pilot interaction.
 #[derive(Default)]
 pub(crate) struct UsageTotals {
     requests_with_usage: u64,
@@ -32,6 +26,7 @@ pub(crate) struct UsageTotals {
 }
 
 impl UsageTotals {
+    /// Accumulate reported usage; absent cache metrics remain unknown.
     pub(crate) fn record(
         &mut self,
         round: u32,
@@ -94,10 +89,6 @@ impl UsageTotals {
     }
 }
 
-fn estimated_text_tokens(bytes: usize) -> usize {
-    bytes.div_ceil(4)
-}
-
 /// Assemble the exact provider message sequence for a planning request.
 /// Standing sections must precede history. The caller persists each rendered
 /// runtime context in history before the corresponding assistant reply, so a
@@ -109,11 +100,7 @@ pub(crate) fn assemble_planning_messages(
     history_messages: &[Message],
     context_sections: &[PromptSection<'_>],
 ) -> Vec<Message> {
-    let system_bytes = sections.iter().map(|section| section.content.len()).sum();
-    let mut system = String::with_capacity(system_bytes);
-    for section in sections {
-        system.push_str(section.content);
-    }
+    let system = render_context_sections(sections);
     let mut prefix_hasher = DefaultHasher::new();
     system.hash(&mut prefix_hasher);
     let cacheable_prefix_fingerprint = prefix_hasher.finish();
@@ -126,25 +113,25 @@ pub(crate) fn assemble_planning_messages(
     let mut section_metrics = sections
         .iter()
         .chain(context_sections.iter())
-        .map(|section| {
+        .map(|(name, content)| {
             serde_json::json!({
-                "name": section.name,
-                "bytes": section.content.len(),
-                "estimated_tokens": estimated_text_tokens(section.content.len()),
+                "name": name,
+                "bytes": content.len(),
+                "estimated_tokens": content.len().div_ceil(4),
             })
         })
         .collect::<Vec<_>>();
     section_metrics.push(serde_json::json!({
         "name": "history",
         "bytes": history_bytes,
-        "estimated_tokens": estimated_text_tokens(history_bytes),
+        "estimated_tokens": history_bytes.div_ceil(4),
     }));
     info!(
         "[pilot/prompt] {}",
         serde_json::json!({
             "round": round,
             "prompt_text_bytes": prompt_bytes,
-            "estimated_input_tokens": estimated_text_tokens(prompt_bytes),
+            "estimated_input_tokens": prompt_bytes.div_ceil(4),
             "history_bytes": history_bytes,
             "capability_catalog_render_cache_hit": capability_cache_hit,
             "cacheable_prefix_bytes": system.len(),
@@ -154,10 +141,7 @@ pub(crate) fn assemble_planning_messages(
     );
 
     let mut messages = Vec::with_capacity(sanitized_history.len() + 2);
-    // Preserve the system-level semantics while using OpenAI's developer role
-    // on the wire: GPT-5.6 can place a stable cache breakpoint at the end of
-    // the initial developer block. Runtime state still remains ordered user
-    // history after it.
+    // Keep the stable developer prefix ahead of user-side runtime history.
     messages.push(Message::developer(&system));
     messages.extend(sanitized_history);
     close_trailing_assistant(&mut messages);
@@ -165,21 +149,16 @@ pub(crate) fn assemble_planning_messages(
 }
 
 pub(crate) fn render_context_sections(sections: &[PromptSection<'_>]) -> String {
-    let bytes = sections.iter().map(|section| section.content.len()).sum();
-    let mut context = String::with_capacity(bytes);
-    for section in sections {
-        context.push_str(section.content);
-    }
-    context
+    sections.iter().map(|(_, content)| *content).collect()
 }
 
 /// Some providers reject a trailing assistant message as a completion prefill.
 /// Close it with an explicit next-action user turn instead.
 pub(crate) fn close_trailing_assistant(messages: &mut Vec<Message>) {
-    let trailing_assistant = messages
+    if messages
         .last()
-        .is_some_and(|message| message.role == "assistant");
-    if trailing_assistant {
+        .is_some_and(|message| message.role == "assistant")
+    {
         messages.push(Message::user(
             "Continue from the state above. Take the next action, \
              or give your final answer if the task is complete.",
