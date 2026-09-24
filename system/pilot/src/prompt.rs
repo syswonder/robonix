@@ -4,6 +4,7 @@
 // Prompt assembly and provider-usage accounting for Pilot. This module owns
 // message ordering; planner owns what each round observes and dispatches.
 
+use crate::discovery::CapDoc;
 use crate::history;
 use crate::vlm::{Message, VlmUsage};
 use robonix_scribe::info;
@@ -98,7 +99,6 @@ pub(crate) fn assemble_planning_messages(
     capability_cache_hit: bool,
     sections: &[PromptSection<'_>],
     history_messages: &[Message],
-    context_sections: &[PromptSection<'_>],
 ) -> Vec<Message> {
     let system = render_context_sections(sections);
     let mut prefix_hasher = DefaultHasher::new();
@@ -112,7 +112,6 @@ pub(crate) fn assemble_planning_messages(
     let prompt_bytes = system.len() + history_bytes;
     let mut section_metrics = sections
         .iter()
-        .chain(context_sections.iter())
         .map(|(name, content)| {
             serde_json::json!({
                 "name": name,
@@ -150,6 +149,31 @@ pub(crate) fn assemble_planning_messages(
 
 pub(crate) fn render_context_sections(sections: &[PromptSection<'_>]) -> String {
     sections.iter().map(|(_, content)| *content).collect()
+}
+
+pub(crate) fn render_capability_docs(docs: &[CapDoc]) -> String {
+    if docs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\n## Capability docs\nRead a `[skill]` provider's manual with `read_capability_doc` before its first call; primitive and service manuals are optional. Use only the listed provider id.\n",
+    );
+    for doc in docs {
+        let skill = if doc.kind == "skill" { " [skill]" } else { "" };
+        out.push_str(&format!(
+            "- `{}`{}: {}\n",
+            doc.provider_id, skill, doc.description
+        ));
+    }
+    out
+}
+
+pub(crate) fn changed_snapshot(previous: &mut String, current: String) -> String {
+    if *previous == current {
+        return String::new();
+    }
+    *previous = current.clone();
+    current
 }
 
 /// Some providers reject a trailing assistant message as a completion prefill.

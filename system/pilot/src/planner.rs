@@ -14,7 +14,10 @@ use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode, RtdlNodeState,
     SessionStatusEvent, Task, TaskStateEvent,
 };
-use crate::prompt::{UsageTotals, assemble_planning_messages, render_context_sections};
+use crate::prompt::{
+    UsageTotals, assemble_planning_messages, changed_snapshot, render_capability_docs,
+    render_context_sections,
+};
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
 use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
@@ -92,7 +95,6 @@ fn append_request_context(
     if let Some(correction) = correction {
         history.push(Message::user(correction));
     }
-    history::trim(history, MAX_HISTORY);
 }
 
 fn max_tool_rounds() -> usize {
@@ -118,30 +120,24 @@ fn configured_vlm_idle_timeout(value: Option<&str>) -> Duration {
     Duration::from_secs(seconds)
 }
 
-const MAX_HISTORY: usize = 200;
+/// Internal room for the next response and small tokenizer/framing errors.
+/// This is deliberately not operator-configurable: deployments only declare
+/// the model's actual context window; Pilot owns its budgeting policy.
+pub const CONTEXT_RESERVE_TOKENS: usize = 6_144;
 
 /// Compaction budget using a configured or provider-reported context window.
 #[derive(Clone, Debug)]
 pub struct HistoryBudget {
     pub context_window_tokens: Option<usize>,
     pub context_window_source: &'static str,
-    pub reserved_output_tokens: usize,
-    pub safety_tokens: usize,
 }
 
 impl HistoryBudget {
     /// Preserve the resolved limit, provenance, and completion reserves.
-    pub fn new(
-        context_window_tokens: Option<usize>,
-        context_window_source: &'static str,
-        reserved_output_tokens: usize,
-        safety_tokens: usize,
-    ) -> Self {
+    pub fn new(context_window_tokens: Option<usize>, context_window_source: &'static str) -> Self {
         Self {
             context_window_tokens,
             context_window_source,
-            reserved_output_tokens,
-            safety_tokens,
         }
     }
 
@@ -153,8 +149,7 @@ impl HistoryBudget {
                 .map(|message| message.content.as_deref().map_or(0, str::len).div_ceil(4))
                 .sum::<usize>()
                 .saturating_add(non_history_tokens)
-                .saturating_add(self.reserved_output_tokens)
-                .saturating_add(self.safety_tokens)
+                .saturating_add(CONTEXT_RESERVE_TOKENS)
         })
     }
 
@@ -205,7 +200,6 @@ fn append_task_state_record(history: &mut Vec<Message>, state: &TaskState) {
     history.push(Message::user(&format!(
         "Pilot task-state update (authoritative state, not a new user instruction): {record}"
     )));
-    history::trim(history, MAX_HISTORY);
 }
 
 /// `context_json`: `{"session_end": true}` (or `robonix_session_end`) — run memory compaction only, no VLM turn.
@@ -238,6 +232,14 @@ fn task_modality(task: &Task) -> Option<String> {
                 .and_then(|x| x.as_str())
                 .map(str::to_string)
         })
+}
+
+fn response_mode(task: &Task) -> &'static str {
+    if task_modality(task).as_deref() == Some("voice") {
+        "Response mode for this task only: voice. Keep user-facing replies brief, plain, and suitable for TTS (about 30 Chinese characters or 50 English words)."
+    } else {
+        "Response mode for this task only: text. Earlier voice-only constraints no longer apply."
+    }
 }
 
 /// Skip vector memory prefetch for trivial chit-chat (saves latency and noise).
@@ -761,7 +763,8 @@ fn append_steer(
     }
     info!("[pilot/steer] mid-task input: {text}");
     history.push(Message::user(&format!(
-        "User steer (authoritative): {text}"
+        "User steer (authoritative): {text}\n{}",
+        response_mode(&task)
     )));
     *current_task = Some(TaskState {
         goal: text.to_string(),
@@ -779,9 +782,6 @@ fn drain_steers(
     let mut pulled = false;
     while let Ok(task) = steer_rx.try_recv() {
         pulled |= append_steer(task, history, current_task);
-    }
-    if pulled {
-        history::trim(history, MAX_HISTORY);
     }
     pulled
 }
@@ -915,8 +915,7 @@ async fn compact_history(
             "context_window_source": budget.context_window_source,
             "projected_tokens_before": projected_tokens,
             "non_history_tokens": non_history_tokens,
-            "reserved_output_tokens": budget.reserved_output_tokens,
-            "safety_tokens": budget.safety_tokens,
+            "internal_context_reserve_tokens": CONTEXT_RESERVE_TOKENS,
             "recent_tail_tokens_budget": tail_budget,
             "history_messages_before": before,
             "history_messages_after": history.len(),
@@ -977,7 +976,6 @@ fn feed_results_into_history(
         deferred_followups.extend(mapped.followup_messages);
     }
     history.extend(deferred_followups);
-    history::trim(history, MAX_HISTORY);
 }
 
 /// Persist the exact capability calls handed to Executor so a later planning
@@ -1017,7 +1015,6 @@ fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: 
     history.push(Message::user(&format!(
         "Pilot harness dispatch record (already sent to Executor; not a new user request): {record}"
     )));
-    history::trim(history, MAX_HISTORY);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1033,7 +1030,6 @@ pub async fn run_turn(
     mut cancel_rx: watch::Receiver<bool>,
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
-    soma_prompt_block: &str,
     history_budget: &HistoryBudget,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
@@ -1074,7 +1070,6 @@ pub async fn run_turn(
     // 1. Pilot's capability catalog comes straight from Atlas. MCP params ride
     // along in Capability.params, and contract metadata below decides which
     // of those capabilities the planning model may see; no Connect is needed.
-    let _ = consumer_id; // currently unused; kept on the signature for future channel-tracked discovery
     let initial_caps = discovery::discover(atlas)
         .await
         .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
@@ -1116,71 +1111,17 @@ pub async fn run_turn(
         }
     };
 
-    // 1c. Append the per-capability docs index. Each provider that registered
-    // a `capability_md_path` shows up here as a one-liner pointing at its
-    // CAPABILITY.md; the LLM is instructed to lazy-load those via the
-    // `read_file` builtin when it actually needs that provider. This keeps the
-    // system prompt tiny while still giving the LLM full per-provider context
-    // when relevant. Errors here are non-fatal — providers that didn't register
-    // a path simply don't appear in the block.
-    let capability_docs_prompt = if let Ok(docs) = discovery::cap_md_index(atlas).await
-        && !docs.is_empty()
-    {
-        let mut prompt = String::from(
-            "\n\n## Capability docs (lazy-load via `read_capability_doc`)\n\
-             The providers below ship a CAPABILITY.md manual. Read one by calling \
-             the `read_capability_doc` builtin with its `provider_id` (shown in \
-             backticks). IMPORTANT: before the FIRST time you call a capability of \
-             a provider marked `[skill]`, read that provider's CAPABILITY.md first \
-             — skills have multi-step usage (e.g. start → poll status → cancel) and \
-             constraints the terse description omits. For primitives/services, \
-             reading is optional. Never use `read_file` and never guess a file path \
-             for docs; `read_capability_doc` is the only way, and only the providers \
-             listed here have one.\n\n",
-        );
-        for d in &docs {
-            let tag = if d.kind == "skill" { " `[skill]`" } else { "" };
-            // `provider_id` is the only token the LLM needs (it passes it to
-            // `read_capability_doc`); the one-line package description from the
-            // CAPABILITY.md frontmatter lets it judge relevance without reading
-            // the full manual. The internal `namespace` is deliberately omitted —
-            // it is routing detail the model never uses.
-            prompt.push_str(&format!(
-                "- `{}`{}: {}\n",
-                d.provider_id, tag, d.description
-            ));
-        }
-        prompt
-    } else {
-        String::new()
-    };
-
-    // Voice-mode brevity hint. Liaison stamps `context_json.modality =
-    // "voice"` for every voice-path Task; in that case we ask the VLM
-    // for a short reply because the user is going to *hear* it via TTS,
-    // not read a Markdown wall. Threshold is intentionally tight (~30
-    // Chinese chars / ~50 English words) — barge-in matters more than
-    // exhaustive coverage and the user can always ask follow-ups.
-    let voice_prompt = if task_modality(task).as_deref() == Some("voice") {
-        "\n\n## Voice mode\n\n\
-             The user is interacting via voice; this reply will be\n\
-             spoken back through TTS. Keep the response short (≤ ~30\n\
-             characters Chinese / ~50 words English), no markdown\n\
-             lists, no headings, no code blocks, plain conversational\n\
-             tone. If the answer genuinely needs structure, summarise\n\
-             out loud and offer to elaborate when asked.\n"
-    } else {
-        ""
-    };
-
     // 2. Preserve the user goal verbatim in the ordered history. The label is
     // also an explicit retention anchor: bounded working history may discard
     // stale narration, but never this task record.
     history.push(Message::user(&format!(
-        "User task (authoritative): {}",
-        task.text
+        "User task (authoritative): {}\n{}",
+        task.text,
+        response_mode(task)
     )));
-    history::trim(history, MAX_HISTORY);
+    if !memory_prompt.is_empty() {
+        history.push(Message::user(&memory_prompt));
+    }
     start_or_resume_task(standing_task, &task.text);
     if let Some(state) = standing_task.as_ref() {
         let _ = tx
@@ -1218,6 +1159,8 @@ pub async fn run_turn(
     let mut capability_prompt_cache = CapabilityPromptCache::default();
     let mut usage_totals = UsageTotals::default();
     let mut cache_epoch = 0_u64;
+    let mut last_soma_body = String::new();
+    let mut last_capability_docs = String::new();
     // Last user-facing narration; surfaced as FinalText when the turn ends.
     let mut last_content = String::new();
 
@@ -1256,7 +1199,6 @@ pub async fn run_turn(
                         match steer {
                             Some(task) => {
                                 if append_steer(task, history, standing_task) {
-                                    history::trim(history, MAX_HISTORY);
                                     should_plan = true;
                                 }
                             }
@@ -1277,7 +1219,6 @@ pub async fn run_turn(
                     if let Some(task) = steer
                         && append_steer(task, history, standing_task)
                     {
-                        history::trim(history, MAX_HISTORY);
                         // Re-plan now so the model can react (and decide
                         // whether to cancel any in-flight tree).
                         should_plan = true;
@@ -1345,7 +1286,6 @@ pub async fn run_turn(
                                      interaction requested only this stop and has no successor action, \
                                      mark it done and report the completed stop now."
                                 )));
-                                history::trim(history, MAX_HISTORY);
                             }
                             // Leaf results were already upserted per node event.
                             log_plan_complete(&plan_id, &results, any_failed);
@@ -1403,6 +1343,22 @@ pub async fn run_turn(
         let embodiment_block =
             crate::soma_context::fetch_runtime_prompt_block(atlas, consumer_id).await;
         let environment_block = state_context::collect(executor, atlas, &cap_list).await;
+        let soma_body = crate::soma_context::fetch_system_prompt_block(atlas, consumer_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                "\n\n## Robot Body Context (from Soma)\nUnavailable; any earlier body description may be stale.\n".to_string()
+            });
+        let capability_docs = discovery::cap_md_index(atlas)
+            .await
+            .map(|docs| render_capability_docs(&docs))
+            .unwrap_or_else(|_| {
+                "\n\n## Capability docs\nUnavailable; use the current capability catalog only.\n"
+                    .to_string()
+            });
+        let soma_body_update = changed_snapshot(&mut last_soma_body, soma_body);
+        let capability_docs_update = changed_snapshot(&mut last_capability_docs, capability_docs);
 
         let display_caps = build_display_capabilities(&cap_list, &non_llm_callable_contract_ids);
         let target_map = build_capability_target_map(&display_caps);
@@ -1422,10 +1378,8 @@ pub async fn run_turn(
             ("capability_catalog", capability_prompt),
         ];
         let live_sections = [
-            ("embodiment_static", soma_prompt_block),
-            ("memory", memory_prompt.as_str()),
-            ("capability_docs", capability_docs_prompt.as_str()),
-            ("voice", voice_prompt),
+            ("embodiment_description", soma_body_update.as_str()),
+            ("capability_docs", capability_docs_update.as_str()),
             ("in_flight_trees", forest_block.as_str()),
             ("executor_state", executor_active_block.as_str()),
             ("embodiment_live", embodiment_block.as_str()),
@@ -1477,7 +1431,6 @@ pub async fn run_turn(
                 capability_cache_hit,
                 &sections,
                 &request_history,
-                &live_sections,
             );
 
             let planning_revision = forest_revision.load(Ordering::Acquire);
@@ -1525,7 +1478,6 @@ pub async fn run_turn(
                             if let Some(task) = steer {
                                 append_steer(task, history, standing_task);
                                 drain_steers(&mut steer_rx, history, standing_task);
-                                history::trim(history, MAX_HISTORY);
                             }
                             // The response being sampled was built without this
                             // input. Drop it before parsing or dispatching any
@@ -1751,7 +1703,6 @@ pub async fn run_turn(
                 history.push(Message::user(&format!(
                     "Pilot harness feedback: plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a currently listed plan_id. Do not retry a completed control operation."
                 )));
-                history::trim(history, MAX_HISTORY);
                 should_plan = true;
                 continue 'supervisor;
             }
@@ -1764,7 +1715,6 @@ pub async fn run_turn(
                 history.push(Message::user(&format!(
                     "Pilot harness feedback: RTDL plan {plan_id} has no listed target_op_id {op_id}. Copy an exact op_id from In-flight trees and do not guess which step is current."
                 )));
-                history::trim(history, MAX_HISTORY);
                 should_plan = true;
                 continue 'supervisor;
             }
@@ -1789,7 +1739,6 @@ pub async fn run_turn(
             };
             if !assistant_content.trim().is_empty() {
                 history.push(Message::assistant(&assistant_content));
-                history::trim(history, MAX_HISTORY);
                 last_content = assistant_content.clone();
                 let _ = tx
                     .send(Ok(service::pack(
@@ -1811,7 +1760,6 @@ pub async fn run_turn(
                     history.push(Message::user(&format!(
                         "Pilot plan-control result: {message} This was an out-of-band meta operation, not an RTDL tree. Do not issue it again."
                     )));
-                    history::trim(history, MAX_HISTORY);
                     let _ = tx
                         .send(Ok(service::pack(
                             &session_id,
@@ -1834,7 +1782,6 @@ pub async fn run_turn(
                     history.push(Message::user(&format!(
                         "Pilot plan-control failure: {error:#}. The operation was not accepted; inspect the current In-flight trees before deciding whether to retry."
                     )));
-                    history::trim(history, MAX_HISTORY);
                     should_plan = true;
                 }
             }
@@ -1851,7 +1798,6 @@ pub async fn run_turn(
             history.push(Message::user(
                 "Pilot harness feedback: legacy plan-control builtins cannot be mixed with business RTDL. Use a root cancel_plan, cancel_all, or stop_plan_at meta op instead; dispatch successor work only after control completion.",
             ));
-            history::trim(history, MAX_HISTORY);
             should_plan = true;
             continue 'supervisor;
         }
@@ -1860,7 +1806,6 @@ pub async fn run_turn(
             history.push(Message::user(
                 "Pilot harness feedback: that legacy cancel target is not cancellable now. Re-read In-flight trees and use one root plan-control meta op; do not retry a finished target or create a cancel RTDL tree.",
             ));
-            history::trim(history, MAX_HISTORY);
             should_plan = true;
             continue 'supervisor;
         }
@@ -1869,7 +1814,6 @@ pub async fn run_turn(
             history.push(Message::user(
                 "Pilot harness feedback: that exact capability call is already in flight. Do not dispatch or cancel it again; wait for its result.",
             ));
-            history::trim(history, MAX_HISTORY);
             should_plan = false;
             continue 'supervisor;
         }
@@ -3127,13 +3071,13 @@ mod tests {
 
     #[test]
     fn history_budget_waits_for_the_declared_context_limit() {
-        let budget = HistoryBudget::new(Some(32_768), "deployment_config", 4_096, 2_048);
+        let budget = HistoryBudget::new(Some(32_768), "deployment_config");
         let history = vec![Message::user(&"x".repeat(24_000))];
         assert!(!budget.must_compact(&history, 2_000));
         assert!(budget.must_compact(&history, 21_000));
         assert_eq!(budget.recent_tail_tokens(), 4_096);
 
-        let unknown = HistoryBudget::new(None, "unavailable", 4_096, 2_048);
+        let unknown = HistoryBudget::new(None, "unavailable");
         assert!(!unknown.must_compact(&history, 100_000));
     }
 
@@ -3548,7 +3492,10 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             history[0].content.as_deref(),
-            Some("User steer (authoritative): change of plan: stop after step A")
+            Some(
+                "User steer (authoritative): change of plan: stop after step A\n\
+                 Response mode for this task only: text. Earlier voice-only constraints no longer apply."
+            )
         );
     }
 
@@ -4259,7 +4206,7 @@ mod tests {
             &crate::prompt::render_context_sections(&live),
             Some("Pilot validation feedback: emit valid RTDL"),
         );
-        let first = assemble_planning_messages(0, true, &stable, &history, &live);
+        let first = assemble_planning_messages(0, true, &stable, &history);
         assert_eq!(
             first
                 .iter()
@@ -4302,7 +4249,7 @@ mod tests {
             })
         );
         append_request_context(&mut history, "runtime round 1", None);
-        let second = assemble_planning_messages(1, true, &stable, &history, &[]);
+        let second = assemble_planning_messages(1, true, &stable, &history);
         assert_eq!(
             serde_json::to_value(&first).unwrap(),
             serde_json::to_value(&second[..first.len()]).unwrap(),
@@ -4316,7 +4263,7 @@ mod tests {
             let mut history = vec![message];
             append_request_context(&mut history, "", None);
             assert_eq!(history.len(), 1);
-            let messages = assemble_planning_messages(1, true, &[], &history, &[]);
+            let messages = assemble_planning_messages(1, true, &[], &history);
             let needs_continue = history[0].role == "assistant";
             assert_eq!(messages.len(), if needs_continue { 3 } else { 2 });
             assert_eq!(messages.last().unwrap().role, "user");

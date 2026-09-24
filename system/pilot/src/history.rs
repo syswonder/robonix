@@ -145,22 +145,6 @@ pub fn authoritative_records(history: &[Message]) -> Vec<Message> {
         .collect()
 }
 
-/// Bound disposable conversational material without silently evicting user
-/// tasks, lifecycle records, dispatches, or executor results. If those
-/// authoritative records alone exceed `max`, keep them all; a later explicit
-/// compaction can replace them only with a verified durable summary.
-pub fn trim(history: &mut Vec<Message>, max: usize) {
-    let mut remove = history.len().saturating_sub(max);
-    history.retain(|message| {
-        if remove > 0 && !is_authoritative_record(message) {
-            remove -= 1;
-            false
-        } else {
-            true
-        }
-    });
-}
-
 /// Filter `history` to a form OpenAI-compatible endpoints accept:
 /// every `tool` message must be preceded by an `assistant` whose
 /// `tool_calls` lists its `tool_call_id`. Orphans (e.g. left over from
@@ -199,41 +183,8 @@ pub fn sanitize_for_vlm(history: &[Message]) -> Vec<Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{authoritative_records, trim};
+    use super::authoritative_records;
     use crate::vlm::Message;
-
-    #[test]
-    fn trim_keeps_tasks_and_executor_outcomes_verbatim() {
-        let mut history = vec![
-            Message::user("User task (authoritative): inspect the loading dock"),
-            Message::assistant("I will inspect it."),
-            Message::user(
-                "Executor feedback for the current RTDL leaf (not a new user request): succeeded",
-            ),
-            Message::assistant("The inspection is complete."),
-        ];
-        trim(&mut history, 2);
-        assert_eq!(history.len(), 2);
-        assert_eq!(
-            history[0].content.as_deref(),
-            Some("User task (authoritative): inspect the loading dock")
-        );
-        assert_eq!(
-            history[1].content.as_deref(),
-            Some("Executor feedback for the current RTDL leaf (not a new user request): succeeded")
-        );
-    }
-
-    #[test]
-    fn trim_allows_authoritative_records_to_exceed_the_nominal_cap() {
-        let mut history = vec![
-            Message::user("User task (authoritative): inspect the loading dock"),
-            Message::user("User steer (authoritative): stop at the doorway"),
-            Message::user("Executor feedback scope: plan_id=1"),
-        ];
-        trim(&mut history, 1);
-        assert_eq!(history.len(), 3);
-    }
 
     #[test]
     fn authoritative_records_excludes_disposable_narration() {

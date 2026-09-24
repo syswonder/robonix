@@ -211,12 +211,7 @@ async fn main() -> Result<()> {
     // guessed generic value.
     let vlm = vlm::VlmClient::new(&cfg.vlm);
     let context_window = vlm.context_window_info().await;
-    let history_budget = planner::HistoryBudget::new(
-        context_window.tokens,
-        context_window.source,
-        cfg.vlm.reserved_output_tokens,
-        cfg.vlm.context_safety_tokens,
-    );
+    let history_budget = planner::HistoryBudget::new(context_window.tokens, context_window.source);
     info!(
         "[pilot/context_budget] {}",
         serde_json::json!({
@@ -224,8 +219,7 @@ async fn main() -> Result<()> {
             "context_window_tokens": history_budget.context_window_tokens,
             "context_window_source": history_budget.context_window_source,
             "matched_model_id": context_window.matched_model_id,
-            "reserved_output_tokens": history_budget.reserved_output_tokens,
-            "safety_tokens": history_budget.safety_tokens,
+            "internal_context_reserve_tokens": planner::CONTEXT_RESERVE_TOKENS,
             "automatic_compaction_enabled": history_budget.context_window_tokens.is_some(),
         })
     );
@@ -254,19 +248,6 @@ async fn main() -> Result<()> {
 
     atlas.register_service(&cfg.id, PILOT_NAMESPACE, "").await?;
     info!("registered as '{}' under '{PILOT_NAMESPACE}'", cfg.id);
-
-    let soma_prompt_block = match soma_context::fetch_system_prompt_block(&mut atlas, &cfg.id).await
-    {
-        Ok(Some(block)) => {
-            info!("loaded Soma body context into Pilot system prompt");
-            block
-        }
-        Ok(None) => String::new(),
-        Err(e) => {
-            warn!("Soma body context load failed; continuing without it: {e:#}");
-            String::new()
-        }
-    };
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -320,13 +301,7 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
 
-    let svc = PilotServiceImpl::new(
-        atlas.clone(),
-        cfg.id.clone(),
-        vlm,
-        history_budget,
-        soma_prompt_block,
-    );
+    let svc = PilotServiceImpl::new(atlas.clone(), cfg.id.clone(), vlm, history_budget);
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
     let mut server_task = tokio::spawn(async move {

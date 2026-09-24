@@ -37,7 +37,7 @@ pub fn llm_name(contract_id: &str) -> String {
 }
 
 /// One row per provider that registered a CAPABILITY.md, summarised for the
-/// LLM-facing "## Capability docs" block in pilot's system prompt. We expose
+/// LLM-facing "## Capability docs" history update. We expose
 /// the `provider_id` (what the LLM passes to `read_capability_doc`), the
 /// package `kind` (from atlas's authoritative `CapabilityProvider.kind`, so
 /// skills can be flagged read-first), and a one-line `description` lifted from
@@ -89,7 +89,7 @@ fn kind_label(kind: i32) -> String {
 }
 
 /// Returns a `CapDoc` per provider that registered non-empty CAPABILITY.md
-/// *content*. Pilot lists these in the system prompt and instructs the LLM to
+/// *content*. Pilot lists these in planning history and instructs the LLM to
 /// pull the full text on demand via the `read_capability_doc` builtin.
 pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
     let providers = atlas

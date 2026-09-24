@@ -2135,7 +2135,8 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
         let capacity = if let Some(tokens) = context_window_tokens {
             format!("context={tokens} (manual)")
         } else {
-            "context=auto (Pilot resolves provider /models, then its full offline registry; inspect Pilot's context_budget log)".to_string()
+            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
+                .to_string()
         };
         format!("{port}  vlm={model}@{host}  {capacity}")
     } else {

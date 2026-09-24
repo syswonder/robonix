@@ -34,10 +34,6 @@ Common configuration:
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional
   operator override for the deployed model's total context capacity.
-- `--vlm-reserved-output-tokens` / `ROBONIX_VLM_RESERVED_OUTPUT_TOKENS`:
-  capacity retained for the next planner reply (default: 4096).
-- `--vlm-context-safety-tokens` / `ROBONIX_VLM_CONTEXT_SAFETY_TOKENS`:
-  conservative framing/reasoning headroom (default: 2048).
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_pilot=info`.
@@ -81,8 +77,6 @@ system:
       api_key: ${VLM_API_KEY}
       model: local-vision-planner
       context_window_tokens: 32768 # manual: inspect the model card/server
-      reserved_output_tokens: 4096
-      context_safety_tokens: 2048
 ```
 
 Use the smaller effective limit when a model card and an inference-server
@@ -100,7 +94,7 @@ Atlas discovery still runs before every planning round. Pilot omits contracts wh
 
 A plan names a capability by the exact catalog entry `<provider_id>.<llm_name>`. Contract ids remain runtime identifiers for Atlas, contracts, and internal configuration; they are not a second model-facing spelling. Pilot omits a capability from both the catalog and target map when its contract metadata sets `llm_callable = false`.
 
-A planning request is split so that its prefix is cacheable. The system message carries Pilot rules, the RTDL contract, and the current callable capability catalog, all before the ordered conversation history. Each round appends its complete runtime observation — Soma body and live state, memory, provider-doc index, voice mode, in-flight trees, Executor state, and environment — as a user history record, then appends the assistant reply and any task-state/result records. The next request therefore extends rather than reorders the prior message sequence. User tasks and steers, task-state changes, dispatch records, execution feedback, and plan-control outcomes are authoritative history records: normal bounding evicts only disposable narration, and rolling compaction retains those source records beside its summary. Prompt logs include both the cacheable-prefix byte length and fingerprint, making accidental prefix churn observable.
+A planning request is split so that its prefix is cacheable. The system message carries Pilot rules, the RTDL contract, and the current callable capability catalog, all before the ordered conversation history. Memory and an explicit response mode are appended once for each submitted task; every task records either voice or text mode, so a later text request supersedes voice-only constraints without rewriting history. Soma body data and the provider-doc index are refreshed before every planning round but appended only when their content changes. Live embodiment health, in-flight trees, Executor state, and environment state are appended on every round, followed by the assistant reply and any task-state/result records. The next request therefore extends rather than reorders the prior message sequence. User tasks and steers, task-state changes, dispatch records, execution feedback, and plan-control outcomes are authoritative history records; rolling compaction retains those source records beside its summary. Prompt logs include both the cacheable-prefix byte length and fingerprint, making accidental prefix churn observable.
 
 Both Soma blocks are projected onto what a planner acts on. From the body description that drops the `urdf` file reference — a path in the provider's own filesystem namespace, pointing at the kinematics this crate already declines to inject — the `footprint` collision polygon that navigation rather than the planner consumes, and the description of each exported capability, which the capability catalog in the same prompt already carries verbatim; the component-to-capability mapping stays, since the catalog does not say which part of the body offers a capability. From the live health snapshot it drops fields at an absent value, which the prompt's own "missing means unknown" rule already covers. `dimensions`, sensor `placement`, `can_do` / `cannot_do`, and the deployment notes are body facts and remain.
 

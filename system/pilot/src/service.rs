@@ -102,7 +102,7 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
 }
 
 /// LLM conversation history per `session_id`. Grows across turns; never
-/// expired (turns trim themselves at MAX_HISTORY in planner).
+/// expired; active turns compact history against the model context window.
 type Histories = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<Message>>>>>>;
 type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<Option<TaskState>>>>>>;
 
@@ -174,7 +174,6 @@ pub struct PilotServiceImpl {
     provider_id: String,
     vlm: VlmClient,
     history_budget: HistoryBudget,
-    soma_prompt_block: Arc<String>,
     histories: Histories,
     /// Harness-owned standing goal per session. It survives a transport turn
     /// that pauses for user input, so the next message cannot silently replace
@@ -202,14 +201,12 @@ impl PilotServiceImpl {
         provider_id: String,
         vlm: VlmClient,
         history_budget: HistoryBudget,
-        soma_prompt_block: String,
     ) -> Self {
         Self {
             atlas,
             provider_id,
             vlm,
             history_budget,
-            soma_prompt_block: Arc::new(soma_prompt_block),
             histories: Arc::new(Mutex::new(HashMap::new())),
             task_states: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
@@ -437,7 +434,6 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let provider_id = self.provider_id.clone();
         let vlm = self.vlm.clone();
         let history_budget = self.history_budget.clone();
-        let soma_prompt_block = Arc::clone(&self.soma_prompt_block);
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
         let steers = Arc::clone(&self.steers);
@@ -489,7 +485,6 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 cancel_rx,
                 steer_rx,
                 plan_seq,
-                soma_prompt_block.as_str(),
                 &history_budget,
             )
             .await

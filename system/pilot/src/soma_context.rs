@@ -2,10 +2,9 @@
 //
 // Pilot-side native Soma awareness.
 //
-// Soma exposes robot body data as gRPC contracts. Pilot fetches the
-// default robot's Soma YAML once at startup, then injects it into every
-// turn's system prompt so the model knows its body without the user first
-// calling a bridge tool.
+// Soma exposes robot body data as gRPC contracts. Pilot refreshes the default
+// robot's compact body description while planning and records only changes in
+// history, so hot-plugged components do not leave a stale system prompt.
 //
 // Deliberately YAML only. The URDF is a full kinematic XML tree whose link
 // and joint geometry the planner never reasons over, so injecting it only
@@ -134,7 +133,7 @@ pub async fn fetch_system_prompt_block(
     };
     let mut block = String::from(
         "\n\n## Robot Body Context (from Soma)\n\n\
-         This is the robot's self-description, loaded automatically at Pilot startup. \
+         This is the robot's self-description, refreshed automatically before planning. \
          Treat it as authoritative HARD CONSTRAINTS for the robot's body, sensors, \
          frames, limits, and deployment-specific notes. Do not ask the user to call \
          Soma manually unless this context is absent or stale.\n\n\
