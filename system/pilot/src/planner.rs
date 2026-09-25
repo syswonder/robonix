@@ -3021,6 +3021,56 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn compaction_always_frees_a_quarter_of_the_room() {
+        // History keeps growing across many tasks; each compaction must bring it
+        // under 75% of the room so the next one is not due at once.
+        let budget = HistoryBudget::new(Some(32_768), "deployment_config");
+        let non_history = 8_000;
+        let room = budget.room(non_history).unwrap();
+        // The same caps `compact_history` derives from the room.
+        let tail_cap = room * super::TAIL_SHARE_PCT / 100;
+        let message_cap = room * super::MESSAGE_SHARE_PCT / 100;
+        let pin_cap = room * super::PIN_SHARE_PCT / 100;
+        let summary_cap = (room * super::SUMMARY_SHARE_PCT / 100).min(super::SUMMARY_MAX_TOKENS);
+        let mut history: Vec<Message> = Vec::new();
+        let mut compactions = 0;
+        for step in 0..2_000 {
+            history.push(Message::user(&format!(
+                "User task (authoritative): task {step} {}",
+                "t".repeat(40)
+            )));
+            history.push(Message::user(&format!(
+                "Executor feedback scope: {}",
+                "r".repeat(1_500)
+            )));
+            if !budget.must_compact(&history, non_history) {
+                continue;
+            }
+            let plan = crate::history::plan_compaction(&history, tail_cap, message_cap, pin_cap);
+            let summary = crate::history::truncated(
+                &Message::user(&format!(
+                    "{} {}",
+                    crate::history::SUMMARY_LABEL,
+                    "s".repeat(100_000)
+                )),
+                summary_cap,
+            );
+            history = std::iter::once(summary)
+                .chain(plan.pinned)
+                .chain(plan.tail)
+                .collect();
+            let used: usize = history.iter().map(crate::history::tokens).sum();
+            assert!(
+                used <= room * 3 / 4 + 64,
+                "compaction {compactions} left {used} of {room}"
+            );
+            assert!(!budget.must_compact(&history, non_history));
+            compactions += 1;
+        }
+        assert!(compactions >= 50);
+    }
+
+    #[test]
     fn history_budget_waits_for_the_declared_context_limit() {
         let budget = HistoryBudget::new(Some(32_768), "deployment_config");
         let history = vec![Message::user(&"x".repeat(24_000))];
