@@ -10,8 +10,7 @@ From the repo root:
 cargo build -p robonix-pilot
 ```
 
-The crate is part of the top-level Cargo workspace and is built / installed by
-`make build` and `make install` respectively.
+The crate is part of the top-level Cargo workspace and is built / installed by `make build` and `make install` respectively.
 
 ## Run
 
@@ -32,8 +31,7 @@ Common configuration:
 - `--vlm-upstream` / `ROBONIX_VLM_UPSTREAM`: OpenAI-compatible API base URL.
 - `--vlm-api-key` / `ROBONIX_VLM_API_KEY`: VLM API key.
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
-- `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional
-  operator override for the deployed model's total context capacity.
+- `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_pilot=info`.
@@ -42,32 +40,18 @@ Common configuration:
 
 ## Context capacity: automatic, visible, and overrideable
 
-Pilot compacts history before the next request would exceed the model's total
-context capacity. This is not the same thing as `max_tokens`: it is the full
-input + output budget.
+Pilot compacts history before the next request would exceed the model's total context capacity. This is not the same thing as `max_tokens`: it is the full input + output budget.
 
 Pilot resolves the capacity in this order:
 
-1. A manual deployment value (`vlm.context_window_tokens`, the environment
-   variable, or the CLI flag). This is authoritative.
+1. A manual deployment value (`vlm.context_window_tokens`, the environment variable, or the CLI flag). This is authoritative.
 2. Provider metadata from `GET /models/{id}`.
-3. Provider metadata from `GET /models`: first the exact id, then a unique
-   canonical terminal name. This handles a gateway advertising
-   `anthropic/claude-opus-5.5` when the deployment configured
-   `claude-opus-5.5`. Two different providers with the same terminal name are
-   intentionally treated as ambiguous, never guessed.
-4. Otherwise Pilot starts without pre-emptive history compaction. A manual
-   declaration enables predictable compaction for an unknown/private model.
+3. Provider metadata from `GET /models`: first the exact id, then a unique canonical terminal name. This handles a gateway advertising `anthropic/claude-opus-5.5` when the deployment configured `claude-opus-5.5`. Two different providers with the same terminal name are intentionally treated as ambiguous, never guessed.
+4. Otherwise Pilot starts without pre-emptive history compaction. A manual declaration enables predictable compaction for an unknown/private model.
 
-The startup `[pilot/context_budget]` JSON record includes the configured model,
-the selected provider id when a canonical match was used, capacity, and source.
-Canonical matches emit a warning asking the operator to verify the gateway
-route. At `rbnx boot`, `context=... (manual)` means an operator override;
-otherwise `context=auto` means Pilot will resolve and log the real source after
-startup.
+The startup `[pilot/context_budget]` JSON record includes the configured model, the selected provider id when a canonical match was used, capacity, and source. Canonical matches emit a warning asking the operator to verify the gateway route. At `rbnx boot`, `context=... (manual)` means an operator override; otherwise `context=auto` means Pilot will resolve and log the real source after startup.
 
-Set a manual value only when the route is private, metadata is missing or
-ambiguous, or the gateway has a smaller server cap:
+Set a manual value only when the route is private, metadata is missing or ambiguous, or the gateway has a smaller server cap:
 
 ```yaml
 system:
@@ -79,8 +63,7 @@ system:
       context_window_tokens: 32768 # manual: inspect the model card/server
 ```
 
-Use the smaller effective limit when a model card and an inference-server
-setting (such as `max_model_len` or `max_seq_len`) disagree.
+Use the smaller effective limit when a model card and an inference-server setting (such as `max_model_len` or `max_seq_len`) disagree.
 
 ## Prompt assets
 
@@ -132,11 +115,7 @@ MVP RTDL supports only:
 
 Pilot buffers the full assistant JSON before showing user-visible text, validates the RTDL, expands it into an arena-style `Plan { nodes, root_index }`, sends that `Plan` to Liaison, and dispatches it to Executor. Executor interprets `sequence`, `parallel`, and `do` nodes directly.
 
-Pilot forwards `VERIFYING` node states for live visibility but does not put
-them in LLM history or `BatchResult`. Once verification finishes, the final
-leaf result is written to history exactly once; a final failure triggers
-replanning immediately. `BatchResult` contains only the latest final state for
-each node.
+Pilot forwards `VERIFYING` node states for live visibility but does not put them in LLM history or `BatchResult`. Once verification finishes, the final leaf result is written to history exactly once; a final failure triggers replanning immediately. `BatchResult` contains only the latest final state for each node.
 
 Parallel example:
 
