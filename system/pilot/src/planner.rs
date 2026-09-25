@@ -100,6 +100,21 @@ fn configured_vlm_idle_timeout(value: Option<&str>) -> Duration {
 /// the model's actual context window; Pilot owns its budgeting policy.
 pub const CONTEXT_RESERVE_TOKENS: usize = 6_144;
 
+// What a compaction leaves behind, as percentages of the history room. They
+// add up to 75%, so every compaction frees at least a quarter of the room and
+// the next one cannot follow immediately: compaction always makes progress.
+/// Recent messages, kept verbatim.
+const TAIL_SHARE_PCT: usize = 50;
+/// The one rolling summary of everything older; also capped in tokens.
+const SUMMARY_SHARE_PCT: usize = 15;
+const SUMMARY_MAX_TOKENS: usize = 6_000;
+/// The current task's own words, when they fall out of the tail.
+const PIN_SHARE_PCT: usize = 10;
+/// No single kept message, such as one large executor result, may exceed this.
+const MESSAGE_SHARE_PCT: usize = 20;
+/// Floor for the room when the non-history context alone nearly fills the window.
+const MIN_HISTORY_ROOM: usize = 2_048;
+
 /// Compaction budget using a configured or provider-reported context window.
 #[derive(Clone, Debug)]
 pub struct HistoryBudget {
@@ -116,30 +131,20 @@ impl HistoryBudget {
         }
     }
 
-    /// Estimate history, pending context, and reserves when a limit is known.
-    fn projected_tokens(&self, history: &[Message], non_history_tokens: usize) -> Option<usize> {
-        self.context_window_tokens.map(|_| {
-            history
-                .iter()
-                .map(|message| message.content.as_deref().map_or(0, str::len).div_ceil(4))
-                .sum::<usize>()
-                .saturating_add(non_history_tokens)
-                .saturating_add(CONTEXT_RESERVE_TOKENS)
+    /// Tokens history may use once this round's non-history context and the
+    /// reserve are set aside; `None` when the context window is unknown.
+    fn room(&self, non_history_tokens: usize) -> Option<usize> {
+        self.context_window_tokens.map(|limit| {
+            limit
+                .saturating_sub(non_history_tokens.saturating_add(CONTEXT_RESERVE_TOKENS))
+                .max(MIN_HISTORY_ROOM)
         })
     }
 
+    /// Whether history no longer fits in its room.
     fn must_compact(&self, history: &[Message], non_history_tokens: usize) -> bool {
-        self.context_window_tokens.is_some_and(|limit| {
-            self.projected_tokens(history, non_history_tokens)
-                .is_some_and(|projected| projected >= limit)
-        })
-    }
-
-    /// Reserve one eighth of the context for recent messages, within bounds.
-    fn recent_tail_tokens(&self) -> usize {
-        self.context_window_tokens
-            .map(|limit| (limit / 8).clamp(1_024, 8_192))
-            .unwrap_or(0)
+        self.room(non_history_tokens)
+            .is_some_and(|room| history.iter().map(history::tokens).sum::<usize>() > room)
     }
 }
 
@@ -810,10 +815,14 @@ fn apply_task_update(
     *state != before
 }
 
-/// Token-budgeted rolling compaction. A successful compaction deliberately
-/// starts a new provider cache epoch because earlier message bytes change.
-/// When the deployment cannot expose a context limit, automatic compaction is
-/// disabled rather than guessing a generic model window.
+/// Once history outgrows its room, keep the recent messages verbatim and fold
+/// everything older into one bounded rolling summary.
+///
+/// The result always fits in 75% of the room (see the shares above), so the
+/// next compaction is at least a quarter of the room away. If the summarizer
+/// fails, the older messages are still dropped behind a note saying so; a
+/// failed summary never leaves history as large as it was, which is what used
+/// to make compaction repeat every round.
 async fn compact_history(
     history: &mut Vec<Message>,
     vlm: &VlmClient,
@@ -821,84 +830,85 @@ async fn compact_history(
     non_history_tokens: usize,
     cache_epoch: u64,
 ) -> bool {
-    let Some(limit) = budget.context_window_tokens else {
+    let Some(room) = budget.room(non_history_tokens) else {
         return false;
     };
-    let Some(projected_tokens) = budget.projected_tokens(history, non_history_tokens) else {
+    if !budget.must_compact(history, non_history_tokens) {
         return false;
+    }
+    let before_messages = history.len();
+    let before_tokens: usize = history.iter().map(history::tokens).sum();
+    let summary_cap = (room * SUMMARY_SHARE_PCT / 100).min(SUMMARY_MAX_TOKENS);
+    let plan = history::plan_compaction(
+        history,
+        room * TAIL_SHARE_PCT / 100,
+        room * MESSAGE_SHARE_PCT / 100,
+        room * PIN_SHARE_PCT / 100,
+    );
+
+    let previous = plan
+        .evicted
+        .first()
+        .and_then(|m| m.content.as_deref())
+        .filter(|text| text.starts_with(history::SUMMARY_LABEL))
+        .map(|text| text[history::SUMMARY_LABEL.len()..].trim().to_string());
+    let mut request = vec![Message::system(&format!(
+        "You compact a robot agent's working memory. Rewrite the conversation below, including \
+         any earlier summary at its start, as one plain-text note of at most about {summary_cap} \
+         tokens. Keep, in this order of priority: the current goal and its success criteria; \
+         what each finished task achieved or why it failed; RTDL work still running; decisions \
+         and facts needed to continue. Drop narration. Do not invent facts."
+    ))];
+    request.extend(history::sanitize_for_vlm(&plan.evicted));
+    request.push(Message::user("Write the note now."));
+    let completion = if plan.evicted.is_empty() {
+        None
+    } else {
+        collect_vlm_text(vlm, &request)
+            .await
+            .filter(|completion| !completion.text.trim().is_empty())
     };
-    if !budget.must_compact(history, non_history_tokens) || history.len() <= 4 {
-        return false;
-    }
-
-    let tail_budget = budget.recent_tail_tokens();
-    let mut retained_tokens = 0usize;
-    let mut split = history.len();
-    while split > 0 && retained_tokens < tail_budget {
-        split -= 1;
-        retained_tokens = retained_tokens.saturating_add(
-            history[split]
-                .content
-                .as_deref()
-                .map_or(0, str::len)
-                .div_ceil(4),
-        );
-    }
-    if split == 0 {
-        return false;
-    }
-    let mut msgs = vec![Message::system(
-        "You compact a robot agent's working memory. Summarize the conversation so far \
-         into a concise but COMPLETE note that preserves: the user's goal(s) and any \
-         success criteria, key decisions, important tool results / observations, the \
-         current state of the task, and anything needed to keep going. Compact plain text, \
-         no markdown headings. Do not invent facts.",
-    )];
-    msgs.extend(history::sanitize_for_vlm(&history[..split]));
-    msgs.push(Message::user("Summarize the above conversation now."));
-
-    let completion = match collect_vlm_text(vlm, &msgs).await {
-        Some(completion) if !completion.text.trim().is_empty() => completion,
-        _ => return false,
+    let summarized = completion.is_some();
+    let note = match &completion {
+        Some(completion) => completion.text.trim().to_string(),
+        None => format!(
+            "{}\n[{} earlier messages were dropped without a new summary because the summarizer was unavailable.]",
+            previous.as_deref().unwrap_or(""),
+            plan.evicted.len()
+        ),
     };
+    let summary = history::truncated(
+        &Message::user(&format!("{}\n{}", history::SUMMARY_LABEL, note.trim())),
+        summary_cap,
+    );
 
-    let before = history.len();
-    let before_tokens: usize = history
-        .iter()
-        .map(|m| m.content.as_deref().map_or(0, str::len).div_ceil(4))
-        .sum();
-    let authoritative = history::authoritative_records(&history[..split]);
-    let mut compacted = Vec::with_capacity(history.len() - split + 1 + authoritative.len());
-    compacted.push(Message::user(&format!(
-        "[summary of earlier conversation — treat as established context]\n{}",
-        completion.text.trim()
-    )));
-    compacted.extend(authoritative);
-    compacted.extend_from_slice(&history[split..]);
-    *history = compacted;
-    let after_tokens: usize = history
-        .iter()
-        .map(|m| m.content.as_deref().map_or(0, str::len).div_ceil(4))
-        .sum();
+    let evicted = plan.evicted.len();
+    let pinned = plan.pinned.len();
+    *history = std::iter::once(summary)
+        .chain(plan.pinned)
+        .chain(plan.tail)
+        .collect();
+    let after_tokens: usize = history.iter().map(history::tokens).sum();
     info!(
         "[pilot/compaction] {}",
         serde_json::json!({
             "event": "history_compaction",
             "cache_epoch_before": cache_epoch,
             "cache_epoch_after": cache_epoch.saturating_add(1),
-            "context_window_tokens": limit,
+            "context_window_tokens": budget.context_window_tokens,
             "context_window_source": budget.context_window_source,
-            "projected_tokens_before": projected_tokens,
             "non_history_tokens": non_history_tokens,
-            "internal_context_reserve_tokens": CONTEXT_RESERVE_TOKENS,
-            "recent_tail_tokens_budget": tail_budget,
-            "history_messages_before": before,
+            "history_room_tokens": room,
+            "summary_cap_tokens": summary_cap,
+            "summarized": summarized,
+            "evicted_messages": evicted,
+            "pinned_messages": pinned,
+            "history_messages_before": before_messages,
             "history_messages_after": history.len(),
             "history_tokens_before_estimate": before_tokens,
             "history_tokens_after_estimate": after_tokens,
-            "summary_input_tokens": completion.usage.as_ref().map(|usage| usage.prompt_tokens),
-            "summary_output_tokens": completion.usage.as_ref().map(|usage| usage.completion_tokens),
-            "summary_cached_input_tokens": completion.usage.as_ref().and_then(|usage| usage.cached_tokens),
+            "summary_input_tokens": completion.as_ref().and_then(|c| c.usage.as_ref()).map(|u| u.prompt_tokens),
+            "summary_output_tokens": completion.as_ref().and_then(|c| c.usage.as_ref()).map(|u| u.completion_tokens),
         })
     );
     true
@@ -3016,7 +3026,6 @@ mod tests {
         let history = vec![Message::user(&"x".repeat(24_000))];
         assert!(!budget.must_compact(&history, 2_000));
         assert!(budget.must_compact(&history, 21_000));
-        assert_eq!(budget.recent_tail_tokens(), 4_096);
 
         let unknown = HistoryBudget::new(None, "unavailable");
         assert!(!unknown.must_compact(&history, 100_000));
@@ -4184,13 +4193,6 @@ mod tests {
         );
         let record = history.last().unwrap();
         assert_eq!(record.role, "user");
-        assert_eq!(
-            crate::history::authoritative_records(&history)
-                .last()
-                .unwrap()
-                .content,
-            record.content,
-        );
         let record = record.content.as_deref().unwrap();
         let (_, json) = record.split_once(": ").unwrap();
         assert_eq!(
