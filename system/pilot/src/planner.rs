@@ -20,6 +20,7 @@ use crate::prompt::{
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
+use crate::transcript::Transcript;
 use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -151,7 +152,7 @@ impl HistoryBudget {
 /// Harness-owned state for the latest user interaction. Long-running work is
 /// represented independently by the RTDL forest; it must not keep older user
 /// text welded into the current goal forever.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TaskState {
     goal: String,
     success_criterion: String,
@@ -766,7 +767,7 @@ fn drain_steers(
     pulled
 }
 
-fn start_or_resume_task(current_task: &mut Option<TaskState>, user_text: &str) {
+pub(crate) fn start_or_resume_task(current_task: &mut Option<TaskState>, user_text: &str) {
     let text = user_text.trim();
     if text.is_empty() {
         return;
@@ -829,6 +830,8 @@ async fn compact_history(
     budget: &HistoryBudget,
     non_history_tokens: usize,
     cache_epoch: u64,
+    transcript: &mut Transcript,
+    task: Option<&TaskState>,
 ) -> bool {
     let Some(room) = budget.room(non_history_tokens) else {
         return false;
@@ -884,10 +887,13 @@ async fn compact_history(
 
     let evicted = plan.evicted.len();
     let pinned = plan.pinned.len();
+    // The evicted messages leave history here; make sure they are archived.
+    transcript.record(history, task);
     *history = std::iter::once(summary)
         .chain(plan.pinned)
         .chain(plan.tail)
         .collect();
+    transcript.record_compaction(history, evicted, pinned, summarized);
     let after_tokens: usize = history.iter().map(history::tokens).sum();
     info!(
         "[pilot/compaction] {}",
@@ -1016,6 +1022,7 @@ pub async fn run_turn(
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
     history_budget: &HistoryBudget,
+    transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
 
@@ -1150,6 +1157,8 @@ pub async fn run_turn(
     let mut last_content = String::new();
 
     'supervisor: loop {
+        // Archive what the last iteration added, before anything can compact it.
+        transcript.record(history, standing_task.as_ref());
         // Check for hard interrupt at the top of every iteration.
         if *cancel_rx.borrow() {
             return_interrupted!(&forest);
@@ -1318,6 +1327,7 @@ pub async fn run_turn(
         // Pull any steers that landed while we were busy (e.g. during the
         // previous VLM stream) so this round plans with the latest user input.
         drain_steers(&mut steer_rx, history, standing_task);
+        transcript.record(history, standing_task.as_ref());
 
         // Re-discover capabilities from atlas every round so providers that
         // registered mid-turn are visible in the next call.
@@ -1378,6 +1388,8 @@ pub async fn run_turn(
             history_budget,
             compaction_non_history_tokens,
             cache_epoch,
+            transcript,
+            standing_task.as_ref(),
         )
         .await
         {

@@ -17,10 +17,11 @@ use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::planner::{self, ExecutorConn, HistoryBudget, TaskState};
+use crate::transcript::Transcript;
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
-use robonix_scribe::{debug, error};
+use robonix_scribe::{debug, error, info};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -105,6 +106,8 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
 /// expired; active turns compact history against the model context window.
 type Histories = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<Message>>>>>>;
 type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<Option<TaskState>>>>>>;
+/// Transcript per `session_id`, kept for as long as its history.
+type Transcripts = Arc<Mutex<HashMap<String, Arc<Mutex<Transcript>>>>>;
 
 #[derive(Clone)]
 struct ActiveTurnInput {
@@ -179,6 +182,7 @@ pub struct PilotServiceImpl {
     /// that pauses for user input, so the next message cannot silently replace
     /// unfinished work with a model-authored summary.
     task_states: TaskStates,
+    transcripts: Transcripts,
     /// Per-session cancellation senders. `abort_turn` Task signals this
     /// without holding the history lock.
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
@@ -209,6 +213,7 @@ impl PilotServiceImpl {
             history_budget,
             histories: Arc::new(Mutex::new(HashMap::new())),
             task_states: Arc::new(Mutex::new(HashMap::new())),
+            transcripts: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             steers: Arc::new(Mutex::new(HashMap::new())),
             seen_task_ids: Arc::new(Mutex::new(HashMap::new())),
@@ -216,18 +221,55 @@ impl PilotServiceImpl {
         }
     }
 
-    async fn get_or_create_history(&self, session_id: &str) -> Arc<Mutex<Vec<Message>>> {
-        let mut map = self.histories.lock().await;
-        map.entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
-            .clone()
-    }
-
-    async fn get_or_create_task_state(&self, session_id: &str) -> Arc<Mutex<Option<TaskState>>> {
-        let mut map = self.task_states.lock().await;
-        map.entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
-            .clone()
+    /// The history, task state, and transcript of a session, created on
+    /// first use. A session this process has not seen yet is restored from its
+    /// transcript when one exists, so a session survives a Pilot restart. The
+    /// file is read off the async runtime and without holding the session maps.
+    async fn get_or_create_session(
+        &self,
+        session_id: &str,
+    ) -> (
+        Arc<Mutex<Vec<Message>>>,
+        Arc<Mutex<Option<TaskState>>>,
+        Arc<Mutex<Transcript>>,
+    ) {
+        let known = self.histories.lock().await.contains_key(session_id);
+        let restored = if known {
+            None
+        } else {
+            let id = session_id.to_string();
+            tokio::task::spawn_blocking(move || Transcript::restore(&id))
+                .await
+                .ok()
+                .flatten()
+        };
+        let mut histories = self.histories.lock().await;
+        let mut task_states = self.task_states.lock().await;
+        let mut transcripts = self.transcripts.lock().await;
+        if !histories.contains_key(session_id) {
+            if let Some(restored) = &restored {
+                info!(
+                    "[pilot] restored session '{session_id}' from its transcript: {} messages",
+                    restored.history.len()
+                );
+            }
+            let (history, task) = restored.map_or((Vec::new(), None), |r| (r.history, r.task));
+            transcripts.insert(
+                session_id.to_string(),
+                Arc::new(Mutex::new(Transcript::new(
+                    session_id,
+                    &history,
+                    task.as_ref(),
+                ))),
+            );
+            histories.insert(session_id.to_string(), Arc::new(Mutex::new(history)));
+            task_states.insert(session_id.to_string(), Arc::new(Mutex::new(task)));
+        }
+        (
+            histories[session_id].clone(),
+            task_states[session_id].clone(),
+            transcripts[session_id].clone(),
+        )
     }
 
     async fn accept_task_id_once(&self, session_id: &str, task_id: &str) -> bool {
@@ -414,8 +456,8 @@ impl RobonixSystemPilot for PilotServiceImpl {
             return Ok(Response::new(rx));
         }
 
-        let history_arc = self.get_or_create_history(&task.session_id).await;
-        let task_state_arc = self.get_or_create_task_state(&task.session_id).await;
+        let (history_arc, task_state_arc, transcript_arc) =
+            self.get_or_create_session(&task.session_id).await;
         let plan_seq = Arc::clone(&self.plan_seq);
         // what is tokio's tx and rx:
         // https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.Sender.html
@@ -473,7 +515,8 @@ impl RobonixSystemPilot for PilotServiceImpl {
 
             let mut history = history_arc.lock().await;
             let mut standing_task = task_state_arc.lock().await;
-            if let Err(e) = planner::run_turn(
+            let mut transcript = transcript_arc.lock().await;
+            let result = planner::run_turn(
                 &task,
                 &mut history,
                 &mut standing_task,
@@ -486,9 +529,12 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 steer_rx,
                 plan_seq,
                 &history_budget,
+                &mut transcript,
             )
-            .await
-            {
+            .await;
+            // Every exit, including errors and interrupts, archives the turn.
+            transcript.record(&history, standing_task.as_ref());
+            if let Err(e) = result {
                 error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
             }
