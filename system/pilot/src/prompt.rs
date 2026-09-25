@@ -4,10 +4,13 @@
 // Prompt assembly and provider-usage accounting for Pilot. This module owns
 // message ordering; planner owns what each round observes and dispatches.
 
+use crate::atlas_pb;
 use crate::discovery::CapDoc;
 use crate::history;
+use crate::planner::DisplayCapability;
 use crate::vlm::{Message, VlmUsage};
 use robonix_scribe::{debug, info};
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -96,7 +99,7 @@ impl UsageTotals {
 /// later request extends rather than reorders this sequence.
 pub(crate) fn assemble_planning_messages(
     round: u32,
-    capability_cache_hit: bool,
+    catalog_unchanged: bool,
     sections: &[PromptSection<'_>],
     history_messages: &[Message],
 ) -> Vec<Message> {
@@ -132,7 +135,7 @@ pub(crate) fn assemble_planning_messages(
             "prompt_text_bytes": prompt_bytes,
             "estimated_input_tokens": prompt_bytes.div_ceil(4),
             "history_bytes": history_bytes,
-            "capability_catalog_render_cache_hit": capability_cache_hit,
+            "capability_catalog_unchanged": catalog_unchanged,
             "cacheable_prefix_bytes": system.len(),
             "cacheable_prefix_fingerprint": cacheable_prefix_fingerprint,
             "sections": section_metrics,
@@ -188,14 +191,6 @@ pub(crate) fn render_capability_docs(docs: &[CapDoc]) -> String {
     out
 }
 
-pub(crate) fn changed_snapshot(previous: &mut String, current: String) -> String {
-    if *previous == current {
-        return String::new();
-    }
-    *previous = current.clone();
-    current
-}
-
 /// Some providers reject a trailing assistant message as a completion prefill.
 /// Close it with an explicit next-action user turn instead.
 pub(crate) fn close_trailing_assistant(messages: &mut Vec<Message>) {
@@ -208,4 +203,143 @@ pub(crate) fn close_trailing_assistant(messages: &mut Vec<Message>) {
              or give your final answer if the task is complete.",
         ));
     }
+}
+
+/// The capability catalog as the model last saw it in this task.
+///
+/// The catalog is carried in history rather than the system prefix, so a
+/// provider registering or leaving never invalidates the cached prefix. The
+/// first round of a task, and the first round after history compaction,
+/// carry the full catalog; later rounds carry only the entries added,
+/// changed, or removed since, and nothing when the catalog is unchanged.
+///
+/// A round's record counts as shown only once that round is written to
+/// history; a round dropped for a steer or a stale plan leaves the view as it
+/// was, so the next round repeats what the model has not yet seen.
+#[derive(Default)]
+pub(crate) struct CatalogView {
+    shown: Option<BTreeMap<String, String>>,
+    staged: Option<BTreeMap<String, String>>,
+}
+
+impl CatalogView {
+    /// Render this round's catalog record; empty when nothing changed.
+    pub(crate) fn update(&mut self, caps: &[DisplayCapability<'_>]) -> String {
+        let current = capability_entries(caps);
+        let record = match &self.shown {
+            None => render_full_catalog(&current),
+            Some(shown) => render_catalog_changes(shown, &current),
+        };
+        self.staged = Some(current);
+        record
+    }
+
+    /// The round's record is now in history.
+    pub(crate) fn commit(&mut self) {
+        if let Some(staged) = self.staged.take() {
+            self.shown = Some(staged);
+        }
+    }
+
+    /// Forget what was shown, so the next round carries the full catalog.
+    pub(crate) fn reset(&mut self) {
+        self.shown = None;
+    }
+}
+
+/// Maximum inline description length; full documentation is loaded on demand.
+pub(crate) const MAX_INLINE_DESCRIPTION_CHARS: usize = 300;
+
+/// Return a character-bounded opening paragraph and whether text was omitted.
+pub(crate) fn summarize_description(description: &str) -> (String, bool) {
+    let full = description.trim();
+    let first = full.split("\n\n").next().unwrap_or(full).trim();
+    let summary: String = first.chars().take(MAX_INLINE_DESCRIPTION_CHARS).collect();
+    let truncated = summary.len() < full.len();
+    (summary, truncated)
+}
+
+/// One catalog entry per callable capability, keyed by its capability name,
+/// with the description escaped and the input schema inlined.
+pub(crate) fn capability_entries(
+    display_caps: &[DisplayCapability<'_>],
+) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+    for cap in display_caps {
+        let c = cap.cap;
+        let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) =
+            c.params.as_ref().and_then(|params| params.kind.as_ref())
+        else {
+            continue;
+        };
+        let schema: serde_json::Value =
+            serde_json::from_str(&mcp.input_schema_json).unwrap_or(serde_json::Value::Null);
+        let (summary, truncated) = summarize_description(&c.description);
+        let description = serde_json::to_string(&summary).unwrap_or_else(|_| "\"\"".to_string());
+        let mut entry = format!(
+            "- capability_name: {}\n  description: {}\n  args_schema: {}\n",
+            cap.display_name, description, schema
+        );
+        if truncated {
+            entry.push_str(&format!(
+                "  more: call `read_capability_doc` with provider_id `{}` for this \
+                 capability's full description\n",
+                cap.provider_id
+            ));
+        }
+        entries.insert(cap.display_name.clone(), entry);
+    }
+    entries
+}
+
+/// The whole catalog, stated as replacing any catalog shown earlier.
+pub(crate) fn render_full_catalog(entries: &BTreeMap<String, String>) -> String {
+    let mut out = String::from(
+        "\n\n## Available capabilities\nThis is the complete catalog; it replaces any earlier catalog in this conversation.\n\n",
+    );
+    out.extend(entries.values().map(String::as_str));
+    out
+}
+
+/// What changed since `shown`; empty when nothing did.
+fn render_catalog_changes(
+    shown: &BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
+) -> String {
+    let added: Vec<&str> = current
+        .iter()
+        .filter(|(name, _)| !shown.contains_key(*name))
+        .map(|(_, entry)| entry.as_str())
+        .collect();
+    let changed: Vec<&str> = current
+        .iter()
+        .filter(|(name, entry)| shown.get(*name).is_some_and(|old| old != *entry))
+        .map(|(_, entry)| entry.as_str())
+        .collect();
+    let removed: Vec<String> = shown
+        .keys()
+        .filter(|name| !current.contains_key(*name))
+        .map(|name| format!("`{name}`"))
+        .collect();
+    if added.is_empty() && changed.is_empty() && removed.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\n## Available capabilities: changes\nApply these to the latest catalog above; entries not listed are unchanged.\n",
+    );
+    if !added.is_empty() {
+        out.push_str("Added:\n");
+        out.extend(added);
+    }
+    if !changed.is_empty() {
+        out.push_str("Changed (new entry):\n");
+        out.extend(changed);
+    }
+    if !removed.is_empty() {
+        out.push_str(&format!(
+            "Removed, no longer callable: {}\n",
+            removed.join(", ")
+        ));
+    }
+    out
 }

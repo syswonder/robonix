@@ -15,8 +15,8 @@ use crate::pb::pilot::{
     SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::prompt::{
-    UsageTotals, assemble_planning_messages, changed_snapshot, render_capability_docs,
-    render_context_sections,
+    CatalogView, UsageTotals, assemble_planning_messages, capability_entries,
+    render_capability_docs, render_context_sections, render_full_catalog,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
@@ -26,9 +26,7 @@ use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info, warn};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,33 +50,10 @@ const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 const RTDL_DO: u32 = 2;
 
-struct DisplayCapability<'a> {
-    display_name: String,
-    provider_id: &'a str,
-    cap: &'a atlas_pb::Capability,
-}
-
-#[derive(Default)]
-struct CapabilityPromptCache {
-    fingerprint: u64,
-    catalog: String,
-    initialized: bool,
-}
-
-impl CapabilityPromptCache {
-    /// Reuse the rendered catalog while Atlas reports the same provider,
-    /// contract, description, and input-schema data. Discovery still runs on
-    /// every round, so a registration change invalidates the cache immediately.
-    fn render<'a>(&'a mut self, caps: &[DisplayCapability<'_>]) -> (&'a str, bool) {
-        let fingerprint = capability_prompt_fingerprint(caps);
-        let hit = self.initialized && self.fingerprint == fingerprint;
-        if !hit {
-            self.catalog = render_capability_prompt(caps);
-            self.fingerprint = fingerprint;
-            self.initialized = true;
-        }
-        (&self.catalog, hit)
-    }
+pub(crate) struct DisplayCapability<'a> {
+    pub(crate) display_name: String,
+    pub(crate) provider_id: &'a str,
+    pub(crate) cap: &'a atlas_pb::Capability,
 }
 
 /// Persist exactly the user-side suffix sent for a completed planning request.
@@ -1156,7 +1131,7 @@ pub async fn run_turn(
     let mut cancel_requested: HashSet<String> = HashSet::new();
     let forest_revision = Arc::new(AtomicU64::new(0));
     let mut should_plan = true;
-    let mut capability_prompt_cache = CapabilityPromptCache::default();
+    let mut catalog_view = CatalogView::default();
     let mut usage_totals = UsageTotals::default();
     let mut cache_epoch = 0_u64;
     let mut last_soma_body = String::new();
@@ -1357,40 +1332,36 @@ pub async fn run_turn(
                 "\n\n## Capability docs\nUnavailable; use the current capability catalog only.\n"
                     .to_string()
             });
-        let soma_body_update = changed_snapshot(&mut last_soma_body, soma_body);
-        let capability_docs_update = changed_snapshot(&mut last_capability_docs, capability_docs);
-
         let display_caps = build_display_capabilities(&cap_list, &non_llm_callable_contract_ids);
         let target_map = build_capability_target_map(&display_caps);
         // The RTDL protocol is part of the cacheable system prefix. Starting
         // with its compact form avoids the old full-on-round-zero rewrite that
         // made the second provider request cold.
         let protocol_prompt = rtdl_protocol(false);
-        let (capability_prompt, capability_cache_hit) =
-            capability_prompt_cache.render(&display_caps);
-
         let forest_block = build_forest_block(&forest, &cancel_requested);
         let executor_active_block = fetch_executor_active_block(executor).await;
-        // Stable instructions precede history; current observations follow it.
+        // Only instructions that never change sit before history.
         let sections = [
             ("standing_system", standing_prompt.as_str()),
             ("rtdl_protocol", protocol_prompt),
-            ("capability_catalog", capability_prompt),
         ];
-        let live_sections = [
-            ("embodiment_description", soma_body_update.as_str()),
-            ("capability_docs", capability_docs_update.as_str()),
-            ("in_flight_trees", forest_block.as_str()),
-            ("executor_state", executor_active_block.as_str()),
-            ("embodiment_live", embodiment_block.as_str()),
-            ("environment_live", environment_block.as_str()),
-        ];
-        let runtime_context = render_context_sections(&live_sections);
-        let compaction_non_history_tokens = sections
-            .iter()
-            .chain(&live_sections)
-            .map(|(_, content)| content.len().div_ceil(4))
-            .sum();
+        // Budget as if every snapshot were shown in full: after a compaction
+        // they all are.
+        let full_catalog = render_full_catalog(&capability_entries(&display_caps));
+        let compaction_non_history_tokens = [
+            standing_prompt.as_str(),
+            protocol_prompt,
+            full_catalog.as_str(),
+            soma_body.as_str(),
+            capability_docs.as_str(),
+            forest_block.as_str(),
+            executor_active_block.as_str(),
+            embodiment_block.as_str(),
+            environment_block.as_str(),
+        ]
+        .iter()
+        .map(|content| content.len().div_ceil(4))
+        .sum();
         if compact_history(
             history,
             vlm,
@@ -1401,7 +1372,34 @@ pub async fn run_turn(
         .await
         {
             cache_epoch = cache_epoch.saturating_add(1);
+            // The summary may have absorbed the last full snapshots; show
+            // them again rather than send changes against a missing baseline.
+            catalog_view.reset();
+            last_soma_body.clear();
+            last_capability_docs.clear();
         }
+        let catalog_update = catalog_view.update(&display_caps);
+        let soma_body_update = if soma_body == last_soma_body {
+            ""
+        } else {
+            soma_body.as_str()
+        };
+        let capability_docs_update = if capability_docs == last_capability_docs {
+            ""
+        } else {
+            capability_docs.as_str()
+        };
+        // Current observations follow history, in a fixed order.
+        let live_sections = [
+            ("capability_catalog", catalog_update.as_str()),
+            ("embodiment_description", soma_body_update),
+            ("capability_docs", capability_docs_update),
+            ("in_flight_trees", forest_block.as_str()),
+            ("executor_state", executor_active_block.as_str()),
+            ("embodiment_live", embodiment_block.as_str()),
+            ("environment_live", environment_block.as_str()),
+        ];
+        let runtime_context = render_context_sections(&live_sections);
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -1428,7 +1426,7 @@ pub async fn run_turn(
             }
             let messages = assemble_planning_messages(
                 round,
-                capability_cache_hit,
+                catalog_update.is_empty(),
                 &sections,
                 &request_history,
             );
@@ -1679,6 +1677,11 @@ pub async fn run_turn(
 
         // Persist the sent context before its reply to preserve prefix reuse.
         append_request_context(history, &runtime_context, correction.as_deref());
+        // Only now have these snapshots reached history; later rounds send
+        // what changes against them.
+        catalog_view.commit();
+        last_soma_body = soma_body;
+        last_capability_docs = capability_docs;
 
         // RTDL recovery gave up after a retry: surface the user-facing message
         // once and END the turn. Without this the empty recovery plan would fall
@@ -2052,68 +2055,6 @@ fn rtdl_protocol(full: bool) -> &'static str {
     } else {
         RTDL_PROTOCOL_REMINDER
     }
-}
-
-/// Hash the exact Atlas fields used by the prompt so registration changes
-/// invalidate the rendered catalog without relying on provider list identity.
-fn capability_prompt_fingerprint(display_caps: &[DisplayCapability<'_>]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for cap in display_caps {
-        cap.display_name.hash(&mut hasher);
-        cap.provider_id.hash(&mut hasher);
-        cap.cap.contract_id.hash(&mut hasher);
-        cap.cap.description.hash(&mut hasher);
-        if let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) = cap
-            .cap
-            .params
-            .as_ref()
-            .and_then(|params| params.kind.as_ref())
-        {
-            mcp.input_schema_json.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-/// Maximum inline description length; full documentation is loaded on demand.
-const MAX_INLINE_DESCRIPTION_CHARS: usize = 300;
-
-/// Return a character-bounded opening paragraph and whether text was omitted.
-fn summarize_description(description: &str) -> (String, bool) {
-    let full = description.trim();
-    let first = full.split("\n\n").next().unwrap_or(full).trim();
-    let summary: String = first.chars().take(MAX_INLINE_DESCRIPTION_CHARS).collect();
-    let truncated = summary.len() < full.len();
-    (summary, truncated)
-}
-
-/// Render deterministic capability entries with escaped descriptions and schemas.
-fn render_capability_prompt(display_caps: &[DisplayCapability<'_>]) -> String {
-    let mut prompt = String::from("\n## Available capabilities\n\n");
-    for cap in display_caps {
-        let c = cap.cap;
-        let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) =
-            c.params.as_ref().and_then(|params| params.kind.as_ref())
-        else {
-            continue;
-        };
-        let schema: serde_json::Value =
-            serde_json::from_str(&mcp.input_schema_json).unwrap_or(serde_json::Value::Null);
-        let (summary, truncated) = summarize_description(&c.description);
-        let description = serde_json::to_string(&summary).unwrap_or_else(|_| "\"\"".to_string());
-        prompt.push_str(&format!(
-            "- capability_name: {}\n  description: {}\n  args_schema: {}\n",
-            cap.display_name, description, schema
-        ));
-        if truncated {
-            prompt.push_str(&format!(
-                "  more: call `read_capability_doc` with provider_id `{}` for this \
-                 capability's full description\n",
-                cap.provider_id
-            ));
-        }
-    }
-    prompt
 }
 
 /// One parsed RTDL envelope from the VLM.
@@ -3044,25 +2985,25 @@ Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, HistoryBudget,
-        MAX_INLINE_DESCRIPTION_CHARS, MetaPlanOp, RTDL_DO, RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER,
-        RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep, UsageTotals, append_request_context,
-        append_steer, append_task_state_record, apply_task_update, assemble_planning_messages,
-        build_capability_target_map, build_display_capabilities, build_executor_active_block,
-        build_forest_block, compact_tool_result, configured_vlm_idle_timeout,
-        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
-        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
-        is_legacy_plan_control_contract, is_terminal_executor_state,
-        mixes_control_inspection_with_action, parse_meta_plan_op, parse_rtdl_assistant_response,
-        parse_task_update, plan_call_signatures, record_dispatched_plan, rtdl_node_kind_name,
-        rtdl_recovery_final_text, rtdl_state_name, should_replan_after_plan_done,
-        skip_memory_prefetch, start_or_resume_task, summarize_description, task_is_session_end,
-        upsert_terminal_result,
+        CapabilityTargetMap, CatalogView, DEFAULT_SUCCESS_CRITERION, HistoryBudget, MetaPlanOp,
+        RTDL_DO, RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta,
+        TreeStep, UsageTotals, append_request_context, append_steer, append_task_state_record,
+        apply_task_update, assemble_planning_messages, build_capability_target_map,
+        build_display_capabilities, build_executor_active_block, build_forest_block,
+        compact_tool_result, configured_vlm_idle_timeout, duplicate_in_flight_signature,
+        expand_rtdl_to_plan, extract_json_object, feed_results_into_history, format_plan_summary,
+        invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
+        is_terminal_executor_state, mixes_control_inspection_with_action, parse_meta_plan_op,
+        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
+        task_is_session_end, upsert_terminal_result,
     };
     use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
     use crate::pb::pilot::{
         CapabilityCall, CapabilityCallResult, Plan, RtdlNode, RtdlNodeState, Task,
     };
+    use crate::prompt::{MAX_INLINE_DESCRIPTION_CHARS, summarize_description};
     use crate::vlm::{Message, VlmUsage};
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
@@ -3195,20 +3136,32 @@ mod tests {
     }
 
     #[test]
-    fn stable_catalog_is_cached_and_three_step_tree_stays_one_plan() {
+    fn catalog_is_full_once_then_changes_only_and_three_step_tree_stays_one_plan() {
         let capabilities = vec![
             test_capability("demo", "observe"),
             test_capability("demo", "remember"),
             test_capability("demo", "report"),
         ];
         let display = build_display_capabilities(&capabilities, &HashSet::new());
-        let mut cache = CapabilityPromptCache::default();
-        let (first, first_hit) = cache.render(&display);
-        let first = first.to_string();
-        let (second, second_hit) = cache.render(&display);
-        assert!(!first_hit);
-        assert!(second_hit);
-        assert_eq!(first, second);
+        let mut view = CatalogView::default();
+        let first = view.update(&display);
+        assert!(first.contains("complete catalog") && first.contains("demo.test_report"));
+        // A dropped round never reached history, so the full catalog repeats.
+        assert!(view.update(&display).contains("complete catalog"));
+        view.commit();
+        assert_eq!(view.update(&display), "");
+
+        let fewer = build_display_capabilities(&capabilities[..2], &HashSet::new());
+        let change = view.update(&fewer);
+        assert!(change.contains("Removed, no longer callable: `demo.test_report`"));
+        assert!(!change.contains("demo.test_observe"));
+        view.commit();
+        assert!(
+            view.update(&display)
+                .contains("Added:\n- capability_name: demo.test_report")
+        );
+        view.reset();
+        assert!(view.update(&display).contains("complete catalog"));
 
         let targets = build_capability_target_map(&display);
         let rtdl = json!({
