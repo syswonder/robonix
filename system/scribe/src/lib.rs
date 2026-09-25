@@ -285,6 +285,14 @@ static LOG_DIR: LazyLock<std::path::PathBuf> = LazyLock::new(|| {
         .unwrap_or_else(|_| std::path::PathBuf::from("./logs"))
 });
 
+/// The directory Scribe writes its JSON-lines files to: `$SCRIBE_LOG_DIR`, or
+/// `./logs` when unset. Components that keep other on-disk records next to
+/// their logs use it so everything lands in the one directory `rbnx boot`
+/// collects.
+pub fn log_dir() -> &'static std::path::Path {
+    LOG_DIR.as_path()
+}
+
 /// Global file sink; `None` when the log directory can't be created
 /// (read-only filesystem, full disk, etc.).  When `None`, file writes
 /// are silently skipped — the process keeps running console-only.

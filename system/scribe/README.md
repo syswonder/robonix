@@ -25,6 +25,10 @@ variable is unset. Components launched by `rbnx boot` normally receive a log
 directory from the boot environment, so their Scribe output is collected with
 the rest of the component logs.
 
+`robonix_scribe::log_dir()` returns that directory, so a component can keep
+other on-disk records beside its logs (Pilot's session transcripts, for
+example).
+
 Each JSON-lines record carries:
 
 - `ts`: local-time timestamp with nanosecond precision,
