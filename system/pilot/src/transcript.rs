@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn distinct_session_ids_get_distinct_files() {
-        let names: Vec<PathBuf> = ["任务A", "任务B", "a/b", "a_b", "a%2Fb"]
+        let names: Vec<PathBuf> = ["caf\u{e9}", "caf\u{e8}", "a/b", "a_b", "a%2Fb"]
             .iter()
             .map(|id| path_for(id))
             .collect();
