@@ -7,14 +7,13 @@ use crate::config::VlmConfig;
 use anyhow::{Context, Result, bail};
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestDeveloperMessageArgs,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
-    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionTools,
-    CreateChatCompletionRequestArgs, FunctionCall, FunctionObject, FunctionObjectArgs, ImageDetail,
-    ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
+    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -85,8 +84,7 @@ fn open_retry_delay(
 /// One message in an OpenAI Chat Completions conversation.
 /// Spec: https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages
 ///
-/// One struct, five roles (`system` / `developer` / `user` / `assistant` /
-/// `tool`); each
+/// One struct, four roles (`system` / `user` / `assistant` / `tool`); each
 /// role uses a different subset of the optional fields. `skip_serializing_if`
 /// on every Option prunes irrelevant fields at serialization, so the wire
 /// JSON for each role only carries what OpenAI expects:
@@ -1073,10 +1071,6 @@ fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionReque
     for m in messages {
         let msg = match m.role.as_str() {
             "system" => ChatCompletionRequestSystemMessageArgs::default()
-                .content(m.content.clone().unwrap_or_default())
-                .build()?
-                .into(),
-            "developer" => ChatCompletionRequestDeveloperMessageArgs::default()
                 .content(m.content.clone().unwrap_or_default())
                 .build()?
                 .into(),
