@@ -182,16 +182,6 @@ impl Message {
             image_base64: None,
         }
     }
-    pub fn developer(content: &str) -> Self {
-        Self {
-            role: "developer".into(),
-            name: None,
-            content: Some(content.into()),
-            tool_calls: None,
-            tool_call_id: None,
-            image_base64: None,
-        }
-    }
     pub fn user(content: &str) -> Self {
         Self {
             role: "user".into(),
@@ -600,7 +590,7 @@ impl VlmClient {
         let mut request_body = serde_json::to_value(request)
             .context("serialize chat completion request for transport")?;
         // GPT-5.6 understands these OpenAI cache controls. Keep the stable
-        // developer prefix alive through the interactive task; compatibility
+        // system prefix alive through the interactive task; compatibility
         // fallback below removes this optional field if a proxy rejects it.
         if let Some(body) = request_body.as_object_mut() {
             body.insert(

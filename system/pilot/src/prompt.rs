@@ -143,8 +143,9 @@ pub(crate) fn assemble_planning_messages(
     );
 
     let mut messages = Vec::with_capacity(sanitized_history.len() + 2);
-    // Keep the stable developer prefix ahead of user-side runtime history.
-    messages.push(Message::developer(&system));
+    // The stable prefix goes in `system`: every OpenAI-compatible provider
+    // accepts it, while some (Qwen, for one) reject the newer `developer` role.
+    messages.push(Message::system(&system));
     messages.extend(sanitized_history);
     close_trailing_assistant(&mut messages);
     debug!(

@@ -4166,7 +4166,7 @@ mod tests {
                 .map(|m| (m.role.as_str(), m.content.as_deref().unwrap()))
                 .collect::<Vec<_>>(),
             vec![
-                ("developer", "standing system and RTDL contract"),
+                ("system", "standing system and RTDL contract"),
                 ("user", "User task (authoritative): inspect room"),
                 ("user", "runtime round 0"),
                 ("user", "Pilot validation feedback: emit valid RTDL"),
