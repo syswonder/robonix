@@ -24,9 +24,16 @@ fn workspace_root() -> PathBuf {
 /// Returns the canonical path on success, or an error if the path escapes the
 /// allowed directory (path traversal).
 fn safe_resolve(user_path: &str) -> anyhow::Result<PathBuf> {
-    let root = workspace_root()
+    safe_resolve_in(&workspace_root(), user_path)
+}
+
+/// [`safe_resolve`] against an explicit root. Tests call this directly: the
+/// workspace root comes from a process-wide environment variable, and setting
+/// it from parallel tests leaks one test's root into another's file ops.
+fn safe_resolve_in(workspace: &Path, user_path: &str) -> anyhow::Result<PathBuf> {
+    let root = workspace
         .canonicalize()
-        .unwrap_or_else(|_| workspace_root());
+        .unwrap_or_else(|_| workspace.to_path_buf());
     let candidate = if Path::new(user_path).is_absolute() {
         PathBuf::from(user_path)
     } else {
@@ -517,10 +524,9 @@ mod tests {
         // Set workspace to a temp dir so we have a known root
         let tmp = std::env::temp_dir().join("rbnx_test_ws");
         std::fs::create_dir_all(&tmp).unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
         // ../../../etc/passwd must be rejected
-        let result = safe_resolve("../../../etc/passwd");
+        let result = safe_resolve_in(&tmp, "../../../etc/passwd");
         assert!(
             result.is_err(),
             "path traversal with ../../../etc/passwd should fail"
@@ -536,10 +542,9 @@ mod tests {
     fn path_traversal_absolute_outside_workspace_is_rejected() {
         let tmp = std::env::temp_dir().join("rbnx_test_ws2");
         std::fs::create_dir_all(&tmp).unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
         // /etc/hostname is a real file outside workspace
-        let result = safe_resolve("/etc/hostname");
+        let result = safe_resolve_in(&tmp, "/etc/hostname");
         assert!(
             result.is_err(),
             "absolute path /etc/hostname outside workspace should fail"
@@ -558,9 +563,8 @@ mod tests {
         // Create a test file inside workspace
         let test_file = tmp.join("allowed.txt");
         std::fs::write(&test_file, "hello").unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
-        let result = safe_resolve("allowed.txt");
+        let result = safe_resolve_in(&tmp, "allowed.txt");
         assert!(
             result.is_ok(),
             "path within workspace should be allowed: {:?}",
