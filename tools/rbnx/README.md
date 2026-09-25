@@ -82,6 +82,14 @@ and nothing about the run recorded it. The lockfile is that record. It is
 written, not enforced: boot still runs whatever the cache holds, and a dirty
 checkout is warned about rather than refused.
 
+Next to the lock, `rbnx-boot/logs/` holds each component's log and
+`rbnx-boot/sessions/` holds session state: boot passes it to system
+components as `ROBONIX_SESSION_DIR` (an existing value wins), and Pilot keeps
+each session's transcript there so the session survives a restart. Boot clears
+old log files but never touches `sessions/`. `rbnx clean -f` removes
+everything under `rbnx-boot/` except `cache/` and `sessions/`; pass `--cache`
+or `--sessions` to remove those too.
+
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:

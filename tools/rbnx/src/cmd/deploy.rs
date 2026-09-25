@@ -900,6 +900,7 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
 
 async fn spawn_system_binary(
     log_dir: &Path,
+    session_dir: &Path,
     name: &str,
     bin: &str,
     args: &[String],
@@ -916,6 +917,7 @@ async fn spawn_system_binary(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("SCRIBE_LOG_DIR", log_dir)
+        .env("ROBONIX_SESSION_DIR", session_dir)
         .process_group(0);
     let mut child = cmd.spawn().with_context(|| {
         format!(
@@ -1390,6 +1392,11 @@ pub async fn execute(
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
+    // Session state (Pilot transcripts) outlives the logs: boot clears old
+    // log files, and `rbnx clean` keeps this directory unless asked.
+    let session_dir = std::env::var_os("ROBONIX_SESSION_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("sessions"));
     // The CLI prepares and clears this directory before Scribe's first log
     // call. Do not remove files here: Scribe may already hold open handles.
     std::fs::create_dir_all(&log_dir)
@@ -1622,7 +1629,7 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, name, bin, &args).await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args).await?
                 };
                 children.push(sp);
                 persist_state(
