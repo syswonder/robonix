@@ -37,6 +37,7 @@ Common configuration:
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_pilot=info`.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
+- `ROBONIX_SESSION_DIR`: where session transcripts are kept (see Session transcripts). `rbnx boot` sets it; defaults to `./sessions`.
 
 ## Context capacity: automatic, visible, and overrideable
 
@@ -99,9 +100,9 @@ The `info` records above carry sizes and token counts, never prompt text. To see
 
 ## Session transcripts
 
-Pilot keeps every session's conversation in an append-only JSON-lines file, `<log dir>/pilot-sessions/<session_id>.jsonl`, where the log directory is Scribe's (`$SCRIBE_LOG_DIR`, or `./logs`). History compaction removes old messages from what the model sees; the transcript keeps all of them, so no interaction is lost. Each line has `ts` and `kind`: `session` (the first line, with the session id and Pilot version), `message` (one history message; an image is recorded by size only, as `image_bytes`), `task_state` (the task state after it changed), and `compaction` (the full history that replaced the old one, with how many messages were evicted and pinned).
+Pilot keeps every session's conversation in an append-only JSON-lines file, `<session dir>/<session_id>/transcript.jsonl`. The session dir is `$ROBONIX_SESSION_DIR`, which `rbnx boot` sets to `<deploy>/rbnx-boot/sessions`, or `./sessions` when unset; each session has its own directory so records about it can live beside the transcript. Session state is not a log: boot clears old logs but never this directory, and `rbnx clean` keeps it unless given `--sessions`. History compaction removes old messages from what the model sees; the transcript keeps all of them, so no interaction is lost. Each line has `ts` and `kind`: `session` (the first line, with the session id and Pilot version), `message` (one history message; an image is recorded by size only, as `image_bytes`), `task_state` (the task state after it changed), and `compaction` (the full history that replaced the old one, with how many messages were evicted and pinned).
 
-When Pilot receives a task for a session it has no history for, such as after a restart, it rebuilds that session from the transcript: the last `compaction` record's history, or an empty one, followed by every later `message`, plus the last `task_state`. Images are not restored. A line that does not parse, such as one cut short by a crash, is skipped with a warning. A failed write is logged and retried with the next record, and never stops the turn. There is no retention policy yet; delete old files by hand.
+When Pilot receives a task for a session it has no history for, such as after a restart, it rebuilds that session from the transcript: the last `compaction` record's history, or an empty one, followed by every later `message`, plus the last `task_state`. Images are not restored. A line that does not parse, such as one cut short by a crash, is skipped with a warning. A failed write is logged, its records stay queued for the next write, and it never stops the turn. There is no retention policy yet; delete old sessions by hand or with `rbnx clean --sessions`.
 
 ## RTDL Planning Flow
 

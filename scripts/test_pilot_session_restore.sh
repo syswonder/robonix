@@ -61,8 +61,9 @@ export ROBONIX_VLM_API_KEY="$VLM_API_KEY"
 export ROBONIX_VLM_MODEL="$VLM_MODEL"
 export ROBONIX_VLM_FORMAT=openai
 export ROBONIX_SOURCE_PATH="$ROOT"
-# Transcripts land under the Scribe log directory; keep them in this run's dir.
+# Keep this run's logs and session state in its own directory.
 export SCRIBE_LOG_DIR="$WORK/logs"
+export ROBONIX_SESSION_DIR="$WORK/sessions"
 export SCRIBE_STDOUT_LEVEL=warn
 export SCRIBE_FILE_LEVEL=info
 
@@ -159,7 +160,7 @@ start_pilot
 SECOND="$(ask "What code word did I give you earlier? Do not call any capability; reply with the code word only.")"
 echo "after restart: $SECOND"
 
-TRANSCRIPT="$WORK/logs/pilot-sessions/$SESSION_ID.jsonl"
+TRANSCRIPT="$WORK/sessions/$SESSION_ID/transcript.jsonl"
 echo
 echo "=== PILOT SESSION RESTORE ASSERTIONS ==="
 check "the session transcript was written" '[[ -s "$TRANSCRIPT" ]]'

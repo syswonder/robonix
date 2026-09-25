@@ -18,8 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// One session's transcript file, and how much of the session has already been
 /// written to it.
 ///
-/// The file is `<Scribe log dir>/pilot-sessions/<session_id>.jsonl`, one JSON
-/// record per line, each with `ts` and `kind`:
+/// The file is `<session dir>/<session_id>/transcript.jsonl`, one JSON record
+/// per line, each with `ts` and `kind`. The session dir is
+/// `$ROBONIX_SESSION_DIR` (`rbnx boot` sets `<deploy>/rbnx-boot/sessions`), or
+/// `./sessions` when unset. Records:
 ///
 /// - `session`: first line of the file, with `session_id` and `pilot_version`.
 /// - `message`: one history message (`role`, `content`, ...). An image is
@@ -212,21 +214,22 @@ fn replay(path: &std::path::Path) -> Option<Restored> {
     Some(restored)
 }
 
-/// `<Scribe log dir>/pilot-sessions/<session_id>.jsonl`. Bytes other than
-/// ASCII letters, digits, `-`, and `_` are percent-encoded, so distinct session
-/// ids always get distinct file names.
+/// `<session dir>/<session_id>/transcript.jsonl`. Bytes of the session id
+/// other than ASCII letters, digits, `-`, and `_` are percent-encoded, so
+/// distinct session ids always get distinct directories.
 fn path_for(session_id: &str) -> PathBuf {
-    let mut file_name = String::new();
+    let mut dir_name = String::new();
     for byte in session_id.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
-            file_name.push(byte as char);
+            dir_name.push(byte as char);
         } else {
-            file_name.push_str(&format!("%{byte:02X}"));
+            dir_name.push_str(&format!("%{byte:02X}"));
         }
     }
-    robonix_scribe::log_dir()
-        .join("pilot-sessions")
-        .join(format!("{file_name}.jsonl"))
+    let root = std::env::var_os("ROBONIX_SESSION_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("sessions"));
+    root.join(dir_name).join("transcript.jsonl")
 }
 
 /// A message's fields as stored in the transcript: the image, if any, becomes
@@ -338,11 +341,7 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        assert!(
-            names
-                .iter()
-                .all(|p| p.parent().unwrap().ends_with("pilot-sessions"))
-        );
+        assert!(names.iter().all(|p| p.ends_with("transcript.jsonl")));
     }
 
     #[test]
