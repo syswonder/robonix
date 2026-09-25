@@ -64,6 +64,8 @@ export ROBONIX_VLM_MODEL="$VLM_MODEL"
 export ROBONIX_VLM_FORMAT=openai
 export ROBONIX_SOURCE_PATH="$ROOT"
 export ROBONIX_PILOT_MAX_TOOL_ROUNDS=64
+# Keep this run's session transcripts in its own directory.
+export ROBONIX_SESSION_DIR="$WORK/sessions"
 export SCRIBE_STDOUT_LEVEL=warn
 export SCRIBE_FILE_LEVEL=debug
 
