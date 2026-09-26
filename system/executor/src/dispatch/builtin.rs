@@ -24,9 +24,16 @@ fn workspace_root() -> PathBuf {
 /// Returns the canonical path on success, or an error if the path escapes the
 /// allowed directory (path traversal).
 fn safe_resolve(user_path: &str) -> anyhow::Result<PathBuf> {
-    let root = workspace_root()
+    safe_resolve_in(&workspace_root(), user_path)
+}
+
+/// [`safe_resolve`] against an explicit root. Tests call this directly: the
+/// workspace root comes from a process-wide environment variable, and setting
+/// it from parallel tests leaks one test's root into another's file ops.
+fn safe_resolve_in(workspace: &Path, user_path: &str) -> anyhow::Result<PathBuf> {
+    let root = workspace
         .canonicalize()
-        .unwrap_or_else(|_| workspace_root());
+        .unwrap_or_else(|_| workspace.to_path_buf());
     let candidate = if Path::new(user_path).is_absolute() {
         PathBuf::from(user_path)
     } else {
@@ -230,12 +237,14 @@ async fn read_capability_doc(
         .await
     {
         Ok(providers) => match providers.iter().find(|p| p.id == provider_id) {
-            Some(p) if !p.capability_md.is_empty() => {
-                out.success = true;
-                out.output = truncate(&p.capability_md, 12000);
-            }
-            Some(_) => {
-                out.error = format!("provider '{provider_id}' registered no CAPABILITY.md");
+            Some(p) => {
+                let doc = render_provider_doc(p);
+                if doc.is_empty() {
+                    out.error = format!("provider '{provider_id}' published no documentation");
+                } else {
+                    out.success = true;
+                    out.output = truncate(&doc, 12000);
+                }
             }
             None => {
                 out.error = format!("no provider '{provider_id}' registered in atlas");
@@ -246,6 +255,33 @@ async fn read_capability_doc(
         }
     }
     out
+}
+
+/// Everything atlas knows that helps a caller use `provider`: its CAPABILITY.md
+/// when it registered one, followed by the full description of each capability
+/// the provider offers.
+///
+/// The planning catalogue prints only the opening paragraph of a description,
+/// so this is where a caller reads the rest. Serving the descriptions as well
+/// as the manual matters because a provider registers its descriptions from its
+/// contracts, always, while CAPABILITY.md is hand-written and usually absent —
+/// answering only from the manual left this builtin with nothing to return for
+/// most providers.
+fn render_provider_doc(provider: &atlas_pb::CapabilityProvider) -> String {
+    let mut doc = String::new();
+    let manual = provider.capability_md.trim();
+    if !manual.is_empty() {
+        doc.push_str(manual);
+        doc.push('\n');
+    }
+    for cap in &provider.capabilities {
+        let description = cap.description.trim();
+        if description.is_empty() {
+            continue;
+        }
+        doc.push_str(&format!("\n## {}\n\n{}\n", cap.contract_id, description));
+    }
+    doc
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -454,14 +490,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_provider_without_a_manual_still_documents_its_capabilities() {
+        // Most providers never hand-write a CAPABILITY.md, but every provider
+        // registers its capabilities' descriptions. Answering only from the
+        // manual left this builtin with nothing to return for those providers,
+        // which is exactly when the planner asks.
+        let provider = atlas_pb::CapabilityProvider {
+            id: "memgraph".to_string(),
+            capability_md: String::new(),
+            capabilities: vec![atlas_pb::Capability {
+                contract_id: "robonix/service/memory/hybrid_search".to_string(),
+                description: "Search memory.\n\nRequest JSON: {...}".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let doc = render_provider_doc(&provider);
+        assert!(doc.contains("robonix/service/memory/hybrid_search"));
+        assert!(doc.contains("Request JSON: {...}"));
+    }
+
+    #[test]
+    fn a_provider_with_neither_manual_nor_descriptions_documents_nothing() {
+        let provider = atlas_pb::CapabilityProvider {
+            id: "bare".to_string(),
+            ..Default::default()
+        };
+        assert!(render_provider_doc(&provider).is_empty());
+    }
+
+    #[test]
     fn path_traversal_dotdot_is_rejected() {
         // Set workspace to a temp dir so we have a known root
         let tmp = std::env::temp_dir().join("rbnx_test_ws");
         std::fs::create_dir_all(&tmp).unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
         // ../../../etc/passwd must be rejected
-        let result = safe_resolve("../../../etc/passwd");
+        let result = safe_resolve_in(&tmp, "../../../etc/passwd");
         assert!(
             result.is_err(),
             "path traversal with ../../../etc/passwd should fail"
@@ -477,10 +542,9 @@ mod tests {
     fn path_traversal_absolute_outside_workspace_is_rejected() {
         let tmp = std::env::temp_dir().join("rbnx_test_ws2");
         std::fs::create_dir_all(&tmp).unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
         // /etc/hostname is a real file outside workspace
-        let result = safe_resolve("/etc/hostname");
+        let result = safe_resolve_in(&tmp, "/etc/hostname");
         assert!(
             result.is_err(),
             "absolute path /etc/hostname outside workspace should fail"
@@ -499,9 +563,8 @@ mod tests {
         // Create a test file inside workspace
         let test_file = tmp.join("allowed.txt");
         std::fs::write(&test_file, "hello").unwrap();
-        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
-        let result = safe_resolve("allowed.txt");
+        let result = safe_resolve_in(&tmp, "allowed.txt");
         assert!(
             result.is_ok(),
             "path within workspace should be allowed: {:?}",

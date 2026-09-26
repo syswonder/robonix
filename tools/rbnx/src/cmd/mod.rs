@@ -173,6 +173,10 @@ pub enum Commands {
         /// With `-f`, also wipe `rbnx-boot/cache/` (force re-clone).
         #[arg(long)]
         cache: bool,
+        /// With `-f`, also wipe `rbnx-boot/sessions/` (Pilot session
+        /// transcripts, which restore sessions after a restart).
+        #[arg(long)]
+        sessions: bool,
     },
     /// Install a package from GitHub or local path
     ///
@@ -454,7 +458,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             package,
             file,
             cache,
-        } => clean::execute(config, package, file, cache).await,
+            sessions,
+        } => clean::execute(config, package, file, cache, sessions).await,
         Commands::Install { github, path } => install::execute(config, github, path).await,
         Commands::List => list::execute(config).await,
         Commands::Info { name } => info::execute(config, &name).await,

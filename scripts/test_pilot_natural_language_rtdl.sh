@@ -12,6 +12,7 @@ PILOT_ADDR="${RBNX_TEST_PILOT_ADDR:-127.0.0.1:52071}"
 ATLAS_BIN="${ROBONIX_ATLAS_BIN:-$(command -v robonix-atlas || true)}"
 EXECUTOR_BIN="${ROBONIX_EXECUTOR_BIN:-$(command -v robonix-executor || true)}"
 PILOT_BIN="${ROBONIX_PILOT_BIN:-$(command -v robonix-pilot || true)}"
+PYTHON_BIN="${ROBONIX_TEST_PYTHON:-python3}"
 WORK="$(mktemp -d /tmp/robonix-pilot-language.XXXXXX)"
 TRACE="$WORK/timeline.log"
 ATLAS_LOG="$WORK/atlas.log"
@@ -26,13 +27,16 @@ cleanup() {
   for pid in "${PILOT_PID:-}" "${EXECUTOR_PID:-}" "${ATLAS_PID:-}"; do
     [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
   done
+  if [[ $rc -ne 0 || "${ROBONIX_TEST_KEEP_ARTIFACTS:-0}" == "1" ]]; then
+    echo "artifacts retained at $WORK" >&2
+  fi
   if [[ $rc -ne 0 ]]; then
     echo "FAIL: artifacts retained at $WORK" >&2
     echo "--- pilot log tail ---" >&2
     tail -120 "$PILOT_LOG" >&2 || true
     echo "--- executor log tail ---" >&2
     tail -80 "$EXECUTOR_LOG" >&2 || true
-  else
+  elif [[ "${ROBONIX_TEST_KEEP_ARTIFACTS:-0}" != "1" ]]; then
     rm -rf "$WORK"
   fi
   exit "$rc"
@@ -60,6 +64,8 @@ export ROBONIX_VLM_MODEL="$VLM_MODEL"
 export ROBONIX_VLM_FORMAT=openai
 export ROBONIX_SOURCE_PATH="$ROOT"
 export ROBONIX_PILOT_MAX_TOOL_ROUNDS=64
+# Keep this run's session transcripts in its own directory.
+export ROBONIX_SESSION_DIR="$WORK/sessions"
 export SCRIBE_STDOUT_LEVEL=warn
 export SCRIBE_FILE_LEVEL=debug
 
@@ -96,7 +102,7 @@ wait_port "$EXECUTOR_ADDR"
 PILOT_PID=$!
 wait_port "$PILOT_ADDR"
 
-PROTO_SOURCE="$(find "$ROOT/target" -path '*/out/robonix_contracts.proto' -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+PROTO_SOURCE="$(find "$ROOT/target" -path '*/out/robonix_contracts.proto' -print 2>/dev/null | head -1 | xargs -n1 dirname 2>/dev/null)"
 if [[ -z "$PROTO_SOURCE" || ! -d "$PROTO_SOURCE" ]]; then
   echo "generated proto source not found; build Pilot first" >&2
   exit 2
@@ -104,10 +110,10 @@ fi
 PROTO_GEN="$WORK/proto_gen"
 mkdir -p "$PROTO_GEN"
 cp "$PROTO_SOURCE"/*.proto "$PROTO_GEN/"
-python3 -m grpc_tools.protoc -I "$PROTO_GEN" \
+"$PYTHON_BIN" -m grpc_tools.protoc -I "$PROTO_GEN" \
   --python_out="$PROTO_GEN" --grpc_python_out="$PROTO_GEN" "$PROTO_GEN"/*.proto
 
-PYTHONPATH="$PROTO_GEN${PYTHONPATH:+:$PYTHONPATH}" python3 - "$PILOT_ADDR" "$TRACE" <<'PY'
+PYTHONPATH="$PROTO_GEN${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" - "$PILOT_ADDR" "$TRACE" <<'PY'
 import asyncio
 import json
 import pathlib

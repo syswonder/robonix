@@ -13,7 +13,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
     ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
-    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat,
+    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::time::Duration;
+use uuid::Uuid;
 
 const MAX_OPEN_RETRIES: usize = 3;
 
@@ -34,9 +35,33 @@ fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> b
         return false;
     }
     let body = body.to_ascii_lowercase();
-    ["stream_options", "include_usage", "prompt_cache_key"]
-        .iter()
-        .any(|field| body.contains(field))
+    [
+        "stream_options",
+        "include_usage",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "response_format",
+        "json_schema",
+    ]
+    .iter()
+    .any(|field| body.contains(field))
+}
+
+/// Downgrade a `json_schema` response format to `json_object`.
+///
+/// A provider that does not implement schema-guided output still implements
+/// `json_object`, and the planner's reply must stay parseable as JSON: dropping
+/// the format outright would let a rejection turn every later reply into prose.
+/// Returns whether anything changed.
+fn downgrade_response_format(body: &mut Value) -> bool {
+    let Some(format) = body.get_mut("response_format") else {
+        return false;
+    };
+    if format.get("type").and_then(Value::as_str) != Some("json_schema") {
+        return false;
+    }
+    *format = serde_json::json!({"type": "json_object"});
+    true
 }
 
 fn open_retry_delay(
@@ -201,6 +226,11 @@ impl Message {
 /// enum to drive token streaming, tool dispatch, and finish handling.
 pub enum VlmStreamItem {
     TextDelta(String),
+    /// A reasoning model's thinking, streamed before any answer. Carried so
+    /// the planner can see that the stream is alive: the bytes themselves are
+    /// never added to the reply and never sent back to the provider, which is
+    /// what the OpenAI-compatible `reasoning_content` convention expects.
+    ReasoningDelta(String),
     ToolCall(ToolCall),
     /// Provider-reported usage for the complete streamed request. OpenAI sends
     /// it in a final choice-less chunk when `include_usage` is supported.
@@ -218,6 +248,94 @@ pub struct VlmUsage {
     pub cached_tokens: Option<u64>,
 }
 
+/// A context-window limit discovered for the configured deployment.
+///
+/// OpenAI-compatible `/models` metadata is optional and proxies frequently do
+/// not expose it. Callers must distinguish an explicit deployment declaration
+/// from a metadata probe and from an unknown limit; treating a guessed number
+/// as a provider guarantee would make compaction unsafe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextWindowInfo {
+    pub tokens: Option<usize>,
+    pub source: &'static str,
+    /// Provider model id selected by an exact or canonical list match.
+    pub matched_model_id: Option<String>,
+}
+
+fn context_window_from_metadata(value: &Value) -> Option<usize> {
+    let tokens_at = |candidate: &Value| {
+        [
+            "context_window",
+            "context_length",
+            "max_context_length",
+            "input_token_limit",
+        ]
+        .iter()
+        .find_map(|field| candidate.get(*field).and_then(Value::as_u64))
+        .and_then(|tokens| usize::try_from(tokens).ok())
+        .filter(|tokens| *tokens > 0)
+    };
+    tokens_at(value).or_else(|| {
+        ["data", "model", "capabilities"]
+            .iter()
+            .filter_map(|field| value.get(*field))
+            .find_map(tokens_at)
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ModelListContextMatch {
+    tokens: usize,
+    matched_model_id: String,
+    canonical: bool,
+}
+
+/// Middleboxes commonly namespace a provider model (`openai/gpt-5.6-terra`)
+/// while deployment configuration names only the model (`gpt-5.6-terra`).
+/// Canonicalization removes one namespace and normalizes separators; it never
+/// removes dates/version suffixes, which could hide a capacity change.
+fn canonical_model_name(model: &str) -> String {
+    model
+        .trim()
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+}
+
+fn context_window_match_from_model_list(
+    value: &Value,
+    model: &str,
+) -> Option<ModelListContextMatch> {
+    let models = value.get("data")?.as_array()?;
+    let match_entry = |candidate: &Value, canonical: bool| {
+        Some(ModelListContextMatch {
+            tokens: context_window_from_metadata(candidate)?,
+            matched_model_id: candidate.get("id")?.as_str()?.to_string(),
+            canonical,
+        })
+    };
+    if let Some(exact) = models
+        .iter()
+        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(model))
+        .and_then(|candidate| match_entry(candidate, false))
+    {
+        return Some(exact);
+    }
+    let canonical = canonical_model_name(model);
+    let mut matches = models.iter().filter_map(|candidate| {
+        (candidate
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| canonical_model_name(id) == canonical))
+        .then(|| match_entry(candidate, true))
+        .flatten()
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 /// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
 /// Cheap to clone — `async_openai::Client` wraps a `reqwest::Client` (an
 /// `Arc<...>` internally). No mutex needed when sharing across tasks.
@@ -227,6 +345,122 @@ pub struct VlmClient {
     api_base: String,
     api_key: String,
     model: String,
+    configured_context_window_tokens: Option<usize>,
+    /// One routing key for the lifetime of this Pilot process. A per-task key
+    /// would defeat reuse between independent tasks with the same standing
+    /// prompt. It is opaque and is not derived from a user/session id.
+    prompt_cache_key: String,
+}
+
+/// What the caller wants back from one completion.
+///
+/// A request for `JsonObject` is not free: the OpenAI chat API rejects it
+/// unless the messages themselves mention JSON, so a prompt that asks for
+/// prose must not carry it. Making the shape explicit per call keeps a
+/// summarisation request from inheriting the planner's structured-output mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReplyShape {
+    /// Free text. The caller reads the content as prose.
+    Text,
+    /// The RTDL envelope, described to the provider as a JSON schema so the
+    /// shape is carried by the request rather than only by prose in the prompt.
+    RtdlEnvelope,
+}
+
+/// The RTDL envelope as a JSON schema.
+///
+/// Deliberately not `strict`. Strict structured output requires every object in
+/// the schema to close with `additionalProperties: false`, and an RTDL `do`
+/// node's `args` is open by construction: its keys come from the called
+/// capability's own contract, which differs per capability. Closing it would
+/// mean flattening `args` into a JSON string, which is the opaque-blob shape
+/// that costs a contract its type surface. The schema therefore guides the
+/// model; admission stays with Pilot's own validator, which resolves every call
+/// against the catalog before a plan is dispatched.
+/// How long a `task_update` field may be.
+///
+/// It has to admit an honest restatement of a long instruction and refuse a
+/// copy of the prompt. The EB-Habitat task text with its seventy-entry action
+/// catalogue is about 3.6 KB; a restatement of it fits in a line.
+const TASK_FIELD_MAX_CHARS: usize = 400;
+
+fn rtdl_envelope_schema() -> Value {
+    let node = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["sequence", "parallel", "do"]},
+            "op_id": {"type": "integer"},
+            "description": {"type": "string"},
+            "cap": {"type": "string"},
+            "args": {"type": "object"},
+            "children": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        },
+        "required": ["op", "op_id", "description"],
+    });
+    // A plan-control meta op replaces the whole tree rather than sitting inside
+    // one, and carries none of a node's fields. Leaving it out of the schema
+    // would tell the model that cancelling a running plan is malformed.
+    let meta = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["cancel_plan", "cancel_all", "stop_plan_at"]},
+            // An identifier is the same identifier whether JSON spells it 1 or
+            // "1". Demanding the quoted form cost four of thirty-five planning
+            // rounds in one deepseek episode, for a value Pilot then stringifies
+            // anyway.
+            "plan_id": {"type": ["string", "integer"]},
+            "target_op_id": {"type": ["string", "integer"]},
+            "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
+            "wait_ms": {"type": "integer"},
+        },
+        "required": ["op"],
+    });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "rtdl_description": {"type": "string"},
+            "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
+            // `goal` and `success_criterion` are restatements, not transcripts.
+            // Without an upper bound a model may copy the task text back --
+            // deepseek-v3.2 returned the whole prompt, action catalogue
+            // included, on every round, hit the 4096-token output ceiling and
+            // had its JSON truncated mid-string. A model that summarises, as
+            // 4o-mini does, spends 109-155 tokens on the same field.
+            "task_update": {
+                "type": ["object", "null"],
+                "properties": {
+                    "goal": {"type": "string", "maxLength": TASK_FIELD_MAX_CHARS},
+                    "success_criterion": {
+                        "type": "string", "maxLength": TASK_FIELD_MAX_CHARS,
+                    },
+                    "status": {"type": "string", "enum": ["in_progress", "done"]},
+                },
+                "required": ["goal", "success_criterion", "status"],
+            },
+        },
+        "required": ["content", "rtdl_description", "rtdl", "task_update"],
+        "$defs": {"node": node, "meta": meta},
+    })
+}
+
+/// The `response_format` a reply shape needs, if any.
+///
+/// Prose carries none: the chat API rejects `json_object` unless the messages
+/// themselves mention JSON, so attaching it to a summarisation prompt turns
+/// every such request into a 400.
+fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
+    match shape {
+        ReplyShape::Text => None,
+        ReplyShape::RtdlEnvelope => Some(ResponseFormat::JsonSchema {
+            json_schema: ResponseFormatJsonSchema {
+                description: None,
+                name: "rtdl_envelope".to_string(),
+                schema: Some(rtdl_envelope_schema()),
+                strict: Some(false),
+            },
+        }),
+    }
 }
 
 impl VlmClient {
@@ -236,6 +470,87 @@ impl VlmClient {
             api_base: cfg.upstream.trim_end_matches('/').to_string(),
             api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
+            configured_context_window_tokens: cfg.context_window_tokens,
+            prompt_cache_key: Uuid::new_v4().simple().to_string(),
+        }
+    }
+
+    /// Stable cache-routing key for this running Pilot deployment. It spans
+    /// task/session boundaries so unchanged prefixes keep a consistent route
+    /// until a restart or provider cache expiry.
+    pub fn prompt_cache_key(&self) -> &str {
+        &self.prompt_cache_key
+    }
+
+    /// Resolve the usable context-window limit at process start.
+    ///
+    /// A deployment setting is authoritative. Then prefer provider metadata,
+    /// then an extension on the provider's model list. Unknown starts without
+    /// pre-emptive compaction rather than compacting against a guess.
+    pub async fn context_window_info(&self) -> ContextWindowInfo {
+        if let Some(tokens) = self.configured_context_window_tokens {
+            return ContextWindowInfo {
+                tokens: Some(tokens),
+                source: "deployment_config",
+                matched_model_id: None,
+            };
+        }
+
+        let Ok(list_url) = reqwest::Url::parse(&format!("{}/models", self.api_base)) else {
+            return ContextWindowInfo {
+                tokens: None,
+                source: "unavailable",
+                matched_model_id: None,
+            };
+        };
+        let mut detail_url = list_url.clone();
+        let detail_url_ok = match detail_url.path_segments_mut() {
+            Ok(mut segments) => {
+                segments.push(&self.model);
+                true
+            }
+            Err(_) => false,
+        };
+        if detail_url_ok
+            && let Some(tokens) = self
+                .get_model_metadata(detail_url)
+                .await
+                .as_ref()
+                .and_then(context_window_from_metadata)
+        {
+            return ContextWindowInfo {
+                tokens: Some(tokens),
+                source: "provider_model_metadata",
+                matched_model_id: None,
+            };
+        }
+        if let Some(matched) = self
+            .get_model_metadata(list_url)
+            .await
+            .as_ref()
+            .and_then(|value| context_window_match_from_model_list(value, &self.model))
+        {
+            return ContextWindowInfo {
+                tokens: Some(matched.tokens),
+                source: if matched.canonical {
+                    "provider_model_list_canonical_metadata"
+                } else {
+                    "provider_model_list_metadata"
+                },
+                matched_model_id: Some(matched.matched_model_id),
+            };
+        }
+        ContextWindowInfo {
+            tokens: None,
+            source: "unavailable",
+            matched_model_id: None,
+        }
+    }
+
+    async fn get_model_metadata(&self, url: reqwest::Url) -> Option<Value> {
+        match self.inner.get(url).bearer_auth(&self.api_key).send().await {
+            Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+            Ok(_) | Err(_) => None,
         }
     }
 
@@ -249,6 +564,7 @@ impl VlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         prompt_cache_key: Option<&str>,
+        reply_shape: ReplyShape,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<VlmStreamItem>> + Send>>> {
         let oai_messages = build_openai_messages(messages)?;
         let oai_tools = build_openai_tools(tools)?;
@@ -261,8 +577,10 @@ impl VlmClient {
             .stream_options(ChatCompletionStreamOptions {
                 include_usage: Some(true),
                 include_obfuscation: None,
-            })
-            .response_format(ResponseFormat::JsonObject);
+            });
+        if let Some(format) = response_format_for(reply_shape) {
+            req_builder.response_format(format);
+        }
         if !oai_tools.is_empty() {
             req_builder.tools(oai_tools);
         }
@@ -274,6 +592,15 @@ impl VlmClient {
             .context("build chat completion request")?;
         let mut request_body = serde_json::to_value(request)
             .context("serialize chat completion request for transport")?;
+        // GPT-5.6 understands these OpenAI cache controls. Keep the stable
+        // system prefix alive through the interactive task; compatibility
+        // fallback below removes this optional field if a proxy rejects it.
+        if let Some(body) = request_body.as_object_mut() {
+            body.insert(
+                "prompt_cache_options".to_string(),
+                serde_json::json!({"mode": "implicit", "ttl": "30m"}),
+            );
+        }
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
@@ -300,17 +627,36 @@ impl VlmClient {
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
             if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
-                let removed = request_body.as_object_mut().is_some_and(|body| {
-                    let stream_options = body.remove("stream_options").is_some();
-                    let prompt_cache_key = body.remove("prompt_cache_key").is_some();
-                    stream_options || prompt_cache_key
-                });
-                if !removed {
+                let downgraded = downgrade_response_format(&mut request_body);
+                let mut dropped: Vec<&str> = Vec::new();
+                if let Some(body) = request_body.as_object_mut() {
+                    for field in ["stream_options", "prompt_cache_key", "prompt_cache_options"] {
+                        if body.remove(field).is_some() {
+                            dropped.push(field);
+                        }
+                    }
+                }
+                if dropped.is_empty() && !downgraded {
                     bail!("open VLM chat stream: HTTP {status}: {text}");
                 }
-                robonix_scribe::warn!(
-                    "[pilot/vlm] upstream rejected optional cache/usage fields with HTTP {status}; retrying without them"
-                );
+                // Name what changed rather than "retrying without them": a
+                // downgrade is not a removal, and a run that later reads as
+                // schema-guided needs this line to say it was not.
+                if downgraded {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] upstream rejected response_format json_schema with HTTP \
+                         {status}; downgrading to json_object for the rest of this stream. \
+                         RTDL shape is no longer schema-guided; admission still runs in Pilot. \
+                         Upstream said: {text}"
+                    );
+                }
+                if !dropped.is_empty() {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] upstream rejected optional request fields with HTTP {status}; \
+                         retrying without {}",
+                        dropped.join(", ")
+                    );
+                }
                 compatibility_fallback_attempted = true;
                 continue;
             }
@@ -415,12 +761,74 @@ impl VlmClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccumulatedToolCall, MAX_OPEN_RETRIES, VlmStreamItem, VlmUsage, open_retry_delay,
-        parse_usage, process_stream_line, rejects_optional_request_fields,
+        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
+        context_window_from_metadata, context_window_match_from_model_list,
+        downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
+        rejects_optional_request_fields, response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Duration;
+
+    #[test]
+    fn reads_context_window_from_common_provider_metadata_shapes() {
+        assert_eq!(
+            context_window_from_metadata(&json!({"context_window": 131_072})),
+            Some(131_072)
+        );
+        assert_eq!(
+            context_window_from_metadata(&json!({"data": {"context_length": 32_768}})),
+            Some(32_768)
+        );
+        assert_eq!(
+            context_window_from_metadata(&json!({"object": "list", "data": []})),
+            None
+        );
+    }
+
+    #[test]
+    fn reads_only_the_selected_model_from_a_provider_model_list() {
+        let metadata = json!({"data": [
+            {"id": "small", "context_window": 8_192},
+            {"id": "planner", "capabilities": {"context_length": 131_072}}
+        ]});
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "planner")
+                .map(|matched| matched.tokens),
+            Some(131_072)
+        );
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "absent"),
+            None
+        );
+    }
+
+    #[test]
+    fn uniquely_matches_a_namespaced_provider_model_by_canonical_name() {
+        let metadata = json!({"data": [
+            {"id": "openai/gpt-5.6-terra", "context_length": 1_050_000}
+        ]});
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "gpt-5.6-terra"),
+            Some(super::ModelListContextMatch {
+                tokens: 1_050_000,
+                matched_model_id: "openai/gpt-5.6-terra".to_string(),
+                canonical: true,
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_guess_when_canonical_model_names_are_ambiguous() {
+        let metadata = json!({"data": [
+            {"id": "provider-a/planner", "context_length": 128_000},
+            {"id": "provider-b/planner", "context_length": 64_000}
+        ]});
+        assert_eq!(
+            context_window_match_from_model_list(&metadata, "planner"),
+            None
+        );
+    }
 
     #[test]
     fn transient_open_errors_use_bounded_backoff() {
@@ -468,6 +876,61 @@ mod tests {
     }
 
     #[test]
+    fn prose_replies_carry_no_response_format() {
+        // The chat API rejects json_object unless the messages themselves
+        // mention JSON, so the compaction prompt, which asks for prose, must
+        // not carry it.
+        assert!(response_format_for(ReplyShape::Text).is_none());
+    }
+
+    #[test]
+    fn a_planning_reply_carries_the_rtdl_schema() {
+        let Some(ResponseFormat::JsonSchema { json_schema }) =
+            response_format_for(ReplyShape::RtdlEnvelope)
+        else {
+            panic!("planning replies must carry a schema");
+        };
+        assert_eq!(json_schema.name, "rtdl_envelope");
+        // Strict would require every object to close, and an RTDL `do` node's
+        // `args` is open by construction: its keys come from the called
+        // capability's contract.
+        assert_eq!(json_schema.strict, Some(false));
+        let schema = json_schema.schema.expect("schema body");
+        let node = &schema["$defs"]["node"];
+        assert_eq!(node["properties"]["op"]["enum"][0], "sequence");
+        assert_eq!(
+            node["properties"]["children"]["items"]["$ref"],
+            "#/$defs/node"
+        );
+        // A plan-control meta op replaces the whole tree and carries none of a
+        // node's fields; leaving it out would describe cancelling a running
+        // plan as malformed.
+        let meta = &schema["$defs"]["meta"];
+        assert_eq!(meta["properties"]["op"]["enum"][0], "cancel_plan");
+        let alternatives = schema["properties"]["rtdl"]["anyOf"]
+            .as_array()
+            .expect("rtdl accepts a node or a meta op");
+        assert_eq!(alternatives.len(), 2);
+    }
+
+    #[test]
+    fn a_provider_without_schema_support_falls_back_to_a_json_object() {
+        // Dropping the format outright would let one rejection turn every later
+        // planning reply into prose.
+        assert!(rejects_optional_request_fields(
+            reqwest::StatusCode::BAD_REQUEST,
+            "Invalid schema for response_format 'rtdl_envelope'"
+        ));
+        let mut body = serde_json::json!({
+            "response_format": {"type": "json_schema", "json_schema": {"name": "rtdl_envelope"}}
+        });
+        assert!(downgrade_response_format(&mut body));
+        assert_eq!(body["response_format"]["type"], "json_object");
+        // Already downgraded, or never schema-shaped: nothing to do.
+        assert!(!downgrade_response_format(&mut body));
+    }
+
+    #[test]
     fn optional_field_fallback_does_not_mask_unrelated_client_errors() {
         assert!(rejects_optional_request_fields(
             reqwest::StatusCode::BAD_REQUEST,
@@ -485,6 +948,31 @@ mod tests {
             reqwest::StatusCode::UNAUTHORIZED,
             "prompt_cache_key"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_thinking_chunk_without_content_still_reaches_the_consumer() {
+        // Nothing is emitted for such a chunk on dev, so the planner sees
+        // silence while a reasoning model thinks and its idle timer fires.
+        for field in ["reasoning_content", "reasoning"] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
+            let mut finish = String::new();
+            process_stream_line(
+                &format!(
+                    r#"data: {{"choices":[{{"delta":{{"{field}":"weighing the options"}}}}]}}"#
+                ),
+                &mut calls,
+                &mut finish,
+                &tx,
+            )
+            .await
+            .unwrap();
+            let Some(Ok(VlmStreamItem::ReasoningDelta(delta))) = rx.recv().await else {
+                panic!("{field}: expected a reasoning delta");
+            };
+            assert_eq!(delta, "weighing the options");
+        }
     }
 
     #[tokio::test]
@@ -558,6 +1046,27 @@ async fn process_stream_line(
         && !content.is_empty()
         && tx
             .send(Ok(VlmStreamItem::TextDelta(content.to_string())))
+            .await
+            .is_err()
+    {
+        return Ok(true);
+    }
+    // A thinking model streams this for as long as it reasons, with no
+    // `content` in sight. Forward it so the planner's idle timer measures the
+    // stream rather than the answer. `reasoning_content` is what DeepSeek-style
+    // endpoints emit and what GLM, Kimi and Qwen follow; `reasoning` is the
+    // spelling of gateways that pass OpenRouter's field through.
+    if let Some(reasoning) = choice
+        .get("delta")
+        .and_then(|delta| {
+            delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+        })
+        .and_then(Value::as_str)
+        && !reasoning.is_empty()
+        && tx
+            .send(Ok(VlmStreamItem::ReasoningDelta(reasoning.to_string())))
             .await
             .is_err()
     {

@@ -450,6 +450,26 @@ soma_endpoint: 127.0.0.1:50091
         );
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn pilot_context_preflight_allows_learning_unknown_and_marks_manual_override() {
+        let known = vec![
+            "--vlm-upstream".into(),
+            "https://api.example/v1".into(),
+            "--vlm-api-key".into(),
+            "test-key".into(),
+            "--vlm-model".into(),
+            "gpt-4o".into(),
+        ];
+        assert!(require_system_args("pilot", &known).is_ok());
+
+        let mut unknown = known.clone();
+        unknown[5] = "private-local-planner".into();
+        assert!(require_system_args("pilot", &unknown).is_ok());
+        unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
+        assert!(require_system_args("pilot", &unknown).is_ok());
+        assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -880,6 +900,7 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
 
 async fn spawn_system_binary(
     log_dir: &Path,
+    session_dir: &Path,
     name: &str,
     bin: &str,
     args: &[String],
@@ -896,6 +917,7 @@ async fn spawn_system_binary(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("SCRIBE_LOG_DIR", log_dir)
+        .env("ROBONIX_SESSION_DIR", session_dir)
         .process_group(0);
     let mut child = cmd.spawn().with_context(|| {
         format!(
@@ -1370,6 +1392,11 @@ pub async fn execute(
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
+    // Session state (Pilot transcripts) outlives the logs: boot clears old
+    // log files, and `rbnx clean` keeps this directory unless asked.
+    let session_dir = std::env::var_os("ROBONIX_SESSION_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("sessions"));
     // The CLI prepares and clears this directory before Scribe's first log
     // call. Do not remove files here: Scribe may already hold open handles.
     std::fs::create_dir_all(&log_dir)
@@ -1602,7 +1629,7 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, name, bin, &args).await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args).await?
                 };
                 children.push(sp);
                 persist_state(
@@ -2055,22 +2082,23 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
             _ => missing.push(label),
         }
     }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !missing.is_empty() {
+        return Err(format!(
             "missing required pilot config: {}. Set in manifest under \
              system: pilot: vlm: {{...}} or via env (source your .zshrc / \
              inline-prepend VLM_BASE_URL=… VLM_API_KEY=… VLM_MODEL=…)",
             missing.join(", "),
-        ))
+        ));
     }
+
+    Ok(())
 }
 
 fn system_boot_detail(name: &str, args: &[String]) -> String {
     let mut listen: Option<&str> = None;
     let mut vlm_upstream: Option<&str> = None;
     let mut vlm_model: Option<&str> = None;
+    let mut context_window_tokens: Option<&str> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -2086,6 +2114,10 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             }
             ("--vlm-model", Some(v)) => {
                 vlm_model = Some(v);
+                i += 2;
+            }
+            ("--vlm-context-window-tokens", Some(v)) => {
+                context_window_tokens = Some(v);
                 i += 2;
             }
             _ => {
@@ -2107,7 +2139,13 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             })
             .unwrap_or("?");
         let model = vlm_model.unwrap_or("?");
-        format!("{port}  vlm={model}@{host}")
+        let capacity = if let Some(tokens) = context_window_tokens {
+            format!("context={tokens} (manual)")
+        } else {
+            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
+                .to_string()
+        };
+        format!("{port}  vlm={model}@{host}  {capacity}")
     } else {
         port
     }
@@ -2194,6 +2232,13 @@ fn system_cli_args(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     };
+    let nested_tokens = |outer: &str, inner: &str| -> Option<String> {
+        map.and_then(|m| m.get(serde_yaml::Value::String(outer.into())))
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| m.get(serde_yaml::Value::String(inner.into())))
+            .and_then(|v| v.as_u64())
+            .map(|tokens| tokens.to_string())
+    };
     let push_pair = |out: &mut Vec<String>, flag: &str, val: Option<String>| {
         if let Some(v) = val {
             out.push(flag.into());
@@ -2235,6 +2280,11 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
             push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
+            push_pair(
+                &mut out,
+                "--vlm-context-window-tokens",
+                nested_tokens("vlm", "context_window_tokens"),
+            );
         }
         "liaison" => {
             push_pair(&mut out, "--listen", s("listen"));

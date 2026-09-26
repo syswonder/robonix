@@ -39,6 +39,10 @@ pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
+    /// Context limit declared by the deployment. This wins over provider
+    /// metadata and the built-in registry because a proxy may expose a logical
+    /// model name while routing to a smaller physical context window.
+    pub context_window_tokens: Option<usize>,
     /// Wire dialect. Currently only "openai" is implemented; checked at
     /// `resolve` time, kept on the struct for diagnostics / future routing.
     #[allow(dead_code)]
@@ -74,6 +78,11 @@ pub struct Args {
     /// LLM model identifier.
     #[arg(long, env = "ROBONIX_VLM_MODEL")]
     pub vlm_model: Option<String>,
+
+    /// Deployment-specific total context window. Required when Pilot cannot
+    /// obtain a capacity from provider metadata.
+    #[arg(long, env = "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS")]
+    pub vlm_context_window_tokens: Option<usize>,
 
     /// LLM API dialect ("openai" only for now).
     #[arg(long, env = "ROBONIX_VLM_FORMAT")]
@@ -121,6 +130,8 @@ struct FileVlmConfig {
     model: Option<String>,
     #[serde(default)]
     api_format: Option<String>,
+    #[serde(default)]
+    context_window_tokens: Option<usize>,
 }
 
 impl PilotConfig {
@@ -171,6 +182,10 @@ impl PilotConfig {
             .or(file_vlm.model)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
+        let context_window_tokens = args
+            .vlm_context_window_tokens
+            .or(file_vlm.context_window_tokens)
+            .filter(|tokens| *tokens > 0);
 
         Ok(Self {
             atlas_endpoint,
@@ -180,6 +195,7 @@ impl PilotConfig {
                 upstream,
                 api_key,
                 model,
+                context_window_tokens,
                 api_format,
             },
         })

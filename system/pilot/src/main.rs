@@ -25,9 +25,11 @@ mod history;
 mod memory;
 mod pb;
 mod planner;
+mod prompt;
 mod service;
 mod soma_context;
 mod state_context;
+mod transcript;
 mod vlm;
 
 use anyhow::{Context, Result};
@@ -205,6 +207,40 @@ async fn main() -> Result<()> {
 
     let cfg = PilotConfig::resolve(parsed)?;
 
+    // Resolve capacity before registering an Atlas capability. An unknown
+    // window starts without pre-emptive compaction; it is never replaced by a
+    // guessed generic value.
+    let vlm = vlm::VlmClient::new(&cfg.vlm);
+    let context_window = vlm.context_window_info().await;
+    let history_budget = planner::HistoryBudget::new(context_window.tokens, context_window.source);
+    info!(
+        "[pilot/context_budget] {}",
+        serde_json::json!({
+            "model": cfg.vlm.model,
+            "context_window_tokens": history_budget.context_window_tokens,
+            "context_window_source": history_budget.context_window_source,
+            "matched_model_id": context_window.matched_model_id,
+            "internal_context_reserve_tokens": planner::CONTEXT_RESERVE_TOKENS,
+            "automatic_compaction_enabled": history_budget.context_window_tokens.is_some(),
+        })
+    );
+    if context_window.source == "provider_model_list_canonical_metadata" {
+        warn!(
+            "[pilot/context_budget] configured model '{}' was matched by canonical name to provider id '{}'. Verify that this is the intended gateway route; set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS (or --vlm-context-window-tokens) to override its capacity.",
+            cfg.vlm.model,
+            context_window
+                .matched_model_id
+                .as_deref()
+                .unwrap_or("unknown")
+        );
+    }
+    if history_budget.context_window_tokens.is_none() {
+        warn!(
+            "[pilot/context_budget] model '{}' has no declared capacity; starting without pre-emptive compaction. Set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS to enable predictable history compaction.",
+            cfg.vlm.model
+        );
+    }
+
     info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
@@ -213,19 +249,6 @@ async fn main() -> Result<()> {
 
     atlas.register_service(&cfg.id, PILOT_NAMESPACE, "").await?;
     info!("registered as '{}' under '{PILOT_NAMESPACE}'", cfg.id);
-
-    let soma_prompt_block = match soma_context::fetch_system_prompt_block(&mut atlas, &cfg.id).await
-    {
-        Ok(Some(block)) => {
-            info!("loaded Soma body context into Pilot system prompt");
-            block
-        }
-        Ok(None) => String::new(),
-        Err(e) => {
-            warn!("Soma body context load failed; continuing without it: {e:#}");
-            String::new()
-        }
-    };
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -279,13 +302,7 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
 
-    let vlm = vlm::VlmClient::new(&cfg.vlm);
-    info!(
-        "VLM upstream='{}' model='{}'",
-        cfg.vlm.upstream, cfg.vlm.model
-    );
-
-    let svc = PilotServiceImpl::new(atlas.clone(), cfg.id.clone(), vlm, soma_prompt_block);
+    let svc = PilotServiceImpl::new(atlas.clone(), cfg.id.clone(), vlm, history_budget);
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
     let mut server_task = tokio::spawn(async move {
