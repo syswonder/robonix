@@ -30,11 +30,13 @@ use robonix_scribe::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tonic::Request;
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
@@ -620,7 +622,10 @@ fn build_forest_block(
     if entries.is_empty() {
         return String::new();
     }
-    entries.sort_by_key(|(plan_id, _)| plan_id.parse::<u64>().unwrap_or(u64::MAX));
+    entries.sort_by_key(|(plan_id, _)| {
+        let counter = plan_id.rsplit('-').next().unwrap_or(plan_id);
+        counter.parse::<u64>().unwrap_or(u64::MAX)
+    });
     let mut block = String::from(
         "\n\n## In-flight trees\n\
          These RTDL trees you dispatched earlier are still running concurrently. \
@@ -1649,7 +1654,11 @@ pub async fn run_turn(
             // Reserve an id atomically only for normal RTDL. Concurrent sessions
             // cannot observe or dispatch the same id. A failed expansion may
             // leave a harmless gap, but an id is never reused.
-            let plan_id = (plan_seq.fetch_add(1, Ordering::Relaxed) + 1).to_string();
+            let plan_id = format!(
+                "{}-{}",
+                *RUN_TAG,
+                plan_seq.fetch_add(1, Ordering::Relaxed) + 1
+            );
             match expand_rtdl_to_plan(
                 &rtdl,
                 &target_map,
@@ -2314,9 +2323,23 @@ fn rtdl_recovery_final_text() -> String {
 /// correlation — not merely unique within one plan.
 static OP_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Allocate the next global op_id (1, 2, 3, …) as a decimal string.
+/// Four hex characters naming this Pilot process. Both counters restart at 0
+/// on every start, while a session restored from its transcript still refers
+/// to the ids of the run that wrote it, and a surviving Executor still holds
+/// the plans that run dispatched. The tag keeps them apart with nothing to
+/// seed or persist. Four characters because components restart on their own
+/// after a failure, so two adjacent runs must not draw the same tag; short
+/// because the model copies these ids by hand out of the In-flight trees block.
+pub static RUN_TAG: LazyLock<String> =
+    LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
+
+/// Allocate the next global op_id (`a7c3-1`, `a7c3-2`, …).
 fn next_op_id() -> String {
-    (OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1).to_string()
+    format!(
+        "{}-{}",
+        *RUN_TAG,
+        OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1
+    )
 }
 
 fn expand_rtdl_to_plan(
@@ -3008,14 +3031,15 @@ Concretely:
 mod tests {
     use super::{
         CapabilityTargetMap, CatalogView, DEFAULT_SUCCESS_CRITERION, HistoryBudget, MetaPlanOp,
-        RTDL_DO, RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta,
-        TreeStep, UsageTotals, append_request_context, append_steer, append_task_state_record,
-        apply_task_update, assemble_planning_messages, build_capability_target_map,
-        build_display_capabilities, build_executor_active_block, build_forest_block,
-        compact_tool_result, configured_vlm_idle_timeout, duplicate_in_flight_signature,
-        expand_rtdl_to_plan, extract_json_object, feed_results_into_history, format_plan_summary,
-        invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
-        is_terminal_executor_state, mixes_control_inspection_with_action, parse_meta_plan_op,
+        RTDL_DO, RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskState,
+        TreeMeta, TreeStep, UsageTotals, append_request_context, append_steer,
+        append_task_state_record, apply_task_update, assemble_planning_messages,
+        build_capability_target_map, build_display_capabilities, build_executor_active_block,
+        build_forest_block, compact_tool_result, configured_vlm_idle_timeout,
+        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        is_legacy_plan_control_contract, is_terminal_executor_state,
+        mixes_control_inspection_with_action, next_op_id, parse_meta_plan_op,
         parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
         record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
@@ -4186,6 +4210,18 @@ mod tests {
         // The model's op_id=0 is ignored; pilot assigns non-empty unique ids.
         assert!(!plan.nodes[0].op_id.is_empty());
         assert_ne!(plan.nodes[0].op_id, plan.nodes[1].op_id);
+    }
+
+    #[test]
+    fn ids_carry_this_run_so_a_restored_history_cannot_collide() {
+        // Both counters restart at 0, so without the tag a restored session
+        // would be handed the very ids its own history still names.
+        let id = next_op_id();
+        let (tag, counter) = id.split_once('-').expect("op id is tagged");
+        assert_eq!(tag, *RUN_TAG);
+        assert!(counter.parse::<u64>().is_ok());
+        // An id written by an earlier run can never be produced by this one.
+        assert_ne!(id, counter);
     }
 
     #[test]
