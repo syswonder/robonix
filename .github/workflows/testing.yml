@@ -32,7 +32,7 @@ name: Webots Integration Tests
 
 on:
   push:
-    branches: [dev, main]
+    branches: [dev, main, dev-ci-test]
   workflow_dispatch:
     inputs:
       gpu_id:
