@@ -305,8 +305,21 @@ jobs:
 
   # ── Gate 2: the GPU testing job itself ────────────────────────────────────
   gpu_testing:
-    name: Webots integration suite
+    name: Webots integration suite (${{ matrix.backend }})
     needs: security-gate
+    # Scene has two perception backends and both ship, so both run the full
+    # suite. The legs run one after another: the concurrency group below keeps
+    # a single pending job, so a second leg queued behind the first would
+    # cancel it.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - backend: concept_graphs
+            key: cg
+          - backend: dualmap
+            key: dm
     concurrency:
       group: robonix-webots-gpu-${{ inputs.gpu_id || vars.ROBONIX_CI_GPU_ID || '0' }}
       cancel-in-progress: false
@@ -339,7 +352,7 @@ jobs:
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
       RUN_ATTEMPT: "${{ github.run_attempt }}"
-      RUN_KEY: "${{ github.run_id }}-${{ github.run_attempt }}"
+      RUN_KEY: "${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}"
       # GPU selection is runner-specific. Priority:
       # workflow_call input -> repo/org variable -> runner env -> default GPU 0.
       ROBONIX_CI_GPU_ID_INPUT: ${{ inputs.gpu_id || '' }}
@@ -360,6 +373,9 @@ jobs:
       WEBOTS_HEADLESS_MODE: "nvidia"
       WEBOTS_STREAM: "1"
       ROBONIX_SIM_PRIVILEGED: "true"
+      # Named explicitly so a missing or stale image fails the run instead of
+      # quietly falling back to the other backend.
+      SCENE_PERCEPTION_BACKEND: ${{ matrix.backend }}
 
     steps:
       - name: Configure network egress policy
@@ -475,6 +491,19 @@ jobs:
           nvidia-smi -q >/dev/null || { echo "::error::nvidia-smi unhealthy"; exit 1; }
           if dmesg 2>/dev/null | grep -qi 'NVRM: Xid'; then
             echo "::warning::Xid in dmesg — GPU may be degraded"; fi
+
+      - name: Remove containers left by an interrupted run
+        run: |
+          set -euo pipefail
+          # A runner killed mid-job never reaches its own cleanup, and its
+          # containers keep the GPU, so the next run fails the capacity check.
+          # This runner takes one job at a time and this step runs before this
+          # job starts anything, so every ci-* resource here belongs to a job
+          # that is no longer running.
+          docker ps -aq --filter "name=^ci-" | xargs -r docker rm -f
+          docker images --format '{{.Repository}}:{{.Tag}}' | grep '^ci-' | xargs -r docker rmi || true
+          docker volume ls -q | grep '^ci-' | xargs -r docker volume rm || true
+          docker network ls --format '{{.Name}}' | grep '^ci-' | xargs -r docker network rm || true
 
       - name: Wait for runner GPU capacity
         run: |
@@ -769,6 +798,36 @@ jobs:
           for d in rbnx-boot/cache/*/; do
             [ -d "$d/.git" ] && echo "$(basename "$d") @ $(git -C "$d" rev-parse --short HEAD) $(git -C "$d" log -1 --format=%s)"
           done | tee "$RUNNER_TEMP/remote-provenance.txt"
+
+      - name: Prepare scene image for ${{ matrix.backend }}
+        run: |
+          set -euo pipefail
+          if [ "$SCENE_PERCEPTION_BACKEND" = "concept_graphs" ]; then
+            echo "ROBONIX_SCENE_IMAGE=robonix-scene" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # DualMap is a layer over the scene image. Tag it by the Dockerfile
+          # and the base image it was built from, so it is rebuilt exactly
+          # when either changes and reused otherwise (it downloads ~400 MB).
+          df=system/scene/docker/Dockerfile.dualmap
+          base_id="$(docker image inspect robonix-scene --format '{{.Id}}')"
+          tag="robonix-scene-dualmap:ci-$( { cat "$df"; echo "$base_id"; } | sha256sum | cut -c1-12)"
+          if docker image inspect "$tag" >/dev/null 2>&1; then
+            echo "reusing $tag"
+          else
+            # Same mirrors the checkout uses: large GitHub and Hugging Face
+            # transfers from this runner get cut off mid-stream.
+            docker build --network=host -f "$df" --build-arg BASE_IMAGE=robonix-scene \
+              --build-arg GITHUB_PREFIX=https://ghfast.top/ --build-arg HF_ENDPOINT=https://hf-mirror.com \
+              -t "$tag" system/scene/docker
+          fi
+          docker run --rm --entrypoint sh "$tag" -c 'test -d /opt/dualmap/utils'
+          # Drop the tags earlier Dockerfiles or base images produced. Usually
+          # there are none, which must not fail the step under pipefail.
+          for old in $(docker images robonix-scene-dualmap --format '{{.Tag}}' | grep '^ci-' || true); do
+            [ "$old" = "${tag#*:}" ] || docker rmi "robonix-scene-dualmap:$old" >/dev/null 2>&1 || true
+          done
+          echo "ROBONIX_SCENE_IMAGE=$tag" >> "$GITHUB_ENV"
 
       - name: Validate Executor control-plane isolation
         run: |
@@ -1141,6 +1200,16 @@ jobs:
             tail -240 "$RUNNER_TEMP/rbnx-boot.log" || true
           } | tee -a "$RUNNER_TEMP/sim-logs/scene-readiness.txt"
           exit 1
+
+      - name: Verify scene perception backend
+        run: |
+          set -euo pipefail
+          line="$(docker logs "$ROBONIX_SCENE_CONTAINER" 2>&1 | grep -m1 '\[scene\] perception: .*backend=' || true)"
+          echo "${line:-no perception line in the scene log}"
+          case "$line" in
+            *"backend=${SCENE_PERCEPTION_BACKEND},"*) ;;
+            *) echo "::error::scene is not running the ${SCENE_PERCEPTION_BACKEND} backend"; exit 1 ;;
+          esac
 
       - name: Run scenario suite
         id: scenarios
@@ -1735,7 +1804,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: testing-logs-${{ github.run_id }}
+          name: testing-logs-${{ github.run_id }}-${{ matrix.key }}
           path: |
             examples/webots/rbnx-boot/logs/
             examples/webots/logs/
@@ -1781,10 +1850,18 @@ jobs:
           fi
 
   report:
-    name: Webots report generation
+    name: Webots report generation (${{ matrix.backend }})
     needs: gpu_testing
     if: always()
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: concept_graphs
+            key: cg
+          - backend: dualmap
+            key: dm
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       ENABLE_LLM_ANALYSIS: ${{ inputs.enable_llm_analysis == true }}
@@ -1816,9 +1893,8 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: testing-logs-*
+          name: testing-logs-${{ github.run_id }}-${{ matrix.key }}
           path: dl
-          merge-multiple: true
 
       - name: Prepare self-contained report viewer assets
         run: |
@@ -1839,14 +1915,15 @@ jobs:
             llm_args+=(--llm)
           fi
           if [ "${REPORT_SITE_PUBLISHED:-false}" = "true" ]; then
-            export ROBONIX_REPORT_MAP_URL="https://ci-reports.robonix.ai/reports/runs/${GITHUB_RUN_ID}/slam-map.png"
+            export ROBONIX_REPORT_MAP_URL="https://ci-reports.robonix.ai/reports/runs/${GITHUB_RUN_ID}-${{ matrix.key }}/slam-map.png"
           fi
           python3 testing/build_report_from_artifacts.py \
             --artifact-root dl \
             --out-dir report \
             --repo . \
             "${llm_args[@]}" \
-            --metadata "report_id=${GITHUB_RUN_ID}" \
+            --metadata "report_id=${GITHUB_RUN_ID}-${{ matrix.key }}" \
+            --metadata "scene_backend=${{ matrix.backend }}" \
             --metadata "run_url=${run_url}" \
             --metadata "pr_number=${REPORT_PR_NUMBER:-}" \
             --metadata "pr_title=${REPORT_PR_TITLE:-}" \
@@ -1867,7 +1944,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: testing-report-${{ github.run_id }}
+          name: testing-report-${{ github.run_id }}-${{ matrix.key }}
           path: report/
           if-no-files-found: ignore
 
@@ -1914,9 +1991,8 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: testing-report-*
+          pattern: testing-report-${{ github.run_id }}-*
           path: report-dl
-          merge-multiple: true
 
       - name: Configure report repository deploy key
         if: env.PUBLISH_REPORT_SITE == 'true'
@@ -1958,25 +2034,32 @@ jobs:
           fi
 
       - name: Stage report site
+        id: stage
         if: env.PUBLISH_REPORT_SITE == 'true'
         run: |
           set -euo pipefail
-          report_id="${GITHUB_RUN_ID}"
-          report_dir="${REPORT_SITE_DIR}/reports/runs/${report_id}"
-          expected_base_url="${REPORT_BASE_URL}"
-          expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
-          rm -rf "$report_dir"
-          mkdir -p "$report_dir" "${REPORT_SITE_DIR}/reports" report-dl
-          if [ -f report-dl/index.html ]; then
-            cp -a report-dl/. "$report_dir/"
-          else
+          mkdir -p "${REPORT_SITE_DIR}/reports" report-dl
+          # One report per scene backend, each under its own run directory.
+          report_id=""
+          for src in report-dl/testing-report-*/; do
+            [ -f "$src/index.html" ] || continue
+            id="$(basename "$src")"; id="${id#testing-report-}"
+            rm -rf "${REPORT_SITE_DIR}/reports/runs/${id}"
+            mkdir -p "${REPORT_SITE_DIR}/reports/runs/${id}"
+            cp -a "$src". "${REPORT_SITE_DIR}/reports/runs/${id}/"
+            [ -n "$report_id" ] || report_id="$id"
+          done
+          if [ -z "$report_id" ]; then
+            report_id="${GITHUB_RUN_ID}"
+            mkdir -p "${REPORT_SITE_DIR}/reports/runs/${report_id}"
             printf '%s\n' \
               '<!doctype html>' \
               '<meta charset="utf-8">' \
               '<title>Robonix Webots CI Report</title>' \
               '<body><h1>Robonix Webots CI Report</h1><p>No generated report artifact was available for this run.</p></body>' \
-              > "$report_dir/index.html"
+              > "${REPORT_SITE_DIR}/reports/runs/${report_id}/index.html"
           fi
+          expected_report_url="${REPORT_BASE_URL}/reports/runs/${report_id}/"
           python3 testing/report_index.py --site-dir "$REPORT_SITE_DIR" --retention-days 90
           printf '%s\n' \
             '<!doctype html>' \
@@ -2019,7 +2102,7 @@ jobs:
         run: |
           set -euo pipefail
           page_url="${REPORT_BASE_URL}"
-          echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
+          echo "report_url=${{ steps.stage.outputs.report_url }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe report Pages URL
         if: env.PUBLISH_REPORT_SITE == 'true'

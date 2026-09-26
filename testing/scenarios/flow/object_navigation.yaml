@@ -79,7 +79,11 @@ steps:
               nav_x: {select: "$", path: $.x, transform: float}
               nav_y: {select: "$", path: $.y, transform: float}
               nav_yaw: {select: "$", path: $.yaw, transform: float}
+  # After the lifecycle restart the object is remembered from before, but
+  # SLAM rebuilds the map from scratch, so the first plan toward it can fail
+  # until the map covers it again. A later attempt must still succeed.
   - status: in_progress
+    retry_delay_s: 3.0
     rtdl_description: navigate to object approach pose
     rtdl:
       op: sequence
