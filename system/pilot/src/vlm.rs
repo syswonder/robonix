@@ -226,6 +226,11 @@ impl Message {
 /// enum to drive token streaming, tool dispatch, and finish handling.
 pub enum VlmStreamItem {
     TextDelta(String),
+    /// A reasoning model's thinking, streamed before any answer. Carried so
+    /// the planner can see that the stream is alive: the bytes themselves are
+    /// never added to the reply and never sent back to the provider, which is
+    /// what the OpenAI-compatible `reasoning_content` convention expects.
+    ReasoningDelta(String),
     ToolCall(ToolCall),
     /// Provider-reported usage for the complete streamed request. OpenAI sends
     /// it in a final choice-less chunk when `include_usage` is supported.
@@ -946,6 +951,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_thinking_chunk_without_content_still_reaches_the_consumer() {
+        // Nothing is emitted for such a chunk on dev, so the planner sees
+        // silence while a reasoning model thinks and its idle timer fires.
+        for field in ["reasoning_content", "reasoning"] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
+            let mut finish = String::new();
+            process_stream_line(
+                &format!(
+                    r#"data: {{"choices":[{{"delta":{{"{field}":"weighing the options"}}}}]}}"#
+                ),
+                &mut calls,
+                &mut finish,
+                &tx,
+            )
+            .await
+            .unwrap();
+            let Some(Ok(VlmStreamItem::ReasoningDelta(delta))) = rx.recv().await else {
+                panic!("{field}: expected a reasoning delta");
+            };
+            assert_eq!(delta, "weighing the options");
+        }
+    }
+
+    #[tokio::test]
     async fn choice_less_usage_chunk_reaches_the_consumer() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
@@ -1016,6 +1046,27 @@ async fn process_stream_line(
         && !content.is_empty()
         && tx
             .send(Ok(VlmStreamItem::TextDelta(content.to_string())))
+            .await
+            .is_err()
+    {
+        return Ok(true);
+    }
+    // A thinking model streams this for as long as it reasons, with no
+    // `content` in sight. Forward it so the planner's idle timer measures the
+    // stream rather than the answer. `reasoning_content` is what DeepSeek-style
+    // endpoints emit and what GLM, Kimi and Qwen follow; `reasoning` is the
+    // spelling of gateways that pass OpenRouter's field through.
+    if let Some(reasoning) = choice
+        .get("delta")
+        .and_then(|delta| {
+            delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+        })
+        .and_then(Value::as_str)
+        && !reasoning.is_empty()
+        && tx
+            .send(Ok(VlmStreamItem::ReasoningDelta(reasoning.to_string())))
             .await
             .is_err()
     {

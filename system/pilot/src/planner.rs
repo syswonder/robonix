@@ -943,7 +943,11 @@ async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<VlmTe
         match item.ok()? {
             VlmStreamItem::TextDelta(d) => text.push_str(&d),
             VlmStreamItem::Usage(value) => usage = Some(value),
-            VlmStreamItem::ToolCall(_) | VlmStreamItem::Finish => {}
+            // A thinking model summarizing history must not put its own
+            // reasoning into the summary.
+            VlmStreamItem::ReasoningDelta(_)
+            | VlmStreamItem::ToolCall(_)
+            | VlmStreamItem::Finish => {}
         }
     }
     Some(VlmTextCompletion { text, usage })
@@ -1490,6 +1494,7 @@ pub async fn run_turn(
                 };
                 let mut full_text = String::new();
                 let mut tool_calls: Vec<crate::vlm::ToolCall> = Vec::new();
+                let mut reasoning_bytes = 0_usize;
 
                 let receive_result: anyhow::Result<()> = loop {
                     tokio::select! {
@@ -1519,6 +1524,13 @@ pub async fn run_turn(
                             };
                             match item {
                                 VlmStreamItem::TextDelta(delta) => full_text.push_str(&delta),
+                                // Thinking keeps the idle timer below from
+                                // firing, by arriving at all. It is counted,
+                                // not kept: it is not part of the reply and
+                                // is never sent back to the provider.
+                                VlmStreamItem::ReasoningDelta(delta) => {
+                                    reasoning_bytes += delta.len()
+                                }
                                 VlmStreamItem::ToolCall(tc) => tool_calls.push(tc),
                                 VlmStreamItem::Usage(usage) => info!(
                                     "[pilot/prompt] {}",
@@ -1552,6 +1564,11 @@ pub async fn run_turn(
                     return Err(error);
                 }
 
+                if reasoning_bytes > 0 {
+                    debug!(
+                        "[pilot/vlm] round={round} model thought for {reasoning_bytes} byte(s) before replying"
+                    );
+                }
                 let content = if full_text.is_empty() {
                     None
                 } else {
