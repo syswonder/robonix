@@ -202,6 +202,18 @@ pub async fn execute_build(
     build::execute_local(package_root, clean).await
 }
 
+/// URLs to try for a repository: for GitHub, the `RBNX_GH_MIRROR` prefix
+/// first (default `https://ghfast.top/`, empty to disable), then the URL itself.
+pub(super) fn url_candidates(url: &str) -> Vec<String> {
+    let mirror = std::env::var("RBNX_GH_MIRROR").unwrap_or_else(|_| "https://ghfast.top/".into());
+    let mut urls = Vec::new();
+    if !mirror.is_empty() && url.starts_with("https://github.com/") {
+        urls.push(format!("{}/{url}", mirror.trim_end_matches('/')));
+    }
+    urls.push(url.to_string());
+    urls
+}
+
 /// Build every package referenced by a top-level `robonix_manifest.yaml`.
 /// Two phases:
 ///   1. **fetch** — `path:` entries already on disk; `url:` entries
@@ -239,29 +251,43 @@ pub(super) fn git_clone_with_retry(
     const BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
     let mut last_code: Option<i32> = None;
+    let mut tried = false;
     for attempt in 1..=ATTEMPTS {
-        if attempt > 1 && dest.exists() {
-            // A failed clone can leave a partial tree; git will not clone into
-            // it, so the retry would fail for a different reason than the one
-            // we are retrying. Only ever remove what a previous *attempt of
-            // this call* created — every caller already guarantees the
-            // destination is absent, and a helper that deletes whatever it
-            // finds there would be a trap for the next one that does not.
-            let _ = std::fs::remove_dir_all(dest);
+        for source in url_candidates(url) {
+            // Only remove what an earlier try of this call left; callers
+            // guarantee `dest` is absent to begin with.
+            if tried {
+                let _ = std::fs::remove_dir_all(dest);
+            }
+            tried = true;
+            let mut clone = std::process::Command::new("git");
+            clone.arg("clone").arg("--depth").arg("1");
+            if let Some(b) = branch {
+                clone.arg("--branch").arg(b);
+            }
+            clone.arg(&source).arg(dest);
+            let status = clone
+                .status()
+                .with_context(|| format!("git clone {source} failed to spawn"))?;
+            if status.success() {
+                // A mirror is only the transport; the checkout records the real origin.
+                if source != url {
+                    let set = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(dest)
+                        .args(["remote", "set-url", "origin", url])
+                        .status()
+                        .with_context(|| format!("git remote set-url in {}", dest.display()))?;
+                    anyhow::ensure!(
+                        set.success(),
+                        "git remote set-url in {}: {set}",
+                        dest.display()
+                    );
+                }
+                return Ok(());
+            }
+            last_code = status.code();
         }
-        let mut clone = std::process::Command::new("git");
-        clone.arg("clone").arg("--depth").arg("1");
-        if let Some(b) = branch {
-            clone.arg("--branch").arg(b);
-        }
-        clone.arg(url).arg(dest);
-        let status = clone
-            .status()
-            .with_context(|| format!("git clone {url} failed to spawn"))?;
-        if status.success() {
-            return Ok(());
-        }
-        last_code = status.code();
         if attempt < ATTEMPTS {
             output::warning(&format!(
                 "git clone {url} failed (attempt {attempt}/{ATTEMPTS}); \

@@ -1380,7 +1380,7 @@ jobs:
           state_file="$RUNNER_TEMP/sim-logs/scene-state-post-restart.json"
           scene_ready=0
           echo "waiting for a real non-robot scene object after lifecycle restart: ${scene_url}"
-          for _ in $(seq 1 180); do
+          for i in $(seq 1 180); do
             if curl -fsS --max-time 2 "$scene_url" -o "$state_file"; then
               if python3 - "$state_file" <<'SCENE_READY_PY'
           import json, sys
@@ -1407,6 +1407,33 @@ jobs:
                 scene_ready=1
                 break
               fi
+            fi
+            if [ "$i" -eq 30 ]; then
+              # The mapping loop turns open-loop, so the robot can come back
+              # facing a bare wall and a still camera then sees nothing. One
+              # slow turn in place shows it the room.
+              echo "no object after 60 s; turning the robot once in place"
+              docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS' || true
+          source /opt/ros/humble/setup.bash
+          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+          python3 - <<'PY'
+          import math, time
+          import rclpy
+          from geometry_msgs.msg import Twist
+          rclpy.init()
+          node = rclpy.create_node("ci_look_around")
+          pub = node.create_publisher(Twist, "/cmd_vel", 10)
+          time.sleep(2.0)
+          msg = Twist()
+          msg.angular.z = 0.4
+          end = time.time() + 2 * math.pi / 0.4
+          while time.time() < end:
+              pub.publish(msg)
+              rclpy.spin_once(node, timeout_sec=0.05)
+          pub.publish(Twist())
+          node.destroy_node(); rclpy.shutdown()
+          PY
+          EOS
             fi
             sleep 2
           done

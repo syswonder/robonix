@@ -167,37 +167,44 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
     // "skipped". `http.lowSpeedLimit/Time` additionally kills a transfer
     // that connects but then stalls mid-stream. If the `timeout` binary
     // isn't present (e.g. non-coreutils host), fall back to a bare fetch.
-    let fetch_args = [
-        "-C",
-        p.dir.to_str().unwrap_or("."),
-        "-c",
-        "http.lowSpeedLimit=1000",
-        "-c",
-        "http.lowSpeedTime=8",
-        "fetch",
-        "--quiet",
-        "--depth",
-        "200",
-        "origin",
-        &branch,
-    ];
-    // Keep this short: the freshness notice is cosmetic and must never
-    // noticeably delay boot. 6s is plenty for a reachable remote; an
-    // unreachable one fails fast and the check is skipped.
-    let timed = Command::new("timeout")
-        .arg("6")
-        .arg("git")
-        .args(fetch_args)
-        .status();
-    let fetched = match timed {
-        Ok(s) => s.success(),
-        // `timeout` unavailable — fall back to a direct fetch.
-        Err(_) => Command::new("git")
+    // Through the GitHub mirror first when there is one, as clone does.
+    let sources = origin_url(&p.dir)
+        .map(|url| super::run_package::url_candidates(&url))
+        .unwrap_or_else(|| vec!["origin".into()]);
+    let fetch = |source: &str| {
+        let fetch_args = [
+            "-C",
+            p.dir.to_str().unwrap_or("."),
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=8",
+            "fetch",
+            "--quiet",
+            "--depth",
+            "200",
+            source,
+            &branch,
+        ];
+        // Keep this short: the freshness notice is cosmetic and must never
+        // noticeably delay boot. 6s is plenty for a reachable remote; an
+        // unreachable one fails fast and the check is skipped.
+        let timed = Command::new("timeout")
+            .arg("6")
+            .arg("git")
             .args(fetch_args)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
+            .status();
+        match timed {
+            Ok(s) => s.success(),
+            // `timeout` unavailable — fall back to a direct fetch.
+            Err(_) => Command::new("git")
+                .args(fetch_args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+        }
     };
+    let fetched = sources.iter().any(|source| fetch(source));
     if !fetched {
         st.note = Some("git fetch timed out / failed (offline?) — skipped".into());
         return st;
