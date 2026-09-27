@@ -30,9 +30,11 @@ RUN set -e; export https_proxy=$PROXY http_proxy=$PROXY; \
  && git -c submodule.3rdparty/mobileclip.url=${MOBILECLIP_REPO} submodule update --init 3rdparty/mobileclip \
  && rm -rf /opt/dualmap/.git /opt/dualmap/3rdparty/mobileclip/.git
 
+# rerun-sdk comes from the base image: DualMap only imports it (Scene turns its
+# visualiser off), and the map pages need the base's version.
 RUN set -e; export https_proxy=$PROXY http_proxy=$PROXY; \
     pip install -q --no-cache-dir "supervision==0.25.1" distinctipy plyfile pympler dill tabulate \
-        "rerun-sdk==0.22.1" "numpy==1.26.4" \
+        "numpy==1.26.4" \
  && pip install -q --no-deps -e /opt/dualmap/3rdparty/mobileclip \
  && python3 -c "import sys; sys.path.insert(0, '/opt/dualmap'); import dualmap, utils.object_detector, utils.local_map_manager; print('dualmap import ok')"
 

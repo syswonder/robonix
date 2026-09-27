@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>scene — rerun</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; }
+  /* The viewer writes `position: relative` onto the host and an inline
+     `width: 640px; height: 360px` onto its canvas as it starts. A percentage
+     height survives the first, `!important` beats the second; without both
+     the map drew into a 640x360 corner of the frame. Only the canvas is
+     pinned: pinning the viewer's other children breaks its layout. */
+  #host { width: 100%; height: 100%; }
+  #host > canvas { width: 100% !important; height: 100% !important; display: block; }
+  .msg { color: #9aa4b2; font: 14px/1.6 system-ui, sans-serif; padding: 24px; }
+</style>
+<div id="host"></div>
+<script type="module">
+  // Embedded as a module rather than a bare iframe: only the module reports
+  // `selection_change`, which is what links a click in the map to the panel.
+  import { WebViewer } from "/assets/rerun/index.js";
+
+  const host = document.getElementById("host");
+  const which = new URLSearchParams(location.search).get("view") || "3d";
+
+  function down(text) {
+    const msg = document.createElement("div");
+    msg.className = "msg";
+    msg.textContent = "No viewer: " + text + ".";
+    host.replaceChildren(msg);
+  }
+
+  try {
+    const info = await (await fetch("/api/viewer")).json();
+    const data = info.url;  // the proxy picks the feed from this page's view
+    if (!data) throw new Error(info.detail || "the viewer is not running");
+
+    const viewer = new WebViewer();
+    await viewer.start(data, host, { hide_welcome_screen: true, theme: "dark" });
+
+    // The 2D view zooms on every wheel event, so a trackpad flings the map
+    // out of sight; rerun has no setting for it, so the page damps the delta.
+    if (which === "2d") {
+      host.addEventListener("wheel", (ev) => {
+        if (!ev.isTrusted) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        ev.target.dispatchEvent(new WheelEvent("wheel", {
+          bubbles: true, cancelable: true, clientX: ev.clientX, clientY: ev.clientY,
+          ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey,
+          deltaMode: ev.deltaMode, deltaX: ev.deltaX * 0.2, deltaY: ev.deltaY * 0.2,
+        }));
+      }, { capture: true, passive: false });
+    }
+
+    // eframe reads its size on `resize`; a frame still laying out measures
+    // small, so nudge it after layout and on every later change.
+    const renudge = () => window.dispatchEvent(new Event("resize"));
+    requestAnimationFrame(renudge);
+    setTimeout(renudge, 300);
+    setTimeout(renudge, 1200);
+    new ResizeObserver(renudge).observe(host);
+
+    // Viewer → panel: relay the selected entity up to the shell.
+    viewer.on("selection_change", (event) => {
+      const entity = (event.items || []).find((i) => i.type === "entity");
+      parent.postMessage(
+        { source: "scene-rerun", type: "selection",
+          entity_path: entity ? entity.entity_path : null,
+          position: entity ? entity.position : null },
+        location.origin,
+      );
+    });
+
+    // Panel → viewer: rerun has no selection setter, so scene resends the
+    // blueprint with the object as the camera target.
+    window.addEventListener("message", (ev) => {
+      if (ev.origin !== location.origin) return;
+      const m = ev.data;
+      if (!m || m.source !== "scene-shell" || m.type !== "focus") return;
+      fetch("/api/viewer/focus", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ object_id: m.object_id, view: which }),
+      }).catch(() => {});
+    });
+  } catch (error) {
+    down(String(error && error.message ? error.message : error));
+  }
+</script>

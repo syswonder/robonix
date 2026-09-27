@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""FastMCP tool definitions for read-only Scene queries.
-
-  list_objects()           → perceived physical objects in the registry
-  list_regions()           → user-authored room regions with stable IDs
-  goal_near(object_id)     → reachable approach pose for a physical object
-  goal_room(room_id)       → reachable pose inside a room polygon
-
-Writes happen on the ingest path (perception → registry); these
-handlers only read. Inputs are codegen-derived ROS dataclasses
-(`semantic_map_mcp.*`); the @mcp_contract decorator turns each one
-into a JSON-schema-typed MCP tool that Pilot discovers via atlas.
-"""
+"""FastMCP tool definitions for read-only Scene queries."""
 from __future__ import annotations
 
 import asyncio
@@ -19,8 +8,6 @@ import math
 import os
 import time
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING
-
 from typing import TYPE_CHECKING
 
 from .state import ObjectRegistry, SceneObject
@@ -42,6 +29,8 @@ import semantic_map_mcp  # type: ignore
 from semantic_map_mcp import (  # type: ignore
     GoalNear_Request,
     GoalNear_Response,
+    GoalRegion_Request,
+    GoalRegion_Response,
     GoalRoom_Request,
     GoalRoom_Response,
     GetObjectContext_Request,
@@ -60,6 +49,8 @@ from semantic_map_mcp import (  # type: ignore
     UpdateObjectGeometry_Response,
     UpdateObjectLabel_Request,
     UpdateObjectLabel_Response,
+    Find_Request,
+    Find_Response,
     ListRegions_Request,
     ListRegions_Response,
     ListRelations_Request,
@@ -71,13 +62,14 @@ from semantic_map_mcp import (  # type: ignore
     SceneGraphNode as SceneGraphNodeIDL,
 )
 
+from . import find as find_impl
+
 from mcp.server.fastmcp import FastMCP
 from robonix_api import mcp_contract
 
 log = logging.getLogger(__name__)
 
 
-# ── Module-level state pointers, set by service.py at startup ──────────────
 _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
@@ -85,13 +77,13 @@ _ANNO_STORE: "AnnotationStore | None" = None
 _OBJECT_MUTATIONS: "ObjectMutationCoordinator | None" = None
 _ROBOT_GEOMETRY: RobotGeometryState | None = None
 
-# Scene Hook: when list_objects detects visible objects, automatically
-# capture the latest RGB frame and POST to memgraph's Scene Hook HTTP
-# endpoint so the robot's memory is updated without Pilot involvement.
-# Set MEMGRAPH_HOOK_URL to override the memgraph Scene Hook address.
-# Default 127.0.0.1 works when Scene runs with --network host or on
-# the same machine as memgraph.  For Docker without host networking
-# use "http://172.17.0.1:37798" (default bridge gateway).
+# Scene Hook: when list_objects detects visible objects, automatically capture
+# the latest RGB frame and POST to memgraph's Scene Hook HTTP endpoint so the
+# robot's memory is updated without Pilot involvement. Set MEMGRAPH_HOOK_URL to
+# override the memgraph Scene Hook address. Default 127.0.0.1 works when Scene
+# runs with --network host or on the same machine as memgraph. For Docker
+# without host networking use "http://172.17.0.1:37798" (default bridge
+# gateway).
 _MEMGRAPH_HOOK_URL = os.environ.get(
     "MEMGRAPH_HOOK_URL",
     "http://127.0.0.1:37798",
@@ -102,25 +94,10 @@ _last_save_ids: frozenset = frozenset()
 
 
 async def _try_save_observation(visible_objects: list) -> None:
-    """Fire-and-forget: capture RGB frame + save observation to memgraph.
-
-    Never raises — all failures are logged at debug/warning level so
-    the caller (list_objects) is never affected.
-
-    Log trace (every stage emits a structured log line so the full
-    lifecycle is grep-able):
-      scene_hook: triggered — N objects: [...]           (info, entry)
-      scene_hook: rgb WxH encoding (seq=N, age=Ts)       (info)
-      scene_hook: encoded WxH → JPEG N bytes (ratio=X%)  (info)
-      scene_hook: POST N bytes → memgraph ...            (info)
-      scene_hook: ← memgraph 200 node=N (Tms)            (info, success)
-      scene_hook: ← memgraph NNN <reason>                (warning, failure)
-      scene_hook: ! <exception>                           (warning, crash)
-    """
+    """Fire-and-forget: capture RGB frame + save observation to memgraph."""
     global _last_save_ts, _last_save_ids
     t0 = time.time()
 
-    # ── throttle: skip when the same objects were just saved ──────
     now = t0
     obj_ids = frozenset(o.object_id for o in visible_objects)
     if obj_ids == _last_save_ids and (now - _last_save_ts) < _SAVE_COOLDOWN_S:
@@ -128,13 +105,12 @@ async def _try_save_observation(visible_objects: list) -> None:
                   len(obj_ids), now - _last_save_ts)
         return
 
-    labels = [o.cls for o in visible_objects if o.cls]
+    labels = [o.label for o in visible_objects if o.label]
     n_objs = len(visible_objects)
     log.info("scene_hook: triggered — %d objects: %s",
              n_objs, ", ".join(labels) if labels else "<none>")
 
     try:
-        # ── grab latest RGB frame from ROS hub ────────────────────
         if _HUB is None or not _HUB.has("rgb"):
             log.info("scene_hook: skip — no rgb subscriber on hub")
             return
@@ -148,7 +124,6 @@ async def _try_save_observation(visible_objects: list) -> None:
         log.info("scene_hook: rgb %dx%d %s (seq=%d, age=%.1fs)",
                  w, h, enc, seq, frame_age_s)
 
-        # ── raw RGB8 → JPEG ───────────────────────────────────────
         t_encode = time.time()
         import numpy as np
 
@@ -174,7 +149,6 @@ async def _try_save_observation(visible_objects: list) -> None:
         log.info("scene_hook: encoded %dx%d → JPEG %.1f KB (raw %.1f KB, ratio %.0f%%, %dms)",
                  w, h, jpg_kb, raw_kb, 100 * jpg_kb / max(raw_kb, 1), round(encode_ms))
 
-        # ── build remember request ────────────────────────────────
         msg = (
             f"observed {', '.join(labels)} in the scene"
             if labels
@@ -194,7 +168,7 @@ async def _try_save_observation(visible_objects: list) -> None:
         spatial_objects = [
             {
                 "obj_id": o.object_id,
-                "label": o.cls,
+                "label": o.label,
                 "x": float(o.pose.x),
                 "y": float(o.pose.y),
                 "z": float(o.pose.z),
@@ -215,7 +189,6 @@ async def _try_save_observation(visible_objects: list) -> None:
         }
         body_bytes = len(img_b64)  # approximate — base64 dominates
 
-        # ── POST to memgraph Scene Hook ───────────────────────────
         t_post = time.time()
         import httpx
 
@@ -268,24 +241,40 @@ def attach_annotation_store(store: "AnnotationStore | None") -> None:
 def attach_object_mutations(
     coordinator: "ObjectMutationCoordinator | None",
 ) -> None:
-    """Wire the epoch-checked mutation coordinator; the correction tools
-    are unavailable (and say so) until service startup provides one."""
+    """Wire the epoch-checked mutation coordinator; the correction tools are
+    unavailable (and say so) until service startup provides one.
+    """
     global _OBJECT_MUTATIONS
     _OBJECT_MUTATIONS = coordinator
 
 
-# ── conversions: SceneObject → IDL Object ──────────────────────────────────
+
+def _registry() -> ObjectRegistry:
+    if _REGISTRY is None:
+        raise RuntimeError("scene mcp_tools.attach_state was never called")
+    return _REGISTRY
+
+
+def _mutations() -> "ObjectMutationCoordinator":
+    if _OBJECT_MUTATIONS is None:
+        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    return _OBJECT_MUTATIONS
+
+
+async def _epoch_snapshot() -> tuple[dict, str, int, bool]:
+    """Objects with the map epoch they belong to, as the mutation tools see it."""
+    registry = _registry()
+    if _OBJECT_MUTATIONS is not None:
+        return await _OBJECT_MUTATIONS.snapshot_objects()
+    return await registry.snapshot(), "", -1, False
+
 
 def _to_idl(o: SceneObject) -> Object:
-    """Project a registry record onto the wire type.
-
-    Extents and frame come from the record's own box as well as its pose:
-    UpdateObjectGeometry validates the caller's frame against both, so a
-    caller resending what it read here has to be able to see both."""
+    """Project a registry record onto the wire type."""
     frame = str(o.pose.frame_id or o.bbox.frame_id or "")
     return Object(
         id=o.object_id,
-        label=o.cls,
+        label=o.label,
         x=float(o.pose.x),
         y=float(o.pose.y),
         z=float(o.pose.z),
@@ -297,6 +286,12 @@ def _to_idl(o: SceneObject) -> Object:
         observation_count=max(0, int(o.observation_count)),
         last_seen_unix=float(o.last_seen),
     )
+
+
+def _robot(objects: dict) -> "SceneObject | None":
+    """The robot's own record, which the pose feed flags."""
+    return next((o for o in objects.values()
+                 if not o.missing and o.attributes.get("is_robot")), None)
 
 
 def _annotation_object_id(a: "Annotation") -> str:
@@ -330,58 +325,64 @@ def _annotation_to_object(a: "Annotation") -> Object:
 def _find_annotation_target(object_id: str) -> "Annotation | None":
     if _ANNO_STORE is None:
         return None
+    # Deprecated: ids handed out before regions were renamed from rooms.
+    if object_id.startswith("scene.room."):
+        object_id = "scene.region." + object_id[len("scene.room."):]
     for annotation in _ANNO_STORE.list():
         if object_id == _annotation_object_id(annotation):
             return annotation
     return None
 
 
-def _normalize_room_reference(value: str) -> str:
+def _normalize_region_reference(value: str) -> str:
     return " ".join(str(value or "").strip().casefold().split())
 
 
-def _room_aliases(room: "Annotation") -> set[str]:
-    name = _normalize_room_reference(room.name)
-    aliases = {name}
-    for prefix in ("room ", "room-", "房间 ", "房间"):  # i18n-ok: user room aliases
+def _reference_forms(value: str) -> set[str]:
+    """A reference, plus the same reference with a leading kind word removed.
+
+    "room" stays accepted: people and models say "room 315".
+    """
+    name = _normalize_region_reference(value)
+    forms = {name}
+    for prefix in ("region ", "region-", "room ", "room-",
+                   "房间 ", "房间"):  # i18n-ok: user region aliases
         if name.startswith(prefix) and name[len(prefix):].strip():
-            aliases.add(name[len(prefix):].strip())
-    return aliases
+            forms.add(name[len(prefix):].strip())
+    return forms
 
 
-def _resolve_room_target(reference: str) -> tuple["Annotation | None", list["Annotation"]]:
-    """Resolve stable ID first, then an exact unique room name/short alias.
-
-    The second return value contains ambiguous candidates. Fuzzy matching is
-    deliberately excluded: navigation must not guess between similar rooms.
+def _resolve_region_target(reference: str) -> tuple["Annotation | None", list["Annotation"]]:
+    """Resolve stable ID first, then an exact unique region name/short alias.
     """
     exact = _find_annotation_target(reference)
-    if exact is not None and exact.kind == "room":
+    if exact is not None and exact.kind == "region":
         return exact, []
     if _ANNO_STORE is None:
         return None, []
-    needle = _normalize_room_reference(reference)
+    # Both sides are reduced the same way.
+    needles = _reference_forms(reference)
     matches = [
-        room for room in _ANNO_STORE.list()
-        if room.kind == "room" and needle in _room_aliases(room)
+        region for region in _ANNO_STORE.list()
+        if region.kind == "region" and (needles & _reference_forms(region.name))
     ]
     if len(matches) == 1:
         return matches[0], []
     return None, matches
 
 
-def _room_id_hint() -> str:
+def _region_id_hint() -> str:
     if _ANNO_STORE is None:
-        return "no rooms are currently registered"
-    rooms = [a for a in _ANNO_STORE.list() if a.kind == "room"]
-    if not rooms:
-        return "no rooms are currently registered"
+        return "no regions are currently registered"
+    regions = [a for a in _ANNO_STORE.list() if a.kind == "region"]
+    if not regions:
+        return "no regions are currently registered"
     candidates = ", ".join(
-        f"{room.name!r} (id={_annotation_object_id(room)})"
-        for room in rooms[:20]
+        f"{region.name!r} (id={_annotation_object_id(region)})"
+        for region in regions[:20]
     )
-    suffix = "" if len(rooms) <= 20 else f", ... {len(rooms) - 20} more"
-    return f"available rooms: {candidates}{suffix}"
+    suffix = "" if len(regions) <= 20 else f", ... {len(regions) - 20} more"
+    return f"available regions: {candidates}{suffix}"
 
 
 def _object_id_hint(reference: str, objects: list[SceneObject]) -> str:
@@ -391,7 +392,7 @@ def _object_id_hint(reference: str, objects: list[SceneObject]) -> str:
 
     def score(obj: SceneObject) -> float:
         object_id = str(obj.object_id).casefold()
-        label = str(obj.cls).casefold()
+        label = str(obj.label).casefold()
         return max(
             SequenceMatcher(None, wanted, object_id).ratio(),
             SequenceMatcher(None, wanted, label).ratio(),
@@ -399,47 +400,35 @@ def _object_id_hint(reference: str, objects: list[SceneObject]) -> str:
 
     nearest = sorted(objects, key=score, reverse=True)[:3]
     candidates = ", ".join(
-        f"{obj.cls!r} (id={obj.object_id})" for obj in nearest
+        f"{obj.label!r} (id={obj.object_id})" for obj in nearest
     )
     return f"did you mean one of: {candidates}"
 
 
-# ── @mcp_contract handlers ─────────────────────────────────────────────────
 
 mcp = FastMCP("scene_provider")
 
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/list_objects")
 async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
-    """Return perceived objects plus compatibility room entries.
+    """Return perceived objects plus compatibility region entries.
 
-    New callers should call list_regions for full room geometry and staleness.
+    New callers should call list_regions for full region geometry and staleness.
     Use get_scene_graph only when object relationships are needed.
     Contract: robonix/system/scene/list_objects."""
-    if _REGISTRY is None:
-        raise RuntimeError("scene mcp_tools.attach_state was never called")
-    if _OBJECT_MUTATIONS is not None:
-        (
-            objs,
-            map_id,
-            generation,
-            generation_supported,
-        ) = await _OBJECT_MUTATIONS.snapshot_objects()
-    else:
-        objs, _surfs = await _REGISTRY.snapshot()
-        map_id, generation, generation_supported = "", -1, False
+    objs, map_id, generation, generation_supported = await _epoch_snapshot()
     visible = [o for o in objs.values() if not o.missing]
     objects = [_to_idl(o) for o in visible]
     if _ANNO_STORE is not None:
         objects.extend(
             _annotation_to_object(annotation)
             for annotation in _ANNO_STORE.list()
-            if annotation.kind == "room"
+            if annotation.kind == "region"
         )
 
-    # Scene Hook: auto-save observation when objects are visible.
-    # This is fire-and-forget — list_objects returns immediately
-    # regardless of whether the save succeeds.
+    # Scene Hook: auto-save observation when objects are visible. This is fire-
+    # and-forget — list_objects returns immediately regardless of whether the
+    # save succeeds.
     if visible:
         asyncio.create_task(_try_save_observation(visible))
 
@@ -457,17 +446,18 @@ async def update_object_label(
     req: UpdateObjectLabel_Request,
 ) -> UpdateObjectLabel_Response:
     """Apply a sticky operator label correction to one derived object."""
-    if _OBJECT_MUTATIONS is None:
-        raise RuntimeError("Scene object mutation coordinator is unavailable")
-    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_label(
-        object_id=req.object_id,
-        label=req.label,
-        clear_override=req.clear_override,
-        expected_map_id=req.expected_map_id,
-        expected_generation=req.expected_generation,
-        persist_to_snapshot=req.persist_to_snapshot,
-        note=req.note,
-    )
+    mutations = _mutations()
+    # The web API calls the same entry point, so the two cannot drift.
+    obj, persisted, map_id, generation = (
+        await mutations.apply_label_correction(
+            object_id=req.object_id,
+            label=req.label,
+            clear_override=req.clear_override,
+            expected_map_id=req.expected_map_id,
+            expected_generation=req.expected_generation,
+            persist_to_snapshot=req.persist_to_snapshot,
+            note=req.note,
+        ))
     return UpdateObjectLabel_Response(
         object=_to_idl(obj),
         map_id=map_id,
@@ -481,9 +471,8 @@ async def update_object_geometry(
     req: UpdateObjectGeometry_Request,
 ) -> UpdateObjectGeometry_Response:
     """Replace one derived object's pose/bbox with a non-nav operator value."""
-    if _OBJECT_MUTATIONS is None:
-        raise RuntimeError("Scene object mutation coordinator is unavailable")
-    obj, persisted, map_id, generation = await _OBJECT_MUTATIONS.update_geometry(
+    mutations = _mutations()
+    obj, persisted, map_id, generation = await mutations.update_geometry(
         object_id=req.object_id,
         x=req.x,
         y=req.y,
@@ -509,10 +498,9 @@ async def update_object_geometry(
 @mcp_contract(mcp, contract_id="robonix/system/scene/delete_object")
 async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
     """Delete one incorrect derived object from the asserted map epoch."""
-    if _OBJECT_MUTATIONS is None:
-        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    mutations = _mutations()
     deleted_id, persisted, map_id, generation = (
-        await _OBJECT_MUTATIONS.delete_object(
+        await mutations.remove_object(
             object_id=req.object_id,
             expected_map_id=req.expected_map_id,
             expected_generation=req.expected_generation,
@@ -531,10 +519,9 @@ async def delete_object(req: DeleteObject_Request) -> DeleteObject_Response:
 @mcp_contract(mcp, contract_id="robonix/system/scene/flush_objects")
 async def flush_objects(req: FlushObjects_Request) -> FlushObjects_Response:
     """Clear all derived objects while preserving robot and annotations."""
-    if _OBJECT_MUTATIONS is None:
-        raise RuntimeError("Scene object mutation coordinator is unavailable")
+    mutations = _mutations()
     deleted_count, persisted, map_id, generation = (
-        await _OBJECT_MUTATIONS.flush_objects(
+        await mutations.flush_objects(
             expected_map_id=req.expected_map_id,
             expected_generation=req.expected_generation,
             persist_to_snapshot=req.persist_to_snapshot,
@@ -566,13 +553,32 @@ def _annotation_to_region(a: "Annotation") -> Region:
     )
 
 
+@mcp_contract(mcp, contract_id="robonix/system/scene/find")
+async def find(req: Find_Request) -> Find_Response:
+    """The objects matching a class (`label`), a `region` and one scene-graph
+    `relation` to an `anchor`, nearest the robot first. Use instead of
+    list_objects when looking for something. Contract: robonix/system/scene/find."""
+    objects, _map_id, _generation, _supported = await _epoch_snapshot()
+    regions = [{"name": a.name, "points": a.points}
+               for a in (_ANNO_STORE.list() if _ANNO_STORE is not None else [])
+               if a.kind == "region"]
+    snapshot = _SG_STORE.get_snapshot() if _SG_STORE is not None else None
+    robot = _robot(objects)
+    matches, detail = find_impl.find(
+        objects, label=req.label or "", region=req.region or "",
+        relation=req.relation or "", anchor=req.anchor or "", regions=regions,
+        edges=list(snapshot.edges) if snapshot else [],
+        robot_xy=(float(robot.pose.x), float(robot.pose.y)) if robot else None)
+    return Find_Response(objects=[_to_idl(o) for o in matches], detail=detail)
+
+
 @mcp_contract(mcp, contract_id="robonix/system/scene/list_regions")
 async def list_regions(_req: ListRegions_Request) -> ListRegions_Response:
-    """Return every registered room region with its stable goal_room ID.
+    """Return every registered region with its stable goal_region ID.
 
     Perceived physical objects are intentionally excluded. Stale annotations
     remain visible and are marked explicitly so callers never infer absence
-    from a hidden or incomplete room list.
+    from a hidden or incomplete region list.
     Contract: robonix/system/scene/list_regions.
     """
     if _ANNO_STORE is None:
@@ -581,7 +587,7 @@ async def list_regions(_req: ListRegions_Request) -> ListRegions_Response:
         regions=[
             _annotation_to_region(annotation)
             for annotation in _ANNO_STORE.list()
-            if annotation.kind == "room"
+            if annotation.kind == "region"
         ],
         map_id=_ANNO_STORE.map_id,
         stamp_unix=time.time(),
@@ -602,19 +608,13 @@ def _polygon_area(points) -> float:
 async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Response:
     """Return one coherent map-frame spatial snapshot for Pilot."""
     snapshot_at = time.time()
-    if _REGISTRY is None:
-        raise RuntimeError("scene mcp_tools.attach_state was never called")
-    objects, _surfaces = await _REGISTRY.snapshot()
-    robot = next((
-        item for item in objects.values()
-        if not item.missing
-        and (getattr(item, "is_robot", False) or str(item.cls).lower() == "robot")
-    ), None)
+    objects = await _registry().snapshot()
+    robot = _robot(objects)
     map_id = _ANNO_STORE.map_id if _ANNO_STORE is not None else ""
     if robot is None:
         return GetRobotContext_Response(
             pose_known=False, map_id=map_id, x=0.0, y=0.0, z=0.0, yaw=0.0,
-            room_id="", room_name="", containing_area_ids=[],
+            region_id="", region_name="", containing_area_ids=[],
             containing_area_names=[], nearby_objects=[], observed_at_unix=0.0,
             snapshot_at_unix=snapshot_at, stale=True,
             reason="robot pose is not available from Scene",
@@ -628,11 +628,11 @@ async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Re
             if len(annotation.points or []) >= 3
             and point_in_polygon(x, y, annotation.points)
         ]
-    rooms = sorted(
-        (annotation for annotation in containing if annotation.kind == "room"),
+    regions = sorted(
+        (annotation for annotation in containing if annotation.kind == "region"),
         key=lambda annotation: (_polygon_area(annotation.points), annotation.name),
     )
-    room = rooms[0] if rooms else None
+    region = regions[0] if regions else None
     containing.sort(key=lambda annotation: (annotation.kind, annotation.name))
     nearby = []
     for item in objects.values():
@@ -648,13 +648,13 @@ async def get_robot_context(_req: GetRobotContext_Request) -> GetRobotContext_Re
     reason = "current Scene spatial snapshot"
     if stale:
         reason = "Scene robot pose is older than 2 seconds"
-    elif room is None:
-        reason = "robot pose is current but outside every registered room"
+    elif region is None:
+        reason = "robot pose is current but outside every registered region"
     return GetRobotContext_Response(
         pose_known=True, map_id=map_id, x=x, y=y, z=float(robot.pose.z),
         yaw=float(robot.pose.yaw),
-        room_id=_annotation_object_id(room) if room is not None else "",
-        room_name=str(room.name) if room is not None else "",
+        region_id=_annotation_object_id(region) if region is not None else "",
+        region_name=str(region.name) if region is not None else "",
         containing_area_ids=[_annotation_object_id(item) for item in containing],
         containing_area_names=[str(item.name) for item in containing],
         nearby_objects=[_to_idl(item) for _, item in nearby[:12]],
@@ -669,8 +669,8 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     """Find a navigation-safe approach pose near a physical scene object.
     Returns map-frame (x, y, yaw); pass to navigation/navigate.
 
-    Room annotations are deliberately not accepted. Resolve those through
-    goal_room so the returned pose is constrained to the room polygon.
+    Region annotations are deliberately not accepted. Resolve those through
+    goal_region so the returned pose is constrained to the region polygon.
 
     ``reachable=false`` when:
 
@@ -679,8 +679,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     * no free cell exists within the target search radius.
 
     Contract: robonix/system/scene/goal_near."""
-    if _REGISTRY is None:
-        raise RuntimeError("scene mcp_tools.attach_state was never called")
+    registry = _registry()
     footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
     if footprint is None:
         return GoalNear_Response(
@@ -690,7 +689,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
             yaw=0.0,
             reason="Soma footprint unavailable — robot geometry is not ready",
         )
-    objs, _surfs = await _REGISTRY.snapshot()
+    objs = await registry.snapshot()
     target = objs.get(req.object_id)
     if target is None:
         visible = [obj for obj in objs.values() if not obj.missing]
@@ -699,17 +698,11 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
             reason=(
                 f"unknown physical object_id '{req.object_id}'; "
                 f"{_object_id_hint(req.object_id, visible)}; "
-                "use goal_room for room annotations"
+                "use goal_region for region annotations"
             ),
         )
 
-    robot = next(
-        (
-            o for o in objs.values()
-            if getattr(o, "is_robot", False) or str(o.cls).lower() == "robot"
-        ),
-        None,
-    )
+    robot = _robot(objs)
     if robot is not None:
         approach_ang = math.atan2(
             float(target.pose.y) - float(robot.pose.y),
@@ -717,8 +710,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
         )
     else:
         # Without a live robot pose there is no evidence for a preferred
-        # approach side. The planner remains unbiased and still faces the
-        # returned pose toward the target.
+        # approach side.
         approach_ang = None
 
     if _HUB is None or not _HUB.has("occupancy_grid"):
@@ -785,55 +777,52 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     gx, gy, yaw = found
     return GoalNear_Response(
         reachable=True, x=float(gx), y=float(gy), yaw=float(yaw),
-        reason=f"approach pose for '{target.cls}' ({req.object_id})",
+        reason=f"approach pose for '{target.label}' ({req.object_id})",
     )
 
 
-@mcp_contract(mcp, contract_id="robonix/system/scene/goal_room")
-async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
-    """Resolve a room annotation to a safe map-frame pose inside its polygon.
+@mcp_contract(mcp, contract_id="robonix/system/scene/goal_region")
+async def goal_region(req: GoalRegion_Request) -> GoalRegion_Response:
+    """Resolve a region annotation to a safe map-frame pose inside its polygon.
 
-    Use this for named rooms and user-defined regions before navigation/navigate.
-    The result never falls outside the room polygon.
-    Contract: robonix/system/scene/goal_room.
+    Use this for named regions before navigation/navigate.
+    The result never falls outside the region polygon.
+    Contract: robonix/system/scene/goal_region.
     """
-    # The footprint is read further down, right before it is used. Checking it
-    # here as well made robot readiness preempt every check on the request
-    # itself, so a stale or unknown room came back as "robot geometry is not
-    # ready" and the caller had no idea which of the two was actually wrong.
-    room, ambiguous = _resolve_room_target(req.room_id)
+    # The footprint is read further down, right before it is used.
+    region, ambiguous = _resolve_region_target(req.region_id)
     if ambiguous:
         candidates = ", ".join(
             f"{item.name!r} (id={_annotation_object_id(item)})"
             for item in ambiguous
         )
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"ambiguous room reference '{req.room_id}'; candidates: "
+                f"ambiguous region reference '{req.region_id}'; candidates: "
                 f"{candidates}; pass one exact stable ID"
             ),
         )
-    if room is None:
-        return GoalRoom_Response(
+    if region is None:
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"unknown room reference '{req.room_id}'; pass a stable ID or "
-                f"unique room name returned by list_regions; {_room_id_hint()}"
+                f"unknown region reference '{req.region_id}'; pass a stable ID or "
+                f"unique region name returned by list_regions; {_region_id_hint()}"
             ),
         )
-    stable_room_id = _annotation_object_id(room)
-    if room.stale:
-        return GoalRoom_Response(
+    stable_region_id = _annotation_object_id(region)
+    if region.stale:
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=(
-                f"room '{room.name}' ({stable_room_id}) is stale: "
-                f"{room.stale_reason or 'geometry may not match the active map'}"
+                f"region '{region.name}' ({stable_region_id}) is stale: "
+                f"{region.stale_reason or 'geometry may not match the active map'}"
             ),
         )
     footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
     if footprint is None:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False,
             x=0.0,
             y=0.0,
@@ -841,19 +830,19 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
             reason="Soma footprint unavailable — robot geometry is not ready",
         )
     if _HUB is None or not _HUB.has("occupancy_grid"):
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason="no occupancy_grid available - mapping not running",
         )
     try:
         msg, _stamp, count = _HUB.latest("occupancy_grid")
     except Exception as exc:  # noqa: BLE001
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason=f"occupancy_grid hub error: {exc}",
         )
     if msg is None or count == 0 or not msg.info.width or not msg.info.height:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
             reason="occupancy_grid empty - wait for mapping to publish",
         )
@@ -861,7 +850,7 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
         getattr(getattr(msg, "header", None), "frame_id", "") or ""
     ).strip()
     if not grid_frame:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False,
             x=0.0,
             y=0.0,
@@ -870,31 +859,30 @@ async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
         )
     found = room_goal(
         msg,
-        room.points,
+        region.points,
         footprint,
-        yaw_candidates=room_yaw_candidates(room.points),
+        yaw_candidates=room_yaw_candidates(region.points),
     )
     if found is None:
-        return GoalRoom_Response(
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason=f"no known free pose inside room '{room.name}' ({stable_room_id})",
+            reason=f"no known free pose inside region '{region.name}' ({stable_region_id})",
         )
     x, y, room_yaw = found
-    if not point_in_polygon(x, y, room.points):
-        return GoalRoom_Response(
+    if not point_in_polygon(x, y, region.points):
+        return GoalRegion_Response(
             reachable=False, x=0.0, y=0.0, yaw=0.0,
-            reason="internal validation rejected a pose outside the room polygon",
+            reason="internal validation rejected a pose outside the region polygon",
         )
-    return GoalRoom_Response(
+    return GoalRegion_Response(
         reachable=True,
         x=float(x),
         y=float(y),
         yaw=room_yaw,
-        reason=f"safe pose inside room '{room.name}' ({stable_room_id})",
+        reason=f"safe pose inside region '{region.name}' ({stable_region_id})",
     )
 
 
-# ── scene graph MCP tools ────────────────────────────────────────────────────
 
 def _sg_snapshot() -> SceneGraphSnapshot | None:
     if _SG_STORE is None:
@@ -947,6 +935,17 @@ def _annotation_list() -> list[SceneAnnotationIDL]:
     if _ANNO_STORE is None:
         return []
     return [_annotation_to_idl(a) for a in _ANNO_STORE.list()]
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/goal_room")
+async def goal_room(req: GoalRoom_Request) -> GoalRoom_Response:
+    """DEPRECATED: use goal_region. Same resolution, under the old name.
+
+    Contract: robonix/system/scene/goal_room.
+    """
+    out = await goal_region(GoalRegion_Request(region_id=req.room_id))
+    return GoalRoom_Response(reachable=out.reachable, x=out.x, y=out.y,
+                             yaw=out.yaw, reason=out.reason)
 
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/get_scene_graph")
@@ -1052,7 +1051,7 @@ __all__ = [
     "list_objects",
     "list_regions",
     "goal_near",
-    "goal_room",
+    "goal_region",
     "get_scene_graph",
     "get_object_context",
     "list_relations",

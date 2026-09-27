@@ -176,10 +176,10 @@ Rules:
    container and are unreadable here. A provider not listed in "Capability docs"
    has no manual; call it directly from its `args_schema`.
 9. For a named room or region, current Scene data is authoritative. Call Scene
-   `list_regions`, use the returned stable ID with `goal_room`, and only then
+   `list_regions`, use the returned stable ID with `goal_region`, and only then
    call navigation with the reachable pose returned by Scene. A Memory
    coordinate, grasp pose, observation pose, room label, or guessed ID is not a
-   substitute. Because the navigation arguments depend on the `goal_room`
+   substitute. Because the navigation arguments depend on the `goal_region`
    result, these are separate planning rounds.
 10. Treat navigation completion in relation to the resolved requested
     destination. `SUCCEEDED` for a pose equal to the current pose is a

@@ -1,34 +1,20 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""ROS2 subscribers — scene's primary ingest path. Runs an rclpy node
-in a dedicated thread, subscribes to robot-self-pose / 2D laser /
-RGB / depth topics, and stashes the latest sample of each behind an
-asyncio-friendly accessor.
-The asyncio side never touches rclpy callbacks directly — they post
-into thread-safe slots; the periodic ticks that consume the data
-(VLM perception, self-tracker, plane extraction) read those slots
-on their own schedule. Keeps GIL contention predictable and means
-the relation engine / MCP server don't stall behind a fat pointcloud
-callback.
-
-Topic names come from atlas channel declarations or
-`RBNX_CONFIG_FILE.observations[]` so a new robot does not need a code edit —
-just declare which topic publishes which observation kind.
+"""ROS 2 ingest: an rclpy node on its own thread keeps the latest message of
+each observation kind in a thread-safe slot that asyncio code reads on its own
+schedule. Topics come from Atlas or `observations[]` in the config.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 
-# These imports are deferred until start() is called so that scene's
-# import-time code path doesn't blow up on hosts that don't have
-# rclpy (e.g. running the unit tests). The container build always
-# has rclpy.
+# Deferred so Scene imports without rclpy (unit tests).
 def _import_ros():
     import rclpy  # type: ignore
     from rclpy.node import Node  # type: ignore
@@ -38,13 +24,8 @@ def _import_ros():
     from sensor_msgs.msg import Image, LaserScan, PointCloud2, CameraInfo  # type: ignore
     from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped  # type: ignore
     from nav_msgs.msg import Odometry, OccupancyGrid  # type: ignore
-    # tf2 remains available as a compatibility source for explicitly named
-    # transforms. Generic Scene code never invents either endpoint.
     from tf2_ros import Buffer, TransformListener  # type: ignore
-    # map/msg/MapLifecycle comes from the generated ros2_idl overlay
-    # (rbnx codegen --ros2 + colcon build), NOT the ROS distro. Import it
-    # defensively: a deploy without the overlay must lose only the
-    # lifecycle subscription, not every scene subscription.
+    # From the generated ros2_idl overlay; without it only this subscription is lost.
     try:
         from map.msg import MapLifecycle  # type: ignore
     except ImportError:
@@ -61,17 +42,11 @@ def _import_ros():
         "Image": Image,
         "LaserScan": LaserScan,
         "CameraInfo": CameraInfo,
-        # mapping declares /rtabmap/cloud_map under
-        # robonix/service/map/pointcloud — scene auto-classifies it
-        # as kind=lidar3d. Without this import scene crashes the
-        # moment mapping appears.
         "PointCloud2": PointCloud2,
         "PoseWithCovarianceStamped": PoseWithCovarianceStamped,
         "TransformStamped": TransformStamped,
         "Odometry": Odometry,
         "OccupancyGrid": OccupancyGrid,
-        # None when the ros2_idl overlay is missing — _subscribe skips the
-        # spec with a warning instead of crashing the hub.
         "MapLifecycle": MapLifecycle,
         "Buffer": Buffer,
         "TransformListener": TransformListener,
@@ -80,12 +55,8 @@ def _import_ros():
 
 @dataclass
 class TopicSpec:
-    """One observation kind's wiring. `kind` is the abstract name
-    (rgb / depth / lidar2d / pose / odom); `topic` is the concrete
-    ROS topic; `msg_type` selects which sensor_msgs / nav_msgs class
-    to import. Optional `qos_profile` carries the Atlas declaration; when it
-    is absent, sensor streams use best-effort/volatile and map lifecycle data
-    uses reliable/transient-local semantics."""
+    """One observation kind (rgb, depth, lidar2d, pose, ...) wired to a ROS topic;
+    `qos_profile` is the publisher's declaration from Atlas."""
     kind: str
     topic: str
     msg_type: str            # "Image" | "LaserScan" | "PoseWithCovarianceStamped" | "Odometry"
@@ -93,13 +64,8 @@ class TopicSpec:
 
 
 def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
-    """Return reliability, durability and depth for one Atlas topic.
-
-    Atlas carries the publisher's declared QoS. A RELIABLE request cannot
-    connect to a BEST_EFFORT publisher, while a BEST_EFFORT subscription can
-    consume either reliability. Honour the declaration instead of replacing
-    every sensor stream with a hard-coded RELIABLE request.
-    """
+    """Reliability, durability and depth for one topic. Follows the publisher's
+    declaration: a RELIABLE request cannot connect to a BEST_EFFORT publisher."""
     sensor_kinds = {"rgb", "depth", "lidar2d", "lidar3d", "intrinsics"}
     if spec.kind in {
         "rgb",
@@ -137,10 +103,7 @@ def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
 
 
 class _LatestSlot:
-    """Thread-safe cache of the most recent message on one topic.
-    Writers are rclpy callbacks (background thread); readers are
-    asyncio ticks. We don't queue — VLM / relation engine only ever
-    care about the latest frame."""
+    """The latest message on one topic, written by rclpy callbacks."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -160,14 +123,7 @@ class _LatestSlot:
 
 
 class SubscribersHub:
-    """Owns the rclpy.Node + spin thread + per-kind latest slots.
-    Lifecycle:
-
-      hub = SubscribersHub(specs=[...])
-      await hub.start()        # spawns spin thread, creates subs
-      ...
-      await hub.stop()         # destroys node, joins thread
-    """
+    """The rclpy node, its spin thread and one latest-message slot per kind."""
 
     def __init__(self, specs: list[TopicSpec], *, node_name: str = "scene_subscribers") -> None:
         self.specs = specs
@@ -177,7 +133,6 @@ class SubscribersHub:
         self._node: Any = None
         self._spin_thread: threading.Thread | None = None
         self._stop_evt = threading.Event()
-        # tf2 buffer + listener — populated in start() once rclpy is up.
         self._tf_buffer: Any = None
         self._tf_listener: Any = None
 
@@ -196,9 +151,6 @@ class SubscribersHub:
         Node = self._ros["Node"]
         node = Node(self.node_name)
         self._node = node
-        # tf2 buffer + listener spin alongside the topic subscriptions.
-        # Consumers must supply both frame names from contracts, message
-        # headers, or explicit deployment configuration.
         Buffer = self._ros["Buffer"]
         TransformListener = self._ros["TransformListener"]
         self._tf_buffer = Buffer()
@@ -214,13 +166,8 @@ class SubscribersHub:
         log.info("[scene-ros] hub up: %d topic(s) + tf2", len(self.specs))
 
     def add_spec(self, spec: TopicSpec) -> bool:
-        """Add a new (kind, topic) subscription to a hub already up.
-        Used by the background reconciler to absorb topics that come
-        online after start(). Returns True if added, False if the
-        kind was already known — or if the subscription could not be
-        created (missing msg class): committing the slot anyway would
-        make has_kinds() claim a subscription that doesn't exist and
-        pair a success log with the skip warning."""
+        """Subscribe to a topic that appeared after start(). False when the kind
+        is already known or its message class is unavailable."""
         if self._ros is None:
             return False
         if spec.kind in self._slots:
@@ -265,15 +212,10 @@ class SubscribersHub:
 
     # ── subscription wiring ────────────────────────────────────────────────
     def _subscribe(self, spec: TopicSpec) -> bool:
-        """Create the rclpy subscription for one spec. Returns False (with
-        a warning) when the msg class is unavailable — the hub and every
-        other subscription keep running."""
+        """Create one subscription; False (with a warning) when the message class is missing."""
         assert self._ros is not None
         msg_cls = self._ros.get(spec.msg_type)
         if msg_cls is None:
-            # Unknown or unavailable msg class (e.g. MapLifecycle without
-            # the ros2_idl overlay). One subscription degrades, the hub —
-            # and every other subscription — keeps running.
             log.warning(
                 "[scene-ros] msg type %r unavailable — skipping %s on %s "
                 "(generated interface overlay missing?)",
@@ -308,10 +250,7 @@ class SubscribersHub:
 
         def _cb(msg: Any, _slot: _LatestSlot = slot, _k: str = _kind) -> None:
             _slot.write(msg)
-            # First arrival debug — proves the subscription wiring is alive
-            # end-to-end. Skipped after count > 1 so we don't spam. Critical
-            # for diagnosing the "subscribed but no msg arrives" class of bug
-            # (e.g. DDS GUID mismatch after a republisher restart).
+            # Proves the wiring works; "subscribed but nothing arrives" is otherwise silent.
             if _slot._count == 1:
                 log.info("[scene-ros] FIRST msg on %s (kind=%s)", spec.topic, _k)
 
@@ -329,8 +268,7 @@ class SubscribersHub:
 
     # ── consumer-side accessors ────────────────────────────────────────────
     def latest(self, kind: str) -> tuple[Any, float, int]:
-        """Returns (msg, stamp_unix, count). msg is None until the
-        first callback arrives; readers should branch on stamp_unix > 0."""
+        """(msg, stamp_unix, count); msg is None until the first message arrives."""
         slot = self._slots.get(kind)
         if slot is None:
             return None, 0.0, 0
@@ -340,49 +278,12 @@ class SubscribersHub:
         return kind in self._slots
 
     # ── tf2 accessors ────────────────────────────────────────────────────
-    def lookup_xy_yaw(
-        self,
-        target_frame: str,
-        source_frame: str,
-    ) -> Optional[tuple[float, float, float, float]]:
-        """Return (x, y, z, yaw) of `target_frame` expressed in
-        `source_frame` via tf2, or None when the transform isn't
-        available yet. Both frame arguments must originate outside this
-        generic helper; it deliberately has no robot or map-frame defaults.
-        """
-        if self._ros is None or self._tf_buffer is None:
-            return None
-        try:
-            Time = self._ros["Time"]
-            Duration = self._ros["Duration"]
-            tf = self._tf_buffer.lookup_transform(
-                source_frame, target_frame,
-                Time(),                        # latest available
-                Duration(seconds=0.1),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.debug("[scene-ros] tf2 lookup %s→%s failed: %s",
-                      source_frame, target_frame, e)
-            return None
-        t = tf.transform.translation
-        q = tf.transform.rotation
-        # Quaternion → yaw (around Z).
-        import math
-        yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        )
-        return float(t.x), float(t.y), float(t.z), float(yaw)
-
     def lookup_transform_4x4(
         self,
         target_frame: str,
         source_frame: str,
     ):
-        """Return a 4x4 numpy homogeneous transform that maps points
-        from `target_frame` into `source_frame`. None when tf isn't
-        available. Used by perception only after both frame names have
-        been learned from data or explicit deployment configuration."""
+        """4x4 transform mapping points from `target_frame` into `source_frame`, or None."""
         if self._ros is None or self._tf_buffer is None:
             return None
         try:

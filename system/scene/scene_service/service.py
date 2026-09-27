@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""scene_service entrypoint — wires the registry, ingest pollers,
-relation engine, FastMCP server, and atlas registration together.
-
-Capability owns atlas register / driver lifecycle / MCP HTTP / heartbeat
-(`scene.bootstrap()` + `scene.use_mcp_app(mcp_tools.mcp)`); everything below
-is scene-specific: registry + geometric relation loop, ROS2 ingest hub,
-VLM perception + scene-graph enrichment, web debug UI.
-"""
+"""scene_service entrypoint: registry, ROS 2 ingest, perception, scene graph,
+MCP tools and web UI. Atlas registration, the driver lifecycle and the MCP
+HTTP server belong to `robonix_api.Service`."""
 
 from __future__ import annotations
 
@@ -21,12 +16,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
+import uvicorn
 
-# torch + open3d C-extension calls can segfault on driver / kernel
-# mismatches. Without faulthandler, exit 139 lands without a Python
-# trace and we have to guess. Enable it as early as possible so the C
-# stack lands in scene's stderr the moment a SIGSEGV/SIGFPE hits.
+# torch/open3d can segfault on driver mismatches; get a stack when they do.
 faulthandler.enable(all_threads=True)
 
 
@@ -60,13 +52,30 @@ from .state import (
     Pose3D,
 )
 from .state.object_registry import now_unix
+from .object_views import (
+    bearing_of as _view_bearing,
+    looks_like as _view_looks_like,
+    store_from_env,
+)
 from .web_binding import resolve_web_host
 
+_LOG_LEVEL = os.environ.get("SCENE_LOG_LEVEL", "INFO").upper()
+# `force`: an imported library may already have configured the root logger.
 logging.basicConfig(
-    level=os.environ.get("SCENE_LOG_LEVEL", "INFO").upper(),
+    level=_LOG_LEVEL,
     format="[scene-service] %(levelname)s %(message)s",
+    force=True,
 )
 log = logging.getLogger("scene-service")
+# Scribe's bridge later resets the root logger's level and handlers, so this
+# logger keeps its own level and, in a container (whose console rbnx pipes to
+# scribe), its own console handler.
+log.setLevel(_LOG_LEVEL)
+if Path("/.dockerenv").exists():
+    _console = logging.StreamHandler()
+    _console.setFormatter(
+        logging.Formatter("[scene-service] %(levelname)s %(message)s"))
+    log.addHandler(_console)
 
 
 _lifecycle = SceneLifecycleRuntime(log)
@@ -105,16 +114,8 @@ async def _wait_for_lifecycle_event(event) -> bool:
     return True
 
 
-# scene's input set is fixed: it knows exactly which contracts it consumes.
-# Each tuple is (kind, contract_id, msg_type). At startup we ask atlas which
-# of these any registered cap is currently providing over ROS2 and subscribe
-# only to those. No leaf-based inference, no QueryContract round-trip — the
-# contract id is the API and msg_type is the contract's wire shape promise.
-#
-# Adding a new sensor type to scene = appending one row here and writing the
-# matching consumer. Third-party primitives don't get auto-picked-up under
-# foreign namespaces; if you want scene to consume your data, declare it
-# under one of these contract ids (which is the whole point of contracts).
+# The contracts Scene consumes, as (kind, contract_id, msg_type); Atlas says
+# which providers serve them. A new input is a row here plus its consumer.
 _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("rgb", "robonix/primitive/camera/rgb", "Image"),
     ("depth", "robonix/primitive/camera/depth", "Image"),
@@ -125,26 +126,16 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("pose", "robonix/service/map/pose", "PoseWithCovarianceStamped"),
     ("odom", "robonix/primitive/chassis/odom", "Odometry"),
     ("occupancy_grid", "robonix/service/map/occupancy_grid", "OccupancyGrid"),
-    # Latched {map_id, mode, generation} broadcast from mapping. Startup
-    # binding is probed separately (_discover_map_binding, before the hub
-    # exists); this hub subscription feeds the runtime mismatch watcher
-    # (_lifecycle_watch). Needs the generated `map` interface package
-    # (ros2_idl overlay) — the hub skips the row gracefully when missing.
+    # Mapping's latched {map_id, mode, generation}, for _lifecycle_watch; the
+    # hub skips it when the generated `map` package is missing.
     ("map_lifecycle", "robonix/service/map/lifecycle", "MapLifecycle"),
 ]
 
-# Optional manifest opt-out: kinds listed here are dropped even if atlas
-# advertises them. Useful when a deployment doesn't want scene burning
-# CPU on, say, a high-rate depth stream.
+# Kinds dropped even when Atlas advertises them.
 _DEFAULT_DISABLED_KINDS: frozenset[str] = frozenset()
 
 
-# Transport pref: "ros2" (default) drives the rclpy ingest path that
-# scene actually has wired today; "grpc" is a placeholder for the
-# future streaming-RPC ingest path. Contracts themselves are
-# transport-agnostic — `mode = "topic_out"` says "this is a
-# unidirectional output stream" and a primitive may serve it over
-# ROS2 OR gRPC. Scene picks the transport its ingest understands.
+# Only the ROS 2 ingest path is wired; "grpc" is reserved.
 _TRANSPORTS: dict[str, Transport] = {
     "ros2": Transport.ROS2,
     "grpc": Transport.GRPC,
@@ -159,9 +150,7 @@ def _resolve_pb_transport(name: str) -> int:
     return int(t)
 
 
-# Memo: dedup the "[scene] %r ← atlas: topic=..." log line so the
-# 5-second auto-rediscover loop only logs when an endpoint actually
-# changes. Keyed on (transport, contract_id) → resolution-signature.
+# (transport, contract_id) -> last resolution, so rediscovery logs changes only.
 _LAST_RESOLVED: dict[tuple, tuple] = {}
 
 
@@ -172,23 +161,9 @@ def _build_topic_specs(
     camera_provider_id: str = "",
     known_kinds: set[str] | None = None,
 ) -> list[TopicSpec]:
-    """Two paths:
-
-      A. Auto-discovery (default — when manifest's `observations[]` is
-         empty / absent). Scene walks `_SCENE_CONTRACTS` and for each
-         entry asks atlas which cap (if any) is declaring it over
-         `transport`. msg_type comes from the same table — no
-         QueryContract round-trip.
-
-      B. Explicit overrides (when manifest provides `observations[]`).
-         Each entry is `{kind, contract[, msg_type]}`. msg_type is
-         taken from the entry, or from `_SCENE_CONTRACTS` if the
-         contract is one scene already knows.
-
-    `transport` is `"ros2"` (today's wired ingest) or `"grpc"` (future).
-    `known_kinds` lets the background reconciler resolve only subscriptions
-    the hub does not already own. Errors skip one entry but never fail bring-up.
-    """
+    """Topic specs from the manifest's `observations[]` when given, else from
+    Atlas for every row of `_SCENE_CONTRACTS` not in `known_kinds`. A failing
+    entry is skipped, never fatal."""
     pb_t = _resolve_pb_transport(transport)
     if observations:
         return _resolve_explicit(observations, atlas_stub, pb_t, camera_provider_id)
@@ -207,19 +182,8 @@ def _resolve_auto(
     *,
     known_kinds: set[str] | None = None,
 ) -> list[TopicSpec]:
-    """Walk `_SCENE_CONTRACTS` and use `ATLAS.find_capability` + `connect_capability`
-    to resolve each contract. atlas hands out the endpoint via
-    ConnectCapability; the cap framework also tracks the channel for
-    teardown so we don't leak edges in atlas.
-
-    Contracts without a provider come back via the reconciler every
-    `period_s`. Kinds already owned by the subscriber hub are skipped so each
-    live subscription retains one Atlas channel instead of opening one per
-    reconciliation pass.
-
-    `_unused` keeps the call signature stable for callers built around
-    the old raw atlas_pb stub; the actual lookup goes through `atlas`.
-    """
+    """Resolve each `_SCENE_CONTRACTS` row through Atlas, skipping kinds the
+    hub already owns so a subscription keeps one channel."""
     transport = Transport(pb_transport)
     known = known_kinds or set()
     out: list[TopicSpec] = []
@@ -246,8 +210,7 @@ def _resolve_one_contract(
     *,
     provider_id: str = "",
 ) -> Optional[TopicSpec]:
-    """ATLAS.find_capability(contract) → connect_capability → endpoint. Returns None when no
-    cap currently advertises the contract over this transport."""
+    """The endpoint serving `contract_id`, or None when nobody provides it."""
     caps = ATLAS.find_capability(
         contract_id=contract_id,
         transport=transport,
@@ -273,8 +236,6 @@ def _resolve_one_contract(
     qos_profile = ""
     if isinstance(ch.params, Ros2Params):
         qos_profile = ch.params.qos_profile or ""
-    # Only log on first resolution / change. The auto-discover loop
-    # re-resolves every ~5s; spamming the same line every cycle is noise.
     sig = (endpoint, msg_type, qos_profile or "default", cap_view.provider_id)
     prev = _LAST_RESOLVED.get((transport, contract_id))
     if prev != sig:
@@ -297,16 +258,10 @@ def _resolve_one_contract(
 
 
 def _discover_map_binding(wait_s: float) -> Optional[dict]:
-    """Probe mapping's latched lifecycle broadcast for the startup binding.
+    """Mapping's latched {map_id, mode, generation}, or None.
 
-    Adaptive cost: polls atlas for the `robonix/service/map/lifecycle`
-    contract for at most `wait_s` (the normal full-boot order starts scene
-    BEFORE mapping, so the contract is usually absent and this returns in
-    ~`wait_s`); once the contract resolves — the scene-restart-while-
-    mapping-runs case — the latched sample arrives immediately, with a 5 s
-    ceiling as safety. Returns {map_id, mode, generation} or None; blocking
-    is fine here, it runs before anything else is wired. `wait_s <= 0`
-    disables the probe (unit tests / ROS-less runs)."""
+    Waits up to `wait_s` for the contract (mapping usually boots after Scene)
+    and 5 s for the sample; `wait_s <= 0` disables the probe."""
     if wait_s <= 0:
         return None
     deadline = time.monotonic() + wait_s
@@ -319,8 +274,6 @@ def _discover_map_binding(wait_s: float) -> Optional[dict]:
                 "MapLifecycle",
             )
         except Exception as e:  # noqa: BLE001
-            # Probe runs before bootstrap; if atlas isn't reachable yet a
-            # wire error must degrade to static binding, not kill startup.
             log.warning(
                 "[scene] lifecycle probe: atlas query failed (%s) — "
                 "falling back to static map binding",
@@ -347,12 +300,8 @@ def _resolve_explicit(
     pb_transport: int,
     camera_provider_id: str = "",
 ) -> list[TopicSpec]:
-    """Manifest-driven override path. Each entry pairs a logical kind
-    with a contract id; we go through the same single-contract resolver
-    used by the auto path so behaviour is identical. msg_type comes
-    from `_SCENE_CONTRACTS` (or the entry's own `msg_type` field if
-    it's a brand-new kind not in the default list).
-    """
+    """Resolve the manifest's `{kind, contract[, msg_type, provider_id]}`
+    entries; msg_type defaults to the `_SCENE_CONTRACTS` row."""
     by_contract: dict[str, tuple[str, str]] = {
         cid: (k, mt) for (k, cid, mt) in _SCENE_CONTRACTS
     }
@@ -392,28 +341,19 @@ def _resolve_explicit(
 
 # ── Self-pose tracker ──────────────────────────────────────────────────────
 class _SelfTracker:
-    """Owns the `robot` SceneObject — created on first pose update from
-    the atlas-resolved `service/map/pose` stream (the canonical map-
-    frame pose contract), then EMA-updated. Never goes `missing` (we
-    just stop refreshing if the upstream stops responding). Also
-    exposes a sync `latest_xy_yaw` callback that the VLM detector
-    consumes for camera-to-map projection.
-    """
+    """Owns the `robot` object, created from the first map-frame pose and
+    updated from then on; `latest_xy_yaw` feeds the VLM detector."""
 
     def __init__(
         self,
         registry: ObjectRegistry,
         robot_geometry: RobotGeometryState,
     ) -> None:
-        """Track the robot pose and represent its Soma-owned footprint."""
         self.registry = registry
         self.robot_geometry = robot_geometry
         self._latest: Optional[tuple[float, float, float, float]] = None
         self._object_id: Optional[str] = None
-        # World frame name used for stamped outputs. Updated by the
-        # pose loop from the localizer's `header.frame_id` so we never
-        # hardcode a specific provider's frame name (`map` for rtabmap,
-        # `world` for some mocap setups, etc.).
+        # The localizer's own frame name, never assumed to be "map".
         self.world_frame_id: str = ""
 
     def latest_xy_yaw(self) -> Optional[tuple[float, float, float, float]]:
@@ -430,7 +370,7 @@ class _SelfTracker:
                 self._object_id is None or self._object_id not in self.registry._objects
             ):  # noqa: SLF001
                 obj = self.registry.insert_object(
-                    cls="robot",
+                    label="robot",
                     pose=Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id=wf),
                     bbox=BBox3D(
                         size_x=footprint.size_x_m,
@@ -467,15 +407,204 @@ class _SelfTracker:
                     )
 
 
-# ── Stale-tick: flip missing flag after grace period ───────────────────────
+# ── Stale-tick: flip missing flag, and collapse duplicates ─────────────────
+
+# Merging is a quadratic repair, not a normal step, so it runs rarely.
+_MERGE_EVERY_N_TICKS = 10
+
+
+def _merge_gate_from_env() -> tuple[float, float]:
+    """Floor and height gates for the duplicate collapse, in metres; a zero
+    floor gate turns the collapse off."""
+    def _read(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "").strip() or default)
+        except ValueError:
+            return default
+
+    return (_read("SCENE_MERGE_XY_M", 0.35), _read("SCENE_MERGE_Z_M", 1.20))
+
+
+def declarable_scene_tools() -> list:
+    """Every `@mcp_contract` handler in mcp_tools, once each, by contract id.
+    Walked rather than listed, so a new tool cannot be left undeclared."""
+    seen: dict[str, Any] = {}
+    for name in dir(mcp_tools):
+        if name.startswith("_"):
+            continue
+        fn = getattr(mcp_tools, name, None)
+        cid = getattr(fn, "_robonix_contract_id", None)
+        if not cid or not callable(fn):
+            continue
+        seen.setdefault(str(cid), fn)
+    return [seen[cid] for cid in sorted(seen)]
+
+
+def _declare_tools() -> None:
+    """Declare the MCP tools on Atlas with the metadata @mcp_contract stashed."""
+    tools = declarable_scene_tools()
+    for fn in tools:
+        in_cls = getattr(fn, "_robonix_input_cls", None)
+        scene.declare_mcp(
+            fn._robonix_contract_id,
+            scene.mcp_endpoint,
+            description=(fn.__doc__ or "").strip(),
+            input_schema_json=json.dumps(in_cls.json_schema()) if in_cls else "{}",
+        )
+    log.info("scene declared %d MCP tools at %s", len(tools), scene.mcp_endpoint)
 
 
 async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> None:
+    merge_xy, merge_z = _merge_gate_from_env()
+    tick = 0
     while True:
+        tick += 1
         async with registry.lock():
             flipped = registry.mark_stale(now_unix())
+            merged = []
+            if merge_xy > 0.0 and tick % _MERGE_EVERY_N_TICKS == 0:
+                merged = registry.merge_duplicates(
+                    now_unix(), xy_m=merge_xy, z_m=merge_z)
         if flipped:
             log.debug("marked %d object(s) missing (grace expired)", flipped)
+        for absorbed, survivor in merged:
+            # Info: an id a caller may hold just stopped naming this object.
+            log.info("merged duplicate %s into %s", absorbed, survivor)
+        await asyncio.sleep(period_s)
+
+
+async def _object_views_tick(
+    store, detector, registry, map_binding, *,
+    period_s: float = 4.0,
+) -> None:
+    """Offer the camera's current view of each visible object to the store.
+
+    Slow on purpose: a new side of an object only appears once the robot
+    moves. The frame is read without the perception lock; a one-tick skew
+    moves a crop by centimetres.
+    """
+    from .scene_graph.image_relations import project_box, project_point
+
+    while True:
+        await asyncio.sleep(period_s)
+        try:
+            bundle = detector.latest_frame_bundle()
+            if bundle is None:
+                continue
+            rgb, K, T_cam_map = bundle
+            height, width = int(rgb.shape[0]), int(rgb.shape[1])
+            # Depth rejects crops of whatever occludes the object.
+            depth_m = None
+            try:
+                depth_m = detector.latest_depth_metres()
+            except Exception:  # noqa: BLE001
+                depth_m = None
+            # Camera-optical -> map pose: its translation is the camera position.
+            cam_xy = (float(T_cam_map[0, 3]), float(T_cam_map[1, 3]))
+
+            objects = await registry.snapshot()
+            map_id = store.partition(map_binding)
+            for obj in objects.values():
+                if obj.missing or obj.attributes.get("is_robot"):
+                    continue
+                rect = project_box(
+                    T_cam_map, K,
+                    (obj.pose.x, obj.pose.y, obj.pose.z),
+                    (obj.bbox.size_x, obj.bbox.size_y, obj.bbox.size_z),
+                    obj.bbox.yaw, width, height,
+                )
+                if rect is None:
+                    continue
+                centre = project_point(
+                    T_cam_map, K, (obj.pose.x, obj.pose.y, obj.pose.z))
+                if centre is None or not _view_looks_like(depth_m, rect, centre[2]):
+                    continue
+                bearing = _view_bearing(
+                    cam_xy, (float(obj.pose.x), float(obj.pose.y)))
+                await asyncio.to_thread(
+                    store.offer,
+                    map_id=map_id, object_id=obj.object_id, image_bgr=rgb,
+                    rect=rect, bearing=bearing, img_w=width, img_h=height,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("[scene-views] capture failed")
+
+
+async def _export_clouds(detector) -> tuple[dict, dict]:
+    """Point clouds and camera colours per registry id, from perception."""
+    clouds: dict[str, list] = {}
+    colours: dict[str, list] = {}
+    if detector is None or not hasattr(detector, "export_3d_snapshot"):
+        return clouds, colours
+    try:
+        snapshot = await asyncio.to_thread(detector.export_3d_snapshot)
+    except Exception:  # noqa: BLE001
+        # Warning: an export that keeps failing leaves the map point-less.
+        log.warning("[scene-rerun] the point-cloud export failed; objects "
+                    "will have no points this tick", exc_info=True)
+        return clouds, colours
+    for entry in snapshot.get("objects") or []:
+        # Registry id when the backend has one, else its own uuid.
+        key = entry.get("object_id") or entry.get("id")
+        if not key:
+            continue
+        clouds[key] = entry.get("points") or []
+        if entry.get("point_colors"):
+            colours[key] = entry["point_colors"]
+    return clouds, colours
+
+
+async def _rerun_tick(sink, registry, detector, hub, sg_store=None,
+                      robot_geometry=None, *, period_s: float = 1.0) -> None:
+    """Publish the settled semantic map to the viewer, once a page opened it."""
+    from . import web as web_ui
+    from .rerun_sink import relation_edges
+
+    ticks = 0
+    started = time.time()
+    while True:
+        try:
+            if not sink.ready:  # the export is the cost; nobody is watching
+                await asyncio.sleep(period_s)
+                continue
+            objects = await registry.snapshot()
+            live = [o for o in objects.values() if o.settled]
+            clouds, colours = await _export_clouds(detector)
+            robot = next((o for o in objects.values()
+                          if o.attributes.get("is_robot")), None)
+            pose = (robot.pose.x, robot.pose.y, robot.pose.yaw) if robot else None
+
+            def publish():
+                # One thread: rerun's timeline is per thread, and PNG work
+                # and per-point loops stay off the event loop.
+                sink.set_time(time.time() - started)
+                occupancy = web_ui.occupancy_payload(hub)
+                sink.log_occupancy(occupancy)
+                sink.log_objects(live, clouds, colours)
+                edges = relation_edges(sg_store)
+                sink.log_relations(
+                    edges, {o.object_id: (o.pose.x, o.pose.y, o.pose.z) for o in live})
+                # Soma's polygon; the registry only holds the robot's box.
+                shape = robot_geometry.current() if robot_geometry else None
+                footprint = [list(p) for p in shape.points] if shape else []
+                if pose is not None:
+                    sink.log_robot(pose, footprint)
+                sink.log_map2d(occupancy, live, clouds, edges, pose, footprint)
+                return edges
+
+            edges = await asyncio.to_thread(publish)
+            if ticks % 60 == 0:  # an unfed viewer looks like an empty map
+                log.info(
+                    "[scene-rerun] tick %d: %d objects, %d with points, "
+                    "%d with colour, robot=%s, %d edges", ticks, len(live),
+                    sum(1 for o in live if clouds.get(o.object_id)),
+                    sum(1 for o in live if colours.get(o.object_id)),
+                    pose is not None, len(edges))
+            ticks += 1
+        except Exception:  # noqa: BLE001
+            log.exception("[scene-rerun] publish failed")
         await asyncio.sleep(period_s)
 
 
@@ -488,11 +617,8 @@ async def _auto_discover_loop(
     camera_provider_id: str = "",
     period_s: float = 5.0,
 ) -> None:
-    """Background reconciler. Re-runs discovery every `period_s` and
-    dynamically adds new (kind, topic) subscriptions as they appear.
-    Keeps scene picking up mapping/nav outputs that come online minutes
-    after scene started. Explicit observations skip this loop —
-    they're static."""
+    """Subscribe to inputs that appear after start (mapping boots late).
+    Explicit observations are static and skip this."""
     if explicit:
         return
     while True:
@@ -521,31 +647,12 @@ async def _start_ros_ingest(
     self_tracker: "_SelfTracker",
     config: dict,
 ) -> tuple[SubscribersHub, Optional[Any], list[asyncio.Task]]:
-    """Bring up the rclpy hub + the per-kind consumers (self-pose
-    bridge, ConceptGraphs perception, VLM fallback). Returns
-    (hub, detector_or_None, bg_tasks_for_shutdown).
+    """Start the rclpy hub and its consumers (self pose, perception), each
+    its own task. Returns (hub, detector or None, background tasks).
 
-    Each consumer is its own asyncio task so a hung perception call
-    doesn't starve the pose updater, and vice versa.
-
-    Detector preference:
-      1. ConceptGraphsDetector — RGB + depth + camera_info present and
-         YOLO-World/MobileSAM weights baked into the image. This is the
-         only path that gives metric-accurate object positions.
-      2. VLMObjectDetector — fallback when there is no depth stream.
-         Approximate only; positions wobble.
-      3. None — neither RGB nor depth available."""
-    # Auto-discovery is a never-ending background concern: scene is a
-    # system service that runs alongside primitives + other services
-    # which may declare their ROS2 outputs at any time (mapping comes
-    # up after primitives, a soma can hot-plug a new sensor, etc.).
-    # Strategy:
-    #   1. Wait until at least one matching contract appears (keeps
-    #      retrying — no timeout, scene's whole job is to track these).
-    #   2. Background reconciler keeps re-polling forever and adds new
-    #      kinds to the hub as they show up.
-    # Explicit `observations:` in the manifest skips both phases —
-    # those references are static and authoritative.
+    Waits until Atlas offers at least one input, then a reconciler adds the
+    rest as they appear; explicit `observations` skip both.
+    """
     explicit = config.get("observations") or []
     transport = str(config.get("transport") or "ros2")
     camera_provider_id = str(config.get("camera_provider_id") or "").strip()
@@ -592,15 +699,7 @@ async def _start_ros_ingest(
     if pose_max_age_s <= 0.0:
         raise ValueError("pose_max_age_s must be greater than zero")
 
-    # ── self-pose bridge ───────────────────────────────────────────────────
-    # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
-    # callbacks fire ~10 Hz on /amcl_pose, so 5 Hz consumer is enough
-    # to keep the registry's robot record fresh without flooding the
-    # asyncio loop. Falls back to /odom when /amcl_pose isn't there.
-    #
-    # ALWAYS start this task — the loop itself probes hub.has(...) on
-    # every tick, so it tolerates pose/odom showing up later (mapping
-    # boots after scene; without this we'd skip task creation forever).
+    # Always started: pose/odom may appear after Scene does.
     bg_tasks.append(
         asyncio.create_task(
             _self_pose_loop(
@@ -612,17 +711,11 @@ async def _start_ros_ingest(
         )
     )
 
-    # Perception startup races with camera primitive cap registration:
-    # the chassis cap usually shows up first (its `pose`/`odom` topics
-    # populate hub.specs at the initial discovery), but the camera
-    # primitive's RGB/depth contracts may take a few extra seconds to
-    # land in atlas. Wait up to a bounded window for them to appear via
-    # the auto-discover reconciler loop, so we don't permanently lose
-    # the ConceptGraphs path because of a startup race.
+    # The camera often registers after the chassis; give it a bounded wait so
+    # the RGB-D path is not lost to a startup race.
     perception_wait_s = float(os.environ.get("SCENE_PERCEPTION_WAIT_S", "30"))
     deadline = time.time() + perception_wait_s
     while time.time() < deadline and not (hub.has("rgb") and hub.has("depth")):
-        # Pull fresh specs from atlas and add anything new.
         new_specs = _build_topic_specs(
             explicit, atlas_stub, transport, camera_provider_id
         )
@@ -645,11 +738,8 @@ async def _start_ros_ingest(
             )
 
     # ── perception ─────────────────────────────────────────────────────────
-    # Which perception tier the current hardware supports is decided by the
-    # capability probe, not inline here: `plan.detector` routes to the
-    # ConceptGraphs (metric), VLM (visual), or no (geometric) path. The
-    # metric path is strongly preferred — it owns depth-backprojected
-    # poses; the others are named, logged degradations, not silent ones.
+    # The capability probe picks the tier: metric (RGB-D), visual (VLM) or
+    # none; each degradation is logged.
     perception_cfg = perception_config(config)
     if perception_cfg.ignored_keys:
         log.warning(
@@ -672,25 +762,21 @@ async def _start_ros_ingest(
         or os.environ.get("SCENE_BASE_FRAME")
         or ""
     ).strip()
+    def _latest(kind: str) -> Optional[Any]:
+        msg, stamp, _ = hub.latest(kind)
+        return None if msg is None or stamp == 0.0 else msg
+
     def _rgb_msg() -> Optional[Any]:
-        msg, stamp, _ = hub.latest("rgb")
-        if msg is None or stamp == 0.0:
-            return None
-        return msg
+        return _latest("rgb")
 
     def _depth_msg() -> Optional[Any]:
-        msg, stamp, _ = hub.latest("depth")
-        if msg is None or stamp == 0.0:
-            return None
-        return msg
+        return _latest("depth")
+
+    def _frame_of(msg: Any) -> str:
+        return str(getattr(getattr(msg, "header", None), "frame_id", "") or "").strip()
 
     def _active_camera_frame() -> str:
-        if camera_frame:
-            return camera_frame
-        msg = _rgb_msg()
-        return str(
-            getattr(getattr(msg, "header", None), "frame_id", "") or ""
-        ).strip()
+        return camera_frame or _frame_of(_rgb_msg())
 
     def _active_base_frame() -> str:
         footprint = self_tracker.robot_geometry.current()
@@ -698,20 +784,15 @@ async def _start_ros_ingest(
 
     if plan.detector in ("concept_graphs", "dualmap"):
 
-        # Prefer the live `primitive/camera/intrinsics` contract. Deployments
-        # without a reliable CameraInfo stream may opt in via an explicit
-        # `intrinsics_fallback` in the scene config. This still runs the real
-        # RGB-D ConceptGraphs path; it only supplies K for back-projection when
-        # the contract has not delivered a usable sample yet.
+        # The intrinsics contract first; the configured `intrinsics_fallback`
+        # only until a usable CameraInfo arrives.
         intrinsics_logged = {"ok": False, "bad": False, "fallback": False}
 
         def _cam_info() -> Optional[_CamIntrinsics]:
             if hub.has("intrinsics"):
                 msg, stamp, _ = hub.latest("intrinsics")
                 if msg is not None and stamp > 0.0:
-                    info_frame = str(
-                        getattr(getattr(msg, "header", None), "frame_id", "") or ""
-                    ).strip()
+                    info_frame = _frame_of(msg)
                     expected_frame = _active_camera_frame()
                     if not expected_frame or info_frame != expected_frame:
                         if not intrinsics_logged["bad"]:
@@ -740,9 +821,6 @@ async def _start_ros_ingest(
                             )
                             intrinsics_logged["ok"] = True
                         return k
-                    # Contract is published but the CameraInfo K is zero/garbage —
-                    # distinct from "no contract"; warn once so a miscalibrated
-                    # publisher is visible rather than silently stalling perception.
                     if not intrinsics_logged["bad"]:
                         log.warning(
                             "[scene] intrinsics contract published but CameraInfo K "
@@ -767,9 +845,7 @@ async def _start_ros_ingest(
                 return k
             return None
 
-        # The metric tier has two interchangeable mappers; the manifest's
-        # `perception.backend` (or SCENE_PERCEPTION_BACKEND) picks one. Both
-        # take the same inputs and feed the same registry.
+        # Two interchangeable metric mappers, chosen by `perception.backend`.
         backend = perception_cfg.backend
         detector_cls = DualMapDetector if backend == "dualmap" else ConceptGraphsDetector
         backend_kwargs = {"dualmap_cfg": perception_cfg.dualmap or None} if backend == "dualmap" else {}
@@ -780,28 +856,16 @@ async def _start_ros_ingest(
             world_frame_fn=lambda: self_tracker.world_frame_id,
             on_detections=lambda dets: _ingest_detections(registry, dets),
             registry=registry,
-            # Pass the hub so the detector can resolve camera→world from the
-            # authoritative TF tree. The pose + camera-extrinsics contracts
-            # remain a validated compatibility fallback when TF is unavailable.
+            # camera->world from TF, with the pose + extrinsics contracts as
+            # the fallback.
             robot_base_frame_fn=_active_base_frame,
             hub=hub,
-            # Detection cadence. The default 0.6 s keeps objects fresh but runs
-            # YOLO+CLIP on the GPU continuously; on a shared Jetson GPU that
-            # starves co-located GPU work (e.g. FunASR ASR), making voice slow.
-            # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
-            # speech + perception together.
-            # manifest > launcher env > default
+            # Raise on a shared GPU (e.g. with speech); manifest > env > default.
             period_s=float(
                 perception_cfg.period_s
                 or os.environ.get("SCENE_DETECT_PERIOD_S", "")
                 or 0.6
             ),
-            # Detector confidence floor. Every other perception knob has an
-            # override; this one did not, so the single threshold that decides
-            # whether a detection exists at all could only be changed by
-            # rebuilding. Upstream concept-graphs runs 0.2 against real
-            # imagery; low-texture synthetic scenes need the room to go lower
-            # still, and a cluttered deployment may want it higher.
             confidence_threshold=float(
                 perception_cfg.confidence_threshold
                 or os.environ.get("SCENE_DETECT_CONFIDENCE", "")
@@ -839,16 +903,12 @@ async def _start_ros_ingest(
             jpeg = _image_msg_to_jpeg(msg)
             return (jpeg, count) if jpeg is not None else None
 
-        # Resolve the contract K at projection time because CameraInfo often
-        # arrives after the service starts. Fall back only to the same explicit
-        # deployment calibration accepted by the metric path; never invent K.
+        # Resolved per call (CameraInfo often arrives late); never invents K.
         def _vlm_intrinsics() -> Optional[_CamIntrinsics]:
             if hub.has("intrinsics"):
                 msg, stamp, _ = hub.latest("intrinsics")
                 if msg is not None and stamp > 0.0:
-                    info_frame = str(
-                        getattr(getattr(msg, "header", None), "frame_id", "") or ""
-                    ).strip()
+                    info_frame = _frame_of(msg)
                     if info_frame == _active_camera_frame():
                         intrinsics = _cam_info_to_intrinsics(msg)
                         if intrinsics is not None:
@@ -885,9 +945,6 @@ async def _start_ros_ingest(
             "goal_near remain available"
         )
     else:
-        # geometric tier: no camera. Object detection is off, but the
-        # occupancy grid + goal_near BFS stay available, so navigation-
-        # style queries still work — this is a degraded mode, not a fault.
         log.warning(
             "[scene] perception: geometric tier — no camera wired; object "
             "detection disabled (occupancy_grid + goal_near remain available)"
@@ -897,12 +954,8 @@ async def _start_ros_ingest(
 
 
 def _scene_intrinsics_fallback(raw: Any) -> Optional[tuple[str, _CamIntrinsics]]:
-    """Return an explicitly configured camera intrinsics fallback.
-
-    Real hardware should publish `primitive/camera/intrinsics`. The fallback is
-    opt-in and must include the full K because an unreviewed calibration silently
-    moves 3D objects.
-    """
+    """The configured intrinsics fallback, or None. Opt-in and complete only:
+    a guessed K silently moves every object."""
     if raw in (None, "", False):
         return None
     if isinstance(raw, str):
@@ -950,23 +1003,10 @@ def _scene_intrinsics_fallback(raw: Any) -> Optional[tuple[str, _CamIntrinsics]]
 
 
 def _cam_info_to_intrinsics(msg: Any) -> Optional[_CamIntrinsics]:
-    """Convert a sensor_msgs/CameraInfo into _CamIntrinsics.
-
-    Reads the 3x3 row-major K matrix (`k[0]=fx`, `k[2]=cx`, `k[4]=fy`,
-    `k[5]=cy`) plus width/height. ROS2 exposes the field as lowercase
-    `k`; we also accept `K` for safety. Returns None when any of
-    fx/fy/cx/cy/width/height is non-positive — an all-zero or partially
-    populated CameraInfo carries no usable geometry, and the caller
-    treats None as "wait for valid intrinsics", never as "use a default".
-    The except is narrow on purpose: a genuinely unexpected error should
-    surface, not be swallowed as if intrinsics were merely missing."""
+    """sensor_msgs/CameraInfo to _CamIntrinsics, or None when K or the size is
+    not positive (the caller then waits; it never uses a default)."""
     try:
-        # `k` is the row-major 3x3 intrinsics. rclpy delivers it as a numpy
-        # ndarray, so DON'T use `a or b` to pick the field — `bool(ndarray)`
-        # on a multi-element array raises ValueError ("truth value ...
-        # ambiguous"), which the except below would swallow as "no
-        # intrinsics", stalling perception forever on a perfectly valid K.
-        # Select the field with explicit None checks instead.
+        # rclpy hands K over as an ndarray: `k or K` would raise here.
         k_field = getattr(msg, "k", None)
         if k_field is None:
             k_field = getattr(msg, "K", None)
@@ -993,48 +1033,32 @@ async def _self_pose_loop(
     *,
     pose_max_age_s: float,
 ) -> None:
-    """Feed SelfTracker the robot's world-frame pose, sourced through
-    the `service/map/pose` (or fallback `service/map/odom`) atlas
-    contract — i.e. whatever provider mapping/AMCL/mocap registered.
+    """Feed the tracker the robot's pose from the map pose contract, else
+    odometry, in the frame the message names; frameless samples are dropped."""
 
-    Frame name comes from the message's `header.frame_id` (so the
-    rest of scene's outputs stamp the same world frame the localizer
-    is using), not a hardcoded `"map"` constant: a deployment
-    publishing pose in `world` or `odom_combined`
-    Just Works without scene caring.
+    def read(msg) -> tuple:
+        p = (msg.pose.pose if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
+             else msg.pose)
+        q = p.orientation
+        return (float(p.position.x), float(p.position.y), float(p.position.z),
+                _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w)),
+                getattr(getattr(msg, "header", None), "frame_id", None) or None)
 
-    Samples without an explicit source frame are ignored. Scene must not
-    invent a frame for spatial state.
-    """
     missing_frame_warned = False
     stale_warned = False
     while True:
         x = y = z = yaw = None
         frame_id: Optional[str] = None
 
-        # Path A: SLAM-corrected pose contract (preferred — bounded drift).
-        if hub.has("pose"):
+        if hub.has("pose"):  # SLAM-corrected, preferred
             msg, stamp_unix, _count = hub.latest("pose")
             if (
                 msg is not None
                 and stamp_unix > 0
                 and time.time() - stamp_unix <= pose_max_age_s
             ):
-                p = (
-                    msg.pose.pose
-                    if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
-                    else msg.pose
-                )
-                q = p.orientation
-                x = float(p.position.x)
-                y = float(p.position.y)
-                z = float(p.position.z)
-                yaw = _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
-                frame_id = (
-                    getattr(getattr(msg, "header", None), "frame_id", None) or None
-                )
+                x, y, z, yaw, frame_id = read(msg)
 
-        # Path B: SLAM odom (smoothly varying — for high-rate trackers).
         if x is None and hub.has("odom"):
             msg, stamp_unix, _count = hub.latest("odom")
             footprint = self_tracker.robot_geometry.current()
@@ -1048,15 +1072,7 @@ async def _self_pose_loop(
                 and footprint is not None
                 and child_frame == footprint.base_frame
             ):
-                p = msg.pose.pose
-                q = p.orientation
-                x = float(p.position.x)
-                y = float(p.position.y)
-                z = float(p.position.z)
-                yaw = _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
-                frame_id = (
-                    getattr(getattr(msg, "header", None), "frame_id", None) or None
-                )
+                x, y, z, yaw, frame_id = read(msg)
 
         if x is not None and frame_id:
             self_tracker.world_frame_id = frame_id
@@ -1197,13 +1213,8 @@ def _camera_to_world_from_contracts(
 
 
 def _image_msg_to_jpeg(msg) -> Optional[bytes]:
-    """sensor_msgs/Image -> JPEG bytes.
-
-    Accepts common RGB/BGR encodings and returns None on unknown encodings
-    rather than throwing; the VLM tick can skip that frame.
-    """
+    """sensor_msgs/Image to JPEG bytes; None for an unknown encoding."""
     try:
-        import numpy as np  # noqa: F401
         from PIL import Image as PILImage
 
         h, w = msg.height, msg.width
@@ -1246,8 +1257,7 @@ def _bytes_to_array(data, h: int, w: int, channels: int):
 
 
 async def _ingest_detections(registry: ObjectRegistry, detections):
-    """Apply data association on the registry. Imported here to keep the
-    top-level imports tidy."""
+    """Associate detections with registry objects."""
     from .state.data_assoc import associate
 
     if not detections:
@@ -1264,9 +1274,7 @@ async def _ingest_detections(registry: ObjectRegistry, detections):
 
 
 def _log_bg_task_exit(task: "asyncio.Task") -> None:
-    """Done-callback for scene's fire-and-forget background tasks: log any
-    exception at ERROR the moment the task dies, instead of letting asyncio
-    sit on it until interpreter shutdown."""
+    """Log a background task's exception when it dies, not at shutdown."""
     if task.cancelled():
         return
     exc = task.exception()
@@ -1355,8 +1363,6 @@ async def _lifecycle_watch(
                     try:
                         anno_store.reconcile_generation(live_gen)
                     except Exception as e:  # noqa: BLE001
-                        # Best-effort marker write (disk full / read-only
-                        # dir); the watcher itself must survive it.
                         log.error(
                             "[scene-anno] generation reconcile failed "
                             "(annotation staleness may be outdated): %s",
@@ -1446,31 +1452,53 @@ async def _lifecycle_watch(
 
 
 # ── active runtime ─────────────────────────────────────────────────────────
+def _env_flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).lower() in ("true", "1", "yes")
+
+
+def _web_port_from(config: dict) -> int:
+    """The web UI's port, 0 when it is switched off."""
+    raw = config.get("web_port")
+    if raw is not None and raw != "":
+        return int(int(raw) or 0)
+    return int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
+
+
 async def _run_active(config: dict) -> None:
     """Start Scene resources after Driver(INIT) and Driver(ACTIVATE)."""
+    # ── The map viewer ────────────────────────────────────────────────────
+    rerun_sink = None
+    viewer_choice = "off"
+    web_host = ""
+    web_port_early = _web_port_from(config)
+    if web_port_early > 0:
+        web_host = resolve_web_host(config)
+        viewer_choice = str(
+            config.get("web_viewer")
+            or os.environ.get("SCENE_WEB_VIEWER", "rerun")
+        ).strip().lower()
+        if viewer_choice not in ("rerun", "off"):
+            raise ValueError(
+                f"scene web_viewer must be rerun or off, not {viewer_choice!r}")
+        if viewer_choice != "off":
+            from .rerun_sink import RerunSink
+
+            # Started by the first page that opens it, not here.
+            viewer_grpc_port = int(
+                os.environ.get("SCENE_RERUN_GRPC_PORT", "9876"))
+            rerun_sink = RerunSink(
+                grpc_port=viewer_grpc_port,
+                grpc_port_2d=viewer_grpc_port + 1,
+            )
+
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
     robot_geometry = RobotGeometryState()
     self_tracker = _SelfTracker(registry, robot_geometry)
 
-    # Object persistence (warm restore across restarts). Created before
-    # perception so the registry is repopulated before the first detections
-    # arrive; the embedder is wired in later (only needed for writes). The
-    # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
-    # prior boot wrote rows — but writes are driven by the scene-graph builder.
-    # Which SLAM map this scene session belongs to. This is the join key
-    # against mapping and the scope key for ALL of scene's persistent state:
-    # object poses are only valid in their own map's frame, and so are the
-    # scene-graph caption/relation caches. Computed once here so the object
-    # store (below) and the scene-graph cache (further down) partition on
-    # the same value.
-    #
-    # Binding precedence (choose_map_binding): mapping's latched lifecycle
-    # broadcast — the authoritative map identity, probed briefly here —
-    # then manifest `map_id`, then SCENE_MAP_ID env, then "default". The
-    # static levers stay as fallback because the normal full-boot order
-    # starts scene BEFORE mapping (probe cost then ≈ the wait window);
-    # a scene restart while mapping runs binds from the broadcast alone.
+    # The map this session belongs to partitions all persistent state.
+    # Precedence: mapping's lifecycle broadcast, manifest `map_id`,
+    # SCENE_MAP_ID, "default" (mapping usually boots after Scene).
     broadcast = _discover_map_binding(
         float(os.environ.get("SCENE_MAP_BINDING_WAIT_S", "3.0"))
     )
@@ -1478,11 +1506,7 @@ async def _run_active(config: dict) -> None:
         broadcast, config.get("map_id"), os.environ.get("SCENE_MAP_ID")
     )
     map_id = binding.map_id
-    restore_on_start = os.environ.get("SCENE_RESTORE_ON_START", "false").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    restore_on_start = _env_flag("SCENE_RESTORE_ON_START", "false")
     scene_state_map_id = map_id if restore_on_start else ".live"
     log.info(
         "[scene] map binding: id=%s gen=%s source=%s mode=%s restore_on_start=%s state_partition=%s",
@@ -1502,10 +1526,7 @@ async def _run_active(config: dict) -> None:
         "source": binding.source if restore_on_start else "default",
     }
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
-        # mapping is provably UP but running ephemeral (no map_id) — its
-        # frame resets every boot, so the named partition scene just bound
-        # statically will never re-anchor. Likely a manifest misconfig
-        # (SCENE_MAP_ID set, mapping's config.map_id forgotten).
+        # An unsaved mapping session never re-anchors a named partition.
         log.warning(
             "[scene] mapping broadcasts an EPHEMERAL session (empty map_id) "
             "while scene binds %r from %s — objects stored under this id "
@@ -1518,11 +1539,7 @@ async def _run_active(config: dict) -> None:
         )
 
     obj_store = None
-    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in (
-        "true",
-        "1",
-        "yes",
-    ):
+    if _env_flag("SCENE_OBJECT_MEMORY_ENABLED", "true"):
         from .persistence import ObjectStore
 
         db_path = os.environ.get(
@@ -1550,9 +1567,6 @@ async def _run_active(config: dict) -> None:
                 db_path,
             )
         except Exception as e:  # noqa: BLE001
-            # Object memory is opted in (default on), so a failure here is not
-            # benign: persistence is OFF for the whole session — no warm
-            # restore now and no writes later. Log at error, not warning.
             log.error(
                 "[scene-persist] object memory enabled but store init/restore "
                 "failed — persistence OFF for this session (no restore, no "
@@ -1561,12 +1575,8 @@ async def _run_active(config: dict) -> None:
             )
             obj_store = None
 
-    # User annotations (rooms / POIs) — user-authored semantics on the same
-    # map_id partition rule as the object store; validity is additionally
-    # tracked against mapping's generation epoch (annotations only — the
-    # object store has no epoch concept). A failure here disables the
-    # annotation API for the session (web answers 503) but never blocks
-    # scene itself.
+    # Regions and POIs, partitioned like the objects and checked against
+    # mapping's generation; a failure disables the annotation API only.
     anno_dir = os.environ.get(
         "SCENE_ANNOTATIONS_DIR", "/data/robonix/scene_annotations"
     )
@@ -1614,58 +1624,19 @@ async def _run_active(config: dict) -> None:
             "snapshot/restore objects this session: %s",
             e,
         )
-    # mcp_tools v0 only needs the registry + the ROS hub (the latter is
-    # supplied later in _start_ros_ingest). The geometric relation loop +
-    # scene-graph store are wired further down, once the registry is live.
     mcp_tools.attach_state(
         registry=registry,
         robot_geometry=robot_geometry,
     )
     mcp_tools.attach_annotation_store(anno_store)
 
-    # Geometry is a live Soma dependency of the active Scene runtime. The
-    # capability/lifecycle servers were already bootstrapped by `_run()`.
     geometry_task = asyncio.create_task(
         reconcile_robot_geometry(robot_geometry),
         name="scene-robot-geometry",
     )
 
-    # Declare each scene MCP tool on atlas. Each handler has
-    # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
-    # description / JSON schema stay in sync with the codegen types.
-    for fn in (
-        mcp_tools.list_objects,
-        mcp_tools.list_regions,
-        mcp_tools.get_robot_context,
-        mcp_tools.goal_near,
-        mcp_tools.goal_room,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.list_relations,
-        mcp_tools.update_object_label,
-        mcp_tools.update_object_geometry,
-        mcp_tools.delete_object,
-        mcp_tools.flush_objects,
-    ):
-        cid = getattr(fn, "_robonix_contract_id", None)
-        if cid is None:
-            log.warning(
-                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
-            )
-            continue
-        in_cls = getattr(fn, "_robonix_input_cls", None)
-        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
-        scene.declare_mcp(
-            cid,
-            scene.mcp_endpoint,
-            description=(fn.__doc__ or "").strip(),
-            input_schema_json=schema,
-        )
-    log.info("scene declared 12 MCP tools at %s", scene.mcp_endpoint)
+    _declare_tools()
 
-    # ROS2 ingest hub + downstream consumers (self-pose, perception).
-    # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
-    # reach into ATLAS's wire client directly for that.
     stub = ATLAS._wire_stub
     hub, perception, ingest_bg = await _start_ros_ingest(
         atlas_stub=stub,
@@ -1673,36 +1644,25 @@ async def _run_active(config: dict) -> None:
         self_tracker=self_tracker,
         config=config,
     )
-    # Now that the hub exists, hand it to mcp_tools so goal_near BFS can
-    # read the occupancy grid. (Earlier attach_state call set registry
-    # only; this one re-binds with the hub — attach_state is intentionally
-    # cheap and idempotent.)
-    mcp_tools.attach_state(
+    mcp_tools.attach_state(  # again, now with the hub for goal_near
         registry=registry,
         hub=hub,
         robot_geometry=robot_geometry,
     )
 
-    # Wire the persistence embedder to perception's loaded CLIP text encoder
-    # (same 512-d space as the per-object image features). The VLM-fallback
-    # detector has no `embed_text`; persistence then stores placeholder
-    # vectors (scalar state still restores fine).
+    # CLIP text embeddings for persistence; placeholders without them.
     if obj_store is not None:
         obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
         geometry_task,
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
-        # Object-level watchdog: polls the registry for NEW objects and
-        # saves one image per object to memgraph.  Default on; set
-        # SCENE_OBJECT_WATCHDOG=0 to disable.
+        # One image per new object to memgraph (SCENE_OBJECT_WATCHDOG=0: off).
         *([asyncio.create_task(
             ObjectWatchdog(
                 registry=registry, hub=hub,
             ).run(),
             name="object-watchdog",
         )] if os.environ.get("SCENE_OBJECT_WATCHDOG", "1") in ("1", "true", "yes") else []),
-        # P2 guard: warn when mapping's live map identity drifts from the
-        # binding scene started with (P3 will act on it instead).
         asyncio.create_task(
             _lifecycle_watch(
                 hub,
@@ -1715,10 +1675,6 @@ async def _run_active(config: dict) -> None:
             ),
             name="scene-lifecycle-watch",
         ),
-        # Background reconciler: keeps scene's hub adding subscriptions
-        # for new ROS2 topic_outs that appear on atlas after start
-        # (mapping comes up after scene; same pattern for any future
-        # service that publishes a contract scene knows about).
         asyncio.create_task(
             _auto_discover_loop(
                 atlas_stub=stub,
@@ -1731,26 +1687,18 @@ async def _run_active(config: dict) -> None:
         ),
         *ingest_bg,
     ]
-    # These tasks are fire-and-forget: nothing awaits them, so an uncaught
-    # exception would otherwise vanish until shutdown (the failure mode of
-    # the failure-detectors themselves). Surface any death immediately.
     for _t in bg_tasks:
         _t.add_done_callback(_log_bg_task_exit)
 
     # ── Relation layer ───────────────────────────────────────────────
-    # Fast geometric relations (contact/containment + reachable_by) are
-    # cheap and must reach Pilot within seconds — and even without VLM
-    # creds — so the store and the geometric loop run unconditionally.
-    # SCENE_GRAPH_ENABLED gates only the slow LLM enrichment below.
+    # Geometric relations always run; SCENE_GRAPH_ENABLED gates only the
+    # LLM enrichment.
     from .scene_graph.geometric_loop import GeometricRelationLoop
     from .scene_graph.store import SceneGraphStore
 
     sg_cache_dir = os.environ.get(
         "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
     )
-    # Partition the scene-graph caches by the same runtime state partition as
-    # the object store. Startup defaults to a live session; explicit Load rebinds
-    # persistent room/object state through the web map facade.
     sg_store = SceneGraphStore(cache_dir=sg_cache_dir, map_id=scene_state_map_id)
     log.info(
         "[scene-graph] cache base=%s partitioned by map_id=%s",
@@ -1763,29 +1711,24 @@ async def _run_active(config: dict) -> None:
 
     # ── Scene Graph (optional LLM enrichment of the residual) ────────
     sg_stop: asyncio.Event | None = None
-    if os.environ.get("SCENE_GRAPH_ENABLED", "true").lower() in ("true", "1", "yes"):
+    if _env_flag("SCENE_GRAPH_ENABLED", "true"):
         from .scene_graph.builder import (
             SceneGraphBuilder,
             SceneGraphConfig,
             scene_graph_loop,
         )
-        from .scene_graph.captioner import NodeCaptioner
         from .scene_graph.llm_client import SceneGraphLLMClient
         from .scene_graph.relations import RelationInferer
 
         sg_cfg = SceneGraphConfig()
         sg_llm = SceneGraphLLMClient()
-        sg_captioner = NodeCaptioner()
         sg_inferer = RelationInferer(sg_llm)
         sg_builder = SceneGraphBuilder(
             registry=registry,
-            captioner=sg_captioner,
             relation_inferer=sg_inferer,
             store=sg_store,
             config=sg_cfg,
-            # Live sessions are not persisted (objects reach the DB only via
-            # an explicit Save snapshot); the builder's continuous writes are
-            # the LEGACY warm-restore mode's mechanism and follow its switch.
+            # Continuous writes belong to the legacy warm-restore mode only.
             object_store=obj_store if restore_on_start else None,
             perception=perception,
         )
@@ -1802,14 +1745,7 @@ async def _run_active(config: dict) -> None:
             sg_cache_dir,
         )
 
-    # Web debug UI on a separate port — top-down 2D canvas + objects
-    # table + robot pose. Lives in the same asyncio loop as the rest
-    # of scene so registry reads are local. Set `web_port: 0` in the
-    # deploy-manifest scene block to disable. SCENE_WEB_PORT and
-    # ── Operator corrections ─────────────────────────────────────────
-    # The coordinator is the single writer for derived-object mutations:
-    # it revalidates the map epoch, keeps registry/perception/graph-cache
-    # coherent, and owns snapshot persistence with rollback.
+    # ── Operator corrections: the single writer for object mutations ──
     from .object_mutations import ObjectMutationCoordinator
 
     object_mutations = ObjectMutationCoordinator(
@@ -1824,21 +1760,63 @@ async def _run_active(config: dict) -> None:
     )
     mcp_tools.attach_object_mutations(object_mutations)
 
-    # SCENE_WEB_HOST is the environment fallback; an explicit Scene config file
-    # can set web_host. Both default to loopback — see web_binding.
-    web_port = int(
-        int(config.get("web_port") or "0")
-        if config.get("web_port") is not None and config.get("web_port") != ""
-        else int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
-    )
+    web_port = _web_port_from(config)
     web_task = None
     web_server: uvicorn.Server | None = None
+
+    def spawn(coro, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(_log_bg_task_exit)
+        bg_tasks.append(task)
+
     if web_port > 0:
-        web_host = resolve_web_host(config)
+        if rerun_sink is not None:
+            if not rerun_sink.available:  # the map pages say the same
+                log.warning("[scene-rerun] %s", rerun_sink.detail)
+            # Always running; each tick is a no-op until a page opens the viewer.
+            try:
+                viewer_period = float(
+                    os.environ.get("SCENE_RERUN_PERIOD_S", "") or 1.0)
+            except ValueError:
+                log.warning(
+                    "[scene-rerun] SCENE_RERUN_PERIOD_S=%r is not a number; "
+                    "publishing once a second",
+                    os.environ.get("SCENE_RERUN_PERIOD_S"))
+                viewer_period = 1.0
+            spawn(_rerun_tick(rerun_sink, registry, perception, hub,
+                              sg_store, robot_geometry,
+                              period_s=max(0.1, viewer_period)),
+                  "scene-rerun")
+
+        # Unset SCENE_OBJECT_VIEWS_DIR means no photographs, and no captions.
+        object_views = store_from_env()
+        ephemeral_session_id = "session-" + time.strftime(
+            "%Y%m%dT%H%M%SZ", time.gmtime())
+        if object_views is not None:
+            object_views.session_id = ephemeral_session_id
+            # Last run's unsaved photographs show a map this one never saw.
+            dropped = object_views.forget_stale_sessions(ephemeral_session_id)
+            if dropped:
+                log.info("[scene-views] discarded %d unsaved session(s) from "
+                         "a previous run", dropped)
+        if object_views is not None and perception is not None:
+            spawn(_object_views_tick(object_views, perception, registry,
+                                     live_binding), "scene-views")
+            log.info("[scene-views] storing object views under %s (max %d each)",
+                     object_views.root, object_views.max_views)
+            from .object_captions import caption_loop
+            from .scene_graph.llm_client import SceneGraphLLMClient
+            spawn(caption_loop(registry, object_views, live_binding,
+                               SceneGraphLLMClient()), "scene-captions")
+        else:
+            log.info("[scene-views] not storing object views "
+                     "(SCENE_OBJECT_VIEWS_DIR unset)")
+
         web_app = web_ui.make_app(
             registry=registry,
             hub=hub,
             detector=perception,
+            rerun_sink=rerun_sink,
             sg_store=sg_store,
             anno_store=anno_store,
             object_store=obj_store,
@@ -1847,6 +1825,8 @@ async def _run_active(config: dict) -> None:
             ops_lock=map_ops_lock,
             semantic_hold=semantic_hold,
             robot_geometry=robot_geometry,
+            object_mutations=object_mutations,
+            object_views=object_views,
         )
         web_uv = uvicorn.Config(
             app=web_app,
@@ -1856,11 +1836,9 @@ async def _run_active(config: dict) -> None:
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
+        web_task.add_done_callback(_log_bg_task_exit)
         log.info("web UI on http://%s:%d", web_host, web_port)
-        # Loopback is the default. Anything else was asked for, and is worth
-        # one line in the log because this surface has no authentication and
-        # its annotation endpoints write map data — whoever reaches it can
-        # change what the robot believes about its world.
+        # The UI has no authentication and its endpoints write map data.
         if web_host not in ("127.0.0.1", "::1", "localhost"):
             log.warning(
                 "web UI is bound to %s, not loopback, and has no "
@@ -1880,10 +1858,7 @@ async def _run_active(config: dict) -> None:
     await _wait_for_lifecycle_event(_lifecycle.shutdown_requested)
     log.info("shutdown requested; tearing down")
 
-    # Driver(SHUTDOWN) must not acknowledge until every producer and owned
-    # task has exited, uvicorn has released its listening socket, and the
-    # milvus-lite lock is closed. The coordinator attempts every step before
-    # surfacing a cleanup error to the lifecycle handler.
+    # SHUTDOWN is acknowledged only once every task, socket and lock is gone.
     await close_scene_runtime_resources(
         background_tasks=bg_tasks,
         scene_graph_stop=sg_stop,
@@ -1903,42 +1878,11 @@ async def _run() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, _lifecycle.request_process_shutdown)
 
-    # Capability owns lifecycle gRPC, heartbeat, and MCP HTTP. Bootstrap must
-    # happen before config-dependent resources so rbnx can deliver CMD_INIT.
+    # Bootstrap first, so rbnx can deliver CMD_INIT.
     scene.use_mcp_app(mcp_tools.mcp)
     scene.bootstrap()
 
-    # These tools are decorated on the FastMCP app rather than through
-    # @scene.mcp(), so declare their existing metadata after bootstrap.
-    scene_tools = (
-        mcp_tools.list_objects,
-        mcp_tools.goal_near,
-        mcp_tools.goal_room,
-        mcp_tools.get_scene_graph,
-        mcp_tools.get_object_context,
-        mcp_tools.get_robot_context,
-        mcp_tools.list_relations,
-    )
-    for fn in scene_tools:
-        cid = getattr(fn, "_robonix_contract_id", None)
-        if cid is None:
-            log.warning(
-                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
-            )
-            continue
-        in_cls = getattr(fn, "_robonix_input_cls", None)
-        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
-        scene.declare_mcp(
-            cid,
-            scene.mcp_endpoint,
-            description=(fn.__doc__ or "").strip(),
-            input_schema_json=schema,
-        )
-    log.info(
-        "scene declared %d MCP tools at %s",
-        len(scene_tools),
-        scene.mcp_endpoint,
-    )
+    _declare_tools()
 
     run_error: BaseException | None = None
     try:
@@ -1952,10 +1896,8 @@ async def _run() -> None:
         _lifecycle.mark_runtime_failed(exc)
         raise
     finally:
-        # Release the Driver(SHUTDOWN) handler only after active resources are
-        # closed. Its gRPC completion callback tears down the capability server
-        # after the response has left the server. Direct signals have no such
-        # callback, so they tear the capability down here.
+        # A driver SHUTDOWN tears the capability down after its response is
+        # sent; a direct signal has no such callback, so it is done here.
         _lifecycle.mark_shutdown_complete(run_error)
         if _lifecycle.driver_shutdown_requested.is_set():
             stopped = await asyncio.to_thread(scene._stopping.wait, 3.0)

@@ -484,22 +484,27 @@ def test_relation_cache_reuses_input_and_invalidates_scene_changes(caplog):
         await inferer.infer(nodes, bundle)  # visible geometry changed
         assert client.calls == 2
 
+        # A new view of the same objects is not a new question: relations
+        # among them do not depend on where the camera stood.
         changed = frame.copy()
         changed[10:100, 20:140] = (20, 240, 10)
-        await inferer.infer(nodes, (changed, _K(), np.eye(4)))
-        assert client.calls == 3
-
         moved_camera = np.eye(4)
         moved_camera[2, 3] = 0.1
+        await inferer.infer(nodes, (changed, _K(), np.eye(4)))
         await inferer.infer(nodes, (changed, _K(), moved_camera))
-        assert client.calls == 4
+        assert client.calls == 2
 
         nodes[0].caption = "blue cup"
         await inferer.infer(nodes, (changed, _K(), moved_camera))
-        assert client.calls == 5
+        assert client.calls == 3
 
         await inferer.infer(nodes + [_third_node()], (changed, _K(), moved_camera))
-        assert client.calls == 6
+        assert client.calls == 4
+
+        # ...until the answer is old enough to be worth asking again.
+        inferer.refresh_s = 0.0
+        await inferer.infer(nodes + [_third_node()], (frame, _K(), np.eye(4)))
+        assert client.calls == 5
 
     with patch(
         "scene_service.scene_graph.image_relations.annotate_frame",
@@ -507,10 +512,10 @@ def test_relation_cache_reuses_input_and_invalidates_scene_changes(caplog):
     ):
         _run(exercise())
 
-    assert client.calls == 6
-    assert inferer.inference_counts["processed"] == 6
-    assert inferer.inference_counts["skipped"] == 3
-    assert "processed=6 skipped=3 retried=0 failed=0" in caplog.text
+    assert client.calls == 5
+    assert inferer.inference_counts["processed"] == 5
+    assert inferer.inference_counts["skipped"] == 5
+    assert "processed=5 skipped=5 retried=0 failed=0" in caplog.text
 
 
 def test_relation_cache_reuses_an_explicit_empty_result():

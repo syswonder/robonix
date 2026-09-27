@@ -1,0 +1,169 @@
+    /* ── The dock: a right-hand column; collapsed it keeps the tab strip. ── */
+    .dock {
+      flex: 0 0 var(--dock-w, 300px);
+      display: flex; min-width: 0;
+      background: var(--panel);
+      border-left: 1px solid var(--line);
+      color: var(--fg);
+    }
+    .dock.shut { flex-basis: 34px; }
+    .dock .grip { flex: 0 0 5px; cursor: col-resize; background: transparent; }
+    .dock .grip:hover, .dock .grip.live { background: var(--acc); opacity: .5; }
+    .dock.shut .grip, .dock.shut .col { display: none; }
+
+    .dock .tabs {
+      flex: 0 0 34px; display: flex; flex-direction: column;
+      align-items: center; gap: 2px; padding-top: 8px;
+      background: #12161e; border-right: 1px solid var(--line);
+    }
+    .dock.shut .tabs { border-right: 0; }
+    .dock .tabs button {
+      width: 26px; height: 26px; display: grid; place-items: center;
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      color: var(--muted); cursor: pointer; padding: 0;
+    }
+    .dock .tabs button:hover { color: var(--fg); background: #1c2230; }
+    .dock .tabs button.on { color: var(--acc); background: #1c2230; border-color: #2c3547; }
+    .dock .tabs svg { width: 15px; height: 15px; }
+
+    .dock .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .dock .head {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+      padding: 9px 10px 7px; border-bottom: 1px solid var(--line);
+    }
+    .dock .head .name {
+      font-size: 12px; font-weight: 600; letter-spacing: .02em;
+      text-transform: uppercase; color: var(--fg);
+    }
+    .dock .head .stamp {
+      flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 10px;
+      color: var(--muted); text-align: right; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .dock .head .shutbtn {
+      background: none; border: 0; color: var(--muted); cursor: pointer;
+      font-size: 15px; line-height: 1; padding: 0 2px;
+    }
+    .dock .head .shutbtn:hover { color: var(--fg); }
+    .dock .btn.small { padding: 3px 8px; font-size: 11.5px; }
+    .dock:not([data-tab="objects"]) #dock-flush { display: none; }
+
+    /* The list and the detail scroll separately, so a long list cannot push
+       the detail off the bottom of the window. */
+    .dock .panes { flex: 1; overflow: hidden; padding: 10px; min-height: 0; }
+    .dock .pane { display: none; }
+    .dock .pane.on { display: block; }
+    .dock .pane[data-pane="objects"].on {
+      display: flex; flex-direction: column; height: 100%; min-height: 0;
+    }
+    .dock .objs-scroll { flex: 1 1 auto; overflow-y: auto; min-height: 48px; }
+
+    .dock .gone {
+      font-size: 11px; color: var(--muted); cursor: pointer;
+      padding: 4px 2px 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px;
+    }
+    .dock .gone:hover { color: var(--fg); }
+    .dock tr.row.gone .nm, .dock tr.row.gone .cls { opacity: .55; }
+
+    .dock .split {
+      flex: 0 0 7px; margin: 4px -10px; cursor: row-resize;
+      background: transparent; position: relative;
+    }
+    .dock .split::after {
+      content: ""; position: absolute; left: 10px; right: 10px; top: 3px;
+      height: 1px; background: var(--line);
+    }
+    .dock .split:hover::after, .dock .split.live::after { background: var(--acc); height: 2px; }
+    .dock #dock-detail { flex: 0 0 var(--detail-h, 340px); overflow-y: auto; min-height: 0; }
+    /* An author `display` beats the UA rule for [hidden]. */
+    .dock #dock-detail[hidden],
+    .dock .pane[data-pane="objects"].on:not(:has(#dock-detail:not([hidden]))) .split {
+      display: none;
+    }
+    .dock .empty { color: #555; font-size: 12px; }
+
+    /* Data is where monospace earns its place: these columns line up. */
+    .dock table { width: 100%; border-collapse: collapse;
+                  font-family: var(--font-mono); font-size: 11px; }
+    .dock td { padding: 4px 3px; vertical-align: top; border-bottom: 1px solid #1c2230; }
+    .dock tr.row { cursor: pointer; }
+    .dock tr.row:hover td { background: #1c2230; }
+    .dock tr.row.sel td { background: #1b2740; }
+    .dock tr.row.sel td.nm { color: var(--acc); }
+    .dock td.nm { color: var(--fg); font-family: var(--font-ui);
+                  font-size: 12.5px; white-space: nowrap; }
+    .dock td.cls { color: #f0c674; font-family: var(--font-ui);
+                   font-size: 12px; padding-left: 8px; }
+    .dock td.rg { color: var(--muted); font-size: 10px; text-align: right;
+                  white-space: nowrap; width: 1%; }
+    .dock tr.unsure td { opacity: .62; }
+    .dock tr.unsure td.cls::after {
+      content: "?"; color: #e0a050; font-weight: 700; margin-left: 4px;
+    }
+
+    .dock .detail { padding: 10px 0 8px; margin-top: 10px; border-top: 1px solid var(--line);
+                    animation: dock-in var(--t) var(--ease); }
+    .dock .detail h3 { margin: 0 0 2px; font-size: 15px; color: var(--fg);
+                       font-weight: 600; word-break: break-word; }
+    .dock .detail .sub { color: #f0c674; font-size: 12px; margin-bottom: 10px; }
+    .dock .detail dl { margin: 0 0 12px; display: grid;
+                       grid-template-columns: auto 1fr; gap: 4px 12px; }
+    .dock .detail dt { color: var(--muted); font-size: 11.5px; }
+    .dock .detail dd { margin: 0; font-family: var(--font-mono); font-size: 11.5px;
+                       color: var(--fg); word-break: break-all; }
+    .dock .detail .warn { color: #e0a050; }
+    .dock .detail .evidence { margin: 10px 0 12px; }
+    /* Fixed height and `contain`, so switching crops neither jumps nor stretches. */
+    .dock .detail .hero {
+      box-sizing: border-box; width: 100%; height: 190px; display: flex;
+      align-items: center; justify-content: center;
+      border: 1px solid var(--line); border-radius: 5px;
+      background: #0b0e13; overflow: hidden;
+    }
+    .dock .detail .hero img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+    .dock .detail .hero .none { color: var(--muted); font-size: 11.5px; text-align: center; padding: 0 12px; }
+    .dock .detail .strip { display: flex; gap: 6px; overflow-x: auto; margin-top: 6px; }
+    .dock .detail .shot {
+      flex: 0 0 auto; width: 44px; height: 44px; padding: 0;
+      border: 1px solid var(--line); border-radius: 4px;
+      background: #0e1218; cursor: pointer; overflow: hidden;
+    }
+    .dock .detail .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .dock .detail .shot:hover { border-color: #39415a; }
+    .dock .detail .shot.on { border-color: var(--acc); }
+    .dock .detail .acts { display: flex; gap: 8px; }
+    .dock .detail .edit { display: flex; gap: 6px; margin-bottom: 10px; }
+    .dock .detail .acts .btn, .dock .detail .edit .field { flex: 1; min-width: 0; }
+    .dock .detail .said { margin-top: 9px; font-size: 11.5px; color: #e0a050; min-height: 1em; }
+
+    .dock .rel { display: flex; gap: 6px; align-items: baseline; padding: 3px 0;
+                 border-bottom: 1px solid #1c2230; font-family: var(--font-mono); font-size: 11px; }
+    .dock .rs { color: var(--acc); }
+    .dock .rp { color: #f0c050; font-weight: 600; font-family: var(--font-ui); }
+    .dock .rt { color: #f0c674; }
+    .dock .kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0;
+                border-bottom: 1px solid #1c2230; font-size: 12px; }
+    .dock .kv .k { color: var(--muted); }
+    .dock .kv .v { font-family: var(--font-mono); font-size: 11px; color: var(--acc); }
+
+    /* Thin, dark scrollbars (Firefox, then WebKit). */
+    .dock .objs-scroll, .dock #dock-detail, .dock .detail .strip {
+      scrollbar-width: thin; scrollbar-color: #2b3242 transparent;
+    }
+    .dock ::-webkit-scrollbar { width: 8px; height: 8px; }
+    .dock ::-webkit-scrollbar-track, .dock ::-webkit-scrollbar-corner { background: transparent; }
+    .dock ::-webkit-scrollbar-thumb {
+      background: #2b3242; border-radius: 4px;
+      border: 2px solid transparent; background-clip: padding-box;
+    }
+    .dock :hover::-webkit-scrollbar-thumb { background: #3a435a; background-clip: padding-box; }
+
+    /* The shell's timing. Width is not animated: the grip drags it. */
+    .dock .tabs button, .dock .head .shutbtn,
+    .dock tr.row td, .dock .detail .shot {
+      transition: color var(--t) var(--ease), background var(--t) var(--ease),
+                  border-color var(--t) var(--ease);
+    }
+    .dock .grip { transition: background var(--t) var(--ease), opacity var(--t) var(--ease); }
+    @keyframes dock-in { from { opacity: 0 } to { opacity: 1 } }
+    @media (prefers-reduced-motion: reduce) { .dock .detail { animation: none; } }

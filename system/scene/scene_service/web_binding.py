@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Resolve the Scene debug UI bind address.
+"""Resolve the Scene web UI bind address.
 
-The UI carries no authentication and its annotation endpoints read and write
-map data, so reaching it is enough to alter what the robot believes about its
-world. The default is therefore loopback: exposing that surface to a network
-is a decision, and a decision should be made rather than inherited.
-
-`web_host` in the Scene config, or SCENE_WEB_HOST, opens it deliberately —
-a deployment whose operator UI is reached from another machine sets one of
-them, and the service says at startup when it is bound wide.
+The UI has no authentication and can edit map data, so it binds loopback
+unless `web_host` or SCENE_WEB_HOST opens it.
 """
 
 from __future__ import annotations

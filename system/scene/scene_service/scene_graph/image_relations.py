@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Image-grounded VLM relation inference (VLM-primary scene graph).
+"""Image-grounded relation inference.
 
-Replaces the text-only, coordinates-as-JSON relation pass with one that lets the
-model *see* the scene: tracked objects are projected from the map frame into the
-current RGB keyframe, numbered boxes are drawn, and a single multimodal VLM call
-enumerates the relations among the numbered objects. Box numbers map back to
-``object_id`` to build edges.
-
-Why this layer is image-grounded and geometry is not: contact/containment
-("monitor on the desk") is exactly where coordinate-only reasoning and AABB
-tests fail (full-volume desk box, perspective), and a VLM reads it holistically;
-metric robot-actionable facts (``reachable_by``, ``near``) stay deterministic in
-the geometric layer and are intentionally excluded from this vocabulary.
+Tracked objects are projected into the current RGB keyframe as numbered boxes,
+and one VLM call names the relations between the numbers. Contact and
+containment are read far better from pixels than from boxes; the metric
+relations (`near`, `reachable_by`) stay with the geometric loop.
 """
 from __future__ import annotations
 
@@ -38,10 +31,6 @@ from .types import SceneGraphEdge, SceneGraphNode
 log = logging.getLogger(__name__)
 
 
-# Relations the image pass may emit. `near` and `reachable_by` are deliberately
-# absent — those are metric facts owned by the geometric layer (near is served
-# as a proximity query, reachable_by as a gripper-distance edge), not visual
-# judgements. Keeping them out stops the graph filling with "everything is near".
 IMAGE_RELATION_VOCAB = (
     "on_top_of", "under", "inside", "contains",
     "attached_to", "part_of", "same_object",
@@ -53,14 +42,8 @@ IMAGE_RELATION_VOCAB = (
 def project_point(
     T_cam_map: np.ndarray, K: Any, p_world: tuple[float, float, float]
 ) -> Optional[tuple[float, float, float]]:
-    """Project a map-frame point to ``(u, v, depth)`` pixels, or None if it is
-    behind the camera.
-
-    ``T_cam_map`` is the 4×4 camera-optical→map transform (as built by the
-    perception detector); its inverse takes a map point into the camera-optical
-    frame, then the pinhole model with intrinsics ``K`` (fx/fy/cx/cy) gives the
-    pixel. ``depth`` (camera-frame z) is returned so callers can z-sort or gate
-    on it. Points at/behind the image plane (z ≤ 0) return None."""
+    """Map-frame point → `(u, v, depth)` pixels through the camera-optical→map
+    transform and pinhole `K`; None behind the camera."""
     try:
         T_map_cam = np.linalg.inv(np.asarray(T_cam_map, dtype=np.float64))
     except np.linalg.LinAlgError:
@@ -82,17 +65,12 @@ def _corners(
     """8 world-frame corners of a yaw-rotated, axis-z-aligned box."""
     hx, hy, hz = extent[0] / 2.0, extent[1] / 2.0, extent[2] / 2.0
     c, s = math.cos(yaw), math.sin(yaw)
-    out = []
-    for sx in (-1.0, 1.0):
-        for sy in (-1.0, 1.0):
-            for sz in (-1.0, 1.0):
-                lx, ly, lz = sx * hx, sy * hy, sz * hz
-                # Rotate the local offset about Z (yaw), then translate.
-                wx = center[0] + (c * lx - s * ly)
-                wy = center[1] + (s * lx + c * ly)
-                wz = center[2] + lz
-                out.append((wx, wy, wz))
-    return out
+    return [
+        (center[0] + c * sx * hx - s * sy * hy,
+         center[1] + s * sx * hx + c * sy * hy,
+         center[2] + sz * hz)
+        for sx in (-1.0, 1.0) for sy in (-1.0, 1.0) for sz in (-1.0, 1.0)
+    ]
 
 
 def project_box(
@@ -104,13 +82,8 @@ def project_box(
     img_w: int,
     img_h: int,
 ) -> Optional[tuple[int, int, int, int]]:
-    """Project a 3D box to a clipped 2D pixel rect ``(u0, v0, u1, v1)``, or None
-    when the object is not usefully visible.
-
-    Projects the 8 corners, keeps those in front of the camera, takes their
-    pixel min/max and clips to the image. Returns None if fewer than two corners
-    are in front (object mostly behind the camera) or the clipped rect has no
-    area (entirely out of frame)."""
+    """Clipped pixel rect `(u0, v0, u1, v1)` of a 3D box, or None when fewer
+    than two corners are in front of the camera or it is out of frame."""
     us, vs = [], []
     for w in _corners(center, extent, yaw):
         pt = project_point(T_cam_map, K, w)
@@ -137,13 +110,8 @@ def annotate_frame(
     *,
     max_dim: int = 960,
 ) -> Optional[str]:
-    """Draw numbered rectangles on a copy of ``rgb_bgr`` and return it as a
-    base64 JPEG string (no data-url prefix), or None if encoding fails.
-
-    ``boxes`` is ``[(box_id, (u0, v0, u1, v1)), ...]``. The frame is downscaled
-    so its longest side is ≤ ``max_dim`` (after drawing, so coordinates need no
-    rescale) to bound VLM token cost. cv2 is imported lazily — the projection
-    helpers above stay importable without it."""
+    """Numbered rectangles drawn on a copy of the frame, downscaled to
+    `max_dim` after drawing, as base64 JPEG; None if encoding fails."""
     try:
         import cv2
     except Exception as e:  # noqa: BLE001
@@ -201,9 +169,7 @@ Output schema:
 
 
 def build_image_relation_user_text(legend: list[tuple[int, str]]) -> str:
-    """User-turn text accompanying the annotated image: the box-number → label
-    legend plus the instruction. The image itself is attached as a separate
-    multimodal part by the caller (``chat_json(images=...)``)."""
+    """The box-number → label legend and the instruction."""
     lines = ["Numbered objects in the image:"]
     for box_id, label in legend:
         lines.append(f"  {box_id}: {label}")
@@ -219,12 +185,8 @@ def build_image_relation_user_text(legend: list[tuple[int, str]]) -> str:
 def parse_image_relations(
     raw: dict, box_to_oid: dict[int, str]
 ) -> list[SceneGraphEdge]:
-    """Turn the VLM's ``{"edges": [...]}`` into validated graph edges.
-
-    Drops edges whose box numbers are unknown, self-edges, duplicates of an
-    already-seen ``(source, target, relation)``, and relations outside
-    ``IMAGE_RELATION_VOCAB`` (after normalization). Confidence is bounded to
-    [0, 1]. Never raises on a malformed entry — it is skipped."""
+    """Validated edges from the VLM's `{"edges": [...]}`; unknown boxes,
+    self-edges, duplicates and off-vocabulary relations are skipped."""
     edges: list[SceneGraphEdge] = []
     seen: set[tuple[str, str, str]] = set()
     for item in raw.get("edges", []) or []:
@@ -245,11 +207,10 @@ def parse_image_relations(
         if key in seen:
             continue
         seen.add(key)
-        confidence = 0.0
         try:
             confidence = float(item.get("confidence", 0.0))
         except (TypeError, ValueError):
-            pass
+            confidence = 0.0
         edges.append(SceneGraphEdge(
             source_id=src_oid,
             target_id=tgt_oid,
@@ -266,6 +227,19 @@ def parse_image_relations(
 ImageRelationOutcome = Literal["processed", "cached", "failed", "backoff"]
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _finite(value: Optional[float], key: str, default: float) -> float:
+    """`value`, else the env var; `default` when that is not finite."""
+    chosen = value if value is not None else _env_float(key, default)
+    return chosen if math.isfinite(chosen) else default
+
+
 def _all_close(left: tuple, right: tuple, tolerance: float) -> bool:
     return len(left) == len(right) and all(
         abs(a - b) <= tolerance for a, b in zip(left, right)
@@ -274,7 +248,6 @@ def _all_close(left: tuple, right: tuple, tolerance: float) -> bool:
 
 @dataclass(frozen=True)
 class _VisibleObjectSignature:
-    """Stable relation inputs for one projected visible object."""
 
     object_id: str
     label: str
@@ -286,7 +259,6 @@ class _VisibleObjectSignature:
 
 @dataclass(frozen=True)
 class _RelationInputSignature:
-    """Typed whole-scene relation input compared with explicit tolerances."""
 
     visible: tuple[_VisibleObjectSignature, ...]
     intrinsics: tuple[int, int, float, float, float, float]
@@ -298,7 +270,7 @@ class _RelationInputSignature:
 
 @dataclass(frozen=True)
 class ImageRelationResult:
-    """Atomic relation result with the inference decision that produced it."""
+    """Edges plus the decision that produced them."""
 
     edges: tuple[SceneGraphEdge, ...]
     outcome: ImageRelationOutcome
@@ -309,9 +281,8 @@ class ImageRelationResult:
 
 
 class ImageRelationInferer:
-    """Whole-scene image-grounded relation pass: project → annotate → one VLM
-    call → parse. Successful results are reused while the visible scene input
-    remains perceptually and geometrically unchanged."""
+    """project → annotate → one VLM call → parse, reusing the last answer
+    while the visible objects stay the same."""
 
     def __init__(
         self,
@@ -323,45 +294,25 @@ class ImageRelationInferer:
         failure_backoff_max_s: Optional[float] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """Configure relation input caching, diagnostics, and retry bounds."""
         self.llm_client = llm_client
-        if max_dim is not None:
-            self.max_dim = max_dim
-        else:
+        if max_dim is None:
             try:
-                self.max_dim = int(os.environ.get("SCENE_GRAPH_IMAGE_MAX_DIM", "960"))
+                max_dim = int(os.environ.get("SCENE_GRAPH_IMAGE_MAX_DIM", "960"))
             except ValueError:
-                self.max_dim = 960
-        threshold = (
-            frame_change_threshold
-            if frame_change_threshold is not None
-            else self._env_float("SCENE_GRAPH_IMAGE_CHANGE_THRESHOLD", 0.01)
-        )
-        self.frame_change_threshold = (
-            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.01
-        )
-        backoff_base = (
-            failure_backoff_base_s
-            if failure_backoff_base_s is not None
-            else self._env_float(
-                "SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_BASE_SEC", 30.0
-            )
-        )
-        self.failure_backoff_base_s = (
-            max(0.0, backoff_base) if math.isfinite(backoff_base) else 30.0
-        )
-        backoff_max = (
-            failure_backoff_max_s
-            if failure_backoff_max_s is not None
-            else self._env_float(
-                "SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_MAX_SEC", 300.0
-            )
-        )
-        self.failure_backoff_max_s = (
-            max(self.failure_backoff_base_s, backoff_max)
-            if math.isfinite(backoff_max)
-            else max(self.failure_backoff_base_s, 300.0)
-        )
+                max_dim = 960
+        self.max_dim = max_dim
+        self.frame_change_threshold = min(1.0, max(0.0, _finite(
+            frame_change_threshold, "SCENE_GRAPH_IMAGE_CHANGE_THRESHOLD", 0.01)))
+        self.failure_backoff_base_s = max(0.0, _finite(
+            failure_backoff_base_s, "SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_BASE_SEC", 30.0))
+        self.failure_backoff_max_s = max(self.failure_backoff_base_s, _finite(
+            failure_backoff_max_s, "SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_MAX_SEC", 300.0))
+        # Relations among the same objects do not change because the camera
+        # moved, so a new viewpoint of an unchanged set is not asked about
+        # again until this long after the last answer.
+        self.refresh_s = max(0.0, _env_float(
+            "SCENE_GRAPH_IMAGE_REFRESH_SEC", 600.0))
+        self._last_success_at = 0.0
         self._clock = clock
         self._last_success_signature: Optional[_RelationInputSignature] = None
         self._last_success_frame: Optional[FrameFingerprint] = None
@@ -369,13 +320,6 @@ class ImageRelationInferer:
         self._failure_streak = 0
         self._retry_at = 0.0
         self._stats = InferenceCounters()
-
-    @staticmethod
-    def _env_float(key: str, default: float) -> float:
-        try:
-            return float(os.environ.get(key, str(default)))
-        except ValueError:
-            return default
 
     @property
     def inference_counts(self) -> dict[str, int]:
@@ -386,11 +330,8 @@ class ImageRelationInferer:
         nodes: list[SceneGraphNode],
         bundle: tuple[np.ndarray, Any, np.ndarray],
     ) -> Optional[ImageRelationResult]:
-        """Return this round's typed relation result or None when it cannot run.
-
-        Failure and backoff remain distinct so the builder advances hysteresis
-        only after a real failed call. A successful empty edge list is cached.
-        """
+        """This round's result, or None when it cannot run. Failure and
+        backoff stay distinct: only a real failed call ages the edges."""
         if not self.llm_client.available:
             return None
         rgb_bgr, K, T_cam_map = bundle
@@ -416,16 +357,8 @@ class ImageRelationInferer:
                 object_id=node.object_id,
                 label=label,
                 rect=rect,
-                center=(
-                    float(node.bbox_center[0]),
-                    float(node.bbox_center[1]),
-                    float(node.bbox_center[2]),
-                ),
-                extent=(
-                    float(node.bbox_extent[0]),
-                    float(node.bbox_extent[1]),
-                    float(node.bbox_extent[2]),
-                ),
+                center=tuple(float(v) for v in node.bbox_center),
+                extent=tuple(float(v) for v in node.bbox_extent),
                 yaw=float(node.yaw),
             ))
             next_id += 1
@@ -450,12 +383,16 @@ class ImageRelationInferer:
             max_dim=self.max_dim,
         )
         frame = fingerprint_bgr(rgb_bgr)
-        if self._same_input(
+        unchanged = self._same_input(
             signature,
             frame,
             self._last_success_signature,
             self._last_success_frame,
-        ) and self._last_success_edges is not None:
+        ) or (
+            self._same_objects(signature, self._last_success_signature)
+            and self._clock() - self._last_success_at < self.refresh_s
+        )
+        if unchanged and self._last_success_edges is not None:
             self._record_skip("unchanged-input")
             edges = copy.deepcopy(self._last_success_edges)
             now_unix = time.time()
@@ -494,6 +431,7 @@ class ImageRelationInferer:
         edges = parse_image_relations(raw, box_to_oid)
         self._last_success_signature = signature
         self._last_success_frame = frame
+        self._last_success_at = self._clock()
         self._last_success_edges = copy.deepcopy(edges)
         self._clear_failure()
         self._stats.processed += 1
@@ -507,7 +445,6 @@ class ImageRelationInferer:
         previous_signature: Optional[_RelationInputSignature],
         previous_frame: Optional[FrameFingerprint],
     ) -> bool:
-        """Compare stable scene metadata together with its camera pixels."""
         return self._signatures_equivalent(signature, previous_signature) and frames_equivalent(
             frame,
             previous_frame,
@@ -515,11 +452,28 @@ class ImageRelationInferer:
         )
 
     @staticmethod
+    def _same_objects(
+        current: _RelationInputSignature,
+        previous: Optional[_RelationInputSignature],
+    ) -> bool:
+        """Same objects, same names, none moved; the camera may have."""
+        if previous is None or current.model != previous.model:
+            return False
+        if len(current.visible) != len(previous.visible):
+            return False
+        for left, right in zip(current.visible, previous.visible):
+            if left.object_id != right.object_id or left.label != right.label:
+                return False
+            if not _all_close(left.center, right.center, 0.05):
+                return False
+        return True
+
+    @staticmethod
     def _signatures_equivalent(
         current: _RelationInputSignature,
         previous: Optional[_RelationInputSignature],
     ) -> bool:
-        """Ignore sensor-level geometry jitter but invalidate meaningful input changes."""
+        """Equal up to sensor jitter."""
         if previous is None:
             return False
         if (
@@ -553,7 +507,6 @@ class ImageRelationInferer:
         self._log_stats(level, reason)
 
     def _record_failure(self, now: float) -> None:
-        """Schedule endpoint-wide backoff after a relation call fails."""
         self._failure_streak += 1
         exponent = min(self._failure_streak - 1, 10)
         delay = min(
@@ -569,7 +522,6 @@ class ImageRelationInferer:
         self._retry_at = 0.0
 
     def _log_stats(self, level: int, reason: str) -> None:
-        """Expose cumulative relation inference decisions in Scene logs."""
         log.log(
             level,
             "[image-rel] inference stats: processed=%d skipped=%d "

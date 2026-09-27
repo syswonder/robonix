@@ -18,12 +18,12 @@ from scene_service.state.object_registry import BBox3D, ObjectRegistry, Pose3D
 
 # ── registry-level helpers ────────────────────────────────────────────────
 
-def _insert(reg: ObjectRegistry, cls: str, xyz, *, now: float):
+def _insert(reg: ObjectRegistry, label: str, xyz, *, now: float):
     """Insert a perception object at `xyz` and return it (test helper).
 
     Bypasses the asyncio lock — single-threaded test, no contention."""
     return reg.insert_object(
-        cls,
+        label,
         Pose3D(*xyz),
         BBox3D(0.2, 0.2, 0.2),
         confidence=0.9,
@@ -154,7 +154,7 @@ def test_apply_snapshot_cross_tick_rebind():
     # Tick 1 + 2: same uuid u1 seen twice → one record, obs climbs to 2.
     run(det._apply_snapshot([_snap("u1", "keyboard", (1.0, 0.0, 0.7))]))
     run(det._apply_snapshot([_snap("u1", "keyboard", (1.0, 0.0, 0.7))]))
-    objs = [o for o in reg.all_objects() if o.cls == "keyboard"]
+    objs = [o for o in reg.all_objects() if o.label == "keyboard"]
     assert len(objs) == 1, f"expected 1 keyboard, got {len(objs)}"
     oid, obs = objs[0].object_id, objs[0].observation_count
     assert obs == 2, f"expected obs=2, got {obs}"
@@ -168,7 +168,7 @@ def test_apply_snapshot_cross_tick_rebind():
 
     # Tick 4: re-detected under a fresh uuid u2 → re-binds the SAME id, obs→3.
     run(det._apply_snapshot([_snap("u2", "keyboard", (1.02, 0.0, 0.7))]))
-    objs = [o for o in reg.all_objects() if o.cls == "keyboard"]
+    objs = [o for o in reg.all_objects() if o.label == "keyboard"]
     assert len(objs) == 1, f"re-detect must not duplicate; got {len(objs)}"
     assert objs[0].object_id == oid, "id must be stable across the uuid gap"
     assert objs[0].observation_count == 3, "obs count must continue, not reset"
@@ -185,7 +185,7 @@ def test_apply_snapshot_ttl_prune():
     run = asyncio.new_event_loop().run_until_complete
 
     run(det._apply_snapshot([_snap("u1", "keyboard", (1.0, 0.0, 0.7))]))
-    oid = next(o.object_id for o in reg.all_objects() if o.cls == "keyboard")
+    oid = next(o.object_id for o in reg.all_objects() if o.label == "keyboard")
 
     # Soft-evict, then backdate last_seen past the TTL.
     run(det._apply_snapshot([]))
@@ -197,6 +197,22 @@ def test_apply_snapshot_ttl_prune():
     print("  [PASS] test_apply_snapshot_ttl_prune")
 
 
+def test_apply_snapshot_follows_a_registry_merge():
+    """Two tracks the registry folded into one keep feeding that one record,
+    instead of minting a fresh id every tick that is then folded again."""
+    reg = ObjectRegistry()
+    det = _make_detector(reg)
+    run = asyncio.new_event_loop().run_until_complete
+    both = [_snap("u1", "chair", (1.0, 0.0, 0.4)), _snap("u2", "chair", (1.1, 0.0, 0.4))]
+
+    run(det._apply_snapshot(both))
+    assert len(reg.merge_duplicates(time.time(), xy_m=0.35)) == 1
+    (kept,) = [o.object_id for o in reg.all_objects() if o.label == "chair"]
+
+    run(det._apply_snapshot(both))
+    assert [o.object_id for o in reg.all_objects() if o.label == "chair"] == [kept]
+
+
 if __name__ == "__main__":
     print("Running object-identity unit tests...\n")
     test_find_rebindable()
@@ -205,4 +221,5 @@ if __name__ == "__main__":
     test_parse_merge_class_groups()
     test_apply_snapshot_cross_tick_rebind()
     test_apply_snapshot_ttl_prune()
+    test_apply_snapshot_follows_a_registry_merge()
     print("\nAll tests passed!")

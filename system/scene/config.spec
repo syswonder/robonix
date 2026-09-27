@@ -204,6 +204,34 @@ config:
   # the web interface.
   web_port: 50107
 
+  # optional string, default rerun (fallback SCENE_WEB_VIEWER): rerun | off.
+  # rerun draws the 3D and 2D map pages (the scene docker image ships it; when
+  # it is missing the pages say why); off never starts it.
+  web_viewer: rerun
+
+  # These are environment variables only:
+  #
+  #   SCENE_RERUN_GRPC_PORT: 9876     the 3D map's gRPC port; the 2D map uses
+  #                                   the next one. Local only: the browser
+  #                                   reaches both through web_port.
+  #   SCENE_RERUN_PERIOD_S: 1.0       how often the map pages are redrawn
+  #   SCENE_RERUN_HISTORY: latest     latest keeps one value per entity, so the
+  #                                   browser's memory stays bounded; changes
+  #                                   keeps a timeline for debugging
+  #   SCENE_RERUN_VIEWER_DIR: /opt/rerun-web-viewer
+  #                                   where the image installed the viewer's
+  #                                   browser bundle
+  #   SCENE_OBJECT_VIEWS_DIR: unset   where each object's photographs are kept;
+  #                                   unset keeps none, and then no object gets
+  #                                   a VLM caption either (start.sh sets it)
+  #   SCENE_OBJECT_VIEWS_MAX: 5       photographs kept per object
+  #   SCENE_CAPTION_LANG: zh          language of VLM captions: zh or en
+  #   SCENE_GRAPH_IMAGE_REFRESH_SEC: 600
+  #                                   the same objects, unmoved, reuse the last
+  #                                   image-relation answer for this long
+  #                                   however the camera moves
+  #   SCRIBE_LOG_DIR: set by rbnx     read by the logs page
+
   # ═══ 3. Leave alone unless something is wrong ═════════════════════════════
 
   # These describe the sensor path, which Atlas normally resolves on its own.

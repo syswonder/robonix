@@ -1,31 +1,12 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Scene perception backed by DualMap (Eku127/DualMap, RA-L 2025, Apache-2.0).
+"""Scene perception backed by DualMap (Eku127/DualMap, Apache-2.0).
 
-DualMap is an online open-vocabulary mapper built from YOLO-World + FastSAM /
-MobileSAM + MobileCLIP with a Bayesian class filter and a local/global map.
-Scene runs its detector and *local* map on the live RGB-D stream and projects
-the resulting objects into ``ObjectRegistry`` exactly the way the
-ConceptGraphs backend does, so every consumer (MCP tools, web UI, scene graph,
-persistence, the Replica export) stays unchanged.
-
-Reuse strategy: this class subclasses ``ConceptGraphsDetector`` for the parts
-that are backend-neutral — frame fetching, camera→map transform, registry
-reconciliation (``_project_to_registry`` / ``_apply_snapshot``), the 3D
-snapshot for the web UI and ``latest_frame_bundle`` — and replaces model
-loading, the per-tick mapping step, text embedding and the export. The map
-state it keeps in ``self._map_objects`` is a plain list of dicts shaped like
-ConceptGraphs' ``MapObjectList`` entries (``id``, ``class_name``, ``pcd``,
-``bbox``, ``conf``, ``num_detections``, ``n_points``, ``inst_color``,
-``clip_ft``), rebuilt from DualMap's local map after every frame.
-
-DualMap's own configuration is composed with Hydra from its checked-in YAML
-files (``/opt/dualmap/config``) with Scene's overrides applied on top, so the
-upstream defaults stay authoritative.
-
-Runtime requirements: the DualMap source at ``SCENE_DUALMAP_ROOT`` (default
-``/opt/dualmap``) on ``sys.path``, ``supervision>=0.25``, ``mobileclip``, and
-the weights ``yolov8l-world.pt``, ``mobile_sam.pt``, ``FastSAM-s.pt`` and the
-MobileCLIP-S2 OpenCLIP checkpoint (see ``_DEFAULT_WEIGHTS``).
+Subclasses ``ConceptGraphsDetector`` for the backend-neutral parts (frames,
+camera-to-map transform, registry reconciliation, 3D snapshot) and replaces
+model loading, the per-tick mapping step, text embedding and the export.
+``self._map_objects`` holds dicts shaped like ConceptGraphs map entries,
+rebuilt from DualMap's maps every keyframe. DualMap's config is composed with
+Hydra from its own YAML under ``SCENE_DUALMAP_ROOT`` with Scene's overrides.
 """
 from __future__ import annotations
 
@@ -56,28 +37,17 @@ _DEFAULT_WEIGHTS = {
     "fastsam": "/opt/models/dualmap/FastSAM-s.pt",
     "mobileclip": "/opt/models/dualmap/mobileclip_s2_datacompdr.bin",
 }
-# Text encoder used to stamp labels into the Replica export. The scorer matches
-# objects to class prompts through CLIP text features, so the export carries the
-# ViT-B-32 text embedding of each object's label (same weights Scene lite uses).
+# Text encoder for the Replica export; its scorer matches labels via CLIP text features.
 _EXPORT_CLIP = ("ViT-B-32", "/opt/models/open_clip_pytorch_model.bin")
 
-# Export cadence: the map is written every this many ticks (and at stop) so a
-# killed container still leaves a recent export behind.
+# Also exported at stop; periodic so a killed container leaves a recent export.
 _EXPORT_EVERY_TICKS = 100
-# Consecutive CUDA failures after which the tick loop gives up (see _tick_locked).
 _CUDA_FAILURE_LIMIT = 20
-# How much of the smaller box the intersection must cover before two same-class
-# tracks are treated as one object. See _absorb_overlapping for the sweep.
 _MERGE_OVERLAP = 0.5
-# A reconstructed surface, not a body. The floor arrives through the detector as
-# a slab 1.6 mm thick carrying two thousand points, so evidence cannot tell it
-# from a table; thickness can. Well under a keyboard (7-13 mm measured) and a
-# rug (20-50 mm), both of which are real and thin.
+# Thinner than any real object (keyboards, rugs): a slice of the floor.
 _SLAB_THICKNESS_M = 0.005
 _SLAB_OF_FLOOR_M = 0.20
 _BELOW_FLOOR_M = 0.02
-# A track this much smaller than the largest of its own class, on this much less
-# evidence, is a fragment rather than a second object of that kind.
 _OUTLIER_SIZE_FRACTION = 0.25
 _OUTLIER_POINTS_FRACTION = 0.10
 
@@ -90,15 +60,9 @@ def _inst_color(uid: str) -> list[float]:
             0.35 + 0.65 * (h & 0xFF) / 255.0]
 
 
-
 def _overlap_fraction(a: tuple, b: tuple) -> float:
-    """Share of the smaller of two AABBs that their intersection covers.
-
-    Boxes are (min_xyz, max_xyz) arrays. A flat track has near-zero volume and
-    would divide out to nonsense, so each extent is floored at 2 cm — the
-    comparison is then over area rather than volume, which is the honest
-    reading for two coplanar table tops.
-    """
+    """Share of the smaller of two (min_xyz, max_xyz) boxes that their
+    intersection covers. Extents are floored at 2 cm so flat tracks compare by area."""
     import numpy as np
 
     lo = np.maximum(a[0], b[0])
@@ -111,13 +75,12 @@ def _overlap_fraction(a: tuple, b: tuple) -> float:
     vb = float(np.prod(np.maximum(b[1] - b[0], 0.02)))
     return inter / max(1e-9, min(va, vb))
 
+
 class DualMapDetector(ConceptGraphsDetector):
     """Per-frame DualMap mapper that feeds Scene's ``ObjectRegistry``."""
 
     def __init__(self, *args: Any, dualmap_cfg: Optional[dict] = None, **kwargs: Any) -> None:
-        """Same constructor as ``ConceptGraphsDetector`` plus ``dualmap_cfg``, the
-        manifest's ``perception.dualmap`` mapping (see ``DUALMAP_KEYS``). Nothing
-        heavy happens here; models load in ``start``."""
+        """``dualmap_cfg`` is the manifest's ``perception.dualmap`` (see ``DUALMAP_KEYS``)."""
         super().__init__(*args, **kwargs)
         self._dualmap_cfg = dict(dualmap_cfg or {})
         self._dm_root = os.environ.get("SCENE_DUALMAP_ROOT", "").strip() or _DEFAULT_ROOT
@@ -127,24 +90,15 @@ class DualMapDetector(ConceptGraphsDetector):
         self._dm_data_input: Any = None
         self._dm_names: list[str] = []
         self._map_objects = []
-        # Occupancy-consistency gate, shared with the other backend.
         self._known_gate = None
-        # Share of an object's points that must sit on ground the occupancy map
-        # has observed. 1.0 would reject anything overhanging the mapped area.
         self._min_mapped_fraction = float(self._dualmap_cfg.get("min_mapped_fraction", 0.5))
         self._keep_unknown = bool(self._dualmap_cfg.get("keep_unknown", False))
-        # FastSAM only adds class-agnostic segments, which become "unknown" objects.
-        # When those are dropped anyway it is pure cost (and a second CUDA thread), so
-        # it follows keep_unknown unless the manifest says otherwise.
+        # FastSAM only yields "unknown" objects, so it follows keep_unknown by default.
         self._use_fastsam = bool(self._dualmap_cfg.get("use_fastsam", self._keep_unknown))
         self._consecutive_failures = 0
-        # Named for the status page: which backend is actually running is a
-        # question people currently answer by reading the manifest.
         self.backend_name = "dualmap"
         self.last_tick_s = 0.0
-        # Keyframe gate (see DualMap core.check_keyframe). Feeding every tick
-        # gave ~10x the observations of DualMap's stride-10 evaluation and
-        # fragmented objects; on a robot a frame without motion adds nothing.
+        # Keyframe gate (DualMap core.check_keyframe): mapping every frame fragments objects.
         self._kf_translation_m = float(self._dualmap_cfg.get("keyframe_translation_m", 0.1))
         self._kf_rotation_deg = float(self._dualmap_cfg.get("keyframe_rotation_deg", 3.0))
         self._kf_time_s = float(self._dualmap_cfg.get("keyframe_time_s", 5.0))
@@ -152,50 +106,23 @@ class DualMapDetector(ConceptGraphsDetector):
         self._last_kf_time = 0.0
         self._last_frame_key: Any = None
         self._skipped_frames = 0
-        # DualMap only merges its local map against itself in end_process(); the
-        # same call is made here every N keyframes so partial views of one object
-        # (a rug seen from two sides) collapse while the map is live.
+        # DualMap merges its local map only at end_process(); do it periodically instead.
         self._merge_every = int(self._dualmap_cfg.get("merge_every_keyframes", 20))
         self._keyframes = 0
-        # Only tracks DualMap itself marks stable (its Bayesian class filter has
-        # converged) reach the registry; transient tracks that appear for a few
-        # frames otherwise pile up as "missing" ghosts in the map views.
         self._stable_only = bool(self._dualmap_cfg.get("stable_only", False))
-        # Tracks seen in fewer keyframes than this stay out of the registry (a
-        # milder filter than stable_only: one-frame flickers never show up).
         self._min_observations = int(self._dualmap_cfg.get("min_observations", 1))
-        # Height of the floor in the world frame, and the gate measured from it:
-        # a track whose points all lie on (or under) the floor is depth noise,
-        # not an object. The same rule guards the concept_graphs backend, and
-        # the value comes from the same place — perception.floor_z_m or
-        # SCENE_CG_FLOOR_Z_M, which the Replica replay sets from the dataset's
-        # own floor (-1.51 m). A backend-private default of 0 here silently
-        # dropped every Replica object below the world origin.
+        # Falls back to the shared perception floor_z_m (see _floor_z_m).
         self._floor_z_override = self._dualmap_cfg.get("floor_z_m")
-        # Off by default. On Replica the gate deleted every rug and carpet
-        # (2-5 cm above the floor) and took the rug class from 0.16 IoU to 0;
-        # the Webots "bed under the floor" it was written for is a depth error
-        # that association now absorbs. A deployment with real floor noise can
-        # turn it on.
+        # Off by default: it also drops rugs and carpets.
         self._floor_gate = bool(self._dualmap_cfg.get("floor_gate", False))
         self._promoted = 0        # local tracks handed to the global map
-        # DualMap's global ("abstract") map is a navigation memory: only tracks
-        # judged low-mobility (furniture) are promoted into it, and every other
-        # stable track is DROPPED from the local map once it leaves the active
-        # window. That is the right memory for "go to the table", and the wrong
-        # one for an inventory — on Replica it halved the object count and
-        # the segmentation score. DualMap's own Replica evaluation runs
-        # local-only (runner_dataset.yaml), which keeps every stable track; so
-        # does this backend unless a deployment asks for the global map.
+        # DualMap's global map keeps only low-mobility tracks and drops the rest
+        # from the local map, which suits navigation but not an inventory; off by default.
         self._global_map = bool(self._dualmap_cfg.get("global_map", False))
-        # DualMap object-lifecycle overrides, passed straight through to its
-        # config; only the keys a deployment has a reason to change are exposed.
+        # DualMap config overrides passed straight through.
         self._lifecycle_cfg = {k: int(self._dualmap_cfg[k]) for k in
                                ("stable_num", "active_window_size", "max_pending_count")
                                if self._dualmap_cfg.get(k) is not None}
-        # Association knobs, also DualMap's own. Its dataset default gates
-        # point overlap at 2 cm, which assumes ground-truth poses; a robot whose
-        # SLAM pose is off by 3-10 cm between keyframes never meets it.
         self._lifecycle_cfg.update({k: float(self._dualmap_cfg[k]) for k in
                                     ("downsample_voxel_size", "sim_threshold", "merge_sim_threshold")
                                     if self._dualmap_cfg.get(k) is not None})
@@ -213,12 +140,8 @@ class DualMapDetector(ConceptGraphsDetector):
 
     # ── lifecycle ─────────────────────────────────────────────────────
     async def start(self) -> None:
-        """Load DualMap in an executor thread and start the tick loop. When
-        A deployment that asked for this backend and cannot have it is a
-        deployment error, not a degraded mode: Scene would come up, answer every
-        query, and recognize nothing, which looks like an empty room rather than
-        a broken install. So a failed load raises instead of leaving the
-        detector idle."""
+        """Load DualMap and start the tick loop. A failed load raises: running
+        without the requested backend would look like an empty room."""
         if self._task is not None:
             return
         loop = asyncio.get_running_loop()
@@ -250,9 +173,8 @@ class DualMapDetector(ConceptGraphsDetector):
                 pass
 
     def _write_classes_file(self) -> Optional[str]:
-        """Materialise the manifest vocabulary (``perception.dualmap.classes``)
-        as the one-name-per-line file DualMap's YOLO-World wrapper reads.
-        ``SCENE_DUALMAP_CLASSES`` may point at an existing file instead."""
+        """The vocabulary file DualMap reads: ``perception.dualmap.classes`` written
+        to a temp file, or the file named by ``SCENE_DUALMAP_CLASSES``."""
         env_path = os.environ.get("SCENE_DUALMAP_CLASSES", "").strip()
         classes = self._dualmap_cfg.get("classes")
         if classes:
@@ -270,10 +192,8 @@ class DualMapDetector(ConceptGraphsDetector):
         return None
 
     def _load_dualmap(self) -> bool:
-        """Compose DualMap's Hydra config with Scene's overrides and build the
-        detector and local map manager. Runs in an executor thread; returns
-        False (after logging why) instead of raising so perception degrades to
-        'no detector' the same way the ConceptGraphs backend does."""
+        """Compose DualMap's Hydra config and build its detector and map managers.
+        Runs in an executor thread; returns False after logging why."""
         root = self._dm_root
         if not os.path.isdir(os.path.join(root, "config")):
             log.warning("[scene-dualmap] DualMap root %s has no config/ directory", root)
@@ -319,16 +239,8 @@ class DualMapDetector(ConceptGraphsDetector):
             f"fastsam.model_path={weights['fastsam']}", f"clip.pretrained={weights['mobileclip']}",
             f"use_fastsam={str(self._use_fastsam).lower()}",
         ]
-        # DualMap's object lifecycle is sized for a dataset replay that maps
-        # every frame: an object needs `stable_num` observations before it counts
-        # as stable, and one that leaves the `active_window_size` most recent
-        # frames without getting there is deleted after `max_pending_count`
-        # rounds. A robot mapping keyframes at walking pace sees each object far
-        # fewer times, so on a deployment these three have to be scaled to the
-        # observation rate or the map empties out behind the robot.
         overrides += [f"{k}={self._lifecycle_cfg[k]}" for k in sorted(self._lifecycle_cfg)]
-        # DualMap's YAML uses paths relative to its checkout; Scene's cwd is not
-        # that checkout, so every such path is pinned to the root here.
+        # DualMap's YAML paths are relative to its checkout, not Scene's cwd.
         classes = self._classes_file or os.path.join(root, "config", "class_list", "gpt_indoor_general.txt")
         overrides += [
             "yolo.use_given_classes=true", f"yolo.given_classes_path={classes}",
@@ -339,9 +251,7 @@ class DualMapDetector(ConceptGraphsDetector):
             GlobalHydra.instance().clear()
             with initialize_config_dir(version_base=None, config_dir=os.path.join(root, "config")):
                 cfg = compose(config_name="runner_dataset", overrides=overrides)
-            # ReRunVisualizer is a process-wide singleton that the detector and
-            # map manager fetch by calling it with no arguments; it has to be
-            # configured once first. Rerun itself stays off.
+            # A singleton the detector and map managers fetch; configure it once.
             vis = ReRunVisualizer(cfg)
             vis.set_use_rerun(False)
             self._dm = Detector(cfg)
@@ -366,9 +276,8 @@ class DualMapDetector(ConceptGraphsDetector):
 
     # ── per-tick mapping ──────────────────────────────────────────────
     def _tick_locked(self) -> None:
-        """Feed one RGB-D frame through DualMap's detector and local map, then
-        mirror the local map into ``self._map_objects`` and the registry.
-        Side effects: advances ``self._tick_idx`` and replaces ``self._map_objects``."""
+        """Feed one keyframe through DualMap, then mirror its maps into
+        ``self._map_objects`` and the registry."""
         rgb_msg = self._rgb_msg()
         depth_msg = self._depth_msg()
         if rgb_msg is None or depth_msg is None:
@@ -429,13 +338,7 @@ class DualMapDetector(ConceptGraphsDetector):
             self._dm.update_data()
             self._lm.set_curr_idx(self._tick_idx)
             self._lm.process_observations(obs)
-            # Both halves of DualMap. The local map associates observations
-            # within a class, using CLIP similarity as well as geometry; a track
-            # that becomes stable is promoted to the global map, which merges by
-            # top-down 2D box overlap ACROSS classes — that is what collapses one
-            # workstation reported as tv + speaker + desk into one object. Running
-            # only the local half (as this adapter first did) throws that away and
-            # loses every promoted object with it.
+            # Stable local tracks are promoted to the global map, which merges across classes.
             promoted = self._lm.get_global_observations()
             self._lm.clear_global_observations()
             if promoted and self._gm is not None:
@@ -456,9 +359,7 @@ class DualMapDetector(ConceptGraphsDetector):
                             self._tick_idx - 1, self._consecutive_failures, e,
                             exc_info=self._consecutive_failures == 1)
             if "CUDA error" in str(e) and self._consecutive_failures >= _CUDA_FAILURE_LIMIT:
-                # A CUDA error is sticky for the process: every later kernel fails too.
-                # Stop ticking so the log says so once instead of forever, and keep the
-                # last good map in the registry until the service is restarted.
+                # A CUDA error is sticky for the process; stop and keep the last good map.
                 log.error("[scene-dualmap] %d consecutive CUDA failures — GPU context is lost; "
                           "stopping perception until Scene is restarted", self._consecutive_failures)
                 self._stop.set()
@@ -469,11 +370,7 @@ class DualMapDetector(ConceptGraphsDetector):
                                                  "ground_slab": 0, "class_outlier": 0,
                                                  "overlapping": 0}
         known = self._known_ground()
-        # A promoted object leaves the local map, so the scene is the union of
-        # both: what the robot is looking at now, and what it has already
-        # committed to memory. Promotion keeps the uid (GlobalObject inherits it
-        # from the observation), so an object does not change identity when it
-        # crosses over.
+        # Promotion moves a track to the global map with the same uid; show both maps.
         tracks = list(getattr(self._lm, "local_map", []) or [])
         if self._gm is not None:
             tracks += list(getattr(self._gm, "global_map", []) or [])
@@ -492,8 +389,7 @@ class DualMapDetector(ConceptGraphsDetector):
                 dropped["unstable"] += 1
                 continue
             objects.append(d)
-        # Order matters: the floor slabs carry the most points of anything in
-        # the tick, so they have to go before any step that ranks by evidence.
+        # Floor slabs go first: they carry the most points and would win any ranking.
         objects = self._drop_ground_slabs(objects, dropped)
         objects = self._drop_class_outliers(objects, dropped)
         objects = self._absorb_overlapping(objects, dropped)
@@ -518,12 +414,9 @@ class DualMapDetector(ConceptGraphsDetector):
             self._export()
 
     # ── operator hooks (delete / flush) ───────────────────────────────
-    # The base class edits `_map_objects` only; here that list is rebuilt from
-    # DualMap's local map every tick, so the removal has to reach the local map.
+    # `_map_objects` is rebuilt from DualMap's maps each tick, so edits go there.
     async def delete_object(self, object_id: str) -> None:
-        """Drop the DualMap local-map objects bound to ``object_id`` so they do
-        not come back on the next tick; the registry record is handled by the
-        caller (``ObjectMutationCoordinator``)."""
+        """Drop the DualMap tracks bound to ``object_id``; the caller removes the registry record."""
         uuids = {u for u, oid in getattr(self, "_uuid_to_oid", {}).items() if oid == object_id}
         for u in uuids:
             self._uuid_to_oid.pop(u, None)
@@ -534,11 +427,6 @@ class DualMapDetector(ConceptGraphsDetector):
             with self._inference_lock:
                 self._lm.local_map = [o for o in self._lm.local_map
                                       if str(getattr(o, "uid", "")) not in uuids]
-                # The global map too. `_tick_locked` rebuilds the scene from the
-                # union of both maps, and promotion keeps the uid, so a track
-                # that had become stable would be dropped from the local map and
-                # then reinstated from the global one on the very next tick --
-                # the operator deletes it and it comes back.
                 if self._gm is not None:
                     self._gm.global_map = [o for o in self._gm.global_map
                                            if str(getattr(o, "uid", "")) not in uuids]
@@ -547,7 +435,7 @@ class DualMapDetector(ConceptGraphsDetector):
         await asyncio.get_running_loop().run_in_executor(None, _drop)
 
     async def reset_derived_state(self) -> None:
-        """Empty DualMap's local map and the uuid bindings (flush)."""
+        """Empty both DualMap maps and the uuid bindings (flush)."""
         if hasattr(self, "_uuid_to_oid"):
             self._uuid_to_oid.clear()
         if self._lm is None:
@@ -556,8 +444,6 @@ class DualMapDetector(ConceptGraphsDetector):
         def _reset() -> None:
             with self._inference_lock:
                 self._lm.local_map = []
-                # Emptying only the local map leaves every promoted track in
-                # place, and a flush that keeps objects is not a flush.
                 if self._gm is not None:
                     self._gm.global_map = []
                 self._map_objects = []
@@ -565,11 +451,7 @@ class DualMapDetector(ConceptGraphsDetector):
         await asyncio.get_running_loop().run_in_executor(None, _reset)
 
     def _is_keyframe(self, rgb_msg: Any, pose: Any) -> bool:
-        """DualMap's keyframe rule on the live stream: skip a frame that is the
-        same message as the last mapped one, and otherwise map it only when the
-        camera translated ``keyframe_translation_m``, rotated
-        ``keyframe_rotation_deg`` or ``keyframe_time_s`` elapsed. Updates the
-        last-keyframe state when it returns True."""
+        """True for a new frame after enough translation, rotation or time; records it."""
         import numpy as np
         hdr = getattr(rgb_msg, "header", None)
         stamp = getattr(hdr, "stamp", None)
@@ -592,10 +474,8 @@ class DualMapDetector(ConceptGraphsDetector):
         return True
 
     def _keep_merged_uids(self, before: list) -> None:
-        """DualMap's merge builds a fresh LocalObject (new uid) from the observations
-        of the tracks it fuses. Give each merged object the uid of the constituent
-        that contributed most observations so the registry record (and its
-        ``scene.object.<cls>_NNN`` id) survives the merge instead of churning."""
+        """Give each merged object the uid of the track that contributed most
+        observations, so its registry id survives DualMap's merge."""
         obs_owner: dict[int, Any] = {}
         for obj in before:
             for ob in getattr(obj, "observations", []) or []:
@@ -614,16 +494,13 @@ class DualMapDetector(ConceptGraphsDetector):
 
     @property
     def _floor_z_m(self) -> float:
-        """Floor height: the backend's own setting when given, else the shared
-        perception setting (env overrides are applied to that at start)."""
+        """Backend floor_z_m if set, else the shared perception floor_z_m."""
         if self._floor_z_override is not None:
             return float(self._floor_z_override)
         return float((getattr(self, "cfg", None) or {}).get("floor_z_m", 0.0))
 
     def _to_map_object(self, o: Any, dropped: Optional[dict] = None) -> Optional[dict]:
-        """Shape one DualMap ``LocalObject`` like a ConceptGraphs map entry, or
-        None when it has too few points or no usable label; ``dropped`` counts
-        the reasons for the periodic diagnostic."""
+        """One DualMap track as a map entry, or None; ``dropped`` counts why."""
         import numpy as np
         pcd = getattr(o, "pcd", None)
         if pcd is None:
@@ -636,10 +513,7 @@ class DualMapDetector(ConceptGraphsDetector):
             if dropped is not None:
                 dropped["points"] += 1
             return None
-        # Floor gate: depth noise on the floor plane gets segmented and labelled
-        # like an object ("bed", "desk") and then sits under the map at z<0. A
-        # real object has some height above the floor; measure it at the 90th
-        # percentile so a few stray points below the plane do not save a track.
+        # Floor gate: floor noise has no height; 90th percentile ignores stray points.
         try:
             z = np.asarray(pcd.points, dtype=float)[:, 2] if self._floor_gate else None
             if z is not None and float(np.percentile(z, 90)) - self._floor_z_m < 0.05:
@@ -670,10 +544,6 @@ class DualMapDetector(ConceptGraphsDetector):
             "class_name": name,
             "pcd": pcd,
             "bbox": bbox,
-            # No flat placeholder: a fabricated 0.5 is indistinguishable
-            # from a measured 0.5 and sorts in the middle of everything.
-            # _track_confidence returns 0.0 when nothing informative exists,
-            # which reads as "no evidence" rather than "medium".
             "conf": [conf],
             "num_detections": int(getattr(o, "observed_num", 1) or 1),
             "n_points": int(n_points),
@@ -684,16 +554,7 @@ class DualMapDetector(ConceptGraphsDetector):
 
     # ── nested copies of one object ───────────────────────────────────
     def _drop_ground_slabs(self, objects: list, dropped: dict) -> list:
-        """Drop tracks that are a slice of the floor rather than a thing on it.
-
-        Depth on a large flat surface segments into pieces that the detector
-        labels like furniture, and each piece carries a thousand points, so
-        every filter that ranks by evidence keeps it — the nine that survived
-        one office run were labelled `desk` and outnumbered the real tables.
-        Being flat is not enough on its own (a keyboard is flat): it has to be
-        flat AND lying on the floor, which nothing the robot is asked to find
-        is.
-        """
+        """Drop tracks that are thin and on the floor, or mostly below it."""
         import numpy as np
 
         kept = []
@@ -704,10 +565,6 @@ class DualMapDetector(ConceptGraphsDetector):
                 zc = float(np.median(pts[:, 2]))
                 thin_on_floor = ((z1 - z0) < _SLAB_THICKNESS_M
                                  and abs(z0 - self._floor_z_m) < _SLAB_OF_FLOOR_M)
-                # A 3.5 x 4.5 m "desk" whose median point sat 5 cm UNDER the
-                # floor: the floor plus a few table legs, and not thin at all.
-                # Nothing the robot is asked to find has most of itself below
-                # the ground it stands on. A rug's median is above the floor.
                 mostly_below_floor = zc < self._floor_z_m - _BELOW_FLOOR_M
                 if thin_on_floor or mostly_below_floor:
                     dropped["ground_slab"] += 1
@@ -716,18 +573,8 @@ class DualMapDetector(ConceptGraphsDetector):
         return kept
 
     def _drop_class_outliers(self, objects: list, dropped: dict) -> list:
-        """Drop a track far too small to be the thing its own label names.
-
-        The scale comes from the class itself rather than from a table of
-        expected object sizes: a vocabulary is the deployment's own list, and
-        nobody should have to write down how big a desk is for their site. The
-        real members of a class agree on scale, while a depth-error copy is a
-        fragment an order of magnitude smaller on an order of magnitude less
-        evidence — 0.11 m tracks labelled `desk` beside 1.6 m ones. Both
-        conditions are required, so a class that genuinely holds one large and
-        one small member keeps both, and a class with fewer than three members
-        is left alone entirely for want of a scale to judge against.
-        """
+        """Drop a track far smaller, on far less evidence, than the largest of its
+        class (classes with at least three members only)."""
         import numpy as np
 
         by_class: dict[str, list] = {}
@@ -754,26 +601,8 @@ class DualMapDetector(ConceptGraphsDetector):
         return [o for o in objects if id(o) not in drop]
 
     def _absorb_overlapping(self, objects: list, dropped: dict) -> list:
-        """Absorb a same-class track that occupies the space of a bigger one.
-
-        A large object is registered in pieces -- one table seen from two sides
-        comes back as two tracks covering nearly the same volume -- and a
-        detection with wrong depth is re-registered along the camera ray, each
-        copy smaller and further out than the last (one plant became ten, point
-        counts falling 776 -> 14). Both are the same shape of error: two tracks
-        claiming one piece of space.
-
-        What separates them from two real objects is whether one claims the
-        other's space: the intersection covers half of the smaller box, or the
-        smaller box's centre is inside the bigger one. Two tables pushed
-        together satisfy neither -- they overlap only where they touch
-        (measured 0.12) and their centres are a metre apart -- so they stay
-        two. Deciding by space rather than by distance is what keeps two chairs
-        side by side apart, and it is why a plain radius merge could not be
-        used: at a radius wide enough to collapse the smear it also collapsed
-        distinct objects (measured: duplicates 31 -> 6, but true positives
-        40 -> 24).
-        """
+        """Absorb a same-class track that claims a bigger one's space: its centre
+        is inside, or the boxes overlap by more than half of the smaller."""
         import numpy as np
 
         by_class: dict[str, list] = {}
@@ -797,13 +626,6 @@ class DualMapDetector(ConceptGraphsDetector):
                 for j in range(i + 1, len(order)):
                     if id(order[j]) in absorbed or boxes[j] is None:
                         continue
-                    # Either test alone is a claim on the same piece of space.
-                    # Overlap catches a table met in halves, whose pieces sit
-                    # beside each other rather than one inside the other;
-                    # containment catches a long thin copy whose centre is well
-                    # inside the original but whose volume overlaps far less
-                    # than half. Replacing the second with the first raised
-                    # duplicates from 7 to 16 on the same tour.
                     inside = bool(np.all(centres[j] >= lo) and np.all(centres[j] <= hi))
                     if inside or _overlap_fraction(boxes[i], boxes[j]) > _MERGE_OVERLAP:
                         absorbed.add(id(order[j]))
@@ -820,14 +642,8 @@ class DualMapDetector(ConceptGraphsDetector):
         return self._known_gate.current()
 
     def _on_known_ground(self, obj: dict, known) -> bool:
-        """Has the robot ever looked where this object claims to be?
-
-        A detection whose depth is wrong lands along the camera ray, often well
-        past the walls, and is registered again further out each time it is
-        seen -- one plant became ten, strung into ground the map never observed.
-        Not a threshold to tune: the map settles it. Objects the map has no
-        opinion about are kept.
-        """
+        """Whether enough of the object lies on ground the map has observed
+        (kept when the map has no opinion)."""
         import numpy as np
 
         pts = np.asarray(obj["pcd"].points, dtype=np.float64)
@@ -842,9 +658,7 @@ class DualMapDetector(ConceptGraphsDetector):
             return self._encode_text_nolock(texts)
 
     def _encode_text_nolock(self, texts: list[str]) -> Optional[list[list[float]]]:
-        """Encode ``texts`` with the detector's MobileCLIP text tower (L2-normalised,
-        one 512-d vector per text). Caller holds ``_inference_lock``; returns None
-        when the encoder is unavailable or fails."""
+        """L2-normalised MobileCLIP text features; caller holds ``_inference_lock``."""
         try:
             import torch
             tok = self._dm.clip_tokenizer(list(texts)).to(self._device)
@@ -860,12 +674,8 @@ class DualMapDetector(ConceptGraphsDetector):
 
     # ── Replica export ────────────────────────────────────────────────
     def _export(self) -> None:
-        """Write the local map as a ConceptGraphs-style export when
-        ``SCENE_EXPORT_CG_PICKLE`` is set; an empty map still writes a file so a
-        scorer never reads a stale run. Labels are embedded with the ViT-B-32 text
-        encoder (loaded once, cached) so the upstream scorer's CLIP matching
-        reduces to label matching; when that encoder is unavailable the geometry
-        is still written with zero features and an error is logged."""
+        """Write a ConceptGraphs-style export when ``SCENE_EXPORT_CG_PICKLE`` is set
+        (also for an empty map, so a scorer never reads a stale run)."""
         out_dir = os.environ.get("SCENE_EXPORT_CG_PICKLE", "").strip()
         if not out_dir:
             return
@@ -934,23 +744,8 @@ class DualMapDetector(ConceptGraphsDetector):
 
 
 def _track_confidence(track: Any) -> float:
-    """How much DualMap actually believes this track's label.
-
-    Three sources, in decreasing authority, first informative one wins:
-
-      1. ``max_prob`` -- the Bayesian class filter's winning probability.
-         Initialised to 0.0 and only written once the filter has updated
-         that track, so zero means "not yet", not "no confidence".
-      2. ``class_probs`` -- the same distribution read directly. Its initial
-         value is the uniform prior (1/num_classes), which is not a
-         measurement; a distribution still at the prior is skipped rather
-         than reported as a very small confidence.
-      3. the latest observation's own detector score -- unfused, but real,
-         and present from the first sighting.
-
-    Returns 0.0 when none of them say anything, which is the honest answer:
-    the label is a guess with no evidence behind it yet.
-    """
+    """Label confidence: the class filter's max_prob, else class_probs above the
+    uniform prior, else the latest detection score, else 0.0 (no evidence)."""
     prob = float(getattr(track, "max_prob", 0.0) or 0.0)
     if prob > 0.0:
         return min(1.0, prob)
@@ -963,7 +758,6 @@ def _track_confidence(track: Any) -> float:
             arr = _np.asarray(probs, dtype=float)
             if arr.size:
                 top = float(arr.max())
-                # Uniform means untouched: every entry equals the prior.
                 if top > (1.0 / arr.size) + 1e-6:
                     return min(1.0, top)
         except Exception:  # noqa: BLE001
@@ -978,4 +772,3 @@ def _track_confidence(track: Any) -> float:
         pass
 
     return 0.0
-

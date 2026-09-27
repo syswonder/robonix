@@ -62,10 +62,10 @@ def _unavailable() -> bool:
     print(f"  [SKIP] map facade tests unavailable: {err}")
     return True
 
-def _obj(oid: str, cls: str = "cup", *, missing: bool = False,
+def _obj(oid: str, label: str = "cup", *, missing: bool = False,
          attributes: "dict | None" = None) -> SceneObject:
     return SceneObject(
-        object_id=oid, cls=cls,
+        object_id=oid, label=label,
         pose=Pose3D(x=1.0, y=2.0, z=0.0, yaw=0.0, frame_id="map"),
         bbox=BBox3D(size_x=0.1, size_y=0.1, size_z=0.1, yaw=0.0, frame_id="map"),
         confidence=0.9, first_seen=1.0, last_seen=2.0,
@@ -293,13 +293,13 @@ def test_mapping_mode_resave_refused():
 
 def test_save_refuses_overwriting_unloaded_annotations():
     """Bound-is-not-loaded: a live session must not carry its (possibly
-    empty) annotation partition over a map's previously saved rooms."""
+    empty) annotation partition over a map's previously saved regions."""
     if _unavailable():
         return
     with tempfile.TemporaryDirectory() as tmp:
-        # Pre-save rooms under labx from an earlier "session".
+        # Pre-save regions under labx from an earlier "session".
         earlier = AnnotationStore(os.path.join(tmp, "anno"), map_id="labx")
-        earlier.create(kind="room", name="kitchen", points=ROOM_PTS)
+        earlier.create(kind="region", name="kitchen", points=ROOM_PTS)
         web_mod, app, env = _make_env(
             tmp, binding={"map_id": "labx", "mode": "", "generation": None,
                           "source": "lifecycle"},
@@ -310,7 +310,7 @@ def test_save_refuses_overwriting_unloaded_annotations():
         with _patched(web_mod, rpc=_rpc_ok, maps=_spatial("labx")):
             status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
         assert status == 409, (status, body)
-        # The saved rooms survived untouched.
+        # The saved regions survived untouched.
         kept = AnnotationStore(os.path.join(tmp, "anno"), map_id="labx")
         assert [a.name for a in kept.list()] == ["kitchen"]
     print("  [PASS] test_save_refuses_overwriting_unloaded_annotations")
@@ -327,7 +327,7 @@ def test_save_excludes_self_robot_object():
             tmp, binding={"map_id": "default", "mode": "", "generation": None,
                           "source": "default"},
             objs=[_obj("o1"),
-                  _obj("selfbot", cls="robot", attributes={"is_robot": True})],
+                  _obj("selfbot", label="robot", attributes={"is_robot": True})],
         )
         if app is None:
             return
@@ -342,7 +342,7 @@ def test_save_excludes_self_robot_object():
 def test_failed_snapshot_keeps_previous_sidecar_and_fails_the_save():
     """An incomplete object write must leave the sidecar at the previous,
     still-consistent snapshot (and not purge it) — and the Save must report
-    an explicit failure, not 200/ok: geometry + rooms + objects commit as
+    an explicit failure, not 200/ok: geometry + regions + objects commit as
     one unit, so an operator must retry rather than trust the artifact."""
     if _unavailable():
         return
@@ -445,6 +445,22 @@ def test_delete_removes_sidecar_and_both_partitions():
         assert "labx__s3" not in env.store.rows and "labx" not in env.store.rows
         assert env.meta.read("labx") is None
     print("  [PASS] test_delete_removes_sidecar_and_both_partitions")
+
+
+def test_the_map_in_use_cannot_be_deleted():
+    """Mapping would keep localizing on it and Scene would still name it."""
+    if _unavailable():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        web_mod, app, env = _make_env(
+            tmp, binding={"map_id": "labx", "mode": "localization", "generation": 1,
+                          "source": "ui_load"},
+        )
+        if app is None:
+            return
+        with _patched(web_mod, rpc=_rpc_ok):
+            status, body = _call(app, "POST", "/api/maps/delete", {"map_id": "labx"})
+        assert status == 409 and not body["ok"], body
 
 
 def test_reserved_map_ids_rejected():

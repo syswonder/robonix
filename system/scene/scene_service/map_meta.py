@@ -1,25 +1,13 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Scene-owned per-map semantic snapshot metadata (the epoch sidecar).
+"""Per-map sidecar naming the object partition of the map's last Save.
 
-mapping owns a saved map's spatial artifact; scene owns the matching semantic
-snapshot (objects + room annotations). The sidecar records, per `map_id`,
-WHICH object partition holds the snapshot written by the Save that produced
-the artifact on disk. Every Save allocates a fresh partition token
-(`"<map_id>__s<seq>"`) and repoints the sidecar at it, so:
-
-- Load restores exactly the rows written together with the loaded artifact —
-  never rows from an earlier build of a same-named map, whose map frame no
-  longer exists (the mis-anchored / off-map restore bug).
-- A map with NO sidecar (saved before this mechanism, or a foreign DB)
-  restores nothing rather than coordinates in a dead frame.
-
-One JSON file per map under `base_dir`, written atomically (tmp + replace).
-`mapping_generation` / `mapping_mode` are recorded for diagnostics when the
-lifecycle broadcast is available at save time; the mechanism itself never
-depends on them.
+Every Save writes its objects under a fresh token (`"<map_id>__s<seq>"`) and
+then repoints the sidecar at it, so Load restores exactly the rows saved with
+the loaded spatial map. A map without a sidecar restores nothing.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -54,14 +42,8 @@ class MapSemanticMeta:
 
 
 class MapMetaStore:
-    """Per-map sidecar files: `<base_dir>/<map_id>.json`.
-
-    All methods are synchronous; the internal lock guards individual file
-    ops only — the `next_partition` → persist rows → `write` sequence is NOT
-    atomic here, and callers serialize whole Save/Load/Delete operations
-    (the web facade's `ops_lock`). A file that cannot be parsed is treated
-    as absent with a WARNING: restoring nothing is the safe outcome, and the
-    bytes are left in place for inspection."""
+    """`<base_dir>/<map_id>.json`. The lock covers single file ops; callers
+    serialize whole Save/Load/Delete sequences."""
 
     def __init__(self, base_dir: str) -> None:
         self._lock = threading.Lock()
@@ -72,13 +54,9 @@ class MapMetaStore:
         return self._base / f"{sanitize_map_id(map_id)}.json"
 
     def read(self, map_id: str) -> Optional[MapSemanticMeta]:
-        """The sidecar for `map_id`, or None when absent/unreadable. A
-        malformed record must never crash a Load — it degrades to
-        "no snapshot", which restores nothing. "Malformed" includes an
-        identity mismatch: a parseable record naming ANOTHER map (or a
-        partition token outside this map's `<id>__s<seq>` namespace) would
-        let Load restore a different map's objects into this one, so it is
-        treated as corrupt rather than trusted."""
+        """The sidecar, or None when absent or malformed. A record naming
+        another map or a token outside `<id>__s<seq>` counts as malformed:
+        trusting it would restore another map's objects."""
         clean = sanitize_map_id(map_id)
         path = self._path(map_id)
         with self._lock:
@@ -102,13 +80,7 @@ class MapMetaStore:
                         f"partition {meta.object_partition!r} is not this "
                         f"map's save token {expected_partition!r}"
                     )
-                # Return NORMALIZED numeric fields: a foreign sidecar with
-                # save_seq "2"/2.0 passes the checks above, but the raw
-                # value would then poison downstream arithmetic —
-                # `next_partition`'s `save_seq + 1` (TypeError escaping as
-                # a 500 mid-Save) or a minted "…__s3.0" token no later
-                # read would accept. Same for mapping_generation, which
-                # feeds integer comparisons in annotation staleness.
+                # Normalized: "2" or 2.0 would break `save_seq + 1` later.
                 return replace(
                     meta,
                     save_seq=seq,
@@ -125,20 +97,16 @@ class MapMetaStore:
                 return None
 
     def next_partition(self, map_id: str) -> tuple[str, int]:
-        """The partition token for the NEXT snapshot of `map_id`, without
-        touching the sidecar (the caller commits via `write` only after the
-        snapshot rows are safely persisted). The sequence advances only on
-        commit, so a FAILED attempt's token is handed out again — callers
-        clear that partition before writing into it."""
+        """The next Save's token. The sequence only advances on `write`, so a
+        failed Save's token is handed out again; callers clear it first."""
         clean = sanitize_map_id(map_id)
         prev = self.read(clean)
         seq = (prev.save_seq + 1) if prev is not None else 1
         return f"{clean}__s{seq}", seq
 
     def write(self, meta: MapSemanticMeta) -> None:
-        """Atomically persist `meta` as its map's sidecar. Raises on I/O
-        failure — a Save must not report success while the sidecar still
-        points at the previous snapshot."""
+        """Atomic replace; raises on I/O failure so a Save cannot succeed
+        while the sidecar points at the previous snapshot."""
         path = self._path(meta.map_id)
         tmp = path.with_suffix(".json.tmp")
         with self._lock:
@@ -149,13 +117,41 @@ class MapMetaStore:
             os.replace(tmp, path)
 
     def delete(self, map_id: str) -> bool:
-        """Remove `map_id`'s sidecar (map deletion). True when one existed."""
+        """Remove `map_id`'s sidecar and preview (map deletion). True when a
+        sidecar existed."""
         path = self._path(map_id)
         with self._lock:
             existed = path.exists()
-            if existed:
-                path.unlink()
+            for p in (path, *self._preview_paths(map_id)):
+                p.unlink(missing_ok=True)
             return existed
+
+    def _preview_paths(self, map_id: str) -> tuple[Path, Path]:
+        clean = sanitize_map_id(map_id)
+        return self._base / f"{clean}.png", self._base / f"{clean}.grid.json"
+
+    def write_preview(self, map_id: str, occupancy: dict) -> None:
+        """Keep the grid as saved, so the map library can show it without
+        reaching into mapping's files."""
+        png, grid = self._preview_paths(map_id)
+        geometry = {k: occupancy[k] for k in
+                    ("width", "height", "resolution", "origin_x", "origin_y")}
+        with self._lock:
+            png.write_bytes(base64.b64decode(occupancy["png_b64"]))
+            grid.write_text(json.dumps(geometry), encoding="utf-8")
+
+    def read_preview(self, map_id: str) -> tuple[Optional[bytes], Optional[dict]]:
+        """The saved grid image and its geometry, each None when absent."""
+        png, grid = self._preview_paths(map_id)
+        try:
+            image = png.read_bytes()
+        except OSError:
+            image = None
+        try:
+            geometry = json.loads(grid.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            geometry = None
+        return image, geometry
 
 
 def make_meta(map_id: str, partition: str, seq: int, *,

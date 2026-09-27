@@ -5,7 +5,7 @@ from scene_service.state.object_registry import BBox3D, ObjectRegistry, Pose3D
 
 def _detection(*, pose_frame: str, bbox_frame: str) -> Detection:
     return Detection(
-        cls="fixture",
+        label="fixture",
         pose=Pose3D(x=1.0, y=2.0, z=0.0, frame_id=pose_frame),
         bbox=BBox3D(
             size_x=0.2,

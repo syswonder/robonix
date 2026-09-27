@@ -378,6 +378,18 @@ def main() -> int:
                   results)
 
     if args.delete_after:
+        # The map in use cannot be deleted. Saving the session under another
+        # name moves it off this one, which the runner's cleanup then removes.
+        try:
+            refused = http_json("POST", scene + "/api/maps/delete",
+                                {"map_id": args.map_id}, timeout=60.0)
+        except RuntimeError as e:
+            refused = {"ok": False, "detail": str(e)}
+        check("delete_in_use_refused", "HTTP 409" in str(refused.get("detail")),
+              str(refused), results)
+        moved = http_json("POST", scene + "/api/maps/save",
+                          {"map_id": args.map_id + "-after"}, timeout=args.timeout)
+        check("save_elsewhere_ok", bool(moved.get("ok")), str(moved.get("detail", "")), results)
         deleted = http_json("POST", scene + "/api/maps/delete",
                             {"map_id": args.map_id}, timeout=60.0)
         print("delete_response", json.dumps(deleted, ensure_ascii=False, sort_keys=True))
