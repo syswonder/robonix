@@ -2321,6 +2321,10 @@ fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan 
             call: None,
             op_id: "recovery".to_string(),
             description: "recovery: no valid plan produced".to_string(),
+            condition_json: "".to_string(),
+            bind: "".to_string(),
+            repeat_count: 0,
+            max_iterations: 0,
         }],
         root_index: 0,
     }
@@ -2484,6 +2488,10 @@ fn expand_rtdl_node(
                 call: None,
                 op_id: next_op_id(),
                 description,
+                condition_json: "".to_string(),
+                bind: "".to_string(),
+                repeat_count: 0,
+                max_iterations: 0,
             });
             let mut child_indices = Vec::with_capacity(children.len());
             for (idx, child) in children.iter().enumerate() {
@@ -2530,6 +2538,10 @@ fn expand_rtdl_node(
                 }),
                 op_id: next_op_id(),
                 description,
+                condition_json: "".to_string(),
+                bind: "".to_string(),
+                repeat_count: 0,
+                max_iterations: 0,
             });
             Ok(node_index)
         }
