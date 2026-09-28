@@ -13,7 +13,7 @@ class Registry:
         self.objects = objects
 
     async def snapshot(self):
-        return self.objects, {}
+        return self.objects
 
 
 class Annotations:
@@ -23,7 +23,7 @@ class Annotations:
         return [
             SimpleNamespace(
                 annotation_id="315",
-                kind="room",
+                kind="region",
                 name="room 315",
                 points=[[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0]],
             ),
@@ -39,7 +39,7 @@ class Annotations:
 def scene_object(object_id, label, x, y, last_seen):
     return SceneObject(
         object_id=object_id,
-        cls=label,
+        label=label,
         pose=Pose3D(x, y, 0.0, yaw=0.4),
         bbox=BBox3D(),
         confidence=1.0,
@@ -55,6 +55,7 @@ def test_robot_context_combines_pose_room_area_and_nearby_objects():
         "banana": scene_object("scene.object.banana_001", "banana", 1.0, 0.5, now),
         "far": scene_object("scene.object.chair_001", "chair", 10.0, 10.0, now),
     }
+    objects["robot"].attributes["is_robot"] = True  # as the pose feed marks it
     mcp_tools.attach_state(registry=Registry(objects))
     mcp_tools.attach_annotation_store(Annotations())
 
@@ -64,8 +65,8 @@ def test_robot_context_combines_pose_room_area_and_nearby_objects():
 
     assert response.pose_known and not response.stale
     assert response.map_id == "floor-3"
-    assert response.room_id == "scene.room.315"
-    assert response.room_name == "room 315"
+    assert response.region_id == "scene.region.315"
+    assert response.region_name == "room 315"
     assert response.containing_area_names == ["open area", "room 315"]
     assert [item.id for item in response.nearby_objects] == [
         "scene.object.banana_001"

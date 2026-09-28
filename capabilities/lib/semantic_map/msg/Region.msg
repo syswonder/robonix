@@ -1,5 +1,5 @@
-# User-authored room region anchored to the active SLAM map.
-# `id` is the stable Scene identifier accepted directly by goal_room.
+# User-authored region anchored to the active SLAM map.
+# `id` is the stable Scene identifier accepted directly by goal_region.
 
 string id
 string kind

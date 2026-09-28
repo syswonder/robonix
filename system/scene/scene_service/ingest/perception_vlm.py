@@ -1,17 +1,8 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""VLM-based object detection: take an RGB frame, ask an
-OpenAI-compatible vision model to enumerate visible objects with
-approximate image coordinates, parse the JSON response, and (when
-depth is available) reproject to world coordinates.
-
-This lives inside scene/ deliberately — system/ services should not
-reverse-depend on a service-layer perception package. The detector
-calls the same OpenAI-compatible endpoint that pilot already uses
-(VLM_BASE_URL / VLM_API_KEY / VLM_MODEL), so no new credentials.
-
-The polling loop keeps a perceptual fingerprint of the last successful frame,
-so a cached camera image or low-level JPEG noise does not spend another model
-call. Failures retry with bounded exponential backoff.
+"""VLM object detection: ask an OpenAI-compatible vision model (VLM_BASE_URL,
+VLM_API_KEY, VLM_MODEL) for the objects in an RGB frame and project them into
+the world frame. An unchanged frame reuses the last answer; failures back off
+exponentially.
 """
 from __future__ import annotations
 
@@ -66,13 +57,7 @@ Limit to at most 12 detections, prioritising larger / closer items.
 
 @dataclass
 class _CamIntrinsics:
-    """Pinhole intrinsics supplied by the active camera deployment.
-
-    Scene must not carry simulator-specific calibration constants. Metric
-    perception gets K from `primitive/camera/intrinsics`; deployments without a
-    reliable CameraInfo stream may provide a reviewed `intrinsics_fallback` in
-    their manifest.
-    """
+    """Pinhole intrinsics from the camera deployment (or its manifest fallback)."""
     width: int
     height: int
     fx: float
@@ -82,13 +67,8 @@ class _CamIntrinsics:
 
 
 class VLMObjectDetector:
-    """Runs the RGB-poll → VLM-call → Detection-list pipeline as one
-    asyncio task. Calls back into `on_detections` with a batch of
-    `Detection` objects at each successful tick.
-
-    The detector reads camera/snapshot via the existing PrimitivePoller
-    machinery (passed in as `rgb_fetcher`) so we don't duplicate the
-    atlas connect logic."""
+    """Polls ``rgb_fetcher``, asks the VLM, and hands ``Detection`` batches to
+    ``on_detections``."""
 
     def __init__(
         self,
@@ -105,10 +85,8 @@ class VLMObjectDetector:
         failure_backoff_max_s: Optional[float] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """Configure frame polling, inference caching, and bounded retries."""
-        # `rgb_fetcher` returns the latest JPEG bytes and, when available, its
-        # delivery count. service.py includes that count so a frozen stream
-        # cannot refresh objects or spend a cache-expiry inference.
+        # `rgb_fetcher` returns JPEG bytes, optionally with a delivery count so a
+        # frozen stream cannot refresh objects.
         self.rgb_fetcher = rgb_fetcher
         self.camera_to_world_fn = camera_to_world_fn
         self.on_detections = on_detections
@@ -120,45 +98,16 @@ class VLMObjectDetector:
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
         self._clock = clock
-        threshold = (
-            frame_change_threshold
-            if frame_change_threshold is not None
-            else self._env_float("SCENE_VLM_FRAME_CHANGE_THRESHOLD", 0.01)
-        )
-        self.frame_change_threshold = (
-            min(1.0, max(0.0, threshold)) if math.isfinite(threshold) else 0.01
-        )
-        cache_max_age = (
-            cache_max_age_s
-            if cache_max_age_s is not None
-            else self._env_float("SCENE_VLM_CACHE_MAX_AGE_SEC", 120.0)
-        )
-        self.cache_max_age_s = (
-            max(0.0, cache_max_age) if math.isfinite(cache_max_age) else 120.0
-        )
+        self.frame_change_threshold = min(1.0, max(0.0, self._setting(
+            frame_change_threshold, "SCENE_VLM_FRAME_CHANGE_THRESHOLD", 0.01)))
+        self.cache_max_age_s = max(0.0, self._setting(
+            cache_max_age_s, "SCENE_VLM_CACHE_MAX_AGE_SEC", 120.0))
         default_backoff_base = max(period_s, 5.0) if math.isfinite(period_s) else 5.0
-        backoff_base = (
-            failure_backoff_base_s
-            if failure_backoff_base_s is not None
-            else self._env_float(
-                "SCENE_VLM_FAILURE_BACKOFF_BASE_SEC", default_backoff_base
-            )
-        )
-        self.failure_backoff_base_s = (
-            max(0.0, backoff_base)
-            if math.isfinite(backoff_base)
-            else default_backoff_base
-        )
-        backoff_max = (
-            failure_backoff_max_s
-            if failure_backoff_max_s is not None
-            else self._env_float("SCENE_VLM_FAILURE_BACKOFF_MAX_SEC", 60.0)
-        )
-        self.failure_backoff_max_s = (
-            max(self.failure_backoff_base_s, backoff_max)
-            if math.isfinite(backoff_max)
-            else max(self.failure_backoff_base_s, 60.0)
-        )
+        self.failure_backoff_base_s = max(0.0, self._setting(
+            failure_backoff_base_s, "SCENE_VLM_FAILURE_BACKOFF_BASE_SEC",
+            default_backoff_base))
+        self.failure_backoff_max_s = max(self.failure_backoff_base_s, self._setting(
+            failure_backoff_max_s, "SCENE_VLM_FAILURE_BACKOFF_MAX_SEC", 60.0))
         self._last_success_frame: Optional[FrameFingerprint] = None
         self._last_success_detections: Optional[list[dict]] = None
         self._last_seen_delivery_count: Optional[int | float] = None
@@ -168,16 +117,10 @@ class VLMObjectDetector:
         self._retry_at = 0.0
         self._stats = InferenceCounters()
 
-        # Pull VLM creds from env at construction so failures are
-        # visible at startup rather than first tick.
         self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
         self.api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         self.model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
-        # Shared VLM-wide reasoning knob. Opt-in: unset/empty → the field is
-        # omitted entirely, so non-reasoning models and strict OpenAI-compatible
-        # endpoints (which 400 on an unsupported param) are unaffected. Set
-        # VLM_REASONING_EFFORT=minimal to keep a reasoning VLM_MODEL (e.g.
-        # doubao-seed-2-1-pro) fast (~2 s, no thinking); minimal|low|medium|high.
+        # Sent only when set; strict endpoints reject the unknown field.
         self.reasoning_effort = os.environ.get("VLM_REASONING_EFFORT", "").strip()
         if not self.api_key:
             log.warning("[scene-vlm] VLM_API_KEY not set; perception will be inert")
@@ -188,6 +131,12 @@ class VLMObjectDetector:
             return float(os.environ.get(key, str(default)))
         except ValueError:
             return default
+
+    @classmethod
+    def _setting(cls, value: Optional[float], env: str, default: float) -> float:
+        """``value``, else the environment, else ``default`` when not finite."""
+        v = value if value is not None else cls._env_float(env, default)
+        return v if math.isfinite(v) else default
 
     @property
     def inference_counts(self) -> dict[str, int]:
@@ -222,13 +171,8 @@ class VLMObjectDetector:
                 pass
 
     async def _tick(self) -> None:
-        """Process one frame, reusing results or delaying failed retries.
-
-        Cache hits from newly delivered frames still reproject and publish
-        prior detections so the object registry stays fresh.
-        """
-        # The ROS subscriber caches its latest frame in a thread-safe slot, so
-        # this fetch is synchronous. Tests and legacy callers may omit counts.
+        """Process one frame. A cache hit on a newly delivered frame republishes
+        the previous detections so the registry stays fresh."""
         sample = self.rgb_fetcher()
         if sample is None:
             return
@@ -297,11 +241,7 @@ class VLMObjectDetector:
             self._last_published_delivery_count = delivery_count
 
     async def _publish_detections(self, raw: list[dict]) -> bool:
-        """Reproject cached output, returning whether this delivery is consumed.
-
-        Non-empty model output that cannot yet be projected remains pending so
-        a later tick can retry local publication without another model call.
-        """
+        """Project and publish; False leaves unprojectable output pending for a retry."""
         detections = self._project_to_world(raw)
         if raw and not detections:
             return False
@@ -315,7 +255,6 @@ class VLMObjectDetector:
         self._log_stats(level, reason)
 
     def _record_failure(self, now: float) -> None:
-        """Schedule endpoint-wide backoff after an attempted inference fails."""
         self._failure_streak += 1
         exponent = min(self._failure_streak - 1, 10)
         delay = min(
@@ -331,7 +270,6 @@ class VLMObjectDetector:
         self._retry_at = 0.0
 
     def _log_stats(self, level: int, reason: str) -> None:
-        """Expose cumulative inference decisions in the Scene logs."""
         log.log(
             level,
             "[scene-vlm] inference stats: processed=%d skipped=%d "
@@ -344,8 +282,7 @@ class VLMObjectDetector:
         )
 
     async def _call_vlm(self, jpeg_b64: str) -> Optional[list[dict]]:
-        """One OpenAI-compatible chat-completions call with image input.
-        Returns the parsed `detections` list (possibly empty)."""
+        """One chat-completions call; the parsed ``detections`` list, or None."""
         if not self.base_url or not self.api_key:
             return None
         url = f"{self.base_url}/chat/completions"
@@ -400,11 +337,8 @@ class VLMObjectDetector:
         return valid
 
     def _project_to_world(self, raw: list[dict]) -> list[Detection]:
-        """Project image detections through deployment-provided geometry.
-
-        Scene admits no spatial object unless intrinsics, a camera-to-world
-        transform, and the transform's destination frame are all known.
-        """
+        """Back-project detections; nothing is admitted without intrinsics and a
+        camera-to-world transform with a named frame."""
         import numpy as np
 
         out: list[Detection] = []
@@ -436,8 +370,8 @@ class VLMObjectDetector:
 
         for d in raw:
             try:
-                cls = str(d.get("cls", "")).strip().lower()
-                if not cls:
+                label = str(d.get("cls", "")).strip().lower()
+                if not label:
                     continue
                 conf = float(d.get("confidence", 0.5))
                 bbox = d.get("bbox_2d", [0, 0, K.width, K.height])
@@ -470,7 +404,7 @@ class VLMObjectDetector:
                 size_y = 0.5 * (size_x + size_z)  # depth dimension is unobserved in v1
 
                 out.append(Detection(
-                    cls=_canon_class(cls),
+                    label=_canon_class(label),
                     pose=Pose3D(
                         x=float(X_m),
                         y=float(Y_m),
@@ -505,6 +439,6 @@ _CLASS_ALIASES: dict[str, str] = {
 }
 
 
-def _canon_class(cls: str) -> str:
-    s = cls.strip().lower().replace(" ", "_").replace("-", "_")
+def _canon_class(label: str) -> str:
+    s = label.strip().lower().replace(" ", "_").replace("-", "_")
     return _CLASS_ALIASES.get(s, s)

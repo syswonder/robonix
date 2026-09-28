@@ -135,6 +135,8 @@ Install these from their own documentation first — Robonix does not provide or
 | **Rust** (stable) | The system components are Rust; `make install` builds them with cargo | [rustup.rs](https://rustup.rs/) |
 | **uv** | Resolves and runs the Python workspace — services and primitives | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
 | **Docker** | Runs the Webots simulator stack, and any capability provider you choose to containerise | [docs.docker.com](https://docs.docker.com/engine/install/) |
+| **NVIDIA Container Toolkit** | Only on a machine with an NVIDIA GPU: Scene then runs its detector in a container with `--gpus all`, which fails without it | [docs.nvidia.com](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| **System packages** | A C toolchain, `pkg-config` and OpenSSL headers for the Rust build, and ALSA's `arecord`/`aplay` for the audio driver | `sudo apt install build-essential pkg-config libssl-dev git curl alsa-utils` |
 
 Rust and uv install into your home directory, so put them on `PATH` before continuing:
 

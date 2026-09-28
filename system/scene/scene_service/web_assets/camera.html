@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>scene cam — robonix</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%;
+                 background: #08090c; color: #d8dde6;
+                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* Two stacked tiles, RGB on top of depth. Each tile takes half the
+       viewport. Image fills the tile keeping aspect; the dark bg shows
+       through letterboxing when the panel aspect doesn't match the
+       camera's. */
+    #stack { display: grid; grid-template-rows: 1fr 1fr;
+             height: 100vh; gap: 1px; background: #1a1d24; }
+    .tile { position: relative; background: #08090c;
+            min-width: 0; min-height: 0; overflow: hidden;
+            display: flex; align-items: center; justify-content: center; }
+    .tile img { max-width: 100%; max-height: 100%;
+                object-fit: contain; image-rendering: pixelated; }
+    .tile .label { position: absolute; top: 6px; left: 8px;
+                   z-index: 5; padding: 3px 8px;
+                   background: rgba(10,12,16,0.78); border: 1px solid #303542;
+                   border-radius: 4px; font-size: 11px; color: #889;
+                   pointer-events: none; }
+    .tile .label b { color: #f0c050; font-weight: 600; }
+    .tile .stale { color: #ee7066; }
+    .tile .empty { color: #555;
+                   font-size: 12px; text-align: center; padding: 1em; }
+  </style>
+</head>
+<body>
+  <div id="stack">
+    <div class="tile" id="rgb">
+      <span class="label"><b>rgb</b> <span class="meta">—</span></span>
+      <img id="rgb_img" alt="" />
+      <div class="empty" id="rgb_empty">no rgb stream connected</div>
+    </div>
+    <div class="tile" id="depth">
+      <span class="label"><b>depth</b> <span class="meta">—</span> <i style="color:#666">(near=bright)</i></span>
+      <img id="depth_img" alt="" />
+      <div class="empty" id="depth_empty">no depth frame available</div>
+    </div>
+  </div>
+  <script>
+    const POLL_MS = 200;  // 5 Hz
+    const STALE_MS = 2000; // mark stale if no update in 2s
+
+    let lastRgbStamp = 0, lastDepthStamp = 0;
+
+    function fmtAge(stamp_ms) {
+      if (!stamp_ms) return '—';
+      const age = (Date.now() - stamp_ms) / 1000;
+      if (age < 0 || age > 1e6) return 'stamp ' + Math.round(stamp_ms / 1000);
+      return age.toFixed(1) + 's ago';
+    }
+
+    function applyTile(panelId, payload, lastStamp) {
+      const tile = document.getElementById(panelId);
+      const img  = document.getElementById(panelId + '_img');
+      const empty = document.getElementById(panelId + '_empty');
+      const meta = tile.querySelector('.meta');
+      if (!payload || !payload.png_b64) {
+        img.style.display = 'none';
+        empty.style.display = '';
+        meta.textContent = '—';
+        return lastStamp;
+      }
+      empty.style.display = 'none';
+      img.style.display = '';
+      // Only re-render when stamp changes (avoid flicker on identical frames).
+      if (payload.stamp_ms !== lastStamp) {
+        img.src = 'data:image/png;base64,' + payload.png_b64;
+      }
+      const ageStr = fmtAge(payload.stamp_ms);
+      const stale = (Date.now() - payload.stamp_ms) > STALE_MS;
+      meta.textContent = `${payload.width}x${payload.height} ${payload.encoding} · ${ageStr}`;
+      meta.classList.toggle('stale', stale);
+      return payload.stamp_ms;
+    }
+
+    async function tick() {
+      try {
+        const r = await fetch('/api/camera', { cache: 'no-store' });
+        const j = await r.json();
+        lastRgbStamp = applyTile('rgb', j.rgb, lastRgbStamp);
+        lastDepthStamp = applyTile('depth', j.depth, lastDepthStamp);
+      } catch (_) { /* swallow — next tick retries */ }
+      setTimeout(tick, POLL_MS);
+    }
+    tick();
+  </script>
+</body>
+</html>

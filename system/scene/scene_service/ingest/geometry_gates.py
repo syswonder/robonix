@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""
-Both perception backends produce objects that could not exist where they are
-claimed to be. The checks that reject them belong to neither backend: they
-are statements about the world -- a robot cannot have seen an object in a cell
-it never observed -- and living inside one backend meant the other shipped
-without them (objects standing outside the walls on the concept_graphs rows).
-"""
+"""Geometry checks that reject objects perception places where none can be."""
 from __future__ import annotations
 
 import logging
@@ -15,10 +9,8 @@ log = logging.getLogger("scene.gates")
 
 
 class KnownGround:
-    """The occupancy grid as a "has the robot looked here" mask, cached per map.
-
-    `hub.latest("occupancy_grid")` is read on demand; the mask is rebuilt only
-    when the grid's stamp changes, which is only when the map does.
+    """
+    The occupancy grid as a "has the robot looked here" mask, cached per map.
     """
 
     def __init__(self, hub: Any):
@@ -53,12 +45,7 @@ class KnownGround:
 
 
 def fraction_on_known_ground(points_xy, known) -> Optional[float]:
-    """Share of these XY points that fall on cells the map has observed.
-
-    None when the map has no opinion (no grid, or nothing to test) -- the caller
-    keeps the object in that case rather than rejecting it on no evidence. A
-    point outside the grid entirely counts as unobserved.
-    """
+    """Share of these XY points that fall on cells the map has observed."""
     import numpy as np
 
     mask, (ox, oy), res = known

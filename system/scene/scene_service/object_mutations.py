@@ -7,7 +7,8 @@ import asyncio
 import copy
 import logging
 import math
-from typing import Any
+import time
+from typing import Any, Optional
 
 from .state import BBox3D, ObjectRegistry, Pose3D, SceneObject
 
@@ -45,16 +46,13 @@ class ObjectMutationCoordinator:
 
     def generation_supported(self) -> bool:
         """Whether the live mapping binding exposes a real generation counter.
-
-        When it does not, the epoch check compares map_id alone and no longer
-        orders two edits racing inside one map. Callers are told rather than
-        left to infer it from the -1 sentinel."""
+        """
         return self.live_binding.get("generation") is not None
 
     async def snapshot_objects(self) -> tuple[dict, str, int, bool]:
         """Return registry objects and their epoch under the map-ops lock."""
         async with self.ops_lock:
-            objects, _surfaces = await self.registry.snapshot()
+            objects = await self.registry.snapshot()
             map_id, generation = self.current_epoch()
             return objects, map_id, generation, self.generation_supported()
 
@@ -77,11 +75,7 @@ class ObjectMutationCoordinator:
 
     @staticmethod
     def _record_note(obj: SceneObject, note: str) -> None:
-        """Store the caller's reason alongside the correction it explains.
-
-        Operator corrections outrank perception and never expire, so the
-        record has to be able to say why it exists. An empty note clears any
-        earlier one rather than leaving a stale reason attached to a new edit."""
+        """Store the caller's reason alongside the correction it explains."""
         text = str(note or "").strip()[:512]
         if text:
             obj.attributes["operator_note"] = text
@@ -89,9 +83,7 @@ class ObjectMutationCoordinator:
             obj.attributes.pop("operator_note", None)
 
     def _invalidate_graph(self, object_id: str) -> None:
-        """Drop only the caption/relation cache entries touching one
-        object. A single edit must not wipe the whole map's LLM-derived
-        cache; the full clear is reserved for flush_objects."""
+        """Drop only the relation cache entries touching one object."""
         invalidate = getattr(self.scene_graph_store, "invalidate_object", None)
         if invalidate is not None:
             invalidate(object_id)
@@ -139,6 +131,59 @@ class ObjectMutationCoordinator:
         )
         return written == len(objects)
 
+    def _persist_default(self, map_id: str, requested) -> bool:
+        """Whether to write this correction into the map's snapshot."""
+        if requested is not None:
+            return bool(requested)
+        if self.map_meta is None:
+            return False
+        try:
+            return self.map_meta.read(map_id) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def resolve_epoch(
+        self,
+        expected_map_id: str = "",
+        expected_generation: Optional[int] = None,
+    ) -> tuple[str, int]:
+        """The map epoch an edit is aimed at."""
+        current_id, current_generation = self.current_epoch()
+        map_id = str(expected_map_id or "").strip()
+        if not map_id:
+            return current_id, current_generation
+        try:
+            generation = int(expected_generation)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            generation = current_generation
+        return map_id, generation
+
+    async def _in_epoch(self, operation, *, expected_map_id: str = "",
+                        expected_generation: Optional[int] = None,
+                        persist_to_snapshot: Optional[bool] = None, **kwargs):
+        """Run `operation` against the resolved epoch, persisting by default
+        when the map has a snapshot."""
+        map_id, generation = self.resolve_epoch(expected_map_id,
+                                                expected_generation)
+        return await operation(
+            expected_map_id=map_id, expected_generation=generation,
+            persist_to_snapshot=self._persist_default(map_id,
+                                                      persist_to_snapshot),
+            **kwargs)
+
+    async def apply_label_correction(self, **kwargs):
+        """Rename one object, or clear a previous rename."""
+        return await self._in_epoch(self.update_label, **kwargs)
+
+    async def apply_caption(self, **kwargs):
+        """A person's caption for one object; "" hands it back to the model."""
+        return await self._in_epoch(self.set_caption, source="operator",
+                                    **kwargs)
+
+    async def remove_object(self, **kwargs):
+        """Delete one object."""
+        return await self._in_epoch(self.delete_object, **kwargs)
+
     async def update_label(
         self,
         *,
@@ -150,13 +195,9 @@ class ObjectMutationCoordinator:
         persist_to_snapshot: bool,
         note: str = "",
     ) -> tuple[SceneObject, bool, str, int]:
-        # Operator labels are stored verbatim. Canonicalizing here silently
-        # rewrote corrections ("desk" became "table") — the human said desk,
-        # the record shows desk.
+        # Operator labels are stored verbatim.
         normalized = str(label or "").strip()
-        # Length is checked in both modes. `label` is ignored when the caller
-        # clears the override, but accepting an unbounded string there just
-        # because it will be dropped invites a caller to believe it was used.
+        # Length is checked in both modes.
         if len(normalized) > 128:
             raise ValueError("label must not exceed 128 characters")
         if not clear_override and not normalized:
@@ -177,7 +218,7 @@ class ObjectMutationCoordinator:
                     raise KeyError(f"unknown Scene object {object_id!r}")
                 if current.attributes.get("is_robot"):
                     raise ValueError("the robot self-object label cannot be edited")
-                old_label = current.cls
+                old_label = current.label
                 old_attributes = copy.deepcopy(current.attributes)
 
             previous_override = str(
@@ -218,7 +259,7 @@ class ObjectMutationCoordinator:
                     await self._persist_one(updated, partition)
                 except Exception as exc:
                     async with self.registry.lock():
-                        updated.cls = old_label
+                        updated.label = old_label
                         updated.attributes = old_attributes
                     if previous_override and update_detector is not None:
                         await update_detector(object_id, previous_override)
@@ -232,6 +273,56 @@ class ObjectMutationCoordinator:
                 persisted = True
 
             self._invalidate_graph(object_id)
+            return updated, persisted, map_id, generation
+
+    async def set_caption(
+        self,
+        *,
+        object_id: str,
+        caption: str,
+        source: str = "operator",
+        expected_map_id: str,
+        expected_generation: int,
+        persist_to_snapshot: bool,
+        note: str = "",
+    ) -> tuple[SceneObject, bool, str, int]:
+        """Describe one object, or clear the description with an empty string.
+        """
+        async with self.ops_lock:
+            map_id, generation = self._assert_epoch(
+                expected_map_id,
+                expected_generation,
+            )
+            partition = (
+                self._snapshot_partition(map_id)
+                if persist_to_snapshot
+                else None
+            )
+            async with self.registry.lock():
+                current = self.registry.get_object(object_id)
+                if current is None:
+                    raise KeyError(f"unknown Scene object {object_id!r}")
+                old_caption = current.caption
+                old_source = current.caption_source
+                old_at = current.caption_updated_at
+                updated = self.registry.set_object_caption(
+                    object_id, caption, source=source, now=time.time())
+
+            persisted = False
+            if partition is not None:
+                try:
+                    await self._persist_one(updated, partition)
+                except Exception as exc:
+                    async with self.registry.lock():
+                        updated.caption = old_caption
+                        updated.caption_source = old_source
+                        updated.caption_updated_at = old_at
+                    raise RuntimeError(
+                        "failed to persist the caption; runtime state was "
+                        "rolled back"
+                    ) from exc
+                persisted = True
+
             return updated, persisted, map_id, generation
 
     async def update_geometry(

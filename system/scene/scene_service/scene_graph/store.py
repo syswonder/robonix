@@ -1,24 +1,15 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Live scene graph and persistent caption/relation caches.
+"""Live scene graph plus the on-disk relation cache.
 
-Two single-threaded asyncio writers own disjoint slices:
-
-* the geometric loop updates nodes and deterministic geometric edges; and
-* the model builder updates semantic edges that geometry cannot decide.
-
-``get_snapshot()`` combines both slices for MCP and web consumers.
-
-Cache persistence uses simple JSON files so the system can survive
-restarts without re-calling the LLM for every object pair. Only the
-caption + relation *caches* are persisted; the live node/edge slices are
-rebuilt each tick. Cache I/O failures are swallowed — the worst case is a
-redundant LLM call.
+Two asyncio writers own disjoint slices: the geometric loop writes nodes and
+geometric edges, the builder writes semantic edges. The relation cache is
+persisted as JSON so a restart does not re-ask the LLM about every pair; its
+I/O failures only cost a redundant call.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -30,25 +21,15 @@ log = logging.getLogger(__name__)
 
 
 class SceneGraphStore:
-    """In-memory live graph (two writer slices) + on-disk JSON caches."""
+    """In-memory live graph (two writer slices) + on-disk relation cache."""
 
     def __init__(
         self,
         cache_dir: str = "/data/robonix/scene_graph/cache",
         map_id: str | None = None,
     ) -> None:
-        """Build the live graph + open the on-disk JSON caches.
-
-        When ``map_id`` is given, the caption/relation caches are nested under
-        ``cache_dir/<sanitized map_id>/`` so two SLAM maps never share a cache
-        (caption/relation answers are only valid within the map frame they were
-        computed in — the same per-map isolation the object store gets from its
-        ``"{map_id}::{object_id}"`` composite key). The id is run through
-        ``map_binding.sanitize_map_id`` (the one sanitize rule shared by every
-        map_id-partitioned store; reached via persistence's alias, imported
-        lazily so this stays importable without the milvus backend) so it is a
-        safe path component. With no ``map_id`` the
-        path is unchanged (legacy/"default" behaviour)."""
+        # Cached answers are only valid in the map frame they were computed
+        # in, so each map gets its own cache directory.
         self._nodes: dict[str, SceneGraphNode] = {}
         self._geometric_edges: list[SceneGraphEdge] = []
         self._semantic_edges: list[SceneGraphEdge] = []
@@ -60,7 +41,6 @@ class SceneGraphStore:
 
             base = base / _sanitize_map_id(map_id)
         self._cache_dir = base
-        self._caption_cache: dict[str, str] = {}
         self._relation_cache: dict[str, SceneGraphEdge] = {}
         self._load_caches()
 
@@ -69,43 +49,24 @@ class SceneGraphStore:
     def set_geometric(
         self, nodes: list[SceneGraphNode], edges: list[SceneGraphEdge]
     ) -> None:
-        """Replace the geometric slice (nodes + contact/containment edges).
-        The dict/list references are swapped in one step, so a concurrent
-        get_snapshot() never sees a half-updated geometric layer. Called by
-        the fast geometric loop each tick."""
         self._nodes = {n.object_id: n for n in nodes}
         self._geometric_edges = edges
         self._geometric_updated_at = time.time()
 
     def set_semantic_edges(self, edges: list[SceneGraphEdge]) -> None:
-        """Replace the semantic (LLM-inferred) edge slice. Called by the
-        builder once per rebuild, after residual inference + hysteresis."""
         self._semantic_edges = edges
         self._semantic_updated_at = time.time()
 
     def get_semantic_edges(self) -> list[SceneGraphEdge]:
-        """Current semantic edges — the builder reads these to carry edges
-        forward across rebuilds (hysteresis)."""
         return self._semantic_edges
 
     def get_geometric_edges(self) -> list[SceneGraphEdge]:
-        """Current geometric (contact/containment) edges, owned by the fast
-        loop. The builder reads these to skip pairs geometry already
-        decided, spending LLM budget only on the residual."""
         return self._geometric_edges
 
     def get_snapshot(self) -> Optional[SceneGraphSnapshot]:
-        """Compose the live graph for read-only consumers (MCP, web).
-
-        Nodes come from the geometric loop; edges are the geometric slice
-        followed by the semantic slice. The builder skips pairs geometry
-        already decided, so the slices are disjoint by construction; the
-        dedup on (source, target, relation) — geometric wins — only guards
-        the ~1 s startup window before the geometric debounce emits, and
-        keeps distinct relations on the same pair (e.g. geometric on_top_of
-        + semantic attached_to). Returns None before the first geometric
-        tick has populated anything, preserving the prior "no snapshot yet"
-        contract for callers."""
+        """Both slices composed for readers, or None before anything was
+        published. A (source, target, relation) in both slices is kept once,
+        geometric first."""
         if not (self._nodes or self._geometric_edges or self._semantic_edges):
             return None
         edges: list[SceneGraphEdge] = []
@@ -122,19 +83,6 @@ class SceneGraphStore:
             updated_at=max(self._geometric_updated_at, self._semantic_updated_at),
         )
 
-    # ── caption cache ────────────────────────────────────────────────────
-
-    @staticmethod
-    def _caption_key(node: SceneGraphNode) -> str:
-        return f"{node.object_id}:{node.label}:{node.observation_count // 5}"
-
-    def get_cached_caption(self, node: SceneGraphNode) -> Optional[str]:
-        return self._caption_cache.get(self._caption_key(node))
-
-    def put_cached_caption(self, node: SceneGraphNode) -> None:
-        if node.caption is not None:
-            self._caption_cache[self._caption_key(node)] = node.caption
-
     # ── relation cache ───────────────────────────────────────────────────
 
     @staticmethod
@@ -142,18 +90,9 @@ class SceneGraphStore:
         a: SceneGraphNode, b: SceneGraphNode, hint: GeometryHint,
         semantic_only: bool = False,
     ) -> str:
-        # Key on object identity PLUS a coarse geometry signature. Raw
-        # label/caption/coords made the key drift on every float-level
-        # position jitter (near-100% miss, redundant LLM calls, edge
-        # flicker); keying on object_id alone went to the other extreme —
-        # a pair's relation was computed once and frozen forever, never
-        # invalidating when an object moved. The bucketed signature from
-        # geometry_signature() is the middle ground: stable under EMA
-        # jitter, but changes when the spatial configuration actually
-        # changes, so a moved object's edge cache-misses and recomputes.
-        # The mode suffix ('s'/'f') keeps a semantic-only answer (for a
-        # geometry-owned pair) from being served to a full-inference query
-        # of the same pair+signature, and vice versa.
+        # The bucketed geometry signature survives pose jitter but changes
+        # when an object really moves. The mode suffix keeps semantic-only
+        # and full answers for the same pair apart.
         mode = "s" if semantic_only else "f"
         return f"{a.object_id}__{b.object_id}__{geometry_signature(hint)}__{mode}"
 
@@ -167,64 +106,38 @@ class SceneGraphStore:
         self, a: SceneGraphNode, b: SceneGraphNode, hint: GeometryHint,
         edge: SceneGraphEdge, semantic_only: bool = False,
     ) -> None:
-        # Keep one entry per object-pair: the latest geometry signature.
-        # The signature is in the key so a moved object cache-misses and
-        # recomputes (the whole point of the geometry-signature key), but
-        # without this eviction a pair that drifts through many signature
-        # buckets would leave one stale entry per visited bucket forever.
-        # A pair's prior spatial answer is superseded by the current one,
-        # so dropping the old-signature entries is lossless in practice
-        # (an object that returns to an old configuration just recomputes
-        # once). prune_relations handles the orthogonal case of an
-        # endpoint leaving the registry entirely.
+        # One entry per pair: a pair drifting through signature buckets would
+        # otherwise leave one stale entry per bucket.
         prefix = f"{a.object_id}__{b.object_id}__"
         for k in [k for k in self._relation_cache if k.startswith(prefix)]:
             del self._relation_cache[k]
         self._relation_cache[self._relation_key(a, b, hint, semantic_only)] = edge
 
     def invalidate_object(self, object_id: str) -> int:
-        """Drop the caption and relation cache entries that mention one
-        object. This is the mutation-path invalidation: an operator edit
-        changes one object, so only that object's caption and the pairs
-        it participates in can be stale. Wiping both caches wholesale on
-        every edit (and flushing them to disk) would throw away hundreds
-        of unrelated LLM answers per keystroke. Returns entries dropped;
-        callers decide when a disk flush is worth it."""
-        oid = str(object_id)
-        dropped = 0
-        caption_prefix = f"{oid}:"
-        for key in [k for k in self._caption_cache if k.startswith(caption_prefix)]:
-            del self._caption_cache[key]
-            dropped += 1
-        endpoint = f"{oid}__"
-        infix = f"__{oid}__"
-        for key in [
+        """Drop the cached relations that mention one object; returns how
+        many. Callers decide when a disk flush is worth it."""
+        endpoint = f"{object_id}__"
+        infix = f"__{object_id}__"
+        stale = [
             k for k in self._relation_cache
             if k.startswith(endpoint) or infix in k
-        ]:
+        ]
+        for key in stale:
             del self._relation_cache[key]
-            dropped += 1
-        return dropped
+        return len(stale)
 
     def clear_derived_state(self) -> None:
-        """Clear every object-derived live slice and persistent cache.
-        Flush-scale operations only; single-object edits should use
-        invalidate_object instead."""
+        """Clear both live slices and the cache (flush-scale operations)."""
         self._nodes.clear()
         self._geometric_edges.clear()
         self._semantic_edges.clear()
         self._geometric_updated_at = 0.0
         self._semantic_updated_at = 0.0
-        self._caption_cache.clear()
         self._relation_cache.clear()
         self.flush_caches()
 
     def prune_relations(self, live_object_ids: set[str]) -> int:
-        """Drop cached edges with an endpoint no longer in the registry.
-        Returns how many were evicted. Complements put_cached_relation's
-        keep-latest-per-pair eviction: that bounds growth across an
-        object's *moves*, this bounds it across object *departures*.
-        Called by the builder each rebuild before flushing to disk."""
+        """Drop cached edges with an endpoint no longer in the registry."""
         stale = [
             k for k, e in self._relation_cache.items()
             if e.source_id not in live_object_ids
@@ -237,19 +150,15 @@ class SceneGraphStore:
     # ── persistence ──────────────────────────────────────────────────────
 
     def _load_caches(self) -> None:
-        self._caption_cache = self._read_json("captions.json", default={})
-        rel_raw = self._read_json("relations.json", default={})
-        for k, v in rel_raw.items():
+        for k, v in self._read_json("relations.json", default={}).items():
             try:
                 self._relation_cache[k] = SceneGraphEdge(**v)
             except (TypeError, KeyError):
                 pass
 
     def flush_caches(self) -> None:
-        self._write_json("captions.json", self._caption_cache)
-        rel_out: dict[str, dict] = {}
-        for k, edge in self._relation_cache.items():
-            rel_out[k] = {
+        self._write_json("relations.json", {
+            k: {
                 "source_id": edge.source_id,
                 "target_id": edge.target_id,
                 "relation": edge.relation,
@@ -258,7 +167,8 @@ class SceneGraphStore:
                 "reason": edge.reason,
                 "updated_at": edge.updated_at,
             }
-        self._write_json("relations.json", rel_out)
+            for k, edge in self._relation_cache.items()
+        })
 
     def _read_json(self, filename: str, default: dict) -> dict:
         path = self._cache_dir / filename
@@ -274,8 +184,7 @@ class SceneGraphStore:
     def _write_json(self, filename: str, data: dict) -> None:
         try:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
-            path = self._cache_dir / filename
-            with open(path, "w") as f:
+            with open(self._cache_dir / filename, "w") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
         except Exception:  # noqa: BLE001
             log.debug("[scene-graph-store] failed to write %s", filename)

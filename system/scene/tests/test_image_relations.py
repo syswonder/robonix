@@ -187,7 +187,6 @@ def test_builder_dispatch():
     import time
 
     from scene_service.scene_graph.builder import SceneGraphBuilder, SceneGraphConfig
-    from scene_service.scene_graph.captioner import NodeCaptioner
     from scene_service.scene_graph.llm_client import SceneGraphLLMClient
     from scene_service.scene_graph.relations import RelationInferer
     from scene_service.scene_graph.store import SceneGraphStore
@@ -214,12 +213,11 @@ def test_builder_dispatch():
             loop.run_until_complete(populate())
             client = SceneGraphLLMClient(api_key="", base_url="")
             cfg = SceneGraphConfig()
-            cfg.caption_enabled = False
 
             # Image path: a stub perception yields a bundle; a fake inferer
             # returns a known edge. That edge must land in the semantic slice.
             inj = [SceneGraphEdge(
-                "scene.object.monitor_001", "scene.object.table_001",
+                "scene.object.0001", "scene.object.0002",
                 "on_top_of", 0.9, "llm")]
 
             class _Perc:
@@ -235,7 +233,7 @@ def test_builder_dispatch():
 
             store = SceneGraphStore(cache_dir=tmpdir)
             builder = SceneGraphBuilder(
-                registry=registry, captioner=NodeCaptioner(),
+                registry=registry,
                 relation_inferer=RelationInferer(client), store=store,
                 config=cfg, perception=_Perc())
             fake_inferer = _FakeInf()
@@ -244,7 +242,7 @@ def test_builder_dispatch():
             sem = store.get_semantic_edges()
             assert any(
                 e.relation == "on_top_of"
-                and e.source_id == "scene.object.monitor_001"
+                and e.source_id == "scene.object.0001"
                 for e in sem
             ), f"image-path edge expected in semantic slice, got {sem}"
 
@@ -266,7 +264,7 @@ def test_builder_dispatch():
             # path runs; with no LLM creds it yields no semantic edges.
             store2 = SceneGraphStore(cache_dir=tmpdir + "/2")
             builder2 = SceneGraphBuilder(
-                registry=registry, captioner=NodeCaptioner(),
+                registry=registry,
                 relation_inferer=RelationInferer(client), store=store2,
                 config=cfg, perception=None)
             loop.run_until_complete(builder2.rebuild_once())
@@ -288,7 +286,6 @@ def test_builder_transient_blip_preserves_graph():
     import time
 
     from scene_service.scene_graph.builder import SceneGraphBuilder, SceneGraphConfig
-    from scene_service.scene_graph.captioner import NodeCaptioner
     from scene_service.scene_graph.llm_client import SceneGraphLLMClient
     from scene_service.scene_graph.relations import RelationInferer
     from scene_service.scene_graph.store import SceneGraphStore
@@ -315,7 +312,7 @@ def test_builder_transient_blip_preserves_graph():
             loop.run_until_complete(populate())
 
             inj = [SceneGraphEdge(
-                "scene.object.monitor_001", "scene.object.table_001",
+                "scene.object.0001", "scene.object.0002",
                 "on_top_of", 0.9, "llm")]
 
             class _Perc:
@@ -327,10 +324,9 @@ def test_builder_transient_blip_preserves_graph():
                     return ImageRelationResult(tuple(inj), "processed")
 
             cfg = SceneGraphConfig()
-            cfg.caption_enabled = False
             store = SceneGraphStore(cache_dir=tmpdir)
             b = SceneGraphBuilder(
-                registry=registry, captioner=NodeCaptioner(),
+                registry=registry,
                 relation_inferer=RelationInferer(
                     SceneGraphLLMClient(api_key="", base_url="")),
                 store=store, config=cfg, perception=_Perc())
@@ -350,7 +346,7 @@ def test_builder_transient_blip_preserves_graph():
                 f"got {store.get_semantic_edges()}")
 
             # Round 3: the table actually leaves the registry → its edge drops.
-            del registry._objects["scene.object.table_001"]
+            del registry._objects["scene.object.0002"]
             loop.run_until_complete(b.rebuild_once())
             assert store.get_semantic_edges() == [], (
                 "an edge whose endpoint left the registry must be dropped")

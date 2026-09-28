@@ -161,23 +161,8 @@ def test_edge_candidates():
     print("  [PASS] test_edge_candidates")
 
 
-def test_captioner():
-    """V1 captioner sets caption = label."""
-    from scene_service.scene_graph.captioner import NodeCaptioner
-    from scene_service.scene_graph.types import SceneGraphNode
-
-    cap = NodeCaptioner()
-    node = SceneGraphNode("obj_1", "cup", (0, 0, 0), (0.1, 0.1, 0.1))
-    assert node.caption is None
-
-    result = _ensure_loop().run_until_complete(cap.caption_node(node))
-    assert result.caption == "cup"
-    assert result.caption_updated_at is not None
-    print("  [PASS] test_captioner")
-
-
 def test_store_cache():
-    """Store caches captions and relations, persists to JSON."""
+    """Store caches relations and persists them to JSON."""
     from scene_service.scene_graph.store import SceneGraphStore
     from scene_service.scene_graph.types import (
         SceneGraphEdge,
@@ -193,11 +178,6 @@ def test_store_cache():
             "obj_1", "cup", (1.0, 0.5, 0.8), (0.1, 0.1, 0.15),
             caption="a white cup", observation_count=10,
         )
-
-        # Caption cache.
-        assert store.get_cached_caption(node) is None
-        store.put_cached_caption(node)
-        assert store.get_cached_caption(node) == "a white cup"
 
         # Relation cache.
         node2 = SceneGraphNode(
@@ -220,11 +200,9 @@ def test_store_cache():
 
         # Flush + reload from disk.
         store.flush_caches()
-        assert os.path.exists(os.path.join(tmpdir, "captions.json"))
         assert os.path.exists(os.path.join(tmpdir, "relations.json"))
 
         store2 = SceneGraphStore(cache_dir=tmpdir)
-        assert store2.get_cached_caption(node) == "a white cup"
         cached2 = store2.get_cached_relation(node, node2, hint)
         assert cached2 is not None
         assert cached2.relation == "on_top_of"
@@ -232,33 +210,20 @@ def test_store_cache():
 
 
 def test_store_cache_map_id_partition():
-    """Two stores with different map_ids on the same base dir keep isolated
-    caches: each writes to its own <map_id> subdir and cannot read the other's
-    cached captions."""
+    """Stores on different map_ids keep their relation caches apart."""
+    from scene_service.scene_graph.relations import compute_geometry_hint
     from scene_service.scene_graph.store import SceneGraphStore
-    from scene_service.scene_graph.types import SceneGraphNode
+    from scene_service.scene_graph.types import SceneGraphEdge, SceneGraphNode
 
-    node = SceneGraphNode(
-        "obj_1", "cup", (1.0, 0.5, 0.8), (0.1, 0.1, 0.15),
-        caption="a white cup", observation_count=10,
-    )
-
+    a = SceneGraphNode("obj_1", "cup", (1.0, 0.5, 0.8), (0.1, 0.1, 0.15))
+    b = SceneGraphNode("obj_2", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05))
+    hint = compute_geometry_hint(a, b)
     with tempfile.TemporaryDirectory() as base:
         kitchen = SceneGraphStore(cache_dir=base, map_id="kitchen")
-        kitchen.put_cached_caption(node)
+        kitchen.put_cached_relation(a, b, hint, SceneGraphEdge("obj_1", "obj_2", "on_top_of"))
         kitchen.flush_caches()
-
-        # Same base dir, different map_id → nested in its own subdir, blind to
-        # kitchen's cache.
-        office = SceneGraphStore(cache_dir=base, map_id="office")
-        assert office.get_cached_caption(node) is None
-
-        assert os.path.exists(os.path.join(base, "kitchen", "captions.json"))
-        assert not os.path.exists(os.path.join(base, "office", "captions.json"))
-
-        # A fresh store reopened on the same map_id sees its own cache back.
-        kitchen2 = SceneGraphStore(cache_dir=base, map_id="kitchen")
-        assert kitchen2.get_cached_caption(node) == "a white cup"
+        assert SceneGraphStore(cache_dir=base, map_id="office").get_cached_relation(a, b, hint) is None
+        assert SceneGraphStore(cache_dir=base, map_id="kitchen").get_cached_relation(a, b, hint) is not None
     print("  [PASS] test_store_cache_map_id_partition")
 
 
@@ -310,7 +275,6 @@ def test_relation_inferer_no_llm():
 def test_builder_rebuild_no_objects():
     """Builder with empty registry produces empty snapshot."""
     from scene_service.scene_graph.builder import SceneGraphBuilder, SceneGraphConfig
-    from scene_service.scene_graph.captioner import NodeCaptioner
     from scene_service.scene_graph.llm_client import SceneGraphLLMClient
     from scene_service.scene_graph.relations import RelationInferer
     from scene_service.scene_graph.store import SceneGraphStore
@@ -320,13 +284,11 @@ def test_builder_rebuild_no_objects():
         registry = ObjectRegistry()
         store = SceneGraphStore(cache_dir=tmpdir)
         client = SceneGraphLLMClient(api_key="", base_url="")
-        captioner = NodeCaptioner()
         inferer = RelationInferer(client)
         config = SceneGraphConfig()
 
         builder = SceneGraphBuilder(
             registry=registry,
-            captioner=captioner,
             relation_inferer=inferer,
             store=store,
             config=config,
@@ -351,7 +313,6 @@ def test_builder_rebuild_with_objects():
 
 def _run_builder_rebuild_with_objects_body():
     from scene_service.scene_graph.builder import SceneGraphBuilder, SceneGraphConfig
-    from scene_service.scene_graph.captioner import NodeCaptioner
     from scene_service.scene_graph.llm_client import SceneGraphLLMClient
     from scene_service.scene_graph.relations import RelationInferer
     from scene_service.scene_graph.store import SceneGraphStore
@@ -397,13 +358,11 @@ def _run_builder_rebuild_with_objects_body():
 
         store = SceneGraphStore(cache_dir=tmpdir)
         client = SceneGraphLLMClient(api_key="", base_url="")
-        captioner = NodeCaptioner()
         inferer = RelationInferer(client)
         config = SceneGraphConfig()
 
         builder = SceneGraphBuilder(
             registry=registry,
-            captioner=captioner,
             relation_inferer=inferer,
             store=store,
             config=config,
@@ -414,7 +373,7 @@ def _run_builder_rebuild_with_objects_body():
         # Should have 3 nodes (all have obs >= 2).
         assert len(snap.nodes) == 3, f"Expected 3 nodes, got {len(snap.nodes)}"
 
-        # All nodes should have caption = label (v1 captioner).
+        # Without an object caption a node is captioned by its label.
         for node in snap.nodes.values():
             assert node.caption == node.label, f"{node.object_id}: caption should be label"
 
@@ -464,37 +423,6 @@ def test_geometry_containment():
     hint3 = compute_geometry_hint(small, far)
     assert hint3.containment == "none"
     print("  [PASS] test_geometry_containment")
-
-
-def test_geometric_relation():
-    """Deterministic geometric predicates: contact, containment, near."""
-    from scene_service.scene_graph.geometry import geometric_relation
-    from scene_service.scene_graph.types import SceneGraphNode
-
-    # cup resting on table: cup bottom (0.5 - 0.075 = 0.425) meets table
-    # top (0.4 + 0.025 = 0.425), with XY overlap.
-    cup = SceneGraphNode("cup", "cup", (1.0, 0.5, 0.5), (0.1, 0.1, 0.15))
-    table = SceneGraphNode("table", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05))
-    assert geometric_relation(cup, table) == ("on_top_of", 0.95)
-    assert geometric_relation(table, cup) == ("under", 0.95)
-
-    # ball whose center sits inside the box, but the box center is NOT
-    # inside the ball (offset so containment is one-directional).
-    ball = SceneGraphNode("ball", "ball", (1.4, 1.0, 0.5), (0.1, 0.1, 0.1))
-    box = SceneGraphNode("box", "box", (1.0, 1.0, 0.5), (1.0, 1.0, 1.0))
-    assert geometric_relation(ball, box) == ("inside", 0.95)
-    assert geometric_relation(box, ball) == ("contains", 0.95)
-
-    # two cups 0.5 m apart on the floor — only `near`.
-    c1 = SceneGraphNode("c1", "cup", (0.0, 0.0, 0.5), (0.1, 0.1, 0.1))
-    c2 = SceneGraphNode("c2", "cup", (0.5, 0.0, 0.5), (0.1, 0.1, 0.1))
-    rel = geometric_relation(c1, c2)
-    assert rel is not None and rel[0] == "near"
-
-    # far apart — geometry decides nothing.
-    far = SceneGraphNode("far", "cup", (3.0, 0.0, 0.5), (0.1, 0.1, 0.1))
-    assert geometric_relation(c1, far) is None
-    print("  [PASS] test_geometric_relation")
 
 
 def test_strict_geometric_relations():
@@ -549,32 +477,6 @@ def test_geometric_loop_object_relations():
     assert 0 < len(near_from_chair0) <= 3
     assert all(e.method == "geometric" for e in edges)
     print("  [PASS] test_geometric_loop_object_relations")
-
-
-def test_compute_geometric_edges():
-    """compute_geometric_edges emits contact/containment edges only."""
-    from scene_service.scene_graph.geometry import compute_geometric_edges
-    from scene_service.scene_graph.types import SceneGraphNode
-
-    cup = SceneGraphNode("cup", "cup", (1.0, 0.5, 0.5), (0.1, 0.1, 0.15))
-    table = SceneGraphNode("table", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05))
-    ball = SceneGraphNode("ball", "ball", (1.4, 1.0, 0.5), (0.1, 0.1, 0.1))
-    box = SceneGraphNode("box", "box", (1.0, 1.0, 0.5), (1.0, 1.0, 1.0))
-    far = SceneGraphNode("far", "cup", (5.0, 5.0, 0.5), (0.1, 0.1, 0.1))
-
-    edges = compute_geometric_edges([cup, table, ball, box, far])
-    rels = {(e.source_id, e.target_id, e.relation) for e in edges}
-
-    assert ("cup", "table", "on_top_of") in rels
-    assert any(e.relation in ("inside", "contains")
-               for e in edges if {e.source_id, e.target_id} == {"ball", "box"})
-    # `near` is never emitted as an edge.
-    assert all(e.relation != "near" for e in edges)
-    # every geometric edge is tagged and explained.
-    assert all(e.method == "geometric" and e.reason for e in edges)
-    # the isolated object touches nothing → no edge references it.
-    assert all("far" not in (e.source_id, e.target_id) for e in edges)
-    print("  [PASS] test_compute_geometric_edges")
 
 
 def test_geometry_signature_stable():
@@ -817,7 +719,6 @@ if __name__ == "__main__":
     test_types()
     test_prompts()
     test_edge_candidates()
-    test_captioner()
     test_store_cache()
     test_store_cache_map_id_partition()
     test_llm_client_no_key()
@@ -825,8 +726,6 @@ if __name__ == "__main__":
     test_builder_rebuild_no_objects()
     test_builder_rebuild_with_objects()
     test_geometry_containment()
-    test_geometric_relation()
-    test_compute_geometric_edges()
     test_geometry_signature_stable()
     test_relation_cache_invalidation()
     test_store_compose()

@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Minimal async OpenAI-compatible LLM client for scene graph inference.
-
-Reuses the same VLM_BASE_URL / VLM_API_KEY / VLM_MODEL / VLM_REASONING_EFFORT
-environment variables already used by the VLM fallback detector in
-perception_vlm.py.
-"""
+"""Minimal async OpenAI-compatible client, configured by the VLM_* variables
+the VLM detector also reads."""
 from __future__ import annotations
 
 import json
@@ -19,12 +15,7 @@ log = logging.getLogger(__name__)
 
 
 class SceneGraphLLMClient:
-    """Thin wrapper around an OpenAI-compatible chat-completions endpoint.
-
-    All errors are caught internally — callers always get a dict back
-    (empty dict on failure) so the scene graph loop never crashes due
-    to LLM issues.
-    """
+    """Chat-completions wrapper that never raises: failures return {}."""
 
     def __init__(
         self,
@@ -47,7 +38,6 @@ class SceneGraphLLMClient:
             or os.environ.get("OPENAI_API_KEY")
             or ""
         )
-        # Relation inference uses the same VLM_MODEL as the rest of scene.
         self.model = (
             model
             or os.environ.get("VLM_MODEL")
@@ -55,14 +45,7 @@ class SceneGraphLLMClient:
             or "gpt-4o-mini"
         )
         self.timeout = timeout
-        # Forwarded only when non-empty, so non-reasoning models (and
-        # providers that reject the field) are unaffected. Values:
-        # minimal | low | medium | high; "minimal" = no thinking, which on
-        # a reasoning model (e.g. doubao-seed-2-1-pro) answers a relation
-        # prompt in ~2 s instead of blowing past the timeout while it
-        # "thinks". Shared VLM-wide knob, opt-in: unset/empty → field omitted
-        # (default), so a non-reasoning VLM_MODEL is untouched. An explicit
-        # `reasoning_effort` constructor arg overrides the env.
+        # Sent only when set: providers without reasoning reject the field.
         if reasoning_effort is not None:
             self.reasoning_effort = reasoning_effort.strip()
         else:
@@ -86,17 +69,9 @@ class SceneGraphLLMClient:
         timeout: float | None = None,
         images: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Send a chat-completions request expecting JSON output.
+        """One request expecting a JSON object reply; {} on any failure.
 
-        Returns the parsed JSON dict, or ``{}`` on any failure.
-        Never raises — all errors are logged and swallowed.
-
-        ``images`` are base64-encoded JPEG strings (no data-url prefix). When
-        present the user turn is sent as multimodal content
-        (``[{text}, {image_url}, ...]``) so a vision model can see the frame;
-        otherwise the user turn is the bare ``user_message`` string. The
-        image-url shape matches the VLM perception detector
-        (``perception_vlm._DETECTION_PROMPT`` request)."""
+        `images` are base64 JPEGs sent as multimodal parts of the user turn."""
         if not self.available:
             return {}
 
@@ -139,9 +114,7 @@ class SceneGraphLLMClient:
                     return {}
                 data = r.json()
         except (httpx.HTTPError, Exception) as e:  # noqa: BLE001
-            # Include the exception type: a read timeout's str() is empty,
-            # which historically logged a bare "request failed:" with no
-            # clue it was a timeout.
+            # The type matters: a read timeout's str() is empty.
             log.warning(
                 "[scene-graph-llm] request failed: %s: %s",
                 type(e).__name__,

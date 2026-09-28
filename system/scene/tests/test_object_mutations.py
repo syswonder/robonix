@@ -56,11 +56,11 @@ def make_coordinator(registry: ObjectRegistry, store: StubStore,
     )
 
 
-def seed(registry: ObjectRegistry, cls: str = "chair") -> str:
+def seed(registry: ObjectRegistry, label: str = "chair") -> str:
     async def _seed() -> str:
         async with registry.lock():
             obj = registry.insert_object(
-                cls=cls,
+                label=label,
                 pose=Pose3D(1.0, 2.0, 0.1, 0.0, "map"),
                 bbox=BBox3D(0.5, 0.5, 0.9, 0.0, "map"),
                 confidence=0.9,
@@ -95,7 +95,7 @@ def test_operator_label_is_verbatim():
         persist_to_snapshot=False,
     ))
     # "desk" must not be canonicalized into "table" or anything else.
-    assert updated.cls == "desk"
+    assert updated.label == "desk"
     assert updated.attributes["operator_label"] == "desk"
     assert (persisted, map_id, generation) == (False, "m1", 3)
     # Narrow invalidation: this object only, no full clear.

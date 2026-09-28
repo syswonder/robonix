@@ -422,6 +422,17 @@ esac
 echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
 docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
 
+# DualMap, the default backend, is a layer over the image above (start.sh uses
+# it when present). SCENE_PERCEPTION_BACKEND=concept_graphs skips it.
+if [[ "$TARGET" == "x86-docker" && "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]]; then
+    echo "[build] DualMap layer -> robonix-scene-dualmap"
+    docker build "${DOCKER_BUILD_FLAGS[@]}" -f docker/Dockerfile.dualmap \
+        --build-arg BASE_IMAGE="$IMG" \
+        --build-arg GITHUB_PREFIX="${GH_MIRROR:+${GH_MIRROR%/}/}" \
+        --build-arg HF_ENDPOINT="$HF_MIRROR" \
+        -t robonix-scene-dualmap docker/
+fi
+
 # colcon-build the ros2_idl overlay (map interface package for the
 # lifecycle broadcast) inside the image we just built, so the install
 # tree lands on the host bind mount at the SAME path the runtime

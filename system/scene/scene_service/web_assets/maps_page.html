@@ -1,0 +1,383 @@
+<!-- The map library: a card per saved map, and Save for the live session. -->
+<style>
+  .mg { padding: 18px 20px 28px; }
+
+  .mg-bar { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap;
+            margin-bottom: 18px; }
+  .mg-bar label { display: flex; flex-direction: column; gap: 5px;
+                  font-size: 11.5px; color: var(--muted); }
+  .mg-bar .grow { flex: 1; }
+  .mg-msg { font-size: 12px; color: var(--muted); min-height: 1.2em; }
+  .mg-msg.err { color: #e5484d; }
+  .mg-msg.ok { color: #8ef0b7; }
+
+  .mg-grid { display: grid; gap: 14px;
+             grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
+
+  .mg-card {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    overflow: hidden; display: flex; flex-direction: column; cursor: default;
+    transition: border-color .14s ease, transform .14s ease,
+                box-shadow .14s ease; }
+  .mg-card:hover { border-color: #39415a; }
+  .mg-card.bound { border-color: #2f4a3a; }
+
+  /* A fixed height, not aspect-ratio, which a tall preview would override. */
+  .mg-shot { height: 150px; background: #0b0e13; display: grid;
+             place-items: center; border-bottom: 1px solid var(--line);
+             overflow: hidden; }
+  .mg-shot canvas.shot { max-width: 100%; max-height: 100%;
+                         image-rendering: pixelated; }
+  .mg-shot .none { color: #3a4050; font-size: 11.5px; }
+
+  .mg-body { padding: 10px 12px 12px; display: flex; flex-direction: column;
+             gap: 8px; flex: 1; }
+  .mg-name { font-size: 14px; font-weight: 600; color: var(--fg);
+             word-break: break-all; }
+  .mg-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mg-facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px;
+              font-size: 11.5px; }
+  .mg-facts dt, .mg-more dt { color: var(--muted); }
+  .mg-facts dd, .mg-more dd { margin: 0; font-family: var(--font-mono); color: var(--fg); }
+
+  .mg-acts { display: flex; gap: 6px; margin-top: auto; padding-top: 4px; }
+  .mg-acts .btn { flex: 1; }
+  .mg-bar .field { width: 220px; }
+
+  .mg-empty { padding: 40px 4px; color: #555; font-size: 13px; }
+
+  /* Details open over the page, not in the grid among the other cards. */
+  .mg-card.open { position: fixed; inset: 6vh 8vw; z-index: 900; overflow: auto;
+                  box-shadow: 0 20px 60px rgba(0, 0, 0, .6); }
+  .mg-card.open .mg-shot { height: 45vh; }
+  .mg-backdrop { position: fixed; inset: 0; z-index: 899; background: rgba(8, 10, 14, .7); }
+  .mg-backdrop[hidden] { display: none; }
+  /* [hidden] loses to the display below without this. */
+  .mg-more[hidden] { display: none; }
+  .mg-more { border-top: 1px solid var(--line); padding: 10px 12px 12px;
+             display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+             font-size: 11.5px; animation: mg-in var(--t) var(--ease); }
+  .mg-more dd { word-break: break-all; }
+  .mg-more dd.bad { color: #e5484d; }
+  .mg-lists { grid-column: 1 / -1; display: grid; gap: 14px;
+              grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+              margin-top: 8px; }
+  .mg-list h4 { margin: 0 0 5px; font-size: 11.5px; color: var(--muted);
+                font-weight: 600; }
+  .mg-list ul { margin: 0; padding: 0; list-style: none;
+                max-height: 220px; overflow: auto; }
+  .mg-list li { display: flex; justify-content: space-between; gap: 10px;
+                padding: 2px 0; border-bottom: 1px solid #1c2230;
+                font-size: 11.5px; }
+  .mg-list li .a { color: var(--fg); }
+  .mg-list li .b { color: var(--muted); font-family: var(--font-mono);
+                   font-size: 11px; white-space: nowrap; }
+  .mg-list .none { color: #555; font-size: 11.5px; }
+  /* Save, Load and Delete rebind the whole map: nothing else may run meanwhile. */
+  .mg-lock { position: fixed; inset: 0; z-index: 1000; display: grid;
+             place-items: center; background: rgba(8, 10, 14, .72);
+             color: var(--fg); font-size: 14px; }
+  .mg-lock[hidden] { display: none; }
+  @keyframes mg-in { from { opacity: 0 } to { opacity: 1 } }
+  @media (prefers-reduced-motion: reduce) { .mg-more { animation: none } }
+</style>
+
+<div class="mg">
+  <div class="mg-bar">
+    <label>
+      <span data-i18n="maps.newName">Name for this session</span>
+      <input class="field" id="mg-name" placeholder="apartment_demo" autocomplete="off" />
+    </label>
+    <button class="btn primary" id="mg-save" data-i18n="maps.save">Save current session</button>
+    <button class="btn" id="mg-refresh" data-i18n="maps.refresh">Refresh</button>
+    <div class="grow"></div>
+    <div class="mg-msg" id="mg-msg"></div>
+  </div>
+  <div class="mg-grid" id="mg-grid"></div>
+  <div class="mg-backdrop" id="mg-backdrop" hidden></div>
+  <div class="mg-lock" id="mg-lock" hidden></div>
+  <div class="mg-empty" id="mg-empty" data-i18n="maps.empty" hidden>
+    No saved maps yet. Explore, then save this session under a name.
+  </div>
+</div>
+
+<script>
+  const grid = document.getElementById('mg-grid');
+  const emptyNote = document.getElementById('mg-empty');
+  const msg = document.getElementById('mg-msg');
+  const nameBox = document.getElementById('mg-name');
+  let boundId = '';
+  let busy = false;
+
+  function say(text, kind) {
+    msg.textContent = text || '';
+    msg.className = 'mg-msg' + (kind ? ' ' + kind : '');
+  }
+  const esc = x => String(x ?? '').replace(/[&<>"]/g,
+    c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+
+  function when(value) {
+    if (!value) return '—';
+    // mapping reports unix seconds; Date() wants milliseconds.
+    const ms = (typeof value === 'number' && value < 1e12) ? value * 1000 : value;
+    const d = new Date(ms);
+    if (isNaN(d)) return String(value);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+         + `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function card(m) {
+    const id = m.map_id;
+    const bound = id === boundId;
+    const broken = m.has_spatial_artifact === false || m.spatial_ok === false;
+    const tags = [];
+    if (bound) tags.push(`<span class="tag good" data-i18n="maps.inUse"></span>`);
+    if (broken) tags.push(`<span class="tag bad" data-i18n="maps.broken"></span>`);
+    return `
+      <div class="mg-card ${bound ? 'bound' : ''}" data-id="${esc(id)}">
+        <div class="mg-shot"><canvas class="shot" width="300" height="150"></canvas></div>
+        <div class="mg-body">
+          <div class="mg-name">${esc(id)}</div>
+          ${tags.length ? `<div class="mg-tags">${tags.join('')}</div>` : ''}
+          <dl class="mg-facts">
+            <dt data-i18n="maps.saved"></dt><dd>${when(m.updated)}</dd>
+            ${m.artifact_size ? `<dt data-i18n="maps.size"></dt>
+              <dd>${(m.artifact_size / 1048576).toFixed(1)} MB</dd>` : ''}
+          </dl>
+          <div class="mg-more" hidden></div>
+          <div class="mg-acts">
+            <button class="btn more" data-i18n="maps.details"></button>
+            <button class="btn load" data-i18n="maps.load" ${broken ? 'disabled' : ''}></button>
+            <button class="btn danger del" data-i18n="maps.delete"
+              ${bound ? 'disabled data-i18n-title="maps.inUseNoDelete"' : ''}></button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function detailRows(m) {
+    // The artifact's verdict first: it says why Load may be disabled.
+    const rows = [
+      ['maps.health', m.spatial_ok === false
+        ? (m.artifact_detail || t('maps.broken')) : t('maps.healthy'),
+        m.spatial_ok === false],
+      ['maps.size', m.artifact_size
+        ? `${(m.artifact_size / 1048576).toFixed(2)} MB` : '—', false],
+      ['maps.saved', when(m.updated), false],
+      ['maps.id', m.map_id, false],
+    ];
+    return rows.map(([key, value, bad]) =>
+      `<dt data-i18n="${key}"></dt>`
+      + `<dd class="${bad ? 'bad' : ''}">${esc(value)}</dd>`).join('');
+  }
+
+  // A saved map's contents change only when it is saved again.
+  const contentsCache = new Map();
+  async function contentsOf(id) {
+    if (contentsCache.has(id)) return contentsCache.get(id);
+    const promise = fetch(`/api/maps/${encodeURIComponent(id)}/contents`,
+                          {cache: 'no-store'})
+      .then(r => r.json()).catch(() => ({ok: false}))
+      .then(d => { if (!d.ok) contentsCache.delete(id); return d; });
+    contentsCache.set(id, promise);
+    return promise;
+  }
+
+  // Metres to preview pixels; image rows count from the top.
+  function worldToPx(grid, x, y) {
+    const col = (x - grid.origin_x) / grid.resolution;
+    const row = grid.height - (y - grid.origin_y) / grid.resolution;
+    return [col, row];
+  }
+
+  async function paintShot(el, m) {
+    const canvas = el.querySelector('canvas.shot');
+    if (!canvas) return;
+    const img = new Image();
+    img.src = `/api/maps/${encodeURIComponent(m.map_id)}/preview`;
+    try {
+      await img.decode();
+    } catch (_) {
+      // Saved before Scene kept previews, or Save kept none.
+      canvas.outerHTML = `<span class="none" data-i18n="maps.noPreview">${t('maps.noPreview')}</span>`;
+      return;
+    }
+    const d = await contentsOf(m.map_id);
+    const grid = (d && d.grid) || null;
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, 0, 0);
+    if (!grid || !grid.resolution) return;
+    for (const r of (d.regions || [])) {
+      const pts = (r.points || []).map(pt => worldToPx(grid, pt[0], pt[1]));
+      if (pts.length < 2) continue;
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(122,167,255,0.22)';
+      ctx.fill();
+      ctx.strokeStyle = '#7aa7ff';
+      ctx.lineWidth = Math.max(1, canvas.width / 300);
+      ctx.stroke();
+    }
+  }
+
+  function listBlock(titleKey, rows) {
+    return `<div class="mg-list"><h4 data-i18n="${titleKey}"></h4>`
+      + (rows.length
+          ? `<ul>${rows.map(([a, b]) =>
+              `<li><span class="a">${esc(a)}</span>`
+              + `<span class="b">${esc(b)}</span></li>`).join('')}</ul>`
+          : `<div class="none" data-i18n="maps.nothing"></div>`)
+      + `</div>`;
+  }
+
+  async function fillLists(more, id) {
+    const d = await contentsOf(id);
+    if (!d || d.ok === false) return;
+    const regions = (d.regions || []).map(r =>
+      [r.name || r.id || '—', `${(r.points || []).length} pts`]);
+    const objects = (d.objects || []).map(o =>
+      [o.label || '—', `${o.x.toFixed(2)}, ${o.y.toFixed(2)}`]);
+
+    const host = document.createElement('div');
+    host.className = 'mg-lists';
+    host.innerHTML = listBlock('maps.regions', regions)
+                   + listBlock('maps.objects', objects);
+    more.appendChild(host);
+    applyLang(langGet(), document);
+  }
+
+  function wire(el, m) {
+    const id = m.map_id;
+    const more = el.querySelector('.mg-more');
+
+    const moreBtn = el.querySelector('.mg-acts .more');
+    // onclick, not addEventListener: `wire` runs again on a rebuilt card.
+    moreBtn.onclick = () => {
+      const wasOpen = el.classList.contains('open');
+      closeDetails();
+      if (wasOpen) return;
+      backdrop.hidden = false;
+      moreBtn.dataset.i18n = 'maps.back';
+      moreBtn.textContent = t('maps.back');
+      more.innerHTML = detailRows(m);
+      more.hidden = false;
+      el.classList.add('open');
+      applyLang(langGet(), document);
+      fillLists(more, id);
+    };
+    const acts = el.querySelector('.mg-acts');
+    const loadBtn = acts.querySelector('.load');
+    if (loadBtn && !loadBtn.disabled) {
+      loadBtn.addEventListener('click', () => call('load', id));
+    }
+    const delBtn = acts.querySelector('.del');
+    if (delBtn.disabled) return;
+    delBtn.addEventListener('click', () => {
+      // Confirmed in the card rather than with confirm().
+      const original = acts.innerHTML;
+      acts.innerHTML = `<button class="btn confirm" data-i18n="maps.delete"></button>
+        <button class="btn no" data-i18n="maps.cancel"></button>`;
+      acts.querySelector('.no').addEventListener('click', () => {
+        acts.innerHTML = original;
+        wire(el, m);
+        applyLang(langGet(), document);
+      });
+      acts.querySelector('.confirm').addEventListener(
+        'click', () => call('delete', id));
+      applyLang(langGet(), document);
+    });
+  }
+
+  const backdrop = document.getElementById('mg-backdrop');
+  function closeDetails() {
+    backdrop.hidden = true;
+    grid.querySelectorAll('.mg-card.open').forEach(o => {
+      o.classList.remove('open');
+      const d = o.querySelector('.mg-more');
+      if (d) { d.hidden = true; d.innerHTML = ''; }
+      const b = o.querySelector('.mg-acts .more');
+      if (b) { b.dataset.i18n = 'maps.details'; b.textContent = t('maps.details'); }
+    });
+  }
+  backdrop.addEventListener('click', closeDetails);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetails(); });
+
+  // Save, load or delete one map; one operation at a time.
+  async function call(op, id, working = t('maps.working')) {
+    if (busy) return null;
+    busy = true;
+    const lock = document.getElementById('mg-lock');
+    lock.textContent = working + ' ' + t('maps.lockHint');
+    lock.hidden = false;
+    say(working, '');
+    let d = null;
+    try {
+      const r = await fetch(`/api/maps/${op}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({map_id: id}),
+      });
+      d = await r.json();
+      say(d.ok ? '' : (d.detail || t('maps.failed')), d.ok ? 'ok' : 'err');
+    } catch (e) {
+      say(String(e), 'err');
+    }
+    busy = false;
+    lock.hidden = true;
+    contentsCache.delete(id);
+    await load();
+    return d;
+  }
+
+  // Mapping may not answer right after boot; retry until the list arrives.
+  let retry = null;
+  function retryLater() {
+    clearTimeout(retry);
+    retry = setTimeout(() => { if (!document.hidden) load(); else retryLater(); }, 3000);
+  }
+
+  async function load() {
+    clearTimeout(retry);
+    // Only marks the card in use; the list shows without it.
+    const state = await fetch('/api/state', {cache: 'no-store'})
+      .then(r => r.json()).catch(() => ({}));
+    try {
+      const maps = await fetch('/api/maps', {cache: 'no-store'}).then(r => r.json());
+      if (!maps.ok) retryLater();
+      const mb = state.map_binding || {};
+      // An unnamed live session has no card.
+      boundId = (mb.source === 'default' && !mb.mode) ? '' : (mb.map_id || '');
+      const list = maps.maps || [];
+      emptyNote.hidden = list.length > 0;
+      backdrop.hidden = true;  // the open card is being rebuilt
+      grid.innerHTML = list.map(card).join('');
+      list.forEach(m => {
+        const el = grid.querySelector(`.mg-card[data-id="${CSS.escape(m.map_id)}"]`);
+        if (el) { wire(el, m); paintShot(el, m); }
+      });
+      applyLang(langGet(), document);
+      if (!maps.ok && maps.detail) say(maps.detail, 'err');
+    } catch (e) {
+      say(String(e), 'err');
+      retryLater();
+    }
+  }
+
+  document.getElementById('mg-refresh').addEventListener('click', load);
+  document.getElementById('mg-save').addEventListener('click', async () => {
+    const id = nameBox.value.trim();
+    if (!id) { say(t('maps.nameRequired'), 'err'); nameBox.focus(); return; }
+    const d = await call('save', id, t('maps.saving'));
+    if (d && d.ok) nameBox.value = '';
+  });
+  nameBox.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) document.getElementById('mg-save').click();
+  });
+
+  load();
+</script>

@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Fast geometric relation loop.
+"""Fast geometric relation loop (a few Hz).
 
-Produces the one metric, robot-actionable relation geometry still owns under
-the VLM-primary scene graph — ``reachable_by`` (a real 3D gripper→object
-distance) — at a high rate so it reaches Pilot within ~1-2 s of an object
-stabilizing, independent of (and far faster than) the LLM scene-graph builder.
-Writes the *geometric slice* (nodes + edges) into ``SceneGraphStore``; the
-image-grounded builder fills the relational + semantic edges asynchronously.
-
-Contact/containment (``on_top_of``/``under``/``inside``/``contains``) is **no
-longer** computed here: the AABB tests misfired on full-volume boxes and
-same-surface objects, so the image-grounded VLM owns those now. ``near`` is not
-emitted as an edge either — proximity is served as a query
-(``get_object_context.nearby_objects``).
+Publishes the node set and the edges geometry decides on its own:
+`reachable_by` (gripper distance) and, with SCENE_RELATIONS=geometric (the
+default), strict contact/containment plus capped `near`. The builder adds
+the semantic edges on its slower cadence.
 """
 from __future__ import annotations
 
@@ -26,7 +18,7 @@ from ..state.object_registry import Pose3D, SceneObject
 from .builder import _is_stable, _object_to_node
 from .geometry import CONF_MED, strict_geometric_relations
 from .store import SceneGraphStore
-from .types import SceneGraphEdge
+from .types import INVERSE_RELATIONS, SceneGraphEdge
 
 log = logging.getLogger(__name__)
 
@@ -45,16 +37,13 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
-# Reachability v1: pure gripper→object distance (real IK waits for Soma).
-# Ported from the retired RelationEngine. TODO(soma-kinematics).
+# Distance-only reachability until Soma provides kinematics.
 _REACHABLE_RADIUS_M = 1.0
-# Deterministic object↔object relations (ThinkGraphs/BBQ style: geometry
-# decides, no LLM in the loop). `near` is capped per object so a crowded room
-# does not become a complete graph.
 _RELATIONS_MODE = os.environ.get("SCENE_RELATIONS", "geometric").strip().lower()  # geometric | reachable_only
+# `near` is capped per object so a crowded room does not become a complete graph.
 _NEAR_MAX_PER_OBJECT = _env_int("SCENE_NEAR_MAX_PER_OBJECT", 3)
 _NEAR_RADIUS_M = _env_float("SCENE_NEAR_RADIUS_M", 1.5)
-_GRIPPER_OBJECT_PREFIX = "robot.right_gripper"  # canonical self-tracker name
+_GRIPPER_OBJECT_PREFIX = "robot.right_gripper"
 
 
 def _dist3(a: Pose3D, b: Pose3D) -> float:
@@ -62,8 +51,7 @@ def _dist3(a: Pose3D, b: Pose3D) -> float:
 
 
 def _find_gripper(objects: Iterable[SceneObject]) -> Optional[SceneObject]:
-    """Locate the robot's gripper self-object (for reachability). Prefers
-    the canonical gripper id, else any robot self-object (single-arm v1)."""
+    """The gripper self-object, else any robot self-object."""
     for o in objects:
         if o.object_id.startswith(_GRIPPER_OBJECT_PREFIX):
             return o
@@ -74,15 +62,7 @@ def _find_gripper(objects: Iterable[SceneObject]) -> Optional[SceneObject]:
 
 
 class GeometricRelationLoop:
-    """High-rate geometric relation producer; owns the store's geometric
-    slice.
-
-    Each tick recomputes contact/containment + reachable_by from the
-    registry and runs the result through a debounce hysteresis band so EMA
-    pose jitter (object_registry alpha=0.3) does not flicker the graph,
-    while keeping emission latency under ~1 s. Read path: callers use
-    ``SceneGraphStore.get_snapshot()``; this loop only writes.
-    """
+    """Owns the store's geometric slice; debounces edges against pose jitter."""
 
     def __init__(
         self,
@@ -100,17 +80,13 @@ class GeometricRelationLoop:
             if min_observations is not None
             else _env_int("SCENE_GRAPH_MIN_OBSERVATIONS", 2)
         )
-        # Debounce band: emit at score >= _ENTER (≈0.7 s at 3 Hz), drop at
-        # score <= 0 (≈0.7 s grace after disappearance). _MAX caps how long
-        # a long-lived edge can coast through dropouts.
+        # An edge is emitted at score >= _enter and dropped at 0; _max caps
+        # how long it coasts through dropouts.
         self._enter = 2
         self._max = 3
-        # key -> (score, last edge seen for that key)
         self._scores: dict[tuple[str, str, str], tuple[int, SceneGraphEdge]] = {}
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
-
-    # ── lifecycle ────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         if self._task is not None:
@@ -144,67 +120,41 @@ class GeometricRelationLoop:
             except asyncio.TimeoutError:
                 pass
 
-    # ── per-tick ─────────────────────────────────────────────────────────
-
     async def _tick(self) -> None:
-        """Recompute geometric edges, debounce, and publish the slice.
-
-        Stable non-robot objects become nodes (captions read from the
-        builder's cache, falling back to the label); reachable_by uses the
-        gripper self-object, which is excluded from the node set on
-        purpose — its edge target is therefore an id outside ``nodes``."""
-        objs_dict, _ = await self.registry.snapshot()
+        objs_dict = await self.registry.snapshot()
         objects = list(objs_dict.values())
         stable = [o for o in objects if _is_stable(o, self.min_observations)]
-
         nodes = [_object_to_node(o) for o in stable]
-        for node in nodes:
-            node.caption = self.store.get_cached_caption(node) or node.label
-
-        # VLM-primary: geometry owns only `reachable_by` (a real 3D gripper
-        # distance the robot acts on). Contact/containment (on_top_of/under/
-        # inside/contains) are no longer emitted here — they came from
-        # volumetric-AABB tests that misfire on full-volume boxes and
-        # same-surface objects; the image-grounded VLM pass (scene-graph
-        # builder) owns them now. `near` was already a proximity query, not an
-        # edge. This loop still publishes the node set.
         raw = self._reachable_edges(objects, stable)
         if _RELATIONS_MODE == "geometric":
             raw.extend(self._object_relations(nodes))
-        emitted = self._debounce(raw)
-        self.store.set_geometric(nodes, emitted)
+        self.store.set_geometric(nodes, self._debounce(raw))
 
     def _reachable_edges(
         self, objects: list[SceneObject], stable: list[SceneObject]
     ) -> list[SceneGraphEdge]:
-        """`reachable_by` edges object→gripper for stable objects within the
-        reach radius. Empty when no gripper/robot self-object is tracked."""
+        """object→gripper edges within reach. The gripper is not a node, so
+        these edges point outside the node set."""
         gripper = _find_gripper(objects)
         if gripper is None:
             return []
-        out: list[SceneGraphEdge] = []
-        for o in stable:
-            if o.object_id == gripper.object_id:
-                continue
-            if _dist3(o.pose, gripper.pose) <= _REACHABLE_RADIUS_M:
-                out.append(SceneGraphEdge(
-                    source_id=o.object_id,
-                    target_id=gripper.object_id,
-                    relation="reachable_by",
-                    confidence=CONF_MED,
-                    method="geometric",
-                    reason="geometry: within gripper reach radius (distance-only)",
-                ))
-        return out
+        return [
+            SceneGraphEdge(
+                source_id=o.object_id,
+                target_id=gripper.object_id,
+                relation="reachable_by",
+                confidence=CONF_MED,
+                method="geometric",
+                reason="geometry: within gripper reach radius (distance-only)",
+            )
+            for o in stable
+            if o.object_id != gripper.object_id
+            and _dist3(o.pose, gripper.pose) <= _REACHABLE_RADIUS_M
+        ]
 
     def _object_relations(self, nodes) -> list[SceneGraphEdge]:
-        """Pairwise deterministic relations between stable objects.
-
-        Support/containment edges are emitted in both directions (the
-        vocabulary has explicit inverses). `near` edges are kept only for
-        each object's closest `_NEAR_MAX_PER_OBJECT` neighbours within
-        `_NEAR_RADIUS_M`, and only when no stronger relation links the pair.
-        """
+        """Contact/containment both ways; `near` only for each object's closest
+        `_NEAR_MAX_PER_OBJECT` neighbours and only when nothing stronger holds."""
         out: list[SceneGraphEdge] = []
         near_candidates: dict[str, list[tuple[float, str]]] = {}
         for i, a in enumerate(nodes):
@@ -216,15 +166,14 @@ class GeometricRelationLoop:
                         continue
                     reason = f"geometry: {rel} (centre distance {dist:.2f} m)"
                     out.append(SceneGraphEdge(a.object_id, b.object_id, rel, conf, "geometric", reason))
-                    inv = {"on_top_of": "under", "under": "on_top_of", "inside": "contains", "contains": "inside"}[rel]
-                    out.append(SceneGraphEdge(b.object_id, a.object_id, inv, conf, "geometric", reason))
+                    out.append(SceneGraphEdge(
+                        b.object_id, a.object_id, INVERSE_RELATIONS[rel], conf, "geometric", reason))
         seen: set[tuple[str, str]] = set()
         for src, cands in near_candidates.items():
             for dist, dst in sorted(cands)[:_NEAR_MAX_PER_OBJECT]:
-                key = (src, dst)
-                if key in seen:
+                if (src, dst) in seen:
                     continue
-                seen.add(key)
+                seen.add((src, dst))
                 out.append(SceneGraphEdge(
                     src, dst, "near", CONF_MED, "geometric",
                     f"geometry: within {_NEAR_RADIUS_M:.1f} m (centre distance {dist:.2f} m)",
@@ -232,11 +181,7 @@ class GeometricRelationLoop:
         return out
 
     def _debounce(self, edges: list[SceneGraphEdge]) -> list[SceneGraphEdge]:
-        """Hysteresis band over (source, target, relation) keys. Present
-        keys gain a point (capped at _max), absent keys lose one; a key is
-        emitted while its score >= _enter and forgotten once it hits 0.
-        This both delays emission of a flickering new edge and grants a
-        brief grace before removing one that momentarily drops out."""
+        """Present keys gain a point (capped at _max), absent keys lose one."""
         present = {(e.source_id, e.target_id, e.relation): e for e in edges}
         new_state: dict[tuple[str, str, str], tuple[int, SceneGraphEdge]] = {}
         emitted: list[SceneGraphEdge] = []

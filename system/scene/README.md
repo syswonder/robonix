@@ -394,6 +394,9 @@ system:
     config:
       camera_provider_id: front_rgbd_camera
       web_port: 50107
+      # rerun (default) | off. rerun draws the map pages; the scene
+      # docker image ships it.
+      web_viewer: rerun
 ```
 
 The value is the camera package entry's `name` (and therefore its Atlas
@@ -532,12 +535,17 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_OBJECT_TTL_SEC` | `30` | how long a soft-evicted (`missing`) object is kept so a re-detection can re-bind its id + observation_count before it is hard-pruned; decouples object identity from per-tick uuid churn |
 | `SCENE_GRAPH_IMAGE_RELATIONS` | `true` | VLM-primary relations: one image-grounded VLM call (projected numbered boxes) owns relational + semantic edges. `false` forces the legacy text-only per-pair inference (also the automatic fallback when no camera frame bundle is available) |
 | `SCENE_GRAPH_IMAGE_MAX_DIM` | `960` | longest-side pixel cap for the annotated frame sent to the VLM; bounds image token cost |
+| `SCENE_GRAPH_IMAGE_REFRESH_SEC` | `600` | the same visible objects, unmoved and under the same names, reuse the last image-relation answer for this long however the camera moves; a new object, a moved one or a new caption asks again |
 | `SCENE_VLM_FRAME_CHANGE_THRESHOLD` / `SCENE_GRAPH_IMAGE_CHANGE_THRESHOLD` | `0.01` / `0.01` | maximum normalized RGB RMS across 4x4 blocks in a 32x32 sample; ignores JPEG/sensor noise without averaging away small local objects |
 | `SCENE_VLM_CACHE_MAX_AGE_SEC` | `120` | maximum age of a successful detection cache entry when new camera messages continue to arrive; a frozen camera message never spends an expiry inference, and `0` disables reuse across new messages |
 | `SCENE_VLM_FAILURE_BACKOFF_BASE_SEC` / `SCENE_VLM_FAILURE_BACKOFF_MAX_SEC` | `max(detect period, 5)` / `60` | bounded exponential retry window for visual-tier detection failures |
 | `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_BASE_SEC` / `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_MAX_SEC` | `30` / `300` | bounded exponential retry window for whole-scene image-relation failures |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 | `SCENE_WEB_HOST` | `0.0.0.0` | Web UI bind host; set `127.0.0.1` on a robot/control workstation to keep the operator surface local-only. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
+| `SCENE_WEB_VIEWER` | `rerun` | `rerun` draws the 3D and 2D map pages with rerun (the scene docker image ships `rerun-sdk` and its browser bundle; without them the pages say why); `off` never starts it. Config key: `web_viewer`. |
+| `SCENE_RERUN_GRPC_PORT` | `9876` | Port the 3D page reads log data from. The 2D page reads the next port up (`9877` by default), so forward both. |
+| `SCENE_RERUN_PERIOD_S` | `1.0` | How often the map is published. A tick now sends only what changed, so this sets how quickly the robot's own marker follows it rather than how much data the viewer holds. Raise it when watching over a forwarded connection. |
+| `SCENE_RERUN_HISTORY` | `latest` | `latest` logs every entity as static: the browser holds one value per entity, so its memory stays bounded and the page opens on the current map. `changes` keeps a timeline for debugging, and the browser's store then grows with the session. The occupancy grid is static in both modes. |
 | `SCENE_OBJECT_MEMORY_ENABLED` | `true` | enable the object snapshot DB backing the map UI's Save/Load (boot warm-restore only under `SCENE_RESTORE_ON_START`) |
 | `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
 | `SCENE_MAP_ID` | `default` | FALLBACK map binding: mapping's latched `robonix/service/map/lifecycle` broadcast wins when present at startup; this env (below manifest `map_id`) applies when mapping isn't up yet (normal full-boot order) or doesn't broadcast |
@@ -625,10 +633,12 @@ Pilot (scene-graph `in_room` edges) is a planned follow-up.
 | Contract                                       | Tool name        | What it does                                                        |
 |------------------------------------------------|------------------|---------------------------------------------------------------------|
 | `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object (id, label, x,y,z, last_seen). LLM filters client-side. |
-| `robonix/system/scene/list_regions`            | `list_regions`   | Room regions only, with stable IDs accepted by `goal_room`, polygon geometry, and staleness metadata. |
+| `robonix/system/scene/list_regions`            | `list_regions`   | Room regions only, with stable IDs accepted by `goal_region`, polygon geometry, and staleness metadata. |
 | `robonix/system/scene/get_robot_context`       | `get_robot_context` | One coherent robot pose, room/area containment, and nearby-object snapshot. |
 | `robonix/system/scene/goal_near`               | `goal_near`      | Footprint-safe approach pose near a registered object. Pass to `navigation/navigate`. |
-| `robonix/system/scene/goal_room`               | `goal_room`      | Footprint-safe pose inside a room annotation. |
+| `robonix/system/scene/goal_region`             | `goal_region`    | Footprint-safe pose inside a region annotation. |
+| `robonix/system/scene/goal_room`               | `goal_room`      | Deprecated alias of `goal_region`. |
+| `robonix/system/scene/find`                    | `find`           | Resolve a description to candidate objects, or say they are ambiguous and what would tell them apart. |
 | `robonix/system/scene/get_scene_graph`         | `get_scene_graph` | Current semantic graph nodes and relation edges. |
 | `robonix/system/scene/get_object_context`      | `get_object_context` | One object's graph context plus nearby objects and directly related edges. |
 | `robonix/system/scene/list_relations`          | `list_relations` | Relation edges, optionally filtered by relation type. |

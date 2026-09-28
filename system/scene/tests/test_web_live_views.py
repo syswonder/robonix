@@ -154,20 +154,22 @@ def test_camera_requests_are_offloaded_single_flight_and_rate_limited(monkeypatc
 def test_live_map_pages_expose_first_paint_readiness_and_errors():
     """Expose visible first-paint state and guard both image callbacks."""
     web = _web_module()
-    for html in (web._INDEX_HTML, web._USER_HTML):
-        assert '<body data-ready="loading">' in html
+    for html in (web._REGIONS_HTML,):
+        # `data-ready` is the contract -- the first-paint state this test
+        # is about. The tag also names the page it renders now, so the
+        # attribute is read rather than the whole tag matched.
+        assert 'data-ready="loading"' in html
         assert 'role="status"' in html
         assert "document.body.dataset.ready = value" in html
         assert "c.clientWidth > 0 && c.clientHeight > 0" in html
         assert "visibilitychange" in html
-        assert "Scene state unavailable" in html
-        assert "Scene map image could not be decoded" in html
+        assert "regions.unavailable" in html
+        assert "regions.badImage" in html
         assert html.count("if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;") == 2
 
-    assert "if (currentState) draw(currentState);" in web._INDEX_HTML
     assert (
         "occStamp = meta.stamp_ms;\n            occLoading = 0;\n            draw();"
-        in web._USER_HTML
+        in web._REGIONS_HTML
     )
     assert "no depth frame available" in web._INDEX_CAM_HTML
 
@@ -182,7 +184,7 @@ def test_occupancy_generation_guard_rejects_late_success_and_error_callbacks():
         r"function isCurrentOccupancyLoad\(token, stamp\) \{\s*"
         r"return token === occLoadToken && stamp === occLoading;\s*\}"
     )
-    for html in (web._INDEX_HTML, web._USER_HTML):
+    for html in (web._REGIONS_HTML,):
         match = pattern.search(html)
         assert match is not None
         program = "\n".join(
@@ -200,7 +202,7 @@ def test_occupancy_generation_guard_rejects_late_success_and_error_callbacks():
 
 @pytest.mark.parametrize(
     "html_name",
-    ["_INDEX_HTML", "_USER_HTML", "_INDEX_CAM_HTML", "_INDEX_3D_HTML"],
+    ["_REGIONS_HTML", "_INDEX_CAM_HTML"],
 )
 def test_live_view_inline_javascript_is_valid(html_name):
     """Parse each changed inline script with the host JavaScript engine."""
@@ -209,10 +211,143 @@ def test_live_view_inline_javascript_is_valid(html_name):
         pytest.skip("node is not installed")
     web = _web_module()
     html = getattr(web, html_name)
-    if html_name == "_INDEX_3D_HTML":
-        script = html.split('<script type="module">', 1)[1].split("</script>", 1)[0]
-        args = [node, "--input-type=module", "--check"]
-    else:
-        script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-        args = [node, "--check"]
-    subprocess.run(args, input=script, text=True, check=True)
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    subprocess.run([node, "--check"], input=script, text=True, check=True)
+
+
+def test_every_navigation_target_is_a_page_with_the_sidebar():
+    """The sidebar links must all resolve, and each page must carry it back."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    client = TestClient(app)
+    for href, label, _key in web._NAV_LINKS:
+        response = client.get(href)
+        assert response.status_code == 200, href
+        assert label in response.text, href
+        # Every link is present on every page, so any page reaches any other.
+        for other_href, _label, _k in web._NAV_LINKS:
+            assert f'href="{other_href}"' in response.text, (href, other_href)
+
+
+def test_the_viewer_endpoint_says_why_there_is_no_viewer():
+    """A blank frame cannot distinguish "no data" from "never started"."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
+    payload = TestClient(app).get("/api/viewer").json()
+    assert payload["url"] == ""
+    assert payload["detail"]
+
+
+def test_a_cross_site_form_post_is_refused():
+    """A page on another site can POST text/plain without a preflight."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    client = TestClient(web.make_app(registry=_registry_with_no_objects(), hub=None))
+    forged = client.post("/api/objects/flush", content=b"{}",
+                         headers={"content-type": "text/plain"})
+    assert forged.status_code == 415
+    assert client.post("/api/objects/flush", json={}).status_code != 415
+
+
+def _registry_with_no_objects():
+    """An empty registry, enough for the page-shape assertions above."""
+    from scene_service.state import ObjectRegistry
+
+    return ObjectRegistry()
+
+
+# ── One port for the whole UI ───────────────────────────────────────────────
+# rerun serves the viewer application on one port and each page's stream on
+# another. The frame used to point straight at them, so reading the map from
+# a laptop meant forwarding four ports and forgetting one produced a blank
+# frame with no error. Scene proxies all of them under its own port.
+
+
+class _FakeSink:
+    """A sink that is up, with recognisable ports and nothing behind them."""
+
+    ready = True
+    # Layout asks `available` (does this deployment have a viewer at all) and
+    # only the forwarding routes ask `ready` (is one running). A sink that is
+    # up is both. See `RerunSink.available`.
+    available = True
+    detail = ""
+
+    def data_port(self, page):
+        return 55552 if page == "2d" else 55551
+
+
+def _proxy_client():
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    return TestClient(web.make_app(registry=_registry_with_no_objects(),
+                                   hub=None, rerun_sink=_FakeSink()))
+
+
+def test_the_data_source_is_on_scenes_own_origin():
+    """rerun takes an absolute source URL whose path must be exactly `/proxy`;
+    it has to name the host the reader reached, not a port scene bound."""
+    client = _proxy_client()
+    payload = client.get("/api/viewer").json()
+    assert payload["url"] == "rerun+http://testserver/proxy"
+
+
+def test_each_page_reaches_its_own_feed():
+    """The two feeds share a path, so the asking page decides which one."""
+    client = _proxy_client()
+    two_d = client.get("/proxy",
+                       headers={"referer": "http://h/rerun?view=2d"})
+    assert "55552" in two_d.text, two_d.text
+    three_d = client.get("/proxy",
+                         headers={"referer": "http://h/rerun?view=3d"})
+    assert "55551" in three_d.text, three_d.text
+    bare = client.get("/proxy")
+    assert "55551" in bare.text, "an unmarked request must get the 3D feed"
+
+
+def test_the_proxy_says_so_when_there_is_no_viewer():
+    """With no viewer the data path answers at once rather than hanging."""
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    client = TestClient(web.make_app(registry=_registry_with_no_objects(),
+                                     hub=None))
+    assert client.get("/proxy").status_code == 404
+    assert client.get("/api/viewer").json()["url"] == ""
+
+
+def test_the_map_pages_carry_the_object_and_relation_list():
+    """rerun draws the map; it knows nothing about the registry behind it."""
+    client = _proxy_client()
+    for href in ("/", "/2d"):
+        page = client.get(href).text
+        # The lists moved from the floating info panel into the docked
+        # one when the landing page became the viewer's; the question they
+        # answer is the same, so this asks for either.
+        assert ('id="dock-objs"' in page or 'id="info-objs"' in page), href
+        assert ('id="dock-rels"' in page or 'id="info-rels"' in page), href
+        assert "/api/state" in page, href
+
+
+def test_renamed_routes_and_fields_remain_as_deprecated_aliases():
+    from starlette.testclient import TestClient
+    from scene_service.state import BBox3D, Pose3D
+
+    web = _web_module()
+    reg = _registry_with_no_objects()
+    reg.insert_object(
+        label="chair", pose=Pose3D(x=1.0, y=1.0, z=0.0, yaw=0.0, frame_id="map"),
+        bbox=BBox3D(size_x=.4, size_y=.4, size_z=.5, yaw=0.0, frame_id="map"),
+        confidence=0.9, now=1000.0)
+    client = TestClient(web.make_app(registry=reg, hub=None))
+    for old, new in (("/user", "/regions"), ("/api/annotations", "/api/regions")):
+        assert client.get(old).status_code == client.get(new).status_code
+    assert client.get("/3d", follow_redirects=False).headers["location"] == "/"
+    obj = client.get("/api/state").json()["objects"][0]
+    assert obj["cls"] == obj["label"]

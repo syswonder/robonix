@@ -7,7 +7,6 @@ by ObjectRegistry. Geometric relations moved to
 
 from .object_registry import (
     SceneObject,
-    SceneSurface,
     Pose3D,
     BBox3D,
     ObjectRegistry,
@@ -17,7 +16,6 @@ from .data_assoc import Detection, associate
 
 __all__ = [
     "SceneObject",
-    "SceneSurface",
     "Pose3D",
     "BBox3D",
     "ObjectRegistry",
