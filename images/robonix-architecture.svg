@@ -1,0 +1,245 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1368 1015.0" width="1368" height="1015.0" role="img" aria-labelledby="robonix-architecture-title robonix-architecture-desc">
+<title id="robonix-architecture-title">Robonix architecture</title>
+<desc id="robonix-architecture-desc">The user talks to Liaison, which verifies the user with Keystone; Pilot sends the task to an LLM or VLM, which orchestrates skills and services by writing RTDL programs, which Executor runs under Sentinel's supervision. Custom services such as navigation and speech sit beside Scene. Soma, at the bottom, is the body abstraction: a URDF gives the body's geometry and frames, and a YAML body description gives its component tree and the primitive capabilities each component provides to drive the hardware. The skill library runs down the right side from the services into Soma; the preset skills, such as a dance or a backflip, sit where the two overlap. Skills can be learned in a simulator such as Webots, MuJoCo, or Isaac Sim and then deployed to real robots through Robonix.</desc>
+<style>
+ text{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+ .bg{fill:#ffffff} .pnl,.b,.bi{fill:#f5f7fa} .bn{fill:#ffffff} .prog{fill:#edf5ff} .frame{fill:none;stroke:#283689;stroke-width:1.5;stroke-dasharray:8 6;opacity:.75} .b{stroke-width:1.8} .bi{stroke-width:1.4}
+ .h3{font-size:13px;font-weight:700;fill:#111827}
+ .cp{font-size:12.5px;font-weight:700;fill:#374151}
+  .ln{font-size:18px;font-weight:700;letter-spacing:.1em}
+  .lbc{font-size:14px;font-weight:700;letter-spacing:.09em}
+  .lb{font-size:14px;font-weight:700;letter-spacing:.09em;fill:#525252}
+ .t1{font-size:22px;font-weight:700;fill:#111827;letter-spacing:-.01em}
+  .h{font-size:15.5px;fill:#374151}
+ .h2{font-size:15px;font-weight:700;fill:#111827}
+ .cn{font-size:18px;font-weight:700;fill:#111827}
+ .hb{font-size:17px;fill:#1f2937}
+ .s{font-size:13.5px;fill:#6b7280}
+ .user-name{font-size:20px;font-weight:700;fill:#111827}
+ .channel-item{font-size:13px;fill:#6b7280}
+ .it{font-size:12.5px;font-style:italic;fill:#6b7280}
+ .kw{fill:#4589ff;font-weight:700} .mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14.5px;fill:#111827}
+ .ar{stroke:#111827;stroke-width:1.5;fill:none}
+ .skdiv{stroke-width:1.2;stroke-dasharray:6 5;fill:none}
+ .orch{stroke-dasharray:5 4}
+ .ol{fill:none;stroke-width:1.8}
+ .primbg{fill:#f6f2ff}
+ .gl2{font-size:12px;font-weight:700;letter-spacing:.09em}
+ .grp{fill:none;stroke:#4589ff;stroke-width:1.3;stroke-dasharray:7 5}
+ .gl{font-size:12px;font-weight:700;fill:#4589ff;letter-spacing:.09em}
+ @media (prefers-color-scheme:dark){
+  .bg{fill:#0b0f16} .b,.bi,.pnl{fill:#131922} .bn{fill:#1c2430} .prog{fill:#0f1e36} .t1,.h,.h2,.cn,.hb,.mono{fill:#f4f4f4} .mk{fill:#a8a8a8}
+  .h3{fill:#f4f4f4} .s,.it,.cp,.channel-item{fill:#a8a8a8} .user-name{fill:#f4f4f4} g[data-l="neutral"]{fill:#a8a8a8} .ar{stroke:#a8a8a8} .lb{fill:#a8a8a8}
+  rect[data-l="task"],circle[data-l="task"]{stroke:#ff832b} text[data-l="task"],tspan[data-l="task"],g[data-l="task"]{fill:#ff832b} use[data-l="task"]{color:#ff832b}
+  rect[data-l="llm"],circle[data-l="llm"]{stroke:#ff7eb6} text[data-l="llm"],tspan[data-l="llm"],g[data-l="llm"]{fill:#ff7eb6} use[data-l="llm"]{color:#ff7eb6}
+  rect[data-l="rtdl"],circle[data-l="rtdl"]{stroke:#78a9ff} text[data-l="rtdl"],tspan[data-l="rtdl"],g[data-l="rtdl"]{fill:#78a9ff} use[data-l="rtdl"]{color:#78a9ff}
+  rect[data-l="svc"],circle[data-l="svc"]{stroke:#08bdba} text[data-l="svc"],tspan[data-l="svc"],g[data-l="svc"]{fill:#08bdba} use[data-l="svc"]{color:#08bdba}
+  rect[data-l="skill"],circle[data-l="skill"]{stroke:#42be65} text[data-l="skill"],tspan[data-l="skill"],g[data-l="skill"]{fill:#42be65} use[data-l="skill"]{color:#42be65}
+  rect[data-l="prim"],circle[data-l="prim"]{stroke:#be95ff} text[data-l="prim"],tspan[data-l="prim"],g[data-l="prim"]{fill:#be95ff} use[data-l="prim"]{color:#be95ff}
+  rect[data-l="hw"],circle[data-l="hw"]{stroke:#ff832b} text[data-l="hw"],tspan[data-l="hw"],g[data-l="hw"]{fill:#ff832b} use[data-l="hw"]{color:#ff832b}
+  rect[data-l="body"],circle[data-l="body"]{stroke:#08bdba} text[data-l="body"],tspan[data-l="body"],g[data-l="body"]{fill:#08bdba} use[data-l="body"]{color:#08bdba}
+  path.nnl[data-l="llm"]{stroke:#ff7eb6}
+  use.loopic{color:#a8a8a8} path.mlogo{fill:#a8a8a8} rect.primbg{fill:#211833}
+  rect.frame{stroke:#a7b0ff} text[data-l="rbx"],g[data-l="rbx"]{fill:#a7b0ff}
+  rect[data-l="sim"]{stroke:#33b1ff} g[data-l="sim"]{fill:#33b1ff} path.skdiv{stroke:#42be65}
+  rect[data-l="core"],circle[data-l="core"]{stroke:#a7b0ff} text[data-l="core"],tspan[data-l="core"],g[data-l="core"]{fill:#a7b0ff} use[data-l="core"]{color:#a7b0ff}
+  .grp,.gl{stroke:#78a9ff;fill:#78a9ff}}
+</style>
+<defs><symbol id="i-pilot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+  <path d="M19 7a2 2 0 1 0 0 -4a2 2 0 0 0 0 4" />
+  <path d="M11 19h5.5a3.5 3.5 0 0 0 0 -7h-8a3.5 3.5 0 0 1 0 -7h4.5" /></symbol><symbol id="i-executor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16l13 -8l-13 -8" /></symbol><symbol id="i-soma" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" />
+  <path d="M12 2v2" />
+  <path d="M9 12v9" />
+  <path d="M15 12v9" />
+  <path d="M5 16l4 -2" />
+  <path d="M15 14l4 2" />
+  <path d="M9 18h6" />
+  <path d="M10 8v.01" />
+  <path d="M14 8v.01" /></symbol><symbol id="i-public" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM4 12c0-.61.08-1.21.21-1.78L8.99 15v1c0 1.1.9 2 2 2v1.93C7.06 19.43 4 16.07 4 12zm13.89 5.4c-.26-.81-1-1.4-1.9-1.4h-1v-3c0-.55-.45-1-1-1h-6v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41C17.92 5.77 20 8.65 20 12c0 2.08-.81 3.98-2.11 5.4z"/></symbol><symbol id="i-neural" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5L12 4M3.5 7.5L12 12M3.5 7.5L12 20M3.5 16.5L12 4M3.5 16.5L12 12M3.5 16.5L12 20M12 4L20.5 12M12 12L20.5 12M12 20L20.5 12" />
+  <circle cx="3.5" cy="7.5" r="2" fill="currentColor" stroke="none" />
+  <circle cx="3.5" cy="16.5" r="2" fill="currentColor" stroke="none" />
+  <circle cx="12" cy="4" r="2" fill="currentColor" stroke="none" />
+  <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+  <circle cx="12" cy="20" r="2" fill="currentColor" stroke="none" />
+  <circle cx="20.5" cy="12" r="2" fill="currentColor" stroke="none" /></symbol><symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6a1 1 0 0 1 1 -1h12a1 1 0 0 1 1 1v12a1 1 0 0 1 -1 1h-12a1 1 0 0 1 -1 -1l0 -12" />
+  <path d="M9 9h6v6h-6l0 -6" />
+  <path d="M3 10h2" />
+  <path d="M3 14h2" />
+  <path d="M10 3v2" />
+  <path d="M14 3v2" />
+  <path d="M21 10h-2" />
+  <path d="M21 14h-2" />
+  <path d="M14 21v-2" />
+  <path d="M10 21v-2" /></symbol><symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4" />
+  <path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4" /></symbol><symbol id="i-shield" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm6 9.09c0 4-2.55 7.7-6 8.83-3.45-1.13-6-4.82-6-8.83v-4.7l6-2.25 6 2.25v4.7z"/></symbol><symbol id="i-forum" viewBox="0 0 24 24" fill="currentColor"><path d="M15 4v7H5.17L4 12.17V4h11m1-2H3c-.55 0-1 .45-1 1v14l4-4h10c.55 0 1-.45 1-1V3c0-.55-.45-1-1-1zm5 4h-2v9H6v2c0 .55.45 1 1 1h11l4 4V7c0-.55-.45-1-1-1z"/></symbol><marker id="k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="mk" d="M0 0 L10 5 L0 10 z" fill="#111827"/></marker></defs><rect class="bg" width="1368" height="1015.0"/>
+<rect class="b" stroke="#ee5396" data-l="llm" x="128" y="14" width="812" height="88" rx="8"/>
+<path class="nnl" data-l="llm" d="M147.0 46.0L161.0 46.0M147.0 46.0L161.0 58.0M147.0 46.0L161.0 70.0M147.0 58.0L161.0 46.0M147.0 58.0L161.0 58.0M147.0 58.0L161.0 70.0M147.0 70.0L161.0 46.0M147.0 70.0L161.0 58.0M147.0 70.0L161.0 70.0M161.0 46.0L175.0 52.0M161.0 46.0L175.0 64.0M161.0 58.0L175.0 52.0M161.0 58.0L175.0 64.0M161.0 70.0L175.0 52.0M161.0 70.0L175.0 64.0" stroke="#ee5396" stroke-width="1.1" fill="none" opacity="0.7"/>
+<circle class="b nnn" data-l="llm" cx="147.0" cy="46.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="147.0" cy="58.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="147.0" cy="70.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="161.0" cy="46.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="161.0" cy="58.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="161.0" cy="70.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="175.0" cy="52.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<circle class="b nnn" data-l="llm" cx="175.0" cy="64.0" r="3.10" stroke="#ee5396" stroke-width="1.6"/>
+<text class="t1" x="559.0" y="45.0" text-anchor="middle">LLM / VLM</text>
+<text class="h" x="559.0" y="70.0" text-anchor="middle">Orchestrates skills for each natural-language task</text>
+<text class="h" x="559.0" y="90.0" text-anchor="middle">by writing RTDL programs</text>
+<rect class="b" stroke="#1192e8" data-l="sim" x="956" y="14" width="398" height="88" rx="8"/>
+<g fill="#1192e8" data-l="sim" transform="translate(972.0,41.0) scale(1.417)"><g transform="translate(0,24) scale(0.025)"><path d="M440-181 240-296q-19-11-29.5-29T200-365v-230q0-22 10.5-40t29.5-29l200-115q19-11 40-11t40 11l200 115q19 11 29.5 29t10.5 40v230q0 22-10.5 40T720-296L520-181q-19 11-40 11t-40-11Zm0-92v-184l-160-93v185l160 92Zm80 0 160-92v-185l-160 93v184ZM80-680v-120q0-33 23.5-56.5T160-880h120v80H160v120H80ZM280-80H160q-33 0-56.5-23.5T80-160v-120h80v120h120v80Zm400 0v-80h120v-120h80v120q0 33-23.5 56.5T800-80H680Zm120-600v-120H680v-80h120q33 0 56.5 23.5T880-800v120h-80ZM480-526l158-93-158-91-158 91 158 93Zm0 45Zm0-45Zm40 69Zm-80 0Z"/></g></g>
+<text class="t1" x="1180.0" y="54.0" text-anchor="middle">Simulator</text>
+<text class="h" x="1180.0" y="78.0" text-anchor="middle">Webots · MuJoCo · Isaac Sim</text>
+<rect class="prog" data-l="rtdl" stroke="#4589ff" stroke-width="1" opacity="0.45" x="507.0" y="140" width="250" height="124.5"/>
+<rect class="prog" data-l="rtdl" stroke="#4589ff" stroke-width="1" opacity="0.45" x="503.0" y="136" width="250" height="124.5"/>
+<rect class="b prog" stroke="#4589ff" data-l="rtdl" x="499.0" y="132" width="250" height="124.5" rx="0"/>
+<text class="gl2" data-l="rtdl" fill="#4589ff" x="513.0" y="151">RTDL PROGRAM</text>
+<text class="mono" x="536.0" y="176.0"><tspan class="kw" data-l="rtdl">sequence</tspan></text>
+<text class="mono" x="536.0" y="192.5">├─ <tspan class="kw" data-l="rtdl">do</tspan> navigate</text>
+<text class="mono" x="536.0" y="209.0">└─ <tspan class="kw" data-l="rtdl">parallel</tspan></text>
+<text class="mono" x="550.0" y="225.5">├─ <tspan class="kw" data-l="rtdl">do</tspan> pour_water</text>
+<text class="mono" x="550.0" y="242.0">└─ <tspan class="kw" data-l="rtdl">do</tspan> capture</text>
+<path class="ar" d="M424 323.0 L424 106" marker-end="url(#k)"/>
+<text class="it" x="414" y="207.5" text-anchor="end">prompt</text>
+<path class="ar" d="M624 106 L624 128" marker-end="url(#k)"/>
+<path class="ar" d="M624 257.5 L624 320.0" marker-end="url(#k)"/>
+<use href="#i-refresh" class="loopic" x="450.5" y="191.5" width="22" height="22" color="#4b5563"/>
+<path class="ar orch" data-l="rtdl" d="M759.0 194.2 L1036.0 194.2 L1036.0 291.5" marker-end="url(#k)"/>
+<text class="it" x="897.5" y="170.2" text-anchor="middle">orchestrates skills</text>
+<text class="it" x="897.5" y="185.2" text-anchor="middle">and services</text>
+<path class="ar" d="M1193.0 106 L1193.0 291.5" marker-end="url(#k)"/>
+<text class="it" x="1203.0" y="199.5">learn and deploy</text>
+<text class="it" x="1203.0" y="215.5">skills</text>
+<text class="lbc" data-l="svc" fill="#009d9a" x="144" y="317.0">SERVICES</text>
+<g fill="#6b7280" data-l="neutral" transform="translate(8.0,409.0) scale(1.333)"><path d="M12 6c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2m0 10c2.7 0 5.8 1.29 6 2H6c.23-.72 3.31-2 6-2m0-12C9.79 4 8 5.79 8 8s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm0 10c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></g>
+<text class="user-name" x="24" y="465.0" text-anchor="middle">User</text>
+<path class="ar" d="M46 425.0 L138.0 425.0" marker-start="url(#k)" marker-end="url(#k)"/>
+<text class="channel-item" x="92" y="412.0" text-anchor="middle">text</text>
+<text class="channel-item" x="92" y="452.0" text-anchor="middle">voice</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="144.0" y="325.0" width="170.0" height="200.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(175.2,403.0) scale(1.000)"><path d="M15 4v7H5.17L4 12.17V4h11m1-2H3c-.55 0-1 .45-1 1v14l4-4h10c.55 0 1-.45 1-1V3c0-.55-.45-1-1-1zm5 4h-2v9H6v2c0 .55.45 1 1 1h11l4 4V7c0-.55-.45-1-1-1z"/></g>
+<text class="cn" x="207.2" y="421.5">Liaison</text>
+<text class="s" x="229.0" y="447.0" text-anchor="middle">multimodal input</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="394.0" y="325.0" width="260.0" height="200.0" rx="8"/>
+<use href="#i-pilot" data-l="svc" x="481.0" y="384.0" width="24" height="24" color="#009d9a"/>
+<text class="cn" x="513.0" y="402.5">Pilot</text>
+<text class="s" x="524.0" y="428.0" text-anchor="middle">plans with the LLM / VLM</text>
+<text class="s" x="524.0" y="447.0" text-anchor="middle">checks the RTDL program</text>
+<text class="s" x="524.0" y="466.0" text-anchor="middle">manages execution</text>
+<path class="ar" d="M322.0 407.0 L386.0 407.0" marker-end="url(#k)"/>
+<text class="it" x="354.0" y="399.0" text-anchor="middle">task</text>
+<path class="ar" d="M386.0 443.0 L322.0 443.0" marker-end="url(#k)"/>
+<text class="it" x="354.0" y="462.0" text-anchor="middle">feedback</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="734.0" y="325.0" width="290.0" height="76.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(782.0,341.0) scale(1.000)"><g transform="translate(0,24) scale(0.025)"><path d="M200-200h520v-184l45-22q16-8 25.5-22t9.5-32q0-17-9.5-31.5T765-514l-45-21v-185H528l-10-68q-3-22-19.5-37T460-840q-23 0-39.5 15T401-788l-10 68H200v86q56 21 88 68t32 106q0 60-32 107t-88 68v85Zm0 80q-34 0-57-23t-23-57v-152q48 0 84-30.5t36-77.5q0-46-36-76t-84-32v-152q0-33 23.5-56.5T200-800h122q7-51 46-85.5t92-34.5q52 0 91 34.5t47 85.5h122q33 0 56.5 23.5T800-720v134q36 18 58 52t22 74q0 41-22 75t-58 51v134q0 34-23.5 57T720-120H200Zm300-340Z"/></g></g>
+<text class="cn" x="814.0" y="359.5">Custom Services</text>
+<text class="s" x="879.0" y="385.0" text-anchor="middle">navigation · speech · …</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="734.0" y="413.0" width="290.0" height="112.0" rx="8"/>
+<use href="#i-public" data-l="svc" x="836.0" y="428.0" width="24" height="24" color="#009d9a"/>
+<text class="cn" x="868.0" y="446.5">Scene</text>
+<text class="s" x="879.0" y="472.0" text-anchor="middle">semantic map</text>
+<text class="s" x="879.0" y="491.0" text-anchor="middle">(objects, relations)</text>
+<text class="s" x="879.0" y="510.0" text-anchor="middle">spatial map</text>
+<path class="ar" d="M662.0 469.0 L726.0 469.0" marker-start="url(#k)" marker-end="url(#k)"/>
+<text class="it" x="694.0" y="461.0" text-anchor="middle">query</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="144.0" y="571.0" width="170.0" height="60.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(169.3,590.5) scale(0.875)"><path d="M21 10h-8.35A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H13l2 2 2-2 2 2 4-4.04L21 10zM7 15c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z"/></g>
+<text class="cn" x="245.5" y="599.0" text-anchor="middle">Keystone</text>
+<text class="s" x="245.5" y="617.0" text-anchor="middle">identity</text>
+<path class="ar" d="M229.0 529.0 L229.0 566.0" marker-start="url(#k)" marker-end="url(#k)"/>
+<text class="it" x="239.0" y="553.0">verify user</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="394.0" y="571.0" width="260.0" height="60.0" rx="8"/>
+<use href="#i-executor" data-l="svc" x="434.6" y="590.5" width="21" height="21" color="#009d9a"/>
+<text class="cn" x="540.5" y="599.0" text-anchor="middle">Executor</text>
+<text class="s" x="540.5" y="617.0" text-anchor="middle">runs RTDL programs</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="734.0" y="571.0" width="290.0" height="60.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(789.6,590.5) scale(0.875)"><path d="M12 2 4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm6 9.09c0 4-2.55 7.7-6 8.83-3.45-1.13-6-4.82-6-8.83v-4.7l6-2.25 6 2.25v4.7z"/></g>
+<text class="cn" x="895.5" y="599.0" text-anchor="middle">Sentinel</text>
+<text class="s" x="895.5" y="617.0" text-anchor="middle">safety supervision</text>
+<path class="ar" d="M506.0 529.0 L506.0 566.0" marker-end="url(#k)"/>
+<path class="ar" d="M542.0 567.0 L542.0 530.0" marker-end="url(#k)"/>
+<text class="it" x="496.0" y="553.0" text-anchor="end">plan</text>
+<text class="it" x="552.0" y="553.0">feedback</text>
+<path class="ar" d="M726.0 606.0 L662.0 606.0" marker-end="url(#k)"/>
+<text class="it" x="694.0" y="598.0" text-anchor="middle">monitors</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="144.0" y="649.0" width="168.0" height="56.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(183.2,666.5) scale(0.875)"><path d="M21 6.5a2.996 2.996 0 0 0-2.99 3.21l-2.03.68a4.468 4.468 0 0 0-3.22-2.32V5.91A3.018 3.018 0 0 0 15 3c0-1.66-1.34-3-3-3S9 1.34 9 3c0 1.4.96 2.57 2.25 2.91v2.16c-1.4.23-2.58 1.11-3.22 2.32l-2.04-.68C6 9.64 6 9.57 6 9.5c0-1.66-1.34-3-3-3s-3 1.34-3 3 1.34 3 3 3c1.06 0 1.98-.55 2.52-1.37l2.03.68c-.2 1.29.17 2.66 1.09 3.69l-1.41 1.77C6.85 17.09 6.44 17 6 17c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3c0-.68-.22-1.3-.6-1.8l1.41-1.77c1.36.76 3.02.75 4.37 0l1.41 1.77c-.37.5-.59 1.12-.59 1.8 0 1.66 1.34 3 3 3s3-1.34 3-3-1.34-3-3-3c-.44 0-.85.09-1.23.26l-1.41-1.77a4.49 4.49 0 0 0 1.09-3.69l2.03-.68c.53.82 1.46 1.37 2.52 1.37 1.66 0 3-1.34 3-3S22.66 6.5 21 6.5zm-18 4c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zM6 21c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm5-18c0-.55.45-1 1-1s1 .45 1 1-.45 1-1 1-1-.45-1-1zm1 12a2.5 2.5 0 0 1 0-5 2.5 2.5 0 0 1 0 5zm6 4c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm3-8.5c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></g>
+<text class="cn" x="244.5" y="675.0" text-anchor="middle">Atlas</text>
+<text class="s" x="244.5" y="693.0" text-anchor="middle">catalog</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="322.0" y="649.0" width="168.0" height="56.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(353.1,666.5) scale(0.875)"><path d="M13 22h8v-7h-3v-4h-5V9h3V2H8v7h3v2H6v4H3v7h8v-7H8v-2h8v2h-3v7zM10 7V4h4v3h-4zM9 17v3H5v-3h4zm10 0v3h-4v-3h4z"/></g>
+<text class="cn" x="422.5" y="675.0" text-anchor="middle">Nexus</text>
+<text class="s" x="422.5" y="693.0" text-anchor="middle">messaging</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="500.0" y="649.0" width="168.0" height="56.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(529.7,666.5) scale(0.875)"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></g>
+<text class="cn" x="600.5" y="675.0" text-anchor="middle">Chronos</text>
+<text class="s" x="600.5" y="693.0" text-anchor="middle">time sync</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="678.0" y="649.0" width="168.0" height="56.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(713.1,666.5) scale(0.875)"><path d="M8 16h8v2H8zm0-4h8v2H8zm6-10H6c-1.1 0-2 .9-2 2v16c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></g>
+<text class="cn" x="778.5" y="675.0" text-anchor="middle">Scribe</text>
+<text class="s" x="778.5" y="693.0" text-anchor="middle">logs</text>
+<rect class="bi" stroke="#009d9a" data-l="svc" x="856.0" y="649.0" width="168.0" height="56.0" rx="8"/>
+<g fill="#009d9a" data-l="svc" transform="translate(891.1,666.5) scale(0.875)"><path d="M20 4H4c-1.1 0-2 .9-2 2v3h2V6h16v3h2V6c0-1.1-.9-2-2-2zm0 14H4v-3H2v3c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-3h-2v3z"/><path d="M14.89 7.55c-.34-.68-1.45-.68-1.79 0L10 13.76l-1.11-2.21A.988.988 0 0 0 8 11H2v2h5.38l1.72 3.45c.18.34.52.55.9.55s.72-.21.89-.55L14 10.24l1.11 2.21c.17.34.51.55.89.55h6v-2h-5.38l-1.73-3.45z"/></g>
+<text class="cn" x="956.5" y="675.0" text-anchor="middle">Vitals</text>
+<text class="s" x="956.5" y="693.0" text-anchor="middle">health</text>
+<rect class="b" stroke="none" x="1048" y="325.0" width="290" height="554.0" rx="8"/>
+<rect class="b" stroke="#009d9a" data-l="body" x="144" y="723.0" width="1194" height="156" rx="8"/>
+<rect class="ol" stroke="#24a148" data-l="skill" x="1048" y="325.0" width="290" height="554.0" rx="8"/>
+<use href="#i-soma" data-l="body" x="160" y="737.0" width="26" height="26" color="#009d9a"/>
+<text class="cn" x="196" y="756.0">Soma</text>
+<text class="s" x="253.2" y="756.0">body model described in URDF and YAML</text>
+<rect class="primbg" stroke="none" x="160" y="773.0" width="864" height="92" rx="8"/>
+<text class="lbc" data-l="prim" fill="#a56eff" x="172" y="793.0">PRIMITIVES</text>
+<rect class="bi bn" stroke="#a56eff" data-l="prim" x="172.0" y="801.0" width="160.0" height="50" rx="8"/>
+<g fill="#a56eff" data-l="prim" transform="translate(207.2,815.5) scale(0.875)"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.85 7h10.29l1.08 3.11H5.77L6.85 7zM19 17H5v-5h14v5z"/><circle cx="7.5" cy="14.5" r="1.5"/><circle cx="16.5" cy="14.5" r="1.5"/></g>
+<text class="h2" x="268.5" y="822.0" text-anchor="middle">move</text>
+<text class="s" x="268.5" y="841.0" text-anchor="middle">chassis</text>
+<rect class="bi bn" stroke="#a56eff" data-l="prim" x="342.0" y="801.0" width="160.0" height="50" rx="8"/>
+<g fill="#a56eff" data-l="prim" transform="translate(369.5,815.5) scale(0.875)"><path d="m19.93 8.35-3.6 1.68L14 7.7V6.3l2.33-2.33 3.6 1.68c.38.18.82.01 1-.36.18-.38.01-.82-.36-1l-3.92-1.83a.993.993 0 0 0-1.13.2L13.78 4.4A.975.975 0 0 0 13 4c-.55 0-1 .45-1 1v1H8.82C8.4 4.84 7.3 4 6 4 4.34 4 3 5.34 3 7c0 1.1.6 2.05 1.48 2.58L7.08 18H6c-1.1 0-2 .9-2 2v1h13v-1c0-1.1-.9-2-2-2h-1.62L8.41 8.77c.17-.24.31-.49.41-.77H12v1c0 .55.45 1 1 1 .32 0 .6-.16.78-.4l1.74 1.74c.3.3.75.38 1.13.2l3.92-1.83c.38-.18.54-.62.36-1a.753.753 0 0 0-1-.36zM6 8c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm5.11 10H9.17l-2.46-8h.1l4.3 8z"/></g>
+<text class="h2" x="438.5" y="822.0" text-anchor="middle">set pose</text>
+<text class="s" x="438.5" y="841.0" text-anchor="middle">arm</text>
+<rect class="bi bn" stroke="#a56eff" data-l="prim" x="512.0" y="801.0" width="160.0" height="50" rx="8"/>
+<g fill="#a56eff" data-l="prim" transform="translate(553.0,815.5) scale(0.875)"><path d="M18.5 8c-.17 0-.34.02-.5.05V4.5a2.5 2.5 0 0 0-3.04-2.44A2.502 2.502 0 0 0 12.5 0c-1.06 0-1.96.66-2.33 1.59A2.5 2.5 0 0 0 7 4v.55A2.5 2.5 0 0 0 4 7v8.5c0 4.69 3.81 8.5 8.5 8.5s8.5-3.81 8.5-8.5v-5A2.5 2.5 0 0 0 18.5 8zm.5 7.5a6.5 6.5 0 1 1-13 0V7c0-.28.22-.5.5-.5s.5.22.5.5v5h2V4c0-.28.22-.5.5-.5s.5.22.5.5v7h2V2.5c0-.28.22-.5.5-.5s.5.22.5.5V11h2V4.5c0-.28.22-.5.5-.5s.5.22.5.5v8.92c-1.77.77-3 2.53-3 4.58h2c0-1.66 1.34-3 3-3v-4.5c0-.28.22-.5.5-.5s.5.22.5.5v5z"/></g>
+<text class="h2" x="608.5" y="822.0" text-anchor="middle">grasp</text>
+<text class="s" x="608.5" y="841.0" text-anchor="middle">hand</text>
+<rect class="bi bn" stroke="#a56eff" data-l="prim" x="682.0" y="801.0" width="160.0" height="50" rx="8"/>
+<g fill="#a56eff" data-l="prim" transform="translate(714.0,815.5) scale(0.875)"><path d="m14.12 4 1.83 2H20v12H4V6h4.05l1.83-2h4.24M15 2H9L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2zm-3 7c1.65 0 3 1.35 3 3s-1.35 3-3 3-3-1.35-3-3 1.35-3 3-3m0-2c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5z"/></g>
+<text class="h2" x="778.5" y="822.0" text-anchor="middle">capture</text>
+<text class="s" x="778.5" y="841.0" text-anchor="middle">camera</text>
+<rect class="bi bn" stroke="#a56eff" data-l="prim" x="852.0" y="801.0" width="160.0" height="50" rx="8"/>
+<g fill="#a56eff" data-l="prim" transform="translate(895.2,815.5) scale(0.875)"><path d="M19.74 18.33A9.984 9.984 0 0 0 22 12c0-5.52-4.48-10-10-10S2 6.48 2 12s4.48 10 10 10a9.984 9.984 0 0 0 7.11-2.97c.03-.03.05-.06.07-.08.2-.2.39-.41.56-.62zM12 20c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8c0 1.85-.63 3.54-1.69 4.9l-1.43-1.43c.69-.98 1.1-2.17 1.1-3.46 0-3.31-2.69-6-6-6s-6 2.69-6 6 2.69 6 6 6c1.3 0 2.51-.42 3.49-1.13l1.42 1.42A7.822 7.822 0 0 1 12 20zm1.92-7.49c.17-.66.02-1.38-.49-1.9l-.02-.02c-.77-.77-2-.78-2.78-.04-.01.01-.03.02-.05.04-.78.78-.78 2.05 0 2.83l.02.02c.52.51 1.25.67 1.91.49l1.51 1.51c-.6.36-1.29.58-2.04.58-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4c0 .73-.21 1.41-.56 2l-1.5-1.51z"/></g>
+<text class="h2" x="948.5" y="822.0" text-anchor="middle">scan</text>
+<text class="s" x="948.5" y="841.0" text-anchor="middle">lidar</text>
+<text class="lbc" data-l="skill" fill="#24a148" x="1064" y="349.0">SKILL LIBRARY</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="365.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,375.5) scale(0.875)"><path d="M6.99 11 3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></g>
+<text class="h2" x="1107" y="391.0">pick and place</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="415.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,425.5) scale(0.875)"><g transform="translate(0,24) scale(0.025)"><path d="M475-160q4 0 8-2t6-4l328-328q12-12 17.5-27t5.5-30q0-16-5.5-30.5T817-607L647-777q-11-12-25.5-17.5T591-800q-15 0-30 5.5T534-777l-11 11 74 75q15 14 22 32t7 38q0 42-28.5 70.5T527-522q-20 0-38.5-7T456-550l-75-74-175 175q-3 3-4.5 6.5T200-435q0 8 6 14.5t14 6.5q4 0 8-2t6-4l136-136 56 56-135 136q-3 3-4.5 6.5T285-350q0 8 6 14t14 6q4 0 8-2t6-4l136-135 56 56-135 136q-3 2-4.5 6t-1.5 8q0 8 6 14t14 6q4 0 7.5-1.5t6.5-4.5l136-135 56 56-136 136q-3 3-4.5 6.5T454-180q0 8 6.5 14t14.5 6Zm-1 80q-37 0-65.5-24.5T375-166q-34-5-57-28t-28-57q-34-5-56.5-28.5T206-336q-38-5-62-33t-24-66q0-20 7.5-38.5T149-506l232-231 131 131q2 3 6 4.5t8 1.5q9 0 15-5.5t6-14.5q0-4-1.5-8t-4.5-6L398-777q-11-12-25.5-17.5T342-800q-15 0-30 5.5T285-777L144-635q-9 9-15 21t-8 24q-2 12 0 24.5t8 23.5l-58 58q-17-23-25-50.5T40-590q2-28 14-54.5T87-692l141-141q24-23 53.5-35t60.5-12q31 0 60.5 12t52.5 35l11 11 11-11q24-23 53.5-35t60.5-12q31 0 60.5 12t52.5 35l169 169q23 23 35 53t12 61q0 31-12 60.5T873-437L545-110q-14 14-32.5 22T474-80Zm-99-560Z"/></g></g>
+<text class="h2" x="1107" y="441.0">hand over an item</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="465.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,475.5) scale(0.875)"><g transform="translate(0,24) scale(0.025)"><path d="M444-600q-55 0-108 15.5T238-538l42 378h400l44-400h-28q-38 0-69-5.5T542-587q-23-7-48-10t-50-3Zm-216-25q51-27 105.5-41T445-680q30 0 59.5 4t58.5 12q50 14 76.5 19t56.5 5h37l17-160H210l18 175Zm51 545q-31 0-53.5-20T200-151l-80-729h720l-80 729q-3 31-25.5 51T681-80H279Zm165-80h236-400 164Z"/></g></g>
+<text class="h2" x="1107" y="491.0">pour water</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="515.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,525.5) scale(0.875)"><path d="M18 2.01 6 2c-1.11 0-2 .89-2 2v16c0 1.11.89 2 2 2h12c1.11 0 2-.89 2-2V4c0-1.11-.89-1.99-2-1.99zM18 20H6L5.99 4H18v16z"/><circle cx="8" cy="6" r="1"/><circle cx="11" cy="6" r="1"/><path d="M12 19c2.76 0 5-2.24 5-5s-2.24-5-5-5-5 2.24-5 5 2.24 5 5 5zm2.36-7.36c1.3 1.3 1.3 3.42 0 4.72-1.3 1.3-3.42 1.3-4.72 0l4.72-4.72z"/></g>
+<text class="h2" x="1107" y="541.0">fold a towel</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="565.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,575.5) scale(0.875)"><g transform="translate(0,24) scale(0.025)"><path d="M460-200h40v-74l140-140v-186H320v186l140 140v74Zm-80 80v-120L240-380v-220q0-33 23.5-56.5T320-680h40l-40 40v-200h80v160h160v-160h80v200l-40-40h40q33 0 56.5 23.5T720-600v220L580-240v120H380Zm100-280Z"/></g></g>
+<text class="h2" x="1107" y="591.0">plug in a cable</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="615.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,625.5) scale(0.875)"><g transform="translate(0,24) scale(0.025)"><path d="M480-316.5q38-.5 56-27.5l224-336-336 224q-27 18-28.5 55t22.5 61q24 24 62 23.5Zm0-483.5q59 0 113.5 16.5T696-734l-76 48q-33-17-68.5-25.5T480-720q-133 0-226.5 93.5T160-400q0 42 11.5 83t32.5 77h552q23-38 33.5-79t10.5-85q0-36-8.5-70T766-540l48-76q30 47 47.5 100T880-406q1 57-13 109t-41 99q-11 18-30 28t-40 10H204q-21 0-40-10t-30-28q-26-45-40-95.5T80-400q0-83 31.5-155.5t86-127Q252-737 325-768.5T480-800Zm7 313Z"/></g></g>
+<text class="h2" x="1107" y="641.0">read a gauge</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062" y="665.0" width="262" height="42" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1076.0,675.5) scale(0.875)"><g transform="translate(0,24) scale(0.025)"><path d="M240-240h177v-133h103v-133h103v-134h97v-80H543v133H440v133H337v134h-97v80Zm-40 120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm0-560v560-560Z"/></g></g>
+<text class="h2" x="1107" y="691.0">climb stairs</text>
+<rect class="bi bn" stroke="#24a148" data-l="skill" x="1062.0" y="747.0" width="262.0" height="118.0" rx="8"/>
+<g fill="#24a148" data-l="skill" transform="translate(1095.5,795.5) scale(0.875)"><g transform="translate(0,24) scale(0.025)"><path d="m480-80-20-400-140-40H40v-80h240l280-200 52 61-166 119h114l312-180 48 56-340 264-20 400h-80ZM240-640q-33 0-56.5-23.5T160-720q0-33 23.5-56.5T240-800q33 0 56.5 23.5T320-720q0 33-23.5 56.5T240-640Z"/></g></g>
+<text class="h2" x="1209.5" y="804.0" text-anchor="middle">Preset skills</text>
+<text class="s" x="1209.5" y="822.0" text-anchor="middle">(dance, backflip, …)</text>
+<rect class="frame" data-l="rbx" x="128" y="294.5" width="1226" height="600.5" rx="14"/>
+<g data-l="rbx" fill="#283689" transform="translate(144.0,239.1) scale(0.32813)"><path d="M159.11,27.03c-2.31-1.41,.08,19.02-20.72,25.72,1.64-8.68-.75-15.71-2.06-16.83-1.34-1.15-1.47,7.18-12.11,8.85-1.1-1.92-2.7-3.94-4.62-5.96,.96-4.77-.35-8.65-1.06-9.27-.08-.07-1.87,2.21-5.01,3.64-.83-.68-1.66-1.36-2.52-2.01-2.34-1.81-4.69-3.25-6.94-4.41,.24-.54,1.68-4.26,.03-8.06-1.73-4-6.24-5.63-10.68-3.97-4.34,1.62-6.11,5.61-6.44,6.48-.02,.05-.04,.11-.06,.16-5.31-1-9.51-1-12.92-.51-1.83-3.12-5.28-5.44-8.82-5.45-2.91,0-6.22,1.33-8.02,4.01-3.01,4.48-1.49,11.63,3.44,14.31,.4,.22,.81,.39,1.23,.54-.43,.08-.9,.09-1.4,.02-3.31-.51-5.72-4.19-7.55-7.01-.02-.02-.05,.03-.08,.04-9.06,5.84-15.87,17.7-17.02,25.21-.93,.65-1.87,1.31-2.82,2-15.53,11.22-28.72,38.2-20.76,79.27,.17,1.19,1.02,2.53,2.35,2.53l14.45,.06c1.37,0,2.54-1,2.74-2.36l.82-5.6c.65-4.39,3.99-8.03,8.38-8.67,5.52-.8,10.47,3.02,11.26,8.35l.88,5.96c.2,1.34,1.35,2.33,2.7,2.33h14.79c1.35,0,2.5-.99,2.7-2.33l.79-5.3c.56-5.15,4.62-9.16,9.82-9.16s9.39,4.06,9.97,9.16l.82,5.62c.17,1.15,1.15,2,2.32,2h14.41c1.24,0,2.19-.73,2.65-2.05,2.76-8.08,2.26-14.58,1.88-17.92-.07-.6-.21-1.02-.3-1.43-13.95-.27-28.02-4.32-38.25-9.72,11.23,3.65,21.72,5.62,27.34,5.82,73.38,2.6,59.58-80.89,54.38-84.06ZM81.48,63.03c-1.47,3.41-5.43,4.99-8.84,3.52-3.41-1.47-4.99-5.43-3.52-8.84,1.47-3.41,5.43-4.99,8.84-3.52s4.99,5.43,3.52,8.84Z"/><path d="M474.67,89.79h0c3.52,0,6.38,2.86,6.38,6.38v27.32c0,7.05-5.71,12.76-12.76,12.76h0v-40.08c0-3.52,2.86-6.38,6.38-6.38Z"/><path d="M325.39,83.71c-3.36,0-6.56,.65-9.51,1.8-1.38,.54-2.7,1.19-3.96,1.95-.01,0-.02,.01-.03,.02v-10.89c0-3.52-2.86-6.38-6.38-6.38s-6.38,2.86-6.38,6.38v34.05h.03c.35,14.2,11.95,25.61,26.24,25.61s26.27-11.76,26.27-26.27-11.76-26.27-26.27-26.27Zm9.56,36.08c-2.63,2.66-5.77,3.99-9.43,3.99s-6.97-1.36-9.63-4.07c-2.47-2.52-3.77-5.55-3.94-9.08h-.03v-.8c0-3.72,1.31-6.9,3.94-9.54,0,0,.01-.01,.02-.02,2.62-2.62,5.79-3.93,9.49-3.93s6.89,1.35,9.55,4.03c2.65,2.69,3.98,5.94,3.98,9.77s-1.32,6.99-3.94,9.65Z"/><path d="M456.61,90.75c-4.53-5.45-10.56-8.17-18.08-8.17-6.57,0-12.13,2.35-16.66,7.04-4.53,4.69-6.8,10.47-6.8,17.32v22.92c0,3.53,2.86,6.39,6.39,6.39h0c3.53,0,6.39-2.86,6.39-6.39v-22.76c0-5.67,4.28-10.63,9.94-10.99,6.2-.4,11.36,4.51,11.36,10.63v16.73c0,7.06,5.72,12.78,12.78,12.78h0v-27.73c0-7.59-1.77-13.51-5.32-17.77Z"/><path d="M474.65,70.33c1.84,0,3.42,.67,4.73,2,1.32,1.33,1.97,2.95,1.97,4.84s-.65,3.47-1.96,4.79c-1.3,1.32-2.86,1.98-4.67,1.98s-3.46-.67-4.77-2.02c-1.32-1.35-1.97-2.98-1.97-4.9s.65-3.42,1.95-4.73c1.3-1.31,2.87-1.96,4.71-1.96Z"/><path d="M509.1,95.37l-4.26-5.87c-1.88-2.59-4.88-4.12-8.08-4.12h-9.73l14.68,20.24,7.39-10.25Z"/><path d="M519.21,109.32l17.27-23.94h-9.47c-3.21,0-6.22,1.54-8.09,4.14l-7.02,9.72h0s-7.39,10.24-7.39,10.24h0s-4.6,6.38-4.6,6.38l-1.3,1.81h0s-13.4,18.57-13.4,18.57h9.47c3.21,0,6.22-1.54,8.09-4.14l9.05-12.54,9.11,12.56c1.88,2.59,4.88,4.12,8.08,4.12h9.73l-19.53-26.93Z"/><path d="M226.57,111.82c3.18-1.82,5.67-4.42,7.47-7.8s2.7-7.17,2.7-11.35c0-7.43-2.24-13.16-6.71-17.17-3.98-3.52-9.17-5.28-15.57-5.28h-34.16v18.98h20.27c1.3-3.7,4.82-6.35,8.97-6.35,5.25,0,9.51,4.26,9.51,9.51s-4.26,9.51-9.51,9.51c-4.14,0-7.66-2.65-8.97-6.35h-20.27v40.73h12.73v-21.45h17.51l12.39,21.45h18.47l-14.84-24.43Z"/><path d="M383.34,82.8h0c-14.76,0-26.72,11.96-26.72,26.72h0c0,14.76,11.96,26.72,26.72,26.72h0c14.76,0,26.72-11.96,26.72-26.72h0c0-14.76-11.96-26.72-26.72-26.72Zm0,37.54c-6.11,0-11.06-4.95-11.06-11.06s4.95-11.06,11.06-11.06,11.06,4.95,11.06,11.06-4.95,11.06-11.06,11.06Z"/><path d="M267.29,82.8h0c-14.76,0-26.72,11.96-26.72,26.72h0c0,14.76,11.96,26.72,26.72,26.72h0c14.76,0,26.72-11.96,26.72-26.72h0c0-14.76-11.96-26.72-26.72-26.72Zm0,37.79c-6.11,0-11.06-4.95-11.06-11.06s4.95-11.06,11.06-11.06,11.06,4.95,11.06,11.06-4.95,11.06-11.06,11.06Z"/></g>
+<path class="ar" d="M584.0 883.0 L584.0 909.0" marker-start="url(#k)" marker-end="url(#k)"/>
+<rect class="b" stroke="#ff832b" data-l="hw" x="128" y="913.0" width="1226" height="88" rx="8"/>
+<use href="#i-cpu" data-l="hw" x="144.0" y="940.0" width="34" height="34" color="#ff832b"/>
+<text class="t1" x="741.0" y="952.0" text-anchor="middle">Hardware</text>
+<text class="hb" x="741.0" y="978.0" text-anchor="middle">quadruped · wheeled · tracked · humanoid · arm and hand</text>
+</svg>
