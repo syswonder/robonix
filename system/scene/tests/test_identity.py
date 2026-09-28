@@ -213,6 +213,24 @@ def test_apply_snapshot_follows_a_registry_merge():
     assert [o.object_id for o in reg.all_objects() if o.label == "chair"] == [kept]
 
 
+def test_photographs_come_from_the_detectors_own_boxes():
+    """A crop is cut from the box the label was given to, and only while fresh."""
+    import numpy as np
+
+    det = _make_detector(ObjectRegistry())
+    det._uuid_to_oid = {"u1": "scene.object.0007"}
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    det._seen = (rgb, {"u1": [10.4, 20.6, 110.0, 220.0], "gone": [0, 0, 5, 5]},
+                 (1.0, 2.0), time.time())
+
+    frame, boxes, cam_xy = det.latest_detection_views()
+    assert frame is rgb and cam_xy == (1.0, 2.0)
+    assert boxes == [("scene.object.0007", (10, 21, 110, 220))]
+
+    det._seen = det._seen[:3] + (time.time() - 60.0,)
+    assert det.latest_detection_views() is None
+
+
 if __name__ == "__main__":
     print("Running object-identity unit tests...\n")
     test_find_rebindable()

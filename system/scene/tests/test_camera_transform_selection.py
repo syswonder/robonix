@@ -62,11 +62,13 @@ class _FakeHub:
         self.tf_transform = tf_transform
         self.samples = samples
         self.lookup_calls: list[tuple[str, str]] = []
+        self.stamps: list[object] = []
         self.latest_calls: list[str] = []
 
-    def lookup_transform_4x4(self, target_frame: str, source_frame: str):
+    def lookup_transform_4x4(self, target_frame: str, source_frame: str, stamp=None):
         """Record TF queries and return the configured result."""
         self.lookup_calls.append((target_frame, source_frame))
+        self.stamps.append(stamp)
         return self.tf_transform
 
     def has(self, kind: str) -> bool:
@@ -126,6 +128,16 @@ def test_tf_transform_wins_when_explicit_extrinsics_are_also_available() -> None
     np.testing.assert_allclose(actual, tf_transform.astype(np.float32))
     assert hub.lookup_calls == [("selected_camera_optical", "map")]
     assert hub.latest_calls == []
+
+
+def test_tf_is_asked_for_the_pose_at_the_frame_stamp() -> None:
+    """A frame is placed with the pose the robot had when it was captured."""
+    hub = _FakeHub(np.eye(4, dtype=np.float64), _compatibility_samples())
+    stamp = object()
+
+    _detector(hub)._build_camera_to_map_transform(stamp=stamp)
+
+    assert hub.stamps == [stamp]
 
 
 def test_explicit_pose_and_extrinsics_are_used_only_when_tf_is_unavailable() -> None:

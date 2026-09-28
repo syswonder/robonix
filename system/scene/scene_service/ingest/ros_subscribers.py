@@ -282,23 +282,42 @@ class SubscribersHub:
         self,
         target_frame: str,
         source_frame: str,
+        stamp: Any = None,
     ):
-        """4x4 transform mapping points from `target_frame` into `source_frame`, or None."""
+        """4x4 transform mapping points from `target_frame` into `source_frame`, or None.
+
+        `stamp` (a message header stamp) asks for the transform at that moment:
+        a frame is placed with the pose the robot had when it was captured, not
+        the pose it has once detection on it has finished. Outside the buffered
+        history the latest transform is used, as before.
+        """
         if self._ros is None or self._tf_buffer is None:
             return None
-        try:
-            import numpy as np
-            Time = self._ros["Time"]
-            Duration = self._ros["Duration"]
-            tf = self._tf_buffer.lookup_transform(
-                source_frame, target_frame,
-                Time(),
-                Duration(seconds=0.1),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.debug("[scene-ros] tf2 4x4 %s→%s failed: %s",
-                      source_frame, target_frame, e)
-            return None
+        import numpy as np
+        Time = self._ros["Time"]
+        Duration = self._ros["Duration"]
+        tf = None
+        if stamp is not None:
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    source_frame, target_frame,
+                    Time.from_msg(stamp),
+                    Duration(seconds=0.1),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.debug("[scene-ros] tf2 %s→%s at the frame stamp failed: %s",
+                          source_frame, target_frame, e)
+        if tf is None:
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    source_frame, target_frame,
+                    Time(),
+                    Duration(seconds=0.1),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.debug("[scene-ros] tf2 4x4 %s→%s failed: %s",
+                          source_frame, target_frame, e)
+                return None
         t = tf.transform.translation
         q = tf.transform.rotation
         # Quaternion → 3x3 rotation.

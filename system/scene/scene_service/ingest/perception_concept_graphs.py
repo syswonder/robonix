@@ -657,6 +657,10 @@ class ConceptGraphsDetector:
 
         # uuid → registry object_id binding (see _apply_snapshot).
         self._uuid_to_oid: dict[str, str] = {}
+        # (rgb, {track_id: xyxy}, camera xy, wall time) of the last frame that
+        # matched detections: the photographs are cut from these boxes.
+        self._seen = None
+        self._tick_boxes: dict = {}
         # Per-track side tables keyed by the ConceptGraphs object uuid.
         self._bank: dict[Any, list[tuple[Any, float]]] = {}      # (feat, area)
         self._max_area: dict[Any, float] = {}
@@ -863,6 +867,25 @@ class ConceptGraphsDetector:
             log.debug("[scene-cg] depth decode failed: %r", error)
             return None
 
+    def latest_detection_views(self, max_age_s: float = 3.0):
+        """``(rgb_bgr, [(object_id, (u0, v0, u1, v1))], camera_xy)`` for the last
+        frame whose detections matched objects, or None.
+
+        Each box is the one the detector drew for that object in that frame,
+        so the photograph shows what the label was given to.
+        """
+        seen = getattr(self, "_seen", None)
+        if seen is None or time.time() - seen[3] > max_age_s:
+            return None
+        rgb, boxes, cam_xy, _ = seen
+        out = []
+        for track_id, xyxy in boxes.items():
+            oid = self._uuid_to_oid.get(track_id)
+            if oid:
+                u0, v0, u1, v1 = (int(round(float(c))) for c in xyxy)
+                out.append((oid, (u0, v0, u1, v1)))
+        return rgb, out, cam_xy
+
     def latest_frame_bundle(self):
         """
         Return ``(rgb_bgr, K, T_cam_map)`` for projecting map-frame points into
@@ -878,7 +901,7 @@ class ConceptGraphsDetector:
         if K is None or K.fx <= 0 or K.fy <= 0:
             return None
         try:
-            T = self._build_camera_to_map_transform()
+            T = self._build_camera_to_map_transform(stamp=_header_stamp(rgb_msg))
         except Exception as e:  # noqa: BLE001
             log.debug("[scene-cg] frame bundle: transform unavailable: %s", e)
             return None
@@ -932,6 +955,7 @@ class ConceptGraphsDetector:
             return
         rgb = _image_msg_to_bgr(rgb_msg)
         depth = _depth_msg_to_metres(depth_msg)
+        self._tick_boxes = {}
         if rgb is None or depth is None:
             return
         # YOLO-World predict expects RGB in standard channel order.
@@ -1086,8 +1110,11 @@ class ConceptGraphsDetector:
             [0,    0,    1.0],
         ], dtype=np.float32)
         world_frame = str(self._world_frame_fn() or "").strip()
+        # At the depth frame's stamp: detection has taken a while by now, and
+        # the robot may have turned since.
         trans_pose = self._build_camera_to_map_transform(
             expected_world_frame=world_frame,
+            stamp=_header_stamp(depth_msg),
         )
         if trans_pose is None or not world_frame:
             if not getattr(self, "_spatial_not_ready_logged", False):
@@ -1331,6 +1358,9 @@ class ConceptGraphsDetector:
                     log.warning("concept-graphs merge pipeline failed: %s", e)
                 return
 
+        if self._tick_boxes:
+            self._seen = (rgb, dict(self._tick_boxes),
+                          (float(trans_pose[0, 3]), float(trans_pose[1, 3])), time.time())
         self._update_visible_absence(depth=depth, K=K, trans_pose=trans_pose)
         self._tick_idx += 1
         self._maybe_periodic_cleanup()
@@ -1693,7 +1723,8 @@ class ConceptGraphsDetector:
             return ""
         return live or configured
 
-    def _build_camera_to_map_transform(self, *, expected_world_frame: str = ""):
+    def _build_camera_to_map_transform(self, *, expected_world_frame: str = "",
+                                       stamp: Any = None):
         """Return a validated camera-to-world transform. dev-next keeps its TF-
         first experiment, but both TF endpoints must come from the active
         camera and localizer."""
@@ -1709,6 +1740,7 @@ class ConceptGraphsDetector:
             transform = self._hub.lookup_transform_4x4(
                 camera_frame,
                 world_frame,
+                stamp,
             )
             if transform is not None:
                 return transform.astype(np.float32)
@@ -1888,6 +1920,8 @@ class ConceptGraphsDetector:
 
     def _record_observation(self, track_id, det: dict) -> None:
         """Fold one detection into a track's side tables."""
+        if det.get("xyxy"):
+            self._tick_boxes[str(track_id)] = det["xyxy"][0]
         try:
             conf = float(det["conf"][0]) if det.get("conf") else 0.5
             label = str(det.get("class_name") or "").lower()
@@ -2378,6 +2412,14 @@ def _image_msg_to_bgr(msg: Any) -> Optional[Any]:
         arr = np.frombuffer(data, dtype=np.uint8).reshape(h, w)
         return np.stack([arr, arr, arr], axis=2)
     return None
+
+
+def _header_stamp(msg: Any) -> Any:
+    """The message's header stamp, or None when it carries no usable one."""
+    stamp = getattr(getattr(msg, "header", None), "stamp", None)
+    if stamp is None or (getattr(stamp, "sec", 0) == 0 and getattr(stamp, "nanosec", 0) == 0):
+        return None
+    return stamp
 
 
 def _depth_msg_to_metres(msg: Any) -> Optional[Any]:

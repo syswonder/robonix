@@ -23,6 +23,7 @@ from .cg_export import export_map_objects
 from .perception_concept_graphs import (
     ConceptGraphsDetector,
     _depth_msg_to_metres,
+    _header_stamp,
     _image_msg_to_bgr,
 )
 
@@ -305,7 +306,7 @@ class DualMapDetector(ConceptGraphsDetector):
                             getattr(rgb_msg, "encoding", "?"), getattr(depth_msg, "encoding", "?"), self._undecodable)
             return
         try:
-            pose = self._build_camera_to_map_transform()
+            pose = self._build_camera_to_map_transform(stamp=_header_stamp(depth_msg))
         except Exception as e:  # noqa: BLE001
             log.debug("[scene-dualmap] transform unavailable: %s", e)
             pose = None

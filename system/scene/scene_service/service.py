@@ -488,6 +488,27 @@ async def _object_views_tick(
     while True:
         await asyncio.sleep(period_s)
         try:
+            # The detector's own boxes when it keeps them: a crop from the box
+            # the label was given to cannot show something else. Projecting
+            # the fused map box is the fallback, and misses whenever that box
+            # sits off the object.
+            seen = getattr(detector, "latest_detection_views", lambda: None)()
+            if seen is not None:
+                rgb, boxes, cam_xy = seen
+                height, width = int(rgb.shape[0]), int(rgb.shape[1])
+                objects = await registry.snapshot()
+                map_id = store.partition(map_binding)
+                for oid, rect in boxes:
+                    obj = objects.get(oid)
+                    if obj is None or obj.attributes.get("is_robot"):
+                        continue
+                    await asyncio.to_thread(
+                        store.offer,
+                        map_id=map_id, object_id=oid, image_bgr=rgb, rect=rect,
+                        bearing=_view_bearing(cam_xy, (float(obj.pose.x), float(obj.pose.y))),
+                        img_w=width, img_h=height,
+                    )
+                continue
             bundle = detector.latest_frame_bundle()
             if bundle is None:
                 continue
