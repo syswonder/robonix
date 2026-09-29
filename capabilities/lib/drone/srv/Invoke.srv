@@ -1,0 +1,4 @@
+string action  # control action name to execute (taken from the name returned by list_capabilities)
+string params  # JSON object string used as the action's parameter body; pass an empty string when there are no parameters
+---
+std_msgs/String status

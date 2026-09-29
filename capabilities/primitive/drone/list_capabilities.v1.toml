@@ -1,0 +1,10 @@
+# Query all control capabilities currently available on the APK (dynamic discovery).
+[contract]
+id      = "robonix/primitive/drone/list_capabilities"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/ListCapabilities.srv"
+description = "Query all control capabilities currently available on the APK (name/HTTP method/path/parameters/description), for dynamic discovery and use with invoke."
+
+[mode]
+type = "rpc"
