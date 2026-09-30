@@ -5,16 +5,19 @@
 
 use anyhow::Result;
 use clap::Parser;
-use robonix_cli::Config;
+use robonix_cli::{Config, build_info::BuildInfo};
 use robonix_scribe::warn;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 mod cmd;
 mod pb;
 
+static VERSION: LazyLock<String> = LazyLock::new(|| BuildInfo::get().summary());
+
 #[derive(Parser)]
 #[command(name = "rbnx")]
-#[command(version)]
+#[command(version = VERSION.as_str())]
 #[command(about = "Robonix helper CLI for package validation, build, and local orchestration", long_about = None)]
 struct Cli {
     #[command(subcommand)]

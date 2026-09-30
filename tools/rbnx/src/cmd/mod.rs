@@ -33,6 +33,7 @@ mod shutdown;
 mod teardown;
 mod update;
 mod validate;
+mod version;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
 
@@ -274,6 +275,12 @@ pub enum Commands {
         /// Path key to resolve (see above).
         key: String,
     },
+    /// Print the version and the git commit this binary was built from
+    Version {
+        /// Print one JSON object, with the source tree `rbnx path root` resolves.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// List registered capabilities (one row per provider)
     ///
@@ -479,6 +486,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Docs { out_dir } => docs::execute(config, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
+        Commands::Version { json } => version::execute(&config, json),
         Commands::Caps {
             server,
             json,
