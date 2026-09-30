@@ -207,6 +207,27 @@ mod tests {
     }
 
     #[test]
+    fn update_accepts_yes_and_check_flags() {
+        let cli = Cli::try_parse_from(["rbnx", "update", "-y"]).expect("update -y should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Update { yes: true, .. }
+        ));
+        let cli = Cli::try_parse_from(["rbnx", "update", "--check", "--json"])
+            .expect("update --check --json should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Update {
+                check: true,
+                json: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["rbnx", "update", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["rbnx", "update", "--check", "-y"]).is_err());
+    }
+
+    #[test]
     fn boot_accepts_verbose_mode() {
         let cli = Cli::try_parse_from(["rbnx", "boot", "-v"]).expect("boot -v should parse");
         assert!(matches!(

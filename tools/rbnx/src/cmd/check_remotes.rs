@@ -22,6 +22,9 @@ use robonix_cli::output;
 #[derive(Debug, Clone)]
 pub struct RemoteProvider {
     pub name: String,
+    /// Manifest section: `primitive`, `service` or `skill`.
+    pub kind: &'static str,
+    pub url: String,
     pub branch: Option<String>,
     /// Local cache checkout (`rbnx-boot/cache/<name>`); may not exist yet.
     pub dir: PathBuf,
@@ -35,8 +38,8 @@ pub struct RemoteStatus {
     /// Commits the local checkout is behind the remote tip. `None` when the
     /// count could not be determined (e.g. shallow history, fetch failed).
     pub behind: Option<u32>,
-    pub local_short: String,
-    pub remote_short: String,
+    pub local_sha: String,
+    pub remote_sha: String,
     pub remote_date: String,
     pub remote_subject: String,
     /// Non-fatal explanation when the check is incomplete.
@@ -48,7 +51,7 @@ impl RemoteStatus {
     /// is available). Behind-count may be unknown but still outdated.
     pub fn outdated(&self) -> bool {
         self.behind.map(|b| b > 0).unwrap_or(false)
-            || (!self.remote_short.is_empty() && self.remote_short != self.local_short)
+            || (!self.remote_sha.is_empty() && self.remote_sha != self.local_sha)
     }
 }
 
@@ -111,6 +114,8 @@ pub fn collect_remote_providers(manifest_path: &Path) -> Result<Vec<RemoteProvid
                 // per-instance provider id. See deploy::repo_dir_name.
                 dir: cache_root.join(super::deploy::repo_dir_name(url)),
                 name,
+                kind: section,
+                url: url.to_string(),
                 branch,
             });
         }
@@ -136,8 +141,8 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
         name: p.name.clone(),
         dir: p.dir.clone(),
         behind: None,
-        local_short: String::new(),
-        remote_short: String::new(),
+        local_sha: String::new(),
+        remote_sha: String::new(),
         remote_date: String::new(),
         remote_subject: String::new(),
         note: None,
@@ -148,7 +153,7 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
         return st;
     }
 
-    st.local_short = git(&p.dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    st.local_sha = git(&p.dir, &["rev-parse", "HEAD"]).unwrap_or_default();
     if origin_url(&p.dir).is_none() {
         st.note = Some("local checkout has no origin remote — skipped".into());
         return st;
@@ -211,7 +216,7 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
     }
 
     let remote_ref = "FETCH_HEAD";
-    st.remote_short = git(&p.dir, &["rev-parse", "--short", remote_ref]).unwrap_or_default();
+    st.remote_sha = git(&p.dir, &["rev-parse", remote_ref]).unwrap_or_default();
     st.remote_date = git(
         &p.dir,
         &["log", "-1", "--format=%cd", "--date=relative", remote_ref],
@@ -270,7 +275,9 @@ pub fn report_outdated(manifest_path: &Path) {
                 &p.name,
                 &format!(
                     "{behind}; remote {} ({}): {}",
-                    st.remote_short, st.remote_date, st.remote_subject
+                    output::short_sha(&st.remote_sha),
+                    st.remote_date,
+                    st.remote_subject
                 ),
             );
             outdated.push(st);
