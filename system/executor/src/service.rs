@@ -4,6 +4,7 @@
 // gRPC contract handlers for executor plan execution and cancellation.
 
 use crate::dispatch::{async_poll, async_registry};
+use crate::execution::{Actor, Input};
 use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
 use crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlan;
 use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
@@ -22,9 +23,6 @@ use crate::rtdl_wire::{self, NodeEventContext};
 use crate::verification::{self, VerificationPolicy};
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
-use std::collections::HashSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
@@ -33,15 +31,16 @@ use tonic::{Request, Response, Status};
 
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
+#[cfg(test)]
 const RTDL_DO: u32 = 2;
 const MODULE_HEALTH_SCHEMA_VERSION: u32 = 1;
 const MODULE_HEALTH_OK: u32 = 0;
 const MODULE_HEALTH_TTL_MS: u32 = 5000;
 
-/// Immediate node outcome plus overlap verifiers owned by its RTDL subtree.
-struct NodeExecution {
-    failed: bool,
-    verifiers: Vec<JoinHandle<bool>>,
+/// Immediate call outcome and its optional background result verification.
+pub(crate) struct NodeExecution {
+    pub(crate) failed: bool,
+    pub(crate) verifier: Option<JoinHandle<bool>>,
 }
 
 impl NodeExecution {
@@ -49,65 +48,19 @@ impl NodeExecution {
     fn finished(failed: bool) -> Self {
         Self {
             failed,
-            verifiers: Vec::new(),
+            verifier: None,
         }
     }
 }
 
-/// Wait for a subtree's verifiers and report whether any one failed.
-async fn wait_for_verifiers(verifiers: Vec<JoinHandle<bool>>) -> bool {
-    let mut any_failed = false;
-    for verifier in verifiers {
-        match verifier.await {
-            Ok(failed) => any_failed |= failed,
-            Err(error) => {
-                any_failed = true;
-                warn!("[executor/verification] overlap verifier failed to join: {error}");
-            }
+/// Wait for one verifier, treating a panicked or aborted task as failed verification.
+pub(crate) async fn wait_for_verifier(verifier: JoinHandle<bool>) -> bool {
+    match verifier.await {
+        Ok(failed) => failed,
+        Err(error) => {
+            warn!("[executor/verification] overlap verifier failed to join: {error}");
+            true
         }
-    }
-    any_failed
-}
-
-/// Publish an operator immediately when final, or defer its final state until
-/// every verifier in its subtree has completed.
-#[allow(clippy::too_many_arguments)]
-async fn complete_operator(
-    verifiers: Vec<JoinHandle<bool>>,
-    immediate_failed: bool,
-    cancelled: bool,
-    tx: Sender<Result<RtdlEvent, Status>>,
-    node: NodeEventContext,
-    runtime: PlanRuntime,
-    atlas: AtlasClient,
-    provider_id: String,
-) -> NodeExecution {
-    if verifiers.is_empty() {
-        let failed = immediate_failed || cancelled;
-        send_operator_final(&tx, &node, failed, cancelled, &runtime).await;
-        return NodeExecution::finished(failed);
-    }
-
-    send_operator_state(
-        &tx,
-        &node,
-        RtdlNodeStateEnum::Verifying as u32,
-        "is waiting for descendant verification",
-        &runtime,
-    )
-    .await;
-    let known_failed = immediate_failed || cancelled;
-    let verifier = tokio::spawn(async move {
-        let verification_failed = wait_for_verifiers(verifiers).await;
-        let cancelled = cancelled || runtime.is_cancelled(&node.plan_id).await;
-        let failed = immediate_failed || verification_failed || cancelled;
-        send_operator_final(&tx, &node, failed, cancelled, &runtime).await;
-        trigger_stop_on_complete(&runtime, &node, &provider_id, atlas).await;
-        failed
-    });
-    NodeExecution {
-        failed: known_failed,
-        verifiers: vec![verifier],
     }
 }
 
@@ -127,16 +80,16 @@ struct OverlapVerifier {
 /// dispatch runs without serialising on a single mutex.
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
-    atlas: AtlasClient,
+    pub(crate) atlas: AtlasClient,
     /// Executor's own provider_id. Two roles:
     ///   1. consumer_id passed to atlas on every ConnectCapability so the
     ///      channel record reflects who is using each downstream provider.
     ///   2. self-detection: when a CapabilityCall in the plan targets this
     ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
-    provider_id: String,
-    runtime: PlanRuntime,
-    verification: Arc<VerificationPolicy>,
+    pub(crate) provider_id: String,
+    pub(crate) runtime: PlanRuntime,
+    pub(crate) verification: Arc<VerificationPolicy>,
 }
 
 impl ExecutorServiceImpl {
@@ -158,213 +111,20 @@ impl ExecutorServiceImpl {
 impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
     type ExecuteStream = ReceiverStream<Result<RtdlEvent, Status>>;
 
+    /// Validate and reserve a plan before returning headers, then stream its execution.
     async fn execute(
         &self,
         request: Request<Plan>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        let plan = request.into_inner();
-        validate_plan(&plan).map_err(Status::invalid_argument)?;
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let atlas = self.atlas.clone();
-        let provider_id = self.provider_id.clone();
-        let runtime = self.runtime.clone();
-        let verification = Arc::clone(&self.verification);
-
-        tokio::spawn(async move {
-            let plan_id = plan.plan_id.clone();
-            let plan = Arc::new(plan);
-            runtime.register_plan(&plan_id).await;
-            runtime.record_plan_ops(&plan).await;
-            let _ = tx.send(Ok(rtdl_wire::plan_started(plan_id.clone()))).await;
-            let execution = execute_node(
-                Arc::clone(&plan),
-                plan.root_index as usize,
-                tx.clone(),
-                atlas,
-                provider_id,
-                runtime.clone(),
-                verification,
-            )
-            .await;
-            let verification_failed = wait_for_verifiers(execution.verifiers).await;
-            let cancelled = runtime.is_cancelled(&plan_id).await;
-            runtime.complete_plan(&plan_id).await;
-
-            let _ = tx
-                .send(Ok(rtdl_wire::plan_complete(
-                    plan_id,
-                    execution.failed || verification_failed || cancelled,
-                )))
-                .await;
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let input = Input::from_plan(request.into_inner()).map_err(Status::invalid_argument)?;
+        Ok(Response::new(
+            Actor::start(self.clone(), input, tokio_stream::empty()).await?,
+        ))
     }
 }
 
-type ExecuteNodeFuture = Pin<Box<dyn Future<Output = NodeExecution> + Send + 'static>>;
-
-fn execute_node(
-    plan: Arc<Plan>,
-    node_index: usize,
-    tx: Sender<Result<RtdlEvent, Status>>,
-    atlas: AtlasClient,
-    provider_id: String,
-    runtime: PlanRuntime,
-    verification: Arc<VerificationPolicy>,
-) -> ExecuteNodeFuture {
-    Box::pin(async move {
-        let node = &plan.nodes[node_index];
-        let node_ctx = node_event_context(&plan, node_index);
-        let op_id = node.op_id.clone();
-        if runtime.is_cancelled(&plan.plan_id).await {
-            if is_operator_node(node.node_kind) {
-                send_operator_state(
-                    &tx,
-                    &node_ctx,
-                    RtdlNodeStateEnum::Canceled as u32,
-                    "canceled",
-                    &runtime,
-                )
-                .await;
-            }
-            return NodeExecution::finished(true);
-        }
-        if runtime
-            .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnEnter)
-            .await
-        {
-            let mut atlas = atlas;
-            runtime
-                .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
-                .await;
-            send_stop_on_enter(&tx, &node_ctx, &runtime).await;
-            return NodeExecution::finished(true);
-        }
-        let atlas_after = atlas.clone();
-        let execution = match node.node_kind {
-            RTDL_SEQUENCE => {
-                let mut any_failed = false;
-                let mut cancelled = false;
-                let mut verifiers = Vec::new();
-                for child in &node.children {
-                    if runtime.is_cancelled(&plan.plan_id).await {
-                        cancelled = true;
-                        any_failed = true;
-                        break;
-                    }
-                    let child_execution = execute_node(
-                        Arc::clone(&plan),
-                        *child as usize,
-                        tx.clone(),
-                        atlas.clone(),
-                        provider_id.clone(),
-                        runtime.clone(),
-                        verification.clone(),
-                    )
-                    .await;
-                    any_failed |= child_execution.failed;
-                    verifiers.extend(child_execution.verifiers);
-                    if any_failed {
-                        break;
-                    }
-                }
-                let cancelled = cancelled || runtime.is_cancelled(&plan.plan_id).await;
-                complete_operator(
-                    verifiers,
-                    any_failed,
-                    cancelled,
-                    tx.clone(),
-                    node_ctx.clone(),
-                    runtime.clone(),
-                    atlas.clone(),
-                    provider_id.clone(),
-                )
-                .await
-            }
-            RTDL_PARALLEL => {
-                let mut handles = Vec::with_capacity(node.children.len());
-                for child in &node.children {
-                    let child_plan = Arc::clone(&plan);
-                    let child_tx = tx.clone();
-                    let child_atlas = atlas.clone();
-                    let child_provider_id = provider_id.clone();
-                    let child_runtime = runtime.clone();
-                    let child_verification = verification.clone();
-                    let child_index = *child as usize;
-                    handles.push(tokio::spawn(async move {
-                        execute_node(
-                            child_plan,
-                            child_index,
-                            child_tx,
-                            child_atlas,
-                            child_provider_id,
-                            child_runtime,
-                            child_verification,
-                        )
-                        .await
-                    }));
-                }
-                let mut any_failed = false;
-                let mut verifiers = Vec::new();
-                for handle in handles {
-                    match handle.await {
-                        Ok(child_execution) => {
-                            any_failed |= child_execution.failed;
-                            verifiers.extend(child_execution.verifiers);
-                        }
-                        Err(e) => {
-                            any_failed = true;
-                            warn!("[executor] parallel branch task failed: {e}");
-                        }
-                    }
-                }
-                let cancelled = runtime.is_cancelled(&plan.plan_id).await;
-                complete_operator(
-                    verifiers,
-                    any_failed,
-                    cancelled,
-                    tx.clone(),
-                    node_ctx.clone(),
-                    runtime.clone(),
-                    atlas.clone(),
-                    provider_id.clone(),
-                )
-                .await
-            }
-            RTDL_DO => {
-                let call = node
-                    .call
-                    .as_ref()
-                    .expect("validated do node must contain call");
-                execute_call(
-                    call,
-                    node_ctx.clone(),
-                    tx,
-                    atlas,
-                    provider_id.clone(),
-                    runtime.clone(),
-                    verification,
-                )
-                .await
-            }
-            _ => {
-                warn!(
-                    "[executor] invalid node_kind={} reached after validation",
-                    node.node_kind
-                );
-                NodeExecution::finished(true)
-            }
-        };
-        if execution.verifiers.is_empty() {
-            trigger_stop_on_complete(&runtime, &node_ctx, &provider_id, atlas_after).await;
-        }
-        execution
-    })
-}
-
 /// Build the wire context copied into every node_state event.
-fn node_event_context(plan: &Plan, node_index: usize) -> NodeEventContext {
+pub(crate) fn node_event_context(plan: &Plan, node_index: usize) -> NodeEventContext {
     let node = &plan.nodes[node_index];
     NodeEventContext {
         plan_id: plan.plan_id.clone(),
@@ -394,7 +154,7 @@ fn leaf_terminal_state(success: bool, cancelled: bool) -> u32 {
 }
 
 /// Emit the terminal event for an `on_enter` stop point on any RTDL node.
-async fn send_stop_on_enter(
+pub(crate) async fn send_stop_on_enter(
     tx: &Sender<Result<RtdlEvent, Status>>,
     node: &NodeEventContext,
     runtime: &PlanRuntime,
@@ -428,7 +188,7 @@ async fn send_stop_on_enter(
 }
 
 /// Stream a state event for a non-leaf RTDL operator node and record it.
-async fn send_operator_state(
+pub(crate) async fn send_operator_state(
     tx: &Sender<Result<RtdlEvent, Status>>,
     node: &NodeEventContext,
     state: u32,
@@ -453,7 +213,7 @@ async fn send_operator_state(
 }
 
 /// Select and publish one non-leaf operator's final state after execution and verification.
-async fn send_operator_final(
+pub(crate) async fn send_operator_final(
     tx: &Sender<Result<RtdlEvent, Status>>,
     node: &NodeEventContext,
     failed: bool,
@@ -480,7 +240,7 @@ async fn send_operator_final(
 // TODO: Decide whether an overlap node's on_complete boundary should be its
 // capability completion or its post-verification final state. It currently
 // fires after verification, while parent execution may already have continued.
-async fn trigger_stop_on_complete(
+pub(crate) async fn trigger_stop_on_complete(
     runtime: &PlanRuntime,
     node: &NodeEventContext,
     provider_id: &str,
@@ -497,7 +257,7 @@ async fn trigger_stop_on_complete(
 }
 
 /// Dispatch one RTDL `do` node and stream node_state events.
-async fn execute_call(
+pub(crate) async fn execute_call(
     call: &CapabilityCall,
     node: NodeEventContext,
     tx: Sender<Result<RtdlEvent, Status>>,
@@ -602,7 +362,7 @@ async fn execute_call(
         );
         return NodeExecution {
             failed: false,
-            verifiers: vec![verifier],
+            verifier: Some(verifier),
         };
     }
 
@@ -828,58 +588,8 @@ fn executor_health_report(provider_id: &str) -> ModuleHealthReport {
     }
 }
 
-/// Validate Plan arena shape before spawning execution work.
-fn validate_plan(plan: &Plan) -> Result<(), String> {
-    if plan.nodes.is_empty() {
-        return Err("Plan.nodes must not be empty".to_string());
-    }
-    let root = plan.root_index as usize;
-    if root >= plan.nodes.len() {
-        return Err(format!(
-            "Plan.root_index {} is out of bounds for {} nodes",
-            plan.root_index,
-            plan.nodes.len()
-        ));
-    }
-
-    let mut op_ids = HashSet::new();
-    for (idx, node) in plan.nodes.iter().enumerate() {
-        let op_id = node.op_id.trim();
-        if op_id.is_empty() {
-            return Err(format!("node {idx} op_id must not be empty"));
-        }
-        if !op_ids.insert(op_id.to_string()) {
-            return Err(format!("node {idx} has duplicate op_id '{op_id}'"));
-        }
-        if node.description.trim().is_empty() {
-            return Err(format!("node {idx} description must not be empty"));
-        }
-        match node.node_kind {
-            RTDL_SEQUENCE | RTDL_PARALLEL => {
-                for child in &node.children {
-                    if *child as usize >= plan.nodes.len() {
-                        return Err(format!("node {idx} child index {child} is out of bounds"));
-                    }
-                }
-            }
-            RTDL_DO => {
-                if !node.children.is_empty() {
-                    return Err(format!("do node {idx} must not have children"));
-                }
-                let Some(call) = node.call.as_ref() else {
-                    return Err(format!("do node {idx} must contain a call"));
-                };
-                validate_call(idx, call)?;
-            }
-            other => return Err(format!("node {idx} has invalid node_kind {other}")),
-        }
-    }
-
-    let mut colors = vec![VisitColor::White; plan.nodes.len()];
-    visit_for_cycles(root, plan, &mut colors)
-}
-
-fn validate_call(node_index: usize, call: &CapabilityCall) -> Result<(), String> {
+/// Require complete capability identity before dispatch or incremental admission.
+pub(crate) fn validate_call(node_index: usize, call: &CapabilityCall) -> Result<(), String> {
     if call.call_id.is_empty() {
         return Err(format!("do node {node_index} call_id must not be empty"));
     }
@@ -896,44 +606,16 @@ fn validate_call(node_index: usize, call: &CapabilityCall) -> Result<(), String>
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VisitColor {
-    White,
-    Gray,
-    Black,
-}
-
-/// DFS cycle check on the plan arena following only sequence/parallel child edges.
-///
-/// Uses White/Gray/Black marks: entering a Gray node means a back-edge to an ancestor.
-/// `RTDL_DO` nodes have no children in this graph. Returns `Ok` when the subgraph from
-/// `index` is acyclic; otherwise an error naming the node where the cycle was found.
-fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Result<(), String> {
-    match colors[index] {
-        VisitColor::Gray => return Err(format!("cycle detected at node {index}")),
-        VisitColor::Black => return Ok(()),
-        VisitColor::White => {}
-    }
-    colors[index] = VisitColor::Gray;
-    let node = &plan.nodes[index];
-    if matches!(node.node_kind, RTDL_SEQUENCE | RTDL_PARALLEL) {
-        for child in &node.children {
-            visit_for_cycles(*child as usize, plan, colors)?;
-        }
-    }
-    colors[index] = VisitColor::Black;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         ExecutorServiceImpl, MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION, MODULE_HEALTH_TTL_MS,
         OverlapVerifier, PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
-        complete_operator, execute_call, executor_health_report, leaf_terminal_state,
-        send_operator_state, send_stop_on_enter, validate_plan, wait_for_verifiers,
+        execute_call, executor_health_report, leaf_terminal_state, send_operator_state,
+        send_stop_on_enter, wait_for_verifier,
     };
     use crate::config::VerificationRule;
+    use crate::execution::Input;
     use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
@@ -980,62 +662,15 @@ mod tests {
         assert_eq!(module.received_ts_ns, 0);
     }
 
-    /// Aggregate failures without serializing the background verifiers.
+    /// Preserve verifier outcomes and fail closed if its background task cannot finish.
     #[tokio::test]
-    async fn overlap_verifiers_report_any_background_failure() {
-        let verifiers = vec![tokio::spawn(async { false }), tokio::spawn(async { true })];
-
-        assert!(wait_for_verifiers(verifiers).await);
-    }
-
-    /// Operators publish VERIFYING without awaiting their descendant verifier.
-    #[tokio::test]
-    async fn operator_verification_is_deferred_without_blocking_its_parent() {
-        let atlas_addr = reserve_address();
-        let atlas_server =
-            tokio::spawn(serve_atlas(Arc::new(AtlasRegistry::default()), atlas_addr));
-        let atlas = AtlasClient::connect_with_retry(
-            format!("http://{atlas_addr}"),
-            50,
-            Duration::from_millis(10),
-        )
-        .await
-        .expect("connect test Atlas");
-        let runtime = PlanRuntime::default();
-        runtime.register_plan("p").await;
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let pending = tokio::spawn(async move {
-            let _ = release_rx.await;
-            false
-        });
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let execution = complete_operator(
-            vec![pending],
-            false,
-            false,
-            tx,
-            NodeEventContext {
-                plan_id: "p".into(),
-                node_index: 0,
-                node_kind: RTDL_SEQUENCE,
-                op_id: "sequence".into(),
-                description: "continue before verification".into(),
-            },
-            runtime,
-            atlas,
-            "executor".into(),
-        )
-        .await;
-
-        let verifying = rx.recv().await.unwrap().unwrap().node_state.unwrap();
-        assert_eq!(verifying.state, RtdlNodeStateEnum::Verifying as u32);
-        assert!(!execution.failed);
-        assert_eq!(execution.verifiers.len(), 1);
-        release_tx.send(()).unwrap();
-        assert!(!wait_for_verifiers(execution.verifiers).await);
-        let succeeded = rx.recv().await.unwrap().unwrap().node_state.unwrap();
-        assert_eq!(succeeded.state, RtdlNodeStateEnum::Succeeded as u32);
-        atlas_server.abort();
+    async fn overlap_verifier_reports_outcome_and_join_failure() {
+        assert!(!wait_for_verifier(tokio::spawn(async { false })).await);
+        assert!(wait_for_verifier(tokio::spawn(async { true })).await);
+        assert!(wait_for_verifier(tokio::spawn(async { panic!("test verifier panic") })).await);
+        let verifier = tokio::spawn(std::future::pending::<bool>());
+        verifier.abort();
+        assert!(wait_for_verifier(verifier).await);
     }
 
     /// Global overlap=false retains one synchronous verified terminal event.
@@ -1052,7 +687,7 @@ mod tests {
         .await
         .expect("connect test Atlas");
         let runtime = PlanRuntime::default();
-        runtime.register_plan("p").await;
+        runtime.register_plan("p").await.unwrap();
         let contract_id = "robonix/system/executor/builtin/get_all_plans";
         let call = CapabilityCall {
             call_id: "p:1".into(),
@@ -1087,7 +722,7 @@ mod tests {
         .await;
 
         assert!(execution.failed);
-        assert!(execution.verifiers.is_empty());
+        assert!(execution.verifier.is_none());
         let terminal = rx.recv().await.unwrap().unwrap().node_state.unwrap();
         assert_eq!(terminal.state, RtdlNodeStateEnum::Failed as u32);
         assert!(rx.try_recv().is_err());
@@ -1108,7 +743,7 @@ mod tests {
         .await
         .expect("connect test Atlas");
         let runtime = PlanRuntime::default();
-        runtime.register_plan("p").await;
+        runtime.register_plan("p").await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let target_call = call("p:1");
         let verifier = OverlapVerifier {
@@ -1167,7 +802,7 @@ mod tests {
         .await
         .expect("connect test Atlas");
         let runtime = PlanRuntime::default();
-        runtime.register_plan("p").await;
+        runtime.register_plan("p").await.unwrap();
         runtime.trigger_stop("p", "executor", &mut atlas).await;
         assert!(runtime.is_cancelled("p").await);
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -1288,8 +923,9 @@ mod tests {
 
         assert_eq!(
             states.first(),
-            Some(&(1, RtdlNodeStateEnum::Verifying as u32))
+            Some(&(0, RtdlNodeStateEnum::Running as u32))
         );
+        assert!(states.contains(&(1, RtdlNodeStateEnum::Verifying as u32)));
         assert!(states.contains(&(0, RtdlNodeStateEnum::Verifying as u32)));
         assert!(states.contains(&(1, RtdlNodeStateEnum::Failed as u32)));
         assert!(states.contains(&(2, RtdlNodeStateEnum::Succeeded as u32)));
@@ -1362,7 +998,7 @@ mod tests {
             ],
             0,
         );
-        validate_plan(&p).unwrap();
+        Input::from_plan(p).unwrap();
     }
 
     #[test]
@@ -1371,7 +1007,7 @@ mod tests {
             vec![node_with_identity("", "root", RTDL_SEQUENCE, vec![], None)],
             0,
         );
-        assert!(validate_plan(&p).unwrap_err().contains("op_id"));
+        assert!(Input::from_plan(p).unwrap_err().contains("op_id"));
     }
 
     #[test]
@@ -1380,7 +1016,7 @@ mod tests {
             vec![node_with_identity("op_1", "", RTDL_SEQUENCE, vec![], None)],
             0,
         );
-        assert!(validate_plan(&p).unwrap_err().contains("description"));
+        assert!(Input::from_plan(p).unwrap_err().contains("description"));
     }
 
     #[test]
@@ -1392,19 +1028,19 @@ mod tests {
             ],
             0,
         );
-        assert!(validate_plan(&p).unwrap_err().contains("duplicate op_id"));
+        assert!(Input::from_plan(p).unwrap_err().contains("duplicate op_id"));
     }
 
     #[test]
     fn rejects_invalid_root() {
         let p = plan(vec![node(RTDL_SEQUENCE, vec![], None)], 3);
-        assert!(validate_plan(&p).unwrap_err().contains("root_index"));
+        assert!(Input::from_plan(p).unwrap_err().contains("root_index"));
     }
 
     #[test]
     fn rejects_out_of_bounds_child() {
         let p = plan(vec![node(RTDL_SEQUENCE, vec![9], None)], 0);
-        assert!(validate_plan(&p).unwrap_err().contains("out of bounds"));
+        assert!(Input::from_plan(p).unwrap_err().contains("out of bounds"));
     }
 
     #[test]
@@ -1416,14 +1052,14 @@ mod tests {
             ],
             0,
         );
-        assert!(validate_plan(&p).unwrap_err().contains("cycle"));
+        assert!(Input::from_plan(p).unwrap_err().contains("cycle"));
     }
 
     #[test]
     fn rejects_do_without_call() {
         let p = plan(vec![node(RTDL_DO, vec![], None)], 0);
         assert!(
-            validate_plan(&p)
+            Input::from_plan(p)
                 .unwrap_err()
                 .contains("must contain a call")
         );
@@ -1464,7 +1100,7 @@ mod tests {
     async fn stop_on_enter_event_supports_operator_nodes() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let runtime = PlanRuntime::default();
-        runtime.register_plan("p").await;
+        runtime.register_plan("p").await.unwrap();
         let node = NodeEventContext {
             plan_id: "p".to_string(),
             node_index: 0,

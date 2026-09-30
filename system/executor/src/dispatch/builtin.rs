@@ -453,8 +453,31 @@ fn format_command_output(out: std::process::Output) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
+    /// Run environment-mutating tests in a child process so concurrent execution tests
+    /// never inherit a workspace directory that another test removes.
+    fn isolated_workspace_test(name: &str) -> bool {
+        if std::env::var("RBNX_TEST_WORKSPACE_CASE").as_deref() == Ok(name) {
+            return false;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("dispatch::builtin::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("RBNX_TEST_WORKSPACE_CASE", name)
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated workspace test failed: {name}");
+        true
+    }
+
+    /// Check workspace path handling with an isolated process environment.
     #[test]
     fn path_traversal_dotdot_is_rejected() {
+        if isolated_workspace_test("path_traversal_dotdot_is_rejected") {
+            return;
+        }
         // Set workspace to a temp dir so we have a known root
         let tmp = std::env::temp_dir().join("rbnx_test_ws");
         std::fs::create_dir_all(&tmp).unwrap();
@@ -473,8 +496,12 @@ mod tests {
         );
     }
 
+    /// Check workspace path handling with an isolated process environment.
     #[test]
     fn path_traversal_absolute_outside_workspace_is_rejected() {
+        if isolated_workspace_test("path_traversal_absolute_outside_workspace_is_rejected") {
+            return;
+        }
         let tmp = std::env::temp_dir().join("rbnx_test_ws2");
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
@@ -492,8 +519,12 @@ mod tests {
         );
     }
 
+    /// Check workspace path handling with an isolated process environment.
     #[test]
     fn path_resolve_within_workspace_is_allowed() {
+        if isolated_workspace_test("path_resolve_within_workspace_is_allowed") {
+            return;
+        }
         let tmp = std::env::temp_dir().join("rbnx_test_ws3");
         std::fs::create_dir_all(&tmp).unwrap();
         // Create a test file inside workspace
