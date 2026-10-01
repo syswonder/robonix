@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Shared in-process state for Executor plan cancellation.
+//! Active RTDL plans: registration, state snapshots, async calls, and cancellation.
+//! Builtin query/cancel adapters remain here for the unchanged dispatch module.
 
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};

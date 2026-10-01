@@ -12,20 +12,26 @@
 //   4. Serves Execute on `listen`. Per-call dispatch resolves provider via
 //      `ConnectCapability(provider_id, contract_id, MCP)` on atlas.
 
+mod active_plans;
+mod capability_execution;
 mod config;
 mod dispatch;
-mod execute_stream;
-mod execution;
+mod grpc_server;
 mod pb;
-mod plan_runtime;
-mod rtdl_wire;
-mod service;
+mod plan_input;
+mod plan_scheduler;
+mod rtdl_events;
 mod verification;
+
+// Preserve the unchanged dispatch module's imports during this reorganization.
+use active_plans as plan_runtime;
+use rtdl_events as rtdl_wire;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
+use grpc_server::ExecutorServiceImpl;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
@@ -35,7 +41,6 @@ use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSyst
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
-use service::ExecutorServiceImpl;
 use std::sync::Arc;
 use std::time::Duration;
 
