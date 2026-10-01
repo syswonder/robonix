@@ -17,7 +17,9 @@ use tonic::Status;
 
 /// Immediate call outcome and its optional background result verification.
 pub(crate) struct NodeExecution {
+    /// Whether the immediate outcome failed, before any background verification finishes.
     pub(crate) failed: bool,
+    /// Pending background verification task, returning true if verification fails.
     pub(crate) verifier: Option<JoinHandle<bool>>,
 }
 
@@ -44,13 +46,21 @@ pub(crate) async fn wait_for_verifier(verifier: JoinHandle<bool>) -> bool {
 
 /// Owned inputs for one background verifier.
 struct OverlapVerifier {
+    /// Completed capability call whose result is being checked.
     call: CapabilityCall,
+    /// Node identity and task description used for verifier input and final events.
     node: NodeEventContext,
+    /// Sends the verified final node state to the plan's RPC event stream.
     tx: Sender<Result<RtdlEvent, Status>>,
+    /// Atlas connection used to resolve and dispatch the verifier capability.
     atlas: AtlasClient,
+    /// Executor's own provider ID used as the verifier call's consumer identity.
     provider_id: String,
+    /// Shared plan state used to track verifier calls and record the final node state.
     runtime: PlanRuntime,
+    /// Rules selecting the verifier and its configured arguments for this call.
     policy: Arc<VerificationPolicy>,
+    /// Successful capability result retained as the basis for the verified result.
     original: CapabilityCallResult,
 }
 

@@ -28,10 +28,13 @@ const MODULE_HEALTH_SCHEMA_VERSION: u32 = 1;
 const MODULE_HEALTH_OK: u32 = 0;
 const MODULE_HEALTH_TTL_MS: u32 = 5000;
 
+/// Executor gRPC handlers sharing active plans and result verification policy.
+///
 /// `AtlasClient` is cheap to clone — each Execute RPC clones it so per-plan
 /// dispatch runs without serialising on a single mutex.
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
+    /// Atlas connection used to resolve capabilities for execution and cancellation.
     pub(crate) atlas: AtlasClient,
     /// Executor's own provider_id. Two roles:
     ///   1. consumer_id passed to atlas on every ConnectCapability so the
@@ -40,7 +43,9 @@ pub struct ExecutorServiceImpl {
     ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
     pub(crate) provider_id: String,
+    /// Shared plan progress and cancellation state used by all RPC handlers.
     pub(crate) runtime: PlanRuntime,
+    /// Immutable verification timing and routing rules applied to submitted plans.
     pub(crate) verification: Arc<VerificationPolicy>,
 }
 

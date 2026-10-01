@@ -130,8 +130,11 @@ async fn run(
 /// Static metadata for the builtin ops. Used by main.rs to declare them
 /// against atlas at startup so pilot can discover them like any other provider.
 pub struct BuiltinSpec {
+    /// Operation name used as the builtin contract's final path segment.
     pub op: &'static str,
+    /// Human-readable capability description advertised through Atlas.
     pub description: &'static str,
+    /// JSON Schema describing the arguments accepted by this builtin.
     pub input_schema_json: &'static str,
 }
 
@@ -183,8 +186,10 @@ pub const BUILTINS: &[BuiltinSpec] = &[
     },
 ];
 
+/// JSON arguments selecting whose registered capability documentation to read.
 #[derive(Deserialize)]
 struct DocArgs {
+    /// Provider ID used to look up the registered CAPABILITY.md content in Atlas.
     provider_id: String,
 }
 
@@ -255,27 +260,40 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// JSON arguments for reading a text file within the workspace.
 #[derive(Deserialize)]
 struct ReadArgs {
+    /// File to read, resolved against and confined to the workspace root.
     path: String,
 }
+/// JSON arguments for creating or overwriting a text file within the workspace.
 #[derive(Deserialize)]
 struct WriteArgs {
+    /// Destination file, resolved against and confined to the workspace root.
     path: String,
+    /// Text written as the file's complete contents.
     content: String,
 }
+/// JSON arguments for replacing the first matching text in a workspace file.
 #[derive(Deserialize)]
 struct PatchArgs {
+    /// File to modify, resolved against and confined to the workspace root.
     path: String,
+    /// Literal text whose first occurrence is replaced.
     old: String,
+    /// Replacement text inserted in place of the matched occurrence.
     new: String,
 }
+/// JSON arguments for listing entries in a workspace directory.
 #[derive(Deserialize)]
 struct ListArgs {
+    /// Directory to list relative to the workspace root; omission selects the root.
     path: Option<String>,
 }
+/// JSON arguments for executing a shell command through the builtin.
 #[derive(Deserialize)]
 struct CmdArgs {
+    /// Shell source passed to `bash -c` for execution.
     command: String,
 }
 

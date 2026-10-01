@@ -73,6 +73,12 @@ files follow `<interface>.v1.toml` naming, grouped by domain, for example
 
 If one function/method body exceeds five lines, treat documentation as mandatory: The comment block must state behavior at minimum; add side effects, or constraints when they are not obvious from the signature.
 
+Every struct must have a documentation comment explaining what it represents
+and its purpose. Every field, including tuple struct fields, must have its own
+documentation comment explaining its meaning and role. This applies regardless of visibility.
+In Rust, use `///` doc comments, and explain semantics rather than merely
+restating the struct or field name.
+
 ## Testing Guidelines
 
 Place Rust integration tests in each crate's `tests/` directory and keep unit

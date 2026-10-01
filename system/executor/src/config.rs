@@ -15,11 +15,16 @@ pub const EXECUTOR_NAMESPACE: &str = "robonix/system/executor";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50061";
 
+/// Resolved startup settings for Executor connections, identity, and verification.
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
+    /// Atlas endpoint used for registration and capability discovery.
     pub atlas_endpoint: String,
+    /// Socket address on which Executor serves its gRPC capabilities.
     pub listen: String,
+    /// Executor's registered provider ID, also used as its consumer identity.
     pub id: String,
+    /// Timing and routing rules for verifying successful capability results.
     pub verification: VerificationConfig,
 }
 
@@ -29,6 +34,7 @@ pub struct VerificationConfig {
     /// Allow capability execution to continue while matched rules verify.
     #[serde(default)]
     pub overlap: bool,
+    /// Rules matching completed calls to the verifier that checks their results.
     #[serde(default)]
     pub rules: Vec<VerificationRule>,
 }
@@ -36,10 +42,14 @@ pub struct VerificationConfig {
 /// Route one completed capability call to a verifier provider.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct VerificationRule {
+    /// Contract ID of the capability calls whose results should be verified.
     pub target_contract_id: String,
+    /// Optional provider restriction; omission matches any provider of the contract.
     #[serde(default)]
     pub target_provider_id: Option<String>,
+    /// Provider implementing the shared verification contract for matched calls.
     pub verifier_provider_id: String,
+    /// Extra JSON object passed to the verifier alongside the original call context.
     #[serde(default = "empty_json_object")]
     pub verifier_args: serde_json::Value,
 }
@@ -48,6 +58,7 @@ fn empty_json_object() -> serde_json::Value {
     serde_json::json!({})
 }
 
+/// CLI and environment inputs used to configure Executor startup and logging.
 #[derive(Parser, Debug)]
 #[command(
     name = "robonix-executor",
@@ -85,20 +96,27 @@ pub struct Args {
     pub config_json: Option<String>,
 }
 
+/// Optional YAML settings used when higher-priority startup inputs are absent.
 #[derive(Default, Deserialize)]
 struct FileConfig {
+    /// Atlas connection endpoint supplied by the YAML file.
     #[serde(default)]
     atlas_endpoint: Option<String>,
+    /// Executor gRPC bind address supplied by the YAML file.
     #[serde(default)]
     listen: Option<String>,
+    /// Executor provider ID supplied by the YAML file.
     #[serde(default)]
     id: Option<String>,
+    /// Verification settings used when the manifest block does not supply them.
     #[serde(default)]
     verification: Option<VerificationConfig>,
 }
 
+/// Executor settings decoded from the manifest block passed through `--config-json`.
 #[derive(Default, Deserialize)]
 struct ManifestConfig {
+    /// Manifest verification settings, which take precedence over YAML settings.
     #[serde(default)]
     verification: Option<VerificationConfig>,
 }

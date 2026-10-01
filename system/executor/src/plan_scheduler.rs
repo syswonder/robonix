@@ -15,13 +15,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 
-/// Immediate outcomes release sequence siblings; final outcomes include overlap verification.
+/// Scheduling progress for one node, separating immediate and verified outcomes.
 #[derive(Default)]
 struct Execution {
+    /// Whether the node has been started or marked canceled before execution.
     started: bool,
+    /// Outcome used to release sequence siblings: `None` is pending, `Some(true)` is failure.
     immediate: Option<bool>,
+    /// Outcome including background verification: `None` is pending, `Some(true)` is failure.
     final_failed: Option<bool>,
+    /// Whether an operator has emitted VERIFYING while awaiting descendant verification.
     verifying: bool,
+    /// Whether the scheduler skipped this node due to cancellation or a failed sibling.
     canceled: bool,
 }
 
@@ -32,15 +37,25 @@ enum Completion {
 
 /// Own one plan's scheduling state and tasks until all work has been drained.
 pub(crate) struct PlanScheduler {
+    /// Validated plan input and the closure state of its operators.
     input: PlanInput,
+    /// Scheduling progress indexed by the corresponding node's arena position.
     execution: Vec<Execution>,
+    /// Atlas connection cloned for capability dispatch and cancellation.
     atlas: AtlasClient,
+    /// Executor's own provider ID used for consumer identity and builtin dispatch.
     provider_id: String,
+    /// Shared active-plan state used to publish progress and observe cancellation.
     runtime: PlanRuntime,
+    /// Rules and timing policy for verification of successful capability results.
     verification: Arc<VerificationPolicy>,
+    /// Sends execution events or a terminal error to the requesting RPC stream.
     tx: mpsc::Sender<Result<RtdlEvent, Status>>,
+    /// In-flight capability calls and verification waits drained before plan cleanup.
     tasks: JoinSet<Completion>,
+    /// Whether this scheduler has begun cancellation and sealed further input.
     cancelled: bool,
+    /// Input, transport, or task error retained for reporting after cleanup.
     error: Option<Status>,
 }
 

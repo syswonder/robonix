@@ -15,22 +15,33 @@ use tokio::sync::Mutex;
 
 const DEFAULT_CANCEL_WAIT_MS: u64 = 5_000;
 
+/// Shared active-plan state used for progress queries and cancellation.
 #[derive(Clone, Default)]
 pub struct PlanRuntime {
+    /// Active executions keyed by plan ID, shared across RPC handlers and tasks.
     inner: Arc<Mutex<HashMap<String, PlanRun>>>,
+    /// Wakes waiters when cancellation is requested or a completed plan is removed.
     changed: Arc<tokio::sync::Notify>,
 }
 
+/// Identifies an in-flight asynchronous capability call so it can be canceled.
 #[derive(Clone)]
 pub struct RunningAsyncCall {
+    /// Original capability call ID used to track the call within its plan.
     pub call_id: String,
+    /// Provider responsible for the asynchronous execution.
     pub provider_id: String,
+    /// Contract ID used to request cancellation from the provider.
     pub cancel_contract: String,
+    /// Provider-issued execution ID sent to the cancel contract.
     pub run_id: String,
 }
 
+/// Mutable progress and cancellation state retained for one active plan.
 struct PlanRun {
+    /// Whether cancellation has been requested, even if calls are still draining.
     cancelled: bool,
+    /// Calls still available for cancellation, keyed by capability call ID.
     running_async: HashMap<String, RunningAsyncCall>,
     /// Plan-level description (the root node's description = the overall task),
     /// so `get_all_plans` can tell the LLM what each running plan is.
@@ -46,25 +57,38 @@ struct PlanRun {
 /// One op's static identity, snapshotted from the plan arena at register time.
 #[derive(Clone)]
 struct OpMeta {
+    /// Stable node identity used in progress queries and state updates.
     op_id: String,
+    /// Human-readable task performed by this node.
     description: String,
+    /// RTDL node kind distinguishing sequence, parallel, and capability calls.
     node_kind: u32,
+    /// Provider targeted by a capability call; empty for nodes without a call.
     provider_id: String,
+    /// Contract targeted by a capability call; empty for nodes without a call.
     contract_id: String,
 }
 
+/// Calls claimed under the plan lock for cancellation after releasing it.
 struct CancelSnapshot {
+    /// Calls removed from the plan's tracking table to receive cancel requests.
     async_calls: Vec<RunningAsyncCall>,
 }
 
+/// Plans and calls captured together when canceling all active plans.
 struct CancelAllSnapshot {
+    /// Calls claimed from active plans for provider cancellation requests.
     async_calls: Vec<RunningAsyncCall>,
+    /// Plans whose completion must be checked after cancellation is requested.
     plan_ids: Vec<String>,
 }
 
+/// JSON arguments selecting a plan to cancel and how long to await completion.
 #[derive(Deserialize)]
 struct CancelPlanArgs {
+    /// ID of the RTDL plan to cancel.
     plan_id: String,
+    /// Optional completion wait in milliseconds; omission uses the default wait.
     wait_ms: Option<u64>,
 }
 
@@ -167,8 +191,10 @@ impl PlanRuntime {
     /// already finished) — it is a query,
     /// so "not found" is an error; use `get_all_plans` to check liveness.
     pub async fn get_plan_status_builtin(&self, call: &CapabilityCall) -> CapabilityCallResult {
+        /// JSON arguments selecting the active plan whose progress is requested.
         #[derive(Deserialize)]
         struct Args {
+            /// ID of the active RTDL plan to inspect.
             plan_id: String,
         }
         let args: Args = match serde_json::from_str(&call.args_json) {

@@ -13,14 +13,21 @@ pub(crate) const EXECUTE_STREAM_END: u32 = 3;
 /// Owns the growing arena and all input invariants independently of execution.
 #[derive(Debug, Default)]
 pub(crate) struct PlanInput {
+    /// Plan metadata and node arena populated by complete or incremental input.
     plan: Plan,
+    /// Whether plan initialization is complete, allowing node input after START.
     started: bool,
+    /// Whether input is complete or sealed, so further messages are rejected.
     ended: bool,
+    /// Parent arena index for each node; the root has no parent.
     parents: Vec<Option<usize>>,
     /// Parent-first traversal; wire arena indices are preserved for complete plans.
     order: Vec<usize>,
+    /// Whether each node is closed to new children; leaf nodes are always closed.
     closed: Vec<bool>,
+    /// Accepted, trimmed operator IDs used to reject duplicate node identities.
     op_ids: HashSet<String>,
+    /// Accepted capability call IDs used to reject duplicate calls within the plan.
     call_ids: HashSet<String>,
 }
 

@@ -12,12 +12,18 @@ use tonic::Status;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 
+/// Plan and node metadata copied into RTDL progress events and verification requests.
 #[derive(Clone)]
 pub struct NodeEventContext {
+    /// ID of the plan containing the node.
     pub plan_id: String,
+    /// Position of the node in the plan's node arena.
     pub node_index: u32,
+    /// RTDL node kind distinguishing sequence, parallel, and capability calls.
     pub node_kind: u32,
+    /// Stable node identity used to correlate state updates.
     pub op_id: String,
+    /// Human-readable task description included in events and verifier input.
     pub description: String,
 }
 
