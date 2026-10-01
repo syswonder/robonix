@@ -87,6 +87,10 @@ pub fn collect_remote_providers(manifest_path: &Path) -> Result<Vec<RemoteProvid
             continue;
         };
         for entry in entries {
+            // A disabled provider is neither cloned nor updated.
+            if entry.get("status").and_then(|v| v.as_str()) == Some("disabled") {
+                continue;
+            }
             let Some(url) = entry.get("url").and_then(|v| v.as_str()) else {
                 continue; // local `path:` provider — nothing to track
             };

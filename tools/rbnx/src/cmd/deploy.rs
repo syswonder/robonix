@@ -74,14 +74,7 @@ const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
 
-/// Single source of truth for which `system:` keys are shipped binaries
-/// rather than packages under `<robonix_source>/system/<key>/`.
-pub(super) const SYSTEM_BUILTINS: &[&str] =
-    &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
-
-pub(super) fn is_builtin_system(name: &str) -> bool {
-    SYSTEM_BUILTINS.contains(&name)
-}
+pub(super) use robonix_cli::manifest::is_builtin_system;
 
 fn driver_init_timeout() -> Duration {
     std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
@@ -183,6 +176,7 @@ fn resolve_entry_path(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
@@ -743,6 +737,10 @@ pub(super) fn prepare_manifest(
     root: serde_yaml::Value,
     robonix_source_path: Option<&Path>,
 ) -> Result<serde_yaml::Value> {
+    let mut root = root;
+    for entry in robonix_cli::manifest::drop_disabled(&mut root)? {
+        output::boot_skip(&entry, "disabled");
+    }
     let prepared = robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)?;
     robonix_cli::manifest::validate_deployment_instance_names(&prepared)?;
     Ok(prepared)

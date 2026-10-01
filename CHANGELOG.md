@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- **CLI (rbnx):** A deployment entry can say `status: disabled` to stay in the manifest, its `url`, `branch` and `config` kept, while nothing builds, starts or updates it; `rbnx boot` lists it as skipped, soma does not start it, and a built-in system component cannot be disabled.
+
 ## [1.1.0-beta.1] - 2026-10-01
 
 Pre-release for the invite-only beta of [Robonix Hub](https://hub.robonix.ai), the web console that installs, configures and runs Robonix deployments on a robot. Hub installs this version. From this release on, every Rust crate and Python package carries the release version; Python spells it `1.1.0b1`.
