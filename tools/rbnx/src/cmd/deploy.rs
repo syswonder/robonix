@@ -1774,9 +1774,9 @@ pub async fn execute(
                     config: runtime_config,
                     manifest: manifest_override,
                 };
-                match spawn_and_init("system", &entry, &spawn_env, &mut atlas).await {
-                    Ok(sp) => {
-                        children.push(sp);
+                match spawn_and_init("system", &entry, &spawn_env, &mut atlas, &mut children).await
+                {
+                    Ok(()) => {
                         persist_state(
                             &state_path,
                             &manifest_path,
@@ -1806,9 +1806,8 @@ pub async fn execute(
             output::boot_section("service");
         }
         for e in &deploy.service {
-            match spawn_and_init("service", e, &spawn_env, &mut atlas).await {
-                Ok(sp) => {
-                    children.push(sp);
+            match spawn_and_init("service", e, &spawn_env, &mut atlas, &mut children).await {
+                Ok(()) => {
                     persist_state(
                         &state_path,
                         &manifest_path,
@@ -2343,36 +2342,54 @@ fn system_cli_args(
 /// INIT/ACTIVATE and receives the entry's config. Omission and explicit shared
 /// selections stay shared-only; only an exact namespace legacy selection may
 /// accept an upgraded shared runtime Driver.
+/// Spawn one package and bring it to INACTIVE (skills) or ACTIVE. The process
+/// joins `children` as soon as it exists, so a Ctrl-C that cancels this future
+/// mid-way leaves it where the interrupted-boot teardown stops it; a failure
+/// stops it here and takes it back out.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
     spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
-) -> Result<Spawned> {
+    children: &mut Vec<Spawned>,
+) -> Result<()> {
     let before = snapshot_provider_ids(atlas)
         .await
         .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?;
 
-    let mut sp = spawn_package(component, entry, spawn_env).await?;
+    children.push(spawn_package(component, entry, spawn_env).await?);
+    let sp = children.last_mut().expect("just pushed");
+    let result = init_spawned(component, entry, spawn_env, atlas, &before, sp).await;
+    if result.is_err() {
+        children.pop();
+    }
+    result
+}
+
+async fn init_spawned(
+    component: &str,
+    entry: &PackageEntry,
+    spawn_env: &PackageSpawnEnv<'_>,
+    atlas: &mut AtlasClient,
+    before: &ProviderRegistrationSnapshot,
+    sp: &mut Spawned,
+) -> Result<()> {
     let pkg_label = sp.name.clone();
 
     // One package = one provider. Atlas may reuse a stable provider id on
     // takeover, so registration_id (not id alone) correlates this spawn.
 
-    // Once the wrapper is up, every error path below must terminate the
-    // PGID before bailing — otherwise `?` returns the spawned process to
-    // a dead Spawned (which itself has no killing Drop), the caller's
-    // teardown loop never sees it (`children.push(sp)` only runs after
-    // this fn succeeds), and the orphan keeps holding whatever the
-    // package opened (e.g. memsearch's milvus DB lock, executor's gRPC
-    // port, …). Give the provider's SIGTERM handler time to run
-    // `on_shutdown` before SIGKILL fallback; providers may own ROS children
-    // in their own process groups that only the handler knows about.
+    // Every error path below terminates the PGID before returning: the caller
+    // drops this record on error, and the process would otherwise keep what
+    // the package opened (memsearch's milvus DB lock, executor's gRPC port).
+    // The provider's SIGTERM handler gets time to run `on_shutdown` before the
+    // SIGKILL fallback; it may own ROS children in process groups only it
+    // knows about.
     let pgid = sp.pgid;
 
     let registration = match wait_for_registration(
         atlas,
-        &before,
+        before,
         &entry.name,
         &pkg_label,
         component,
@@ -2483,7 +2500,7 @@ async fn spawn_and_init(
                 init_state.to_uppercase()
             ),
         );
-        return Ok(sp);
+        return Ok(());
     }
 
     let activate_state = match with_spinner(
@@ -2514,7 +2531,7 @@ async fn spawn_and_init(
     let _ = init_state; // intermediate, only kept for the assertion below
     output::boot_ok(display_label, &activate_state.to_uppercase());
 
-    Ok(sp)
+    Ok(())
 }
 
 /// Run `fut` while animating the boot spinner so the user sees the
