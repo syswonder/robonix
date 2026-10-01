@@ -1,6 +1,6 @@
 [project]
 name = "robonix-vlm-verifier"
-version = "0.1.0"
+version = "1.1.0b1"
 description = "Generic single-image visual result verification"
 requires-python = ">=3.10"
 dependencies = ["robonix-api", "grpcio-tools", "httpx", "Pillow>=10"]

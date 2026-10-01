@@ -22,7 +22,7 @@
 #                     from codegen-typed handlers, mirrors memory).
 [project]
 name = "robonix-system-scene"
-version = "0.1.0"
+version = "1.1.0b1"
 description = "Scene MCP server — semantic + geometric live map of the robot's environment."
 requires-python = ">=3.10"
 dependencies = [

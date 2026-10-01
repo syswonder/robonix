@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [1.1.0-beta.1] - 2026-10-01
+
+Pre-release for the invite-only beta of [Robonix Hub](https://hub.robonix.ai), the web console that installs, configures and runs Robonix deployments on a robot. Hub installs this version. From this release on, every Rust crate and Python package carries the release version; Python spells it `1.1.0b1`.
+
+### Added
+
+- **Scene:** Add DualMap as a selectable perception backend, and use it by default where the image carries it (experimental). [#243](https://github.com/syswonder/robonix/pull/243)
+- **Scene:** Select a perception profile (lite, full, annotate) from the manifest. [#243](https://github.com/syswonder/robonix/pull/243)
+- **Scene:** Add object-correction contracts, also as MCP tools, and evict objects that are visibly gone from the upstream ConceptGraphs map. [#234](https://github.com/syswonder/robonix/pull/234)
+- **Scene:** Draw the semantic map with rerun, in a web UI that shows the map rather than the registry. [#248](https://github.com/syswonder/robonix/pull/248)
+- **Scene:** Add room-aware semantic goals. [#228](https://github.com/syswonder/robonix/pull/228)
+- **Executor:** Add a result-verification framework, a VLM result verifier, and a scene verifier that checks the reached position and yaw. [#242](https://github.com/syswonder/robonix/pull/242)
+- **Executor:** Add a VERIFYING state and overlapping verification rules. [#251](https://github.com/syswonder/robonix/pull/251)
+- **Capability Contracts and Code Generation:** Add `llm_callable` metadata to control which contracts the planner sees. [#242](https://github.com/syswonder/robonix/pull/242)
+- **Pilot:** Archive each session to a transcript and restore it after a restart. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Pilot:** Hand the planner a current camera frame each round. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Pilot:** Resolve namespaced provider model profiles and require verified model context budgets. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Pilot:** Keep the stream alive while a reasoning model thinks. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Liaison:** Let a client end voice capture and submit early. [#232](https://github.com/syswonder/robonix/pull/232)
+- **Liaison:** Stream hands-free voice events to clients. [#228](https://github.com/syswonder/robonix/pull/228)
+- **CLI (rbnx):** Record which package commits a deployment actually ran. [#247](https://github.com/syswonder/robonix/pull/247)
+- **CLI (rbnx):** Give components a session directory and keep it on `rbnx clean`. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Simulation (Webots):** Register the client audio bridge beside ALSA audio. [#228](https://github.com/syswonder/robonix/pull/228)
+- **Simulation (Webots):** Publish the simulator's own robot pose as an evaluation reference. [#243](https://github.com/syswonder/robonix/pull/243)
+
+### Changed
+
+- **Runtime:** Standardize provider lifecycle management; every provider needs a lifecycle driver. [#228](https://github.com/syswonder/robonix/pull/228)
+- **Pilot:** Keep per-task context in history bounded by tokens, with a cache-stable prompt layout and bounded history compaction. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Pilot:** Describe the RTDL envelope to the provider as a JSON schema. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Workspace:** Version the Rust crates and Python packages with the release. Through 1.0.0 the crates read 0.1.0 and the Python packages 0.0.0 to 0.1.0rc1.
+
+### Fixed
+
+- **Runtime:** Report provider exits immediately, reap failed providers, and harden boot cleanup and task cancellation. [#228](https://github.com/syswonder/robonix/pull/228)
+- **Scene:** Reuse unchanged VLM inference. [#231](https://github.com/syswonder/robonix/pull/231)
+- **Scene:** Survive malformed upstream messages and keep the unauthenticated web UI on loopback by default. [#245](https://github.com/syswonder/robonix/pull/245)
+- **Scene:** Place and photograph each object from the frame it was seen in. [1f437909](https://github.com/syswonder/robonix/commit/1f437909995c5f2aef468f9b634982254b7b6115)
+- **Speech and Audio:** Split long Tencent TTS input. [#230](https://github.com/syswonder/robonix/pull/230)
+- **Scribe:** Build on non-Unix targets. [#236](https://github.com/syswonder/robonix/pull/236)
+- **Build:** Build on LoongArch64 by honoring a system `protoc`. [#249](https://github.com/syswonder/robonix/pull/249)
+- **Simulation (Webots):** Load remote viewer assets through the proxy. [#256](https://github.com/syswonder/robonix/pull/256)
+- **Simulation (Webots):** Give the registered depth image the optical frame it is registered to. [#240](https://github.com/syswonder/robonix/pull/240)
+- **Testing:** Wait for a usable map before the post-restart scenario pass. [#244](https://github.com/syswonder/robonix/pull/244)
+- **Quickstart:** Let a freshly installed machine run the quickstart. [#248](https://github.com/syswonder/robonix/pull/248)
+
 ## [1.0.0] - 2026-08-15
 
 First stable release of Robonix, an operating system for embodied artificial intelligence.

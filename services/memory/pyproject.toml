@@ -6,7 +6,7 @@
 
 [project]
 name = "robonix-memgraph"
-version = "0.1.0"
+version = "1.1.0b1"
 description = "Memgraph MCP server — structured CKG memory (Scribe Mem, parallel to memsearch)."
 requires-python = ">=3.10"
 dependencies = [

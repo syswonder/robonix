@@ -1,6 +1,6 @@
 [project]
 name = "robonix-scene-verifier"
-version = "0.1.0"
+version = "1.1.0b1"
 description = "Scene-backed planar navigation result verifier"
 requires-python = ">=3.10"
 dependencies = [
