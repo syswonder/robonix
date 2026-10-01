@@ -547,7 +547,7 @@ impl RtdlIncrementalParser {
             return Ok(false);
         };
         // Meta operations remain on the existing out-of-band control path.
-        if parent.is_none() && ["cancel_plan", "cancel_all", "stop_plan_at"].contains(&op) {
+        if parent.is_none() && ["cancel_plan", "cancel_all"].contains(&op) {
             return Ok(true);
         }
         ensure!(
@@ -805,10 +805,8 @@ mod tests {
         for rtdl in [
             serde_json::json!({"op": "cancel_plan", "plan_id": "p", "wait_ms": 50_000}),
             serde_json::json!({"op": "cancel_all"}),
-            serde_json::json!({"op": "stop_plan_at", "plan_id": "p", "target_op_id": "n"}),
             serde_json::json!({"op": "cancel_plan", "plan_id": ""}),
-            serde_json::json!({"op": "stop_plan_at", "plan_id": "p"}),
-            serde_json::json!({"op": "stop_plan_at", "plan_id": "p", "target_op_id": "n", "when": "bad"}),
+            serde_json::json!({"op": "cancel_plan"}),
         ] {
             let expected = planner::parse_meta_plan_op(&rtdl);
             let mut p = parser();
@@ -829,6 +827,19 @@ mod tests {
             assert_eq!(p.sequence.load(Ordering::Relaxed), 0);
             assert!(p.take_messages().is_empty());
         }
+    }
+
+    /// Removed control operations fail before allocating or dispatching a plan.
+    #[test]
+    fn removed_control_is_rejected_without_dispatch() {
+        let mut p = parser();
+        let error = p
+            .push(r#"{"rtdl":{"op":"stop_plan_at","plan_id":"p","target_op_id":"n","when":"on_complete"}}"#)
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown RTDL operator"));
+        assert!(p.plan.nodes.is_empty());
+        assert!(p.plan.plan_id.is_empty());
+        assert!(p.take_messages().is_empty());
     }
 
     /// The last delta emits remaining closures; finalization preserves nodes and emits nothing.

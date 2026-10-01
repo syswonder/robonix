@@ -18,7 +18,7 @@ use crate::pb::module_health::{
 };
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
-use crate::plan_runtime::{PlanRuntime, StopWhen};
+use crate::plan_runtime::PlanRuntime;
 use crate::rtdl_wire::{self, NodeEventContext};
 use crate::verification::{self, VerificationPolicy};
 use robonix_atlas::client::AtlasClient;
@@ -135,11 +135,6 @@ pub(crate) fn node_event_context(plan: &Plan, node_index: usize) -> NodeEventCon
     }
 }
 
-/// Return whether a node kind is an RTDL operator rather than a leaf call.
-fn is_operator_node(node_kind: u32) -> bool {
-    matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
-}
-
 /// Map a completed leaf call to its RTDL state. Cancellation wins over the
 /// provider result: a command terminated by cancel_plan normally returns
 /// success=false, but that is an expected CANCELED outcome, not a FAILED tool.
@@ -150,40 +145,6 @@ fn leaf_terminal_state(success: bool, cancelled: bool) -> u32 {
         RtdlNodeStateEnum::Succeeded as u32
     } else {
         RtdlNodeStateEnum::Failed as u32
-    }
-}
-
-/// Emit the terminal event for an `on_enter` stop point on any RTDL node.
-pub(crate) async fn send_stop_on_enter(
-    tx: &Sender<Result<RtdlEvent, Status>>,
-    node: &NodeEventContext,
-    runtime: &PlanRuntime,
-) {
-    let detail = format!("stopped on entering op_id={}: plan cancelled", node.op_id);
-    runtime
-        .record_op_state(
-            &node.plan_id,
-            &node.op_id,
-            RtdlNodeStateEnum::Canceled as u32,
-        )
-        .await;
-    if is_operator_node(node.node_kind) {
-        let _ = tx
-            .send(Ok(rtdl_wire::operator_node_state(
-                node,
-                RtdlNodeStateEnum::Canceled as u32,
-                detail,
-            )))
-            .await;
-    } else {
-        let _ = tx
-            .send(Ok(rtdl_wire::node_state(
-                node,
-                RtdlNodeStateEnum::Canceled as u32,
-                detail,
-                None,
-            )))
-            .await;
     }
 }
 
@@ -236,26 +197,6 @@ pub(crate) async fn send_operator_final(
     send_operator_state(tx, node, state, reason, runtime).await;
 }
 
-/// Apply an `on_complete` stop point only after a node reaches its final state.
-// TODO: Decide whether an overlap node's on_complete boundary should be its
-// capability completion or its post-verification final state. It currently
-// fires after verification, while parent execution may already have continued.
-pub(crate) async fn trigger_stop_on_complete(
-    runtime: &PlanRuntime,
-    node: &NodeEventContext,
-    provider_id: &str,
-    mut atlas: AtlasClient,
-) {
-    if runtime
-        .should_stop_at(&node.plan_id, &node.op_id, StopWhen::OnComplete)
-        .await
-    {
-        runtime
-            .trigger_stop(&node.plan_id, provider_id, &mut atlas)
-            .await;
-    }
-}
-
 /// Dispatch one RTDL `do` node and stream node_state events.
 pub(crate) async fn execute_call(
     call: &CapabilityCall,
@@ -267,9 +208,8 @@ pub(crate) async fn execute_call(
     verification: Arc<VerificationPolicy>,
 ) -> NodeExecution {
     // Log the args too (bounded) so the log shows what each call requested —
-    // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
-    // and any cap call. Truncated to keep large payloads (images, file content)
-    // from bloating the log.
+    // useful for debugging capability calls. Truncated to keep large payloads
+    // (images, file content) from bloating the log.
     let args_preview: String = call.args_json.chars().take(256).collect();
     let args_ellipsis = if call.args_json.len() > 256 {
         "…"
@@ -440,7 +380,6 @@ impl OverlapVerifier {
                 self.call.contract_id, self.call.call_id, verified.error
             );
         }
-        trigger_stop_on_complete(&self.runtime, &self.node, &self.provider_id, self.atlas).await;
         !verified.success
     }
 }
@@ -529,24 +468,6 @@ impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
                     error: String::new(),
                 }
             }
-            "stop_at" => match self
-                .runtime
-                .stop_plan_at_control(&request.plan_id, &request.op_id, &request.when)
-                .await
-            {
-                Ok(message) => ControlPlanResponse {
-                    success: true,
-                    completed: true,
-                    message,
-                    error: String::new(),
-                },
-                Err(error) => ControlPlanResponse {
-                    success: false,
-                    completed: true,
-                    message: String::new(),
-                    error,
-                },
-            },
             action => ControlPlanResponse {
                 success: false,
                 completed: true,
@@ -612,7 +533,7 @@ mod tests {
         ExecutorServiceImpl, MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION, MODULE_HEALTH_TTL_MS,
         OverlapVerifier, PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
         execute_call, executor_health_report, leaf_terminal_state, send_operator_state,
-        send_stop_on_enter, wait_for_verifier,
+        wait_for_verifier,
     };
     use crate::config::VerificationRule;
     use crate::execution::Input;
@@ -803,7 +724,9 @@ mod tests {
         .expect("connect test Atlas");
         let runtime = PlanRuntime::default();
         runtime.register_plan("p").await.unwrap();
-        runtime.trigger_stop("p", "executor", &mut atlas).await;
+        runtime
+            .cancel_plan_control("p", 0, "executor", &mut atlas)
+            .await;
         assert!(runtime.is_cancelled("p").await);
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let target_call = call("p:1");
@@ -1094,29 +1017,5 @@ mod tests {
         assert_eq!(ns.state, RtdlNodeStateEnum::Succeeded as u32);
         assert!(ns.leaf_result.is_none());
         assert!(ns.operator_detail.contains("RTDL sequence op_id=op_1"));
-    }
-
-    #[tokio::test]
-    async fn stop_on_enter_event_supports_operator_nodes() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let runtime = PlanRuntime::default();
-        runtime.register_plan("p").await.unwrap();
-        let node = NodeEventContext {
-            plan_id: "p".to_string(),
-            node_index: 0,
-            node_kind: RTDL_PARALLEL,
-            op_id: "op_1".to_string(),
-            description: "run branches".to_string(),
-        };
-
-        send_stop_on_enter(&tx, &node, &runtime).await;
-
-        let event = rx.recv().await.unwrap().unwrap();
-        let ns = event.node_state.unwrap();
-        assert_eq!(event.event_kind, RtdlEventEnum::NodeState as u32);
-        assert_eq!(ns.op_id, "op_1");
-        assert_eq!(ns.state, RtdlNodeStateEnum::Canceled as u32);
-        assert!(ns.leaf_result.is_none());
-        assert!(ns.operator_detail.contains("stopped on entering"));
     }
 }

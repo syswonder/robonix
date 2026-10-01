@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
 # Real Executor integration test: concurrent long-running RTDL plans,
-# boundary stop, targeted cancel, and isolation of unrelated work.
+# targeted cancellation and isolation of unrelated work.
 set -euo pipefail
 
 ROOT="${ROBONIX_SOURCE_PATH:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -218,15 +218,12 @@ async def main():
             (await active.ListActivePlans(executor_pb2.ListActivePlans_Request())).plans_json
         )
         assert before["count"] == 2, before
-        stopped = await control.ControlPlan(
+        cancelled_a = await control.ControlPlan(
             executor_pb2.ControlPlan_Request(
-                action="stop_at",
-                plan_id="A-route",
-                op_id="A-meeting",
-                when="on_enter",
+                action="cancel", plan_id="A-route", wait_ms=5000
             )
         )
-        assert stopped.success, stopped
+        assert cancelled_a.success and cancelled_a.completed, cancelled_a
 
         await asyncio.sleep(max(0, 12 - rel()))
         c = asyncio.create_task(drive(stub, plan_c))
@@ -255,7 +252,7 @@ labels = [line.split(maxsplit=1)[1] for line in lines]
 ticks = [label for label in labels if label.startswith("B_GREET_TICK_")]
 
 checks = {
-    "A restaurant completed": "A_RESTAURANT_END" in labels,
+    "A restaurant canceled before completion": "A_RESTAURANT_START" in labels and "A_RESTAURANT_END" not in labels,
     "A meeting never started": "A_MEETING_START" not in labels,
     "B greet completed 60 heartbeats": len(ticks) == 60 and "B_GREET_END" in labels,
     "C open-area started": "C_OPEN_START" in labels,
@@ -268,7 +265,7 @@ def terminal_state(plan_id: str, op_id: str) -> int | None:
     return matches[-1] if matches else None
 
 checks.update({
-    "A boundary node canceled": terminal_state("A-route", "A-meeting") == 4,
+    "A pending successor canceled": terminal_state("A-route", "A-meeting") == 4,
     "C targeted node canceled": terminal_state("C-open-area", "C-drive") == 4,
     "D succeeded": terminal_state("D-return-315", "D-return") == 2,
     "B unaffected and succeeded": terminal_state("B-greet", "B-watch") == 2,

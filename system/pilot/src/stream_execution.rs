@@ -216,7 +216,6 @@ impl StreamExecution {
                 action: "cancel".into(),
                 plan_id: self.plan.plan_id.clone(),
                 wait_ms: 5000,
-                ..Default::default()
             }),
         )
         .await??;

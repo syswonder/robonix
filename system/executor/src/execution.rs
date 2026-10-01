@@ -3,7 +3,6 @@
 use crate::pb::executor::{ExecuteStreamInput, RtdlEvent};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum as State;
 use crate::pb::pilot::{Plan, RtdlNode};
-use crate::plan_runtime::StopWhen;
 use crate::rtdl_wire;
 use crate::service::{self, ExecutorServiceImpl};
 use std::collections::HashSet;
@@ -289,8 +288,9 @@ impl Actor {
         self.input.closed.fill(true);
         self.svc
             .runtime
-            .trigger_stop(
+            .cancel_plan_control(
                 &self.input.plan.plan_id,
+                0,
                 &self.svc.provider_id,
                 &mut self.svc.atlas.clone(),
             )
@@ -339,15 +339,6 @@ impl Actor {
             }
             progressed = true;
             let ctx = service::node_event_context(&self.input.plan, index);
-            if ready
-                && self
-                    .svc
-                    .runtime
-                    .should_stop_at(&ctx.plan_id, &ctx.op_id, StopWhen::OnEnter)
-                    .await
-            {
-                self.cancel().await;
-            }
             if self.cancelled || blocked {
                 let leaf = ctx.node_kind == 2;
                 self.execution[index] = Execution {
@@ -383,7 +374,17 @@ impl Actor {
                 self.tasks.spawn(async move {
                     // Cancellation can race with task spawning. Check again before dispatch.
                     if svc.runtime.is_cancelled(&ctx.plan_id).await {
-                        service::send_stop_on_enter(&tx, &ctx, &svc.runtime).await;
+                        svc.runtime
+                            .record_op_state(&ctx.plan_id, &ctx.op_id, State::Canceled as u32)
+                            .await;
+                        let _ = tx
+                            .send(Ok(rtdl_wire::node_state(
+                                &ctx,
+                                State::Canceled as u32,
+                                "canceled before execution".into(),
+                                None,
+                            )))
+                            .await;
                         return Completion::Call(
                             index,
                             service::NodeExecution {
@@ -394,23 +395,14 @@ impl Actor {
                     }
                     let result = service::execute_call(
                         &call,
-                        ctx.clone(),
+                        ctx,
                         tx,
-                        svc.atlas.clone(),
-                        svc.provider_id.clone(),
-                        svc.runtime.clone(),
+                        svc.atlas,
+                        svc.provider_id,
+                        svc.runtime,
                         svc.verification,
                     )
                     .await;
-                    if result.verifier.is_none() {
-                        service::trigger_stop_on_complete(
-                            &svc.runtime,
-                            &ctx,
-                            &svc.provider_id,
-                            svc.atlas,
-                        )
-                        .await;
-                    }
                     Completion::Call(index, result)
                 });
             } else {
@@ -465,13 +457,6 @@ impl Actor {
                     failed,
                     self.cancelled || self.execution[index].canceled,
                     &self.svc.runtime,
-                )
-                .await;
-                service::trigger_stop_on_complete(
-                    &self.svc.runtime,
-                    &ctx,
-                    &self.svc.provider_id,
-                    self.svc.atlas.clone(),
                 )
                 .await;
                 if self

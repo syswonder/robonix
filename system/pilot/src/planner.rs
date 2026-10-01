@@ -264,16 +264,6 @@ struct TreeMeta {
     /// the first is still in flight; execution latency must not duplicate a
     /// physical or external command.
     call_signatures: HashSet<String>,
-    /// Ordered executable leaves from the original RTDL graph. Keeping these
-    /// visible lets the model target any semantic boundary in one control call
-    /// instead of querying live state first or guessing what "current" means.
-    steps: Vec<TreeStep>,
-}
-
-struct TreeStep {
-    op_id: String,
-    description: String,
-    capability: String,
 }
 
 /// Events fed from per-tree driver tasks back to the supervisor loop. One
@@ -417,8 +407,6 @@ async fn cancel_forest_plans(
             .control_plan(Request::new(ControlPlanRequest {
                 action: "cancel".to_string(),
                 plan_id: target.clone(),
-                op_id: String::new(),
-                when: String::new(),
                 wait_ms: 5_000,
             }));
         match tokio::time::timeout(std::time::Duration::from_secs(7), cancel).await {
@@ -443,21 +431,12 @@ async fn cancel_forest_plans(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MetaPlanOp {
-    Cancel {
-        plan_id: String,
-        wait_ms: u64,
-    },
-    CancelAll {
-        wait_ms: u64,
-    },
-    StopAt {
-        plan_id: String,
-        op_id: String,
-        when: String,
-    },
+    Cancel { plan_id: String, wait_ms: u64 },
+    CancelAll { wait_ms: u64 },
 }
 
 impl MetaPlanOp {
+    /// Return the real task plans affected by this cancellation.
     fn cancellation_targets(&self, forest: &HashMap<String, TreeMeta>) -> Vec<String> {
         match self {
             Self::Cancel { plan_id, .. } => vec![plan_id.clone()],
@@ -466,18 +445,17 @@ impl MetaPlanOp {
                 .filter(|(_, meta)| !meta.control_only)
                 .map(|(plan_id, _)| plan_id.clone())
                 .collect::<Vec<_>>(),
-            Self::StopAt { plan_id, .. } => vec![plan_id.clone()],
         }
     }
 }
 
-/// Parse a root RTDL control operation (`cancel_plan`, `cancel_all`, or
-/// `stop_plan_at`) for execution through Executor's control RPC without creating
-/// a Plan or RTDL node. This function only parses; it does not execute the operation.
+/// Parse a root RTDL control operation (`cancel_plan` or `cancel_all`) for
+/// Executor's control RPC without creating a Plan or RTDL node. This function
+/// only parses; it does not execute the operation.
 /// Returns `Ok(None)` when no recognized control operation is present, and an
-/// error when a recognized operation has invalid required identifiers or `when`.
+/// error when a recognized operation has invalid required identifiers.
 /// Missing or non-u64 `wait_ms` defaults to 5,000 ms; larger values are capped at
-/// 30,000 ms. Missing or non-string `when` defaults to `on_complete`.
+/// 30,000 ms.
 pub(crate) fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<MetaPlanOp>> {
     let Some(obj) = rtdl.as_object() else {
         return Ok(None);
@@ -508,52 +486,23 @@ pub(crate) fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<Meta
             wait_ms: wait_ms(),
         },
         "cancel_all" => MetaPlanOp::CancelAll { wait_ms: wait_ms() },
-        "stop_plan_at" => {
-            let when = obj
-                .get("when")
-                .and_then(|value| value.as_str())
-                .unwrap_or("on_complete")
-                .to_string();
-            if !matches!(when.as_str(), "on_enter" | "on_complete") {
-                anyhow::bail!("meta op `stop_plan_at` requires when=on_enter or on_complete");
-            }
-            MetaPlanOp::StopAt {
-                plan_id: string("plan_id")?,
-                op_id: string("target_op_id")?,
-                when,
-            }
-        }
         _ => return Ok(None),
     };
     Ok(Some(parsed))
 }
 
+/// Execute cancellation through Executor without creating an RTDL plan.
 async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> Result<String> {
     let request = match op {
         MetaPlanOp::Cancel { plan_id, wait_ms } => ControlPlanRequest {
             action: "cancel".to_string(),
             plan_id: plan_id.clone(),
-            op_id: String::new(),
-            when: String::new(),
             wait_ms: *wait_ms,
         },
         MetaPlanOp::CancelAll { wait_ms } => ControlPlanRequest {
             action: "cancel_all".to_string(),
             plan_id: String::new(),
-            op_id: String::new(),
-            when: String::new(),
             wait_ms: *wait_ms,
-        },
-        MetaPlanOp::StopAt {
-            plan_id,
-            op_id,
-            when,
-        } => ControlPlanRequest {
-            action: "stop_at".to_string(),
-            plan_id: plan_id.clone(),
-            op_id: op_id.clone(),
-            when: when.clone(),
-            wait_ms: 0,
         },
     };
     let timeout = Duration::from_millis(request.wait_ms.saturating_add(2_000).max(2_000));
@@ -570,9 +519,6 @@ async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> R
     Ok(response.message)
 }
 
-/// Render the in-flight forest as a system-prompt block so the LLM can see what
-/// is still running and reference a `plan_id` to cancel it. Empty when no tree
-/// is running. Trees are ordered by numeric plan id for stable output.
 /// True when every `do` node is a plan-control builtin and there is at least
 /// one. Plan-control trees are not themselves cancellable task work; advertising
 /// them makes the model inspect or cancel its own control actions.
@@ -590,11 +536,7 @@ fn is_control_only(plan: &Plan) -> bool {
             .unwrap_or("");
         if !matches!(
             leaf,
-            "cancel_plan"
-                | "cancel_all_plans"
-                | "get_all_plans"
-                | "get_plan_status"
-                | "stop_plan_at"
+            "cancel_plan" | "cancel_all_plans" | "get_all_plans" | "get_plan_status"
         ) {
             return false;
         }
@@ -602,26 +544,8 @@ fn is_control_only(plan: &Plan) -> bool {
     has_do
 }
 
-fn plan_steps(plan: &Plan) -> Vec<TreeStep> {
-    plan.nodes
-        .iter()
-        .filter(|node| node.node_kind == RTDL_DO)
-        .filter_map(|node| {
-            let call = node.call.as_ref()?;
-            Some(TreeStep {
-                op_id: node.op_id.clone(),
-                description: node.description.clone(),
-                capability: call
-                    .contract_id
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&call.contract_id)
-                    .to_string(),
-            })
-        })
-        .collect()
-}
-
+/// List this supervisor's running task trees and the supported cancellation operations.
+/// Empty when no tree is running; trees are ordered by numeric plan ID.
 fn build_forest_block(
     forest: &HashMap<String, TreeMeta>,
     cancel_requested: &HashSet<String>,
@@ -642,18 +566,7 @@ fn build_forest_block(
          Plan control is NOT a capability call and must never be placed inside a \
          sequence, parallel, or do node. To stop one immediately, emit a root \
          `cancel_plan` meta op with its exact `plan_id` below; to stop all work, \
-         emit a root `cancel_all` meta op. Every plan's ordered executable steps \
-         are listed below. To stop at a requested semantic boundary (for example \
-         after step 8 or after reaching the restaurant), emit a root \
-         `stop_plan_at` meta op with that `plan_id`, the chosen `target_op_id`, \
-         and `when` (`on_enter` to stop \
-         before that op runs, `on_complete` to stop after it finishes). Do not \
-         assume the target is the currently running step, and do not query status \
-         first when the requested boundary is already present in this list. Bind \
-         the user's named boundary literally: `after X` means X/on_complete and \
-         `before X` means X/on_enter. Never rewrite `after X` as `before` its \
-         successor because those are not equivalent in branching/parallel trees. It \
-         cancels the whole plan when execution reaches that op. Cancel/stop each \
+         emit a root `cancel_all` meta op. Cancel each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Do not reuse these ids for new trees. If an in-flight plan \
          is already executing the same goal, do not cancel or re-issue it; wait \
@@ -667,15 +580,6 @@ fn build_forest_block(
             "- plan_id={} running: {}\n",
             plan_id, meta.description
         ));
-        for (index, step) in meta.steps.iter().enumerate() {
-            block.push_str(&format!(
-                "  {}. op_id={} [{}] {}\n",
-                index + 1,
-                step.op_id,
-                step.capability,
-                step.description
-            ));
-        }
     }
     block
 }
@@ -1712,20 +1616,6 @@ pub async fn run_turn(
                 should_plan = true;
                 continue 'supervisor;
             }
-            if let MetaPlanOp::StopAt { plan_id, op_id, .. } = &meta_op
-                && forest
-                    .get(plan_id)
-                    .is_none_or(|meta| !meta.steps.iter().any(|step| step.op_id == *op_id))
-            {
-                warn!("[pilot/harness] suppressed stop_at for unknown op {plan_id}/{op_id}");
-                history.push(Message::user(&format!(
-                    "Pilot harness feedback: RTDL plan {plan_id} has no listed target_op_id {op_id}. Copy an exact op_id from In-flight trees and do not guess which step is current."
-                )));
-                history::trim(history, MAX_HISTORY);
-                should_plan = true;
-                continue 'supervisor;
-            }
-
             if let Some(updated) = task_update {
                 let changed = apply_task_update(standing_task, updated, false);
                 if changed && let Some(state) = standing_task.as_ref() {
@@ -1921,7 +1811,6 @@ pub async fn run_turn(
                 description: rtdl_description,
                 control_only: is_control_only(&graph),
                 call_signatures,
-                steps: plan_steps(&graph),
             },
         );
         tokio::spawn(drive_plan(
@@ -1984,7 +1873,7 @@ fn is_legacy_plan_control_contract(contract_id: &str) -> bool {
     }
     matches!(
         contract_id.rsplit('/').next().unwrap_or_default(),
-        "cancel_plan" | "cancel_all_plans" | "stop_plan_at" | "get_all_plans" | "get_plan_status"
+        "cancel_plan" | "cancel_all_plans" | "get_all_plans" | "get_plan_status"
     )
 }
 
@@ -2012,7 +1901,7 @@ Nodes are exactly one of:
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
 Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
 
-Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
+Plan control is the entire rtdl value, never a nested node or capability: cancel_plan using an exact listed plan_id, or cancel_all. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
@@ -2610,11 +2499,6 @@ by planning capability calls available to you.
   work covered by that tree, or when continuing that same tree is unsafe. A
   failure in an independent monitoring, greeting, observation, or query branch
   is not permission to cancel navigation or another physical task.
-- For any boundary stop, select the explicitly requested step from the ordered
-  in-flight RTDL step list and call `builtin_stop_plan_at` once. The target may
-  be any step in the plan; never assume it means the currently running step.
-  Use `on_complete` for 'after step X' and `on_enter` for 'before step X'.
-  Bind X itself; never substitute X's predecessor or successor.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - For semantic navigation, resolve names through Scene before calling navigation:
   - call Scene `list_regions` first to discover the stable ID for a named room
@@ -2693,8 +2577,8 @@ Concretely:
 mod tests {
     use super::{
         CapabilityPromptCache, CapabilityTargetMap, DEFAULT_SUCCESS_CRITERION, MetaPlanOp, RTDL_DO,
-        RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, TreeStep,
-        append_steer, apply_task_update, build_capability_target_map, build_display_capabilities,
+        RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, TaskState, TreeMeta, append_steer,
+        apply_task_update, build_capability_target_map, build_display_capabilities,
         build_executor_active_block, build_forest_block, compact_tool_result,
         configured_vlm_idle_timeout, feed_results_into_history, format_plan_summary,
         invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
@@ -2947,29 +2831,6 @@ mod tests {
             parse_meta_plan_op(&json!({"op":"cancel_all","wait_ms":99_999})).unwrap(),
             Some(MetaPlanOp::CancelAll { wait_ms: 30_000 })
         );
-        assert_eq!(
-            parse_meta_plan_op(&json!({
-                "op":"stop_plan_at",
-                "plan_id":"9",
-                "target_op_id":"13",
-                "when":"on_enter"
-            }))
-            .unwrap(),
-            Some(MetaPlanOp::StopAt {
-                plan_id: "9".into(),
-                op_id: "13".into(),
-                when: "on_enter".into(),
-            })
-        );
-        assert!(
-            parse_meta_plan_op(&json!({
-                "op":"stop_plan_at",
-                "plan_id":"9",
-                "target_op_id":"13",
-                "when":"later"
-            }))
-            .is_err()
-        );
     }
 
     #[test]
@@ -2977,7 +2838,6 @@ mod tests {
         for leaf in [
             "cancel_plan",
             "cancel_all_plans",
-            "stop_plan_at",
             "get_all_plans",
             "get_plan_status",
         ] {
@@ -3066,9 +2926,9 @@ mod tests {
         start_or_resume_task(&mut standing, "go to the meeting room");
 
         let mut forest = HashMap::new();
-        for (plan_id, description, capability) in [
-            ("11", "navigate to the meeting room", "navigation_navigate"),
-            ("5", "watch for passersby", "greet_greet"),
+        for (plan_id, description) in [
+            ("11", "navigate to the meeting room"),
+            ("5", "watch for passersby"),
         ] {
             forest.insert(
                 plan_id.to_string(),
@@ -3076,11 +2936,6 @@ mod tests {
                     description: description.into(),
                     control_only: false,
                     call_signatures: HashSet::new(),
-                    steps: vec![TreeStep {
-                        op_id: format!("op-{plan_id}"),
-                        description: description.into(),
-                        capability: capability.into(),
-                    }],
                 },
             );
         }
@@ -3121,38 +2976,6 @@ mod tests {
             invalid_cancel_target(&["5".into()], &forest, &requested),
             None
         );
-    }
-
-    #[test]
-    fn forest_prompt_distinguishes_immediate_cancel_from_boundary_stop() {
-        let mut forest = HashMap::new();
-        forest.insert(
-            "4".to_string(),
-            TreeMeta {
-                description: "ordered multi-step task".into(),
-                control_only: false,
-                call_signatures: HashSet::new(),
-                steps: vec![
-                    TreeStep {
-                        op_id: "op-restaurant".into(),
-                        description: "move to restaurant".into(),
-                        capability: "navigate".into(),
-                    },
-                    TreeStep {
-                        op_id: "op-meeting".into(),
-                        description: "move to meeting room".into(),
-                        capability: "navigate".into(),
-                    },
-                ],
-            },
-        );
-        let prompt = build_forest_block(&forest, &HashSet::new());
-        assert!(prompt.contains("op_id=op-restaurant"));
-        assert!(prompt.contains("move to meeting room"));
-        assert!(prompt.contains("target is the currently running step"));
-        assert!(prompt.contains("do not query status"));
-        assert!(prompt.contains("on_complete"));
-        assert!(prompt.contains("on_enter"));
     }
 
     #[test]
@@ -3262,7 +3085,6 @@ mod tests {
                 description: "drive".into(),
                 control_only: false,
                 call_signatures: HashSet::new(),
-                steps: Vec::new(),
             },
         );
         let targets = vec!["7".to_string()];
@@ -3357,7 +3179,6 @@ mod tests {
             "cancel_all_plans",
             "get_all_plans",
             "get_plan_status",
-            "stop_plan_at",
         ] {
             assert!(is_control_only(&single_do_plan(leaf)), "{leaf}");
         }

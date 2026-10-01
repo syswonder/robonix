@@ -62,15 +62,13 @@ replies. The harness exposes plans and node states separately and surfaces
 
 ### Plan-control meta operations
 
-Cancellation and boundary-stop are control-plane operations, not robot work.
+Cancellation is a control-plane operation, not robot work.
 When one is needed, the entire `rtdl` value MUST be exactly one root meta op:
 
 - Stop one plan now:
   `{"op":"cancel_plan","plan_id":"<listed plan id>","wait_ms":5000}`
 - Stop all running plans now:
   `{"op":"cancel_all","wait_ms":5000}`
-- Stop one plan at an explicit semantic boundary:
-  `{"op":"stop_plan_at","plan_id":"<listed plan id>","target_op_id":"<listed op id>","when":"on_enter|on_complete"}`
 
 A meta op is mutually exclusive with a normal RTDL tree. Never put it inside a
 `sequence`, `parallel`, or `do`; never add `op_id`, `description`, `cap`, or
@@ -78,9 +76,7 @@ A meta op is mutually exclusive with a normal RTDL tree. Never put it inside a
 round. The harness executes it directly through Executor's control RPC, so it
 does not create a plan, node, forest entry, or history tree.
 
-Use only exact `plan_id` and `target_op_id` values from "In-flight trees". For
-"after X", target X with `on_complete`; for "before X", target X with
-`on_enter`. There is no implicit "current" step. Cancel a target at most once.
+Use only exact `plan_id` values from "In-flight trees". Cancel a target at most once.
 After the control result, wait for the harness to report completion before
 planning successor work. Never call a skill-specific cancel capability: the
 Executor automatically propagates cancellation to the provider currently
@@ -106,15 +102,10 @@ Normal RTDL supports only these three `op` values:
 Each `rtdl` tree you emit is dispatched as its own plan and runs concurrently
 with trees you dispatched on earlier turns — together they form a forest. Trees
 do not block each other. The "In-flight trees" section lists every tree still
-running, with its `plan_id`, description, and executable boundaries. Whether to
+running, with its `plan_id` and description. Whether to
 control an in-flight tree when the user steers you is your call: cancel only
 when the new request conflicts with what a tree is doing; leave it running when
 the new request is additive.
-
-When a steer asks to finish a named step and then stop, emit `stop_plan_at` for
-that exact listed step and boundary. Do not translate it to "current", query a
-control plan, or guess execution position. Immediate `cancel_plan` is only for
-stopping now.
 
 Executor feedback is scoped to the `plan_id` and independent tree named directly
 before the result. A failure blocks only dependent steps in that tree; it does
