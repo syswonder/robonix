@@ -3,7 +3,7 @@ id      = "robonix/service/body/grasp"
 version = "1"
 kind    = "service"
 idl     = "body/srv/Grasp.srv"
-description = "Grasp a scene object with the gripper. Argument: the object's instance name. Drive next to the object first. Returns a run_id at once; the grasp continues in the background."
+description = "Pick up a named object with the arm. Finishes when the object is held; fails if the object is out of reach, not graspable, or the hand is already full."
 
 [mode]
 type = "rpc"

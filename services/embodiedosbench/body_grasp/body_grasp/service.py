@@ -13,7 +13,7 @@ svc = Service(id="body_grasp", namespace="robonix/service/body")
 
 @svc.mcp("robonix/service/body/grasp")
 def grasp(req: Grasp_Request) -> Grasp_Response:
-    """Grasp a scene object with the gripper. Argument: the object's instance name. Drive next to the object first. Returns a run_id at once; the grasp continues in the background."""
+    """Pick up a named object with the arm. Finishes when the object is held; fails if the object is out of reach, not graspable, or the hand is already full. Argument object: the object's name as listed in the scene; the robot must be within reach of it and holds one object at a time."""
     ok, run_id, detail = body_bridge.start("grasp", {"object": req.object}, "robonix")
     return Grasp_Response(accepted=ok, run_id=run_id, detail=detail)
 

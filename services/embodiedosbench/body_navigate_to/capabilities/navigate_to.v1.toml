@@ -3,7 +3,7 @@ id      = "robonix/service/body/navigate_to"
 version = "1"
 kind    = "service"
 idl     = "body/srv/NavigateTo.srv"
-description = "Drive the robot base next to a scene object. Argument: the object's instance name, exactly as given in the task (for example bowl_1). Returns a run_id at once; the motion continues in the background."
+description = "Walk the robot base to a named object or place in the scene. Finishes when the base has arrived and stopped; fails if the target is unknown or unreachable."
 
 [mode]
 type = "rpc"

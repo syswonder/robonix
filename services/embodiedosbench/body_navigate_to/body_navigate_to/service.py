@@ -13,8 +13,8 @@ svc = Service(id="body_navigate_to", namespace="robonix/service/body")
 
 @svc.mcp("robonix/service/body/navigate_to")
 def navigate_to(req: NavigateTo_Request) -> NavigateTo_Response:
-    """Drive the robot base next to a scene object. Argument: the object's instance name, exactly as given in the task (for example bowl_1). Returns a run_id at once; the motion continues in the background."""
-    ok, run_id, detail = body_bridge.start("navigate", {"object": req.object}, "robonix")
+    """Walk the robot base to a named object or place in the scene. Finishes when the base has arrived and stopped; fails if the target is unknown or unreachable. Give exactly one of object (an object listed in the scene) or place (a piece of furniture listed in the scene)."""
+    ok, run_id, detail = body_bridge.start("navigate", {k: v for k, v in (("object", req.object), ("place", req.place)) if v}, "robonix")
     return NavigateTo_Response(accepted=ok, run_id=run_id, detail=detail)
 
 

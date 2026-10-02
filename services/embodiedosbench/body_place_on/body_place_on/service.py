@@ -13,8 +13,8 @@ svc = Service(id="body_place_on", namespace="robonix/service/body")
 
 @svc.mcp("robonix/service/body/place_on")
 def place_on(req: PlaceOn_Request) -> PlaceOn_Response:
-    """Place the object currently held on top of another scene object. Argument: the target object's instance name. Drive next to the target first. Returns a run_id at once; the placing continues in the background."""
-    ok, run_id, detail = body_bridge.start("place", {"object": req.target}, "robonix")
+    """Put the held object down on a named surface. Finishes when the object rests on it; fails if nothing is held or the surface is out of reach. Argument place: the surface's name as listed in the scene; the robot must be within reach of it and must be holding an object."""
+    ok, run_id, detail = body_bridge.start("place", {"place": req.place}, "robonix")
     return PlaceOn_Response(accepted=ok, run_id=run_id, detail=detail)
 
 

@@ -1,6 +1,6 @@
-# Place the object currently held on top of another scene object, named by
-# its instance name. Returns at once; progress via the status contract.
-string target
+# Put the held object down on a named surface. Finishes when the object rests on it; fails if nothing is held or the surface is out of reach.
+# place: name of the surface to put the held object on. The robot must be within reach of it and must be holding an object.
+string place
 ---
 bool accepted
 string run_id

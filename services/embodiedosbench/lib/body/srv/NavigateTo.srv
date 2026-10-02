@@ -1,6 +1,9 @@
-# Drive the robot base next to a scene object, named by its instance name
-# (for example "bowl_1"). Returns at once; progress via the status contract.
+# Walk the robot base to a named object or place in the scene. Finishes when the base has arrived and stopped; fails if the target is unknown or unreachable.
+# Give exactly one of object or place.
+# object: name of the object to walk to, as listed in the scene.
+# place: name of the place (a piece of furniture) to walk to, as listed in the scene.
 string object
+string place
 ---
 bool accepted
 string run_id

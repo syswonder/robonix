@@ -1,5 +1,5 @@
-# Grasp a scene object, named by its instance name. The robot may drive a
-# little to reach it. Returns at once; progress via the status contract.
+# Pick up a named object with the arm. Finishes when the object is held; fails if the object is out of reach, not graspable, or the hand is already full.
+# object: name of the object to pick up. The robot must be within reach of it; it holds one object at a time.
 string object
 ---
 bool accepted
