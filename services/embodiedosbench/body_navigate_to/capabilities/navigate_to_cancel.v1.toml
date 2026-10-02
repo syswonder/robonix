@@ -1,0 +1,10 @@
+[contract]
+id      = "robonix/service/body/navigate_to/cancel"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/CancelNavigation.srv"
+description = "Stop a navigate_to run (executor use only)."
+llm_callable = false
+
+[mode]
+type = "rpc"

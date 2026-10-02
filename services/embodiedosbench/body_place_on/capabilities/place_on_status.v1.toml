@@ -1,0 +1,10 @@
+[contract]
+id      = "robonix/service/body/place_on/status"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/GetNavigationStatus.srv"
+description = "Status of a place_on run (executor polling only)."
+llm_callable = false
+
+[mode]
+type = "rpc"

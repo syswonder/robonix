@@ -1,0 +1,19 @@
+manifestVersion: 1
+
+package:
+  name: body_navigate_to
+  version: 0.1.0
+  vendor: embodiedosbench
+  description: Forwards robonix/service/body/navigate_to to the benchmark embodiment service.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/service/body/navigate_to
+    path: capabilities/navigate_to.v1.toml
+  - name: robonix/service/body/navigate_to/status
+    path: capabilities/navigate_to_status.v1.toml
+  - name: robonix/service/body/navigate_to/cancel
+    path: capabilities/navigate_to_cancel.v1.toml

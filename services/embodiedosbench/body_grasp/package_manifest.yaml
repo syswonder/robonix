@@ -1,0 +1,19 @@
+manifestVersion: 1
+
+package:
+  name: body_grasp
+  version: 0.1.0
+  vendor: embodiedosbench
+  description: Forwards robonix/service/body/grasp to the benchmark embodiment service.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/service/body/grasp
+    path: capabilities/grasp.v1.toml
+  - name: robonix/service/body/grasp/status
+    path: capabilities/grasp_status.v1.toml
+  - name: robonix/service/body/grasp/cancel
+    path: capabilities/grasp_cancel.v1.toml

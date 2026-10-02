@@ -1,0 +1,7 @@
+# Grasp a scene object, named by its instance name. The robot may drive a
+# little to reach it. Returns at once; progress via the status contract.
+string object
+---
+bool accepted
+string run_id
+string detail

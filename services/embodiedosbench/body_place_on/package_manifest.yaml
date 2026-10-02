@@ -1,0 +1,19 @@
+manifestVersion: 1
+
+package:
+  name: body_place_on
+  version: 0.1.0
+  vendor: embodiedosbench
+  description: Forwards robonix/service/body/place_on to the benchmark embodiment service.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/service/body/place_on
+    path: capabilities/place_on.v1.toml
+  - name: robonix/service/body/place_on/status
+    path: capabilities/place_on_status.v1.toml
+  - name: robonix/service/body/place_on/cancel
+    path: capabilities/place_on_cancel.v1.toml

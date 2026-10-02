@@ -1,0 +1,7 @@
+# Drive the robot base next to a scene object, named by its instance name
+# (for example "bowl_1"). Returns at once; progress via the status contract.
+string object
+---
+bool accepted
+string run_id
+string detail

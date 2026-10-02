@@ -1,0 +1,10 @@
+[contract]
+id      = "robonix/service/body/grasp/status"
+version = "1"
+kind    = "service"
+idl     = "navigation/srv/GetNavigationStatus.srv"
+description = "Status of a grasp run (executor polling only)."
+llm_callable = false
+
+[mode]
+type = "rpc"
