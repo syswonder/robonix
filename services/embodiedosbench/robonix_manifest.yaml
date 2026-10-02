@@ -1,6 +1,6 @@
 # Robonix stack for the benchmark: Atlas + Executor + the three body packages.
-# Pilot/Liaison are added per run from the protocol; this file is enough to
-# drive the packages from a plan submitted straight to Executor.
+# Pilot's model comes from the environment (the ledger proxy in a benchmark run);
+# with VLM_* unset, a plan can still be submitted straight to Executor.
 name: embodiedosbench_robonix
 
 system:
@@ -8,6 +8,16 @@ system:
     listen: 127.0.0.1:50051
   executor:
     listen: 127.0.0.1:50061
+  pilot:
+    listen: 127.0.0.1:50071
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+      api_format: openai
+  liaison:
+    listen: 127.0.0.1:50081
+    pilot_endpoint: 127.0.0.1:50071
 
 service:
   - name: body_navigate_to
