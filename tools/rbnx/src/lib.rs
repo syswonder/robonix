@@ -3,6 +3,7 @@
 //
 // Core library module for robonix-cli
 
+pub mod build_info;
 pub mod config;
 pub mod database;
 pub mod install;

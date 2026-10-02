@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 //! `rbnx update` — pull remote (`url:`) providers to their latest upstream
-//! commit. Two modes, both gated on a y/N confirmation after an overview:
+//! commit. Two modes, both gated on a y/N confirmation (or `--yes`) after an
+//! overview; `--check` prints the overview of a deploy and pulls nothing:
 //!
 //!   * deploy dir (cwd has `robonix_manifest.yaml`, or `-f <manifest>`):
 //!     update every cloned `url:` provider in that deploy.
@@ -11,7 +12,7 @@
 //! checkouts are reported and skipped, never force-reset.
 
 use anyhow::Result;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -19,10 +20,17 @@ use robonix_cli::{Config, output};
 
 use super::check_remotes::{self, RemoteProvider, RemoteStatus};
 
-/// Entry point for `rbnx update [-p <dir>] [-f <manifest>]`.
-pub async fn execute(_config: Config, path: Option<PathBuf>, file: Option<PathBuf>) -> Result<()> {
+/// Entry point for `rbnx update [-p <dir>] [-f <manifest>] [-y] [--check [--json]]`.
+pub async fn execute(
+    _config: Config,
+    path: Option<PathBuf>,
+    file: Option<PathBuf>,
+    yes: bool,
+    check: bool,
+    json: bool,
+) -> Result<()> {
     if let Some(p) = path {
-        return update_single(&p);
+        return update_single(&p, yes);
     }
     let manifest = match file {
         Some(f) => f,
@@ -31,8 +39,13 @@ pub async fn execute(_config: Config, path: Option<PathBuf>, file: Option<PathBu
             let m = cwd.join("robonix_manifest.yaml");
             if m.is_file() {
                 m
+            } else if check {
+                anyhow::bail!(
+                    "--check needs a deploy manifest: no robonix_manifest.yaml in {}; pass -f <manifest>",
+                    cwd.display()
+                );
             } else if cwd.join(".git").is_dir() {
-                return update_single(&cwd);
+                return update_single(&cwd, yes);
             } else {
                 anyhow::bail!(
                     "no robonix_manifest.yaml in {} and cwd is not a git checkout.\n\
@@ -42,7 +55,11 @@ pub async fn execute(_config: Config, path: Option<PathBuf>, file: Option<PathBu
             }
         }
     };
-    update_deploy(&manifest)
+    if json {
+        println!("{}", check_json(&manifest)?);
+        return Ok(());
+    }
+    update_deploy(&manifest, yes, check)
 }
 
 /// Run git in `dir`, returning trimmed stdout on success.
@@ -71,7 +88,15 @@ fn fetch(dir: &Path, branch: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn prompt_yes(question: &str) -> Result<bool> {
+/// Ask before pulling. Without a terminal nobody can answer, so refuse rather
+/// than read whatever stdin holds.
+fn prompt_yes(question: &str, yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        anyhow::bail!("cannot ask for confirmation: stdin is not a terminal (pass --yes to pull)");
+    }
     print!("{question} [y/N]: ");
     io::stdout().flush()?;
     let mut input = String::new();
@@ -92,7 +117,7 @@ fn fast_forward(dir: &Path) -> Result<bool> {
 }
 
 /// Update a single package checkout (overview → confirm → fast-forward).
-fn update_single(dir: &Path) -> Result<()> {
+fn update_single(dir: &Path, yes: bool) -> Result<()> {
     if !dir.join(".git").is_dir() {
         anyhow::bail!("{} is not a git checkout", dir.display());
     }
@@ -125,7 +150,7 @@ fn update_single(dir: &Path) -> Result<()> {
             .unwrap_or_default()
     ));
 
-    if !prompt_yes("Pull to latest?")? {
+    if !prompt_yes("Pull to latest?", yes)? {
         output::info("skipped");
         return Ok(());
     }
@@ -138,7 +163,7 @@ fn update_single(dir: &Path) -> Result<()> {
 }
 
 /// Update every outdated cloned `url:` provider in a deploy manifest.
-fn update_deploy(manifest: &Path) -> Result<()> {
+fn update_deploy(manifest: &Path, yes: bool, check: bool) -> Result<()> {
     let cloned: Vec<RemoteProvider> = check_remotes::collect_remote_providers(manifest)?
         .into_iter()
         .filter(|p| p.dir.join(".git").is_dir())
@@ -156,11 +181,15 @@ fn update_deploy(manifest: &Path) -> Result<()> {
             (None, Some(0)) => "up to date".to_string(),
             (None, Some(n)) => format!(
                 "{n} behind → {} ({}): {}",
-                st.remote_short, st.remote_date, st.remote_subject
+                output::short_sha(&st.remote_sha),
+                st.remote_date,
+                st.remote_subject
             ),
             (None, None) if st.outdated() => format!(
                 "behind → {} ({}): {}",
-                st.remote_short, st.remote_date, st.remote_subject
+                output::short_sha(&st.remote_sha),
+                st.remote_date,
+                st.remote_subject
             ),
             (None, None) => "up to date".to_string(),
         };
@@ -172,14 +201,24 @@ fn update_deploy(manifest: &Path) -> Result<()> {
         output::success("all remote providers up to date");
         return Ok(());
     }
-    if !prompt_yes(&format!("Pull {} package(s) to latest?", outdated.len()))? {
+    if check {
+        return Ok(());
+    }
+    if !prompt_yes(
+        &format!("Pull {} package(s) to latest?", outdated.len()),
+        yes,
+    )? {
         output::info("skipped");
         return Ok(());
     }
     for st in outdated {
         output::action("pull", &st.name);
         match fast_forward(&st.dir) {
-            Ok(true) => output::success(&format!("{} → {}", st.name, st.remote_short)),
+            Ok(true) => output::success(&format!(
+                "{} → {}",
+                st.name,
+                output::short_sha(&st.remote_sha)
+            )),
             Ok(false) => output::warning(&format!(
                 "{}: fast-forward failed (diverged) — skipped",
                 st.name
@@ -188,4 +227,62 @@ fn update_deploy(manifest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `--check --json`: every `url:` provider in the deploy, cloned or not.
+/// Unknown values are null.
+fn check_json(manifest: &Path) -> Result<serde_json::Value> {
+    let known = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    let packages: Vec<_> = check_remotes::collect_remote_providers(manifest)?
+        .iter()
+        .map(|p| {
+            let st = check_remotes::status_of(p);
+            serde_json::json!({
+                "name": p.name,
+                "kind": p.kind,
+                "dir": p.dir,
+                "url": p.url,
+                "branch": p.branch,
+                "cloned": p.dir.join(".git").is_dir(),
+                "local_sha": known(&st.local_sha),
+                "remote_sha": known(&st.remote_sha),
+                "behind": st.behind,
+                "remote_date": known(&st.remote_date),
+                "remote_subject": known(&st.remote_subject),
+                "note": st.note,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "manifest": manifest, "packages": packages }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_json_lists_uncloned_provider() {
+        let dir = std::env::temp_dir().join(format!("rbnx-update-check-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("robonix_manifest.yaml");
+        std::fs::write(
+            &manifest,
+            "service:\n  - name: map\n    url: https://example.com/org/service-map-rbnx.git\n",
+        )
+        .unwrap();
+
+        let report = check_json(&manifest).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let pkg = &report["packages"][0];
+        assert_eq!(report["packages"].as_array().unwrap().len(), 1);
+        assert_eq!(pkg["name"], "map");
+        assert_eq!(pkg["kind"], "service");
+        assert_eq!(pkg["url"], "https://example.com/org/service-map-rbnx.git");
+        assert_eq!(pkg["cloned"], false);
+        assert!(pkg["branch"].is_null());
+        assert!(pkg["local_sha"].is_null());
+        assert!(pkg["behind"].is_null());
+        assert!(pkg["note"].as_str().unwrap().contains("not cloned"));
+    }
 }
