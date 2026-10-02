@@ -55,16 +55,16 @@ pub fn is_builtin_system(name: &str) -> bool {
 /// and the body. The others (pilot, liaison, vitals) may be disabled.
 pub const SYSTEM_REQUIRED: &[&str] = &["atlas", "executor", "soma"];
 
-/// Whether a deployment entry says `status: disabled`. As in a device tree,
-/// `okay` (or no `status` at all) means on; any other value is a mistake
-/// worth stopping for rather than guessing at.
+/// Whether a deployment entry says `status: disabled`. `enabled`, or no
+/// `status` at all, means on; any other value is a mistake worth stopping
+/// for rather than guessing at.
 pub fn entry_disabled(entry: &serde_yaml::Value, at: &str) -> Result<bool> {
     match entry.get("status") {
         None => Ok(false),
         Some(v) => match v.as_str() {
-            Some("okay") => Ok(false),
+            Some("enabled") => Ok(false),
             Some("disabled") => Ok(true),
-            _ => anyhow::bail!("{at}: status must be `okay` or `disabled`, not {v:?}"),
+            _ => anyhow::bail!("{at}: status must be `enabled` or `disabled`, not {v:?}"),
         },
     }
 }
@@ -643,9 +643,9 @@ mod tests {
     fn disabled_entries_leave_the_deployment_and_say_so() {
         let mut root: serde_yaml::Value = serde_yaml::from_str(
             "primitive:\n  - {name: cam, path: cam}\n  - {name: arm, path: arm, status: disabled}\n\
-             service:\n  - {name: memory, url: https://x/m.git, status: okay}\n\
+             service:\n  - {name: memory, url: https://x/m.git, status: enabled}\n\
              skill:\n  - {name: find, url: https://x/f.git, status: disabled}\n\
-             system:\n  atlas: {status: okay}\n  pilot: {}\n  scene: {status: disabled}\n  vitals: {status: disabled}\n",
+             system:\n  atlas: {status: enabled}\n  pilot: {}\n  scene: {status: disabled}\n  vitals: {status: disabled}\n",
         )
         .unwrap();
         let dropped = drop_disabled(&mut root).unwrap();
