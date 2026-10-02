@@ -1,22 +1,36 @@
-# Runtime configuration accepted by the Voiceprint service.
-#
-# This documents the mapping passed as the service instance's `config:` value.
-# It is not loaded as a schema. Environment variables provide fallbacks for
-# standalone use; instance config delivered by Driver(CMD_INIT) takes priority.
+specVersion: 1
+description: >-
+  Enrollment storage, match threshold and model device for the Voiceprint
+  service. Each key takes priority over its environment fallback.
 
-config:
-  # string directory path, default: rbnx-build/data.
-  # Stores the persistent enrolled-speaker database as enrolled.json.
-  # Environment fallback: VOICEPRINT_DATA_DIR.
-  data_dir: rbnx-build/data
+# Configuration is applied once. A repeated Driver(CMD_INIT) with a different
+# resolved configuration fails; an identical one is accepted.
+properties:
+  data_dir:
+    type: string
+    description: >-
+      Directory holding the enrolled-speaker database, enrolled.json. Created
+      if missing. Relative paths are resolved from the service working
+      directory, the package directory. Environment fallback:
+      VOICEPRINT_DATA_DIR.
+    default: rbnx-build/data
 
-  # finite float cosine similarity in [0, 1], default: 0.25.
-  # Minimum score for a known-speaker result and duplicate-voice rejection.
-  # Invalid, non-finite, or out-of-range values fail Driver(CMD_INIT).
-  # Environment fallback: VOICEPRINT_THRESHOLD.
-  threshold: 0.25
+  threshold:
+    type: number
+    description: >-
+      Minimum cosine similarity for a known-speaker result and for rejecting
+      an enrollment whose voice is already enrolled. A value that is not a
+      finite number in [0, 1] fails Driver(CMD_INIT). Environment fallback:
+      VOICEPRINT_THRESHOLD.
+    default: 0.25
+    minimum: 0
+    maximum: 1
 
-  # optional string Torch device. Omit or use null for automatic selection:
-  # cuda:0 when CUDA is available, otherwise cpu. Explicit examples are
-  # cuda:0 and cpu. Environment fallback: VOICEPRINT_DEVICE.
-  device: null
+  device:
+    type: [string, "null"]
+    description: >-
+      Torch device for the ECAPA-TDNN model, such as cuda:0 or cpu, used when
+      the provider activates. Omit or set null for automatic selection:
+      VOICEPRINT_DEVICE if set, otherwise cuda:0 when CUDA is available and
+      cpu when it is not. An empty string fails Driver(CMD_INIT).
+    default: null
