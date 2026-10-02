@@ -12,7 +12,7 @@ import sys
 
 import grpc
 
-sys.path.insert(0, os.environ["AGENTOSBENCH_ROOT"])
+sys.path.insert(0, os.environ["EMBODIEDOSBENCH_ROOT"])
 from embodiedosbench.proto import embodiment_pb2 as pb  # noqa: E402
 from embodiedosbench.proto import embodiment_pb2_grpc as pb_grpc  # noqa: E402
 
