@@ -1,0 +1,18 @@
+# Robonix stack for the benchmark: Atlas + Executor + the three body packages.
+# Pilot/Liaison are added per run from the protocol; this file is enough to
+# drive the packages from a plan submitted straight to Executor.
+name: embodiedosbench_robonix
+
+system:
+  atlas:
+    listen: 127.0.0.1:50051
+  executor:
+    listen: 127.0.0.1:50061
+
+service:
+  - name: body_navigate_to
+    path: ./body_navigate_to
+  - name: body_grasp
+    path: ./body_grasp
+  - name: body_place_on
+    path: ./body_place_on
