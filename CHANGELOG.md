@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
-- **CLI (rbnx):** A deployment entry can say `status: disabled` to stay in the manifest, its `url`, `branch` and `config` kept, while nothing builds, starts or updates it; `rbnx boot` lists it as skipped, soma does not start it, and a built-in system component cannot be disabled.
+- **CLI (rbnx):** A deployment entry can say `status: disabled` (`okay`, or no `status`, is on, as in a device tree) to stay in the manifest, its `url`, `branch` and `config` kept, while nothing builds, starts or updates it; `rbnx boot` lists it as skipped, soma does not start it. Of the built-in system components pilot, liaison and vitals can be disabled; atlas, executor and soma cannot.
 
 ## [1.1.0-beta.1] - 2026-10-01
 

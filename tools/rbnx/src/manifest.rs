@@ -51,16 +51,20 @@ pub fn is_builtin_system(name: &str) -> bool {
     SYSTEM_BUILTINS.contains(&name)
 }
 
-/// Whether a deployment entry says `status: disabled`. `enabled`, the
-/// default, may be written too; any other value is a mistake worth stopping
-/// for rather than guessing at.
+/// The built-in components nothing runs without: the registry, the executor
+/// and the body. The others (pilot, liaison, vitals) may be disabled.
+pub const SYSTEM_REQUIRED: &[&str] = &["atlas", "executor", "soma"];
+
+/// Whether a deployment entry says `status: disabled`. As in a device tree,
+/// `okay` (or no `status` at all) means on; any other value is a mistake
+/// worth stopping for rather than guessing at.
 pub fn entry_disabled(entry: &serde_yaml::Value, at: &str) -> Result<bool> {
     match entry.get("status") {
         None => Ok(false),
         Some(v) => match v.as_str() {
-            Some("enabled") => Ok(false),
+            Some("okay") => Ok(false),
             Some("disabled") => Ok(true),
-            _ => anyhow::bail!("{at}: status must be `enabled` or `disabled`, not {v:?}"),
+            _ => anyhow::bail!("{at}: status must be `okay` or `disabled`, not {v:?}"),
         },
     }
 }
@@ -69,8 +73,8 @@ pub fn entry_disabled(entry: &serde_yaml::Value, at: &str) -> Result<bool> {
 /// name them. [`prepare_deployment_manifest`] does this, so rbnx and soma
 /// both see the deployment without them; rbnx calls it first to report them. A disabled entry stays in the file, `url`, `branch` and
 /// `config` included; nothing builds, starts or updates it until it is
-/// enabled again. Built-in system components cannot be disabled: without
-/// them nothing else runs.
+/// enabled again. Atlas, executor and soma cannot be disabled
+/// ([`SYSTEM_REQUIRED`]): without them nothing else runs.
 pub fn drop_disabled(root: &mut serde_yaml::Value) -> Result<Vec<String>> {
     let mut dropped = Vec::new();
     let Some(map) = root.as_mapping_mut() else {
@@ -98,11 +102,10 @@ pub fn drop_disabled(root: &mut serde_yaml::Value) -> Result<Vec<String>> {
             let name = key.as_str().unwrap_or_default().to_string();
             let at = format!("system.{name}");
             let entry = &system[&key];
-            if is_builtin_system(&name) {
-                if entry.get("status").is_some() {
-                    anyhow::bail!("{at}: built-in components cannot be disabled");
+            if entry_disabled(entry, &at)? {
+                if SYSTEM_REQUIRED.contains(&name.as_str()) {
+                    anyhow::bail!("{at}: atlas, executor and soma cannot be disabled");
                 }
-            } else if entry_disabled(entry, &at)? {
                 system.remove(&key);
                 dropped.push(format!("system {name}"));
             }
@@ -640,13 +643,22 @@ mod tests {
     fn disabled_entries_leave_the_deployment_and_say_so() {
         let mut root: serde_yaml::Value = serde_yaml::from_str(
             "primitive:\n  - {name: cam, path: cam}\n  - {name: arm, path: arm, status: disabled}\n\
-             service:\n  - {name: memory, url: https://x/m.git, status: enabled}\n\
+             service:\n  - {name: memory, url: https://x/m.git, status: okay}\n\
              skill:\n  - {name: find, url: https://x/f.git, status: disabled}\n\
-             system:\n  pilot: {}\n  scene: {status: disabled}\n",
+             system:\n  atlas: {status: okay}\n  pilot: {}\n  scene: {status: disabled}\n  vitals: {status: disabled}\n",
         )
         .unwrap();
         let dropped = drop_disabled(&mut root).unwrap();
-        assert_eq!(dropped, ["primitive arm", "skill find", "system scene"]);
+        assert_eq!(
+            dropped,
+            [
+                "primitive arm",
+                "skill find",
+                "system scene",
+                "system vitals"
+            ]
+        );
+        assert!(root["system"].get("vitals").is_none() && root["system"].get("atlas").is_some());
         assert_eq!(root["primitive"].as_sequence().unwrap().len(), 1);
         assert_eq!(root["service"].as_sequence().unwrap().len(), 1);
         assert!(root["skill"].as_sequence().unwrap().is_empty());
@@ -654,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn a_misspelt_status_or_a_disabled_builtin_stops_the_boot() {
+    fn a_misspelt_status_or_a_disabled_required_component_stops_the_boot() {
         let mut typo: serde_yaml::Value =
             serde_yaml::from_str("service:\n  - {name: m, path: m, status: off}\n").unwrap();
         assert!(
@@ -663,9 +675,12 @@ mod tests {
                 .to_string()
                 .contains("service[0]")
         );
-        let mut builtin: serde_yaml::Value =
-            serde_yaml::from_str("system:\n  atlas: {status: disabled}\n").unwrap();
-        assert!(drop_disabled(&mut builtin).is_err());
+        for name in SYSTEM_REQUIRED {
+            let mut required: serde_yaml::Value =
+                serde_yaml::from_str(&format!("system:\n  {name}: {{status: disabled}}\n"))
+                    .unwrap();
+            assert!(drop_disabled(&mut required).is_err(), "{name}");
+        }
     }
 
     use super::*;
