@@ -22,7 +22,7 @@ use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
 use crate::transcript::Transcript;
 use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
@@ -1164,6 +1164,10 @@ pub async fn run_turn(
     let mut last_capability_docs = String::new();
     // Last user-facing narration; surfaced as FinalText when the turn ends.
     let mut last_content = String::new();
+    // Planning requests this turn, whatever asked for them. `round` advances
+    // only when a tree or control op is dispatched, so harness feedback could
+    // replan without limit; this bounds every path by the same cap.
+    let mut requests = 0usize;
 
     'supervisor: loop {
         // Archive what the last iteration added, before anything can compact it.
@@ -1431,6 +1435,17 @@ pub async fn run_turn(
             ("environment_live", environment_block.as_str()),
         ];
         let runtime_context = render_context_sections(&live_sections);
+        if requests >= max_rounds {
+            warn!("[pilot] hit max planning requests ({max_rounds}), stopping turn");
+            let _ = tx
+                .send(Ok(service::pack(
+                    &session_id,
+                    PilotStreamBody::FinalText(last_content.clone()),
+                )))
+                .await;
+            break;
+        }
+        requests += 1;
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -1634,6 +1649,36 @@ pub async fn run_turn(
 
             match parse_meta_plan_op(&rtdl).context("parse RTDL meta op") {
                 Ok(Some(meta_op)) => {
+                    // A control op that cannot apply to the current forest is a
+                    // bad reply like any other: corrected once with the reason,
+                    // then the turn ends. Some models answer "nothing to do"
+                    // with cancel_all while nothing runs; executing that and
+                    // replanning kept a turn going forever.
+                    if let Some(problem) = meta_op_problem(&meta_op, &forest, &cancel_requested) {
+                        if correction.is_none() {
+                            warn!(
+                                "[pilot/rtdl] meta op rejected round={round}, retrying once: {problem}"
+                            );
+                            correction = Some(build_rtdl_retry_prompt(
+                                &anyhow!(problem),
+                                &raw_content,
+                                &display_caps,
+                            ));
+                            continue;
+                        }
+                        warn!(
+                            "[pilot/rtdl] meta op rejected again round={round}, ending turn: {problem}"
+                        );
+                        let plan_id = String::new();
+                        let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
+                        // What the model said is still the answer to show.
+                        let reply = if assistant_content.trim().is_empty() {
+                            rtdl_recovery_final_text()
+                        } else {
+                            assistant_content
+                        };
+                        break (reply, String::new(), Some(graph), None, plan_id, None, true);
+                    }
                     break (
                         assistant_content,
                         rtdl_description,
@@ -1749,26 +1794,6 @@ pub async fn run_turn(
 
         if let Some(meta_op) = meta_op {
             let targets = meta_op.cancellation_targets(&forest);
-            if let Some(target) = invalid_cancel_target(&targets, &forest, &cancel_requested) {
-                warn!("[pilot/harness] suppressed stale or duplicate meta op for plan {target}");
-                history.push(Message::user(&format!(
-                    "Pilot harness feedback: plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a currently listed plan_id. Do not retry a completed control operation."
-                )));
-                should_plan = true;
-                continue 'supervisor;
-            }
-            if let MetaPlanOp::StopAt { plan_id, op_id, .. } = &meta_op
-                && forest
-                    .get(plan_id)
-                    .is_none_or(|meta| !meta.steps.iter().any(|step| step.op_id == *op_id))
-            {
-                warn!("[pilot/harness] suppressed stop_at for unknown op {plan_id}/{op_id}");
-                history.push(Message::user(&format!(
-                    "Pilot harness feedback: RTDL plan {plan_id} has no listed target_op_id {op_id}. Copy an exact op_id from In-flight trees and do not guess which step is current."
-                )));
-                should_plan = true;
-                continue 'supervisor;
-            }
 
             let task_state_changed = if let Some(updated) = task_update {
                 let changed = apply_task_update(standing_task, updated, false);
@@ -2090,7 +2115,7 @@ Nodes are exactly one of:
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
 Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
 
-Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
+Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
@@ -2598,6 +2623,42 @@ fn plan_cancel_targets(plan: &Plan) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+/// Why `op` cannot apply to the plans in flight, in words for the model; None
+/// when it can.
+fn meta_op_problem(
+    op: &MetaPlanOp,
+    forest: &HashMap<String, TreeMeta>,
+    cancel_requested: &HashSet<String>,
+) -> Option<String> {
+    if forest.is_empty() {
+        return Some(
+            "No plan is in flight, so there is nothing to cancel or stop; the plan-control op was not executed. \
+             Plan control is only for plans listed in In-flight trees. If the request is answered, put the answer \
+             in content and return an empty sequence as rtdl; if it needs robot work, return that work as an RTDL tree."
+                .to_string(),
+        );
+    }
+    if let Some(target) =
+        invalid_cancel_target(&op.cancellation_targets(forest), forest, cancel_requested)
+    {
+        return Some(format!(
+            "Plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a \
+             currently listed plan_id. Do not retry a completed control operation."
+        ));
+    }
+    if let MetaPlanOp::StopAt { plan_id, op_id, .. } = op
+        && forest
+            .get(plan_id)
+            .is_none_or(|meta| !meta.steps.iter().any(|step| step.op_id == *op_id))
+    {
+        return Some(format!(
+            "RTDL plan {plan_id} has no listed target_op_id {op_id}. Copy an exact op_id from In-flight trees and do \
+             not guess which step is current."
+        ));
+    }
+    None
 }
 
 fn invalid_cancel_target(
@@ -3161,6 +3222,7 @@ mod tests {
                 prompt_tokens: 1_200,
                 completion_tokens: 80,
                 cached_tokens: Some(900),
+                model: None,
             },
         );
         assert_eq!(first["input_tokens"], 1_200);
@@ -3178,6 +3240,7 @@ mod tests {
                 prompt_tokens: 800,
                 completion_tokens: 20,
                 cached_tokens: Some(0),
+                model: None,
             },
         );
         assert_eq!(second["cumulative"]["requests_with_usage"], 2);

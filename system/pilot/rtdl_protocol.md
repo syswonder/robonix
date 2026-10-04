@@ -121,6 +121,8 @@ query tree failed.
 
 When the user explicitly asks to stop or cancel all running work, emit one root
 `cancel_all` meta op. Do not inspect first and do not issue per-plan cancels.
+Plan control acts only on plans listed in In-flight trees. With none listed there
+is nothing to stop: answer with an empty `sequence`, never a meta op.
 
 ### Plan IDs (read this — you do NOT choose them)
 

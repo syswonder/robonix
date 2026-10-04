@@ -246,6 +246,9 @@ pub struct VlmUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: Option<u64>,
+    /// The model that answered, as the response names it. Behind a relay this
+    /// is the model actually used, which the configured name does not say.
+    pub model: Option<String>,
 }
 
 /// A context-window limit discovered for the configured deployment.
@@ -871,6 +874,7 @@ mod tests {
                 prompt_tokens: 1200,
                 completion_tokens: 80,
                 cached_tokens: Some(900),
+                model: None,
             })
         );
     }
@@ -994,6 +998,7 @@ mod tests {
                 prompt_tokens: 1200,
                 completion_tokens: 80,
                 cached_tokens: Some(900),
+                model: None,
             })))
         ));
     }
@@ -1114,6 +1119,10 @@ fn parse_usage(value: &Value) -> Option<VlmUsage> {
         prompt_tokens,
         completion_tokens,
         cached_tokens,
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
