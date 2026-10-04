@@ -77,6 +77,7 @@ impl UsageTotals {
             "provider_prompt_tokens": usage.prompt_tokens,
             "provider_completion_tokens": usage.completion_tokens,
             "provider_cached_tokens": usage.cached_tokens,
+            "provider_model": usage.model,
             "cumulative": {
                 "requests_with_usage": self.requests_with_usage,
                 "input_tokens": self.input_tokens,
