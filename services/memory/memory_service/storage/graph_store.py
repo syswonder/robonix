@@ -6,8 +6,10 @@ Interface is designed so a NetworkX / Neo4j backend can be swapped in later.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -15,10 +17,23 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from ..core.types import CausalRelation, CausalEdge, MemoryNode, NodeType
 
 
+def _locked(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class GraphStore:
     """Persistent store for MemoryNode and causal edges.
 
     Phase1: dict-based adjacency list + JSON file persistence.
+
+    The scene hook writes from its own thread while MCP tools write from the
+    event loop, so every public method holds one reentrant lock. Unlocked,
+    two writers race on the shared graph_store.json.tmp and one os.replace
+    finds its file already moved.
     """
 
     # Phase1: local directory under CWD (matches service MEMORY_DIR default).
@@ -28,6 +43,7 @@ class GraphStore:
     def __init__(self, data_dir: str = ""):
         self._data_dir = Path(data_dir or self.DEFAULT_DATA_DIR)
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
         self._nodes: Dict[int, MemoryNode] = {}
         # adjacency: node_id -> set of child node_ids
@@ -41,6 +57,7 @@ class GraphStore:
 
     # ── Node CRUD ──────────────────────────────────────────────────────
 
+    @_locked
     def add_node(self, node: MemoryNode) -> int:
         """Write a node, auto-assigning node_id if not set.
 
@@ -67,14 +84,17 @@ class GraphStore:
         self._persist()
         return node.node_id
 
+    @_locked
     def get_node(self, node_id: int) -> Optional[MemoryNode]:
         """Get a single node by ID."""
         return self._nodes.get(node_id)
 
+    @_locked
     def get_nodes(self, node_ids: List[int]) -> List[MemoryNode]:
         """Batch query nodes."""
         return [self._nodes[nid] for nid in node_ids if nid in self._nodes]
 
+    @_locked
     def update_node(self, node_id: int, node: MemoryNode) -> None:
         """Update an existing node with optimistic-lock version check.
 
@@ -92,12 +112,14 @@ class GraphStore:
         self._nodes[node_id] = node
         self._persist()
 
+    @_locked
     def list_by_type(self, node_type: NodeType, limit: int = 100) -> List[MemoryNode]:
         """List nodes by NodeType, sorted by created_at descending."""
         matching = [n for n in self._nodes.values() if n.node_type == node_type]
         matching.sort(key=lambda n: n.created_at, reverse=True)
         return matching[:limit]
 
+    @_locked
     def list_by_time(self, start_ts: int, end_ts: int, limit: int = 100) -> List[MemoryNode]:
         """List nodes within a timestamp range.
 
@@ -110,6 +132,7 @@ class GraphStore:
         matching.sort(key=lambda n: n.timestamp, reverse=True)
         return matching[:limit]
 
+    @_locked
     def remove_node(self, node_id: int) -> bool:
         """Remove a node and its edges. Returns True if the node existed."""
         if node_id not in self._nodes:
@@ -125,16 +148,19 @@ class GraphStore:
         self._persist()
         return True
 
+    @_locked
     def count(self) -> int:
         """Total number of nodes."""
         return len(self._nodes)
 
+    @_locked
     def all_ids(self) -> List[int]:
         """Return all node IDs."""
         return list(self._nodes.keys())
 
     # ── Causal edges ───────────────────────────────────────────────────
 
+    @_locked
     def add_edge(self, parent_id: int, child_id: int) -> None:
         """Add a causal edge: parent → child."""
         if parent_id not in self._nodes or child_id not in self._nodes:
@@ -150,14 +176,17 @@ class GraphStore:
 
         self._persist()
 
+    @_locked
     def get_parents(self, node_id: int) -> List[int]:
         """Return parent node IDs for a given node."""
         return sorted(self._parents.get(node_id, set()))
 
+    @_locked
     def get_children(self, node_id: int) -> List[int]:
         """Return child node IDs for a given node."""
         return sorted(self._children.get(node_id, set()))
 
+    @_locked
     def get_all_edges(self) -> List[CausalEdge]:
         """Return all causal edges in the graph."""
         edges: List[CausalEdge] = []
@@ -182,6 +211,7 @@ class GraphStore:
         self._next_long_term_id += 1
         return nid
 
+    @_locked
     def promote_to_long_term(self, node_id: int) -> Optional[int]:
         """Move a short-term node (0-999) to the long-term range (1000+).
 
