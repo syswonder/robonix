@@ -1,0 +1,10 @@
+# Take off and hover to the specified altitude.
+[contract]
+id      = "robonix/primitive/drone/takeoff"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Takeoff.srv"
+description = "Take off and hover to the specified altitude (meters)."
+
+[mode]
+type = "rpc"
