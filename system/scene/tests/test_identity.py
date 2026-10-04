@@ -213,6 +213,34 @@ def test_apply_snapshot_follows_a_registry_merge():
     assert [o.object_id for o in reg.all_objects() if o.label == "chair"] == [kept]
 
 
+def test_the_map_gate_admits_but_never_evicts():
+    """An object on ground the map has not observed is not registered; but a
+    registered object whose next snapshot the gate rejects stays as it was,
+    since that is not evidence it is gone."""
+    import numpy as np
+
+    reg = ObjectRegistry()
+    det = _make_detector(reg)
+    run = asyncio.new_event_loop().run_until_complete
+    # A 2 m x 2 m grid at 5 cm whose left half (x < 1 m) has been observed.
+    mask = np.zeros((40, 40), dtype=bool)
+    mask[:, :20] = True
+    det._known_gate = type("Gate", (), {"current": lambda self: (mask, (0.0, 0.0), 0.05)})()
+
+    def snap(uuid, cls, x, y):
+        return {**_snap(uuid, cls, (x, y, 0.5)), "xy": np.array([[x, y]])}
+
+    run(det._apply_snapshot([snap("u1", "keyboard", 0.5, 0.5), snap("u2", "chair", 1.5, 0.5)]))
+    assert [o.label for o in reg.all_objects()] == ["keyboard"]
+    (kb,) = reg.all_objects()
+
+    run(det._apply_snapshot([snap("u1", "keyboard", 1.5, 1.5)]))
+    assert not kb.missing and kb.pose.x == 0.5 and kb.observation_count == 1
+
+    run(det._apply_snapshot([]))
+    assert kb.missing, "a uuid concept-graphs dropped still evicts"
+
+
 def test_photographs_come_from_the_detectors_own_boxes():
     """A crop is cut from the box the label was given to, and only while fresh."""
     import numpy as np
@@ -240,4 +268,5 @@ if __name__ == "__main__":
     test_apply_snapshot_cross_tick_rebind()
     test_apply_snapshot_ttl_prune()
     test_apply_snapshot_follows_a_registry_merge()
+    test_the_map_gate_admits_but_never_evicts()
     print("\nAll tests passed!")
