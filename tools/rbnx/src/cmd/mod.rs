@@ -33,6 +33,7 @@ mod shutdown;
 mod teardown;
 mod update;
 mod validate;
+mod version;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
 
@@ -134,7 +135,8 @@ pub enum Commands {
     ///
     /// In a deploy dir (or with `-f <manifest>`) updates ALL cloned remote
     /// providers; with `-p <dir>` (or inside a package checkout) updates just
-    /// that one. Shows an overview and asks for confirmation before pulling.
+    /// that one. Shows an overview and asks for confirmation before pulling;
+    /// when stdin is not a terminal it refuses unless `--yes` is given.
     Update {
         /// Update a single package checkout at this path.
         #[arg(short = 'p', long)]
@@ -143,6 +145,15 @@ pub enum Commands {
         /// (default: `./robonix_manifest.yaml`).
         #[arg(short = 'f', long)]
         file: Option<PathBuf>,
+        /// Pull without asking for confirmation.
+        #[arg(short = 'y', long, conflicts_with = "check")]
+        yes: bool,
+        /// Report which providers of the deploy have updates; pull nothing.
+        #[arg(long, conflicts_with = "path")]
+        check: bool,
+        /// With --check, print the report as one JSON object.
+        #[arg(long, requires = "check")]
+        json: bool,
     },
     /// Tear down a stack previously brought up by `rbnx boot`
     ///
@@ -273,6 +284,12 @@ pub enum Commands {
     Path {
         /// Path key to resolve (see above).
         key: String,
+    },
+    /// Print the version and the git commit this binary was built from
+    Version {
+        /// Print one JSON object, with the source tree `rbnx path root` resolves.
+        #[arg(long)]
+        json: bool,
     },
 
     /// List registered capabilities (one row per provider)
@@ -452,7 +469,13 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             boot_start_time_ticks,
             boot_id,
         } => boot_watchdog::execute(state, boot_pid, boot_start_time_ticks, boot_id).await,
-        Commands::Update { path, file } => update::execute(config, path, file).await,
+        Commands::Update {
+            path,
+            file,
+            yes,
+            check,
+            json,
+        } => update::execute(config, path, file, yes, check, json).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {
             package,
@@ -479,6 +502,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Docs { out_dir } => docs::execute(config, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
+        Commands::Version { json } => version::execute(&config, json),
         Commands::Caps {
             server,
             json,

@@ -64,63 +64,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .compile_protos(&proto_files, std::slice::from_ref(&proto_out))?;
 
-    emit_build_metadata(&repo_root);
-    Ok(())
+    emit_build_metadata(&repo_root)
 }
 
-/// Inject Linux-kernel-style banner facts as compile-time env vars so
-/// `rbnx boot` can print "robonix v0.1.0 (beb843f) built ... on host by
-/// user with rustc 1.95.0 (target=x86_64-…)". Each fact has a graceful
-/// fallback (e.g. "unknown") so a `cargo install` from a tarball without
-/// a `.git` dir still builds.
-fn emit_build_metadata(repo_root: &std::path::Path) {
+/// Record build facts as compile-time env vars for `rbnx --version` and the
+/// `rbnx boot` banner. vergen writes `VERGEN_*` (git, build date, rustc,
+/// target) and falls back to a placeholder when a fact is unavailable, so a
+/// build from a tarball without `.git` still succeeds.
+fn emit_build_metadata(repo_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::process::Command;
+    use vergen_gitcl::{BuildBuilder, CargoBuilder, Emitter, GitclBuilder, RustcBuilder};
 
-    // git short SHA — if a `.git` exists at repo_root, hash it; otherwise
-    // honour an externally-set ROBONIX_GIT_SHA (so CI / package builds
-    // can inject it without needing the git dir).
-    let git_sha = std::env::var("ROBONIX_GIT_SHA").ok().or_else(|| {
-        let dot_git = repo_root.join(".git");
-        if !dot_git.exists() {
-            return None;
-        }
-        Command::new("git")
-            .args([
-                "-C",
-                repo_root.to_str().unwrap_or(""),
-                "rev-parse",
-                "--short=7",
-                "HEAD",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    });
-    let git_sha = git_sha.unwrap_or_else(|| "unknown".to_string());
-
-    // git dirty flag — append "+" to the SHA when there are uncommitted
-    // changes, mirroring `git describe --dirty` and the kernel's "+"
-    // suffix on "make rpm-pkg" of a dirty tree.
-    let dirty = Command::new("git")
-        .args([
-            "-C",
-            repo_root.to_str().unwrap_or(""),
-            "status",
-            "--porcelain",
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
-    let git_sha = if dirty && git_sha != "unknown" {
-        format!("{git_sha}+")
-    } else {
-        git_sha
-    };
+    Emitter::default()
+        .add_instructions(&BuildBuilder::default().build_date(true).build()?)?
+        .add_instructions(&CargoBuilder::default().target_triple(true).build()?)?
+        .add_instructions(&RustcBuilder::default().semver(true).build()?)?
+        .add_instructions(
+            &GitclBuilder::default()
+                .sha(false)
+                .describe(true, true, None)
+                .commit_date(true)
+                .dirty(false)
+                .build()?,
+        )?
+        .emit()?;
 
     // Build host: <user>@<hostname>. Both come from build env; clean
     // fallbacks for sandboxed builders that scrub them.
@@ -143,53 +110,17 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
     // (Reproducible Builds) still selects the instant when set.
     let build_time = local_build_time();
 
-    // Compiler version — `rustc -V` (e.g. "rustc 1.95.0 (abc123 2026-04-15)").
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let rustc_ver = Command::new(&rustc)
-        .arg("-V")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "rustc unknown".to_string());
-
-    // Compile target triple is exposed by cargo as $TARGET in build.rs.
-    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
-
-    println!("cargo:rustc-env=ROBONIX_GIT_SHA={git_sha}");
     println!("cargo:rustc-env=ROBONIX_BUILDER={builder}");
     println!("cargo:rustc-env=ROBONIX_BUILD_TIME={build_time}");
-    println!("cargo:rustc-env=ROBONIX_RUSTC={rustc_ver}");
-    println!("cargo:rustc-env=ROBONIX_TARGET={target}");
 
-    // Rerun if the repo's commit changes. Watching only `.git/HEAD` is NOT
-    // enough: on a branch, HEAD stays "ref: refs/heads/<branch>" across
-    // commits — the file that actually changes is the ref it points to (and
-    // `.git/logs/HEAD`). Without these the embedded sha/build-time go stale
-    // after committing on the same branch (the binary recompiles from changed
-    // sources, but build.rs is not re-run, so the banner shows an old commit).
-    let git_dir = repo_root.join(".git");
-    let head = git_dir.join("HEAD");
-    if head.exists() {
-        println!("cargo:rerun-if-changed={}", head.display());
-        if let Ok(contents) = std::fs::read_to_string(&head)
-            && let Some(refpath) = contents.strip_prefix("ref:").map(str::trim)
-        {
-            let ref_file = git_dir.join(refpath);
-            if ref_file.exists() {
-                println!("cargo:rerun-if-changed={}", ref_file.display());
-            }
-        }
-    }
-    // logs/HEAD updates on every commit / checkout / reset — reliable catch-all
-    // (also covers the packed-refs case where the loose ref file is absent).
-    let logs_head = git_dir.join("logs").join("HEAD");
+    // vergen watches HEAD and the loose branch ref; logs/HEAD also changes
+    // when the branch ref is packed and has no loose file.
+    let logs_head = repo_root.join(".git").join("logs").join("HEAD");
     if logs_head.exists() {
         println!("cargo:rerun-if-changed={}", logs_head.display());
     }
-    println!("cargo:rerun-if-env-changed=ROBONIX_GIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    Ok(())
 }
 
 /// Build timestamp in the host's local timezone, e.g.
