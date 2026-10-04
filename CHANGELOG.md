@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Added
 
 - **CLI (rbnx):** A deployment entry can say `status: disabled` (`enabled`, or no `status`, is on) to stay in the manifest, its `url`, `branch` and `config` kept, while nothing builds, starts or updates it; `rbnx boot` lists it as skipped, soma does not start it. Of the built-in system components pilot, liaison and vitals can be disabled; atlas, executor and soma cannot.
+- **Config specs:** A package's `config.spec` may now be strict: YAML with `specVersion: 1` and a small JSON Schema subset (`type`, `description`, `default`, `enum`, `minimum`, `maximum`, `items`, nested `properties`, `required`) plus `x-secret`, `x-group` and `x-provider` (a field that names another entry of the deployment, and the contract it must provide), from which tools such as Robonix Hub build the configuration form. Free-text specs are still accepted. Every system and bundled service now ships a strict spec, checked by `rbnx`'s tests; writing them corrected several defaults and accepted values the old text documented wrongly (Speech, Voiceprint, Scene).
 
 ## [1.1.0-beta.1] - 2026-10-01
 
