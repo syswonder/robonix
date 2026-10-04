@@ -1070,6 +1070,12 @@ jobs:
                   fi
                 done
               fi
+              # A skill lists its contracts as soon as it registers, before
+              # CMD_INIT makes it INACTIVE; activating it in between fails.
+              # The suite's first step activates explore, so wait for that.
+              if [ "$missing" -eq 0 ] && ! grep -qE "^● explore \[(INACTIVE|ACTIVE)\]" "$RUNNER_TEMP/caps.wait.txt"; then
+                missing=1
+              fi
               if [ "$missing" -eq 0 ]; then
                 echo "required providers active"
                 break
@@ -1162,7 +1168,9 @@ jobs:
           for obj in objects:
               cls = str(obj.get("cls") or obj.get("label") or "").strip().lower()
               oid = str(obj.get("id") or "")
-              if cls and cls != "robot" and oid.startswith("scene.object."):
+              # A missing object is one restored from a saved map and not seen
+              # since; list_objects leaves those out, so they cannot count.
+              if cls and cls != "robot" and oid.startswith("scene.object.") and not obj.get("missing"):
                   real.append(obj)
           if not real:
               sys.exit(1)
@@ -1391,7 +1399,9 @@ jobs:
           for obj in objects:
               cls = str(obj.get("cls") or obj.get("label") or "").strip().lower()
               oid = str(obj.get("id") or "")
-              if cls and cls != "robot" and oid.startswith("scene.object."):
+              # A missing object is one restored from a saved map and not seen
+              # since; list_objects leaves those out, so they cannot count.
+              if cls and cls != "robot" and oid.startswith("scene.object.") and not obj.get("missing"):
                   print(json.dumps({
                       "id": obj.get("id"),
                       "cls": obj.get("cls") or obj.get("label"),
