@@ -1780,6 +1780,7 @@
          entirely, so this is what actually publishes the pose. Nothing
          in navigation or mapping may consume it. -->
     <plugin type="eaios_webots.ground_truth_odometry.GroundTruthOdometry" />
+    <plugin type="eaios_webots.collision_monitor.CollisionMonitor" />
   </webots>
   <ros2_control name="WebotsControl" type="system">
     <hardware>

@@ -213,6 +213,9 @@ service:
         map: mapping
         odom: tiago_chassis
         scan: tiago_lidar
+        # Head depth camera: obstacles above the lidar's plane, such as
+        # table tops (__ROBONIX_DEPTH_CLOUD_TOPIC__ in config/nav2_params.yaml).
+        depth: tiago_camera
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:
