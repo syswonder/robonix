@@ -1110,6 +1110,7 @@ class ConceptGraphsDetector:
             [0,    0,    1.0],
         ], dtype=np.float32)
         world_frame = str(self._world_frame_fn() or "").strip()
+        self._follow_world_frame(world_frame)
         # At the depth frame's stamp: detection has taken a while by now, and
         # the robot may have turned since.
         trans_pose = self._build_camera_to_map_transform(
@@ -2261,6 +2262,24 @@ class ConceptGraphsDetector:
                 self._map_objects = retained
 
         await asyncio.to_thread(_drop)
+
+    def _follow_world_frame(self, world_frame: str) -> None:
+        """Start the map again when the world frame changes.
+
+        Scene places detections in odometry until the localizer's pose
+        arrives, and a new SLAM session is a new frame too. Clouds from the
+        old frame cannot be associated with detections in the new one; the
+        registry soft-evicts their tracks and re-binds the same objects when
+        they are seen again."""
+        if not world_frame:
+            return
+        previous = getattr(self, "_map_frame", "")
+        self._map_frame = world_frame
+        if not previous or previous == world_frame or self._map_objects is None:
+            return
+        log.info("[scene-cg] world frame %s -> %s; starting the map again", previous, world_frame)
+        self._map_objects = self._cg["MapObjectList"]() if self._cg is not None else []
+        self._vox.clear()
 
     async def reset_derived_state(self) -> None:
         """Empty the CG map and uuid bindings (flush)."""

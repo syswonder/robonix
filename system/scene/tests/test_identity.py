@@ -241,6 +241,33 @@ def test_the_map_gate_admits_but_never_evicts():
     assert kb.missing, "a uuid concept-graphs dropped still evicts"
 
 
+def test_a_new_world_frame_starts_the_map_again():
+    """Objects placed in odometry before the localizer's pose arrived are not
+    kept in that frame: the map starts again in the new one, and the same
+    object seen there keeps its id."""
+    reg = ObjectRegistry()
+    frame = ["odom"]
+    det = _make_detector(reg)
+    det._world_frame_fn = lambda: frame[0]
+    run = asyncio.new_event_loop().run_until_complete
+
+    det._follow_world_frame("odom")
+    run(det._apply_snapshot([_snap("u1", "cabinet", (1.0, 2.0, 0.4))]))
+    (cab,) = reg.all_objects()
+    assert cab.pose.frame_id == "odom"
+
+    det._map_objects, det._vox = ["odom track"], {"odom track": {}}
+    frame[0] = "map"
+    det._follow_world_frame("map")
+    assert len(det._map_objects) == 0 and not det._vox
+
+    run(det._apply_snapshot([]))
+    assert cab.missing
+    run(det._apply_snapshot([_snap("u2", "cabinet", (1.1, 2.0, 0.4))]))
+    assert [o.object_id for o in reg.all_objects()] == [cab.object_id]
+    assert not cab.missing and cab.pose.frame_id == "map"
+
+
 def test_photographs_come_from_the_detectors_own_boxes():
     """A crop is cut from the box the label was given to, and only while fresh."""
     import numpy as np
