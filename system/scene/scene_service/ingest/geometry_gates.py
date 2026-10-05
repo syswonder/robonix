@@ -62,14 +62,3 @@ def fraction_on_known_ground(points_xy, known) -> Optional[float]:
     seen = mask[rows[inside], cols[inside]]
     # Points off the grid are unobserved by definition; count them in the denominator.
     return float(seen.sum()) / float(pts.shape[0])
-
-
-def footprint_samples(x: float, y: float, size_x: float, size_y: float, n: int = 5):
-    """A small grid of XY points across a box footprint, for objects that only
-    carry a centre and a size rather than a point cloud."""
-    import numpy as np
-
-    xs = np.linspace(x - size_x / 2.0, x + size_x / 2.0, max(2, n))
-    ys = np.linspace(y - size_y / 2.0, y + size_y / 2.0, max(2, n))
-    gx, gy = np.meshgrid(xs, ys)
-    return np.column_stack([gx.ravel(), gy.ravel()])

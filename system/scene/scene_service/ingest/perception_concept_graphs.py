@@ -9,7 +9,7 @@ import os
 import threading
 import time
 
-from .geometry_gates import KnownGround, fraction_on_known_ground, footprint_samples
+from .geometry_gates import KnownGround, fraction_on_known_ground
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
@@ -2068,6 +2068,7 @@ class ConceptGraphsDetector:
                     "size_y": float(max(0.05, obb_extent[1])),
                     "size_z": float(max(0.05, obb_extent[2])),
                     "confidence": max(0.0, min(1.0, conf)),
+                    "xy": pts[:, :2],
                 })
             except Exception:  # noqa: BLE001
                 continue
@@ -2085,15 +2086,18 @@ class ConceptGraphsDetector:
         """Reconcile concept-graphs MapObjectList state into the registry
         **incrementally**."""
         now = time.time()
-        # The same occupancy gate the DualMap backend applies: an object
-        # standing on ground the map has never observed cannot have been seen
-        # there.
+        # A rejected snapshot below is not evidence that its object is gone:
+        # visible absence decides that. Its uuid stays live, so a registered
+        # object is neither updated nor evicted while the gate rejects it.
+        live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
+        # The same occupancy gate the DualMap backend applies, on the object's
+        # own points: an object standing on ground the map has never observed
+        # cannot have been seen there.
         known = self._known_gate.current() if self._known_gate is not None else None
         if known is not None:
             kept, dropped = [], 0
             for s_ in snapshots:
-                frac = fraction_on_known_ground(
-                    footprint_samples(s_["x"], s_["y"], s_["size_x"], s_["size_y"]), known)
+                frac = fraction_on_known_ground(s_["xy"], known)
                 if frac is None or frac >= self._min_mapped_fraction:
                     kept.append(s_)
                 else:
@@ -2101,7 +2105,6 @@ class ConceptGraphsDetector:
             if dropped and self._tick_idx % 25 == 0:
                 log.info("[scene-cg] %d object(s) stand on unmapped ground; not registered", dropped)
             snapshots = kept
-        live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
         async with self._registry.lock():
             wf = self._world_frame_fn()
             if not wf:
