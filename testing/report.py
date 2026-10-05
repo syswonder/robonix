@@ -878,6 +878,7 @@ def write_html(
     inline_styles: list[Path] | None = None,
     inline_scripts: list[Path] | None = None,
     map_preview: bool = False,
+    scene: dict | None = None,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     total = int(summary.get("total", 0) or 0)
@@ -908,6 +909,14 @@ def write_html(
         '<div class="slam-map"><img src="slam-map.png" '
         'alt="SLAM occupancy map produced by this run"></div>'
         if map_preview
+        else ""
+    )
+    # score_webots_scene.py's figures, copied next to index.html by main().
+    scene_section = (
+        '<h2>Scene Objects</h2>'
+        f'<p class="section-note">{html.escape(_scene_line(scene))}</p>'
+        + "".join(f'<div class="scene-figure"><img src="{name}" alt="{name}"></div>' for name in SCENE_IMAGES)
+        if scene
         else ""
     )
     generated_on = html.escape(_format_beijing_time(metadata.get("generated_on", "")))
@@ -1392,6 +1401,7 @@ def write_html(
       margin: 6px 0 10px;
     }}
     .slam-map {{ margin: 12px 0 20px; }}
+    .scene-figure img {{ width: min(900px, 100%); margin: 8px 0; border: 1px solid #d0d0d0; }}
     /* Scaled up with nearest-neighbour: the grid is only a couple hundred
        pixels wide at its own resolution, and smoothing an occupancy grid
        invents wall edges the map does not actually have. */
@@ -1430,6 +1440,7 @@ def write_html(
   {infrastructure_section}
   {_llm_analysis_section(analysis)}
   {map_section}
+  {scene_section}
   <h2>Run Metadata</h2>
   {_metadata_table(metadata)}
   <h2>Test Environment</h2>
@@ -1675,9 +1686,22 @@ def write_html(
     out.write_text(body)
 
 
+SCENE_IMAGES = ("scene-objects.png", "scene-score.png")
+
+
+def _scene_line(scene: dict) -> str:
+    return (f"Precision {scene['precision']:.2f}, recall {scene['recall']:.2f}, "
+            f"F1 {scene['f1']:.2f}, label accuracy {scene['label_accuracy']:.2f} "
+            f"over the {scene['visible_truth_count']} of {scene['truth_count']} "
+            f"ground-truth objects the map has looked at "
+            f"({scene['tp']} found, {scene['fp']} false, {scene['fn']} missed).")
+
+
 def write_markdown(summary: dict, analysis: dict | None, out: Path, *,
                    map_preview: bool = False,
-                   map_preview_url: str | None = None) -> None:
+                   map_preview_url: str | None = None,
+                   scene: dict | None = None,
+                   scene_url_base: str | None = None) -> None:
     # `map_preview` marks that slam-map.png sits next to this summary;
     # `map_preview_url` is where the published report site will serve it.
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1714,6 +1738,10 @@ def write_markdown(summary: dict, analysis: dict | None, out: Path, *,
         lines.extend(["", "### SLAM map", "",
                       f"![SLAM occupancy map from this run]({map_preview_url})" if map_preview_url
                       else "SLAM occupancy map: `slam-map.png` in the report artifact."])
+    if scene:
+        lines.extend(["", "### Scene objects", "", _scene_line(scene)])
+        if scene_url_base:
+            lines.extend(["", *(f"![{name}]({scene_url_base}/{name})" for name in SCENE_IMAGES)])
     lines.extend(["", "HTML report with embedded log viewer: `testing/report/index.html` in the uploaded artifact."])
     out.write_text("\n".join(lines) + "\n")
 
@@ -1729,6 +1757,10 @@ def main() -> int:
     ap.add_argument("--llm-analysis-json", type=Path, help="LLM-assisted diagnostic JSON to render")
     ap.add_argument("--map-preview", type=Path, help="SLAM occupancy PNG to ship as slam-map.png next to the report")
     ap.add_argument("--map-preview-url", default="", help="absolute URL where the published report site serves slam-map.png")
+    ap.add_argument("--scene-score-dir", type=Path,
+                    help="directory with score_webots_scene.py's scene-score.json and figures")
+    ap.add_argument("--scene-url-base", default="",
+                    help="absolute URL of the directory the published report site serves them from")
     ap.add_argument("--inline-style", action="append", type=Path, default=[], help="CSS file to embed directly into index.html")
     ap.add_argument("--inline-script", action="append", type=Path, default=[], help="JavaScript file to embed directly into index.html")
     ap.add_argument("--max-log-bytes", type=int, default=524288, help="per-log byte cap; 0 embeds complete files")
@@ -1760,11 +1792,18 @@ def main() -> int:
         map_preview = True
     elif args.map_preview:
         print(f"WARN map preview not found, skipping: {args.map_preview}", file=sys.stderr)
+    scene = None
+    if args.scene_score_dir and (args.scene_score_dir / "scene-score.json").is_file():
+        scene = _read_json(args.scene_score_dir / "scene-score.json")
+        for name in SCENE_IMAGES:
+            shutil.copyfile(args.scene_score_dir / name, args.out_dir / name)
     write_html(summary, logs, metadata, analysis, args.out_dir / "index.html",
-               inline_styles, inline_scripts, map_preview=map_preview)
+               inline_styles, inline_scripts, map_preview=map_preview, scene=scene)
     write_markdown(summary, analysis, args.out_dir / "summary.md",
                    map_preview=map_preview,
-                   map_preview_url=args.map_preview_url or None)
+                   map_preview_url=args.map_preview_url or None,
+                   scene=scene,
+                   scene_url_base=args.scene_url_base or None)
     return 0
 
 

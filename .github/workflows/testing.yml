@@ -776,6 +776,8 @@ jobs:
           python3 -m pip install "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
           # testing harness (fake VLM + scenario runner) parses YAML scenarios.
           python3 -m pip install pyyaml
+          # testing/score_webots_scene.py draws its figures.
+          python3 -m pip install pillow matplotlib
           # Build and use binaries from THIS checkout. Do not mutate or trust the
           # runner user's ~/.cargo/bin; this is a shared Webots host.
           cargo build --workspace
@@ -1291,6 +1293,44 @@ jobs:
           PY
           EOS
 
+      - name: Score scene objects
+        # Scene's objects against the world file's truth, while the map is
+        # still this run's own SLAM session: the next step reloads a saved
+        # map. The simulator's pose of the robot, read on either side of the
+        # snapshot, aligns the two; a robot that moved in between voids it.
+        # Reported in the summary, not gated.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/sim-logs"
+          mkdir -p "$out"
+          sim_pose() {
+            docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS'
+          source /opt/ros/humble/setup.bash
+          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+          timeout 30 python3 - <<'PY'
+          import math, rclpy
+          from nav_msgs.msg import Odometry
+          rclpy.init(); node = rclpy.create_node("ci_robot_pose"); got = []
+          node.create_subscription(Odometry, "/webots/ground_truth/odom", got.append, 10)
+          while not got:
+              rclpy.spin_once(node, timeout_sec=0.5)
+          p = got[-1].pose.pose; q = p.orientation
+          print(p.position.x, p.position.y, math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
+          PY
+          EOS
+          }
+          sleep 10
+          before=$(sim_pose)
+          curl -fsS --max-time 10 "http://127.0.0.1:${SCENE_WEB_PORT}/api/state" -o "$out/scene-state-score.json"
+          after=$(sim_pose)
+          python3 -c 'import math, sys; a, b = (list(map(float, v.split())) for v in sys.argv[1:]); sys.exit(math.dist(a[:2], b[:2]) > 0.02)' "$before" "$after" \
+            || { echo "::warning::the robot moved while the scene was read ($before -> $after)"; exit 1; }
+          world="$(basename "${ROBONIX_WEBOTS_WORLD:-office.wbt}" .wbt)"
+          python3 "$GITHUB_WORKSPACE/testing/score_webots_scene.py" --world-id "$world" \
+            --state-file "$out/scene-state-score.json" --robot-world-pose $after --out-dir "$out"
+
       - name: Verify scene map persistence
         # A failed suite is exactly when the saved map matters most, so this
         # runs even then; it still fails the job on its own checks.
@@ -1799,6 +1839,8 @@ jobs:
           map_preview_args=()
           [ -f "$RUNNER_TEMP/sim-logs/slam-map.png" ] && \
             map_preview_args=(--map-preview "$RUNNER_TEMP/sim-logs/slam-map.png")
+          [ -f "$RUNNER_TEMP/sim-logs/scene-score.json" ] && \
+            map_preview_args+=(--scene-score-dir "$RUNNER_TEMP/sim-logs")
           python3 "$GITHUB_WORKSPACE/testing/report.py" \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" \
             --out-dir "$GITHUB_WORKSPACE/testing/report" \

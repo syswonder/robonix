@@ -175,6 +175,12 @@ def main() -> int:
         map_url = os.environ.get("ROBONIX_REPORT_MAP_URL", "")
         if map_url:
             report_cmd.extend(["--map-preview-url", map_url])
+    scene_score = _find_file(artifact_root, "scene-score.json")
+    if scene_score:
+        report_cmd.extend(["--scene-score-dir", str(scene_score.parent)])
+        map_url = os.environ.get("ROBONIX_REPORT_MAP_URL", "")
+        if map_url:
+            report_cmd.extend(["--scene-url-base", map_url.rsplit("/", 1)[0]])
     _run(report_cmd)
     return 0
 

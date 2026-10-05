@@ -655,6 +655,45 @@ def load_ground_truths(
     return truths, config
 
 
+def _benchmark_world(
+    benchmark: dict[str, Any],
+    world_id: str,
+    repository_root: Path,
+) -> tuple[dict[str, Any], str, tuple[float, ...], float]:
+    """The world's benchmark entry, its WBT text, and the robot's initial pose."""
+
+    world_spec = next(
+        (item for item in benchmark.get("worlds") or () if str(item.get("id")) == world_id),
+        None,
+    )
+    if world_spec is None:
+        raise ValueError(f"unknown benchmark world: {world_id}")
+    world_path = repository_root / str(world_spec["world"])
+    if not world_path.is_file():
+        raise ValueError(f"world file does not exist: {world_spec['world']}")
+    world_text = world_path.read_text(encoding="utf-8")
+    robot_spec = world_spec["robot"]
+    robot_own = _own_fields(
+        _named_node(world_text, str(robot_spec["node_type"]), str(robot_spec["name"]))
+    )
+    robot_xyz = _vector_field(robot_own, "translation", 3)
+    robot_rotation = _optional_vector_field(robot_own, "rotation", 4)
+    return world_spec, world_text, robot_xyz, _planar_yaw(robot_rotation or (0.0, 0.0, 1.0, 0.0))
+
+
+def initial_robot_pose(
+    benchmark_path: Path,
+    *,
+    world_id: str,
+    repository_root: Path,
+) -> tuple[float, float, float]:
+    """The robot's checked-in world pose (x, y, yaw): the frame truth is in."""
+
+    benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    _, _, xyz, yaw = _benchmark_world(benchmark, world_id, repository_root)
+    return float(xyz[0]), float(xyz[1]), yaw
+
+
 def load_semantic_inventory(
     benchmark_path: Path,
     *,
@@ -669,27 +708,9 @@ def load_semantic_inventory(
     """
 
     benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
-    worlds = benchmark.get("worlds") or []
-    world_spec = next(
-        (item for item in worlds if str(item.get("id")) == world_id),
-        None,
+    world_spec, world_text, robot_xyz, robot_yaw = _benchmark_world(
+        benchmark, world_id, repository_root
     )
-    if world_spec is None:
-        raise ValueError(f"unknown benchmark world: {world_id}")
-    world_path = repository_root / str(world_spec["world"])
-    if not world_path.is_file():
-        raise ValueError(f"world file does not exist: {world_spec['world']}")
-    world_text = world_path.read_text(encoding="utf-8")
-    robot_spec = world_spec["robot"]
-    robot = _named_node(
-        world_text,
-        str(robot_spec["node_type"]),
-        str(robot_spec["name"]),
-    )
-    robot_own = _own_fields(robot)
-    robot_xyz = _vector_field(robot_own, "translation", 3)
-    robot_rotation = _optional_vector_field(robot_own, "rotation", 4)
-    robot_yaw = _planar_yaw(robot_rotation or (0.0, 0.0, 1.0, 0.0))
     map_ground_z_world_m = float(world_spec.get("map_ground_z_world_m", 0.0))
     semantic_types = benchmark.get("semantic_types") or {}
     truths: list[SemanticObjectGroundTruth] = []
