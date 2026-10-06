@@ -670,27 +670,36 @@ fn build_forest_block(
     block
 }
 
-fn build_executor_active_block(plans_json: Option<&str>) -> String {
+/// Render the `Executor active plans` prompt block, plus how many plans the
+/// snapshot listed.
+///
+/// The count is `None` when the query failed or its payload was unusable, which
+/// is "unknown", never "no plans": a caller that needs proof of idleness must
+/// not read a missing count as proof of it.
+fn executor_active_snapshot(plans_json: Option<&str>) -> (String, Option<usize>) {
     let Some(raw) = plans_json else {
-        return String::from(
-            "\n\n## Executor active plans (authoritative live snapshot)\n\
-             - status: unavailable\n\
-             The live query failed. Never guess a task count or claim that no \
-             task is running. Tell the user that current execution state could \
-             not be verified.\n",
+        return (
+            String::from(
+                "\n\n## Executor active plans (authoritative live snapshot)\n\
+                 - status: unavailable\n\
+                 The live query failed. Never guess a task count or claim that no \
+                 task is running. Tell the user that current execution state could \
+                 not be verified.\n",
+            ),
+            None,
         );
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return build_executor_active_block(None);
+        return executor_active_snapshot(None);
     };
     let Some(plans) = value.get("plans").and_then(serde_json::Value::as_array) else {
-        return build_executor_active_block(None);
+        return executor_active_snapshot(None);
     };
     let normalized = serde_json::json!({
         "count": plans.len(),
         "plans": plans,
     });
-    format!(
+    let block = format!(
         "\n\n## Executor active plans (authoritative live snapshot)\n\
          This is the source of truth for every currently running RTDL plan, \
          including long-running skills started by earlier interactions. For \
@@ -701,10 +710,11 @@ fn build_executor_active_block(plans_json: Option<&str>) -> String {
          is running unless count is exactly 0.\n\
          snapshot_json: {}\n",
         normalized
-    )
+    );
+    (block, Some(plans.len()))
 }
 
-async fn fetch_executor_active_block(executor: &mut ExecutorConn) -> String {
+async fn fetch_executor_active_snapshot(executor: &mut ExecutorConn) -> (String, Option<usize>) {
     let request = executor
         .active
         .list_active_plans(Request::new(ListActivePlansRequest::default()));
@@ -712,22 +722,22 @@ async fn fetch_executor_active_block(executor: &mut ExecutorConn) -> String {
         Ok(Ok(response)) => {
             let response = response.into_inner();
             if response.success {
-                build_executor_active_block(Some(&response.plans_json))
+                executor_active_snapshot(Some(&response.plans_json))
             } else {
                 warn!(
                     "[pilot/state] Executor active-plan query rejected: {}",
                     response.error
                 );
-                build_executor_active_block(None)
+                executor_active_snapshot(None)
             }
         }
         Ok(Err(error)) => {
             warn!("[pilot/state] Executor active-plan query failed: {error}");
-            build_executor_active_block(None)
+            executor_active_snapshot(None)
         }
         Err(_) => {
             warn!("[pilot/state] Executor active-plan query timed out");
-            build_executor_active_block(None)
+            executor_active_snapshot(None)
         }
     }
 }
@@ -1372,7 +1382,8 @@ pub async fn run_turn(
         // made the second provider request cold.
         let protocol_prompt = rtdl_protocol(false);
         let forest_block = build_forest_block(&forest, &cancel_requested);
-        let executor_active_block = fetch_executor_active_block(executor).await;
+        let (executor_active_block, executor_plan_count) =
+            fetch_executor_active_snapshot(executor).await;
         // Only instructions that never change sit before history.
         let sections = [
             ("standing_system", standing_prompt.as_str()),
@@ -1669,15 +1680,7 @@ pub async fn run_turn(
                         warn!(
                             "[pilot/rtdl] meta op rejected again round={round}, ending turn: {problem}"
                         );
-                        let plan_id = String::new();
-                        let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
-                        // What the model said is still the answer to show.
-                        let reply = if assistant_content.trim().is_empty() {
-                            rtdl_recovery_final_text()
-                        } else {
-                            assistant_content
-                        };
-                        break (reply, String::new(), Some(graph), None, plan_id, None, true);
+                        break rejected_reply_end(assistant_content, &session_id, round);
                     }
                     break (
                         assistant_content,
@@ -1721,7 +1724,7 @@ pub async fn run_turn(
                 *RUN_TAG,
                 plan_seq.fetch_add(1, Ordering::Relaxed) + 1
             );
-            match expand_rtdl_to_plan(
+            let expanded = expand_rtdl_to_plan(
                 &rtdl,
                 &target_map,
                 plan_id.clone(),
@@ -1729,12 +1732,39 @@ pub async fn run_turn(
                 round,
                 &rtdl_description,
             )
-            .context("expand RTDL to Plan")
-            {
-                // Carry `task_update` out so it is applied ONLY after a tree
-                // expands — never on a recovery path, where it could falsely
-                // mark the turn done for a plan that never ran.
+            .context("expand RTDL to Plan");
+            match expanded {
                 Ok(graph) => {
+                    // A reply that expands cleanly can still contradict itself:
+                    // it dispatches nothing while declaring the task in progress
+                    // with nothing running, so the turn cannot advance. Reject it
+                    // like the other harness-level defects, and let the model
+                    // correct it once.
+                    if let Some(problem) = empty_dispatch_problem(
+                        &graph,
+                        task_update.as_ref(),
+                        &forest,
+                        executor_plan_count,
+                    ) {
+                        if correction.is_none() {
+                            warn!(
+                                "[pilot/rtdl] reply rejected round={round}, retrying once: {problem}"
+                            );
+                            correction = Some(build_rtdl_retry_prompt(
+                                &anyhow!(problem),
+                                &raw_content,
+                                &display_caps,
+                            ));
+                            continue;
+                        }
+                        warn!(
+                            "[pilot/rtdl] reply rejected again round={round}, ending turn: {problem}"
+                        );
+                        break rejected_reply_end(assistant_content, &session_id, round);
+                    }
+                    // Carry `task_update` out so it is applied ONLY after a tree
+                    // expands — never on a recovery path, where it could falsely
+                    // mark the turn done for a plan that never ran.
                     break (
                         assistant_content,
                         rtdl_description,
@@ -1776,9 +1806,10 @@ pub async fn run_turn(
         last_soma_body = soma_body;
         last_capability_docs = capability_docs;
 
-        // RTDL recovery gave up after a retry: surface the user-facing message
-        // once and END the turn. Without this the empty recovery plan would fall
-        // through to "no new tree this round" and re-plan forever.
+        // A rejection or a parse/expand failure gave up after a retry: surface
+        // the user-facing message once and END the turn. Without this the empty
+        // recovery plan would fall through to "no new tree this round" and
+        // re-plan forever.
         if recovered {
             if !assistant_content.is_empty() {
                 history.push(Message::assistant(&assistant_content));
@@ -2113,7 +2144,7 @@ Nodes are exactly one of:
 - {"op":"sequence","op_id":0,"description":"...","children":[...]}
 - {"op":"parallel","op_id":0,"description":"...","children":[...]}
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
-Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
+Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence paired with task_update: null or status=done; in_progress with nothing running is rejected.
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
@@ -2285,14 +2316,16 @@ fn raw_preview(raw: &str) -> String {
 // When the VLM emits an RTDL that fails to parse or expand, feed the error back
 // once and let it self-correct; a second failure ends the turn gracefully.
 
-/// Corrective prompt appended to the next VLM round after a parse/expand failure.
+/// Corrective prompt appended to the next VLM round after a rejected reply — a
+/// parse or expand failure, plan control that cannot apply, or an empty dispatch
+/// that contradicts the task state.
 fn build_rtdl_retry_prompt(
     err: &anyhow::Error,
     raw_content: &str,
     display_caps: &[DisplayCapability<'_>],
 ) -> String {
     let mut p = format!(
-        "Your previous RTDL response could not be parsed or expanded by Pilot.\n\
+        "Your previous RTDL response was rejected by Pilot.\n\
          Error: {err:#}\n\
          Previous response preview: {}\n\n\
          Fix the RTDL error and retry the same user request exactly once. If the error \
@@ -2325,11 +2358,72 @@ fn build_rtdl_retry_prompt(
     }
     p.push_str(
         "\nIf no further capability call is needed, use \
-         {\"op\":\"sequence\",\"children\":[]} as `rtdl`. If the user's requested action cannot \
+         {\"op\":\"sequence\",\"children\":[]} as `rtdl` with `task_update: null` (or \
+         `status: \"done\"` when the task is finished). If the user's requested action cannot \
          be performed using the listed capabilities, explain the missing capability in `content` \
-         and return an empty RTDL sequence instead of inventing a capability.\n",
+         and return an empty RTDL sequence, again with `task_update: null`, instead of inventing \
+         a capability.\n",
     );
     p
+}
+
+/// A reply that calls no capability while declaring the task in progress and
+/// leaving nothing running: nothing will advance the task, so the turn cannot
+/// either.
+///
+/// Idleness needs both signals. `forest` covers this turn's dispatches,
+/// including one Executor has not registered yet; `executor_active_plans` is the
+/// count from the snapshot fetched before this round's request — the plan table
+/// as the model was shown it, covering earlier turns and other sessions — so a
+/// plan registered while the model was thinking is not in it, and a listed plan
+/// may be cancelled or verifying rather than running. A failed query reports
+/// `None`, which is not proof of idleness.
+fn empty_dispatch_problem(
+    plan: &Plan,
+    task_update: Option<&TaskState>,
+    forest: &HashMap<String, TreeMeta>,
+    executor_active_plans: Option<usize>,
+) -> Option<String> {
+    let state = task_update?;
+    if state.status != "in_progress" || plan_call_count(plan) > 0 || !forest.is_empty() {
+        return None;
+    }
+    if executor_active_plans != Some(0) {
+        return None;
+    }
+    Some(
+        "`rtdl` calls no capability while `task_update.status` is `in_progress` and nothing is in \
+         flight: dispatch the next step, ask in `content` for what you need and send \
+         `task_update: null` if the task cannot proceed, or mark it `done` only when its success \
+         criterion already holds."
+            .to_string(),
+    )
+}
+
+/// End a turn whose reply was rejected: an empty no-op plan, no meta op, and
+/// what the model said as the answer to show — the recovery text when it said
+/// nothing.
+fn rejected_reply_end(
+    assistant_content: String,
+    session_id: &str,
+    round: u32,
+) -> (
+    String,
+    String,
+    Option<Plan>,
+    Option<MetaPlanOp>,
+    String,
+    Option<TaskState>,
+    bool,
+) {
+    let plan_id = String::new();
+    let graph = empty_sequence_plan(plan_id.clone(), session_id.to_string(), round);
+    let reply = if assistant_content.trim().is_empty() {
+        rtdl_recovery_final_text()
+    } else {
+        assistant_content
+    };
+    (reply, String::new(), Some(graph), None, plan_id, None, true)
 }
 
 /// A single empty-sequence root plan, used as the no-op plan when a turn ends in
@@ -2636,7 +2730,8 @@ fn meta_op_problem(
         return Some(
             "No plan is in flight, so there is nothing to cancel or stop; the plan-control op was not executed. \
              Plan control is only for plans listed in In-flight trees. If the request is answered, put the answer \
-             in content and return an empty sequence as rtdl; if it needs robot work, return that work as an RTDL tree."
+             in content and return an empty sequence as rtdl with task_update: null; if it needs robot work, \
+             return that work as an RTDL tree."
                 .to_string(),
         );
     }
@@ -3112,9 +3207,9 @@ mod tests {
         RTDL_DO, RTDL_PARALLEL, RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskState,
         TreeMeta, TreeStep, UsageTotals, append_request_context, append_steer,
         append_task_state_record, apply_task_update, assemble_planning_messages,
-        build_capability_target_map, build_display_capabilities, build_executor_active_block,
-        build_forest_block, compact_tool_result, configured_vlm_idle_timeout,
-        duplicate_in_flight_signature, expand_rtdl_to_plan, extract_json_object,
+        build_capability_target_map, build_display_capabilities, build_forest_block,
+        compact_tool_result, configured_vlm_idle_timeout, duplicate_in_flight_signature,
+        empty_dispatch_problem, executor_active_snapshot, expand_rtdl_to_plan, extract_json_object,
         feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
         is_legacy_plan_control_contract, is_terminal_executor_state,
         mixes_control_inspection_with_action, next_op_id, parse_meta_plan_op,
@@ -3303,6 +3398,9 @@ mod tests {
             "cancel_plan",
             "plan_id/call_id",
             "task_update.goal",
+            // The empty-dispatch pairing rule must reach the model every round,
+            // not only through the rejection that enforces it.
+            "task_update: null",
             "Scene regions",
             "Never call a skill's cancel capability",
         ] {
@@ -3462,9 +3560,10 @@ mod tests {
 
     #[test]
     fn executor_snapshot_is_authoritative_across_turns() {
-        let block = build_executor_active_block(Some(
+        let (block, count) = executor_active_snapshot(Some(
             r#"{"count":99,"plans":[{"plan_id":"8","description":"greet","ops":[]}]}"#,
         ));
+        assert_eq!(count, Some(1));
         assert!(block.contains("\"count\":1"));
         assert!(block.contains("\"plan_id\":\"8\""));
         assert!(block.contains("long-running skills started by earlier interactions"));
@@ -3472,7 +3571,8 @@ mod tests {
 
     #[test]
     fn unavailable_executor_snapshot_forbids_guessing_zero() {
-        let block = build_executor_active_block(None);
+        let (block, count) = executor_active_snapshot(None);
+        assert_eq!(count, None);
         assert!(block.contains("status: unavailable"));
         assert!(block.contains("Never guess a task count"));
     }
@@ -4233,6 +4333,119 @@ mod tests {
         assert_eq!(plan.nodes.len(), 1);
         assert_eq!(plan.nodes[0].node_kind, RTDL_SEQUENCE);
         assert!(plan.nodes[0].children.is_empty());
+    }
+
+    fn in_progress_task(goal: &str) -> TaskState {
+        TaskState {
+            goal: goal.to_string(),
+            success_criterion: DEFAULT_SUCCESS_CRITERION.to_string(),
+            status: "in_progress".to_string(),
+        }
+    }
+
+    fn in_flight_forest() -> HashMap<String, TreeMeta> {
+        HashMap::from([(
+            "p".to_string(),
+            TreeMeta {
+                description: "running tree".to_string(),
+                control_only: false,
+                call_signatures: HashSet::new(),
+                steps: Vec::new(),
+            },
+        )])
+    }
+
+    #[test]
+    fn empty_dispatch_under_an_in_progress_task_is_rejected() {
+        // Nothing runs and nothing will run while the task is declared to
+        // advance, so the reply must take the retry-with-correction path
+        // instead of being dispatched as a no-op that leaves the task stuck.
+        let targets = CapabilityTargetMap::new();
+        let idle = HashMap::new();
+        for rtdl in [
+            json!({ "op": "sequence", "op_id": 0, "description": "take a photo", "children": [] }),
+            json!({ "op": "parallel", "op_id": 0, "description": "take a photo", "children": [] }),
+            // An empty tree one level down dispatches nothing either.
+            json!({
+                "op": "sequence", "op_id": 0, "description": "take a photo",
+                "children": [
+                    { "op": "parallel", "op_id": 0, "description": "nothing", "children": [] }
+                ]
+            }),
+        ] {
+            let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+            let problem = empty_dispatch_problem(
+                &plan,
+                Some(&in_progress_task("take a photo")),
+                &idle,
+                Some(0),
+            )
+            .expect("an empty dispatch under an in-progress task must be rejected");
+            assert!(problem.contains("calls no capability"));
+        }
+    }
+
+    #[test]
+    fn empty_dispatch_is_allowed_when_nothing_is_declared_in_progress() {
+        // A conversational turn carries `task_update: null`; a finished one,
+        // `status: "done"`.
+        let targets = CapabilityTargetMap::new();
+        let rtdl = json!({ "op": "sequence", "op_id": 0, "description": "chat", "children": [] });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        let idle = HashMap::new();
+        assert!(empty_dispatch_problem(&plan, None, &idle, Some(0)).is_none());
+
+        let mut done = in_progress_task("chat");
+        done.status = "done".to_string();
+        assert!(empty_dispatch_problem(&plan, Some(&done), &idle, Some(0)).is_none());
+    }
+
+    #[test]
+    fn empty_dispatch_is_allowed_while_anything_is_still_running() {
+        // "No new tree this round" while work still runs: the task is in
+        // progress and something will advance it. Three ways to see that work.
+        let targets = CapabilityTargetMap::new();
+        let rtdl = json!({ "op": "sequence", "op_id": 0, "description": "wait", "children": [] });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        let task = in_progress_task("take a photo");
+
+        // Dispatched this turn.
+        assert!(empty_dispatch_problem(&plan, Some(&task), &in_flight_forest(), Some(0)).is_none());
+        // Dispatched by an earlier turn or another session, so only Executor
+        // knows about it.
+        assert!(empty_dispatch_problem(&plan, Some(&task), &HashMap::new(), Some(1)).is_none());
+        // The snapshot query failed: unknown is not proof of idleness.
+        assert!(empty_dispatch_problem(&plan, Some(&task), &HashMap::new(), None).is_none());
+    }
+
+    #[test]
+    fn dispatch_with_a_capability_call_is_allowed_under_an_in_progress_task() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
+        );
+        let rtdl = json!({
+            "op": "sequence",
+            "op_id": 0,
+            "description": "snapshot",
+            "children": [
+                { "op": "do", "op_id": 0, "description": "snap", "cap": "camera_snapshot", "args": {} }
+            ]
+        });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        assert!(
+            empty_dispatch_problem(
+                &plan,
+                Some(&in_progress_task("take a photo")),
+                &HashMap::new(),
+                Some(0),
+            )
+            .is_none()
+        );
     }
 
     #[test]
