@@ -1680,7 +1680,7 @@ pub async fn run_turn(
                         warn!(
                             "[pilot/rtdl] meta op rejected again round={round}, ending turn: {problem}"
                         );
-                        break rejected_reply_end(assistant_content, &session_id, round);
+                        break end_turn_after_rejection(assistant_content, &session_id, round);
                     }
                     break (
                         assistant_content,
@@ -1760,7 +1760,7 @@ pub async fn run_turn(
                         warn!(
                             "[pilot/rtdl] reply rejected again round={round}, ending turn: {problem}"
                         );
-                        break rejected_reply_end(assistant_content, &session_id, round);
+                        break end_turn_after_rejection(assistant_content, &session_id, round);
                     }
                     // Carry `task_update` out so it is applied ONLY after a tree
                     // expands — never on a recovery path, where it could falsely
@@ -2403,7 +2403,7 @@ fn empty_dispatch_problem(
 /// End a turn whose reply was rejected: an empty no-op plan, no meta op, and
 /// what the model said as the answer to show — the recovery text when it said
 /// nothing.
-fn rejected_reply_end(
+fn end_turn_after_rejection(
     assistant_content: String,
     session_id: &str,
     round: u32,
