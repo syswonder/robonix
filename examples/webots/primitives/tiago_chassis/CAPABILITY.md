@@ -1,33 +1,35 @@
 ---
-description: Mobile differential-drive base — all movement during navigation, exploration, and search.
+description: Mobile differential-drive base with gRPC motion commands and ROS 2 odometry.
 ---
 
 # Tiago chassis (`robonix/primitive/chassis`)
 
-The robot's mobile base. Use this for ALL movement during interactive
-exploration / search / wandering — paired with `camera/snapshot`.
+This primitive exposes low-level motion over gRPC and ROS 2. It does not
+advertise an MCP `cmd` tool to Pilot. Model-generated movement uses
+`robonix/service/navigation/navigate`, which plans and avoids obstacles.
 
-For "where is the robot" queries, subscribe to `service/map/pose`
-(SLAM-corrected, map-frame) — that's a localization concern, not a
-chassis-primitive one.
+For a turn, obtain a fresh map-frame robot pose, retain its position, and set
+the navigation goal's orientation to the desired heading. `navigate` accepts
+`goal` as a `geometry_msgs/PoseStamped`, not velocity fields. For planar yaw
+`theta` in radians, orientation is `{x: 0, y: 0, z: sin(theta/2), w: cos(theta/2)}`.
+Use `frame_id: map` when the deployment enables Scene navigation verification.
+Observe the camera before and after movement, and verify the final position
+and heading; navigation acceptance alone does not mean the turn completed.
+A pose goal specifies a final heading, not a full revolution or turn direction.
 
-## Tools
+For localization, use `robonix/service/map/pose` or Scene's robot context.
+Chassis odometry is not a substitute for a map-frame pose.
 
-### `cmd` — `robonix/primitive/chassis/move`
-- input: any of `linear_x linear_y linear_z angular_x angular_y angular_z`
-  (all default to 0 — pass only the axes you want to actuate).
-- duration: ~1 s by default (`TIAGO_CHASSIS_CMD_DURATION_SEC`); after the
-  burst the driver publishes a zero-Twist stop.
-- returns: JSON ack `{status, linear_x, angular_z, duration}`.
+## Interfaces for service callers
 
-#### Burst pattern (use this for visual exploration)
-1. `camera/snapshot` to see the scene.
-2. Reason about what's there.
-3. Issue ONE short `cmd` burst (typical magnitudes):
-   - move forward: `linear_x ≈ 0.10–0.20`
-   - turn left:    `angular_z ≈ +0.4`  (≈ 23°/s)
-   - turn right:   `angular_z ≈ −0.4`
-4. Repeat from step 1.
+- `robonix/primitive/chassis/move`: gRPC `ExecuteMoveCommand`, with a nested
+  `command` payload. Nonzero `forward_m` takes priority over `rotate_deg`,
+  which takes priority over velocity fields. Positive `rotate_deg` turns
+  counterclockwise. Velocity mode applies the twist for `duration_sec`, or
+  the deployment default when zero, then publishes a zero-Twist stop.
+- `robonix/primitive/chassis/odom`: ROS 2 odometry output.
+- `robonix/primitive/chassis/twist_in`: ROS 2 velocity input.
 
-Don't issue multiple `cmd`s back-to-back without a snapshot — you'll
-overshoot blindly.
+The motion response contains `status.data`, a JSON acknowledgement. The
+bounded command uses elapsed time; callers must observe the resulting pose
+rather than treating the acknowledgement as measured motion accuracy.

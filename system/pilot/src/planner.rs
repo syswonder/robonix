@@ -12,7 +12,7 @@ use crate::pb::executor::rtdl_event::RtdlEventEnum;
 use crate::pb::executor::{ControlPlanRequest, ListActivePlansRequest};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{
-    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode, RtdlNodeState,
+    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNodeState,
     SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
@@ -97,7 +97,6 @@ fn assemble_planning_messages(
     capability_cache_hit: bool,
     sections: &[PromptSection<'_>],
     history_messages: &[Message],
-    correction: Option<&str>,
 ) -> Vec<Message> {
     let system_bytes = sections.iter().map(|section| section.content.len()).sum();
     let mut system = String::with_capacity(system_bytes);
@@ -109,8 +108,7 @@ fn assemble_planning_messages(
         .iter()
         .map(|message| message.content.as_deref().map_or(0, str::len))
         .sum();
-    let correction_bytes = correction.map_or(0, str::len);
-    let prompt_bytes = system.len() + history_bytes + correction_bytes;
+    let prompt_bytes = system.len() + history_bytes;
     let mut section_metrics = sections
         .iter()
         .map(|section| {
@@ -126,11 +124,6 @@ fn assemble_planning_messages(
         "bytes": history_bytes,
         "estimated_tokens": estimated_text_tokens(history_bytes),
     }));
-    section_metrics.push(serde_json::json!({
-        "name": "correction",
-        "bytes": correction_bytes,
-        "estimated_tokens": estimated_text_tokens(correction_bytes),
-    }));
     info!(
         "[pilot/prompt] {}",
         serde_json::json!({
@@ -138,18 +131,14 @@ fn assemble_planning_messages(
             "prompt_text_bytes": prompt_bytes,
             "estimated_input_tokens": estimated_text_tokens(prompt_bytes),
             "history_bytes": history_bytes,
-            "correction_bytes": correction_bytes,
             "capability_catalog_render_cache_hit": capability_cache_hit,
             "sections": section_metrics,
         })
     );
 
-    let mut messages = Vec::with_capacity(sanitized_history.len() + 2);
+    let mut messages = Vec::with_capacity(sanitized_history.len() + 1);
     messages.push(Message::system(&system));
     messages.extend(sanitized_history);
-    if let Some(correction) = correction {
-        messages.push(Message::user(correction));
-    }
     messages
 }
 
@@ -869,7 +858,8 @@ fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: 
     history::trim(history, MAX_HISTORY);
 }
 
-/// Record only submitted nodes and observed results when generation is interrupted.
+/// Publish submitted nodes and observed states, retaining terminal leaf results
+/// in history when generation is interrupted or fails.
 async fn record_stream_prefix(
     history: &mut Vec<Message>,
     live: &crate::stream_execution::StreamExecution,
@@ -888,20 +878,29 @@ async fn record_stream_prefix(
         )))
         .await;
     for event in &live.events {
-        if let Some(node) = &event.node_state
-            && is_terminal_executor_state(node.state)
-            && let Some(result) = &node.leaf_result
-        {
-            feed_results_into_history(
-                history,
-                &live.plan.plan_id,
-                description,
-                std::slice::from_ref(result),
-            );
+        if let Some(node) = &event.node_state {
+            if is_terminal_executor_state(node.state)
+                && let Some(result) = &node.leaf_result
+            {
+                feed_results_into_history(
+                    history,
+                    &live.plan.plan_id,
+                    description,
+                    std::slice::from_ref(result),
+                );
+            }
+            let _ = tx
+                .send(Ok(service::pack(
+                    session_id,
+                    PilotStreamBody::NodeState(node.clone()),
+                )))
+                .await;
         }
     }
 }
 
+/// Plan and submit RTDL incrementally, then supervise submitted trees until the
+/// interaction completes, waits for user input, or is interrupted.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     task: &Task,
@@ -1305,347 +1304,271 @@ pub async fn run_turn(
                 }),
             )))
             .await;
-        // Plan with a single corrective retry (merged from dev #88): if the
-        // VLM's RTDL fails to parse or expand, feed the error back and let it
-        // fix the reply once; a second failure ends the turn gracefully (empty
-        // recovery plan) instead of crashing the whole turn. The loop yields a
-        // valid (narration, tree label, plan, id) tuple for the forest dispatch.
-        let mut correction: Option<String> = None;
+        // Generate once. Any failure cancels this round's submitted plan and
+        // ends the turn; already observed execution results remain in history.
         let mut live = crate::stream_execution::StreamExecution::default();
-        let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_update, recovered) = loop {
-            let sections = [
-                PromptSection {
-                    name: "standing_system",
-                    content: &standing_prompt,
-                },
-                PromptSection {
-                    name: "embodiment_static",
-                    content: soma_prompt_block,
-                },
-                PromptSection {
-                    name: "memory",
-                    content: &memory_prompt,
-                },
-                PromptSection {
-                    name: "capability_docs",
-                    content: &capability_docs_prompt,
-                },
-                PromptSection {
-                    name: "voice",
-                    content: voice_prompt,
-                },
-                PromptSection {
-                    name: "rtdl_protocol",
-                    content: protocol_prompt,
-                },
-                PromptSection {
-                    name: "capability_catalog",
-                    content: capability_prompt,
-                },
-                PromptSection {
-                    name: "task",
-                    content: &task_block,
-                },
-                PromptSection {
-                    name: "in_flight_trees",
-                    content: &forest_block,
-                },
-                PromptSection {
-                    name: "executor_state",
-                    content: &executor_active_block,
-                },
-                PromptSection {
-                    name: "embodiment_live",
-                    content: &embodiment_block,
-                },
-                PromptSection {
-                    name: "environment_live",
-                    content: &environment_block,
-                },
-            ];
-            let messages = assemble_planning_messages(
-                round,
-                capability_cache_hit,
-                &sections,
-                history,
-                correction.as_deref(),
-            );
+        let sections = [
+            PromptSection {
+                name: "standing_system",
+                content: &standing_prompt,
+            },
+            PromptSection {
+                name: "embodiment_static",
+                content: soma_prompt_block,
+            },
+            PromptSection {
+                name: "memory",
+                content: &memory_prompt,
+            },
+            PromptSection {
+                name: "capability_docs",
+                content: &capability_docs_prompt,
+            },
+            PromptSection {
+                name: "voice",
+                content: voice_prompt,
+            },
+            PromptSection {
+                name: "rtdl_protocol",
+                content: protocol_prompt,
+            },
+            PromptSection {
+                name: "capability_catalog",
+                content: capability_prompt,
+            },
+            PromptSection {
+                name: "task",
+                content: &task_block,
+            },
+            PromptSection {
+                name: "in_flight_trees",
+                content: &forest_block,
+            },
+            PromptSection {
+                name: "executor_state",
+                content: &executor_active_block,
+            },
+            PromptSection {
+                name: "embodiment_live",
+                content: &embodiment_block,
+            },
+            PromptSection {
+                name: "environment_live",
+                content: &environment_block,
+            },
+        ];
+        let messages = assemble_planning_messages(round, capability_cache_hit, &sections, history);
 
-            let planning_revision = forest_revision.load(Ordering::Acquire);
-            let mut parser = crate::rtdl_stream::RtdlIncrementalParser::new(
-                target_map.clone(),
-                Arc::clone(&plan_seq),
-                session_id.clone(),
-                round,
-            );
-            let mut stream = tokio::time::timeout(
-                vlm_idle_timeout(),
-                vlm.chat_stream(&messages, &[], Some(&prompt_cache_key)),
-            )
-            .await??;
-            // forbidden capability calls because of mutual exclusion for the same capability call
-            let forbidden: HashSet<String> = forest
-                .values()
-                .flat_map(|tree| tree.call_signatures.iter().cloned())
-                .collect();
-            let mut stream_error: Option<anyhow::Error> = None;
-            let mut raw_tool_calls = Vec::new();
-            let idle = tokio::time::sleep(vlm_idle_timeout());
-            tokio::pin!(idle);
+        let planning_revision = forest_revision.load(Ordering::Acquire);
+        let mut parser = crate::rtdl_stream::RtdlIncrementalParser::new(
+            target_map.clone(),
+            Arc::clone(&plan_seq),
+            session_id.clone(),
+            round,
+        );
+        let mut stream = tokio::time::timeout(
+            vlm_idle_timeout(),
+            vlm.chat_stream(&messages, &[], Some(&prompt_cache_key)),
+        )
+        .await??;
+        // forbidden capability calls because of mutual exclusion for the same capability call
+        let forbidden: HashSet<String> = forest
+            .values()
+            .flat_map(|tree| tree.call_signatures.iter().cloned())
+            .collect();
+        let mut stream_error: Option<anyhow::Error> = None;
+        let idle = tokio::time::sleep(vlm_idle_timeout());
+        tokio::pin!(idle);
 
-            // Generate and execute concurrently: `stream` yields VLM output, `parser`
-            // turns complete RTDL fragments into START/NODE/CLOSE/END messages, and
-            // `live` submits them to Executor and buffers its execution events.
-            // Executor can run submitted nodes before the VLM finishes the response.
-            //
-            // The five select branches handle:
-            // 1. Abort (`cancel_rx`): stop VLM generation, cancel this stream's plan,
-            //    and save submitted nodes/observed results. Then cancel forest plans
-            //    and report interruption, even if this stream's cleanup failed.
-            //    Before START succeeds, `live.cancel` has no plan to cancel.
-            // 2. Steering (`steer_rx`): stop generation, cancel the submitted plan,
-            //    preserve its history, and collect new instructions before returning
-            //    to the supervisor to replan. Cleanup errors end the turn.
-            // 3. Executor feedback (`live.next`): after START opens the RPC, buffer
-            //    events for history/forest handling. Node failure stops generation;
-            //    EOF or RPC errors also mark transport loss, causing finalization
-            //    to attempt cancellation instead of normal draining.
-            // 4. VLM idle timeout (`idle`): stop waiting for VLM output and finalize
-            //    the submitted prefix. Executor activity does not reset this timer.
-            // 5. VLM output (`stream.next`): reset the idle timer, parse text into
-            //    RTDL messages, and submit them incrementally. Before any NODE is
-            //    submitted, stale forest context returns control to the supervisor.
-            //    Usage is logged; tool_calls are invalid in RTDL mode; stream errors
-            //    mark transport failure. Normal EOF proceeds to parser finalization
-            //    and validation. Already submitted work is retained, never replayed.
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel_rx.changed() => {
+        // Generate and execute concurrently: `stream` yields VLM output, `parser`
+        // turns complete RTDL fragments into START/NODE/CLOSE/END messages, and
+        // `live` submits them to Executor and buffers its execution events.
+        // Executor can run submitted nodes before the VLM finishes the response.
+        //
+        // The five select branches handle:
+        // 1. Abort (`cancel_rx`): stop VLM generation, cancel this stream's plan,
+        //    and save submitted nodes/observed results. Then cancel forest plans
+        //    and report interruption, even if this stream's cleanup failed.
+        //    Before START succeeds, `live.cancel` has no plan to cancel.
+        // 2. Steering (`steer_rx`): stop generation, cancel the submitted plan,
+        //    preserve its history, and collect new instructions before returning
+        //    to the supervisor to replan. Cleanup errors end the turn.
+        // 3. Executor feedback (`live.next`): after START opens the RPC, buffer
+        //    events for history/forest handling. Node failure stops generation;
+        //    EOF or RPC errors also stop generation and cancel this plan.
+        // 4. VLM idle timeout (`idle`): stop generation and cancel this plan.
+        //    Executor activity does not reset this timer.
+        // 5. VLM output (`stream.next`): reset the idle timer, parse text into
+        //    RTDL messages, and submit them incrementally. Before any NODE is
+        //    submitted, stale forest context returns control to the supervisor.
+        //    Usage is logged; tool_calls and stream errors cancel this plan.
+        //    Normal EOF proceeds to validation and closes the submitted tree.
+        //    Already submitted work is recorded, never replayed.
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel_rx.changed() => {
+                    drop(stream);
+                    if let Err(error) = live.cancel(&mut executor.control).await { warn!("[pilot/stream] abort cleanup: {error:#}"); }
+                    record_stream_prefix(history, &live, tx, &session_id).await;
+                    return_interrupted!(&forest);
+                }
+                steer = steer_rx.recv(), if !steer_rx.is_closed() => {
+                    if let Some(task) = steer {
                         drop(stream);
-                        if let Err(error) = live.cancel(&mut executor.control).await { warn!("[pilot/stream] abort cleanup: {error:#}"); }
+                        let cleanup = live.cancel(&mut executor.control).await;
                         record_stream_prefix(history, &live, tx, &session_id).await;
-                        return_interrupted!(&forest);
+                        append_steer(task, history, standing_task);
+                        cleanup?;
+                        drain_steers(&mut steer_rx, history, standing_task);
+                        history::trim(history, MAX_HISTORY);
+                        should_plan = true;
+                        continue 'supervisor;
                     }
-                    steer = steer_rx.recv(), if !steer_rx.is_closed() => {
-                        if let Some(task) = steer {
-                            drop(stream);
-                            let cleanup = live.cancel(&mut executor.control).await;
-                            record_stream_prefix(history, &live, tx, &session_id).await;
-                            append_steer(task, history, standing_task);
-                            cleanup?;
-                            drain_steers(&mut steer_rx, history, standing_task);
-                            history::trim(history, MAX_HISTORY);
-                            should_plan = true;
-                            continue 'supervisor;
+                }
+                event = live.next(), if live.output.is_some() => {
+                    match event {
+                        Ok(Some(event)) => {
+                            if live.remember(event) { stream_error = Some(anyhow::anyhow!("Executor node failed during generation")); break; }
                         }
+                        Ok(None) => { live.transport_failed = true; stream_error = Some(anyhow::anyhow!("Executor EOF during generation")); break; }
+                        Err(error) => { live.transport_failed = true; stream_error = Some(error.into()); break; }
                     }
-                    event = live.next(), if live.output.is_some() => {
-                        match event {
-                            Ok(Some(event)) => {
-                                if live.remember(event) { stream_error = Some(anyhow::anyhow!("Executor node failed during generation")); break; }
-                            }
-                            Ok(None) => { live.transport_failed = true; stream_error = Some(anyhow::anyhow!("Executor EOF during generation")); break; }
-                            Err(error) => { live.transport_failed = true; stream_error = Some(error.into()); break; }
-                        }
-                    }
-                    _ = &mut idle => { stream_error = Some(anyhow::anyhow!("VLM stream idle timeout")); break; }
-                    item = stream.next() => {
-                        idle.as_mut().reset(tokio::time::Instant::now() + vlm_idle_timeout());
-                        match item {
-                            Some(Ok(VlmStreamItem::TextDelta(delta))) => {
-                                let parsed = parser.push(&delta);
-                                // Submission checks execution feedback and revision;
-                                // this loop handles steer and abort after the batch returns.
-                                let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
-                                    client: &mut executor.streaming, forbidden: &forbidden,
-                                    revision: &forest_revision, expected_revision: planning_revision,
-                                }).await;
-                                match submission {
-                                    Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
-                                    Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
-                                        stream_error = Some(anyhow::anyhow!("Executor node failed during submission")); break;
-                                    }
-                                    Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
-                                        drop(stream);
-                                        live.cancel(&mut executor.control).await?;
-                                        should_plan = false;
-                                        continue 'supervisor;
-                                    }
-                                    Ok(None) => {},
+                }
+                _ = &mut idle => { stream_error = Some(anyhow::anyhow!("VLM stream idle timeout")); break; }
+                item = stream.next() => {
+                    idle.as_mut().reset(tokio::time::Instant::now() + vlm_idle_timeout());
+                    match item {
+                        Some(Ok(VlmStreamItem::TextDelta(delta))) => {
+                            if let Err(error) = parser.push(&delta) { stream_error = Some(error); break; }
+                            // Submission checks execution feedback and revision;
+                            // this loop handles steer and abort after the batch returns.
+                            let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
+                                client: &mut executor.streaming, forbidden: &forbidden,
+                                revision: &forest_revision, expected_revision: planning_revision,
+                            }).await;
+                            match submission {
+                                Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
+                                Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
+                                    stream_error = Some(anyhow::anyhow!("Executor node failed during submission")); break;
                                 }
-                                if let Err(error) = parsed { stream_error = Some(error); break; }
-
+                                Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
+                                    drop(stream);
+                                    live.cancel(&mut executor.control).await?;
+                                    should_plan = false;
+                                    continue 'supervisor;
+                                }
+                                Ok(None) => {},
                             }
-                            Some(Ok(VlmStreamItem::ToolCall(call))) => { raw_tool_calls.push(call); stream_error = Some(anyhow::anyhow!("tool_calls in RTDL mode")); break; }
-                            Some(Ok(VlmStreamItem::Usage(usage))) => info!("[pilot/stream] usage: {:?}", usage),
-                            Some(Ok(_)) => {},
-                            Some(Err(error)) => { live.transport_failed = true; stream_error = Some(error); break; }
-                            None => break,
                         }
+                        Some(Ok(VlmStreamItem::ToolCall(call))) => { stream_error = Some(anyhow::anyhow!("tool_calls in RTDL mode: {}", call.function.name)); break; }
+                        Some(Ok(VlmStreamItem::Usage(usage))) => info!("[pilot/stream] usage: {:?}", usage),
+                        Some(Ok(_)) => {},
+                        Some(Err(error)) => { live.transport_failed = true; stream_error = Some(error); break; }
+                        None => break,
                     }
                 }
             }
-            drop(stream);
-            let mut parsed = None;
-            if stream_error.is_none() {
-                debug!("[pilot/rtdl/raw] raw_content={}", parser.text());
-                match parser.finish() {
-                    Ok(result) => parsed = Some(result),
-                    Err(error) => stream_error = Some(error),
-                }
-            }
-            if !live.plan.nodes.is_empty() {
-                if let Err(error) = live.seal().await {
-                    live.transport_failed = true;
-                    stream_error = Some(error);
-                }
-                if stream_error.is_none() {
-                    if parser.plan == live.plan {
-                        let (envelope, _) = parsed.take().expect("validated response");
-                        break (
-                            envelope.content,
-                            envelope.rtdl_description,
-                            Some(live.plan.clone()),
-                            None,
-                            live.plan.plan_id.clone(),
-                            envelope.task_update,
-                            false,
-                        );
-                    }
-                    stream_error = Some(anyhow::anyhow!("incremental Plan mismatch"));
-                }
-                warn!(
-                    "[pilot/stream] retaining executed prefix: {:#}",
-                    stream_error.as_ref().expect("invalid response")
-                );
-                if live.transport_failed {
-                    if let Err(error) = live.cancel(&mut executor.control).await {
-                        record_stream_prefix(history, &live, tx, &session_id).await;
-                        return Err(error);
-                    }
-                } else if let Err(error) = live.drain().await {
-                    warn!("[pilot/stream] drain failed: {error:#}");
-                    if let Err(error) = live.cancel(&mut executor.control).await {
-                        record_stream_prefix(history, &live, tx, &session_id).await;
-                        return Err(error);
-                    }
-                }
-                let description = live.plan.nodes[0].description.clone();
-                break (
-                    String::new(),
-                    description,
-                    Some(live.plan.clone()),
-                    None,
-                    live.plan.plan_id.clone(),
-                    None,
-                    false,
-                );
-            }
-            if let Some(error) = stream_error {
-                if live.transport_failed {
-                    return Err(error);
-                }
-                if correction.is_none() {
-                    correction = Some(build_rtdl_retry_prompt(
-                        &error,
-                        parser.text(),
-                        &display_caps,
-                    ));
-                    live = crate::stream_execution::StreamExecution::default();
-                    continue;
-                }
-                break (
-                    rtdl_recovery_final_text(),
-                    String::new(),
-                    Some(empty_sequence_plan(
-                        String::new(),
-                        session_id.clone(),
-                        round,
-                    )),
-                    None,
-                    String::new(),
-                    None,
-                    true,
-                );
-            }
-            if forest_revision.load(Ordering::Acquire) != planning_revision {
-                should_plan = false;
-                continue 'supervisor;
-            }
-
-            let (envelope, meta_op) = parsed.expect("validated response");
-            debug!("[pilot/rtdl/raw] model_rtdl={}", envelope.rtdl);
-            let plan_id = parser.plan.plan_id.clone();
-            let graph = meta_op.is_none().then_some(parser.plan);
-            break (
-                envelope.content,
-                envelope.rtdl_description,
-                graph,
-                meta_op,
-                plan_id,
-                envelope.task_update,
-                false,
-            );
-        };
-
-        // RTDL recovery gave up after a retry: surface the user-facing message
-        // once and END the turn. Without this the empty recovery plan would fall
-        // through to "no new tree this round" and re-plan forever.
-        if recovered {
-            if !assistant_content.is_empty() {
-                history.push(Message::assistant(&assistant_content));
-            }
-            let _ = tx
-                .send(Ok(service::pack(
-                    &session_id,
-                    PilotStreamBody::FinalText(assistant_content),
-                )))
-                .await;
-            break;
         }
-
-        if let Some(meta_op) = meta_op {
-            let targets = meta_op.cancellation_targets(&forest);
-            if let Some(target) = invalid_cancel_target(&targets, &forest, &cancel_requested) {
-                warn!("[pilot/harness] suppressed stale or duplicate meta op for plan {target}");
+        drop(stream);
+        let generated = async {
+            if let Some(error) = stream_error {
+                return Err(error);
+            }
+            debug!("[pilot/rtdl/raw] raw_content={}", parser.text());
+            let parsed = parser.finish()?;
+            if !live.plan.nodes.is_empty() {
+                anyhow::ensure!(parser.plan == live.plan, "incremental Plan mismatch");
+                live.seal().await?;
+            }
+            Ok(parsed)
+        }
+        .await;
+        let (envelope, meta_op) = match generated {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let cleanup = live.cancel(&mut executor.control).await;
+                record_stream_prefix(history, &live, tx, &session_id).await;
                 history.push(Message::user(&format!(
-                    "Pilot harness feedback: plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a currently listed plan_id. Do not retry a completed control operation."
+                    "Pilot RTDL generation failed: {error:#}. The turn ended; consult recorded execution results before continuing."
                 )));
                 history::trim(history, MAX_HISTORY);
-                should_plan = true;
-                continue 'supervisor;
-            }
-            if let Some(updated) = task_update {
-                let changed = apply_task_update(standing_task, updated, false);
-                if changed && let Some(state) = standing_task.as_ref() {
-                    let _ = tx
-                        .send(Ok(service::pack(
-                            &session_id,
-                            PilotStreamBody::TaskState(TaskStateEvent {
-                                goal: state.goal.clone(),
-                                success_criterion: state.success_criterion.clone(),
-                                status: state.status.clone(),
-                            }),
-                        )))
-                        .await;
+                if let Err(cancel_error) = cleanup {
+                    return Err(
+                        error.context(format!("plan cancellation failed: {cancel_error:#}"))
+                    );
                 }
+                return Err(error);
             }
-            if !assistant_content.trim().is_empty() {
-                history.push(Message::assistant(&assistant_content));
-                history::trim(history, MAX_HISTORY);
-                last_content = assistant_content.clone();
+        };
+        if live.plan.nodes.is_empty()
+            && forest_revision.load(Ordering::Acquire) != planning_revision
+        {
+            should_plan = false;
+            continue 'supervisor;
+        }
+        let assistant_content = envelope.content;
+        let rtdl_description = envelope.rtdl_description;
+        let task_update = envelope.task_update;
+
+        // Validate control targets before accepting narration or task progress.
+        let cancel_targets = meta_op
+            .as_ref()
+            .map(|op| op.cancellation_targets(&forest))
+            .unwrap_or_default();
+        if let Some(target) = invalid_cancel_target(&cancel_targets, &forest, &cancel_requested) {
+            warn!("[pilot/harness] suppressed stale or duplicate meta op for plan {target}");
+            history.push(Message::user(&format!(
+                "Pilot harness feedback: plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a currently listed plan_id. Do not retry a completed control operation."
+            )));
+            history::trim(history, MAX_HISTORY);
+            should_plan = true;
+            continue 'supervisor;
+        }
+
+        let calls = plan_call_count(&live.plan);
+        if let Some(updated) = task_update {
+            info!(
+                "[pilot/rtdl] task_update goal='{}' status='{}'",
+                updated.goal, updated.status
+            );
+            // Control operations still need their completion event. An empty
+            // response may finish the interaction while unrelated work runs.
+            let changed =
+                apply_task_update(standing_task, updated, meta_op.is_none() && calls == 0);
+            if changed && let Some(state) = standing_task.as_ref() {
                 let _ = tx
                     .send(Ok(service::pack(
                         &session_id,
-                        PilotStreamBody::TextChunk(assistant_content),
+                        PilotStreamBody::TaskState(TaskStateEvent {
+                            goal: state.goal.clone(),
+                            success_criterion: state.success_criterion.clone(),
+                            status: state.status.clone(),
+                        }),
                     )))
                     .await;
             }
+        }
 
+        if !assistant_content.trim().is_empty() {
+            history.push(Message::assistant(&assistant_content));
+            history::trim(history, MAX_HISTORY);
+            last_content = assistant_content.clone();
+            if meta_op.is_some() || !live.plan.nodes.is_empty() {
+                let _ = tx
+                    .send(Ok(service::pack(
+                        &session_id,
+                        PilotStreamBody::TextChunk(assistant_content.clone()),
+                    )))
+                    .await;
+            }
+        }
+
+        round += 1;
+        if let Some(meta_op) = meta_op {
+            let targets = cancel_targets;
             cancel_requested.extend(targets.iter().cloned());
             let result = execute_meta_plan_op(executor, &meta_op).await;
-            round += 1;
             match result {
                 Ok(message) => {
                     info!("[pilot/control] {message}");
@@ -1682,53 +1605,13 @@ pub async fn run_turn(
             continue 'supervisor;
         }
 
-        let graph = graph.expect("non-meta RTDL response must carry a graph");
-
-        let calls = plan_call_count(&graph);
-        let call_signatures = plan_call_signatures(&graph);
-        let cancel_targets = plan_cancel_targets(&graph);
-
-        // Apply progress only after the harness knows whether this response can
-        // safely finish. A model cannot mark a task done while it is also
-        // dispatching work or while an older tree remains in flight.
-        if let Some(updated) = task_update {
-            info!(
-                "[pilot/rtdl] task_update goal='{}' status='{}'",
-                updated.goal, updated.status
-            );
-            let changed = apply_task_update(standing_task, updated, calls == 0);
-            if changed && let Some(state) = standing_task.as_ref() {
-                let _ = tx
-                    .send(Ok(service::pack(
-                        &session_id,
-                        PilotStreamBody::TaskState(TaskStateEvent {
-                            goal: state.goal.clone(),
-                            success_criterion: state.success_criterion.clone(),
-                            status: state.status.clone(),
-                        }),
-                    )))
-                    .await;
-            }
-        }
-
-        log_plan_start(&graph, &rtdl_description, round, calls);
-
-        // Retain model narration for later planning. Action-producing RTDL
-        // rounds are also streamed below so the current user sees and hears
-        // progress instead of receiving only a final burst after a long task.
-        if !assistant_content.is_empty() {
-            history.push(Message::assistant(&assistant_content));
-            last_content = assistant_content.clone();
-        }
-
-        round += 1;
         let hit_cap = round as usize >= max_rounds;
         let task_done = standing_task
             .as_ref()
             .map(TaskState::is_done)
             .unwrap_or(false);
 
-        if calls == 0 {
+        if live.plan.nodes.is_empty() {
             // With no tree left, this is either a final answer or a deliberate
             // request for more user input. End this transport turn exactly once;
             // an in-progress standing task remains persisted by the service and
@@ -1786,31 +1669,24 @@ pub async fn run_turn(
             continue;
         }
 
-        if !assistant_content.trim().is_empty() {
-            let _ = tx
-                .send(Ok(service::pack(
-                    &session_id,
-                    PilotStreamBody::TextChunk(assistant_content.clone()),
-                )))
-                .await;
-        }
-
-        // Non-empty tree: hand the structure to the client and dispatch it to
-        // the forest after its user-facing narration above.
+        // Generation already submitted this tree. Publish its exact prefix and
+        // hand the existing stream to the forest; never dispatch the plan again.
+        let plan = &live.plan;
+        let plan_id = plan.plan_id.clone();
+        log_plan_start(plan, &rtdl_description, plan.round, calls);
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
-                PilotStreamBody::Plan(graph.clone()),
+                PilotStreamBody::Plan(plan.clone()),
             )))
             .await;
-        cancel_requested.extend(cancel_targets);
-        record_dispatched_plan(history, &graph, &rtdl_description);
+        record_dispatched_plan(history, plan, &rtdl_description);
         forest.insert(
             plan_id.clone(),
             TreeMeta {
                 description: rtdl_description,
-                control_only: is_control_only(&graph),
-                call_signatures,
+                control_only: is_control_only(plan),
+                call_signatures: plan_call_signatures(plan),
             },
         );
         tokio::spawn(drive_plan(
@@ -2007,77 +1883,6 @@ pub(crate) fn parse_task_update(v: &serde_json::Value) -> Result<TaskState> {
     })
 }
 
-fn raw_preview(raw: &str) -> String {
-    if raw.is_empty() {
-        return "assistant content was empty".to_string();
-    }
-    let preview: String = raw.chars().take(240).collect();
-    let ellipsis = if raw.chars().count() > 240 { "..." } else { "" };
-    format!("assistant content preview: {preview:?}{ellipsis}")
-}
-
-// ── RTDL recovery (merged from dev #88) ────────────────────────────────────────
-// When the VLM emits an RTDL that fails to parse or expand, feed the error back
-// once and let it self-correct; a second failure ends the turn gracefully.
-
-/// Corrective prompt appended to the next VLM round after a parse/expand failure.
-fn build_rtdl_retry_prompt(
-    err: &anyhow::Error,
-    raw_content: &str,
-    display_caps: &[DisplayCapability<'_>],
-) -> String {
-    let mut p = format!(
-        "Your previous RTDL response could not be parsed or expanded by Pilot.\n\
-         Error: {err:#}\n\
-         Previous response preview: {}\n\n\
-         Fix the RTDL error and retry the same user request exactly once. If the error \
-         mentions an unknown capability, do not repeat that capability. Return ONLY a JSON object \
-         with exactly `content`, `rtdl_description`, `rtdl`, and `task_update`. The reply MUST begin \
-         with `{{` and end with `}}`: no prose, narration, or markdown fences before or after it (put \
-         any user-facing text inside `content`). Use only \
-         capability_name values from this list; do not invent provider names, method names, or \
-         aliases:\n",
-        raw_preview(raw_content)
-    );
-    for cap in display_caps {
-        p.push_str("- ");
-        p.push_str(&cap.display_name);
-        p.push('\n');
-    }
-    p.push_str(
-        "\nIf no further capability call is needed, use \
-         {\"op\":\"sequence\",\"children\":[]} as `rtdl`. If the user's requested action cannot \
-         be performed using the listed capabilities, explain the missing capability in `content` \
-         and return an empty RTDL sequence instead of inventing a capability.\n",
-    );
-    p
-}
-
-/// A single empty-sequence root plan, used as the no-op plan when a turn ends in
-/// RTDL recovery. Carries non-empty `op_id`/`description` so executor's
-/// `validate_plan` accepts it.
-fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan {
-    Plan {
-        plan_id,
-        session_id,
-        round,
-        nodes: vec![RtdlNode {
-            node_kind: RTDL_SEQUENCE,
-            children: Vec::new(),
-            call: None,
-            op_id: "recovery".to_string(),
-            description: "recovery: no valid plan produced".to_string(),
-        }],
-        root_index: 0,
-    }
-}
-
-/// User-facing message when RTDL recovery gives up — never leaks the internal error.
-fn rtdl_recovery_final_text() -> String {
-    "I couldn't produce a valid robot plan after retrying once. Please try again or rephrase the request."
-        .to_string()
-}
-
 fn plan_call_count(plan: &Plan) -> usize {
     plan.nodes
         .iter()
@@ -2095,20 +1900,6 @@ pub(crate) fn plan_call_signatures(plan: &Plan) -> HashSet<String> {
                 .and_then(|value| serde_json::to_string(&value).ok())
                 .unwrap_or_else(|| call.args_json.clone());
             format!("{}|{}|{args}", call.provider_id, call.contract_id)
-        })
-        .collect()
-}
-
-fn plan_cancel_targets(plan: &Plan) -> Vec<String> {
-    plan.nodes
-        .iter()
-        .filter_map(|node| node.call.as_ref())
-        .filter(|call| call.contract_id.rsplit('/').next() == Some("cancel_plan"))
-        .filter_map(|call| serde_json::from_str::<serde_json::Value>(&call.args_json).ok())
-        .filter_map(|args| {
-            args.get("plan_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
         })
         .collect()
 }
@@ -2583,7 +2374,7 @@ mod tests {
         configured_vlm_idle_timeout, feed_results_into_history, format_plan_summary,
         invalid_cancel_target, is_control_only, is_legacy_plan_control_contract,
         is_terminal_executor_state, parse_meta_plan_op, parse_task_update, plan_call_signatures,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
+        record_dispatched_plan, rtdl_node_kind_name, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end, upsert_terminal_result,
     };
@@ -3097,15 +2888,6 @@ mod tests {
             invalid_cancel_target(&["8".to_string()], &forest, &HashSet::new()),
             Some("8".to_string())
         );
-    }
-
-    #[test]
-    fn rtdl_recovery_final_text_hides_internal_error() {
-        let text = rtdl_recovery_final_text();
-        assert!(text.contains("valid robot plan"));
-        assert!(!text.contains("expand RTDL"));
-        assert!(!text.contains("capability call"));
-        assert!(!text.contains("assistant content preview"));
     }
 
     fn task(ctx: &str) -> Task {

@@ -201,14 +201,14 @@ impl StreamExecution {
         Ok(())
     }
 
-    /// Cancel only this generating plan and wait for Executor's active-table removal or its timeout.
+    /// Request cancellation before closing input, without sending CLOSE or END
+    /// that could release more execution. Retain observed results for history.
     pub(crate) async fn cancel(
         &mut self,
         control: &mut RobonixSystemExecutorControlPlanClient<Channel>,
     ) -> Result<()> {
-        let seal = self.seal().await;
         if self.plan.plan_id.is_empty() {
-            return seal;
+            return Ok(());
         }
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(6),
@@ -218,8 +218,10 @@ impl StreamExecution {
                 wait_ms: 5000,
             }),
         )
-        .await??;
-        let response = response.into_inner();
+        .await;
+        // Also close input when the control RPC fails, so Executor observes EOF.
+        self.input.take();
+        let response = response??.into_inner();
         ensure!(
             response.success,
             "Executor cancellation failed: {}",
@@ -245,9 +247,6 @@ impl StreamExecution {
         if !self.complete {
             self.transport_failed = true;
         }
-        if let Err(error) = seal {
-            robonix_scribe::warn!("[pilot/stream] request closure failed during cancel: {error:#}");
-        }
         Ok(())
     }
 }
@@ -255,6 +254,92 @@ impl StreamExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pb::contracts::robonix_system_executor_control_plan_server::{
+        RobonixSystemExecutorControlPlan, RobonixSystemExecutorControlPlanServer,
+    };
+    use crate::pb::executor::ControlPlanResponse;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// Control endpoint that verifies input stays open until cancellation arrives.
+    struct CancelControl {
+        /// Input receiver used to detect premature CLOSE, END, or EOF.
+        input: Arc<Mutex<mpsc::Receiver<ExecuteStreamInput>>>,
+        /// Whether to simulate a failed cancellation RPC.
+        reject: bool,
+    }
+
+    #[tonic::async_trait]
+    impl RobonixSystemExecutorControlPlan for CancelControl {
+        /// Check ordering at the RPC boundary, then accept or reject cancellation.
+        async fn control_plan(
+            &self,
+            request: tonic::Request<ControlPlanRequest>,
+        ) -> Result<tonic::Response<ControlPlanResponse>, tonic::Status> {
+            let request = request.into_inner();
+            assert_eq!(request.action, "cancel");
+            assert_eq!(request.plan_id, "partial");
+            assert!(matches!(
+                self.input.lock().await.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            if self.reject {
+                return Err(tonic::Status::unavailable("control unavailable"));
+            }
+            Ok(tonic::Response::new(ControlPlanResponse {
+                success: true,
+                completed: true,
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// Neither successful nor failed cancellation may seal a partial plan first.
+    #[tokio::test]
+    async fn cancellation_precedes_input_closure_even_when_control_fails() {
+        for reject in [false, true] {
+            let (tx, rx) = mpsc::channel(8);
+            let input = Arc::new(Mutex::new(rx));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let incoming = futures_util::stream::unfold(listener, |listener| async {
+                let stream = listener.accept().await.map(|(stream, _)| stream);
+                Some((stream, listener))
+            });
+            let server = tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(RobonixSystemExecutorControlPlanServer::new(CancelControl {
+                        input: Arc::clone(&input),
+                        reject,
+                    }))
+                    .serve_with_incoming(incoming),
+            );
+            let mut control =
+                RobonixSystemExecutorControlPlanClient::connect(format!("http://{address}"))
+                    .await
+                    .unwrap();
+            let mut live = StreamExecution {
+                input: Some(tx),
+                plan: Plan {
+                    plan_id: "partial".into(),
+                    ..Default::default()
+                },
+                closed: vec![false],
+                ..Default::default()
+            };
+
+            let result = live.cancel(&mut control).await;
+
+            assert_eq!(result.is_err(), reject);
+            assert!(live.input.is_none());
+            assert!(matches!(
+                input.lock().await.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ));
+            server.abort();
+        }
+    }
+
     /// A transport already removed during cleanup must report EOF to the forest driver.
     #[tokio::test]
     async fn removed_output_does_not_hang_forest_handoff() {
