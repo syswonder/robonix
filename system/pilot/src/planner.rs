@@ -1577,13 +1577,11 @@ pub async fn run_turn(
                 break (content, tool_calls);
             };
 
-            if forest_revision.load(Ordering::Acquire) != planning_revision {
-                // Executor state changed while the model was thinking. Never
-                // dispatch a plan based on the stale in-flight snapshot. Return
-                // to the event arm, consume the queued state, then re-plan.
-                should_plan = false;
-                continue 'supervisor;
-            }
+            // Executor state changed while the model was thinking. A new tree
+            // would be based on the stale in-flight snapshot and is dropped
+            // after parsing; a plan-control decision (cancel/stop) targets a
+            // plan by id and stays valid, so it is still applied.
+            let stale_forest = forest_revision.load(Ordering::Acquire) != planning_revision;
 
             if !raw_tool_calls.is_empty() {
                 anyhow::bail!("VLM returned tool_calls in RTDL mode");
@@ -1643,6 +1641,14 @@ pub async fn run_turn(
                         task_update,
                         false,
                     );
+                }
+                Ok(None) if stale_forest => {
+                    // Return to the event arm, consume the queued state, then re-plan.
+                    debug!(
+                        "[pilot/rtdl] round={round} dropped: Executor state changed while planning"
+                    );
+                    should_plan = false;
+                    continue 'supervisor;
                 }
                 Ok(None) => {}
                 Err(e) if correction.is_none() => {

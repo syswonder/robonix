@@ -29,6 +29,17 @@ pub async fn run_until_terminal(
     if !initial.success {
         return (initial, RtdlNodeStateEnum::Failed as u32);
     }
+    // A provider can decline to start a run inside a successful MCP reply
+    // (`accepted: false`, e.g. the body is held by another call). There is no
+    // run to poll, and polling without a run_id fails the status schema.
+    if let Some(reason) = initial_rejection(&initial.output) {
+        let error = format!("{} rejected the call: {reason}", call.contract_id);
+        warn!("[executor] {error}");
+        return (
+            failed_result(call, &error),
+            RtdlNodeStateEnum::Failed as u32,
+        );
+    }
 
     let run_id = extract_run_id(&initial.output);
     let accepted = runtime
@@ -105,11 +116,9 @@ async fn poll_status(
     run_id: &str,
     atlas: &mut AtlasClient,
 ) -> anyhow::Result<String> {
-    let args = if run_id.is_empty() {
-        "{}".to_string()
-    } else {
-        serde_json::json!({ "run_id": run_id }).to_string()
-    };
+    // Always send the field: generated status schemas require it, and
+    // providers read an empty run_id as "the most recent run".
+    let args = serde_json::json!({ "run_id": run_id }).to_string();
     let status_call = CapabilityCall {
         call_id: format!("status-{}", uuid::Uuid::new_v4()),
         provider_id: provider_id.to_string(),
@@ -131,6 +140,20 @@ async fn poll_status(
     } else {
         anyhow::bail!("{}", result.error)
     }
+}
+
+/// `Some(reason)` when the initial MCP response says `accepted: false`.
+pub fn initial_rejection(output: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    if v.get("accepted").and_then(|a| a.as_bool()) != Some(false) {
+        return None;
+    }
+    let detail = v.get("detail").and_then(|d| d.as_str()).unwrap_or_default();
+    Some(if detail.is_empty() {
+        "provider did not accept the call".to_string()
+    } else {
+        detail.to_string()
+    })
 }
 
 /// Read `run_id` from the async cap's initial MCP response JSON.
@@ -238,6 +261,26 @@ mod tests {
     fn extract_run_id_from_response() {
         assert_eq!(extract_run_id(r#"{"run_id":"r1","accepted":true}"#), "r1");
         assert_eq!(extract_run_id(r#"{"goal_id":"g1"}"#), "");
+    }
+
+    #[test]
+    fn rejected_start_is_reported_not_polled() {
+        assert_eq!(
+            initial_rejection(
+                r#"{"accepted":false,"run_id":"","detail":"grasp rejected: RESOURCE_BUSY"}"#
+            ),
+            Some("grasp rejected: RESOURCE_BUSY".to_string())
+        );
+        assert_eq!(
+            initial_rejection(r#"{"accepted":false,"run_id":""}"#),
+            Some("provider did not accept the call".to_string())
+        );
+        assert_eq!(
+            initial_rejection(r#"{"accepted":true,"run_id":"r1"}"#),
+            None
+        );
+        assert_eq!(initial_rejection(r#"{"run_id":"r1"}"#), None);
+        assert_eq!(initial_rejection("not json"), None);
     }
 
     #[test]
