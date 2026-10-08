@@ -94,6 +94,11 @@ pub fn summary(message: &str) {
     println!("\n{}", message.dimmed());
 }
 
+/// Abbreviate a full git SHA for display.
+pub fn short_sha(sha: &str) -> &str {
+    sha.get(..8).unwrap_or(sha)
+}
+
 // ── Boot-log helpers (FreeBSD / dmesg style) ────────────────────────
 //
 // Each boot line carries a monotonic `[ssss.mmm]` timestamp prefix and
@@ -119,12 +124,19 @@ const W_NAME: usize = 18;
 /// via compile-time env vars; missing values gracefully render as
 /// "unknown" so a tarball / sandboxed build still prints a banner.
 pub fn boot_banner() {
-    let version = env!("CARGO_PKG_VERSION");
-    let sha = option_env!("ROBONIX_GIT_SHA").unwrap_or("dev");
+    let info = crate::build_info::BuildInfo::get();
+    let dirty = if info.git_dirty == Some(true) {
+        "+"
+    } else {
+        ""
+    };
+    let sha = info.git_sha.map_or("unknown".to_string(), |sha| {
+        format!("{}{dirty}", short_sha(sha))
+    });
     let builder = option_env!("ROBONIX_BUILDER").unwrap_or("unknown");
     let build_time = option_env!("ROBONIX_BUILD_TIME").unwrap_or("unknown");
-    let rustc = option_env!("ROBONIX_RUSTC").unwrap_or("rustc unknown");
-    let target = option_env!("ROBONIX_TARGET").unwrap_or("unknown");
+    let rustc = format!("rustc {}", info.rustc.unwrap_or("unknown"));
+    let target = info.target.unwrap_or("unknown");
 
     let lines = [
         "    ____        __                 _      ",
@@ -150,9 +162,9 @@ pub fn boot_banner() {
             label_w = label_w
         );
     };
-    row("version", &format!("v{version} ({sha})"));
+    row("version", &format!("v{} ({sha})", info.version));
     row("built", &format!("{build_time} on {builder}"));
-    row("compiler", rustc);
+    row("compiler", &rustc);
     row("target", target);
     println!();
 }

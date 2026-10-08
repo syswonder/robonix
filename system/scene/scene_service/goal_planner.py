@@ -7,6 +7,7 @@ import math
 from collections.abc import Iterable, Sequence
 
 from .geometry import point_in_polygon, polygon_centroid
+from .message_shape import occupancy_grid_is_well_formed
 from .robot_geometry import RobotFootprint
 
 Point = tuple[float, float]
@@ -157,7 +158,7 @@ def _grid_array(grid_msg, *, width: int, height: int):
         grid = np.frombuffer(data, dtype=np.int8)
     else:
         grid = np.asarray(data, dtype=np.int8)
-    if grid.size != width * height:
+    if not occupancy_grid_is_well_formed(width, height, grid.size):
         raise ValueError(
             f"occupancy grid contains {grid.size} cells; expected {width * height}"
         )
@@ -206,7 +207,7 @@ def _cells_nearest_to(
     target_x: float,
     target_y: float,
 ) -> Iterable[tuple[float, float]]:
-    """Yield bounding-box cell centres in increasing distance from a target.
+    """Yield bounding-box cell centres nearest the target first.
 
     The priority flood only retains the explored frontier, so a safe pose near
     the room centroid can be returned without sorting or testing the full room.
@@ -313,6 +314,11 @@ def _ring_cells(center_x: int, center_y: int, radius: int) -> Iterable[tuple[int
         yield center_x + radius, y
 
 
+# How much further an approach pose on the robot's side of an object may be
+# than one on the far side before the far side is used instead.
+FAR_SIDE_SLACK_M = 1.0
+
+
 def object_goal(
     grid_msg,
     *,
@@ -325,8 +331,7 @@ def object_goal(
     """Find the nearest map cell whose real footprint can approach an object."""
     width, height, resolution, origin_x, origin_y = _grid_metadata(grid_msg)
     grid = _grid_array(grid_msg, width=width, height=height)
-    # Preserve the existing goal_near policy: unexplored cells are allowed,
-    # but known occupied cells are not. Nav2 remains the final motion authority.
+    # Unexplored cells are allowed, occupied ones are not; Nav2 decides the rest.
     blocked = grid > 50
     target_gx = math.floor((target_x - origin_x) / resolution)
     target_gy = math.floor((target_y - origin_y) / resolution)
@@ -337,8 +342,15 @@ def object_goal(
         abs(target_gy - (height - 1)),
     )
     minimum_standoff_sq = minimum_standoff_m**2
+    # Prefer the robot's side: for an object on a wall the far side is
+    # unexplored space Nav2 may never reach. The far side is only a fallback.
+    far_side_slack_rings = math.ceil(FAR_SIDE_SLACK_M / resolution)
+    far_side: tuple[float, float, float] | None = None
+    far_side_ring = 0
     for ring in range(max_ring + 1):
-        candidates: list[tuple[float, float, float, float]] = []
+        if far_side is not None and ring > far_side_ring + far_side_slack_rings:
+            return far_side
+        candidates: list[tuple[bool, float, float, float, float]] = []
         for gx, gy in _ring_cells(target_gx, target_gy, ring):
             if not (0 <= gx < width and 0 <= gy < height):
                 continue
@@ -358,8 +370,10 @@ def object_goal(
                 if preferred_approach_yaw is not None
                 else 0.0
             )
-            candidates.append((distance_sq, angle_error, x, y))
-        for _distance_sq, _angle_error, x, y in sorted(candidates):
+            candidates.append((angle_error > math.pi / 2, distance_sq, angle_error, x, y))
+        for is_far_side, _distance_sq, _angle_error, x, y in sorted(candidates):
+            if is_far_side and far_side is not None:
+                continue
             yaw = math.atan2(target_y - y, target_x - x)
             candidate = transformed_footprint(footprint, x, y, yaw)
             if _footprint_clear(
@@ -371,5 +385,7 @@ def object_goal(
                 origin_y=origin_y,
                 polygon=candidate,
             ):
-                return x, y, yaw
-    return None
+                if not is_far_side:
+                    return x, y, yaw
+                far_side, far_side_ring = (x, y, yaw), ring
+    return far_side

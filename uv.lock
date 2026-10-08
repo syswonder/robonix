@@ -4175,12 +4175,12 @@ wheels = [
 
 [[package]]
 name = "robonix"
-version = "0.0.0"
+version = "1.1.0b1"
 source = { virtual = "." }
 
 [[package]]
 name = "robonix-api"
-version = "0.1.0rc1"
+version = "1.1.0b1"
 source = { editable = "pylib/robonix-api" }
 dependencies = [
     { name = "fastmcp" },
@@ -4208,7 +4208,7 @@ provides-extras = ["codegen"]
 
 [[package]]
 name = "robonix-memgraph"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "services/memory" }
 dependencies = [
     { name = "fastmcp" },
@@ -4239,7 +4239,7 @@ requires-dist = [
 
 [[package]]
 name = "robonix-scene-verifier"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "services/verifiers/scene_verifier" }
 dependencies = [
     { name = "grpcio-tools" },
@@ -4258,7 +4258,7 @@ requires-dist = [
 
 [[package]]
 name = "robonix-system-memory"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "services/memsearch" }
 dependencies = [
     { name = "fastmcp" },
@@ -4291,7 +4291,7 @@ requires-dist = [
 
 [[package]]
 name = "robonix-system-scene"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "system/scene" }
 dependencies = [
     { name = "fastmcp" },
@@ -4331,7 +4331,7 @@ requires-dist = [
 
 [[package]]
 name = "robonix-system-speech"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "services/speech" }
 dependencies = [
     { name = "grpcio" },
@@ -4382,7 +4382,7 @@ provides-extras = ["local"]
 
 [[package]]
 name = "robonix-system-voiceprint"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "services/voiceprint" }
 dependencies = [
     { name = "grpcio" },
@@ -4428,7 +4428,7 @@ requires-dist = [
 
 [[package]]
 name = "robonix-vlm-verifier"
-version = "0.1.0"
+version = "1.1.0b1"
 source = { virtual = "services/verifiers/vlm_verifier" }
 dependencies = [
     { name = "grpcio-tools" },

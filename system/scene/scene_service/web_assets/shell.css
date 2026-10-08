@@ -1,0 +1,83 @@
+  /* Dark throughout: the rerun viewer's chrome cannot be made light (0.37
+     ignores SetTheme on the web), so a light shell would leave pages half lit. */
+  :root{
+    /* Han faces included so Chinese text does not fall back to a random face. */
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --bg:#0e1015;--panel:#161a22;--fg:#e8eaed;--muted:#7d828b;
+    --line:#232936;--acc:#7aa7ff;
+    /* One duration and curve for the shell; colour and position only, never
+       size, because the dock is dragged and the log list grows. */
+    --t: 120ms; --ease: cubic-bezier(.2,.7,.35,1);
+  }
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+            font:13px/1.6 var(--font-ui)}
+  .wrap{display:flex;height:100%}
+  nav{width:150px;flex:0 0 150px;background:var(--panel);
+      border-right:1px solid var(--line);
+      display:flex;flex-direction:column;padding:10px 0}
+  nav .brand{padding:8px 14px 14px;color:var(--acc);font-weight:650;font-size:15px;letter-spacing:.01em}
+  .nav-group{margin-bottom:10px}
+  .nav-head{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+            color:#5f6673;padding:6px 14px 4px}
+  nav a{position:relative;display:flex;align-items:center;gap:9px;padding:8px 14px;
+        color:var(--muted);text-decoration:none;font-size:13.5px;
+        white-space:nowrap;border-left:2px solid transparent;
+        transition:color var(--t) var(--ease),background var(--t) var(--ease)}
+  .nav-group a{padding-left:24px}
+  nav a:hover,nav a.on{color:var(--fg);background:#1c2230}
+  nav a.on{color:var(--acc)}
+  /* The active marker grows from the top rather than appearing. */
+  nav a::before{content:"";position:absolute;left:-2px;top:0;bottom:0;width:2px;
+                background:var(--acc);transform:scaleY(0);transform-origin:top;
+                transition:transform var(--t) var(--ease)}
+  nav a.on::before{transform:scaleY(1)}
+  nav .ico{width:16px;height:16px;flex:0 0 16px;opacity:.85;
+           transition:opacity var(--t) var(--ease)}
+  nav a.on .ico{opacity:1}
+  nav .spacer{flex:1}
+  nav .lang{margin:0 10px 6px;padding:5px 0;background:none;cursor:pointer;
+            border:1px solid var(--line);border-radius:5px;
+            color:var(--muted);font:inherit;font-size:12px}
+  nav .lang:hover{color:var(--fg);border-color:#39415260;background:#1c2230}
+  nav .lang:active{transform:translateY(1px)}
+  button{transition:color var(--t) var(--ease),background var(--t) var(--ease),
+                    border-color var(--t) var(--ease),transform 60ms var(--ease)}
+
+  /* The content column: a fixed status strip, then the page. */
+  main{flex:1;position:relative;min-width:0;background:var(--bg);
+       display:flex;flex-direction:column}
+  main > :not(.sbar){flex:1;min-height:0}
+  iframe{border:0;width:100%;height:100%;display:block}
+  .msg{padding:24px;color:var(--muted);max-width:560px}
+  .msg a{color:var(--acc)}
+
+  .sbar{flex:0 0 auto;display:flex;align-items:center;gap:14px;
+        padding:0 16px;height:38px;background:#12161e;
+        border-bottom:1px solid var(--line)}
+  .sb-block{display:flex;align-items:baseline;gap:8px}
+  .sb-k{font-size:10.5px;color:#6a7282;text-transform:uppercase;letter-spacing:.06em}
+  .sb-rule{width:1px;align-self:stretch;margin:8px 0;background:var(--line)}
+  .sb-mode{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;
+           font-weight:600;transition:color var(--t) var(--ease)}
+  .sb-mode .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:0 0 7px}
+  /* Mapping, localising, silent, unreachable. */
+  .sb-mode.map{color:#e0a050}
+  .sb-mode.loc{color:#8ef0b7}
+  .sb-mode.idle{color:#6a7282}
+  .sb-mode.down{color:#e5484d}
+  .sb-mode.map .dot{animation:sb-pulse 1.6s ease-in-out infinite}
+  @keyframes sb-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .sb-map{font-family:var(--font-mono);font-size:12.5px;color:var(--fg)}
+  .sb-map.temp{color:#d9c07a;font-family:var(--font-ui);font-size:12px}
+  /* Amber only when rerun was expected and did not start. */
+  .sb-viewer{font-size:12.5px;color:var(--fg)}
+  .sb-viewer.fell-back{color:#d9c07a;cursor:help}
+
+  @media (prefers-reduced-motion: reduce) {
+    :root{ --t: 0ms }
+    nav a::before,button{transition:none}
+    .sb-mode.map .dot{animation:none}
+  }

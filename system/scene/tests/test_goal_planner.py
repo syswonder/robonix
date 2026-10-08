@@ -112,6 +112,53 @@ def test_object_goal_uses_complete_polygon():
     assert np.isfinite([x, y, yaw]).all()
 
 
+def test_object_goal_approaches_from_the_robot_side_of_a_wall():
+    """An object detected on a wall is approached from where the robot is.
+
+    Unexplored cells stay usable, so the unknown space behind the wall also
+    fits the footprint and can be a little nearer the object. Taking it sends
+    the robot looking for a way round the wall.
+    """
+    grid = _grid()
+    data = np.zeros((30, 30), dtype=np.int8)
+    data[20, :] = 100  # the wall: y in [0.5, 0.6)
+    data[21:, :] = -1  # never observed behind it
+    grid.data = data.tobytes()
+    target_x, target_y = 0.0, 0.58  # on the wall, nearer its far face
+    robot_x, robot_y = 0.0, -1.0
+    result = object_goal(
+        grid,
+        target_x=target_x,
+        target_y=target_y,
+        preferred_approach_yaw=math.atan2(target_y - robot_y, target_x - robot_x),
+        minimum_standoff_m=0.19,
+        footprint=_footprint(0.1, 0.1),
+    )
+    assert result is not None
+    _x, y, _yaw = result
+    assert y < 0.5
+
+
+def test_object_goal_falls_back_to_the_far_side_when_the_near_side_is_full():
+    """With no room on the robot's side the far side is still returned."""
+    grid = _grid()
+    data = np.zeros((30, 30), dtype=np.int8)
+    data[:21, :] = 100  # the wall and everything on the robot's side of it
+    grid.data = data.tobytes()
+    target_x, target_y = 0.0, 0.58
+    result = object_goal(
+        grid,
+        target_x=target_x,
+        target_y=target_y,
+        preferred_approach_yaw=math.atan2(target_y + 1.0, target_x),
+        minimum_standoff_m=0.19,
+        footprint=_footprint(0.1, 0.1),
+    )
+    assert result is not None
+    _x, y, _yaw = result
+    assert y > 0.6
+
+
 def test_room_goal_accepts_ros_signed_int8_sequence():
     """ROS OccupancyGrid commonly exposes unknown cells as integer -1 values."""
     grid = _grid(fill=-1)

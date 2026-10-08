@@ -32,7 +32,17 @@ if [[ "$MODE" == "native" ]]; then
 fi
 
 CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
-IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
+# Named no image, prefer the DualMap one where this host has built it.
+#
+# This mirrors capabilities.default_backend() inside the container, which
+# prefers DualMap wherever the image carries a checkout. scripts/build.sh
+# builds that layer unless SCENE_PERCEPTION_BACKEND=concept_graphs.
+DEFAULT_IMG=robonix-scene
+if [[ "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]] \
+   && docker image inspect robonix-scene-dualmap >/dev/null 2>&1; then
+    DEFAULT_IMG=robonix-scene-dualmap
+fi
+IMG="${ROBONIX_SCENE_IMAGE:-$DEFAULT_IMG}"
 RUNTIME_PROTO_TMP=""
 
 cleanup() {
@@ -122,6 +132,41 @@ declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
+# The ConceptGraphs export (SCENE_EXPORT_CG_PICKLE) is written inside the
+# container; mount the directory so the file lands on the host at the same
+# path the caller named.
+if [[ -n "${SCENE_EXPORT_CG_PICKLE:-}" ]]; then
+  mkdir -p "${SCENE_EXPORT_CG_PICKLE}"
+  EXTRA_MOUNTS+=(-v "${SCENE_EXPORT_CG_PICKLE}:${SCENE_EXPORT_CG_PICKLE}")
+fi
+# The `full` perception profile needs weights the image does not bake in
+# (SAM-L, CLIP ViT-H-14). Point SCENE_MODELS_DIR at a host directory holding
+# them; it appears in the container as /opt/models/full.
+# DualMap backend: a host vocabulary file is mounted read-only at the same path so
+# SCENE_DUALMAP_CLASSES means the same thing inside the container.
+if [[ -n "${SCENE_DUALMAP_CLASSES:-}" ]]; then
+  [[ -f "${SCENE_DUALMAP_CLASSES}" ]] || { echo "[scene/start] SCENE_DUALMAP_CLASSES=${SCENE_DUALMAP_CLASSES} is not a file" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_CLASSES}:${SCENE_DUALMAP_CLASSES}:ro")
+fi
+# A DualMap checkout other than the one baked into the image (a patched or
+# newer copy on the host) has to be visible inside the container at the same
+# path the adapter is told to use.
+if [[ -n "${SCENE_DUALMAP_ROOT:-}" ]]; then
+  [[ -d "${SCENE_DUALMAP_ROOT}/utils" ]] || { echo "[scene/start] SCENE_DUALMAP_ROOT=${SCENE_DUALMAP_ROOT} is not a DualMap checkout" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_ROOT}:${SCENE_DUALMAP_ROOT}:ro")
+fi
+if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
+  [[ -d "${SCENE_MODELS_DIR}" ]] || { echo "[scene/start] SCENE_MODELS_DIR=${SCENE_MODELS_DIR} is not a directory" >&2; exit 2; }
+  EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
+fi
+
+# Scribe's log directory: rbnx sets SCRIBE_LOG_DIR and pipes every package's
+# output into `<tag>.log` under it. Without this, scene cannot read back what
+# it just wrote and the web UI's log view has nothing to show. Read-only, and
+# at the same path inside as out so the variable needs no translation.
+if [[ -n "${SCRIBE_LOG_DIR:-}" && -d "${SCRIBE_LOG_DIR}" ]]; then
+    EXTRA_MOUNTS+=(-v "${SCRIBE_LOG_DIR}:${SCRIBE_LOG_DIR}:ro")
+fi
 
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
@@ -168,6 +213,10 @@ if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
     fi
 fi
 
+# SCENE_WEB_HOST below defaults to loopback. The container runs with
+# --network host, so what the service binds is what the host exposes, and the
+# web UI has no authentication while its annotation endpoints write map data.
+# Set SCENE_WEB_HOST=0.0.0.0 to reach it from another machine.
 exec docker run --rm \
     --name "$CT" \
     --entrypoint /scene/docker/entrypoint.sh \
@@ -180,10 +229,29 @@ exec docker run --rm \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
-    -e SCENE_WEB_HOST="${SCENE_WEB_HOST-0.0.0.0}" \
+    -e SCENE_WEB_HOST="${SCENE_WEB_HOST-127.0.0.1}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
+    -e SCRIBE_LOG_DIR="${SCRIBE_LOG_DIR:-}" \
+    -e SCENE_OBJECT_VIEWS_DIR="${SCENE_OBJECT_VIEWS_DIR:-/data/robonix/scene_object_views}" \
+    -e SCENE_OBJECT_VIEWS_MAX="${SCENE_OBJECT_VIEWS_MAX:-}" \
+    -e SCENE_CAPTION_LANG="${SCENE_CAPTION_LANG:-zh}" \
+    -e SCENE_PROFILE="${SCENE_PROFILE:-}" \
+    -e SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-}" \
+    -e SCENE_DUALMAP_CLASSES="${SCENE_DUALMAP_CLASSES:-}" \
+    -e SCENE_DUALMAP_ROOT="${SCENE_DUALMAP_ROOT:-}" \
+    -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
     -e SCENE_CG_OBJ_MIN_POINTS="${SCENE_CG_OBJ_MIN_POINTS:-}" \
+    -e SCENE_CG_MIN_POINTS="${SCENE_CG_MIN_POINTS:-}" \
+    -e SCENE_CG_FLOOR_Z_M="${SCENE_CG_FLOOR_Z_M:-}" \
+    -e SCENE_CG_PER_DETECTION_DBSCAN="${SCENE_CG_PER_DETECTION_DBSCAN:-}" \
+    -e SCENE_CG_OBJ_MAX_POINTS="${SCENE_CG_OBJ_MAX_POINTS:-}" \
+    -e SCENE_CG_MERGE_THRESHOLD="${SCENE_CG_MERGE_THRESHOLD:-}" \
+    -e SCENE_CG_VOXEL_SIZE="${SCENE_CG_VOXEL_SIZE:-}" \
+    -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
+    -e SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-}" \
+    -e SCENE_DETECT_PERIOD_S="${SCENE_DETECT_PERIOD_S:-}" \
+    -e SCENE_DETECT_CONFIDENCE="${SCENE_DETECT_CONFIDENCE:-}" \
     -e SCENE_CG_MAX_MERGE_DIST_M="${SCENE_CG_MAX_MERGE_DIST_M:-}" \
     -e SCENE_CG_CROSS_CLASS_CENTROID_MAX_M="${SCENE_CG_CROSS_CLASS_CENTROID_MAX_M:-}" \
     -e SCENE_CG_CROSS_CLASS_IOU_THRESH="${SCENE_CG_CROSS_CLASS_IOU_THRESH:-}" \
@@ -200,7 +268,6 @@ exec docker run --rm \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
-    -e SCENE_GRAPH_CAPTION_ENABLED="${SCENE_GRAPH_CAPTION_ENABLED:-true}" \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
     -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \
@@ -211,6 +278,10 @@ exec docker run --rm \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
+    -e SCENE_CAMERA_FRAME="${SCENE_CAMERA_FRAME:-}" \
+    -e SCENE_BASE_FRAME="${SCENE_BASE_FRAME:-}" \
+    -e SCENE_EXPORT_CG_PICKLE="${SCENE_EXPORT_CG_PICKLE:-}" \
+    -e SCENE_EXPORT_CG_EXP="${SCENE_EXPORT_CG_EXP:-}" \
     ${MAP_ID_ARGS[@]+"${MAP_ID_ARGS[@]}"} \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \

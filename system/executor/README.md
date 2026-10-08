@@ -107,8 +107,9 @@ Under `robonix/system/executor/builtin/`:
 
 - `read_file`, `write_file`, `patch_file`, `list_dir`, `run_command`: file and
   shell operations rooted at `ROBONIX_WORKSPACE` (default: current directory).
-- `read_capability_doc`: fetch a provider's registered `CAPABILITY.md` from Atlas
-  by `provider_id`.
+- `read_capability_doc`: read a registered provider's `CAPABILITY.md` followed
+  by the full descriptions of its capabilities. Args: `provider_id` (required).
+  Providers without a `CAPABILITY.md` still return their capability descriptions.
 - `cancel_plan`, `get_all_plans`, `get_plan_status`: compatibility plan controls;
   Pilot uses `control_plan` and `list_active_plans` directly.
 

@@ -125,6 +125,7 @@ mem: Any | None = None
 MEMORY_DIR: str | None = None
 MILVUS_URI: str | None = None
 _APPLIED_CONFIG: tuple[str, str, int] | None = None
+_reopen: Any | None = None  # builds a fresh backend on the configured store
 
 
 def _nonempty_string(cfg: dict, key: str, env_key: str, default: str) -> str:
@@ -175,6 +176,28 @@ def _require_backend() -> Any:
     return mem
 
 
+def _store_gone(exc: Exception) -> bool:
+    """milvus-lite serves the store from a child process; once that process has
+    exited, every call fails with one of these until the client is rebuilt."""
+    text = str(exc)
+    return type(exc).__name__ == "MilvusException" and (
+        "closed channel" in text or "Fail connecting to server" in text)
+
+
+async def _call(op):
+    """Run `op(backend)`, reopening the store once if its server has gone."""
+    global mem
+    try:
+        return await op(_require_backend())
+    except Exception as exc:
+        if _reopen is None or not _store_gone(exc):
+            raise
+        log.warning("milvus-lite server gone (%s); reopening the store", exc)
+        mem = _reopen()
+        await mem.index()
+        return await op(mem)
+
+
 @memory.mcp("robonix/service/memory/search")
 async def search(msg: String) -> String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
@@ -184,7 +207,7 @@ async def search(msg: String) -> String:
     log.info("search (%d chars)", len(msg.data))
     log.debug("search query: %r", msg.data[:80])
     try:
-        results = await _require_backend().search(msg.data, top_k=2)
+        results = await _call(lambda b: b.search(msg.data, top_k=2))
     except Exception as e:
         log.warning("search failed (returning empty): %s: %s", type(e).__name__, e)
         return String(data="No relevant memories found (search unavailable).")
@@ -198,7 +221,7 @@ async def search(msg: String) -> String:
 async def save(msg: String) -> String:
     """Save an important fact, user preference, or decision to long-term memory.
     Contract: robonix/service/memory/save."""
-    backend = _require_backend()
+    _require_backend()
     if MEMORY_DIR is None:
         raise RuntimeError("memory directory is not initialized")
     p = Path(MEMORY_DIR) / f"{date.today()}_notes.md"
@@ -207,7 +230,7 @@ async def save(msg: String) -> String:
     with open(p, "a") as f:
         f.write(f"\n{msg.data}\n")
     try:
-        await backend.index()
+        await _call(lambda b: b.index())
     except Exception as e:
         log.warning("re-index after save failed: %s: %s", type(e).__name__, e)
     return String(data="Memory saved and indexed.")
@@ -249,7 +272,7 @@ async def compact(msg: Empty) -> String:
 @memory.on_init
 def init(cfg: dict):
     """Build and index the configured backend before the provider can activate."""
-    global mem, MEMORY_DIR, MILVUS_URI, _APPLIED_CONFIG
+    global mem, MEMORY_DIR, MILVUS_URI, _APPLIED_CONFIG, _reopen
     try:
         resolved = _resolve_config(cfg)
         if mem is not None:
@@ -272,15 +295,16 @@ def init(cfg: dict):
         log.info("phase 3/4: constructing MemSearch (embedding=onnx, milvus_lite)")
         log.info("  memory_dir = %s", memory_dir)
         log.info("  milvus_uri = %s", milvus_uri)
-        backend = MemSearch(
-            paths=[memory_dir],
-            embedding_provider="onnx",
-            milvus_uri=milvus_uri,
-        )
+        def reopen():
+            return MemSearch(paths=[memory_dir], embedding_provider="onnx",
+                             milvus_uri=milvus_uri)
+
+        backend = reopen()
         log.info("phase 4/4: building initial index")
         asyncio.run(backend.index())
 
         mem = backend
+        _reopen = reopen
         MEMORY_DIR = memory_dir
         MILVUS_URI = milvus_uri
         _APPLIED_CONFIG = resolved
@@ -288,6 +312,7 @@ def init(cfg: dict):
         return Ok()
     except Exception as exc:
         mem = None
+        _reopen = None
         MEMORY_DIR = None
         MILVUS_URI = None
         _APPLIED_CONFIG = None

@@ -99,6 +99,12 @@ if os.path.isfile(png):
     res["preview_width"], res["preview_height"] = png_size(png)
 if os.path.isfile(meta):
     res["meta"] = read_meta(meta)
+# Maps saved before meta.yaml named the engine are RTAB-Map's.
+res["engine"] = res.get("meta", {}).get("engine") or "rtabmap"
+graph = [os.path.join(base, n) for n in ("posegraph.posegraph", "posegraph.data")]
+if res["engine"] == "slam_toolbox":
+    res["graph_exists"] = all(os.path.isfile(p) for p in graph)
+    res["artifact_size"] = sum(os.path.getsize(p) for p in graph if os.path.isfile(p))
 if os.path.isfile(db):
     res["artifact_size"] = os.path.getsize(db)
     con = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=30.0)
@@ -279,13 +285,17 @@ def main() -> int:
     )
     print("artifact", json.dumps(artifact, ensure_ascii=False, sort_keys=True))
     check("artifact_directory_exists", bool(artifact.get("exists")), str(artifact.get("base")), results)
-    check("artifact_sqlite_exists", bool(artifact.get("db_exists")), str(artifact.get("files")), results)
-    check("artifact_quick_check_ok", artifact.get("quick_check") == "ok", str(artifact.get("quick_check")), results)
+    if artifact.get("engine") == "slam_toolbox":
+        check("artifact_pose_graph_exists", bool(artifact.get("graph_exists")),
+              str(artifact.get("files")), results)
+    else:
+        check("artifact_sqlite_exists", bool(artifact.get("db_exists")), str(artifact.get("files")), results)
+        check("artifact_quick_check_ok", artifact.get("quick_check") == "ok", str(artifact.get("quick_check")), results)
+        counts = artifact.get("counts") if isinstance(artifact.get("counts"), dict) else {}
+        check("artifact_nodes_nontrivial", int(counts.get("Node") or 0) >= args.min_nodes,
+              str(counts), results)
     check("artifact_size_nontrivial", int(artifact.get("artifact_size") or 0) >= args.min_artifact_bytes,
           str(artifact.get("artifact_size")), results)
-    counts = artifact.get("counts") if isinstance(artifact.get("counts"), dict) else {}
-    check("artifact_nodes_nontrivial", int(counts.get("Node") or 0) >= args.min_nodes,
-          str(counts), results)
     check("preview_exists", bool(artifact.get("preview_exists")), str(artifact.get("files")), results)
 
     if args.export_preview and artifact.get("preview_exists"):
@@ -368,6 +378,18 @@ def main() -> int:
                   results)
 
     if args.delete_after:
+        # The map in use cannot be deleted. Saving the session under another
+        # name moves it off this one, which the runner's cleanup then removes.
+        try:
+            refused = http_json("POST", scene + "/api/maps/delete",
+                                {"map_id": args.map_id}, timeout=60.0)
+        except RuntimeError as e:
+            refused = {"ok": False, "detail": str(e)}
+        check("delete_in_use_refused", "HTTP 409" in str(refused.get("detail")),
+              str(refused), results)
+        moved = http_json("POST", scene + "/api/maps/save",
+                          {"map_id": args.map_id + "-after"}, timeout=args.timeout)
+        check("save_elsewhere_ok", bool(moved.get("ok")), str(moved.get("detail", "")), results)
         deleted = http_json("POST", scene + "/api/maps/delete",
                             {"map_id": args.map_id}, timeout=60.0)
         print("delete_response", json.dumps(deleted, ensure_ascii=False, sort_keys=True))

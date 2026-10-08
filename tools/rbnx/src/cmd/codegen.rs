@@ -123,6 +123,9 @@ pub async fn execute(
     let ros2_idl = out_root.join("ros2_idl");
     // Per-invocation staging for the system-wide .proto files. No commits;
     // grpc_tools.protoc reads from here in step 3.
+    // Keep codegen's own scribe log with the other build artefacts rather than
+    // letting it default to `./logs` inside the package checkout.
+    let codegen_log_dir = rbnx_build.join("logs");
     let proto_staging = rbnx_build.join("proto-staging");
 
     if clean {
@@ -160,8 +163,12 @@ pub async fn execute(
     //    <pkg>/capabilities/lib. --contracts: global capabilities tree
     //    (per-package contracts merging through codegen is a follow-up).
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    let mut proto_cmd =
-        build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+    let mut proto_cmd = build_codegen_cmd(
+        direct_codegen.as_ref(),
+        cargo_bin.as_deref(),
+        &rust_root,
+        &codegen_log_dir,
+    );
     proto_cmd
         .args(["--lang", "proto", "-I"])
         .arg(&interfaces_lib);
@@ -179,8 +186,12 @@ pub async fn execute(
     if mcp {
         println!("{} robonix-codegen --lang mcp ...", "[codegen]".bold());
         std::fs::create_dir_all(&mcp_types).ok();
-        let mut mcp_cmd =
-            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        let mut mcp_cmd = build_codegen_cmd(
+            direct_codegen.as_ref(),
+            cargo_bin.as_deref(),
+            &rust_root,
+            &codegen_log_dir,
+        );
         mcp_cmd.args(["--lang", "mcp", "-I"]).arg(&interfaces_lib);
         // Include per-package <pkg>/capabilities/lib too — same merge
         // semantics as the proto step, so per-pkg srv files (e.g.
@@ -202,9 +213,27 @@ pub async fn execute(
     // Probe for both python3 and the module up front — the historical
     // silent-ignore on failure left packages with "0 generated Servicers"
     // at runtime and a debug session per missing dep.
-    let python_selection = select_codegen_python(python)?;
+    let selected = select_codegen_python(python)?;
+    // Nothing chosen and the system python3 cannot generate stubs -- the
+    // case on a freshly installed machine, which has no grpcio-tools and
+    // often no pip. A pinned toolchain is prepared once instead of every
+    // package's build script having to know how.
+    let (python_selection, python_info) = match probe_python_grpc_tools(&selected.path) {
+        Ok(info) => (selected, info),
+        Err(_) if selected.source == "default" => {
+            let path = managed_codegen_python()?;
+            let info = probe_python_grpc_tools(&path)?;
+            (
+                PythonSelection {
+                    path,
+                    source: "managed".to_string(),
+                },
+                info,
+            )
+        }
+        Err(e) => return Err(e),
+    };
     let python = &python_selection.path;
-    let python_info = probe_python_grpc_tools(python)?;
     println!(
         "{} Python: {} ({})",
         "[codegen]".bold(),
@@ -270,8 +299,12 @@ pub async fn execute(
     //     container) and start.sh sources <ros2_idl>/install/setup.bash.
     if ros2 {
         println!("{} robonix-codegen --lang ros2 ...", "[codegen]".bold());
-        let mut ros2_cmd =
-            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        let mut ros2_cmd = build_codegen_cmd(
+            direct_codegen.as_ref(),
+            cargo_bin.as_deref(),
+            &rust_root,
+            &codegen_log_dir,
+        );
         ros2_cmd.args(["--lang", "ros2", "-I"]).arg(&interfaces_lib);
         if let Some(p) = pkg_caps_lib.as_ref() {
             ros2_cmd.arg("-I").arg(p);
@@ -434,6 +467,71 @@ fn select_codegen_python(cli: Option<PathBuf>) -> Result<PythonSelection> {
         );
     }
     Ok(selection)
+}
+
+// The managed toolchain's versions: the ones the Webots containers import
+// (examples/webots/scripts/run_python_codegen.sh), since stubs from a newer
+// protobuf major do not load in an older runtime.
+const MANAGED_PROTOBUF: &str = "6.33.6";
+const MANAGED_GRPC_TOOLS: &str = "1.76.0";
+const MANAGED_GRPCIO: &str = "1.80.0";
+
+/// A Python with the pinned codegen toolchain, under the robonix home,
+/// created with uv on first use and reused after that.
+fn managed_codegen_python() -> Result<PathBuf> {
+    let home = Config::robonix_home_dir()?;
+    let venv = home.join("codegen-venv");
+    let python = venv.join("bin").join("python");
+    if python.is_file() && probe_python_grpc_tools(&python).is_ok() {
+        return Ok(python);
+    }
+    println!(
+        "{} preparing grpcio-tools {MANAGED_GRPC_TOOLS} in {}",
+        "[codegen]".bold(),
+        venv.display()
+    );
+    std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
+    // Built aside and moved into place, so packages generating in parallel
+    // never see a half-installed environment.
+    let staging = home.join(format!("codegen-venv.{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    let uv = |args: &[&str]| -> Result<()> {
+        let status = Command::new("uv").args(args).status().with_context(|| {
+            "`uv` is needed to prepare the codegen Python; install it from \
+             https://docs.astral.sh/uv/ or set RBNX_CODEGEN_PYTHON"
+        })?;
+        anyhow::ensure!(status.success(), "uv {} failed: {status}", args.join(" "));
+        Ok(())
+    };
+    let staging_python = staging.join("bin").join("python");
+    let installed = uv(&["venv", "--quiet", &staging.to_string_lossy()]).and_then(|()| {
+        uv(&[
+            "pip",
+            "install",
+            "--quiet",
+            "--python",
+            &staging_python.to_string_lossy(),
+            &format!("protobuf=={MANAGED_PROTOBUF}"),
+            &format!("grpcio-tools=={MANAGED_GRPC_TOOLS}"),
+            &format!("grpcio=={MANAGED_GRPCIO}"),
+        ])
+    });
+    if let Err(error) = installed {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if std::fs::rename(&staging, &venv).is_err() {
+        // Another package finished first, or an old environment is in the
+        // way. Keep a working one; replace a broken one.
+        if python.is_file() && probe_python_grpc_tools(&python).is_ok() {
+            let _ = std::fs::remove_dir_all(&staging);
+        } else {
+            let _ = std::fs::remove_dir_all(&venv);
+            std::fs::rename(&staging, &venv)
+                .with_context(|| format!("move codegen Python into {}", venv.display()))?;
+        }
+    }
+    Ok(python)
 }
 
 fn probe_python_grpc_tools(python: &Path) -> Result<PythonInfo> {
@@ -684,8 +782,9 @@ pub(crate) fn build_codegen_cmd(
     direct: Option<&PathBuf>,
     cargo: Option<&str>,
     rust_root: &Path,
+    log_dir: &Path,
 ) -> Command {
-    if let Some(bin) = direct {
+    let mut cmd = if let Some(bin) = direct {
         Command::new(bin)
     } else {
         let cargo = cargo.expect("either direct codegen bin or cargo bin must be set");
@@ -694,7 +793,15 @@ pub(crate) fn build_codegen_cmd(
             .arg(rust_root.join("Cargo.toml"))
             .arg("--");
         cmd
-    }
+    };
+    // robonix-codegen logs through scribe, which falls back to `./logs` when
+    // SCRIBE_LOG_DIR is unset. Run from a package directory that put an
+    // untracked `logs/codegen.log` inside the checkout, next to the source
+    // rather than under `rbnx-build/` with every other build artefact, where
+    // it then showed up as a local edit in `git status`. Point it at the same
+    // place run_package.rs already uses.
+    cmd.env("SCRIBE_LOG_DIR", log_dir);
+    cmd
 }
 
 #[cfg(test)]

@@ -39,6 +39,7 @@ use robonix_cli::launch::{
 };
 use robonix_cli::output;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -73,14 +74,7 @@ const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
 
-/// Single source of truth for which `system:` keys are shipped binaries
-/// rather than packages under `<robonix_source>/system/<key>/`.
-pub(super) const SYSTEM_BUILTINS: &[&str] =
-    &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
-
-pub(super) fn is_builtin_system(name: &str) -> bool {
-    SYSTEM_BUILTINS.contains(&name)
-}
+pub(super) use robonix_cli::manifest::is_builtin_system;
 
 fn driver_init_timeout() -> Duration {
     std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
@@ -182,7 +176,107 @@ fn resolve_entry_path(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed in {}", dir.display());
+    }
+
+    #[test]
+    fn the_lockfile_records_the_commit_and_whether_the_tree_was_edited() {
+        // A deployment pins packages by branch, so the same manifest is not the
+        // same code twice, and a cache cloned once is reused untouched. One was
+        // found three commits behind its branch with uncommitted edits on top
+        // and nothing about the run said so. The lockfile is what says so.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!("rbnx-lock-{}-{nonce}", std::process::id()));
+        let pkg = temp.join("pkg");
+        std::fs::create_dir_all(&pkg).expect("package directory");
+        git(&pkg, &["init", "-q"]);
+        git(&pkg, &["config", "user.email", "test@example.invalid"]);
+        git(&pkg, &["config", "user.name", "test"]);
+        std::fs::write(pkg.join("f"), "one").expect("file");
+        git(&pkg, &["add", "."]);
+        git(&pkg, &["commit", "-qm", "one"]);
+
+        let deploy: DeployManifest =
+            serde_yaml::from_str("primitive:\n  - name: sample\n    path: pkg\n    branch: main\n")
+                .expect("deployment manifest");
+        let cache_root = temp.join("rbnx-boot/cache");
+        let lock = temp.join("rbnx-boot/deployment.lock");
+
+        write_lockfile(&deploy, &cache_root, &temp);
+        let clean = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(clean.contains("version: 1"), "{clean}");
+        assert!(clean.contains("name: sample"), "{clean}");
+        // what was asked for and what it resolved to are kept apart
+        assert!(clean.contains("original:"), "{clean}");
+        assert!(clean.contains("branch: main"), "{clean}");
+        assert!(clean.contains("locked:"), "{clean}");
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&pkg)
+            .output()
+            .expect("git rev-parse");
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert!(clean.contains(&format!("commit: {head}")), "{clean}");
+        assert!(
+            !clean.contains("dirty"),
+            "a clean checkout must not be flagged: {clean}"
+        );
+
+        // Deterministic: running again with nothing changed must not rewrite it.
+        let before = std::fs::metadata(&lock)
+            .expect("lock metadata")
+            .modified()
+            .ok();
+        write_lockfile(&deploy, &cache_root, &temp);
+        assert_eq!(std::fs::read_to_string(&lock).expect("lockfile"), clean);
+        assert_eq!(
+            std::fs::metadata(&lock)
+                .expect("lock metadata")
+                .modified()
+                .ok(),
+            before,
+            "an unchanged deployment must not rewrite its lock"
+        );
+
+        // An edited checkout is the case the branch name cannot describe. A
+        // flag alone cannot tell two different edits apart, so it carries a
+        // digest of them.
+        std::fs::write(pkg.join("f"), "two").expect("edit");
+        write_lockfile(&deploy, &cache_root, &temp);
+        let dirty = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(dirty.contains("dirty: true"), "{dirty}");
+        assert!(dirty.contains("dirty_digest: sha256:"), "{dirty}");
+
+        let first_digest = dirty
+            .lines()
+            .find(|l| l.contains("dirty_digest"))
+            .expect("digest line")
+            .trim()
+            .to_string();
+        std::fs::write(pkg.join("f"), "three").expect("second edit");
+        write_lockfile(&deploy, &cache_root, &temp);
+        let dirty2 = std::fs::read_to_string(&lock).expect("lockfile");
+        assert!(
+            !dirty2.contains(&first_digest),
+            "a different edit must not share a digest: {dirty2}"
+        );
+
+        std::fs::remove_dir_all(&temp).expect("remove test directory");
+    }
 
     #[test]
     fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
@@ -350,6 +444,26 @@ soma_endpoint: 127.0.0.1:50091
         );
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn pilot_context_preflight_allows_learning_unknown_and_marks_manual_override() {
+        let known = vec![
+            "--vlm-upstream".into(),
+            "https://api.example/v1".into(),
+            "--vlm-api-key".into(),
+            "test-key".into(),
+            "--vlm-model".into(),
+            "gpt-4o".into(),
+        ];
+        assert!(require_system_args("pilot", &known).is_ok());
+
+        let mut unknown = known.clone();
+        unknown[5] = "private-local-planner".into();
+        assert!(require_system_args("pilot", &unknown).is_ok());
+        unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
+        assert!(require_system_args("pilot", &unknown).is_ok());
+        assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -460,6 +574,161 @@ fn check_prerequisites(
     Ok(())
 }
 
+/// One package as it was actually found on disk when the deployment ran.
+struct ResolvedPackage {
+    name: String,
+    /// What the manifest asked for.
+    url: Option<String>,
+    path: Option<String>,
+    branch: Option<String>,
+    /// What that resolved to.
+    commit: Option<String>,
+    dirty_digest: Option<String>,
+}
+
+/// `git rev-parse HEAD`, and a digest of the uncommitted changes if any.
+///
+/// Both are read from the checkout, not from the manifest: a manifest only ever
+/// names a branch, and a branch is not a version. Returns `(None, None)` for
+/// anything that is not a git checkout — a `path:` entry into the source tree
+/// is versioned by whatever contains it.
+///
+/// A dirty tree gets a digest rather than a bare flag. `dirty: true` says the
+/// commit is not the whole story; a digest says *which* not-the-whole-story,
+/// so two machines claiming the same lock can be compared. This is the same
+/// device the project's own reproducibility record uses for its overlays.
+fn git_state(dir: &Path) -> (Option<String>, Option<String>) {
+    let run = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let head = run(&["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if head.is_none() {
+        return (None, None);
+    }
+    // Tracked edits and the list of untracked files, together: either alone
+    // misses a way the checkout can differ from its commit.
+    let status = run(&["status", "--porcelain"]).unwrap_or_default();
+    if status.trim().is_empty() {
+        return (head, None);
+    }
+    let diff = run(&["diff", "HEAD"]).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(status.as_bytes());
+    hasher.update(diff.as_bytes());
+    (head, Some(format!("sha256:{:x}", hasher.finalize())))
+}
+
+/// Write `rbnx-boot/deployment.lock`: what this run actually used.
+///
+/// Shaped after the lockfiles that had to solve this already. From
+/// `flake.lock`, the split between what was asked for and what it resolved to:
+/// a branch is the request, a commit is the answer, and conflating them is the
+/// bug this file exists to expose. From `Cargo.lock` and `package-lock.json`, a
+/// format version, so the file can change without a reader guessing. From all
+/// three, determinism: entries sorted, no timestamp, so the file changes when
+/// the deployment changes and not when it merely ran again — a lock that
+/// rewrites itself on every boot is one nobody reads a diff of.
+///
+/// Written, not enforced. A deployment was found three commits behind its
+/// branch with uncommitted edits on top and no artifact of the run said so.
+/// This is that artifact; refusing to boot on a moved branch is a separate
+/// decision that needs a fetch and a policy.
+fn write_lockfile(deploy: &DeployManifest, cache_root: &Path, manifest_dir: &Path) {
+    let mut rows: Vec<ResolvedPackage> = Vec::new();
+    for entry in deploy
+        .primitive
+        .iter()
+        .chain(deploy.service.iter())
+        .chain(deploy.skill.iter())
+    {
+        let Ok(pkg_path) = resolve_entry_path(entry, cache_root, manifest_dir) else {
+            continue;
+        };
+        if !pkg_path.exists() {
+            continue;
+        }
+        let (commit, dirty_digest) = git_state(&pkg_path);
+        rows.push(ResolvedPackage {
+            name: if entry.name.is_empty() {
+                pkg_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(unnamed)")
+                    .to_string()
+            } else {
+                entry.name.clone()
+            },
+            url: entry.url.clone(),
+            path: entry.path.clone(),
+            branch: entry.branch.clone(),
+            commit,
+            dirty_digest,
+        });
+    }
+    // Deterministic order: the file is meant to be diffed.
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for row in rows.iter().filter(|r| r.dirty_digest.is_some()) {
+        output::warning(&format!(
+            "{}: the cached checkout has uncommitted changes — this run is not \
+             reproducible from its branch alone",
+            row.name
+        ));
+    }
+
+    let mut out = String::from(
+        "# Generated by `rbnx boot`. Do not edit.\n\
+         #\n\
+         # `original` is what the manifest asked for, `locked` is what that\n\
+         # resolved to on this machine. A manifest pins packages by branch and a\n\
+         # cache is cloned once, so the two are not the same thing and only this\n\
+         # file records the second.\n\
+         version: 1\n\
+         packages:\n",
+    );
+    for row in &rows {
+        out.push_str(&format!("  - name: {}\n    original:\n", row.name));
+        if let Some(u) = &row.url {
+            out.push_str(&format!("      url: {u}\n"));
+        }
+        if let Some(p) = &row.path {
+            out.push_str(&format!("      path: {p}\n"));
+        }
+        if let Some(b) = &row.branch {
+            out.push_str(&format!("      branch: {b}\n"));
+        }
+        out.push_str("    locked:\n");
+        match &row.commit {
+            Some(c) => out.push_str(&format!("      commit: {c}\n")),
+            None => out.push_str("      commit: null    # not a git checkout\n"),
+        }
+        if let Some(d) = &row.dirty_digest {
+            out.push_str(&format!("      dirty: true\n      dirty_digest: {d}\n"));
+        }
+    }
+
+    let path = manifest_dir.join("rbnx-boot").join("deployment.lock");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Only rewrite when something changed, so the file's mtime means something
+    // and a boot that changed nothing leaves no diff.
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(out.as_str()) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, out) {
+        output::warning(&format!("could not write {}: {e}", path.display()));
+    }
+}
+
 /// Apply top-level deployment variables, then expand every scalar in the
 /// manifest. Build and boot share this preparation path so package locations,
 /// target-manifest selectors, system settings, and package config all resolve
@@ -468,6 +737,10 @@ pub(super) fn prepare_manifest(
     root: serde_yaml::Value,
     robonix_source_path: Option<&Path>,
 ) -> Result<serde_yaml::Value> {
+    let mut root = root;
+    for entry in robonix_cli::manifest::drop_disabled(&mut root)? {
+        output::boot_skip(&entry, "disabled");
+    }
     let prepared = robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)?;
     robonix_cli::manifest::validate_deployment_instance_names(&prepared)?;
     Ok(prepared)
@@ -625,6 +898,7 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
 
 async fn spawn_system_binary(
     log_dir: &Path,
+    session_dir: &Path,
     name: &str,
     bin: &str,
     args: &[String],
@@ -641,6 +915,7 @@ async fn spawn_system_binary(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("SCRIBE_LOG_DIR", log_dir)
+        .env("ROBONIX_SESSION_DIR", session_dir)
         .process_group(0);
     let mut child = cmd.spawn().with_context(|| {
         format!(
@@ -972,6 +1247,16 @@ async fn spawn_package(
     if let Some(m) = entry.manifest.as_deref() {
         cmd.arg("--manifest").arg(m);
     }
+    // From this spawn to the return below there must be no `.await`. The
+    // caller pushes the returned process into `children` in the same poll,
+    // and a boot interrupted by SIGINT/SIGTERM drops the bring-up future only
+    // at an await point; so a process exists only once it is in `children`,
+    // where the interrupted-boot teardown stops it. An await added here would
+    // reopen the gap this closes, and nothing would flag it. A Drop guard on
+    // `Spawned` that kills its process group would not depend on this. If
+    // rbnx itself is killed (SIGKILL) or crashes, no teardown runs at all and
+    // the package outlives it; that needs the child to watch its parent
+    // (PR_SET_PDEATHSIG), which this does not do.
     let mut child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn package {name} via `{} start`",
@@ -1115,6 +1400,11 @@ pub async fn execute(
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
+    // Session state (Pilot transcripts) outlives the logs: boot clears old
+    // log files, and `rbnx clean` keeps this directory unless asked.
+    let session_dir = std::env::var_os("ROBONIX_SESSION_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("sessions"));
     // The CLI prepares and clears this directory before Scribe's first log
     // call. Do not remove files here: Scribe may already hold open handles.
     std::fs::create_dir_all(&log_dir)
@@ -1203,6 +1493,10 @@ pub async fn execute(
         &manifest_dir,
         config.robonix_source_path.as_deref(),
     )?;
+
+    // Record what this run is about to use, after the caches are settled and
+    // before anything is spawned.
+    write_lockfile(&deploy, &cache_root, &manifest_dir);
 
     // Install the SIGINT/SIGTERM handlers BEFORE bringup begins, not after.
     // Bringup takes many seconds (git, spawns, waiting for ACTIVE); a Ctrl-C
@@ -1343,7 +1637,7 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, name, bin, &args).await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args).await?
                 };
                 children.push(sp);
                 persist_state(
@@ -1488,9 +1782,9 @@ pub async fn execute(
                     config: runtime_config,
                     manifest: manifest_override,
                 };
-                match spawn_and_init("system", &entry, &spawn_env, &mut atlas).await {
-                    Ok(sp) => {
-                        children.push(sp);
+                match spawn_and_init("system", &entry, &spawn_env, &mut atlas, &mut children).await
+                {
+                    Ok(()) => {
                         persist_state(
                             &state_path,
                             &manifest_path,
@@ -1520,9 +1814,8 @@ pub async fn execute(
             output::boot_section("service");
         }
         for e in &deploy.service {
-            match spawn_and_init("service", e, &spawn_env, &mut atlas).await {
-                Ok(sp) => {
-                    children.push(sp);
+            match spawn_and_init("service", e, &spawn_env, &mut atlas, &mut children).await {
+                Ok(()) => {
                     persist_state(
                         &state_path,
                         &manifest_path,
@@ -1796,22 +2089,23 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
             _ => missing.push(label),
         }
     }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !missing.is_empty() {
+        return Err(format!(
             "missing required pilot config: {}. Set in manifest under \
              system: pilot: vlm: {{...}} or via env (source your .zshrc / \
              inline-prepend VLM_BASE_URL=… VLM_API_KEY=… VLM_MODEL=…)",
             missing.join(", "),
-        ))
+        ));
     }
+
+    Ok(())
 }
 
 fn system_boot_detail(name: &str, args: &[String]) -> String {
     let mut listen: Option<&str> = None;
     let mut vlm_upstream: Option<&str> = None;
     let mut vlm_model: Option<&str> = None;
+    let mut context_window_tokens: Option<&str> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -1827,6 +2121,10 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             }
             ("--vlm-model", Some(v)) => {
                 vlm_model = Some(v);
+                i += 2;
+            }
+            ("--vlm-context-window-tokens", Some(v)) => {
+                context_window_tokens = Some(v);
                 i += 2;
             }
             _ => {
@@ -1848,7 +2146,13 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             })
             .unwrap_or("?");
         let model = vlm_model.unwrap_or("?");
-        format!("{port}  vlm={model}@{host}")
+        let capacity = if let Some(tokens) = context_window_tokens {
+            format!("context={tokens} (manual)")
+        } else {
+            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
+                .to_string()
+        };
+        format!("{port}  vlm={model}@{host}  {capacity}")
     } else {
         port
     }
@@ -1935,6 +2239,13 @@ fn system_cli_args(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     };
+    let nested_tokens = |outer: &str, inner: &str| -> Option<String> {
+        map.and_then(|m| m.get(serde_yaml::Value::String(outer.into())))
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| m.get(serde_yaml::Value::String(inner.into())))
+            .and_then(|v| v.as_u64())
+            .map(|tokens| tokens.to_string())
+    };
     let push_pair = |out: &mut Vec<String>, flag: &str, val: Option<String>| {
         if let Some(v) = val {
             out.push(flag.into());
@@ -1976,6 +2287,11 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
             push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
+            push_pair(
+                &mut out,
+                "--vlm-context-window-tokens",
+                nested_tokens("vlm", "context_window_tokens"),
+            );
         }
         "liaison" => {
             push_pair(&mut out, "--listen", s("listen"));
@@ -2034,36 +2350,54 @@ fn system_cli_args(
 /// INIT/ACTIVATE and receives the entry's config. Omission and explicit shared
 /// selections stay shared-only; only an exact namespace legacy selection may
 /// accept an upgraded shared runtime Driver.
+/// Spawn one package and bring it to INACTIVE (skills) or ACTIVE. The process
+/// joins `children` as soon as it exists, so a Ctrl-C that cancels this future
+/// mid-way leaves it where the interrupted-boot teardown stops it; a failure
+/// stops it here and takes it back out.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
     spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
-) -> Result<Spawned> {
+    children: &mut Vec<Spawned>,
+) -> Result<()> {
     let before = snapshot_provider_ids(atlas)
         .await
         .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?;
 
-    let mut sp = spawn_package(component, entry, spawn_env).await?;
+    children.push(spawn_package(component, entry, spawn_env).await?);
+    let sp = children.last_mut().expect("just pushed");
+    let result = init_spawned(component, entry, spawn_env, atlas, &before, sp).await;
+    if result.is_err() {
+        children.pop();
+    }
+    result
+}
+
+async fn init_spawned(
+    component: &str,
+    entry: &PackageEntry,
+    spawn_env: &PackageSpawnEnv<'_>,
+    atlas: &mut AtlasClient,
+    before: &ProviderRegistrationSnapshot,
+    sp: &mut Spawned,
+) -> Result<()> {
     let pkg_label = sp.name.clone();
 
     // One package = one provider. Atlas may reuse a stable provider id on
     // takeover, so registration_id (not id alone) correlates this spawn.
 
-    // Once the wrapper is up, every error path below must terminate the
-    // PGID before bailing — otherwise `?` returns the spawned process to
-    // a dead Spawned (which itself has no killing Drop), the caller's
-    // teardown loop never sees it (`children.push(sp)` only runs after
-    // this fn succeeds), and the orphan keeps holding whatever the
-    // package opened (e.g. memsearch's milvus DB lock, executor's gRPC
-    // port, …). Give the provider's SIGTERM handler time to run
-    // `on_shutdown` before SIGKILL fallback; providers may own ROS children
-    // in their own process groups that only the handler knows about.
+    // Every error path below terminates the PGID before returning: the caller
+    // drops this record on error, and the process would otherwise keep what
+    // the package opened (memsearch's milvus DB lock, executor's gRPC port).
+    // The provider's SIGTERM handler gets time to run `on_shutdown` before the
+    // SIGKILL fallback; it may own ROS children in process groups only it
+    // knows about.
     let pgid = sp.pgid;
 
     let registration = match wait_for_registration(
         atlas,
-        &before,
+        before,
         &entry.name,
         &pkg_label,
         component,
@@ -2174,7 +2508,7 @@ async fn spawn_and_init(
                 init_state.to_uppercase()
             ),
         );
-        return Ok(sp);
+        return Ok(());
     }
 
     let activate_state = match with_spinner(
@@ -2205,7 +2539,7 @@ async fn spawn_and_init(
     let _ = init_state; // intermediate, only kept for the assertion below
     output::boot_ok(display_label, &activate_state.to_uppercase());
 
-    Ok(sp)
+    Ok(())
 }
 
 /// Run `fut` while animating the boot spinner so the user sees the

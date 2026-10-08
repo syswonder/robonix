@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Resolve the Scene debug UI bind address.
+"""Resolve the Scene web UI bind address.
 
-The port is already deployment-configurable.  Keep the historical all-interface
-default for existing deployments, while allowing safety-sensitive robot
-profiles to bind the UI to loopback explicitly.
+The UI has no authentication and can edit map data, so it binds loopback
+unless `web_host` or SCENE_WEB_HOST opens it.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ def resolve_web_host(
     raw = (
         config["web_host"]
         if "web_host" in config
-        else env.get("SCENE_WEB_HOST", "0.0.0.0")
+        else env.get("SCENE_WEB_HOST", "127.0.0.1")
     )
     if not isinstance(raw, str):
         raise ValueError("Scene web_host/SCENE_WEB_HOST must be a string")

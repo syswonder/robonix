@@ -462,7 +462,11 @@ impl RtdlIncrementalParser {
             return Ok(());
         }
         if self.plan.plan_id.is_empty() {
-            self.plan.plan_id = (self.sequence.fetch_add(1, Ordering::Relaxed) + 1).to_string();
+            self.plan.plan_id = format!(
+                "{}-{}",
+                *planner::RUN_TAG,
+                self.sequence.fetch_add(1, Ordering::Relaxed) + 1
+            );
             if submit {
                 self.pending.push(ExecuteStreamInput {
                     message_kind: EXECUTE_STREAM_START,
@@ -679,9 +683,13 @@ fn pick_description(
 /// correlation — not merely unique within one plan.
 static OP_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Allocate the next global op_id (1, 2, 3, …) as a decimal string.
+/// Keep node ids distinct from ids retained across Pilot restarts.
 pub(crate) fn next_op_id() -> String {
-    (OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1).to_string()
+    format!(
+        "{}-{}",
+        *planner::RUN_TAG,
+        OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1
+    )
 }
 
 #[cfg(test)]
@@ -793,7 +801,7 @@ mod tests {
                     .task_update
             );
             assert!(meta_op.is_none());
-            assert_eq!(p.plan.plan_id, "1");
+            assert_eq!(p.plan.plan_id, format!("{}-1", *planner::RUN_TAG));
             assert!(p.take_messages().is_empty());
             assert_same(&p, &raw);
         }

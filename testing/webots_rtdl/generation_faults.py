@@ -17,9 +17,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Keep a two-call sequence open until its first command really starts."""
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        mode=next(m['content'].split('fault:')[-1].strip() for m in reversed(body['messages']) if isinstance(m.get('content'),str) and 'fault:' in m['content'])
-        # The most recent user message is the test instruction.
-        mode=mode.split()[0]
+        instruction=next(m['content'] for m in reversed(body['messages']) if isinstance(m.get('content'),str) and m['content'].startswith('User task (authoritative):'))
+        mode=instruction.split('fault:',1)[1].splitlines()[0].strip()
         requests[mode]=requests.get(mode,0)+1
         trace=OUT/f'fault-{mode}.trace'
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()

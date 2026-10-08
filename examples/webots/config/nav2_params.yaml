@@ -183,11 +183,15 @@ local_costmap:
       width: 5
       height: 5
       resolution: 0.05
-      robot_radius: 0.22
+      # TIAGo's base is 0.54 m across; 3 cm of margin on its radius. No
+      # footprint padding: the controller keeps the centre this far from an
+      # obstacle, and spin and backup must accept every pose it can reach.
+      robot_radius: 0.30
+      footprint_padding: 0.0
       # static_layer first: the rolling local window is cropped from the live
       # rtabmap /map, so the local controller (DWB) sees mapped walls and
       # avoids them reactively. obstacle_layer adds anything not yet mapped.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "depth_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -206,6 +210,50 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
+      depth_layer:
+        # The head camera's depth, for what the lidar's plane misses: table tops,
+        # shelves, anything overhanging the floor. Heights are in the map frame,
+        # where the floor is at -0.0985 (base_link's height); the band spans from
+        # 5 cm above the floor to the top of TIAGo Lite.
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 15.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        update_footprint_enabled: true
+        combination_method: 1
+        origin_z: -0.1
+        publish_voxel_map: false
+        transform_tolerance: 0.3
+        mapping_mode: false
+        observation_sources: depth_mark depth_clear
+        depth_mark:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: true
+          clearing: false
+          obstacle_range: 3.5
+          min_obstacle_height: -0.05
+          max_obstacle_height: 1.30
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: "voxel"
+          voxel_min_points: 0
+          clear_after_reading: true
+        depth_clear:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: false
+          clearing: true
+          max_z: 4.0
+          min_z: 0.1
+          vertical_fov_angle: 0.85
+          horizontal_fov_angle: 1.04
+          decay_acceleration: 5.0
+          model_type: 0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.0
@@ -229,10 +277,11 @@ global_costmap:
       width: 12
       height: 12
       use_sim_time: True
-      robot_radius: 0.22
+      robot_radius: 0.30
+      footprint_padding: 0.0
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "depth_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -250,6 +299,50 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+      depth_layer:
+        # The head camera's depth, for what the lidar's plane misses: table tops,
+        # shelves, anything overhanging the floor. Heights are in the map frame,
+        # where the floor is at -0.0985 (base_link's height); the band spans from
+        # 5 cm above the floor to the top of TIAGo Lite.
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 120.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        update_footprint_enabled: true
+        combination_method: 1
+        origin_z: -0.1
+        publish_voxel_map: false
+        transform_tolerance: 0.3
+        mapping_mode: false
+        observation_sources: depth_mark depth_clear
+        depth_mark:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: true
+          clearing: false
+          obstacle_range: 3.5
+          min_obstacle_height: -0.05
+          max_obstacle_height: 1.30
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: "voxel"
+          voxel_min_points: 0
+          clear_after_reading: true
+        depth_clear:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: false
+          clearing: true
+          max_z: 4.0
+          min_z: 0.1
+          vertical_fov_angle: 0.85
+          horizontal_fov_angle: 1.04
+          decay_acceleration: 5.0
+          model_type: 0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -331,3 +424,38 @@ velocity_smoother:
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
+
+# Last line of defence between the velocity smoother and the velocity guard:
+# whatever the controller planned, the robot stops before anything the lidar
+# or the depth camera sees within 6 cm of its 0.27 m radius, and slows inside
+# 0.55 m. Heights are in base_link, 0.0985 m above the floor.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: True
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    transform_tolerance: 0.3
+    source_timeout: 1.0
+    stop_pub_timeout: 2.0
+    # The base itself, not the costmap's margin: slow the robot so that it
+    # would not touch anything within the next 1.2 s at its current
+    # velocity. Moving away or turning in place is never limited, so a robot
+    # next to furniture can always leave.
+    polygons: ["Base"]
+    Base:
+      type: "circle"
+      radius: 0.27
+      action_type: "approach"
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      max_points: 3
+      visualize: False
+    observation_sources: ["scan", "depth"]
+    scan:
+      type: "scan"
+      topic: "__ROBONIX_SCAN_TOPIC__"
+    depth:
+      type: "pointcloud"
+      topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+      min_height: -0.05
+      max_height: 1.2

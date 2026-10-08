@@ -26,7 +26,7 @@ PROTO AstraRegistered [
           baseColor 0.000000 0.000000 0.000000
         }
         geometry Mesh {
-          url "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/orbbec/meshes/astra.obj"
+          url "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/orbbec/protos/meshes/astra.obj"
         }
       }
       Camera {

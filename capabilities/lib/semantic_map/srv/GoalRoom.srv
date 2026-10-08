@@ -1,3 +1,6 @@
+# DEPRECATED: use robonix/system/scene/goal_region (GoalRegion.srv). Kept so
+# callers written against the old name keep working; same behaviour.
+#
 # robonix/system/scene/goal_room - find a navigation-safe pose inside
 # a user-defined room annotation. The returned map-frame pose is always
 # inside the room polygon; pass it to navigation/navigate.

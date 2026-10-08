@@ -31,20 +31,25 @@ from typing import Any
 import yaml
 
 _CAP_LINE = re.compile(r"^\s*-\s*capability_name:\s*(\S+)\s*$", re.MULTILINE)
+_REMOVED_LINE = re.compile(r"^Removed, no longer callable:(.*)$", re.MULTILINE)
 _VAR_TOKEN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _TEST_ONLY_NODE_KEYS = {"id", "expect", "capture", "once"}
 
 
 def advertised_caps(messages: list[dict]) -> list[str]:
+    # Pilot sends the full catalog in history on a task's first round and only
+    # the entries added, changed or removed after that, so read every message
+    # in order rather than the system prompt alone.
     seen: dict[str, None] = {}
     for m in messages:
-        if m.get("role") != "system":
-            continue
         content = m.get("content")
         if not isinstance(content, str):
             continue
         for name in _CAP_LINE.findall(content):
             seen.setdefault(name, None)
+        for line in _REMOVED_LINE.findall(content):
+            for name in re.findall(r"`([^`]+)`", line):
+                seen.pop(name, None)
     return list(seen)
 
 

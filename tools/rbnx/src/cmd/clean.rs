@@ -64,13 +64,14 @@ pub async fn execute(
     package: Option<PathBuf>,
     file: Option<PathBuf>,
     cache: bool,
+    sessions: bool,
 ) -> Result<()> {
     match (package, file) {
         (Some(_), Some(_)) => {
             anyhow::bail!("pass one of -p / -f, not both")
         }
         (Some(pkg), None) => clean_package(&pkg),
-        (None, Some(f)) => clean_deploy(&config, &f, cache),
+        (None, Some(f)) => clean_deploy(&config, &f, cache, sessions),
         (None, None) => {
             // Default-mode resolution. cwd-local hints in priority order:
             //   1. ./robonix_manifest.yaml   → deploy clean (sibling of `rbnx boot -f`)
@@ -79,7 +80,7 @@ pub async fn execute(
             let cwd = std::env::current_dir().context("get cwd")?;
             let deploy = cwd.join("robonix_manifest.yaml");
             if deploy.is_file() {
-                return clean_deploy(&config, &deploy, cache);
+                return clean_deploy(&config, &deploy, cache, sessions);
             }
             match run_package::find_package_from_cwd() {
                 Ok(pkg) => clean_package(&pkg),
@@ -115,7 +116,12 @@ fn clean_package(pkg: &Path) -> Result<()> {
     Ok(())
 }
 
-fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Result<()> {
+fn clean_deploy(
+    config: &Config,
+    manifest_path: &Path,
+    also_cache: bool,
+    also_sessions: bool,
+) -> Result<()> {
     let manifest_path = manifest_path
         .canonicalize()
         .with_context(|| format!("manifest not found: {}", manifest_path.display()))?;
@@ -185,7 +191,8 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
 
     // Deploy-level cleanup. Walk every entry under <manifest>/rbnx-boot/
     // and remove it. Skip cache/ unless `--cache` was given (re-cloning
-    // url-fetched packages is expensive).
+    // url-fetched packages is expensive), and sessions/ unless `--sessions`
+    // was given (it holds the transcripts that restore Pilot sessions).
     let rbnx_boot = manifest_dir.join("rbnx-boot");
     if rbnx_boot.exists() {
         if let Ok(entries) = std::fs::read_dir(&rbnx_boot) {
@@ -195,6 +202,10 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
                 let is_cache = name == "cache";
                 if is_cache && !also_cache {
                     output::sub_step(&format!("keep {} (use --cache to wipe)", path.display()));
+                    continue;
+                }
+                if name == "sessions" && !also_sessions {
+                    output::sub_step(&format!("keep {} (use --sessions to wipe)", path.display()));
                     continue;
                 }
                 let label = if is_cache { " (cache)" } else { "" };
@@ -212,7 +223,7 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
                 }
             }
         }
-        // If rbnx-boot/ is empty (or only cache/ left when !also_cache),
+        // If rbnx-boot/ is empty (or only the kept cache/ and sessions/ remain),
         // try to rmdir it too. Best-effort — no failure surface.
         let _ = std::fs::remove_dir(&rbnx_boot);
     }

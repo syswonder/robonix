@@ -511,8 +511,14 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
         if isinstance(want, dict) and want.get("success") is False:
             expected_failure_specs.append((step_idx, want))
 
+    # Calls made by a step that declares retry_delay_s before the round that
+    # finally satisfied it. Such a step is allowed to fail and be retried, so
+    # its earlier attempts are not unexpected failures.
+    retried_call_ids: set[str] = set()
+    steps = scenario.get("steps", [])
     cursor = 0
     for step_idx, expected_nodes in sorted(expected_by_step.items()):
+        step_start = cursor
         invalid = [
             (node_path, want)
             for node_path, _node, want in expected_nodes
@@ -548,6 +554,9 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
             if len(observed) < 3:
                 contracts = [(c.get("contract_id"), c.get("call_id")) for c in step_calls]
                 observed.append(f"round {round_idx}: calls={contracts}; {'; '.join(round_errs)}")
+        if matched_round is not None and steps[step_idx].get("retry_delay_s"):
+            for round_idx in range(step_start, matched_round):
+                retried_call_ids.update(c.get("call_id") for c in plan_rounds[round_idx])
         if matched_round is None:
             expected_contracts = [want["contract"] for _node_path, _node, want in expected_nodes]
             detail = " | ".join(observed) if observed else "no later plan rounds"
@@ -560,7 +569,7 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
     # contract and args/output assertions. Contract-only allow-lists are too loose.
     if not scenario.get("allow_leaf_failure", False):
         for lr in leaves:
-            if lr.get("success", False):
+            if lr.get("success", False) or lr.get("call_id") in retried_call_ids:
                 continue
             matched = False
             for _step_idx, want in expected_failure_specs:

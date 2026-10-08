@@ -33,3 +33,6 @@ robonix-codegen.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
 protoc-bin-vendored.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

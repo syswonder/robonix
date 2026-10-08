@@ -42,6 +42,9 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx path KEY`           | Resolve a registered source path (root / capabilities / interfaces-lib / runtime-proto / robonix-api) |
 | `rbnx setup [PATH]`       | Register a robonix source tree at `PATH`               |
 | `rbnx clean`              | Remove per-package build artefacts                     |
+| `rbnx update [-y]`        | Fast-forward cloned `url:` packages; asks first unless `-y`, and refuses without a terminal |
+| `rbnx update --check [--json]` | Report which `url:` packages have upstream commits; pulls nothing |
+| `rbnx version [--json]`   | Version, git commit, build date, rustc, target; `--json` adds the source root |
 
 Run `rbnx <cmd> --help` for full flags.
 
@@ -49,6 +52,46 @@ Run `rbnx <cmd> --help` for full flags.
 `llm_callable = false`; `rbnx contracts` still lists those contracts and marks
 them `pilot-hidden`, because they remain registered and callable by system
 consumers.
+
+### What a boot leaves behind
+
+`rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
+anything. Each package records what the manifest asked for and what that
+resolved to, kept apart the way `flake.lock` keeps them:
+
+```yaml
+version: 1
+packages:
+  - name: mapping
+    original:
+      url: https://github.com/syswonder/service-map-rbnx
+      branch: feat/map-localizer
+    locked:
+      commit: df2ba718c0de1a5f...
+      dirty: true
+      dirty_digest: sha256:9c5e5cd...
+```
+
+Entries are sorted and nothing is timestamped, so the file changes when the
+deployment changes rather than every time it runs — a lock that rewrites itself
+on every boot is one nobody reads a diff of. A dirty checkout gets a digest of
+its uncommitted changes, not just a flag: a flag cannot tell two different
+local edits apart.
+
+A manifest pins packages by branch, and a cache is cloned once and then reused
+untouched, so "the same manifest" is not the same code twice — a deployment was
+found running three commits behind its branch with hand-applied edits on top,
+and nothing about the run recorded it. The lockfile is that record. It is
+written, not enforced: boot still runs whatever the cache holds, and a dirty
+checkout is warned about rather than refused.
+
+Next to the lock, `rbnx-boot/logs/` holds each component's log and
+`rbnx-boot/sessions/` holds session state: boot passes it to system
+components as `ROBONIX_SESSION_DIR` (an existing value wins), and Pilot keeps
+each session's transcript there so the session survives a restart. Boot clears
+old log files but never touches `sessions/`. `rbnx clean -f` removes
+everything under `rbnx-boot/` except `cache/` and `sessions/`; pass `--cache`
+or `--sessions` to remove those too.
 
 ## Built-in system components
 
