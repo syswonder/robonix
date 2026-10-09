@@ -1,24 +1,13 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Associate per-frame detections with persistent scene objects.
-
-The version 1 algorithm applies these steps:
-
-1. Gate candidates spatially using a class-specific radius.
-2. Keep candidates with the same class.
-3. Run Hungarian minimum-cost matching.
-4. Allocate objects for unmatched detections.
-5. Leave unmatched-object expiry to ``mark_stale``.
-6. Update matched object poses with an exponential moving average.
-
-Not implemented in v1 (deferred): Kalman filtering, IoU-based gating,
-appearance embeddings, learned association.
+"""Associate per-frame detections with registry objects: same-class, gated
+Hungarian matching; matches EMA-update the object, the rest become new objects.
 """
 from __future__ import annotations
 
 import logging
 import math
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -34,10 +23,7 @@ from .object_registry import (
 log = logging.getLogger(__name__)
 
 
-# Per-class gating radius in metres. Below this distance, an existing
-# object is considered as a candidate for the incoming detection. Tune
-# per-class because a "table" reasonably moves 1m frame-to-frame
-# (camera shifted) while a "cup" should not.
+# Per-class gate across the floor, metres.
 _GATE_RADIUS_M: dict[str, float] = {
     "cup": 0.30,
     "bottle": 0.30,
@@ -51,30 +37,42 @@ _GATE_RADIUS_M: dict[str, float] = {
 }
 _DEFAULT_GATE_RADIUS_M = 0.50
 
-# Cost = ||D.pose - O.pose|| + alpha * (1 - D.confidence)
-# Higher alpha penalises low-confidence matches harder, biasing toward
-# "let it become a new object" when the detector is unsure.
+# Height is gated separately and loosely: depth error mostly moves z, but a
+# tabletop object must still not match one on the floor beneath it.
+_GATE_Z_M: dict[str, float] = {
+    "person": 1.50,
+    "door": 2.00,
+}
+_DEFAULT_GATE_Z_M = 1.20
+
+# cost = distance + alpha * (1 - confidence): unsure detections prefer a new object.
 _COST_ALPHA = 0.5
 
 
 @dataclass
 class Detection:
-    """One per-frame perception output. Stable id is NOT supplied — it's
-    this layer's job to assign / find one. `pose` and `bbox` must carry
-    the same explicit destination frame established by ingest."""
-    cls: str
+    """One per-frame perception output; `pose` and `bbox` share one frame."""
+    label: str
     pose: Pose3D
     bbox: BBox3D
     confidence: float
     source: str = "perception"
 
 
-def _gate_radius(cls: str) -> float:
-    return _GATE_RADIUS_M.get(cls, _DEFAULT_GATE_RADIUS_M)
+def _gate_radius(label: str) -> float:
+    return _GATE_RADIUS_M.get(label, _DEFAULT_GATE_RADIUS_M)
+
+
+def _gate_z(label: str) -> float:
+    return _GATE_Z_M.get(label, _DEFAULT_GATE_Z_M)
 
 
 def _euclid(p: Pose3D, q: Pose3D) -> float:
     return math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2 + (p.z - q.z) ** 2)
+
+
+def _floor_dist(p: Pose3D, q: Pose3D) -> float:
+    return math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2)
 
 
 def associate(
@@ -83,14 +81,8 @@ def associate(
     *,
     now: Optional[float] = None,
 ) -> tuple[list[str], list[str]]:
-    """Resolve detections against the registry. Caller must hold
-    `registry.lock()`.
-
-    Returns `(matched_ids, new_ids)` for logging / metrics. The registry
-    is mutated in place: matched detections EMA-update existing records,
-    unmatched detections allocate new ones, unmatched objects are NOT
-    touched (mark_stale runs separately on a periodic tick).
-    """
+    """Match detections to registry objects in place; returns (matched_ids, new_ids).
+    Caller holds `registry.lock()`. Unmatched objects are left to mark_stale."""
     if now is None:
         now = now_unix()
     if not detections:
@@ -103,7 +95,7 @@ def associate(
             log.warning(
                 "dropping detection %r with unknown or mixed frames "
                 "(pose=%s bbox=%s)",
-                detection.cls,
+                detection.label,
                 pose_frame or "unknown",
                 bbox_frame or "unknown",
             )
@@ -112,61 +104,54 @@ def associate(
     if not valid_detections:
         return [], []
 
-    # Bucket by class and frame. Coordinates from distinct frames are never
-    # comparable, even when their numeric values happen to be nearby.
+    # Bucket by class and frame: coordinates from different frames never compare.
     by_key: dict[tuple[str, str], list[SceneObject]] = {}
     for obj in registry.all_objects():
-        # Robot self-object never participates in detection matching.
         if obj.attributes.get("is_robot"):
             continue
         pose_frame = str(obj.pose.frame_id or "").strip()
         bbox_frame = str(obj.bbox.frame_id or "").strip()
         if pose_frame and pose_frame == bbox_frame:
-            by_key.setdefault((obj.cls, pose_frame), []).append(obj)
+            by_key.setdefault((obj.label, pose_frame), []).append(obj)
 
     matched_ids: list[str] = []
     new_ids: list[str] = []
 
-    # Process per class+frame so the cost matrix stays small and meaningful.
+    def insert(d: Detection) -> None:
+        obj = registry.insert_object(label=d.label, pose=d.pose, bbox=d.bbox,
+                                     confidence=d.confidence, now=now, source=d.source)
+        new_ids.append(obj.object_id)
+
     by_key_dets: dict[tuple[str, str], list[Detection]] = {}
     for detection in valid_detections:
-        key = (detection.cls, str(detection.pose.frame_id).strip())
+        key = (detection.label, str(detection.pose.frame_id).strip())
         by_key_dets.setdefault(key, []).append(detection)
 
-    for (cls, frame_id), dets in by_key_dets.items():
-        objs = by_key.get((cls, frame_id), [])
-        gate = _gate_radius(cls)
+    for (label, frame_id), dets in by_key_dets.items():
+        objs = by_key.get((label, frame_id), [])
+        gate = _gate_radius(label)
+        gate_z = _gate_z(label)
         if not objs:
             for d in dets:
-                obj = registry.insert_object(
-                    cls=d.cls,
-                    pose=d.pose,
-                    bbox=d.bbox,
-                    confidence=d.confidence,
-                    now=now,
-                    source=d.source,
-                )
-                new_ids.append(obj.object_id)
+                insert(d)
             continue
 
-        # Build cost matrix (rows = detections, cols = candidate objects).
-        # Use a large sentinel for pairs outside the gate so the
-        # Hungarian solver naturally avoids them; they'll only get
-        # picked when there's no alternative, and we'll filter those
-        # post-hoc below.
+        # Rows are detections, columns objects; `big` marks pairs outside the gate.
         big = 1e6
         M = len(dets)
         N = len(objs)
         cost = np.full((M, N), big, dtype=np.float64)
         for i, d in enumerate(dets):
             for j, o in enumerate(objs):
-                dist = _euclid(d.pose, o.pose)
-                if dist > gate:
+                if _floor_dist(d.pose, o.pose) > gate:
                     continue
+                if abs(d.pose.z - o.pose.z) > gate_z:
+                    continue
+                # Within the gate, rank by full 3D distance.
+                dist = _euclid(d.pose, o.pose)
                 cost[i, j] = dist + _COST_ALPHA * (1.0 - max(0.0, min(1.0, d.confidence)))
 
-        # Pad to square so linear_sum_assignment can solve. Pad with
-        # `big` so padded slots never get chosen unless forced.
+        # Pad to square with `big`.
         K = max(M, N)
         if K > M or K > N:
             padded = np.full((K, K), big, dtype=np.float64)
@@ -175,23 +160,15 @@ def associate(
 
         row_ind, col_ind = linear_sum_assignment(cost)
 
+        matched_rows: set[int] = set()
         for r, c in zip(row_ind, col_ind):
-            if r >= M or c >= N:
-                continue  # padding pair, ignore
-            if cost[r, c] >= big:
-                # Pair outside the gate — treat as unmatched (the detection
-                # becomes a new object below).
+            if r >= M or c >= N or cost[r, c] >= big:
                 continue
+            matched_rows.add(r)
             d = dets[r]
             o = objs[c]
-            # ema_pose=0.10 (was 0.30): VLM-derived poses jitter ~5–10 cm
-            # per tick because the depth source isn't precise. With 0.10
-            # the existing pose dominates and we still pick up genuine
-            # motion within ~10 ticks. Confidence keeps the higher EMA
-            # because per-frame confidence is more directly meaningful.
+            # Low pose EMA: per-frame depth jitters by several centimetres.
             registry.update_object_pose(o, d.pose, d.confidence, now, ema_pose=0.10)
-            # Confidence-weighted bbox blend: new bbox shrinks toward the
-            # detection's by 30% per frame. Cheap, stays stable.
             o.bbox = BBox3D(
                 size_x=0.7 * o.bbox.size_x + 0.3 * d.bbox.size_x,
                 size_y=0.7 * o.bbox.size_y + 0.3 * d.bbox.size_y,
@@ -201,22 +178,8 @@ def associate(
             )
             matched_ids.append(o.object_id)
 
-        # Detections that didn't get a match (or were gated out) → new objects.
-        matched_rows = {
-            r for r, c in zip(row_ind, col_ind)
-            if r < M and c < N and cost[r, c] < big
-        }
         for i, d in enumerate(dets):
-            if i in matched_rows:
-                continue
-            obj = registry.insert_object(
-                cls=d.cls,
-                pose=d.pose,
-                bbox=d.bbox,
-                confidence=d.confidence,
-                now=now,
-                source=d.source,
-            )
-            new_ids.append(obj.object_id)
+            if i not in matched_rows:
+                insert(d)
 
     return matched_ids, new_ids

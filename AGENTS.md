@@ -20,6 +20,22 @@ Robonix. Read once at session start; obey throughout.
   introduce a noun or verb that is not already in the dev guide, **stop
   and ask** before writing code.
 
+## Coding guidelines and skills
+
+`.agents/guidelines/` is the standard for writing and reviewing code here, for people and agents. Its README indexes every rule by a short name; review comments cite those names. The most violated ones: write the least code that solves the request, reuse before adding, no single-use abstractions, delete dead code, and keep comments to the reason the code cannot state.
+
+Repository skills live in `.agents/skills/` (`robonix-simplify`, `robonix-code-review`, `robonix-writing`). Codex reads them there. Claude Code looks in `.claude/skills/`, so link it once in your checkout; `.claude/` is gitignored and the link stays local:
+
+```sh
+mkdir -p .claude && ln -s ../.agents/skills .claude/skills
+```
+
+Third-party skills are not vendored into the repository. These are recommended for your own agent setup:
+
+- [humanizer](https://github.com/blader/humanizer) — removes generated-text habits from prose.
+- [code-simplification](https://github.com/addyosmani/agent-skills/blob/main/skills/code-simplification/SKILL.md) — behaviour-preserving simplification process.
+- [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills) — guardrails against over-engineered agent code.
+
 ## Project Structure & Module Organization
 
 Robonix is an **embodied AI operating system**: a monorepo with Rust system
@@ -71,7 +87,7 @@ types, and crate names matching `robonix-*`. Python targets 3.10+, uses
 files follow `<interface>.v1.toml` naming, grouped by domain, for example
 `capabilities/primitive/camera/rgb.v1.toml`.
 
-If one function/method body exceeds five lines, treat documentation as mandatory: The comment block must state behavior at minimum; add side effects, or constraints when they are not obvious from the signature.
+Comments and docstrings follow `comments-explain-why` in `.agents/guidelines/maintainability.md`: say why when the code cannot, in a line or two.
 
 ## Testing Guidelines
 
@@ -103,19 +119,13 @@ diagnostics, or maintainability outside the test.
 
 ## Review before commit
 
-For non-trivial diffs, run the pr-review-toolkit agents in parallel before
-staging:
+Before asking a human to review, run the repository skills on your change:
 
-- `pr-review-toolkit:code-reviewer` — AGENTS.md adherence + style.
-- `pr-review-toolkit:silent-failure-hunter` — fallback / swallowed error.
-- `pr-review-toolkit:type-design-analyzer` — type discipline, when introducing
-  new types.
-- `pr-review-toolkit:pr-test-analyzer` — test coverage of the diff.
+- `robonix-simplify` — shrink the diff without changing behaviour.
+- `robonix-code-review` — review it against `.agents/guidelines/` (`diff origin/dev <output>`), then fix what it finds.
+- `robonix-writing` — for the commit messages and the PR description.
 
-A repo-local Claude skill `.claude/skills/pre-commit-review/` orchestrates
-this; invoke with `/pre-commit-review` after a logical chunk is done when using
-Claude Code. Other agents should follow the same review intent with the tools
-available to them.
+Other agents follow the same steps with the tools they have.
 
 ## Commit & Pull Request Guidelines
 

@@ -306,6 +306,25 @@ ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
     SCENE_CLIP_MODEL=ViT-B-32 \
     SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin
 
+# viewer (see the file for why this one is --no-deps). Last, so bumping it
+# reuses every heavy layer above.
+COPY requirements/scene-viewer.txt /tmp/requirements/scene-viewer.txt
+# The browser half of the viewer is the npm package of the same version: the
+# page and the recording are one protocol. It lives in the image rather than
+# the source tree so a fresh clone has it after `rbnx build`, with nothing to
+# fetch by hand; scene serves it from RERUN_VIEWER_DIR (rerun_sink.py).
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    without-proxy pip install --no-deps -r /tmp/requirements/scene-viewer.txt \
+        --progress-bar on --timeout 60 --retries 3 \
+    && v="$(sed -n "s/^rerun-sdk==//p" /tmp/requirements/scene-viewer.txt)" \
+    && mkdir -p /opt/rerun-web-viewer \
+    && curl -fSL --retry 5 --retry-delay 2 \
+        "${NPM_REGISTRY}/@rerun-io/web-viewer/-/web-viewer-${v}.tgz" \
+        | tar xz -C /opt/rerun-web-viewer --strip-components=1 \
+            package/index.js package/re_viewer.js package/re_viewer_bg.wasm \
+    && rm /tmp/requirements/scene-viewer.txt
+
 WORKDIR /scene
 
 COPY entrypoint.sh /entrypoint.sh

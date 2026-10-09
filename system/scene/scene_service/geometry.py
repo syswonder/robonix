@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 Point = tuple[float, float]
 
@@ -71,3 +71,10 @@ def disc_inside_polygon(
         )
         for i in range(samples)
     )
+
+def region_of(x: float, y: float, regions: Iterable[dict]) -> str:
+    """The name of the first region containing this point, or ""."""
+    for r in regions or []:
+        if point_in_polygon(x, y, r.get("points") or ()):
+            return str(r.get("name") or r.get("id") or "")
+    return ""

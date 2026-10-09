@@ -1,0 +1,17 @@
+# robonix/system/scene/find — the objects matching every given constraint,
+# nearest the robot first. An empty constraint matches everything.
+
+# A class or caption word, e.g. "chair".
+string label
+# A region name.
+string region
+# Optional: the object must stand in this scene-graph relation to the object
+# `anchor`, e.g. relation "near", anchor "scene.object.0007" (the sofa).
+# One of near, on_top_of, under, inside, contains, reachable_by.
+string relation
+# Object id the relation is measured against.
+string anchor
+---
+Object[] objects
+# Why nothing matched, when nothing did.
+string detail

@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Unit tests for object persistence (warm restore).
-
-The ObjectStore round-trip needs pymilvus + milvus-lite installed; it skips
-cleanly when they aren't. The skip guards import BOTH `pymilvus` and
-`milvus_lite`: the backend (`milvus_lite`) is Linux-only, so a dev mac can
-have `pymilvus` importable yet no working store — guarding on `pymilvus`
-alone passes the gate then crashes mid-test. The restore_object counter test
-is pure Python and always runs.
-"""
+"""Unit tests for object persistence (warm restore)."""
 import os
 import sys
 import tempfile
@@ -23,10 +15,10 @@ from scene_service.state.object_registry import (  # noqa: E402
 )
 
 
-def _make_obj(oid: str, cls: str, *, n: int = 3) -> SceneObject:
+def _make_obj(oid: str, label: str, *, n: int = 3) -> SceneObject:
     return SceneObject(
         object_id=oid,
-        cls=cls,
+        label=label,
         pose=Pose3D(x=1.25, y=-2.5, z=0.75, yaw=0.5, frame_id="map"),
         bbox=BBox3D(size_x=0.2, size_y=0.3, size_z=0.4, yaw=0.7, frame_id="map"),
         confidence=0.8,
@@ -43,19 +35,30 @@ def _close(a: float, b: float, tol: float = 1e-3) -> bool:
 
 
 def test_restore_object_counter_collision():
-    """A new object of a restored class numbers after the highest restored id,
-    never reusing or colliding with it."""
+    """A new object numbers after the highest restored id, never reusing it."""
     reg = ObjectRegistry()
-    reg.restore_object(_make_obj("scene.object.cup_005", "cup"))
-    reg.restore_object(_make_obj("scene.object.cup_002", "cup"))
+    reg.restore_object(_make_obj("scene.object.0005", "cup"))
+    reg.restore_object(_make_obj("scene.object.0002", "cup"))
 
     new = reg.insert_object(
         "cup", Pose3D(0, 0, 0), BBox3D(), 0.5, now=1.0
     )
-    assert new.object_id == "scene.object.cup_006", new.object_id
+    assert new.object_id == "scene.object.0006", new.object_id
     # Restored objects are still present and addressable.
-    assert reg.get_object("scene.object.cup_005") is not None
-    print("  [PASS] test_restore_object_counter_collision")
+    assert reg.get_object("scene.object.0005") is not None
+
+
+def test_a_corrected_class_cannot_free_an_id_to_be_minted_twice():
+    """The regression that motivated dropping the class from the id."""
+    reg = ObjectRegistry()
+    restored = _make_obj("scene.object.0003", "sink")
+    restored.label = "cabinet"          # the operator corrected it before saving
+    reg.restore_object(restored)
+
+    minted = [reg.insert_object("sink", Pose3D(0, 0, 0), BBox3D(), 0.5, now=1.0)
+              .object_id for _ in range(3)]
+    assert "scene.object.0003" not in minted, minted
+    assert reg.get_object("scene.object.0003").label == "cabinet"
 
 
 def test_restore_object_unparseable_id():
@@ -63,14 +66,25 @@ def test_restore_object_unparseable_id():
     reg = ObjectRegistry()
     reg.restore_object(_make_obj("scene.object.weird", "thing"))
     new = reg.insert_object("thing", Pose3D(0, 0, 0), BBox3D(), 0.5, now=1.0)
-    assert new.object_id == "scene.object.thing_001", new.object_id
-    print("  [PASS] test_restore_object_unparseable_id")
+    assert new.object_id == "scene.object.0001", new.object_id
+
+
+def test_an_id_minted_before_the_scheme_changed_still_restores():
+    """Old maps hold `scene.object.cup_005`; nothing reads an id but the keys."""
+    reg = ObjectRegistry()
+    reg.restore_object(_make_obj("scene.object.cup_005", "cup"))
+    assert reg.get_object("scene.object.cup_005") is not None
+    # The trailing number is read whatever precedes it, so the counter is
+    # still advanced past it and a fresh id cannot collide.
+    assert reg.insert_object("cup", Pose3D(0, 0, 0), BBox3D(), 0.5,
+                             now=1.0).object_id == "scene.object.0006"
 
 
 def test_restore_object_clears_cg_uuid_and_flags_restored():
     """Restore drops the stale per-process concept-graphs uuid and flags the
     record `restored`, so the perception reconcile won't evict it before a live
-    detection re-binds it."""
+    detection re-binds it.
+    """
     reg = ObjectRegistry()
     obj = _make_obj("scene.object.cup_005", "cup")
     obj.attributes["cg_uuid"] = "stale-uuid-from-last-process"
@@ -81,10 +95,10 @@ def test_restore_object_clears_cg_uuid_and_flags_restored():
     print("  [PASS] test_restore_object_clears_cg_uuid_and_flags_restored")
 
 
-# ── perception reconcile (warm-restore re-binding) ───────────────────────────
 def _make_detector(reg):
-    """A ConceptGraphsDetector built via __new__ (bypassing __init__, which
-    loads YOLO/SAM/CLIP), wired with only the state `_apply_snapshot` touches."""
+    """A ConceptGraphsDetector built via __new__ (bypassing __init__, which loads
+    YOLO/SAM/CLIP), wired with only the state `_apply_snapshot` touches.
+    """
     from scene_service.ingest.perception_concept_graphs import ConceptGraphsDetector
 
     p = ConceptGraphsDetector.__new__(ConceptGraphsDetector)
@@ -96,11 +110,10 @@ def _make_detector(reg):
     # _apply_snapshot now also touches.
     p._object_ttl_s = 30.0
     p._merge_class_group = {}
-    # The occupancy gate this backend borrowed from DualMap: an object
-    # standing on ground the map has never observed cannot have been seen
-    # there. `None` disables it, which is what these tests want -- they are
-    # about re-binding ids, and a gate would need a hub and a live map to
-    # answer at all.
+    # The occupancy gate this backend borrowed from DualMap: an object standing
+    # on ground the map has never observed cannot have been seen there. `None`
+    # disables it, which is what these tests want -- they are about re-binding
+    # ids, and a gate would need a hub and a live map to answer at all.
     p._known_gate = None
     p._min_mapped_fraction = 0.5
     return p
@@ -116,7 +129,9 @@ def _snap(uuid_s, cls, x, y, z=0.0, *, obs=4, conf=0.9):
 
 def _restore(reg, oid, cls, x, y, *, n=7, source="concept_graphs"):
     """Restore an object the way the persistence layer does (missing=True) at a
-    known pose, then flag its source so the eviction path actually considers it."""
+    known pose, then flag its source so the eviction path actually considers
+    it.
+    """
     obj = _make_obj(oid, cls, n=n)
     obj.pose = Pose3D(x, y, 0.0)
     obj.missing = True
@@ -126,8 +141,9 @@ def _restore(reg, oid, cls, x, y, *, n=7, source="concept_graphs"):
 
 
 def test_apply_snapshot_rebinds_restored_object():
-    """A restored object re-observed within the merge gate keeps its id (no
-    churn, no duplicate), flips out of `missing`, and binds the fresh uuid."""
+    """A restored object re-observed within the merge gate keeps its id (no churn,
+    no duplicate), flips out of `missing`, and binds the fresh uuid.
+    """
     import asyncio
     try:
         from scene_service.ingest.perception_concept_graphs import ConceptGraphsDetector  # noqa: F401
@@ -141,7 +157,7 @@ def test_apply_snapshot_rebinds_restored_object():
 
     asyncio.run(p._apply_snapshot([_snap("u-new", "cup", 1.1, 1.0, obs=8)]))
 
-    cups = [o for o in reg.all_objects() if o.cls == "cup"]
+    cups = [o for o in reg.all_objects() if o.label == "cup"]
     assert len(cups) == 1, [o.object_id for o in cups]      # no duplicate minted
     cup = cups[0]
     assert cup.object_id == "scene.object.cup_005"          # stable id preserved
@@ -156,7 +172,8 @@ def test_apply_snapshot_rebinds_restored_object():
 def test_apply_snapshot_restored_survives_and_far_detection_is_new():
     """An unseen restored object is exempt from uuid-membership eviction, and a
     same-class detection beyond the merge gate spawns a new id (numbered after
-    the restored one) rather than stealing it."""
+    the restored one) rather than stealing it.
+    """
     import asyncio
     try:
         from scene_service.ingest.perception_concept_graphs import ConceptGraphsDetector  # noqa: F401
@@ -176,8 +193,8 @@ def test_apply_snapshot_restored_survives_and_far_detection_is_new():
     assert survivor.attributes.get("restored") is True      # still awaiting re-bind
     assert survivor.missing is True
     new = [o for o in reg.all_objects()
-           if o.cls == "cup" and o.object_id != "scene.object.cup_005"]
-    assert len(new) == 1 and new[0].object_id == "scene.object.cup_006", \
+           if o.label == "cup" and o.object_id != "scene.object.cup_005"]
+    assert len(new) == 1 and new[0].object_id == "scene.object.0006", \
         [o.object_id for o in new]
     print("  [PASS] test_apply_snapshot_restored_survives_and_far_detection_is_new")
 
@@ -195,12 +212,13 @@ def test_object_store_roundtrip():
 
     objs = [_make_obj("scene.object.cup_001", "cup", n=4),
             _make_obj("scene.object.table_001", "table", n=9)]
+    objs[0].caption, objs[0].caption_source = "grandma's mug", "operator"
 
     with tempfile.TemporaryDirectory() as d:
         db_path = os.path.join(d, "objects.db")
         store = ObjectStore(db_path)
         # No embedder wired → placeholder vectors; scalar state is what matters.
-        written = store.persist([(o, f"a {o.cls}") for o in objs])
+        written = store.persist([(o, f"a {o.label}") for o in objs])
         assert written == 2, written
         store.close()
 
@@ -211,7 +229,9 @@ def test_object_store_roundtrip():
     assert set(loaded) == {"scene.object.cup_001", "scene.object.table_001"}
     cup = loaded["scene.object.cup_001"]
     src = objs[0]
-    assert cup.cls == "cup"
+    assert cup.label == "cup"
+    assert (cup.caption, cup.caption_source) == ("grandma's mug", "operator")
+    assert loaded["scene.object.table_001"].caption_source == ""
     assert cup.observation_count == 4
     assert cup.missing is True  # restored objects come back not-currently-seen
     assert _close(cup.pose.x, src.pose.x) and _close(cup.pose.y, src.pose.y)
@@ -252,8 +272,9 @@ def test_object_store_upsert_latest_wins():
 
 
 def test_object_store_map_id_isolation():
-    """Objects of one map_id are invisible to another, and the same object_id
-    on two maps coexists without overwriting (composite primary key)."""
+    """Objects of one map_id are invisible to another, and the same object_id on
+    two maps coexists without overwriting (composite primary key).
+    """
     try:
         import milvus_lite  # noqa: F401
         import pymilvus  # noqa: F401
@@ -297,7 +318,8 @@ def test_object_store_map_id_isolation():
 def test_legacy_schema_recreated():
     """A collection left by an earlier draft (object_id primary key, no pk/
     map_id) is dropped + recreated with the composite pk on open, so a stale
-    host-mounted DB can't silently defeat per-map isolation."""
+    host-mounted DB can't silently defeat per-map isolation.
+    """
     try:
         import milvus_lite  # noqa: F401
         from pymilvus import DataType, MilvusClient
@@ -338,13 +360,17 @@ def test_legacy_schema_recreated():
 
 def test_map_id_sanitized():
     """A map_id with unsafe characters is squashed to a safe identifier so it
-    can't break (or inject into) the milvus filter expression."""
+    can't break (or inject into) the milvus filter expression.
+    """
     import re
 
     from scene_service.persistence import _sanitize_map_id
 
+    # The id is interpolated into a double-quoted milvus filter expression, so
+    # what must not survive is the quote and the backslash that could end or
+    # escape that string.
     inject = _sanitize_map_id('a" or "1"=="1')
-    assert re.fullmatch(r"[A-Za-z0-9._\-]+", inject), inject  # no quotes/spaces survive
+    assert '"' not in inject and "\\" not in inject, inject
     assert _sanitize_map_id("  ") == "default"
     assert _sanitize_map_id(None) == "default"
     assert _sanitize_map_id("kitchen-2.floor_1") == "kitchen-2.floor_1"  # safe id untouched
@@ -352,9 +378,10 @@ def test_map_id_sanitized():
 
 
 def test_partition_scoped_operations():
-    """persist/load_all take an explicit partition without touching the
-    store's own binding (the Save/Load snapshot path), and
-    purge_live_partitions clears only leftover `.live*` rows."""
+    """persist/load_all take an explicit partition without touching the store's
+    own binding (the Save/Load snapshot path), and purge_live_partitions clears
+    only leftover `.live*` rows.
+    """
     try:
         import milvus_lite  # noqa: F401
         import pymilvus  # noqa: F401
@@ -404,3 +431,48 @@ if __name__ == "__main__":
     test_legacy_schema_recreated()
     test_partition_scoped_operations()
     print("\nAll tests passed!")
+
+
+def _live(reg, label, x, now=1000.0):
+    from scene_service.state import BBox3D, Pose3D
+    return reg.insert_object(
+        label=label, pose=Pose3D(x=x, y=0.0, z=0.0, yaw=0.0, frame_id="map"),
+        bbox=BBox3D(size_x=.3, size_y=.3, size_z=.3, yaw=0.0, frame_id="map"),
+        confidence=0.9, now=now)
+
+
+def test_a_pruned_id_forwards_to_the_object_that_absorbed_it():
+    reg = ObjectRegistry()
+    loser, winner = _live(reg, "chair", 1.0), _live(reg, "chair", 1.2)
+    reg.soft_evict(loser)
+    reg.prune_expired(now=1100.0, ttl_s=30.0, merge_dist_m=1.5)
+    assert reg.resolve_id(loser.object_id)[0] == winner.object_id
+
+
+def test_the_model_does_not_overwrite_a_persons_caption():
+    reg = ObjectRegistry()
+    oid = _live(reg, "chair", 1.0).object_id
+    reg.set_object_caption(oid, "grandma's chair", source="operator", now=1.0)
+    reg.set_object_caption(oid, "a grey chair", source="model", now=2.0)
+    assert reg.get_object(oid).caption == "grandma's chair"
+
+
+def test_find_filters_by_label_and_relation():
+    from scene_service.find import find
+    from scene_service.scene_graph.types import SceneGraphEdge
+    reg = ObjectRegistry()
+    a, b, sofa = (_live(reg, c, float(i)) for i, c in enumerate(("chair", "chair", "sofa")))
+    objs = {o.object_id: o for o in (a, b, sofa)}
+    near = [SceneGraphEdge(source_id=b.object_id, target_id=sofa.object_id,
+                           relation="near", method="geometric")]
+    assert [o.object_id for o in find(objs, label="chair", relation="near",
+                                      anchor=sofa.object_id, edges=near)[0]] == [b.object_id]
+    assert find(objs, label="lamp")[1]
+
+def test_a_crop_of_the_wall_behind_is_not_a_view():
+    import numpy as np
+    from scene_service.object_views import looks_like
+    depth = np.full((100, 100), 4.0, dtype="float32")   # a wall 4 m away
+    assert not looks_like(depth, (20, 20, 60, 60), 1.5)  # the object "is" at 1.5 m
+    depth[20:60, 20:60] = 1.5
+    assert looks_like(depth, (20, 20, 60, 60), 1.5)

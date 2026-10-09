@@ -49,6 +49,25 @@ pub struct VlmConfig {
     pub api_format: String,
 }
 
+impl VlmConfig {
+    /// The upstream URL without credentials or a query, safe to log.
+    pub fn endpoint_for_log(&self) -> String {
+        let url = self.upstream.split(['?', '#']).next().unwrap_or("");
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return url.to_string();
+        };
+        let (authority, path) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        if path.is_empty() {
+            format!("{scheme}://{host}")
+        } else {
+            format!("{scheme}://{host}/{path}")
+        }
+    }
+}
+
 /// CLI surface; every field is optional so config-file mode stays usable
 /// without spelling out flags. clap also reads the listed env vars.
 #[derive(Parser, Debug)]

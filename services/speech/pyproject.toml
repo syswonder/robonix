@@ -6,7 +6,7 @@
 
 [project]
 name = "robonix-system-speech"
-version = "0.1.0"
+version = "1.1.0b1"
 description = "Robonix Speech Service — pluggable local or cloud ASR/TTS backends."
 requires-python = ">=3.10"
 dependencies = [

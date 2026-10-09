@@ -125,6 +125,19 @@ class _FailingConstructionMemSearch:
         raise PermissionError("database is not writable")
 
 
+class MilvusException(Exception):
+    pass
+
+
+class _ServerDiesOnceMemSearch(_WorkingMemSearch):
+    """The first instance's milvus-lite server is gone by the first search."""
+
+    async def search(self, _query: str, top_k: int):
+        if self is self.__class__.instances[0]:
+            raise MilvusException("Cannot invoke RPC on closed channel!")
+        return [{"content": "the beacon is alpha-7"}][:top_k]
+
+
 class MemoryLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
         _WorkingMemSearch.instances.clear()
@@ -183,6 +196,21 @@ class MemoryLifecycleTest(unittest.TestCase):
             self.assertEqual(module.MEMORY_DIR, str(environment_memory.resolve()))
             self.assertEqual(module.MILVUS_URI, str(environment_db.resolve()))
             self.assertEqual(observed_threads, ["4"])
+
+    def test_search_reopens_the_store_when_its_server_has_gone(self) -> None:
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            module, _ = _load_service()
+            _run_init(module, _ServerDiesOnceMemSearch, {
+                "memory_dir": str(Path(tmp) / "memory"),
+                "milvus_uri": str(Path(tmp) / "memory.db"),
+            })
+            out = asyncio.run(module.search(_String("beacon")))
+
+            self.assertIn("alpha-7", out.data)
+            self.assertEqual(len(_ServerDiesOnceMemSearch.instances), 2)
+            self.assertEqual(_ServerDiesOnceMemSearch.instances[1].index_calls, 1)
 
     def test_index_failure_returns_err_and_does_not_publish_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,11 +35,8 @@ CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 # Named no image, prefer the DualMap one where this host has built it.
 #
 # This mirrors capabilities.default_backend() inside the container, which
-# prefers DualMap wherever the image carries a checkout: building the layer is
-# what opts a host in, and a host that never built it keeps the plain image and
-# the ConceptGraphs backend exactly as before. Building stays explicit --
-# scripts/build.sh still has to be asked for the dualmap image, because a
-# default build should not silently become the heavy one.
+# prefers DualMap wherever the image carries a checkout. scripts/build.sh
+# builds that layer unless SCENE_PERCEPTION_BACKEND=concept_graphs.
 DEFAULT_IMG=robonix-scene
 if [[ "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]] \
    && docker image inspect robonix-scene-dualmap >/dev/null 2>&1; then
@@ -163,6 +160,14 @@ if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
   EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
 fi
 
+# Scribe's log directory: rbnx sets SCRIBE_LOG_DIR and pipes every package's
+# output into `<tag>.log` under it. Without this, scene cannot read back what
+# it just wrote and the web UI's log view has nothing to show. Read-only, and
+# at the same path inside as out so the variable needs no translation.
+if [[ -n "${SCRIBE_LOG_DIR:-}" && -d "${SCRIBE_LOG_DIR}" ]]; then
+    EXTRA_MOUNTS+=(-v "${SCRIBE_LOG_DIR}:${SCRIBE_LOG_DIR}:ro")
+fi
+
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
     ZENOH_ARGS=(-e "ROBONIX_ZENOH_ROUTER=${ROBONIX_ZENOH_ROUTER}")
@@ -226,6 +231,10 @@ exec docker run --rm \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
     -e SCENE_WEB_HOST="${SCENE_WEB_HOST-127.0.0.1}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
+    -e SCRIBE_LOG_DIR="${SCRIBE_LOG_DIR:-}" \
+    -e SCENE_OBJECT_VIEWS_DIR="${SCENE_OBJECT_VIEWS_DIR:-/data/robonix/scene_object_views}" \
+    -e SCENE_OBJECT_VIEWS_MAX="${SCENE_OBJECT_VIEWS_MAX:-}" \
+    -e SCENE_CAPTION_LANG="${SCENE_CAPTION_LANG:-zh}" \
     -e SCENE_PROFILE="${SCENE_PROFILE:-}" \
     -e SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-}" \
     -e SCENE_DUALMAP_CLASSES="${SCENE_DUALMAP_CLASSES:-}" \
@@ -259,7 +268,6 @@ exec docker run --rm \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
-    -e SCENE_GRAPH_CAPTION_ENABLED="${SCENE_GRAPH_CAPTION_ENABLED:-true}" \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
     -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \

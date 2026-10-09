@@ -43,6 +43,77 @@ pub fn deploy_repo_dir_name(url: &str) -> String {
         .to_string()
 }
 
+/// Single source of truth for which `system:` keys are shipped binaries
+/// rather than packages under `<robonix_source>/system/<key>/`.
+pub const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
+
+pub fn is_builtin_system(name: &str) -> bool {
+    SYSTEM_BUILTINS.contains(&name)
+}
+
+/// The built-in components nothing runs without: the registry, the executor
+/// and the body. The others (pilot, liaison, vitals) may be disabled.
+pub const SYSTEM_REQUIRED: &[&str] = &["atlas", "executor", "soma"];
+
+/// Whether a deployment entry says `status: disabled`. `enabled`, or no
+/// `status` at all, means on; any other value is a mistake worth stopping
+/// for rather than guessing at.
+pub fn entry_disabled(entry: &serde_yaml::Value, at: &str) -> Result<bool> {
+    match entry.get("status") {
+        None => Ok(false),
+        Some(v) => match v.as_str() {
+            Some("enabled") => Ok(false),
+            Some("disabled") => Ok(true),
+            _ => anyhow::bail!("{at}: status must be `enabled` or `disabled`, not {v:?}"),
+        },
+    }
+}
+
+/// Take the entries marked `status: disabled` out of a deployment, and
+/// name them. [`prepare_deployment_manifest`] does this, so rbnx and soma
+/// both see the deployment without them; rbnx calls it first to report them. A disabled entry stays in the file, `url`, `branch` and
+/// `config` included; nothing builds, starts or updates it until it is
+/// enabled again. Atlas, executor and soma cannot be disabled
+/// ([`SYSTEM_REQUIRED`]): without them nothing else runs.
+pub fn drop_disabled(root: &mut serde_yaml::Value) -> Result<Vec<String>> {
+    let mut dropped = Vec::new();
+    let Some(map) = root.as_mapping_mut() else {
+        return Ok(dropped);
+    };
+    for section in ["primitive", "service", "skill"] {
+        let Some(entries) = map.get_mut(section).and_then(|v| v.as_sequence_mut()) else {
+            continue;
+        };
+        let mut kept = Vec::with_capacity(entries.len());
+        for (i, entry) in std::mem::take(entries).into_iter().enumerate() {
+            let at = format!("{section}[{i}]");
+            if entry_disabled(&entry, &at)? {
+                let name = entry.get("name").and_then(|n| n.as_str()).unwrap_or(&at);
+                dropped.push(format!("{section} {name}"));
+            } else {
+                kept.push(entry);
+            }
+        }
+        *entries = kept;
+    }
+    if let Some(system) = map.get_mut("system").and_then(|v| v.as_mapping_mut()) {
+        let keys: Vec<serde_yaml::Value> = system.keys().cloned().collect();
+        for key in keys {
+            let name = key.as_str().unwrap_or_default().to_string();
+            let at = format!("system.{name}");
+            let entry = &system[&key];
+            if entry_disabled(entry, &at)? {
+                if SYSTEM_REQUIRED.contains(&name.as_str()) {
+                    anyhow::bail!("{at}: atlas, executor and soma cannot be disabled");
+                }
+                system.remove(&key);
+                dropped.push(format!("system {name}"));
+            }
+        }
+    }
+    Ok(dropped)
+}
+
 /// Apply deployment `env:` and expand `$VAR` / `${VAR}` in every scalar.
 ///
 /// `rbnx` and Soma call this same entry point before parsing a deployment so
@@ -72,6 +143,7 @@ pub fn prepare_deployment_manifest(
         unsafe { std::env::set_var(key, value) };
     }
     expand_deployment_yaml(&mut root);
+    drop_disabled(&mut root)?;
     Ok(root)
 }
 
@@ -567,6 +639,50 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_entries_leave_the_deployment_and_say_so() {
+        let mut root: serde_yaml::Value = serde_yaml::from_str(
+            "primitive:\n  - {name: cam, path: cam}\n  - {name: arm, path: arm, status: disabled}\n\
+             service:\n  - {name: memory, url: https://x/m.git, status: enabled}\n\
+             skill:\n  - {name: find, url: https://x/f.git, status: disabled}\n\
+             system:\n  atlas: {status: enabled}\n  pilot: {}\n  scene: {status: disabled}\n  vitals: {status: disabled}\n",
+        )
+        .unwrap();
+        let dropped = drop_disabled(&mut root).unwrap();
+        assert_eq!(
+            dropped,
+            [
+                "primitive arm",
+                "skill find",
+                "system scene",
+                "system vitals"
+            ]
+        );
+        assert!(root["system"].get("vitals").is_none() && root["system"].get("atlas").is_some());
+        assert_eq!(root["primitive"].as_sequence().unwrap().len(), 1);
+        assert_eq!(root["service"].as_sequence().unwrap().len(), 1);
+        assert!(root["skill"].as_sequence().unwrap().is_empty());
+        assert!(root["system"].get("scene").is_none() && root["system"].get("pilot").is_some());
+    }
+
+    #[test]
+    fn a_misspelt_status_or_a_disabled_required_component_stops_the_boot() {
+        let mut typo: serde_yaml::Value =
+            serde_yaml::from_str("service:\n  - {name: m, path: m, status: off}\n").unwrap();
+        assert!(
+            drop_disabled(&mut typo)
+                .unwrap_err()
+                .to_string()
+                .contains("service[0]")
+        );
+        for name in SYSTEM_REQUIRED {
+            let mut required: serde_yaml::Value =
+                serde_yaml::from_str(&format!("system:\n  {name}: {{status: disabled}}\n"))
+                    .unwrap();
+            assert!(drop_disabled(&mut required).is_err(), "{name}");
+        }
+    }
+
     use super::*;
 
     #[test]

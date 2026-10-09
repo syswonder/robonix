@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .types import RELATION_TYPES, GeometryHint, SceneGraphNode
+from .types import GeometryHint, SceneGraphNode
 
 RELATION_SYSTEM_PROMPT = """\
 You infer spatial relationships between two objects in a robot's 3D scene graph.

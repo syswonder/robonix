@@ -50,7 +50,7 @@ def _service_mod():
 
 def _obj(oid: str) -> SceneObject:
     return SceneObject(
-        object_id=oid, cls="cup",
+        object_id=oid, label="cup",
         pose=Pose3D(x=1.0, y=2.0, z=0.0, yaw=0.0, frame_id="map"),
         bbox=BBox3D(size_x=0.1, size_y=0.1, size_z=0.1, yaw=0.0, frame_id="map"),
         confidence=0.9, first_seen=1.0, last_seen=2.0,

@@ -42,6 +42,9 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx path KEY`           | Resolve a registered source path (root / capabilities / interfaces-lib / runtime-proto / robonix-api) |
 | `rbnx setup [PATH]`       | Register a robonix source tree at `PATH`               |
 | `rbnx clean`              | Remove per-package build artefacts                     |
+| `rbnx update [-y]`        | Fast-forward cloned `url:` packages; asks first unless `-y`, and refuses without a terminal |
+| `rbnx update --check [--json]` | Report which `url:` packages have upstream commits; pulls nothing |
+| `rbnx version [--json]`   | Version, git commit, build date, rustc, target; `--json` adds the source root |
 
 Run `rbnx <cmd> --help` for full flags.
 

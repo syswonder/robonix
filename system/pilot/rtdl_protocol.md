@@ -121,6 +121,8 @@ query tree failed.
 
 When the user explicitly asks to stop or cancel all running work, emit one root
 `cancel_all` meta op. Do not inspect first and do not issue per-plan cancels.
+Plan control acts only on plans listed in In-flight trees. With none listed there
+is nothing to stop: answer with an empty `sequence`, never a meta op.
 
 ### Plan IDs (read this — you do NOT choose them)
 
@@ -176,10 +178,10 @@ Rules:
    container and are unreadable here. A provider not listed in "Capability docs"
    has no manual; call it directly from its `args_schema`.
 9. For a named room or region, current Scene data is authoritative. Call Scene
-   `list_regions`, use the returned stable ID with `goal_room`, and only then
+   `list_regions`, use the returned stable ID with `goal_region`, and only then
    call navigation with the reachable pose returned by Scene. A Memory
    coordinate, grasp pose, observation pose, room label, or guessed ID is not a
-   substitute. Because the navigation arguments depend on the `goal_room`
+   substitute. Because the navigation arguments depend on the `goal_region`
    result, these are separate planning rounds.
 10. Treat navigation completion in relation to the resolved requested
     destination. `SUCCEEDED` for a pose equal to the current pose is a

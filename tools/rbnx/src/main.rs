@@ -5,16 +5,19 @@
 
 use anyhow::Result;
 use clap::Parser;
-use robonix_cli::Config;
+use robonix_cli::{Config, build_info::BuildInfo};
 use robonix_scribe::warn;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 mod cmd;
 mod pb;
 
+static VERSION: LazyLock<String> = LazyLock::new(|| BuildInfo::get().summary());
+
 #[derive(Parser)]
 #[command(name = "rbnx")]
-#[command(version)]
+#[command(version = VERSION.as_str())]
 #[command(about = "Robonix helper CLI for package validation, build, and local orchestration", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -201,6 +204,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn update_accepts_yes_and_check_flags() {
+        let cli = Cli::try_parse_from(["rbnx", "update", "-y"]).expect("update -y should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Update { yes: true, .. }
+        ));
+        let cli = Cli::try_parse_from(["rbnx", "update", "--check", "--json"])
+            .expect("update --check --json should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Update {
+                check: true,
+                json: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["rbnx", "update", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["rbnx", "update", "--check", "-y"]).is_err());
     }
 
     #[test]

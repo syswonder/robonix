@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 import numpy as np
@@ -35,13 +35,7 @@ class InferenceCounters:
     failed: int = 0
 
     def as_dict(self) -> dict[str, int]:
-        """Return a stable, log-friendly snapshot of all inference counts."""
-        return {
-            "processed": self.processed,
-            "skipped": self.skipped,
-            "retried": self.retried,
-            "failed": self.failed,
-        }
+        return asdict(self)
 
 
 def _image_sample(image: Image.Image) -> tuple[bytes, int, int]:
@@ -55,7 +49,6 @@ def _image_sample(image: Image.Image) -> tuple[bytes, int, int]:
 
 def fingerprint_jpeg(payload: bytes) -> FrameFingerprint:
     """Fingerprint encoded image bytes, tolerating decode failures."""
-
     exact = hashlib.sha256(payload).digest()
     try:
         with Image.open(io.BytesIO(payload)) as image:
@@ -67,7 +60,6 @@ def fingerprint_jpeg(payload: bytes) -> FrameFingerprint:
 
 def fingerprint_bgr(frame: np.ndarray) -> FrameFingerprint:
     """Fingerprint an OpenCV-style BGR frame."""
-
     array = np.asarray(frame)
     exact = hashlib.sha256(
         repr((array.shape, array.dtype.str)).encode("ascii")
@@ -91,13 +83,9 @@ def frames_equivalent(
     *,
     threshold: float,
 ) -> bool:
-    """Return true for exact matches and low-level compression/noise changes.
-
-    The 32x32 sample is divided into 4x4 blocks and the largest normalized RGB
-    RMS distance is compared. Downsampling absorbs JPEG artefacts and sensor
-    noise, while the block maximum keeps small local objects from disappearing
-    into a whole-frame average.
-    """
+    """True for identical frames and for JPEG/sensor-noise-level differences:
+    the largest per-block RGB RMS of the 32x32 samples, so a small local change
+    is not averaged away."""
 
     if left is None or right is None:
         return False

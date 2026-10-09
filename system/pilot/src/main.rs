@@ -213,6 +213,13 @@ async fn main() -> Result<()> {
     let vlm = vlm::VlmClient::new(&cfg.vlm);
     let context_window = vlm.context_window_info().await;
     let history_budget = planner::HistoryBudget::new(context_window.tokens, context_window.source);
+    // Which service and model this Pilot asks; each reply's vlm_usage line
+    // records the model that actually answered, which a relay may choose.
+    info!(
+        "[pilot/vlm] endpoint={} model={}",
+        cfg.vlm.endpoint_for_log(),
+        cfg.vlm.model
+    );
     info!(
         "[pilot/context_budget] {}",
         serde_json::json!({

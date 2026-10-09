@@ -1,0 +1,11 @@
+# robonix/system/scene/goal_region - find a navigation-safe pose inside
+# a user-defined region annotation. The returned map-frame pose is always
+# inside the region polygon; pass it to navigation/navigate.
+
+string region_id
+---
+bool reachable
+float64 x
+float64 y
+float64 yaw
+string reason

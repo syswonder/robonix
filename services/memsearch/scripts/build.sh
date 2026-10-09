@@ -77,10 +77,10 @@ PY
 # download, runtime only serves — pull the model NOW, into the shared HF cache,
 # by building a throwaway one-doc index exactly like the service will at boot.
 echo "[build] warming ONNX embedding model (so start needs no network)"
-# Default to the CN HuggingFace mirror; override HF_ENDPOINT to change it.
-: "${HF_ENDPOINT:=https://hf-mirror.com}"
-export HF_ENDPOINT
-if ! "$VENV/bin/python" - <<'PY'
+# The CN mirror first, then huggingface.co: hf-mirror.com redirects clients
+# it sees as overseas to huggingface.co, a cross-host hop hf_hub won't follow.
+warm() {
+    HF_ENDPOINT="$1" "$VENV/bin/python" - <<'PY'
 import asyncio, os, tempfile
 from memsearch_service.onnx_compat import configure_onnxruntime
 configure_onnxruntime()
@@ -92,7 +92,8 @@ m = MemSearch(paths=[d], embedding_provider="onnx", milvus_uri=os.path.join(d, "
 asyncio.run(m.index())
 print("[build]   embedding model cached OK")
 PY
-then
+}
+if ! warm "${HF_ENDPOINT:-https://hf-mirror.com}" && ! warm https://huggingface.co; then
     echo "[build] error: ONNX embedding-model warm failed" >&2
     exit 1
 fi

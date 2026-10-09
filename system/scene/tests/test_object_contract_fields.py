@@ -30,7 +30,7 @@ def make_registry() -> tuple[ObjectRegistry, str]:
     async def _seed() -> str:
         async with registry.lock():
             obj = registry.insert_object(
-                cls="chair",
+                label="chair",
                 pose=Pose3D(1.0, 2.0, 0.1, 0.25, "map"),
                 bbox=BBox3D(0.4, 0.6, 0.9, 0.25, "map"),
                 confidence=0.9,

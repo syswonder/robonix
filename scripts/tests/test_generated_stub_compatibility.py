@@ -91,6 +91,17 @@ class GeneratedStubCompatibilityTests(unittest.TestCase):
                     f"line refuses to import them.")
 
 
+    def test_rbnx_prepares_the_same_generator(self):
+        """`rbnx codegen` prepares its own Python where the host has none;
+        that toolchain is the same one everything else pins."""
+        text = (REPO_ROOT / "tools/rbnx/src/cmd/codegen.rs").read_text(encoding="utf-8")
+        for const, var in (("MANAGED_PROTOBUF", "PROTOBUF_VERSION"),
+                           ("MANAGED_GRPC_TOOLS", "GRPC_TOOLS_VERSION"),
+                           ("MANAGED_GRPCIO", "GRPCIO_VERSION")):
+            m = re.search(rf'const {const}: &str = "([^"]+)";', text)
+            self.assertTrue(m, f"codegen.rs no longer pins {const}")
+            self.assertEqual(m.group(1), _pinned(var), const)
+
     def test_the_whole_repository_names_one_version_of_each(self):
         """protobuf, grpcio and grpcio-tools are pinned, and pinned alike.
 

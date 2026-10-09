@@ -38,6 +38,8 @@ robonix-codegen.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
 protoc-bin-vendored.workspace = true
+# 9.1 needs rustc 1.88; 10.0.2 and later need 1.96.
+vergen-gitcl = { version = "9.1", features = ["build", "cargo", "rustc"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal", "process", "fs"] }

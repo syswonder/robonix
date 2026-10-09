@@ -207,7 +207,7 @@ def _cells_nearest_to(
     target_x: float,
     target_y: float,
 ) -> Iterable[tuple[float, float]]:
-    """Yield bounding-box cell centres in increasing distance from a target.
+    """Yield bounding-box cell centres nearest the target first.
 
     The priority flood only retains the explored frontier, so a safe pose near
     the room centroid can be returned without sorting or testing the full room.
@@ -331,8 +331,7 @@ def object_goal(
     """Find the nearest map cell whose real footprint can approach an object."""
     width, height, resolution, origin_x, origin_y = _grid_metadata(grid_msg)
     grid = _grid_array(grid_msg, width=width, height=height)
-    # Preserve the existing goal_near policy: unexplored cells are allowed,
-    # but known occupied cells are not. Nav2 remains the final motion authority.
+    # Unexplored cells are allowed, occupied ones are not; Nav2 decides the rest.
     blocked = grid > 50
     target_gx = math.floor((target_x - origin_x) / resolution)
     target_gy = math.floor((target_y - origin_y) / resolution)
@@ -343,11 +342,8 @@ def object_goal(
         abs(target_gy - (height - 1)),
     )
     minimum_standoff_sq = minimum_standoff_m**2
-    # Approach from the robot's side of the object. Nearest-first alone lets
-    # the far side win whenever it is marginally closer, and for an object on
-    # a wall that is unexplored space behind it, which Nav2 can only reach by
-    # a long way round, if at all. The far side is kept as a fallback for when
-    # the robot's side has no room within FAR_SIDE_SLACK_M of it.
+    # Prefer the robot's side: for an object on a wall the far side is
+    # unexplored space Nav2 may never reach. The far side is only a fallback.
     far_side_slack_rings = math.ceil(FAR_SIDE_SLACK_M / resolution)
     far_side: tuple[float, float, float] | None = None
     far_side_ring = 0

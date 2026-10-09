@@ -14,3 +14,6 @@ docker/_weights/
 
 # Container-side editable install cache that scene's build.sh uses.
 .uv-cache/
+
+# Local working notes; not part of the repository.
+NOTES-*.md

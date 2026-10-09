@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# Allowed relation values — kept as a list so prompt and validation
-# can reference the same source of truth.
+# Allowed relation values, shared by the prompts and validation.
 RELATION_TYPES = [
     "near",
     "on_top_of",
@@ -23,10 +22,7 @@ RELATION_TYPES = [
     "unknown",
 ]
 
-# Inverse mapping for directed relations.
-# `reachable_by` is intentionally absent: it is emitted one direction only
-# (object → gripper) and has no named inverse in this vocabulary, so a
-# self-inverse would be semantically wrong. It is never flipped.
+# `reachable_by` has no inverse: it only ever points object → gripper.
 INVERSE_RELATIONS: dict[str, str] = {
     "on_top_of": "under",
     "under": "on_top_of",
@@ -50,7 +46,6 @@ class SceneGraphNode:
     bbox_extent: tuple[float, float, float]
     yaw: float = 0.0
     caption: Optional[str] = None
-    caption_updated_at: Optional[float] = None
     confidence: float = 0.0
     observation_count: int = 0
     last_seen: Optional[float] = None
@@ -75,12 +70,14 @@ class SceneGraphEdge:
     method: str = "llm"       # "llm" | "geometric" | "cached" | "llm_fail"
     reason: str = ""
     updated_at: float = field(default_factory=time.time)
-    # How many consecutive rebuild rounds this edge has *not* been
-    # re-confirmed by the current cycle. 0 = fresh from this round.
-    # SceneGraphBuilder uses this for hysteresis: an edge survives up
-    # to `max_stale_rounds` empty rounds before being dropped, so a
-    # transient round that returns 0 candidates does not wipe the UI.
+    # Consecutive rebuilds this edge went unconfirmed (builder hysteresis).
     stale_rounds: int = 0
+
+    def shown_on_map(self) -> bool:
+        """A relation the map states: measured, or a confident model call.
+        `same_object` is a dedup hint between detections, not a relation."""
+        return self.relation != "same_object" and (
+            self.method == "geometric" or self.confidence >= 0.45)
 
 
 @dataclass

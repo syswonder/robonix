@@ -59,7 +59,7 @@ class _Hub:
     def latest(self, kind):
         return self._slots.get(kind, (None, 0.0, 0))
 
-    def lookup_transform_4x4(self, _target_frame, _source_frame):
+    def lookup_transform_4x4(self, _target_frame, _source_frame, _stamp=None):
         """Make the TF-first path explicitly unavailable in this fixture."""
         return None
 

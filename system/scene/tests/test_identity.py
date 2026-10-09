@@ -18,12 +18,12 @@ from scene_service.state.object_registry import BBox3D, ObjectRegistry, Pose3D
 
 # ── registry-level helpers ────────────────────────────────────────────────
 
-def _insert(reg: ObjectRegistry, cls: str, xyz, *, now: float):
+def _insert(reg: ObjectRegistry, label: str, xyz, *, now: float):
     """Insert a perception object at `xyz` and return it (test helper).
 
     Bypasses the asyncio lock — single-threaded test, no contention."""
     return reg.insert_object(
-        cls,
+        label,
         Pose3D(*xyz),
         BBox3D(0.2, 0.2, 0.2),
         confidence=0.9,
@@ -154,7 +154,7 @@ def test_apply_snapshot_cross_tick_rebind():
     # Tick 1 + 2: same uuid u1 seen twice → one record, obs climbs to 2.
     run(det._apply_snapshot([_snap("u1", "keyboard", (1.0, 0.0, 0.7))]))
     run(det._apply_snapshot([_snap("u1", "keyboard", (1.0, 0.0, 0.7))]))
-    objs = [o for o in reg.all_objects() if o.cls == "keyboard"]
+    objs = [o for o in reg.all_objects() if o.label == "keyboard"]
     assert len(objs) == 1, f"expected 1 keyboard, got {len(objs)}"
     oid, obs = objs[0].object_id, objs[0].observation_count
     assert obs == 2, f"expected obs=2, got {obs}"
@@ -168,7 +168,7 @@ def test_apply_snapshot_cross_tick_rebind():
 
     # Tick 4: re-detected under a fresh uuid u2 → re-binds the SAME id, obs→3.
     run(det._apply_snapshot([_snap("u2", "keyboard", (1.02, 0.0, 0.7))]))
-    objs = [o for o in reg.all_objects() if o.cls == "keyboard"]
+    objs = [o for o in reg.all_objects() if o.label == "keyboard"]
     assert len(objs) == 1, f"re-detect must not duplicate; got {len(objs)}"
     assert objs[0].object_id == oid, "id must be stable across the uuid gap"
     assert objs[0].observation_count == 3, "obs count must continue, not reset"
@@ -185,7 +185,7 @@ def test_apply_snapshot_ttl_prune():
     run = asyncio.new_event_loop().run_until_complete
 
     run(det._apply_snapshot([_snap("u1", "keyboard", (1.0, 0.0, 0.7))]))
-    oid = next(o.object_id for o in reg.all_objects() if o.cls == "keyboard")
+    oid = next(o.object_id for o in reg.all_objects() if o.label == "keyboard")
 
     # Soft-evict, then backdate last_seen past the TTL.
     run(det._apply_snapshot([]))
@@ -197,6 +197,68 @@ def test_apply_snapshot_ttl_prune():
     print("  [PASS] test_apply_snapshot_ttl_prune")
 
 
+def test_apply_snapshot_follows_a_registry_merge():
+    """Two tracks the registry folded into one keep feeding that one record,
+    instead of minting a fresh id every tick that is then folded again."""
+    reg = ObjectRegistry()
+    det = _make_detector(reg)
+    run = asyncio.new_event_loop().run_until_complete
+    both = [_snap("u1", "chair", (1.0, 0.0, 0.4)), _snap("u2", "chair", (1.1, 0.0, 0.4))]
+
+    run(det._apply_snapshot(both))
+    assert len(reg.merge_duplicates(time.time(), xy_m=0.35)) == 1
+    (kept,) = [o.object_id for o in reg.all_objects() if o.label == "chair"]
+
+    run(det._apply_snapshot(both))
+    assert [o.object_id for o in reg.all_objects() if o.label == "chair"] == [kept]
+
+
+def test_the_map_gate_admits_but_never_evicts():
+    """An object on ground the map has not observed is not registered; but a
+    registered object whose next snapshot the gate rejects stays as it was,
+    since that is not evidence it is gone."""
+    import numpy as np
+
+    reg = ObjectRegistry()
+    det = _make_detector(reg)
+    run = asyncio.new_event_loop().run_until_complete
+    # A 2 m x 2 m grid at 5 cm whose left half (x < 1 m) has been observed.
+    mask = np.zeros((40, 40), dtype=bool)
+    mask[:, :20] = True
+    det._known_gate = type("Gate", (), {"current": lambda self: (mask, (0.0, 0.0), 0.05)})()
+
+    def snap(uuid, cls, x, y):
+        return {**_snap(uuid, cls, (x, y, 0.5)), "xy": np.array([[x, y]])}
+
+    run(det._apply_snapshot([snap("u1", "keyboard", 0.5, 0.5), snap("u2", "chair", 1.5, 0.5)]))
+    assert [o.label for o in reg.all_objects()] == ["keyboard"]
+    (kb,) = reg.all_objects()
+
+    run(det._apply_snapshot([snap("u1", "keyboard", 1.5, 1.5)]))
+    assert not kb.missing and kb.pose.x == 0.5 and kb.observation_count == 1
+
+    run(det._apply_snapshot([]))
+    assert kb.missing, "a uuid concept-graphs dropped still evicts"
+
+
+def test_photographs_come_from_the_detectors_own_boxes():
+    """A crop is cut from the box the label was given to, and only while fresh."""
+    import numpy as np
+
+    det = _make_detector(ObjectRegistry())
+    det._uuid_to_oid = {"u1": "scene.object.0007"}
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    det._seen = (rgb, {"u1": [10.4, 20.6, 110.0, 220.0], "gone": [0, 0, 5, 5]},
+                 (1.0, 2.0), time.time())
+
+    frame, boxes, cam_xy = det.latest_detection_views()
+    assert frame is rgb and cam_xy == (1.0, 2.0)
+    assert boxes == [("scene.object.0007", (10, 21, 110, 220))]
+
+    det._seen = det._seen[:3] + (time.time() - 60.0,)
+    assert det.latest_detection_views() is None
+
+
 if __name__ == "__main__":
     print("Running object-identity unit tests...\n")
     test_find_rebindable()
@@ -205,4 +267,6 @@ if __name__ == "__main__":
     test_parse_merge_class_groups()
     test_apply_snapshot_cross_tick_rebind()
     test_apply_snapshot_ttl_prune()
+    test_apply_snapshot_follows_a_registry_merge()
+    test_the_map_gate_admits_but_never_evicts()
     print("\nAll tests passed!")

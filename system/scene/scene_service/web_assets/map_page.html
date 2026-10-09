@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>robonix — map & regions</title>
+  <style>
+    :root { --fg:#e8eaed; --bg:#0e1015; --panel:#161a22; --acc:#7aa7ff;
+            --muted:#7d828b; --warn:#e6c454; --danger:#e06c75; }
+    html, body { background: var(--bg); color: var(--fg); margin: 0; height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+    header { display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+      background: var(--panel); border-bottom: 1px solid #232936; flex: none; }
+    header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+    header .meta { font-size: 12px; color: var(--muted); }
+    header .stale-alert { font-size: 12px; color: var(--warn); display: none; }
+    #main { display: flex; flex: 1; min-height: 0; }
+    #panel { width: 260px; flex: none; background: var(--panel);
+      border-right: 1px solid #232936; display: flex; flex-direction: column; }
+    #panel .actions { padding: 12px; border-bottom: 1px solid #232936; }
+    .btn.primary.active { background: var(--acc); color: #0e1015; }
+    #region-list { flex: 1; min-height: 0; overflow-y: auto; padding: 7px 10px;
+      overscroll-behavior: contain; scrollbar-gutter: stable; }
+    .region { --region-color: var(--acc); border: 1px solid #232936;
+      border-left: 3px solid var(--region-color); border-radius: 7px; padding: 6px 8px;
+      margin-bottom: 6px; font-size: 12px; }
+    .region.selected { border-color: var(--acc); }
+    .region .name { font-weight: 650; }
+    .region .swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+      border-radius: 2px; background: var(--region-color); vertical-align: 1px; }
+    .region .sub { color: var(--muted); font-size: 10px; margin: 2px 0 5px 14px; }
+    .region .badge { color: #0e1015; background: var(--warn); border-radius: 4px;
+      padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 6px; }
+    .region .btns { display: flex; gap: 6px; }
+    #canvas-wrap { position: relative; flex: 1; min-width: 0; }
+    canvas { display: block; width: 100%; height: 100%; background: #14171f; }
+    #hint { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,23,31,.92); border: 1px solid #33405a; color: var(--fg);
+      font-size: 12px; padding: 6px 12px; border-radius: 6px; display: none; }
+    #toast { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,23,31,.95); border: 1px solid #6b3640; color: var(--danger);
+      font-size: 12px; padding: 6px 12px; border-radius: 6px; display: none; }
+    #scene-status { position: absolute; top: 10px; right: 10px;
+      background: rgba(20,23,31,.92); border: 1px solid #33405a; color: var(--muted);
+      font-size: 12px; padding: 6px 10px; border-radius: 6px; }
+    #scene-status.error { border-color: #6b3640; color: var(--danger); }
+    .legend { position: absolute; bottom: 8px; left: 12px; font-size: 11px;
+      color: var(--muted); background: rgba(20,23,31,.85); padding: 4px 8px;
+      border-radius: 4px; }
+    #empty { padding: 10px 2px; color: var(--muted); font-size: 12px; }
+    dialog.modal { width: min(360px, calc(100vw - 32px)); border: 1px solid #33405a;
+      border-radius: 10px; padding: 0; background: #151a23; color: var(--fg);
+      box-shadow: 0 18px 70px rgba(0,0,0,.55); }
+    dialog.modal::backdrop { background: rgba(0,0,0,.55); }
+    .modal-body { padding: 16px; display: grid; gap: 12px; }
+    .modal-title { font-weight: 700; font-size: 14px; }
+    .modal-message { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    /* OK is first in the DOM so Enter confirms; shown on the right. */
+    #region-modal-ok { order: 2; }
+  </style>
+</head>
+<body data-ready="loading">
+<style>__CONTROLS__</style>
+<script>__LABELS__</script>
+<script>__I18N_RUNTIME__</script>
+<style>
+    /* Shown on an unsaved session: marking works, saving keeps it. */
+    #map-note {
+      display: none; margin: 10px 0 0; padding: 10px 12px;
+      border: 1px solid #3a3320; border-radius: 6px; background: #1d1a10;
+      color: #d9cfae; font-size: 12px; line-height: 1.55;
+    }
+    #map-note a { color: #f0c050; }
+    #map-note b { color: #f0c050; }
+    body.unsaved-map #map-note { display: block; }
+
+    #bound-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 2px 9px; border-radius: 999px; font-size: 11.5px;
+      border: 1px solid #2f4a2f; background: #17251a; color: #9fd39f;
+    }
+    #bound-pill.none { border-color: #4a3f20; background: #241f10; color: #d9c07a; }
+    #bound-pill .dot { width: 6px; height: 6px; border-radius: 50%;
+                       background: currentColor; }
+</style>
+<div id="app">
+  <header>
+    <h1 id="page-title" data-i18n="page.regions">Regions</h1>
+    <span id="bound-pill" class="none"><span class="dot"></span><span id="bound-text">no map bound</span></span>
+    <span class="stale-alert" id="stale-alert" data-i18n="regions.staleAlert">⚠ map was rebuilt — review stale regions</span>
+  </header>
+  <div id="main">
+    <div id="panel">
+      <div id="map-note">
+        <b data-i18n="note.title">Temporary map</b><br>
+        <span data-i18n="note.body">Marking and recognition work normally
+        here. Saving this session under a name keeps the regions and objects
+        with it; without that, they end with the session.</span><br>
+        <a href="/maps" target="_top" data-i18n="note.link">Go to maps</a>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="btn-draw" data-i18n="btn.mark">✏ Mark region</button>
+        <button class="btn" id="btn-pose-estimate" data-i18n="form.pose">Pose estimate</button>
+      </div>
+      <div id="region-list"><div id="empty" data-i18n="regions.empty">No regions yet. Click “Mark region”, then click on the map to outline one (double-click or Enter to finish, Esc to cancel).</div></div>
+    </div>
+    <div id="canvas-wrap">
+      <canvas id="c"></canvas>
+      <div id="hint"></div>
+      <div id="toast"></div>
+      <div id="scene-status" role="status"></div>
+      <div class="legend" data-i18n="regions.legend"></div>
+    </div>
+  </div>
+</div>
+<dialog class="modal" id="region-modal">
+  <form method="dialog" class="modal-body">
+    <div class="modal-title" id="region-modal-title" data-i18n="regions.dialog">Region</div>
+    <div class="modal-message" id="region-modal-message"></div>
+    <input class="modal-input field" id="region-modal-input" autocomplete="off" />
+    <div class="modal-actions">
+      <button class="btn primary" id="region-modal-ok" value="ok" data-i18n="regions.ok">OK</button>
+      <button class="btn" id="region-modal-cancel" value="cancel" data-i18n="regions.cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+function fit() { c.width = c.clientWidth; c.height = c.clientHeight; }
+fit();
+
+// ── view transform (world meters ↔ canvas px); the view holds still ──────
+let center = [0, 0];
+let pxPerM = 40;
+let viewInit = false;
+function w2p(x, y) {
+    return [c.width / 2 + (x - center[0]) * pxPerM,
+            c.height / 2 - (y - center[1]) * pxPerM];
+}
+function p2w(px, py) {
+    return [center[0] + (px - c.width / 2) / pxPerM,
+            center[1] - (py - c.height / 2) / pxPerM];
+}
+
+// ── state ────────────────────────────────────────────────────────────────
+let state = null;          // last /api/state payload
+let occImg = null, occMeta = null, occStamp = 0, occLoading = 0;
+let occLoadToken = 0;
+let dragging = false, dragMoved = false, lastPos = null;
+let drawMode = false;
+let draft = [];            // in-progress polygon vertices (world coords)
+let mouseWorld = null;     // live cursor position for the rubber-band edge
+let selectedId = null;
+let poseEstimateMode = false;
+let draftSubmitting = false;
+
+window.addEventListener('resize', () => { fit(); draw(); });
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) draw();
+});
+
+const hintEl = document.getElementById('hint');
+const sceneStatusEl = document.getElementById('scene-status');
+function setHint(text) {
+    hintEl.style.display = text ? 'block' : 'none';
+    hintEl.textContent = text || '';
+}
+function setSceneStatus(text, kind = '') {
+    sceneStatusEl.textContent = text || '';
+    sceneStatusEl.className = kind;
+    sceneStatusEl.style.display = text ? 'block' : 'none';
+}
+setSceneStatus(t('regions.loading'));
+function setSceneReady(value) { document.body.dataset.ready = value; }
+function isCurrentOccupancyLoad(token, stamp) {
+    return token === occLoadToken && stamp === occLoading;
+}
+let toastTimer = null;
+function toast(text) {
+    const t = document.getElementById('toast');
+    t.textContent = text; t.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.style.display = 'none'; }, 4000);
+}
+function polyCentroid(pts) {
+    // Area-weighted: a vertex average drifts toward densely sampled edges.
+    let twiceArea = 0, sx = 0, sy = 0;
+    for (let i = 0; i < pts.length; i++) {
+        const [x0, y0] = pts[i];
+        const [x1, y1] = pts[(i + 1) % pts.length];
+        const cross = x0 * y1 - x1 * y0;
+        twiceArea += cross;
+        sx += (x0 + x1) * cross;
+        sy += (y0 + y1) * cross;
+    }
+    if (Math.abs(twiceArea) < 1e-9) {
+        const sum = pts.reduce(([x, y], p) => [x + p[0], y + p[1]], [0, 0]);
+        return [sum[0] / pts.length, sum[1] / pts.length];
+    }
+    return [sx / (3 * twiceArea), sy / (3 * twiceArea)];
+}
+
+const ROOM_COLORS = [
+    { stroke:'#63a7ff', fill:'rgba(99,167,255,.18)', label:'#d8e9ff' },
+    { stroke:'#5fd6a7', fill:'rgba(95,214,167,.18)', label:'#d2f8e9' },
+    { stroke:'#f0aa5d', fill:'rgba(240,170,93,.18)', label:'#ffe7cd' },
+    { stroke:'#c58cff', fill:'rgba(197,140,255,.18)', label:'#eedcff' },
+    { stroke:'#ef7f9c', fill:'rgba(239,127,156,.18)', label:'#ffd9e3' },
+    { stroke:'#55c8dd', fill:'rgba(85,200,221,.18)', label:'#d4f7fc' },
+    { stroke:'#d5c456', fill:'rgba(213,196,86,.18)', label:'#fff6bd' },
+    { stroke:'#8fcf66', fill:'rgba(143,207,102,.18)', label:'#e3f8d5' },
+];
+function roomColor(annotation) {
+    const key = String(annotation.annotation_id || annotation.name || 'region');
+    let hash = 2166136261;
+    for (let i = 0; i < key.length; i++) {
+        hash ^= key.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return ROOM_COLORS[(hash >>> 0) % ROOM_COLORS.length];
+}
+
+function draw() {
+    fit();
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (!state) return;
+
+    // Occupancy underlay; occStamp advances only on a successful decode, so
+    // a corrupt frame is retried.
+    if (state.occupancy && state.occupancy.stamp_ms !== occStamp
+        && state.occupancy.stamp_ms !== occLoading) {
+        occLoading = state.occupancy.stamp_ms;
+        const loadToken = ++occLoadToken;
+        const meta = state.occupancy;
+        const im = new Image();
+        im.onload = () => {
+            if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;
+            occImg = im;
+            occMeta = meta;
+            occStamp = meta.stamp_ms;
+            occLoading = 0;
+            draw();
+        };
+        im.onerror = () => {
+            if (!isCurrentOccupancyLoad(loadToken, meta.stamp_ms)) return;
+            occLoading = 0;
+            setSceneReady('error');
+            setSceneStatus(t('regions.badImage'), 'error');
+            console.error('occupancy PNG decode failed');
+        };
+        im.src = 'data:image/png;base64,' + meta.png_b64;
+    }
+    if (occImg && occMeta) {
+        if (!viewInit) {   // first grid: fit it into the viewport once
+            const wM = occMeta.width * occMeta.resolution;
+            const hM = occMeta.height * occMeta.resolution;
+            center = [occMeta.origin_x + wM / 2, occMeta.origin_y + hM / 2];
+            pxPerM = Math.min((c.width - 40) / wM, (c.height - 40) / hM, 120);
+            pxPerM = Math.max(pxPerM, 5);
+            viewInit = true;
+        }
+        const wM = occMeta.width * occMeta.resolution;
+        const hM = occMeta.height * occMeta.resolution;
+        const [x0, y0] = w2p(occMeta.origin_x, occMeta.origin_y + hM);
+        ctx.globalAlpha = 0.9;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(occImg, x0, y0, wM * pxPerM, hM * pxPerM);
+        ctx.globalAlpha = 1.0;
+    } else {
+        ctx.fillStyle = '#7d828b'; ctx.font = '13px sans-serif';
+        ctx.fillText('no map yet — the SLAM map appears here once mapping publishes it', 20, 30);
+    }
+
+    // saved regions
+    for (const a of (state.annotations || [])) {
+        if (a.kind !== 'region' || a.points.length < 3) continue;
+        const pts = a.points.map(p => w2p(p[0], p[1]));
+        ctx.beginPath();
+        pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        ctx.closePath();
+        const sel = a.annotation_id === selectedId;
+        const color = roomColor(a);
+        ctx.fillStyle = a.stale ? 'rgba(230,196,84,0.12)' : color.fill;
+        ctx.fill();
+        ctx.lineWidth = sel ? 2.5 : 1.5;
+        ctx.strokeStyle = a.stale ? '#e6c454' : color.stroke;
+        ctx.setLineDash(a.stale ? [6, 4] : []);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const [cx, cy] = w2p(...polyCentroid(a.points));
+        const label = (a.stale ? '⚠ ' : '') + (a.name || t('regions.unnamed'));
+        ctx.font = '700 15px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+        ctx.strokeText(label, cx, cy);
+        ctx.fillStyle = a.stale ? '#f4dc78' : color.label;
+        ctx.fillText(label, cx, cy);
+        ctx.textAlign = 'start';
+    }
+
+    // Objects, labelled, so a region can be drawn around named things.
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    const anchors = [];
+    for (const o of (state.objects || [])) {
+        if (o.label === 'robot') continue;
+        const [px, py] = w2p(o.pose.x, o.pose.y);
+        const colour = classColor(o.label);
+        const r = 4;
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = colour;
+        ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+        ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(14,16,21,0.9)';
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        const text = o.label;
+        anchors.push({
+            x: px, y: py, r: r, text: text, color: colour,
+            w: ctx.measureText(text).width, h: 12,
+        });
+    }
+    if (anchors.length) {
+        // Placement is frozen while panning.
+        const viewKey = `${pxPerM.toFixed(3)}:${center[0].toFixed(2)},` +
+                        `${center[1].toFixed(2)}:${c.width}x${c.height}`;
+        const boxes = placedLabels(anchors, c.width, c.height, viewKey,
+                                   dragging && dragMoved);
+        for (let i = 0; i < anchors.length; i++) {
+            const a = anchors[i], b = boxes[i];
+            drawLeader(ctx, b, a);
+            // A halo reads on both free (white) and unknown (dark) cells.
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+            ctx.strokeText(a.text, b.x + LBL.PAD, b.y + b.h / 2);
+            ctx.fillStyle = a.color;
+            ctx.fillText(a.text, b.x + LBL.PAD, b.y + b.h / 2);
+            ctx.globalAlpha = 1;
+        }
+    }
+
+    // Robot: a fixed-size disc and heading arrow, in screen pixels.
+    const robot = state.robot;
+    if (robot) {
+        const [rx, ry] = w2p(robot.x, robot.y);
+        const yaw = robot.yaw || 0;
+        const R = 8, CONE = 40, SPREAD = 0.34;  // radians either side
+        const TIP = 34, HALF = 7;               // arrow reach and half-width
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
+        const grad = ctx.createRadialGradient(0, 0, R, 0, 0, CONE);
+        grad.addColorStop(0, 'rgba(122, 167, 255, 0.26)');
+        grad.addColorStop(1, 'rgba(122, 167, 255, 0)');
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, CONE, -SPREAD, SPREAD);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(TIP, 0);
+        ctx.lineTo(R + 2, -HALF);
+        ctx.lineTo(R + 2, HALF);
+        ctx.closePath();
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(0, 0, R + 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(8, 11, 17, 0.55)';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(0, 0, R, 0, Math.PI * 2);
+        ctx.fillStyle = '#7aa7ff';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(10, 14, 22, 0.9)';
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    // draft polygon (draw mode)
+    if (drawMode && draft.length) {
+        const pts = draft.map(p => w2p(p[0], p[1]));
+        ctx.beginPath();
+        pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        if (mouseWorld) { const [mx, my] = w2p(...mouseWorld); ctx.lineTo(mx, my); }
+        ctx.strokeStyle = '#8ef0b7'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+        ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = '#8ef0b7';
+        for (const [x, y] of pts) {
+            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+        }
+    }
+
+    const canvasVisible = c.clientWidth > 0 && c.clientHeight > 0;
+    const current = !state.occupancy || (occImg && occStamp === state.occupancy.stamp_ms);
+    setSceneReady(canvasVisible && current ? 'true' : 'loading');
+    // While mapping the grid changes every second: only an empty canvas is "loading".
+    setSceneStatus(!canvasVisible ? t('regions.waitingCanvas')
+        : (state.occupancy && !occImg) ? t('regions.loadingMap') : '');
+}
+
+function setPoseEstimateMode(on) {
+    poseEstimateMode = on;
+    const btn = document.getElementById('btn-pose-estimate');
+    if (btn) {
+        btn.classList.toggle('primary', on);
+        btn.textContent = on ? t('st.poseClick') : t('form.pose');
+    }
+    setHint(on ? t('regions.poseHint') : '');
+    c.style.cursor = on ? 'crosshair' : (drawMode ? 'crosshair' : 'grab');
+}
+function poseDeltaText(delta) {
+    if (!delta) return 'pose feedback unavailable';
+    return `error ${Number(delta.distance_m || 0).toFixed(2)} m, yaw ${Number(delta.abs_yaw_rad || 0).toFixed(2)} rad`;
+}
+async function sendPoseEstimate(world) {
+    if (!world) return;
+    setPoseEstimateMode(false);
+    const x = world[0], y = world[1], theta = 0.0;
+    toast(`pose estimate: ${x.toFixed(2)}, ${y.toFixed(2)}`);
+    const out = await api('POST', '/api/maps/pose_estimate', { x, y, theta });
+    if (out) {
+        toast(`${out.detail || t('st.poseSent')}` +
+            (out.delta_before ? ` · before ${poseDeltaText(out.delta_before)}` : '') +
+            (out.delta_after ? ` · after ${poseDeltaText(out.delta_after)}` : ''));
+    } else toast(tv('st.poseFailedAt', {x: x.toFixed(2), y: y.toFixed(2)}));
+}
+document.getElementById('btn-pose-estimate').addEventListener('click', () => setPoseEstimateMode(!poseEstimateMode));
+
+// ── side panel ───────────────────────────────────────────────────────────
+function esc(s) {
+    return String(s).replace(/[&<>"']/g,
+        ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+const roomModal = document.getElementById('region-modal');
+const roomModalTitle = document.getElementById('region-modal-title');
+const roomModalMessage = document.getElementById('region-modal-message');
+const roomModalInput = document.getElementById('region-modal-input');
+const roomModalOk = document.getElementById('region-modal-ok');
+const roomModalCancel = document.getElementById('region-modal-cancel');
+
+function askModal({ title, message = '', defaultValue = '', input = true, okText = t('regions.ok'), danger = false }) {
+    return new Promise((resolve) => {
+        roomModalTitle.textContent = title;
+        roomModalMessage.textContent = message;
+        roomModalMessage.style.display = message ? 'block' : 'none';
+        roomModalInput.value = defaultValue || '';
+        roomModalInput.style.display = input ? 'block' : 'none';
+        roomModalOk.textContent = okText;
+        roomModalOk.classList.toggle('danger', danger);
+        // returnValue survives a close: reset it, or Esc after an earlier OK
+        // would read as OK.
+        roomModal.returnValue = '';
+        roomModal.addEventListener('close', () => resolve(
+            roomModal.returnValue !== 'ok' ? null
+                : input ? roomModalInput.value.trim() : true), { once: true });
+        if (typeof roomModal.showModal === 'function') roomModal.showModal();
+        else roomModal.setAttribute('open', '');
+        if (input) {
+            roomModalInput.focus();
+            roomModalInput.select();
+        } else {
+            roomModalOk.focus();
+        }
+    });
+}
+
+function askRegionName(title, defaultValue = '') {
+    return askModal({ title, defaultValue, input: true, okText: t('regions.save') });
+}
+
+function askConfirm(title, message, okText = t('regions.delete')) {
+    return askModal({ title, message, input: false, okText, danger: true });
+}
+function renderPanel() {
+    const regions = (state && state.annotations || []).filter(a => a.kind === 'region');
+    const list = document.getElementById('region-list');
+    const anyStale = regions.some(a => a.stale);
+    document.getElementById('stale-alert').style.display = anyStale ? 'inline' : 'none';
+    if (!regions.length) {
+        list.innerHTML = '<div id="empty" data-i18n="regions.empty">'
+          + t('regions.empty') + '</div>';
+        return;
+    }
+    list.innerHTML = regions.map(a => `
+      <div class="region ${a.annotation_id === selectedId ? 'selected' : ''}"
+           data-id="${esc(a.annotation_id)}" style="--region-color:${roomColor(a).stroke}">
+        <span class="swatch" aria-hidden="true"></span><span class="name">${esc(a.name || t('regions.unnamed'))}</span>
+        ${a.stale ? '<span class="badge" title="' + esc(a.stale_reason) + '">' + t('regions.stale') + '</span>' : ''}
+        <div class="sub">${tv('regions.cornerCount', {n: a.points.length})}</div>
+        <div class="btns">
+          <button class="btn small" data-act="rename">${t('regions.rename')}</button>
+          ${a.stale ? `<button class="btn small" data-act="confirm">${t('regions.stillValid')}</button>` : ''}
+          <button class="btn small danger" data-act="delete">${t('regions.delete')}</button>
+        </div>
+      </div>`).join('');
+}
+document.getElementById('region-list').addEventListener('click', async (ev) => {
+    const roomEl = ev.target.closest('.region');
+    if (!roomEl) return;
+    const id = roomEl.dataset.id;
+    const act = ev.target.dataset && ev.target.dataset.act;
+    if (!act) { selectedId = (selectedId === id) ? null : id; renderPanel(); draw(); return; }
+    const region = (state.annotations || []).find(a => a.annotation_id === id);
+    if (!region) return;
+    if (act === 'rename') {
+        const name = await askRegionName(t('regions.renameTitle'), region.name);
+        if (name !== null && name && await api('PUT', '/api/regions/' + id, { name })) {
+            region.name = name;  // before the next poll, so a Delete names it right
+            renderPanel();
+        }
+    } else if (act === 'confirm') {
+        await api('PUT', '/api/regions/' + id, { stale: false });
+    } else if (act === 'delete') {
+        if (await askConfirm(t('regions.deleteTitle'), tv('regions.deleteAsk', {name: region.name})))
+            await api('DELETE', '/api/regions/' + id);
+    }
+});
+
+// ── draw mode ────────────────────────────────────────────────────────────
+const btnDraw = document.getElementById('btn-draw');
+function setDrawMode(on) {
+    drawMode = on;
+    draft = [];
+    btnDraw.classList.toggle('active', on);
+    btnDraw.dataset.i18n = on ? 'btn.cancelDraw' : 'btn.mark';
+    btnDraw.textContent = t(btnDraw.dataset.i18n);
+    c.style.cursor = on ? 'crosshair' : 'grab';
+    setHint(on ? t('st.drawHint') : '');
+    draw();
+}
+btnDraw.addEventListener('click', () => setDrawMode(!drawMode));
+
+async function finishDraft() {
+    if (draftSubmitting) return;
+    if (draft.length < 3) { toast(t('regions.needCorners')); return; }
+    draftSubmitting = true;
+    try {
+        const points = draft.map(p => [p[0], p[1]]);
+        const name = await askRegionName(t('regions.createTitle'), '');
+        if (name === null) return;          // keep drawing
+        if (!name) { toast(t('st.nameRequired')); return; }
+        const body = { kind: 'region', name, points };
+        draft = [];
+        const created = await api('POST', '/api/regions', body);
+        if (created) setDrawMode(false);
+        else { draft = points; draw(); }
+    } finally {
+        draftSubmitting = false;
+    }
+}
+
+// ── canvas input: pan / zoom / vertex clicks / hover ─────────────────────
+c.style.cursor = 'grab';
+c.addEventListener('mousedown', (ev) => {
+    dragging = true; dragMoved = false; lastPos = [ev.offsetX, ev.offsetY];
+});
+window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    // Re-place labels once the pan ends; the frozen boxes were never checked
+    // against labels that scrolled in.
+    if (window.lblCache) window.lblCache.key = '';
+    draw();
+});
+c.addEventListener('mousemove', (ev) => {
+    mouseWorld = p2w(ev.offsetX, ev.offsetY);
+    if (dragging && lastPos) {
+        const dx = ev.offsetX - lastPos[0], dy = ev.offsetY - lastPos[1];
+        if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
+        if (dragMoved) {
+            center = [center[0] - dx / pxPerM, center[1] + dy / pxPerM];
+            lastPos = [ev.offsetX, ev.offsetY];
+        }
+    }
+    draw();
+});
+c.addEventListener('click', (ev) => {
+    if (dragMoved) return;              // that was a pan, not a click
+    if (poseEstimateMode) { sendPoseEstimate(p2w(ev.offsetX, ev.offsetY)); return; }
+    if (drawMode) { draft.push(p2w(ev.offsetX, ev.offsetY)); draw(); }
+});
+c.addEventListener('dblclick', (ev) => {
+    ev.preventDefault();
+    if (drawMode) {
+        // Its two clicks added the same corner twice.
+        if (draft.length > 1) draft.pop();
+        finishDraft();
+    }
+});
+window.addEventListener('keydown', (ev) => {
+    // Keys typed into the name dialog are not drawing commands.
+    if (!drawMode || ev.target.closest('dialog, input, textarea')) return;
+    if (ev.key === 'Escape') setDrawMode(false);
+    if (ev.key === 'Enter' && !ev.repeat) {
+        // Or the keypress that follows lands in the name box and submits it empty.
+        ev.preventDefault();
+        finishDraft();
+    }
+});
+c.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+    // Zoom about the cursor.
+    const [wx, wy] = p2w(ev.offsetX, ev.offsetY);
+    pxPerM = Math.min(400, Math.max(3, pxPerM * factor));
+    const [nx, ny] = p2w(ev.offsetX, ev.offsetY);
+    center = [center[0] + (wx - nx), center[1] + (wy - ny)];
+    draw();
+}, { passive: false });
+
+// ── API + polling ────────────────────────────────────────────────────────
+async function api(method, path, body) {
+    try {
+        const r = await fetch(path, {
+            method,
+            headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        const out = await r.json().catch(() => null);
+        if (!r.ok || !out || out.ok === false) {
+            toast((out && out.detail) || (method + ' failed (' + r.status + ')'));
+            return null;
+        }
+        writes++;
+        refresh();  // not awaited: it waits for the grid image, which can take seconds
+        return out;
+    } catch (e) { toast(tv('regions.requestFailed', {why: e})); return null; }
+}
+
+// A poll sent before a write can answer after it, and would put back what the
+// write just changed (a renamed region showing its old name for a second).
+let writes = 0;
+async function refresh() {
+    // Only the fetch is guarded; a render bug must reach the console.
+    const since = writes;
+    let next = null;
+    try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (!r.ok) {
+            setSceneReady('error');
+            setSceneStatus(tv('regions.unavailable', {why: 'HTTP ' + r.status}), 'error');
+            return;
+        }
+        next = await r.json();
+    } catch (error) {
+        setSceneReady('error');
+        setSceneStatus(tv('regions.unavailable', {why: error}), 'error');
+        return;
+    }
+    if (since !== writes) return;
+    state = next;
+    const mb = state.map_binding;
+    const unsavedLive = mb && mb.source === 'default' && !mb.mode;
+    const saved = !!(mb && mb.map_id && !unsavedLive);
+    document.body.classList.toggle('unsaved-map', !saved);
+    const pill = document.getElementById('bound-pill');
+    const pillText = document.getElementById('bound-text');
+    if (pill && pillText) {
+      pill.className = saved ? '' : 'none';
+      if (saved) {
+        delete pill.dataset.i18n;
+        pillText.textContent = `${mb.map_id} · ${mb.mode || 'mode unknown'}`;
+        pillText.removeAttribute('data-i18n');
+      } else {
+        pillText.setAttribute('data-i18n', 'map.temporary');
+        pillText.textContent = t('map.temporary');
+      }
+    }
+    renderPanel();
+    draw();
+}
+setInterval(refresh, 1000);
+refresh();
+</script>
+</body>
+</html>
