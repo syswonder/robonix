@@ -403,20 +403,44 @@ fn rtdl_envelope_schema() -> Value {
     // A plan-control meta op replaces the whole tree rather than sitting inside
     // one, and carries none of a node's fields. Leaving it out of the schema
     // would tell the model that cancelling a running plan is malformed.
+    //
+    // One alternative per op, requiring exactly the fields `parse_meta_plan_op`
+    // requires: a schema that asks for less than the parser wants steers a
+    // guided model into rejected rounds.
+    //
+    // An identifier is the same identifier whether JSON spells it 1 or "1", and
+    // the parser stringifies either form.
+    let identifier = || serde_json::json!({"type": ["string", "integer"]});
     let meta = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "op": {"type": "string", "enum": ["cancel_plan", "cancel_all", "stop_plan_at"]},
-            // An identifier is the same identifier whether JSON spells it 1 or
-            // "1". Demanding the quoted form cost four of thirty-five planning
-            // rounds in one deepseek episode, for a value Pilot then stringifies
-            // anyway.
-            "plan_id": {"type": ["string", "integer"]},
-            "target_op_id": {"type": ["string", "integer"]},
-            "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
-            "wait_ms": {"type": "integer"},
-        },
-        "required": ["op"],
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["cancel_plan"]},
+                    "plan_id": identifier(),
+                    "wait_ms": {"type": "integer"},
+                },
+                "required": ["op", "plan_id"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["cancel_all"]},
+                    "wait_ms": {"type": "integer"},
+                },
+                "required": ["op"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["stop_plan_at"]},
+                    "plan_id": identifier(),
+                    "target_op_id": identifier(),
+                    "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
+                },
+                "required": ["op", "plan_id", "target_op_id"],
+            },
+        ],
     });
     serde_json::json!({
         "type": "object",
@@ -910,7 +934,23 @@ mod tests {
         // node's fields; leaving it out would describe cancelling a running
         // plan as malformed.
         let meta = &schema["$defs"]["meta"];
-        assert_eq!(meta["properties"]["op"]["enum"][0], "cancel_plan");
+        let ops = meta["oneOf"].as_array().expect("one schema per meta op");
+        assert_eq!(ops.len(), 3);
+        let required = |name: &str| -> Vec<&str> {
+            ops.iter()
+                .find(|op| op["properties"]["op"]["enum"][0] == name)
+                .unwrap_or_else(|| panic!("no schema for {name}"))["required"]
+                .as_array()
+                .expect("required list")
+                .iter()
+                .map(|field| field.as_str().expect("field name"))
+                .collect()
+        };
+        // Exactly what `parse_meta_plan_op` requires per op: `stop_plan_at`
+        // without its ids is well-formed here and unparseable there.
+        assert_eq!(required("cancel_plan"), ["op", "plan_id"]);
+        assert_eq!(required("cancel_all"), ["op"]);
+        assert_eq!(required("stop_plan_at"), ["op", "plan_id", "target_op_id"]);
         let alternatives = schema["properties"]["rtdl"]["anyOf"]
             .as_array()
             .expect("rtdl accepts a node or a meta op");
