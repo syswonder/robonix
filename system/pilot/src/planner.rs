@@ -42,8 +42,6 @@ use uuid::Uuid;
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// incremental ExecuteStream for generated plans; internal probes retain Execute.
 pub struct ExecutorConn {
-    /// Atlas identity of the Executor that owns these RPCs and builtin calls.
-    pub provider_id: String,
     /// Submits RTDL nodes while model output is still arriving.
     pub streaming: RobonixSystemExecutorExecuteStreamClient<Channel>,
     /// Executes complete plans for internal context probes.
@@ -1572,43 +1570,18 @@ pub async fn run_turn(
                 // The errors will be handled here.
                 let cleanup = live.cancel(&mut executor.control).await;
                 record_stream_prefix(history, &live, tx, &session_id).await;
-                // External async cancellation is best-effort, even after the
-                // Executor stream ends. Only observed success proves completion.
-                let external_calls_finished = live
-                    .plan
-                    .nodes
-                    .iter()
-                    .filter_map(|n| n.call.as_ref())
-                    .all(|call| {
-                        call.provider_id == executor.provider_id
-                            || live
-                                .events
-                                .iter()
-                                .filter_map(|e| e.node_state.as_ref())
-                                .any(|node| {
-                                    node.state == RtdlNodeStateEnum::Succeeded as u32
-                                        && node
-                                            .leaf_result
-                                            .as_ref()
-                                            .is_some_and(|r| r.call_id == call.call_id)
-                                })
-                    });
                 let retry = invalid_output
                     && cleanup.is_ok()
                     && (live.plan.plan_id.is_empty() || (live.complete && !live.transport_failed))
-                    && external_calls_finished
                     && output_retries < 2
                     && requests < max_rounds;
                 if retry {
                     output_retries += 1;
                     history.push(Message::user(&format!(
-                        "Pilot rejected your RTDL output: {error:#}.\n\
-                         Rejected output (preview): {}\n\
-                         This attempt's submitted plan has ended. Completed actions were not undone. \
-                         Consult the recorded execution results and current Executor state; do not \
-                         repeat completed actions. Correct the output and plan only the remaining \
-                         work using the required RTDL response format.",
-                        compact_preview(parser.text(), 4000)
+                        "Pilot rejected your RTDL output: {error:#}. \
+                         This attempt's plan has ended; completed actions were not undone. \
+                         Use the recorded execution results and current state to replan \
+                         the remaining work in valid RTDL."
                     )));
                     warn!("[pilot/rtdl] output correction {output_retries}/2: {error:#}");
                     should_plan = true;
