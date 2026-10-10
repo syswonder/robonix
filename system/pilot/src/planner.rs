@@ -42,9 +42,15 @@ use uuid::Uuid;
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// incremental ExecuteStream for generated plans; internal probes retain Execute.
 pub struct ExecutorConn {
+    /// Atlas identity of the Executor that owns these RPCs and builtin calls.
+    pub provider_id: String,
+    /// Submits RTDL nodes while model output is still arriving.
     pub streaming: RobonixSystemExecutorExecuteStreamClient<Channel>,
+    /// Executes complete plans for internal context probes.
     pub graph: RobonixSystemExecutorExecuteClient<Channel>,
+    /// Cancels submitted plans independently of their execution streams.
     pub control: RobonixSystemExecutorControlPlanClient<Channel>,
+    /// Reads active plan state for the next planning request.
     pub active: RobonixSystemExecutorListActivePlansClient<Channel>,
 }
 
@@ -1083,6 +1089,7 @@ pub async fn run_turn(
 
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
+    let mut output_retries = 0;
 
     // Pilot-assigned plan ids come from one process-global atomic counter.
     // They are reserved only for normal RTDL trees, never for meta operations,
@@ -1397,8 +1404,6 @@ pub async fn run_turn(
                 }),
             )))
             .await;
-        // Generate once. Any failure cancels this round's submitted plan and
-        // ends the turn; already observed execution results remain in history.
         let mut live = crate::stream_execution::StreamExecution::default();
         let mut request_history = history.clone();
         append_request_context(&mut request_history, &runtime_context);
@@ -1438,6 +1443,7 @@ pub async fn run_turn(
             .flat_map(|tree| tree.call_signatures.iter().cloned())
             .collect();
         let mut stream_error: Option<anyhow::Error> = None;
+        let mut invalid_output = false;
         let mut reasoning_bytes = 0_usize;
         let idle = tokio::time::sleep(vlm_idle_timeout());
         tokio::pin!(idle);
@@ -1501,7 +1507,7 @@ pub async fn run_turn(
                     idle.as_mut().reset(tokio::time::Instant::now() + vlm_idle_timeout());
                     match item {
                         Some(Ok(VlmStreamItem::TextDelta(delta))) => {
-                            if let Err(error) = parser.push(&delta) { stream_error = Some(error); break; }
+                            if let Err(error) = parser.push(&delta) { invalid_output = true; stream_error = Some(error); break; }
                             // Submission checks execution feedback and revision;
                             // this loop handles steer and abort after the batch returns.
                             let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
@@ -1523,7 +1529,7 @@ pub async fn run_turn(
                             }
                         }
                         Some(Ok(VlmStreamItem::ReasoningDelta(delta))) => reasoning_bytes += delta.len(),
-                        Some(Ok(VlmStreamItem::ToolCall(call))) => { stream_error = Some(anyhow::anyhow!("tool_calls in RTDL mode: {}", call.function.name)); break; }
+                        Some(Ok(VlmStreamItem::ToolCall(call))) => { invalid_output = true; stream_error = Some(anyhow::anyhow!("tool_calls in RTDL mode: {}", call.function.name)); break; }
                         Some(Ok(VlmStreamItem::Usage(usage))) => info!(
                             "[pilot/prompt] {}",
                             usage_totals.record(round, cache_epoch, &usage)
@@ -1546,10 +1552,11 @@ pub async fn run_turn(
                 return Err(error);
             }
             debug!("[pilot/rtdl/raw] raw_content={}", parser.text());
-            let parsed = parser.finish()?;
+            let parsed = parser.finish().inspect_err(|_| invalid_output = true)?;
             if let Some(op) = &parsed.1
                 && let Some(problem) = meta_op_problem(op, &forest, &cancel_requested)
             {
+                invalid_output = true;
                 anyhow::bail!(problem);
             }
             if !live.plan.nodes.is_empty() {
@@ -1562,8 +1569,51 @@ pub async fn run_turn(
         let (envelope, meta_op) = match generated {
             Ok(parsed) => parsed,
             Err(error) => {
+                // The errors will be handled here.
                 let cleanup = live.cancel(&mut executor.control).await;
                 record_stream_prefix(history, &live, tx, &session_id).await;
+                // External async cancellation is best-effort, even after the
+                // Executor stream ends. Only observed success proves completion.
+                let external_calls_finished = live
+                    .plan
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.call.as_ref())
+                    .all(|call| {
+                        call.provider_id == executor.provider_id
+                            || live
+                                .events
+                                .iter()
+                                .filter_map(|e| e.node_state.as_ref())
+                                .any(|node| {
+                                    node.state == RtdlNodeStateEnum::Succeeded as u32
+                                        && node
+                                            .leaf_result
+                                            .as_ref()
+                                            .is_some_and(|r| r.call_id == call.call_id)
+                                })
+                    });
+                let retry = invalid_output
+                    && cleanup.is_ok()
+                    && (live.plan.plan_id.is_empty() || (live.complete && !live.transport_failed))
+                    && external_calls_finished
+                    && output_retries < 2
+                    && requests < max_rounds;
+                if retry {
+                    output_retries += 1;
+                    history.push(Message::user(&format!(
+                        "Pilot rejected your RTDL output: {error:#}.\n\
+                         Rejected output (preview): {}\n\
+                         This attempt's submitted plan has ended. Completed actions were not undone. \
+                         Consult the recorded execution results and current Executor state; do not \
+                         repeat completed actions. Correct the output and plan only the remaining \
+                         work using the required RTDL response format.",
+                        compact_preview(parser.text(), 4000)
+                    )));
+                    warn!("[pilot/rtdl] output correction {output_retries}/2: {error:#}");
+                    should_plan = true;
+                    continue 'supervisor;
+                }
                 history.push(Message::user(&format!(
                     "Pilot RTDL generation failed: {error:#}. The turn ended; consult recorded execution results before continuing."
                 )));
@@ -1575,6 +1625,7 @@ pub async fn run_turn(
                 return Err(error);
             }
         };
+        output_retries = 0;
         if live.plan.nodes.is_empty()
             && forest_revision.load(Ordering::Acquire) != planning_revision
         {
