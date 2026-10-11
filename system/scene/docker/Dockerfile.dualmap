@@ -46,4 +46,7 @@ RUN set -e; export https_proxy=$PROXY http_proxy=$PROXY; mkdir -p /opt/models/du
  && test "$(stat -c %s /opt/models/dualmap/mobileclip_s2_datacompdr.bin)" = 398202800 \
  && test "$(stat -c %s /opt/models/dualmap/FastSAM-s.pt)" = 23851578
 
-ENV PYTHONPATH=/opt/dualmap:${PYTHONPATH}
+# The base image sets no PYTHONPATH. Appending ${PYTHONPATH} only drew an
+# undefined-variable warning and left a trailing colon, an empty entry that
+# puts the working directory on sys.path.
+ENV PYTHONPATH=/opt/dualmap
