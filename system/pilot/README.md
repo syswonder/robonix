@@ -149,8 +149,17 @@ Parallel example:
 }
 ```
 
-An empty sequence means the model is done for the turn:
+An empty sequence means the model is dispatching no new tree this round:
 
 ```json
 { "content": "Done.", "rtdl": { "op": "sequence", "children": [] } }
 ```
+
+Pilot accepts it only when it does not contradict the task state. With
+`task_update.status: "in_progress"` and nothing running — neither this turn's
+dispatches nor any plan in Executor's active-plan snapshot — the model claims the
+task is advancing while nothing will run, so the reply is rejected
+(`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
+the turn ends with what the model said. The protocol and the per-round reminder
+state the pairing rule: an empty sequence goes with `task_update: null` or
+`status: "done"`, or stands while a running tree is waited on.

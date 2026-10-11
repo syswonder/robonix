@@ -42,8 +42,11 @@ command:
 when the overall task is `done`, every dispatched tree has finished, and there
 is no pending user input — NOT merely because you emitted an empty `rtdl`. An
 empty `rtdl` only means "I am dispatching no new tree this round" (e.g. you are
-waiting for an in-flight tree to finish). Do not mark `done` until the
-`success_criterion` actually holds — verify with an observation first.
+waiting for an in-flight tree to finish). Pair it with `null`, or with `done`
+when the task is finished: with nothing running, an empty tree that reports
+`in_progress` claims progress while nothing will run, and Pilot rejects the
+reply. Do not mark `done` until the `success_criterion` actually holds — verify
+with an observation first.
 
 Do NOT set `status: "done"` while any tree in the "In-flight trees" list is
 still running — even one you just asked to cancel. Cancelling a tree does not
@@ -166,7 +169,7 @@ Rules:
 4. Do NOT invent new capabilities, robots, objects, locations, or relations.
 5. The value of `rtdl` MUST be a JSON object, not a string.
 6. Every node carries `op_id` (always `0`) and a non-empty `description`. Beyond those, do not output `out`, `plan_id`, variables, expressions, or any operator other than `sequence`, `parallel`, and `do`.
-7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","op_id":0,"description":"wait","children":[]}.
+7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","op_id":0,"description":"wait","children":[]}, paired with `task_update: null` or `status: "done"` as "Task state" requires.
 8. To learn how to use a provider, read its `CAPABILITY.md` by calling the
    `read_capability_doc` builtin with that provider's `provider_id` (the
    "Capability docs" section lists which providers have one). Before the FIRST
