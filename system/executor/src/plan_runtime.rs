@@ -28,6 +28,7 @@ pub struct RunningAsyncCall {
 }
 
 struct PlanRun {
+    context: crate::execution_context::ExecutionContext,
     cancelled: bool,
     running_async: HashMap<String, RunningAsyncCall>,
     /// op_id → when to cancel the whole plan once execution reaches that op.
@@ -111,6 +112,7 @@ impl PlanRuntime {
         plans.insert(
             plan_id.to_string(),
             PlanRun {
+                context: Default::default(),
                 cancelled: false,
                 running_async: HashMap::new(),
                 stop_points: HashMap::new(),
@@ -153,6 +155,16 @@ impl PlanRuntime {
             run.ops = ops;
             run.description = description;
         }
+    }
+
+    pub async fn context(&self, plan_id: &str) -> crate::execution_context::ExecutionContext {
+        self.inner
+            .lock()
+            .await
+            .get(plan_id)
+            .expect("registered plan")
+            .context
+            .clone()
     }
 
     /// Record the latest observed RTDL state for an op. Called by the execution
@@ -700,6 +712,9 @@ fn kind_label(node_kind: u32) -> &'static str {
         0 => "sequence",
         1 => "parallel",
         2 => "do",
+        3 => "if",
+        4 => "repeat",
+        5 => "while",
         _ => "unknown",
     }
 }
@@ -902,6 +917,7 @@ mod tests {
                     call: None,
                     op_id: "1".into(),
                     description: "sequence".into(),
+                    ..Default::default()
                 },
                 RtdlNode {
                     node_kind: 2,
@@ -914,6 +930,7 @@ mod tests {
                     }),
                     op_id: "2".into(),
                     description: "take snapshot".into(),
+                    ..Default::default()
                 },
             ],
         };
@@ -962,6 +979,7 @@ mod tests {
                     call: None,
                     op_id: "1".into(),
                     description: "drive to the kitchen".into(),
+                    ..Default::default()
                 }],
             })
             .await;

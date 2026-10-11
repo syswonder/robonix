@@ -124,6 +124,17 @@ When the user explicitly asks to stop or cancel all running work, emit one root
 Plan control acts only on plans listed in In-flight trees. With none listed there
 is nothing to stop: answer with an empty `sequence`, never a meta op.
 
+### Conditions, loops, and result variables
+
+- `do` may carry `"bind":"observation"`. After successful execution and verification, Executor saves the capability's JSON output under that name. Non-JSON output is a string. Later sequential bindings replace earlier values; executing a loop body updates its variables. Trees never share variables.
+- Reference a result using `{"var":"observation","path":["items",0,"found"]}`. Omit `path` for the entire output. References may appear recursively in `do.args` and conditions. Missing variables or path entries fail the node; they never become null.
+- Conditions are booleans or expressions such as `{"op":"eq","args":[{"var":"observation","path":["found"]},true]}`. Operators are `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `and`, `or`, and `not`. Comparisons take two arguments; `not` takes one; `and/or` take one or more booleans and short-circuit. Conditions do not coerce strings or numbers to booleans. Ordered comparisons require two numbers or two strings. The exact `var`/`path` and `op`/`args` object shapes are reserved for expressions; other objects remain ordinary capability arguments.
+- `{"op":"if","op_id":0,"description":"choose action","condition":<expression>,"then":<node>,"else":<node>}` runs only the selected subtree. `else` is optional.
+- `{"op":"repeat","op_id":0,"description":"repeat action","count":3,"body":<node>}` runs the body exactly `count` times; zero skips it.
+- `{"op":"while","op_id":0,"description":"observe until done","condition":<expression>,"max_iterations":10,"body":<node>}` checks the condition before each iteration. Initialize any referenced result before the loop, then refresh it within the body. A true condition after the limit fails the loop. Repeat counts are 0–10000; while limits are 1–10000.
+- Body failures and cancellation stop a loop. Each iteration waits for verification before reusing its results.
+- Read only variables produced by earlier completed steps. Concurrent sibling branches cannot depend on each other's results; put their consumer after the `parallel` node.
+
 ### Plan IDs (read this — you do NOT choose them)
 
 Every tree you dispatch is assigned a `plan_id` by the system — a string holding
@@ -151,11 +162,10 @@ foresee into ONE tree:
   wastes RTDL and is slower.
 - Use `parallel` for steps with no ordering dependency (e.g. snapshot + battery
   read; play music + start navigating).
-- Only split across rounds when the NEXT step genuinely depends on the RESULT of
-  the previous one — i.e. you must SEE an observation before you can choose what
-  to do (e.g. snapshot the scene, see which objects are present, THEN decide
-  where to move). Blindly issuing three independent moves one at a time is not
-  such a case — batch them into one tree.
+- Use result references and conditions when the dependent steps are already known.
+  Split across rounds when an observation requires model reasoning that cannot
+  be expressed using these operators, such as identifying an unfamiliar object
+  and choosing a new action.
 - Rule of thumb: if you could write the next 2–5 steps down right now without
   needing to look at anything, they belong in the same tree.
 
@@ -165,7 +175,7 @@ Rules:
 3. Build RTDL `do.args` from the listed `args_schema`. Do NOT invent argument keys.
 4. Do NOT invent new capabilities, robots, objects, locations, or relations.
 5. The value of `rtdl` MUST be a JSON object, not a string.
-6. Every node carries `op_id` (always `0`) and a non-empty `description`. Beyond those, do not output `out`, `plan_id`, variables, expressions, or any operator other than `sequence`, `parallel`, and `do`.
+6. Every node carries `op_id` (always `0`) and a non-empty `description`. Use only the documented fields and operators: `sequence`, `parallel`, `do`, `if`, `repeat`, and `while`. Do not output `out` or `plan_id`.
 7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","op_id":0,"description":"wait","children":[]}.
 8. To learn how to use a provider, read its `CAPABILITY.md` by calling the
    `read_capability_doc` builtin with that provider's `provider_id` (the

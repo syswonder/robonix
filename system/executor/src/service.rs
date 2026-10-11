@@ -34,6 +34,10 @@ use tonic::{Request, Response, Status};
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 const RTDL_DO: u32 = 2;
+const RTDL_IF: u32 = 3;
+const RTDL_REPEAT: u32 = 4;
+const RTDL_WHILE: u32 = 5;
+const MAX_ITERATIONS: u32 = 10_000;
 const MODULE_HEALTH_SCHEMA_VERSION: u32 = 1;
 const MODULE_HEALTH_OK: u32 = 0;
 const MODULE_HEALTH_TTL_MS: u32 = 5000;
@@ -332,19 +336,136 @@ fn execute_node(
                 )
                 .await
             }
+            RTDL_IF | RTDL_REPEAT | RTDL_WHILE => {
+                let context = runtime.context(&plan.plan_id).await;
+                let condition = if node.condition_json.is_empty() {
+                    serde_json::Value::Bool(true)
+                } else {
+                    serde_json::from_str(&node.condition_json).expect("validated condition")
+                };
+                let limit = match node.node_kind {
+                    RTDL_IF => 1,
+                    RTDL_REPEAT => node.repeat_count,
+                    _ => node.max_iterations,
+                };
+                let mut iterations = 0;
+                let mut failed = false;
+                loop {
+                    if runtime.is_cancelled(&plan.plan_id).await {
+                        break;
+                    }
+                    let chosen = if node.node_kind == RTDL_REPEAT {
+                        (iterations < limit).then_some(0)
+                    } else {
+                        match crate::expression::eval_condi(&condition, &context.snapshot().await) {
+                            Ok(true) => Some(0),
+                            Ok(false) if node.node_kind == RTDL_IF => {
+                                (node.children.len() == 2).then_some(1)
+                            }
+                            Ok(false) => None,
+                            Err(error) => {
+                                send_operator_state(
+                                    &tx,
+                                    &node_ctx,
+                                    RtdlNodeStateEnum::Failed as u32,
+                                    &error,
+                                    &runtime,
+                                )
+                                .await;
+                                return NodeExecution::finished(true);
+                            }
+                        }
+                    };
+                    let Some(chosen) = chosen else {
+                        break;
+                    };
+                    if iterations >= limit {
+                        send_operator_state(
+                            &tx,
+                            &node_ctx,
+                            RtdlNodeStateEnum::Failed as u32,
+                            "while condition remains true at max_iterations",
+                            &runtime,
+                        )
+                        .await;
+                        return NodeExecution::finished(true);
+                    }
+                    let execution = execute_node(
+                        plan.clone(),
+                        node.children[chosen] as usize,
+                        tx.clone(),
+                        atlas.clone(),
+                        provider_id.clone(),
+                        runtime.clone(),
+                        verification.clone(),
+                    )
+                    .await;
+                    failed = execution.failed | wait_for_verifiers(execution.verifiers).await;
+                    iterations += 1;
+                    if failed || node.node_kind == RTDL_IF {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                complete_operator(
+                    Vec::new(),
+                    failed,
+                    runtime.is_cancelled(&plan.plan_id).await,
+                    tx.clone(),
+                    node_ctx.clone(),
+                    runtime.clone(),
+                    atlas.clone(),
+                    provider_id.clone(),
+                )
+                .await
+            }
             RTDL_DO => {
-                let call = node
+                let original = node
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
+                let context = runtime.context(&plan.plan_id).await;
+                let args: serde_json::Value =
+                    serde_json::from_str(&original.args_json).expect("validated arguments");
+                let args = match crate::expression::eval_value(&args, &context.snapshot().await) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        let result = CapabilityCallResult {
+                            call_id: original.call_id.clone(),
+                            provider_id: original.provider_id.clone(),
+                            contract_id: original.contract_id.clone(),
+                            success: false,
+                            output: String::new(),
+                            error,
+                        };
+                        runtime
+                            .record_op_state(
+                                &plan.plan_id,
+                                &op_id,
+                                RtdlNodeStateEnum::Failed as u32,
+                            )
+                            .await;
+                        let _ = tx
+                            .send(Ok(rtdl_wire::node_state_from_result(
+                                &node_ctx,
+                                result,
+                                RtdlNodeStateEnum::Failed as u32,
+                            )))
+                            .await;
+                        return NodeExecution::finished(true);
+                    }
+                };
+                let mut call = original.clone();
+                call.args_json = args.to_string();
                 execute_call(
-                    call,
+                    &call,
                     node_ctx.clone(),
                     tx,
                     atlas,
                     provider_id.clone(),
                     runtime.clone(),
                     verification,
+                    &node.bind,
                 )
                 .await
             }
@@ -377,7 +498,10 @@ fn node_event_context(plan: &Plan, node_index: usize) -> NodeEventContext {
 
 /// Return whether a node kind is an RTDL operator rather than a leaf call.
 fn is_operator_node(node_kind: u32) -> bool {
-    matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
+    matches!(
+        node_kind,
+        RTDL_SEQUENCE | RTDL_PARALLEL | RTDL_IF | RTDL_REPEAT | RTDL_WHILE
+    )
 }
 
 /// Map a completed leaf call to its RTDL state. Cancellation wins over the
@@ -438,6 +562,9 @@ async fn send_operator_state(
     let op = match node.node_kind {
         RTDL_SEQUENCE => "sequence",
         RTDL_PARALLEL => "parallel",
+        RTDL_IF => "if",
+        RTDL_REPEAT => "repeat",
+        RTDL_WHILE => "while",
         _ => "operator",
     };
     let detail = format!(
@@ -497,6 +624,7 @@ async fn trigger_stop_on_complete(
 }
 
 /// Dispatch one RTDL `do` node and stream node_state events.
+#[allow(clippy::too_many_arguments)]
 async fn execute_call(
     call: &CapabilityCall,
     node: NodeEventContext,
@@ -505,6 +633,7 @@ async fn execute_call(
     provider_id: String,
     runtime: PlanRuntime,
     verification: Arc<VerificationPolicy>,
+    bind: &str,
 ) -> NodeExecution {
     // Log the args too (bounded) so the log shows what each call requested —
     // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
@@ -566,7 +695,8 @@ async fn execute_call(
     let eligible_for_verification = result.success
         && state == RtdlNodeStateEnum::Succeeded as u32
         && !runtime.is_cancelled(&node.plan_id).await;
-    let overlap = eligible_for_verification
+    let overlap = bind.is_empty()
+        && eligible_for_verification
         && verification.overlap()
         && verification.rule_for(call).is_some();
 
@@ -624,6 +754,13 @@ async fn execute_call(
 
     if runtime.is_cancelled(&node.plan_id).await {
         state = RtdlNodeStateEnum::Canceled as u32;
+    }
+    if state == RtdlNodeStateEnum::Succeeded as u32 && !bind.is_empty() {
+        runtime
+            .context(&node.plan_id)
+            .await
+            .store(bind, &result.output)
+            .await;
     }
     runtime
         .record_op_state(&node.plan_id, &node.op_id, state)
@@ -854,8 +991,40 @@ fn validate_plan(plan: &Plan) -> Result<(), String> {
         if node.description.trim().is_empty() {
             return Err(format!("node {idx} description must not be empty"));
         }
+        if !node.bind.is_empty() && (node.node_kind != RTDL_DO || node.bind.trim() != node.bind) {
+            return Err(format!("node {idx} has invalid bind"));
+        }
+        if matches!(node.node_kind, RTDL_IF | RTDL_WHILE) {
+            let condition = serde_json::from_str(&node.condition_json)
+                .map_err(|error| format!("node {idx} invalid condition: {error}"))?;
+            crate::expression::validate_expr(&condition)?;
+        } else if !node.condition_json.is_empty() {
+            return Err(format!("node {idx} must not contain a condition"));
+        }
+        if node.node_kind != RTDL_REPEAT && node.repeat_count != 0
+            || node.node_kind != RTDL_WHILE && node.max_iterations != 0
+        {
+            return Err(format!("node {idx} has unexpected loop limits"));
+        }
         match node.node_kind {
-            RTDL_SEQUENCE | RTDL_PARALLEL => {
+            RTDL_SEQUENCE | RTDL_PARALLEL | RTDL_IF | RTDL_REPEAT | RTDL_WHILE => {
+                if node.call.is_some() {
+                    return Err(format!("operator node {idx} must not contain a call"));
+                }
+                if node.node_kind == RTDL_IF && !(1..=2).contains(&node.children.len()) {
+                    return Err(format!("if node {idx} requires one or two children"));
+                }
+                if matches!(node.node_kind, RTDL_REPEAT | RTDL_WHILE) && node.children.len() != 1 {
+                    return Err(format!("loop node {idx} requires one body"));
+                }
+                if node.repeat_count > MAX_ITERATIONS
+                    || node.max_iterations > MAX_ITERATIONS
+                    || node.node_kind == RTDL_WHILE && node.max_iterations == 0
+                {
+                    return Err(format!(
+                        "node {idx} loop limit must be at most {MAX_ITERATIONS}; while requires a positive limit"
+                    ));
+                }
                 for child in &node.children {
                     if *child as usize >= plan.nodes.len() {
                         return Err(format!("node {idx} child index {child} is out of bounds"));
@@ -876,7 +1045,78 @@ fn validate_plan(plan: &Plan) -> Result<(), String> {
     }
 
     let mut colors = vec![VisitColor::White; plan.nodes.len()];
-    visit_for_cycles(root, plan, &mut colors)
+    visit_for_cycles(root, plan, &mut colors)?;
+    validate_parallel_bindings(root, plan, &mut vec![None; plan.nodes.len()]).map(|_| ())
+}
+
+fn expression_reads(value: &serde_json::Value, reads: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if crate::expression::is_reference(fields)
+                && let Some(name) = fields.get("var").and_then(serde_json::Value::as_str)
+            {
+                reads.insert(name.into());
+            }
+            for value in fields.values() {
+                expression_reads(value, reads);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for value in items {
+                expression_reads(value, reads);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_parallel_bindings(
+    index: usize,
+    plan: &Plan,
+    cache: &mut [Option<(HashSet<String>, HashSet<String>)>],
+) -> Result<(HashSet<String>, HashSet<String>), String> {
+    if let Some(sets) = &cache[index] {
+        return Ok(sets.clone());
+    }
+    let node = &plan.nodes[index];
+    let mut reads = HashSet::new();
+    let mut writes = HashSet::new();
+    if !node.bind.is_empty() {
+        writes.insert(node.bind.clone());
+    }
+    if !node.condition_json.is_empty() {
+        expression_reads(
+            &serde_json::from_str(&node.condition_json).expect("validated condition"),
+            &mut reads,
+        );
+    }
+    if let Some(call) = &node.call {
+        expression_reads(
+            &serde_json::from_str(&call.args_json).expect("validated arguments"),
+            &mut reads,
+        );
+    }
+    let mut branches = Vec::new();
+    for child in &node.children {
+        let branch = validate_parallel_bindings(*child as usize, plan, cache)?;
+        if node.node_kind == RTDL_PARALLEL {
+            for (other_reads, other_writes) in &branches {
+                if !branch.1.is_disjoint(other_writes)
+                    || !branch.0.is_disjoint(other_writes)
+                    || !branch.1.is_disjoint(other_reads)
+                {
+                    return Err(format!(
+                        "parallel node {index} has conflicting variable dependencies"
+                    ));
+                }
+            }
+        }
+        reads.extend(branch.0.iter().cloned());
+        writes.extend(branch.1.iter().cloned());
+        branches.push(branch);
+    }
+    cache[index] = Some((reads.clone(), writes.clone()));
+    Ok((reads, writes))
 }
 
 fn validate_call(node_index: usize, call: &CapabilityCall) -> Result<(), String> {
@@ -893,7 +1133,12 @@ fn validate_call(node_index: usize, call: &CapabilityCall) -> Result<(), String>
             "do node {node_index} contract_id must not be empty"
         ));
     }
-    Ok(())
+    let args: serde_json::Value = serde_json::from_str(&call.args_json)
+        .map_err(|error| format!("do node {node_index} invalid args: {error}"))?;
+    if !args.is_object() {
+        return Err(format!("do node {node_index} args must be an object"));
+    }
+    crate::expression::validate_expr(&args)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -903,7 +1148,7 @@ enum VisitColor {
     Black,
 }
 
-/// DFS cycle check on the plan arena following only sequence/parallel child edges.
+/// DFS cycle check on every operator child edge.
 ///
 /// Uses White/Gray/Black marks: entering a Gray node means a back-edge to an ancestor.
 /// `RTDL_DO` nodes have no children in this graph. Returns `Ok` when the subgraph from
@@ -916,7 +1161,7 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
     }
     colors[index] = VisitColor::Gray;
     let node = &plan.nodes[index];
-    if matches!(node.node_kind, RTDL_SEQUENCE | RTDL_PARALLEL) {
+    if is_operator_node(node.node_kind) {
         for child in &node.children {
             visit_for_cycles(*child as usize, plan, colors)?;
         }
@@ -954,6 +1199,367 @@ mod tests {
             contract_id: "robonix/test/cap".to_string(),
             args_json: "{}".to_string(),
         }
+    }
+
+    fn control_node(kind: u32, id: &str, children: Vec<u32>) -> RtdlNode {
+        RtdlNode {
+            node_kind: kind,
+            op_id: id.into(),
+            description: id.into(),
+            children,
+            ..Default::default()
+        }
+    }
+
+    fn command_node(id: &str, command: &str, bind: &str) -> RtdlNode {
+        RtdlNode {
+            node_kind: RTDL_DO,
+            op_id: id.into(),
+            description: id.into(),
+            bind: bind.into(),
+            call: Some(CapabilityCall {
+                call_id: id.into(),
+                provider_id: "executor".into(),
+                contract_id: "robonix/system/executor/builtin/run_command".into(),
+                args_json: serde_json::json!({"command":command}).to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    async fn run_control_plan(nodes: Vec<RtdlNode>) -> Vec<crate::pb::executor::RtdlEvent> {
+        run_control_plan_with_cancel(nodes, false).await
+    }
+
+    async fn run_control_plan_with_cancel(
+        nodes: Vec<RtdlNode>,
+        cancel: bool,
+    ) -> Vec<crate::pb::executor::RtdlEvent> {
+        let address = reserve_address();
+        let server = tokio::spawn(serve_atlas(Arc::new(AtlasRegistry::default()), address));
+        let atlas = AtlasClient::connect_with_retry(
+            format!("http://{address}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        let service = ExecutorServiceImpl::new(
+            atlas,
+            "executor".into(),
+            Arc::new(VerificationPolicy::new(false, vec![])),
+        );
+        if cancel {
+            let runtime = service.runtime.clone();
+            let mut atlas = service.atlas.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                runtime.cancel_all_plans("executor", &mut atlas).await;
+            });
+        }
+        let mut stream = service
+            .execute(Request::new(plan(nodes, 0)))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+        server.abort();
+        events
+    }
+
+    #[tokio::test]
+    async fn if_selects_else_and_zero_repeat_skips_body() {
+        let mut branch = control_node(super::RTDL_IF, "branch", vec![1, 2]);
+        branch.condition_json = "false".into();
+        let events = run_control_plan(vec![
+            branch,
+            command_node("then", "exit 1", ""),
+            command_node("else", "printf selected", ""),
+        ])
+        .await;
+        assert!(
+            !events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        let leaves: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.node_state.as_ref())
+            .filter_map(|state| state.leaf_result.as_ref())
+            .collect();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].call_id, "else");
+        let events = run_control_plan(vec![
+            control_node(super::RTDL_REPEAT, "zero", vec![1]),
+            command_node("unreachable", "exit 1", ""),
+        ])
+        .await;
+        assert!(
+            !events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert!(events.iter().all(|event| {
+            event
+                .node_state
+                .as_ref()
+                .is_none_or(|state| state.leaf_result.is_none())
+        }));
+    }
+
+    #[tokio::test]
+    async fn repeat_runs_exact_count_and_stops_after_body_failure() {
+        let mut repeat = control_node(super::RTDL_REPEAT, "repeat", vec![1]);
+        repeat.repeat_count = 3;
+        let events = run_control_plan(vec![
+            repeat.clone(),
+            command_node("body", "printf ok", "result"),
+        ])
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event
+                    .node_state
+                    .as_ref()
+                    .is_some_and(|state| state.leaf_result.is_some()))
+                .count(),
+            3
+        );
+        assert!(
+            !events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        let mut failing = command_node("body", "true", "result");
+        failing.call.as_mut().unwrap().args_json = "{}".into();
+        let events = run_control_plan(vec![repeat, failing]).await;
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event
+                    .node_state
+                    .as_ref()
+                    .is_some_and(|state| state.leaf_result.is_some()))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn while_reads_updated_bindings_and_reports_iteration_limit() {
+        let mut loop_node = control_node(super::RTDL_WHILE, "while", vec![3]);
+        loop_node.max_iterations = 3;
+        loop_node.condition_json =
+            serde_json::json!({"op":"eq","args":[{"var":"observation"},"yes"]}).to_string();
+        let nodes = vec![
+            control_node(RTDL_SEQUENCE, "root", vec![1, 2]),
+            command_node("init", "printf yes", "observation"),
+            loop_node,
+            command_node("refresh", "printf no", "observation"),
+        ];
+        let events = run_control_plan(nodes).await;
+        assert!(
+            !events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event
+                    .node_state
+                    .as_ref()
+                    .is_some_and(|state| state.op_id == "refresh" && state.leaf_result.is_some()))
+                .count(),
+            1
+        );
+        let mut infinite = control_node(super::RTDL_WHILE, "bounded", vec![1]);
+        infinite.max_iterations = 2;
+        infinite.condition_json = "true".into();
+        let events = run_control_plan(vec![infinite, command_node("body", "printf ok", "")]).await;
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert!(events.iter().any(|event| {
+            event
+                .node_state
+                .as_ref()
+                .is_some_and(|state| state.operator_detail.contains("max_iterations"))
+        }));
+    }
+
+    #[test]
+    fn rejects_malformed_loops_and_expression_cycles() {
+        let mut loop_node = control_node(super::RTDL_WHILE, "loop", vec![1]);
+        loop_node.condition_json = "true".into();
+        assert!(
+            validate_plan(&plan(
+                vec![loop_node.clone(), command_node("body", "true", "")],
+                0
+            ))
+            .is_err()
+        );
+        loop_node.max_iterations = 2;
+        loop_node.children = vec![0];
+        assert!(
+            validate_plan(&plan(vec![loop_node], 0))
+                .unwrap_err()
+                .contains("cycle")
+        );
+    }
+
+    #[tokio::test]
+    async fn arguments_use_results_and_context_does_not_leak_between_plans() {
+        let init = command_node("init", r#"printf '{"command":"printf done"}'"#, "previous");
+        let mut consumer = command_node("consumer", "unused", "");
+        consumer.call.as_mut().unwrap().args_json =
+            serde_json::json!({"command":{"var":"previous","path":["command"]}}).to_string();
+        let events = run_control_plan(vec![
+            control_node(RTDL_SEQUENCE, "root", vec![1, 2]),
+            init,
+            consumer.clone(),
+        ])
+        .await;
+        assert!(
+            !events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert!(events.iter().any(|event| {
+            event
+                .node_state
+                .as_ref()
+                .and_then(|state| state.leaf_result.as_ref())
+                .is_some_and(|result| result.call_id == "consumer" && result.output == "done")
+        }));
+        let events = run_control_plan(vec![consumer]).await;
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert!(events.iter().any(|event| {
+            event
+                .node_state
+                .as_ref()
+                .and_then(|state| state.leaf_result.as_ref())
+                .is_some_and(|result| result.error.contains("undefined variable"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_a_running_loop() {
+        let mut repeat = control_node(super::RTDL_REPEAT, "repeat", vec![1]);
+        repeat.repeat_count = 100;
+        let events =
+            run_control_plan_with_cancel(vec![repeat, command_node("body", "sleep 1", "")], true)
+                .await;
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .plan_complete
+                .as_ref()
+                .unwrap()
+                .any_failed
+        );
+        assert!(events.iter().any(|event| {
+            event.node_state.as_ref().is_some_and(|state| {
+                state.op_id == "repeat" && state.state == RtdlNodeStateEnum::Canceled as u32
+            })
+        }));
+    }
+
+    #[test]
+    fn parallel_variables_cannot_race_but_join_consumers_are_valid() {
+        let writer = command_node("writer", "printf ok", "shared");
+        let mut reader = command_node("reader", "unused", "");
+        reader.call.as_mut().unwrap().args_json =
+            serde_json::json!({"command":{"var":"shared"}}).to_string();
+        assert!(
+            validate_plan(&plan(
+                vec![
+                    control_node(RTDL_PARALLEL, "parallel", vec![1, 2]),
+                    writer.clone(),
+                    reader.clone()
+                ],
+                0
+            ))
+            .unwrap_err()
+            .contains("conflicting")
+        );
+        assert!(
+            validate_plan(&plan(
+                vec![
+                    control_node(RTDL_SEQUENCE, "root", vec![1, 3]),
+                    control_node(RTDL_PARALLEL, "parallel", vec![2]),
+                    writer,
+                    reader
+                ],
+                0
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn shared_subgraphs_are_validated_once() {
+        let mut nodes = Vec::new();
+        for index in 0..50 {
+            nodes.push(control_node(
+                RTDL_SEQUENCE,
+                &format!("node-{index}"),
+                if index == 49 {
+                    vec![]
+                } else {
+                    vec![index + 1, index + 1]
+                },
+            ));
+        }
+        assert!(validate_plan(&plan(nodes, 0)).is_ok());
     }
 
     fn reserve_address() -> SocketAddr {
@@ -1083,6 +1689,7 @@ mod tests {
                     verifier_args: serde_json::json!({}),
                 }],
             )),
+            "",
         )
         .await;
 
@@ -1241,6 +1848,7 @@ mod tests {
                     call: None,
                     op_id: "sequence".into(),
                     description: "run the verified sequence".into(),
+                    ..Default::default()
                 },
                 RtdlNode {
                     node_kind: RTDL_DO,
@@ -1253,6 +1861,7 @@ mod tests {
                     }),
                     op_id: "op_1".into(),
                     description: "list active plans".into(),
+                    ..Default::default()
                 },
                 RtdlNode {
                     node_kind: RTDL_DO,
@@ -1265,6 +1874,7 @@ mod tests {
                     }),
                     op_id: "op_2".into(),
                     description: "continue with the next node".into(),
+                    ..Default::default()
                 },
             ],
             root_index: 0,
@@ -1331,6 +1941,7 @@ mod tests {
             call,
             op_id: op_id.to_string(),
             description: description.to_string(),
+            ..Default::default()
         }
     }
 
