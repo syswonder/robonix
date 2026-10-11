@@ -57,6 +57,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# tf2 0.25.23, the Humble release at the time of writing, deadlocks a
+# Buffer: waitForTransform and the listener's testTransformableRequests take
+# the same two locks in opposite order (ros2/geometry2#982). rviz2 runs in
+# this container and stops responding a few minutes into mapping. 0.25.24
+# fixes it and so far only ros2-testing carries it; the navigation package
+# image does the same. Remove this step once the main repository has 0.25.24.
+RUN set -eux; \
+    sed -e 's|^URIs: .*|URIs: http://packages.ros.org/ros2-testing/ubuntu|' \
+        -e 's|^Types: .*|Types: deb|' \
+        /etc/apt/sources.list.d/ros2.sources > /etc/apt/sources.list.d/ros2-testing.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends --only-upgrade \
+        $(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'ros-humble-tf2*' | awk '$1 == "ii" {print $2}'); \
+    rm /etc/apt/sources.list.d/ros2-testing.sources; \
+    rm -rf /var/lib/apt/lists/*; \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ros-humble-tf2-ros)" ge 0.25.24
+
 # Webots simulator (Cyberbotics .deb; apt "webots" is often unavailable on minimal images)
 # Match ros-humble-webots-ros2 (~2025.x) — see https://github.com/cyberbotics/webots/releases
 # Default URL uses ghfast.top mirror for reliable access; override with
