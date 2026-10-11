@@ -8,7 +8,6 @@
 #   - scribe   (structured logging library)
 #   - soma     (body description; launches primitive and skill packages)
 #   - vitals   (onboard health)
-# Keystone, Sentinel, Nexus, and Chronos are design documents only.
 # Repo-side dev tooling lives under `tools/` (rbnx CLI + codegen).
 # Python-only system components (scene) and reference service implementations
 # (services/{memsearch,voiceprint,speech}) are managed by uv and not part of
