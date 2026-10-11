@@ -230,6 +230,8 @@ Robonix ships the components below. Deployments add custom services from the [pa
 
 Preset skills, such as a dance or a backflip, ship with a robot body. The skill library holds the rest, such as picking, pouring, and folding. Soma launches deployed skills, Pilot discovers them through Atlas, and Executor invokes them.
 
+Keystone, Sentinel, Nexus, and Chronos are designed but not implemented yet; their directories hold design documents. The other eight components are implemented.
+
 Every contract lives in [`capabilities/`](capabilities/), whether a service or a package implements it. Primitives and skills live in their own repositories. Currently, all 12 components are under the `system` directory for historical reasons.
 
 ## Documentation

@@ -106,21 +106,23 @@ When Pilot receives a task for a session it has no history for, such as after a 
 
 ## RTDL Planning Flow
 
-Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object:
+Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object with exactly four keys: `content` (text shown to the user), `rtdl_description` (a short label for the tree), `rtdl` (the tree), and `task_update` (`null`, or the task's `goal`, `success_criterion`, and `status` of `in_progress` or `done`):
 
 ```json
 {
   "content": "I will inspect the current scene.",
+  "rtdl_description": "inspect the scene",
   "rtdl": {
     "op": "sequence",
     "children": [
       {
         "op": "do",
-        "cap": "camera_snapshot",
+        "cap": "tiago_camera.camera_snapshot",
         "args": {}
       }
     ]
-  }
+  },
+  "task_update": null
 }
 ```
 
@@ -128,7 +130,7 @@ MVP RTDL supports only:
 
 - `sequence`: ordered children.
 - `parallel`: concurrent children. Executor waits for every child and does not cancel sibling branches when one fails.
-- `do`: one capability call, where `cap` is the unique `capability_name` shown in the prompt and `args` is a JSON object.
+- `do`: one capability call, where `cap` is the `capability_name` shown in the prompt, `<provider_id>.<area>_<name>` (for example `tiago_camera.camera_snapshot` for `robonix/primitive/camera/snapshot`), and `args` is a JSON object.
 
 Pilot buffers the full assistant JSON before showing user-visible text, validates the RTDL, expands it into an arena-style `Plan { nodes, root_index }`, sends that `Plan` to Liaison, and dispatches it to Executor. Executor interprets `sequence`, `parallel`, and `do` nodes directly.
 
@@ -139,20 +141,22 @@ Parallel example:
 ```json
 {
   "content": "I will inspect both signals.",
+  "rtdl_description": "inspect camera and health",
   "rtdl": {
     "op": "parallel",
     "children": [
-      { "op": "do", "cap": "camera_snapshot", "args": {} },
-      { "op": "do", "cap": "battery_status", "args": {} }
+      { "op": "do", "cap": "tiago_camera.camera_snapshot", "args": {} },
+      { "op": "do", "cap": "tiago_health.health_state", "args": {} }
     ]
-  }
+  },
+  "task_update": null
 }
 ```
 
 An empty sequence means the model is dispatching no new tree this round:
 
 ```json
-{ "content": "Done.", "rtdl": { "op": "sequence", "children": [] } }
+{ "content": "Done.", "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_update": null }
 ```
 
 Pilot accepts it only when it does not contradict the task state. With

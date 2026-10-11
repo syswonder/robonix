@@ -1,5 +1,12 @@
 # Remote Liaison Demo
 
+> **Out of date:** this demo does not boot as written. Its manifest points
+> at `../webots/primitives/audio_macos_bridge`, which was renamed to
+> `audio_client_bridge` and now lives in
+> [primitive-audio-client-bridge-rbnx](https://github.com/syswonder/primitive-audio-client-bridge-rbnx).
+> It also has no `soma.yaml`, which Soma needs because the deployment
+> declares primitives and skills.
+
 This example is a small reusable remote voice path for Liaison:
 
 ```text
