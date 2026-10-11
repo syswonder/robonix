@@ -16,6 +16,8 @@ VENV_BACKED_BUILDS = (
     "services/memory/scripts/build.sh",
     "examples/webots/primitives/audio_driver/scripts/build.sh",
     "examples/webots/primitives/audio_client_bridge/scripts/build.sh",
+    "services/verifiers/vlm_verifier/scripts/build.sh",
+    "services/verifiers/scene_verifier/scripts/build.sh",
 )
 DIRECT_CODEGEN = re.compile(
     r"^[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t\n]+[ \t]+)*"
