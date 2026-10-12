@@ -348,22 +348,55 @@ fn execute_node(
                     RTDL_REPEAT => node.repeat_count,
                     _ => node.max_iterations,
                 };
+                let kind = match node.node_kind {
+                    RTDL_IF => "if",
+                    RTDL_REPEAT => "repeat",
+                    _ => "while",
+                };
+                info!(
+                    "[executor/rtdl] plan_id={} node={} op_id={} {kind} start limit={limit}",
+                    plan.plan_id, node_index, op_id
+                );
                 let mut iterations = 0;
                 let mut failed = false;
+                let mut exit_reason = "count completed";
                 loop {
                     if runtime.is_cancelled(&plan.plan_id).await {
+                        exit_reason = "plan canceled";
                         break;
                     }
                     let chosen = if node.node_kind == RTDL_REPEAT {
                         (iterations < limit).then_some(0)
                     } else {
                         match crate::expression::eval_condi(&condition, &context.snapshot().await) {
-                            Ok(true) => Some(0),
-                            Ok(false) if node.node_kind == RTDL_IF => {
-                                (node.children.len() == 2).then_some(1)
+                            Ok(value) => {
+                                let branch = if value {
+                                    Some(0)
+                                } else if node.node_kind == RTDL_IF && node.children.len() == 2 {
+                                    Some(1)
+                                } else {
+                                    None
+                                };
+                                let selected = match (node.node_kind, branch) {
+                                    (RTDL_IF, Some(0)) => "then",
+                                    (RTDL_IF, Some(1)) => "else",
+                                    (_, Some(_)) => "body",
+                                    _ => "none",
+                                };
+                                info!(
+                                    "[executor/rtdl] plan_id={} node={} op_id={} {kind} condition={value} completed_iterations={iterations} selected={selected}",
+                                    plan.plan_id, node_index, op_id
+                                );
+                                if branch.is_none() {
+                                    exit_reason = "condition false";
+                                }
+                                branch
                             }
-                            Ok(false) => None,
                             Err(error) => {
+                                warn!(
+                                    "[executor/rtdl] plan_id={} node={} op_id={} {kind} failed completed_iterations={iterations}: condition evaluation: {error}",
+                                    plan.plan_id, node_index, op_id
+                                );
                                 send_operator_state(
                                     &tx,
                                     &node_ctx,
@@ -380,6 +413,10 @@ fn execute_node(
                         break;
                     };
                     if iterations >= limit {
+                        warn!(
+                            "[executor/rtdl] plan_id={} node={} op_id={} {kind} failed completed_iterations={iterations} max_iterations={limit}: condition remains true",
+                            plan.plan_id, node_index, op_id
+                        );
                         send_operator_state(
                             &tx,
                             &node_ctx,
@@ -390,6 +427,14 @@ fn execute_node(
                         .await;
                         return NodeExecution::finished(true);
                     }
+                    info!(
+                        "[executor/rtdl] plan_id={} node={} op_id={} {kind} iteration={} limit={limit} child={} start",
+                        plan.plan_id,
+                        node_index,
+                        op_id,
+                        iterations + 1,
+                        node.children[chosen]
+                    );
                     let execution = execute_node(
                         plan.clone(),
                         node.children[chosen] as usize,
@@ -402,15 +447,43 @@ fn execute_node(
                     .await;
                     failed = execution.failed | wait_for_verifiers(execution.verifiers).await;
                     iterations += 1;
+                    info!(
+                        "[executor/rtdl] plan_id={} node={} op_id={} {kind} iteration={iterations} child={} complete failed={failed}",
+                        plan.plan_id, node_index, op_id, node.children[chosen]
+                    );
                     if failed || node.node_kind == RTDL_IF {
+                        exit_reason = if failed {
+                            "child failed or canceled"
+                        } else {
+                            "branch completed"
+                        };
                         break;
                     }
                     tokio::task::yield_now().await;
                 }
+                let canceled = runtime.is_cancelled(&plan.plan_id).await;
+                let state = if canceled {
+                    "Canceled"
+                } else if failed {
+                    "Failed"
+                } else {
+                    "Succeeded"
+                };
+                info!(
+                    "[executor/rtdl] plan_id={} node={} op_id={} {kind} end state={state} completed_iterations={iterations} reason={}",
+                    plan.plan_id,
+                    node_index,
+                    op_id,
+                    if canceled {
+                        "plan canceled"
+                    } else {
+                        exit_reason
+                    }
+                );
                 complete_operator(
                     Vec::new(),
                     failed,
-                    runtime.is_cancelled(&plan.plan_id).await,
+                    canceled,
                     tx.clone(),
                     node_ctx.clone(),
                     runtime.clone(),

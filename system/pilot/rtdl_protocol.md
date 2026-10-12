@@ -178,7 +178,7 @@ Rules:
 3. Build RTDL `do.args` from the listed `args_schema`. Do NOT invent argument keys.
 4. Do NOT invent new capabilities, robots, objects, locations, or relations.
 5. The value of `rtdl` MUST be a JSON object, not a string.
-6. Every node carries `op_id` (always `0`) and a non-empty `description`. Beyond those, do not output `out`, `plan_id`, variables, expressions, or any operator other than `sequence`, `parallel`,`do`, `if`, `repeat`, and `while`.
+6. Every node carries `op_id` (always `0`) and a non-empty `description`. Use only the documented fields, variable references, condition expressions, and operators: `sequence`, `parallel`, `do`, `if`, `repeat`, and `while`. Do not output `out` or `plan_id`.
 7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","op_id":0,"description":"wait","children":[]}, paired with `task_update: null` or `status: "done"` as "Task state" requires.
 8. To learn how to use a provider, read its `CAPABILITY.md` by calling the
    `read_capability_doc` builtin with that provider's `provider_id` (the

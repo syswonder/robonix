@@ -80,6 +80,8 @@ Use the smaller effective limit when a model card and an inference-server settin
 
 The VLM-facing RTDL envelope rules live in `rtdl_protocol.md` and are embedded via `include_str!`. Planning uses the same bounded grammar/admission reminder on every round to preserve the cacheable prefix; corrective retries can include the full protocol.
 
+Pilot preserves each `do.bind` name when expanding RTDL into a Plan. Executor stores the successful result in that tree's execution context; later arguments and conditions can reference it with `{"var":"name","path":["field"]}`.
+
 Pilot's standing system prompt is built in `src/planner.rs`. Prompt assembly and usage accounting live in `src/prompt.rs`; each round's section list supplies both context-budget estimates and request rendering.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
@@ -169,3 +171,4 @@ state the pairing rule: an empty sequence goes with `task_update: null` or
 RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `body`), and bounded `while` (`condition`, `max_iterations`, `body`). A `do.bind` stores successful, verified output in the plan's execution context. Reference it with `{"var":"name","path":["field",0]}` in arguments or conditions. Conditions accept booleans and `{"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}` expressions. Missing values and non-boolean conditions fail explicitly.
 
 Variables are isolated per plan; loops update the same binding each iteration. Bound calls wait for verification even under overlap mode, and loop iterations wait for all descendant verification. Parallel siblings must be independent; their results may be consumed after the join. Repeat counts are 0–10000 and while requires a 1–10000 iteration limit. A while condition still true at the limit fails. See [the protocol](../pilot/rtdl_protocol.md) for the complete grammar.
+The `[pilot/rtdl]` plan tree logs include repeat counts, while limits, condition expressions and do binding names. Expressions and binding names use bounded previews. Compare these planned fields with Executor's `[executor/rtdl]` records to check what actually ran.

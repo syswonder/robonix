@@ -2747,7 +2747,7 @@ fn expand_rtdl_node(
                 op_id: next_op_id(),
                 description,
                 condition_json: "".to_string(),
-                bind: "".to_string(),
+                bind,
                 repeat_count: 0,
                 max_iterations: 0,
             });
@@ -3029,6 +3029,22 @@ fn append_plan_node_summary(plan: &Plan, node_index: usize, depth: usize, out: &
             call_display_name(call),
             compact_preview(&call.args_json, 240)
         ));
+    }
+    match node.node_kind {
+        RTDL_IF | RTDL_WHILE => {
+            line.push_str(&format!(
+                " condition={}",
+                compact_preview(&node.condition_json, 240)
+            ));
+            if node.node_kind == RTDL_WHILE {
+                line.push_str(&format!(" max_iterations={}", node.max_iterations));
+            }
+        }
+        RTDL_REPEAT => line.push_str(&format!(" count={}", node.repeat_count)),
+        RTDL_DO if !node.bind.is_empty() => {
+            line.push_str(&format!(" bind={}", compact_preview(&node.bind, 160)));
+        }
+        _ => {}
     }
     out.push(line);
     for child in &node.children {
