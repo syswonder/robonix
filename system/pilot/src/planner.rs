@@ -2150,7 +2150,7 @@ Plan control is the entire rtdl value, never a nested node or capability: cancel
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
-Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call. task_update.goal must exactly copy Current user interaction. Use status=done only when its success criterion is verified and its relevant tree is no longer running.
+Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call. task_update.goal must exactly copy the latest User task or User steer instruction. Use status=done only when its success criterion is verified and its relevant tree is no longer running.
 "#;
 
 fn rtdl_protocol(full: bool) -> &'static str {
@@ -3162,7 +3162,7 @@ by planning capability calls available to you.
   just to confirm unchanged data.
 
 ## Interaction and execution lifetime
-The harness owns the latest instruction shown in \"Current user interaction\".
+The harness owns the latest instruction, the newest \"User task\" or \"User steer\" message.
 Copy it exactly into a non-null `task_update.goal`; `task_update` reports
 progress and never replaces user intent. Older conversation remains in message
 history. Independently running work appears only in \"In-flight RTDL trees\"

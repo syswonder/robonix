@@ -12,7 +12,7 @@ each one provides.
   declares each interface with `DeclareCapability(contract_id, transport,
   endpoint, params)`, and pings `Heartbeat` while it stays alive.
 - **Discovery**: consumers (pilot, executor, scene, downstream services)
-  resolve providers via `QueryCapabilities` (filter by namespace / kind /
+  resolve providers via `Query` (filter by namespace / kind /
   capability id) without needing to know who is running where.
 - **Channels**: `ConnectCapability` opens a tracked consumer→provider
   channel; `DisconnectCapability` releases it. Channels make
