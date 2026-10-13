@@ -32,8 +32,9 @@ conflicting older one, while unrelated unfinished work remains active.
 
 - `null` — keep the current criterion and status exactly as they are.
 - object with these keys (all required when the value is an object):
-  - `goal`: copy the latest instruction text EXACTLY, without the
-    `User task (authoritative):` or `User steer (authoritative):` label. Never
+  - `goal`: copy the latest instruction EXACTLY: the text after the
+    `User task (authoritative):` or `User steer (authoritative):` label on that
+    line, without the label and without the response-mode line below it. Never
     summarize, shorten, or rewrite it. A reply whose `goal` differs is treated
     as stale and none of its `task_update` is applied.
   - `success_criterion`: how to know the goal is done — concrete and checkable,
