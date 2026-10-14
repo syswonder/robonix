@@ -1,0 +1,7 @@
+string session_token
+string external_subject_id
+float32 confidence
+float32 minimum_confidence
+---
+keystone/User user
+bool verified

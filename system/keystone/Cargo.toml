@@ -1,0 +1,43 @@
+[package]
+name = "robonix-keystone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Keystone: user identity, preferences, and access decisions"
+
+[lib]
+name = "robonix_keystone"
+path = "src/lib.rs"
+
+[[bin]]
+name = "robonix-keystone"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+base64.workspace = true
+clap.workspace = true
+prost.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+uuid.workspace = true
+robonix-atlas = { path = "../atlas" }
+robonix-scribe.workspace = true
+
+[build-dependencies]
+robonix-codegen.workspace = true
+protoc-bin-vendored.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,4 @@
+string session_token
+string target_user_id
+---
+keystone/User user

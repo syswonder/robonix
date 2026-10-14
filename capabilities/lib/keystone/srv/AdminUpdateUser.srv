@@ -1,0 +1,7 @@
+string session_token
+string target_user_id
+bool enabled
+string[] roles
+bool voice_guard_enabled
+---
+keystone/User user

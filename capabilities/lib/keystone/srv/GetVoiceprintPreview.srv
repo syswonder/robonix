@@ -1,0 +1,6 @@
+string session_token
+---
+bool available
+uint8[] audio_data
+uint32 sample_rate_hz
+uint64 updated_at_ms
