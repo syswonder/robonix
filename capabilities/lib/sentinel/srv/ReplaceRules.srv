@@ -1,0 +1,4 @@
+string session_token
+string rules_json
+---
+string rules_json

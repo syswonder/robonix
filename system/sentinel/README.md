@@ -1,36 +1,41 @@
-# Sentinel - safety supervision
+# Sentinel - capability-call policy
 
-Sentinel is the planned Robonix safety-supervision component. Its job is to
-decide whether a requested capability call is allowed under the current robot
-state, operator identity, scene context, and policy.
+Sentinel provides the transport-independent rule model and policy evaluation
+for capability calls. Executor and Atlas do not invoke Sentinel yet, so these
+rules are not enforced by the current call path.
 
-## Current status
+Rules can match a contract wildcard, exact Keystone users or roles, local-time
+windows, typed call arguments, and typed robot context. The highest-priority
+matching rule wins. Calls are allowed when no rule applies, while a candidate
+rule with unavailable or wrongly typed trusted data fails closed.
 
-Sentinel is not implemented on `dev` yet. There is no `robonix-sentinel`
-binary, no `system/executor/src/dispatch/sentinel.rs`, and no `sentinel.yaml`
-rule loader in Executor.
+Predicates use an RFC 6901 JSON Pointer and an explicit `boolean`, `string`,
+`integer`, or `float` type. Boolean and string predicates support `eq`/`ne`;
+numeric predicates additionally support `lt`/`le`/`gt`/`ge` and ranges with
+independently inclusive bounds. No string, number, or boolean coercion is
+performed. For example:
 
-Executor currently dispatches validated RTDL `do` nodes directly through Atlas
-to the selected primitive, service, or skill provider. The only safety-related
-controls in the current path are local to the components that already exist,
-for example:
+```json
+{
+  "path": "/soma/data/actuators/body~1arm~1left_piper~1gripper/position/value",
+  "kind": "float",
+  "operator": "range",
+  "min": 0.0,
+  "max": 0.01,
+  "min_inclusive": true,
+  "max_inclusive": true
+}
+```
 
-- Executor plan cancellation and stop points (`cancel_plan`, `stop_plan_at`,
-  `cancel_all_plans`).
-- Liaison access control for text/API users and voiceprint-verified speakers
-  before work enters Pilot/TTS.
-- Provider-side validation in individual primitives and services.
+The `~1` escape represents `/` inside a JSON Pointer component. Argument
+predicates use the same schema but address the capability's `args_json` root.
 
-Do not rely on this directory for runtime enforcement today.
+The `list_rules` and `replace_rules` capability contracts describe the rule
+management interface. Their provider and persistence behavior will be added
+with the runtime integration.
 
-## Intended role
+Run the policy tests from the repository root:
 
-When Sentinel lands, it should sit on the capability-call path before Executor
-dispatches side-effecting work. The policy decision should be based on:
-
-- the requested contract and arguments,
-- the operator identity and permissions from [keystone](../keystone/),
-- current robot/body health from [vitals](../vitals/),
-- current environment state from [scene](../scene/),
-- explicit safety policy such as allow/deny lists, rate limits, workspace
-  limits, stop windows, and emergency-stop state.
+```bash
+cargo test -p robonix-sentinel
+```

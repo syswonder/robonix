@@ -2,10 +2,11 @@
 # The 12 Robonix system components live one-per-directory under `system/`.
 # Rust implementations currently included in the workspace:
 #   - atlas    (capability discovery)
-#   - executor (capability orchestration; embeds sentinel for v0.1)
+#   - executor (capability orchestration)
 #   - keystone (user identity and access)
 #   - liaison  (human-machine interaction)
 #   - pilot    (planning + decision + memory + world model)
+#   - sentinel (capability-call policy)
 #   - scribe   (logging facade)
 #   - soma     (body model and package bring-up)
 #   - vitals   (health monitoring)
@@ -19,6 +20,7 @@ members = [
     "system/keystone",
     "system/liaison",
     "system/pilot",
+    "system/sentinel",
     "system/scribe",
     "system/soma",
     "system/vitals",
