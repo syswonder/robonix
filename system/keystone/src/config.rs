@@ -4,9 +4,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use robonix_keystone::DEFAULT_VOICE_THRESHOLD;
 use serde::Deserialize;
 
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
+/// Keep Keystone reachable by clients running on other hosts.
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:50095";
 pub const DEFAULT_PROVIDER_ID: &str = "keystone";
 pub const KEYSTONE_NAMESPACE: &str = "robonix/system/keystone";
@@ -22,6 +24,7 @@ pub struct KeystoneConfig {
     pub bootstrap_admin_display_name: String,
     pub bootstrap_admin_email: String,
     pub bootstrap_admin_password: Option<String>,
+    pub voice_threshold: f32,
 }
 
 #[derive(Parser, Debug)]
@@ -54,6 +57,9 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_KEYSTONE_BOOTSTRAP_ADMIN_PASSWORD")]
     pub bootstrap_admin_password: Option<String>,
 
+    #[arg(long, env = "ROBONIX_KEYSTONE_VOICE_THRESHOLD")]
+    pub voice_threshold: Option<f32>,
+
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
 
@@ -71,10 +77,11 @@ struct FileConfig {
     bootstrap_admin_username: Option<String>,
     bootstrap_admin_display_name: Option<String>,
     bootstrap_admin_email: Option<String>,
+    voice_threshold: Option<f32>,
 }
 
 impl KeystoneConfig {
-    /// Resolve command-line, deployment JSON, YAML, environment, and safe defaults.
+    /// Resolve command-line, deployment JSON, YAML, environment, and defaults.
     pub fn resolve(args: Args) -> Result<Self> {
         let file = if let Some(path) = &args.config {
             let raw = std::fs::read_to_string(path)
@@ -141,6 +148,11 @@ impl KeystoneConfig {
                 .or(file.bootstrap_admin_email)
                 .unwrap_or_default(),
             bootstrap_admin_password: args.bootstrap_admin_password,
+            voice_threshold: args
+                .voice_threshold
+                .or(deployment.voice_threshold)
+                .or(file.voice_threshold)
+                .unwrap_or(DEFAULT_VOICE_THRESHOLD),
         })
     }
 }

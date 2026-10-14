@@ -450,7 +450,6 @@ impl RobonixSystemKeystoneVerifyVoice for KeystoneService {
                 &input.session_token,
                 &input.external_subject_id,
                 input.confidence,
-                input.minimum_confidence,
             )
             .map(|(user, verified)| VerifyVoiceResponse {
                 user: Some(user_message(user)),
@@ -542,7 +541,8 @@ fn status(error: KeystoneError) -> Status {
         | KeystoneError::InvalidEmail
         | KeystoneError::WeakPassword
         | KeystoneError::InvalidRole(_)
-        | KeystoneError::InvalidVoiceprintSubject => Status::invalid_argument(error.to_string()),
+        | KeystoneError::InvalidVoiceprintSubject
+        | KeystoneError::InvalidVoiceThreshold => Status::invalid_argument(error.to_string()),
         KeystoneError::PasswordHash(_)
         | KeystoneError::LockPoisoned
         | KeystoneError::Database(_) => Status::internal(error.to_string()),

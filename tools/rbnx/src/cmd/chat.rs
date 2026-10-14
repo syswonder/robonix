@@ -1673,6 +1673,10 @@ async fn run_tui(
 
 // ── Liaison gRPC helpers ─────────────────────────────────────────────────────
 
+fn keystone_session_token() -> String {
+    std::env::var("ROBONIX_SESSION_TOKEN").unwrap_or_default()
+}
+
 fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pilot::Task {
     use crate::pb::pilot::Task;
     const INTENT_SOURCE_TEXT: u32 = 0;
@@ -1682,7 +1686,12 @@ fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pi
         source: INTENT_SOURCE_TEXT,
         text: text.to_string(),
         audio_data: vec![],
-        context_json: serde_json::json!({"user_id": user_id, "modality": "text"}).to_string(),
+        context_json: serde_json::json!({
+            "user_id": user_id,
+            "modality": "text",
+            "session_token": keystone_session_token(),
+        })
+        .to_string(),
         timestamp_ms: now_ms(),
     }
 }
@@ -1698,6 +1707,8 @@ fn build_control_task(
         serde_json::from_str(extra_context_json.trim()).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = ctx.as_object_mut() {
         obj.entry("user_id").or_insert(serde_json::json!(user_id));
+        obj.entry("session_token")
+            .or_insert_with(|| serde_json::json!(keystone_session_token()));
     }
     Task {
         task_id: Uuid::new_v4().to_string(),
@@ -1771,6 +1782,7 @@ fn spawn_voice_steer(
             chat_cfg.speaker_cap_id.as_deref(),
         ),
         context_json: String::new(),
+        session_token: keystone_session_token(),
     };
     tokio::spawn(async move {
         if let Ok(mut client) = RobonixSystemLiaisonVoiceClient::connect(ep).await
@@ -1969,6 +1981,7 @@ async fn run_voice_session_with_esc_abort(
             chat_cfg.speaker_cap_id.as_deref(),
         ),
         context_json: String::new(),
+        session_token: keystone_session_token(),
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<VoiceEvent, Status>>(64);

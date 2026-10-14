@@ -3,7 +3,7 @@ name = "robonix-keystone"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Robonix Keystone: user identity, preferences, and access decisions"
+description = "Robonix Keystone: user identity and access service"
 
 [lib]
 name = "robonix_keystone"

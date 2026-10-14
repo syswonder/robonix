@@ -2,6 +2,7 @@
 bool enabled
 string mic_provider_id
 string speaker_provider_id
+string session_token           # Keystone login session that owns hands-free turns
 ---
 bool ok
 bool enabled

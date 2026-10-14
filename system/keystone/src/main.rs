@@ -223,8 +223,13 @@ async fn main() -> Result<()> {
     let config = KeystoneConfig::resolve(args)?;
 
     ensure_parent(&config.database)?;
-    let store = KeystoneStore::open(&config.database)
-        .with_context(|| format!("open Keystone database '{}'", config.database.display()))?;
+    let store =
+        KeystoneStore::open(&config.database, config.voice_threshold).with_context(|| {
+            format!(
+                "initialize Keystone store using database '{}'",
+                config.database.display()
+            )
+        })?;
     bootstrap_admin(&store, &config)?;
 
     let listen: SocketAddr = config
@@ -356,29 +361,44 @@ async fn main() -> Result<()> {
 
 /// Create the first administrator without embedding a reusable password in source.
 fn bootstrap_admin(store: &KeystoneStore, config: &KeystoneConfig) -> Result<()> {
+    if store.has_users()? {
+        return Ok(());
+    }
     let (password, generated) = match config.bootstrap_admin_password.clone() {
         Some(password) if !password.is_empty() => (password, false),
         _ => (random_bootstrap_password(), true),
     };
-    let created = store.bootstrap_admin(
-        &config.bootstrap_admin_username,
-        &config.bootstrap_admin_display_name,
-        &config.bootstrap_admin_email,
-        &password,
-        true,
-    )?;
-    if created.is_some() && generated {
+    if generated {
         write_bootstrap_credentials(
             &config.bootstrap_credentials_file,
             &config.bootstrap_admin_username,
             &password,
         )?;
+    }
+    let created = match store.bootstrap_admin(
+        &config.bootstrap_admin_username,
+        &config.bootstrap_admin_display_name,
+        &config.bootstrap_admin_email,
+        &password,
+        true,
+    ) {
+        Ok(created) => created,
+        Err(error) => {
+            if generated {
+                let _ = std::fs::remove_file(&config.bootstrap_credentials_file);
+            }
+            return Err(error.into());
+        }
+    };
+    if created.is_some() && generated {
         warn!(
             "first administrator created; one-time credentials written to '{}'",
             config.bootstrap_credentials_file.display()
         );
     } else if created.is_some() {
         info!("first administrator created from explicit bootstrap credentials");
+    } else if generated {
+        let _ = std::fs::remove_file(&config.bootstrap_credentials_file);
     }
     Ok(())
 }
@@ -401,14 +421,26 @@ fn write_bootstrap_credentials(path: &Path, username: &str, password: &str) -> R
     ensure_parent(path)?;
     let contents =
         format!("username={username}\npassword={password}\nchange_password_required=true\n");
-    std::fs::write(path, contents)
-        .with_context(|| format!("write bootstrap credentials '{}'", path.display()))?;
     #[cfg(unix)]
     {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("open bootstrap credentials '{}'", path.display()))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("protect bootstrap credentials '{}'", path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("write bootstrap credentials '{}'", path.display()))?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(path, contents)
+        .with_context(|| format!("write bootstrap credentials '{}'", path.display()))?;
     Ok(())
 }
 
@@ -433,6 +465,13 @@ mod tests {
     fn generated_bootstrap_credentials_are_private() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("bootstrap.txt");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&path, "stale").expect("existing credentials");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("existing permissions");
+        }
         write_bootstrap_credentials(&path, "admin", "one-time-secret").expect("write");
         let contents = std::fs::read_to_string(&path).expect("read");
         assert!(contents.contains("username=admin"));
@@ -459,5 +498,29 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.len() >= 32);
         assert!(second.len() >= 32);
+    }
+
+    #[test]
+    fn credential_write_failure_does_not_create_administrator() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let credentials = directory.path().join("credentials");
+        std::fs::create_dir(&credentials).expect("credentials directory");
+        let store = KeystoneStore::open_in_memory(robonix_keystone::DEFAULT_VOICE_THRESHOLD)
+            .expect("store");
+        let config = KeystoneConfig {
+            atlas_endpoint: String::new(),
+            listen: String::new(),
+            provider_id: String::new(),
+            database: directory.path().join("keystone.db"),
+            bootstrap_credentials_file: credentials,
+            bootstrap_admin_username: "admin".to_string(),
+            bootstrap_admin_display_name: "Administrator".to_string(),
+            bootstrap_admin_email: String::new(),
+            bootstrap_admin_password: None,
+            voice_threshold: robonix_keystone::DEFAULT_VOICE_THRESHOLD,
+        };
+
+        assert!(bootstrap_admin(&store, &config).is_err());
+        assert!(!store.has_users().expect("user count"));
     }
 }

@@ -96,7 +96,7 @@ or `--sessions` to remove those too.
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
-Atlas, Executor, Soma, Pilot, Vitals, then Liaison. Their `system.<name>`
+Atlas, Executor, Keystone, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
 manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or

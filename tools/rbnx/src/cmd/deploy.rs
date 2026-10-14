@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
+    fn boot_prerequisites_build_scene_but_skip_builtin_system_components() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -290,6 +290,7 @@ mod tests {
         ));
         let scene = temp.join("system/scene");
         std::fs::create_dir_all(&scene).expect("scene package directory");
+        std::fs::create_dir_all(temp.join("system/keystone")).expect("keystone builtin directory");
         std::fs::create_dir_all(temp.join("system/vitals")).expect("vitals builtin directory");
         std::fs::write(
             scene.join("package_manifest.yaml"),
@@ -309,6 +310,7 @@ stop: "true"
         let deploy = DeployManifest {
             system: HashMap::from([
                 ("scene".to_string(), serde_yaml::Value::Null),
+                ("keystone".to_string(), serde_yaml::Value::Null),
                 ("vitals".to_string(), serde_yaml::Value::Null),
             ]),
             ..Default::default()
@@ -369,6 +371,50 @@ soma_endpoint: 127.0.0.1:50091
             ["--id", "vitals"],
             ["--thresholds-path", "config/vitals.yaml"],
             ["--soma-endpoint", "127.0.0.1:50091"],
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == expected[0] && pair[1] == expected[1]),
+                "missing {:?} in {:?}",
+                expected,
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn liaison_receives_the_keystone_endpoint_from_the_manifest() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 0.0.0.0:50081
+keystone_endpoint: 127.0.0.1:50095
+"#,
+        )
+        .expect("liaison config");
+
+        let args = system_cli_args("liaison", Some(&cfg), Some("0.0.0.0:50051"));
+        let endpoint = args
+            .windows(2)
+            .find(|pair| pair[0] == "--keystone-endpoint")
+            .map(|pair| pair[1].as_str());
+
+        assert_eq!(endpoint, Some("127.0.0.1:50095"));
+    }
+
+    #[test]
+    fn keystone_inherits_the_atlas_endpoint_from_the_manifest() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 127.0.0.1:50095
+"#,
+        )
+        .expect("keystone config");
+
+        let args = system_cli_args("keystone", Some(&cfg), Some("127.0.0.1:51051"));
+
+        for expected in [
+            ["--listen", "127.0.0.1:50095"],
+            ["--atlas", "127.0.0.1:51051"],
         ] {
             assert!(
                 args.windows(2)
@@ -1570,6 +1616,7 @@ pub async fn execute(
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
+                ("keystone", "robonix-keystone"),
                 ("soma", "robonix-soma"),
                 ("vitals", "robonix-vitals"),
                 ("pilot", "robonix-pilot"),
@@ -1647,7 +1694,7 @@ pub async fn execute(
                     started_at_ms,
                     &children,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                tokio::time::sleep(Duration::from_millis(1500)).await;
                 if *name == "soma" {
                     if !deploy.primitive.is_empty() {
                         output::boot_section("primitive");
@@ -2265,6 +2312,16 @@ fn system_cli_args(
             // even when manifests don't mention atlas at all).
             push_pair(&mut out, "--capabilities", s("capabilities"));
         }
+        "keystone" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas_endpoint")
+                    .or_else(|| s("atlas"))
+                    .or_else(|| atlas_listen.map(str::to_string)),
+            );
+        }
         "executor" => {
             push_pair(&mut out, "--listen", s("listen"));
             push_pair(
@@ -2301,6 +2358,7 @@ fn system_cli_args(
                 s("atlas").or_else(|| atlas_listen.map(str::to_string)),
             );
             push_pair(&mut out, "--pilot-endpoint", s("pilot_endpoint"));
+            push_pair(&mut out, "--keystone-endpoint", s("keystone_endpoint"));
             push_pair(&mut out, "--log", s("log"));
         }
         "soma" => {

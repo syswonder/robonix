@@ -8,13 +8,14 @@
 // `robonix/system/liaison`, which exposes:
 //
 //   * SubmitTask(Task) → stream PilotEvent
-//       For text / API / pre-built tasks. Liaison normalises `Task.user_id`
-//       (defaulting to `local:<os_user>` when empty) and forwards to Pilot.
+//       For text / API / pre-built tasks. Liaison resolves a configured
+//       Keystone session or normalises `context_json.user_id`, then forwards
+//       to Pilot.
 //
 //   * StartVoiceSession(...) → stream VoiceEvent
-//       For push-to-talk voice. Liaison drives mic → ASR → voiceprint →
-//       Pilot → optional TTS → speaker, wrapping every stage as a
-//       VoiceEvent. See `voice.rs`.
+//       For push-to-talk voice. Liaison resolves a configured Keystone session,
+//       then drives mic → ASR → optional voiceprint → Pilot → optional TTS →
+//       speaker, wrapping every stage as a VoiceEvent. See `voice.rs`.
 //
 // Liaison itself does NOT contain ASR / TTS / voiceprint logic. Each is an
 // Atlas-registered system capability (robonix/service/speech/asr,
@@ -23,6 +24,7 @@
 
 mod access;
 mod handsfree;
+mod keystone_gateway;
 mod pb;
 mod voice;
 
@@ -257,6 +259,8 @@ pub struct LiaisonPipeline {
     pilot_endpoint_default: String,
     atlas: Arc<Mutex<AtlasClient>>,
     access: Arc<AccessControlConfig>,
+    keystone: Arc<keystone_gateway::KeystoneGateway>,
+    enforce_keystone: bool,
 }
 
 impl LiaisonPipeline {
@@ -267,11 +271,15 @@ impl LiaisonPipeline {
         pilot_endpoint_default: impl Into<String>,
         atlas: Arc<Mutex<AtlasClient>>,
         access: Arc<AccessControlConfig>,
+        keystone: Arc<keystone_gateway::KeystoneGateway>,
+        enforce_keystone: bool,
     ) -> Self {
         Self {
             pilot_endpoint_default: pilot_endpoint_default.into(),
             atlas,
             access,
+            keystone,
+            enforce_keystone,
         }
     }
 
@@ -279,25 +287,47 @@ impl LiaisonPipeline {
     pub async fn handle_intent(
         &self,
         mut task: Task,
-    ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>> {
+    ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>, Status> {
+        if self.enforce_keystone {
+            authenticate_task(&self.keystone, &mut task).await?;
+        } else if let Ok(mut context) =
+            serde_json::from_str::<serde_json::Value>(&task.context_json)
+            && let Some(object) = context.as_object_mut()
+            && object.remove("session_token").is_some()
+        {
+            task.context_json = serde_json::to_string(&context)
+                .map_err(|error| Status::internal(error.to_string()))?;
+        }
         ensure_user_id(&mut task);
-        let user_id = task_user_id(&task);
-        match self.access.authorize_user(&user_id) {
-            AccessDecision::Allow {
-                user_id,
-                method,
-                reason,
-                ..
-            } => {
-                info!("[liaison/access] text allow user={user_id} via {method:?}: {reason}");
-            }
-            AccessDecision::Deny {
-                user_id, reason, ..
-            } => {
-                warn!("[liaison/access] text deny user={user_id}: {reason}");
-                return Err(anyhow!("access denied for user '{user_id}': {reason}"));
+        if !self.enforce_keystone {
+            let user_id = task_user_id(&task);
+            match self.access.authorize_user(&user_id) {
+                AccessDecision::Allow {
+                    user_id,
+                    method,
+                    reason,
+                    ..
+                } => {
+                    info!("[liaison/access] text allow user={user_id} via {method:?}: {reason}");
+                }
+                AccessDecision::Deny {
+                    user_id, reason, ..
+                } => {
+                    warn!("[liaison/access] text deny user={user_id}: {reason}");
+                    return Err(Status::permission_denied(format!(
+                        "access denied for user '{user_id}': {reason}"
+                    )));
+                }
             }
         }
+        self.forward_to_pilot(task).await
+    }
+
+    /// Forward a `Task` to Pilot. Returns a channel that yields `PilotEvent`s.
+    async fn forward_to_pilot(
+        &self,
+        task: Task,
+    ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>, Status> {
         let (tx, rx) = mpsc::channel(64);
 
         let pilot_ep = match resolve_pilot_endpoint(&self.atlas).await {
@@ -307,11 +337,15 @@ impl LiaisonPipeline {
 
         let mut client = RobonixSystemPilotClient::connect(pilot_ep.clone())
             .await
-            .with_context(|| format!("connect Pilot at {pilot_ep}"))?;
+            .map_err(|error| {
+                Status::unavailable(format!("connect Pilot at {pilot_ep}: {error}"))
+            })?;
         let response = client
             .submit_task(Request::new(task))
             .await
-            .with_context(|| format!("Pilot SubmitTask at {pilot_ep}"))?;
+            .map_err(|error| {
+                Status::unavailable(format!("Pilot SubmitTask at {pilot_ep}: {error}"))
+            })?;
         let mut grpc = response.into_inner();
         tokio::spawn(async move {
             while let Some(item) = grpc.next().await {
@@ -326,6 +360,35 @@ impl LiaisonPipeline {
         });
         Ok(rx)
     }
+}
+
+/// Resolve the login token, replace caller-supplied identity with Keystone's
+/// canonical account, and remove the secret before forwarding to Pilot.
+async fn authenticate_task(
+    keystone: &keystone_gateway::KeystoneGateway,
+    task: &mut Task,
+) -> Result<(), Status> {
+    let mut context = serde_json::from_str::<serde_json::Value>(&task.context_json)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let object = context
+        .as_object_mut()
+        .ok_or_else(|| Status::invalid_argument("Task.context_json must be a JSON object"))?;
+    let token = object
+        .remove("session_token")
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Status::unauthenticated("login session is required"))?;
+    let user = keystone.resolve_session(&token).await?;
+    object.insert("user_id".to_string(), serde_json::json!(user.user_id));
+    object.insert("username".to_string(), serde_json::json!(user.username));
+    object.insert(
+        "display_name".to_string(),
+        serde_json::json!(user.display_name),
+    );
+    object.insert("roles".to_string(), serde_json::json!(user.roles));
+    task.context_json =
+        serde_json::to_string(&context).map_err(|error| Status::internal(error.to_string()))?;
+    Ok(())
 }
 
 async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<String> {
@@ -425,11 +488,7 @@ impl RobonixSystemLiaisonSubmit for LiaisonServiceImpl {
         request: Request<Task>,
     ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let task = request.into_inner();
-        let rx = self
-            .pipeline
-            .handle_intent(task)
-            .await
-            .map_err(|e| Status::unavailable(format!("Pilot unreachable: {e:#}")))?;
+        let rx = self.pipeline.handle_intent(task).await?;
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
@@ -454,9 +513,16 @@ impl RobonixSystemLiaisonVoiceFinish for LiaisonServiceImpl {
         request: Request<FinishVoiceCaptureRequest>,
     ) -> Result<Response<FinishVoiceCaptureResponse>, Status> {
         let req = request.into_inner();
+        let keystone = self
+            .pipeline
+            .enforce_keystone
+            .then(|| Arc::clone(&self.pipeline.keystone));
         let session_id = req.session_id.trim().to_string();
         if session_id.is_empty() {
             return Err(Status::invalid_argument("session_id is required"));
+        }
+        if let Some(keystone) = keystone {
+            keystone.resolve_session(&req.session_token).await?;
         }
         let accepted = voice::finish_capture(&session_id);
         let detail = if accepted {
@@ -485,11 +551,16 @@ impl RobonixSystemLiaisonVoice for LiaisonServiceImpl {
     ) -> Result<Response<Self::StartVoiceSessionStream>, Status> {
         let req = request.into_inner();
         self.handsfree.suspend_capture().await;
+        let keystone = self
+            .pipeline
+            .enforce_keystone
+            .then(|| Arc::clone(&self.pipeline.keystone));
         let stream = match voice::start_voice_session(
             req,
             Arc::clone(&self.atlas),
             self.pilot_endpoint_default.clone(),
             Arc::clone(&self.access),
+            keystone,
         )
         .await
         {
@@ -533,12 +604,19 @@ impl RobonixSystemLiaisonHandsfreeSetEnabled for LiaisonServiceImpl {
         request: Request<SetHandsfreeRequest>,
     ) -> Result<Response<SetHandsfreeResponse>, Status> {
         let request = request.into_inner();
+        if request.enabled && self.pipeline.enforce_keystone {
+            self.pipeline
+                .keystone
+                .resolve_session(&request.session_token)
+                .await?;
+        }
         let status = self
             .handsfree
             .set_enabled(
                 request.enabled,
                 request.mic_provider_id,
                 request.speaker_provider_id,
+                request.session_token,
             )
             .await
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -576,7 +654,7 @@ impl RobonixSystemLiaisonHandsfreeEvents for LiaisonServiceImpl {
 // ── Stdin text loop (headless fallback) ─────────────────────────────────────
 
 async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
-    let task = Task {
+    let mut task = Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         source: INTENT_SOURCE_TEXT,
@@ -585,7 +663,8 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
         context_json: r#"{"session_end":true}"#.to_string(),
         timestamp_ms: now_ms(),
     };
-    match pipeline.handle_intent(task).await {
+    ensure_user_id(&mut task);
+    match pipeline.forward_to_pilot(task).await {
         Ok(rx) => {
             let mut stream = ReceiverStream::new(rx);
             while stream.next().await.is_some() {}
@@ -722,6 +801,11 @@ struct Args {
     #[arg(long = "pilot-endpoint")]
     pilot_endpoint: Option<String>,
 
+    /// Keystone endpoint. Providing this requires login sessions for external
+    /// text, control, push-to-talk voice, and hands-free requests.
+    #[arg(long = "keystone-endpoint", env = "ROBONIX_KEYSTONE_ENDPOINT")]
+    keystone_endpoint: Option<String>,
+
     /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
     /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
     /// Normally arrives inside `--config-json`, not as a standalone flag.
@@ -768,6 +852,11 @@ async fn main() -> Result<()> {
         };
         raw.replace("localhost", "127.0.0.1")
     };
+    let enforce_keystone = args.keystone_endpoint.is_some();
+    let keystone_endpoint = args
+        .keystone_endpoint
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1:50095".to_string());
 
     // --listen accepts host:port. If the manifest passes just a port (or
     // the user sets ROBONIX_LIAISON_PORT), bind 0.0.0.0:<port>.
@@ -899,6 +988,10 @@ async fn main() -> Result<()> {
     let mut heartbeat_atlas = atlas.clone();
     let atlas = Arc::new(Mutex::new(atlas));
     let access = Arc::new(AccessControlConfig::from_env());
+    let keystone = Arc::new(keystone_gateway::KeystoneGateway::new(
+        keystone_endpoint,
+        Arc::clone(&atlas),
+    ));
     info!(
         "access gate enabled={} allowed_users={} voice_threshold={:.2}",
         access.enabled,
@@ -909,6 +1002,8 @@ async fn main() -> Result<()> {
         pilot_http.clone(),
         Arc::clone(&atlas),
         Arc::clone(&access),
+        Arc::clone(&keystone),
+        enforce_keystone,
     ));
     let handsfree_config = args
         .config_json
@@ -922,6 +1017,7 @@ async fn main() -> Result<()> {
         Arc::clone(&atlas),
         pilot_http.clone(),
         Arc::clone(&access),
+        enforce_keystone.then(|| Arc::clone(&keystone)),
     );
     handsfree.spawn();
 

@@ -41,38 +41,46 @@ Keystone is a built-in system component:
 ```yaml
 system:
   keystone:
-    listen: 127.0.0.1:50095
+    listen: 0.0.0.0:50095
     log: info
     database: ${HOME}/.robonix/data/keystone.db
     bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
+    voice_threshold: 0.25
   liaison:
     listen: 0.0.0.0:50081
     keystone_endpoint: 127.0.0.1:50095
 ```
 
-Keep the Keystone listener private to the robot host. Clients use the account
-API proxied by Liaison; they do not connect to port `50095` directly.
+Clients may discover Keystone through Atlas and connect to its account API
+directly. Restrict the listener at deployment time when remote access is not
+required.
 
 Optional configuration can be passed in the `system.keystone` mapping:
 
 | Field | Default | Purpose |
 |---|---|---|
-| `listen` | `127.0.0.1:50095` | Keystone gRPC listener |
+| `listen` | `0.0.0.0:50095` | Keystone gRPC listener |
 | `database` | `$ROBONIX_DATA_DIR/keystone.db` | SQLite database |
 | `bootstrap_credentials_file` | `$ROBONIX_DATA_DIR/keystone-bootstrap-admin.txt` | generated first-login credential file |
 | `bootstrap_admin_username` | `admin` | first administrator username |
 | `bootstrap_admin_display_name` | `Administrator` | first administrator display name |
 | `bootstrap_admin_email` | empty | first administrator email |
+| `voice_threshold` | `0.25` | minimum Voiceprint confidence when voice guard is enabled |
+
+The threshold can also be set with `--voice-threshold` or
+`ROBONIX_KEYSTONE_VOICE_THRESHOLD`.
 
 The bootstrap password is intentionally environment-only and is not accepted
 from the deployment manifest.
 
 ## Access behavior
 
+When Liaison is configured with Keystone:
+
 - Text turns require a live session, but do not require a voiceprint.
 - When a user's voice guard is off, authenticated voice turns skip Voiceprint.
 - When the guard is on, every voice turn must identify as that same logged-in
-  user above the configured confidence threshold.
+  user above Keystone's configured confidence threshold.
 - A disabled user cannot log in, and disabling the account revokes its sessions.
 - Account and role management requires `admin`; Keystone prevents deleting,
   disabling, or demoting the last enabled administrator.

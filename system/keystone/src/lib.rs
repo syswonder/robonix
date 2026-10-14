@@ -21,6 +21,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const DEFAULT_SESSION_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.25;
 const MIN_PASSWORD_LENGTH: usize = 8;
 const ROLE_USER: &str = "user";
 const ROLE_ADMIN: &str = "admin";
@@ -98,6 +99,8 @@ pub enum KeystoneError {
     VoiceprintMismatch,
     #[error("voiceprint confidence is below the configured threshold")]
     VoiceprintConfidenceLow,
+    #[error("voice threshold must be a finite value between 0 and 1")]
+    InvalidVoiceThreshold,
     #[error("password hashing failed: {0}")]
     PasswordHash(String),
     #[error("database lock is poisoned")]
@@ -111,21 +114,27 @@ pub enum KeystoneError {
 pub struct KeystoneStore {
     connection: Arc<Mutex<Connection>>,
     session_ttl_ms: u64,
+    voice_threshold: f32,
 }
 
 impl KeystoneStore {
     /// Open or create a persistent Keystone database and apply the current schema.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, KeystoneError> {
+    pub fn open(path: impl AsRef<Path>, voice_threshold: f32) -> Result<Self, KeystoneError> {
+        validate_voice_threshold(voice_threshold)?;
         let connection = Connection::open(path)?;
-        Self::from_connection(connection)
+        Self::from_connection(connection, voice_threshold)
     }
 
     /// Create an isolated in-memory store for tests.
-    pub fn open_in_memory() -> Result<Self, KeystoneError> {
-        Self::from_connection(Connection::open_in_memory()?)
+    pub fn open_in_memory(voice_threshold: f32) -> Result<Self, KeystoneError> {
+        validate_voice_threshold(voice_threshold)?;
+        Self::from_connection(Connection::open_in_memory()?, voice_threshold)
     }
 
-    fn from_connection(connection: Connection) -> Result<Self, KeystoneError> {
+    fn from_connection(
+        connection: Connection,
+        voice_threshold: f32,
+    ) -> Result<Self, KeystoneError> {
         connection.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -189,6 +198,7 @@ impl KeystoneStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             session_ttl_ms: DEFAULT_SESSION_TTL_MS,
+            voice_threshold,
         })
     }
 
@@ -196,6 +206,13 @@ impl KeystoneStore {
         self.connection
             .lock()
             .map_err(|_| KeystoneError::LockPoisoned)
+    }
+
+    pub fn has_users(&self) -> Result<bool, KeystoneError> {
+        let count: u64 = self
+            .connection()?
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+        Ok(count != 0)
     }
 
     /// Create the first administrator exactly once.
@@ -321,12 +338,20 @@ impl KeystoneStore {
         let token_hash = hash_session_token(&token);
         let created_at_ms = now_ms();
         let expires_at_ms = created_at_ms.saturating_add(self.session_ttl_ms);
-        self.connection()?.execute(
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM sessions WHERE revoked = 1 OR expires_at_ms <= ?1",
+            params![created_at_ms],
+        )?;
+        transaction.execute(
             "INSERT INTO sessions(
                 token_hash, user_id, created_at_ms, expires_at_ms, last_seen_at_ms, revoked
              ) VALUES (?1, ?2, ?3, ?4, ?3, 0)",
             params![token_hash, user_id, created_at_ms, expires_at_ms],
         )?;
+        transaction.commit()?;
+        drop(connection);
         Ok(AuthSession {
             token,
             expires_at_ms,
@@ -674,13 +699,12 @@ impl KeystoneStore {
         token: &str,
         external_subject_id: &str,
         confidence: f32,
-        minimum_confidence: f32,
     ) -> Result<(User, bool), KeystoneError> {
         let user = self.authenticate(token)?;
         if !user.voice_guard_enabled {
             return Ok((user, false));
         }
-        if confidence < minimum_confidence {
+        if confidence < self.voice_threshold {
             return Err(KeystoneError::VoiceprintConfidenceLow);
         }
         let owner: Option<String> = self
@@ -891,6 +915,13 @@ fn validate_password(password: &str) -> Result<(), KeystoneError> {
     Ok(())
 }
 
+fn validate_voice_threshold(voice_threshold: f32) -> Result<(), KeystoneError> {
+    if !voice_threshold.is_finite() || !(0.0..=1.0).contains(&voice_threshold) {
+        return Err(KeystoneError::InvalidVoiceThreshold);
+    }
+    Ok(())
+}
+
 fn normalize_roles(roles: &[String]) -> Result<BTreeSet<String>, KeystoneError> {
     let mut normalized = BTreeSet::new();
     for role in roles {
@@ -956,8 +987,8 @@ mod tests {
     const ADMIN_PASSWORD: &str = "admin-password";
     const USER_PASSWORD: &str = "user-password";
 
-    fn store_with_admin() -> (KeystoneStore, AuthSession) {
-        let store = KeystoneStore::open_in_memory().expect("store");
+    fn store_with_admin_at_threshold(voice_threshold: f32) -> (KeystoneStore, AuthSession) {
+        let store = KeystoneStore::open_in_memory(voice_threshold).expect("store");
         store
             .bootstrap_admin(
                 "admin",
@@ -972,13 +1003,17 @@ mod tests {
         (store, admin)
     }
 
+    fn store_with_admin() -> (KeystoneStore, AuthSession) {
+        store_with_admin_at_threshold(DEFAULT_VOICE_THRESHOLD)
+    }
+
     #[test]
     fn register_login_profile_and_restart_persist() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database = directory.path().join("keystone.db");
         let user_id;
         {
-            let store = KeystoneStore::open(&database).expect("open");
+            let store = KeystoneStore::open(&database, DEFAULT_VOICE_THRESHOLD).expect("open");
             store
                 .bootstrap_admin("admin", "Admin", "", ADMIN_PASSWORD, true)
                 .expect("bootstrap");
@@ -992,7 +1027,7 @@ mod tests {
             assert_eq!(updated.display_name, "Alice Smith");
             assert_eq!(updated.email, "new@example.com");
         }
-        let reopened = KeystoneStore::open(&database).expect("reopen");
+        let reopened = KeystoneStore::open(&database, DEFAULT_VOICE_THRESHOLD).expect("reopen");
         let user = reopened.get_user(&user_id).expect("persisted user");
         assert_eq!(user.display_name, "Alice Smith");
         assert!(reopened.login("alice", USER_PASSWORD).is_ok());
@@ -1006,6 +1041,30 @@ mod tests {
             .expect("register");
         let result = store.list_users(&user.token);
         assert!(matches!(result, Err(KeystoneError::AdminRequired)));
+    }
+
+    #[test]
+    fn issuing_session_removes_expired_and_revoked_sessions() {
+        let (store, first) = store_with_admin();
+        let second = store.login("admin", ADMIN_PASSWORD).expect("second login");
+        store.logout(&first.token).expect("logout");
+        store
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE sessions SET expires_at_ms = 0 WHERE token_hash = ?1",
+                params![hash_session_token(&second.token)],
+            )
+            .expect("expire session");
+
+        store.login("admin", ADMIN_PASSWORD).expect("third login");
+
+        let count: u64 = store
+            .connection()
+            .expect("connection")
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .expect("session count");
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -1112,7 +1171,7 @@ mod tests {
 
     #[test]
     fn voice_guard_matches_only_the_logged_in_user() {
-        let (store, admin) = store_with_admin();
+        let (store, admin) = store_with_admin_at_threshold(0.75);
         let alice = store
             .register("alice", "Alice", "", USER_PASSWORD)
             .expect("alice");
@@ -1136,16 +1195,28 @@ mod tests {
             .expect("enable guard");
 
         let (_, verified) = store
-            .verify_voice(&alice.token, "voice-alice", 0.91, 0.75)
+            .verify_voice(&alice.token, "voice-alice", 0.91)
             .expect("matching voice");
         assert!(verified);
         assert!(matches!(
-            store.verify_voice(&alice.token, "voice-bob", 0.91, 0.75),
+            store.verify_voice(&alice.token, "voice-bob", 0.91),
             Err(KeystoneError::VoiceprintMismatch)
         ));
         assert!(matches!(
-            store.verify_voice(&alice.token, "voice-alice", 0.5, 0.75),
+            store.verify_voice(&alice.token, "voice-alice", 0.5),
             Err(KeystoneError::VoiceprintConfidenceLow)
+        ));
+    }
+
+    #[test]
+    fn voice_threshold_rejects_invalid_configuration() {
+        assert!(matches!(
+            KeystoneStore::open_in_memory(f32::NAN),
+            Err(KeystoneError::InvalidVoiceThreshold)
+        ));
+        assert!(matches!(
+            KeystoneStore::open_in_memory(1.01),
+            Err(KeystoneError::InvalidVoiceThreshold)
         ));
     }
 

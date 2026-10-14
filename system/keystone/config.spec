@@ -16,10 +16,10 @@ properties:
 
   listen:
     type: string
-    default: 127.0.0.1:50095
+    default: 0.0.0.0:50095
     description: >-
-      Local gRPC listen address. Expose Keystone only through a component that
-      authenticates external clients.
+      gRPC listen address. Use a loopback address when remote account clients
+      do not connect to Keystone directly.
 
   provider_id:
     type: string
@@ -53,6 +53,15 @@ properties:
     type: string
     default: ""
     description: Email created when the database has no users.
+
+  voice_threshold:
+    type: number
+    minimum: 0
+    maximum: 1
+    default: 0.25
+    description: >-
+      Minimum Voiceprint confidence accepted when the authenticated user's
+      voice guard is enabled.
 
   log:
     type: string

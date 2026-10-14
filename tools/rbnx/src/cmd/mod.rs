@@ -93,7 +93,7 @@ pub enum Commands {
     /// Boot the whole stack from a `robonix_manifest.yaml` (until Ctrl-C)
     ///
     /// Brings up declared built-in system components
-    /// (atlas/executor/soma/pilot/vitals/liaison), other system packages, and
+    /// (atlas/executor/keystone/soma/vitals/pilot/liaison), other system packages, and
     /// every package declared under `primitive`/`service`/`skill`.
     /// `rbnx deploy` is kept as an alias for back-compat.
     #[command(alias = "deploy")]

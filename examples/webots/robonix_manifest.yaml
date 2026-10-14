@@ -17,6 +17,11 @@ system:
   atlas:
     listen: 0.0.0.0:50051
     log: info
+  keystone:
+    listen: 0.0.0.0:50095
+    log: info
+    database: ${HOME}/.robonix/data/keystone.db
+    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
   soma:
     # Empty when boot is invoked directly, so rbnx falls back to ./soma.yaml.
     # examples/webots/boot.sh sets this to soma.full.yaml for the full model.
@@ -60,6 +65,7 @@ system:
     log: info
   liaison:
     listen: 0.0.0.0:50081
+    keystone_endpoint: 127.0.0.1:50095
 
 # after booted all the system components, start the devices (primitives)
 # the robonix boot "device tree"
