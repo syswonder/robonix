@@ -184,7 +184,7 @@ service:
 
   - name: nav2
     url: https://github.com/syswonder/service-navigation-rbnx
-    branch: main
+    branch: feat/costmap-capability
     config:
       params_file: config/nav2_params.yaml
       use_sim_time: true
@@ -208,6 +208,6 @@ service:
 skill:
   # explore_rbnx — autonomous frontier exploration.
   - name: explore
-    url: https://github.com/syswonder/skill-explore-rbnx
-    branch: main
+    url: https://github.com/enkerewpo/skill-explore-rbnx
+    branch: fix/explore-stuck-loop
     config: {}
