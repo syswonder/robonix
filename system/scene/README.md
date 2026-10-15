@@ -1,6 +1,6 @@
 # `system/scene` — live semantic + geometric map
 
-Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes read-only MCP tools that Pilot calls during RTDL planning/execution, and a self-contained 2D + 3D web viewer.
+Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes MCP tools that Pilot calls during RTDL planning/execution: queries (objects, regions, relations, robot context, navigation goals) and object edits (relabel, adjust geometry, delete, flush), and a self-contained 2D + 3D web viewer.
 
 This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
 
@@ -20,7 +20,7 @@ system/scene/
 │   └── start.sh                 docker run wrapper used by `rbnx boot`
 ├── scene_service/
 │   ├── service.py               entrypoint: atlas register + asyncio + FastMCP
-│   ├── mcp_tools.py             5 @mcp_contract handlers (thin wrappers)
+│   ├── mcp_tools.py             14 @mcp_contract handlers (thin wrappers)
 │   ├── web.py                   2D + 3D web viewer (Starlette + three.js)
 │   ├── state/                   ObjectRegistry, data assoc, snapshot
 │   ├── scene_graph/             relations: fast geometric loop (reachable_by) + image-grounded VLM (image_relations.py) + store
@@ -625,8 +625,8 @@ until the poi UI lands). `points` are `[[x, y], ...]` map-frame
 meters. **This shape is the contract any frontend builds on; treat changes
 as breaking.** The full annotation list also rides along in `GET /api/state`
 (field `annotations`, next to `map_binding`) so map pages get everything in
-one poll. There is deliberately no atlas/MCP surface yet — exposing rooms to
-Pilot (scene-graph `in_room` edges) is a planned follow-up.
+one poll. Pilot reaches regions through `list_regions` and `goal_region` (see
+below).
 
 ## Capabilities exposed
 
@@ -642,6 +642,10 @@ Pilot (scene-graph `in_room` edges) is a planned follow-up.
 | `robonix/system/scene/get_scene_graph`         | `get_scene_graph` | Current semantic graph nodes and relation edges. |
 | `robonix/system/scene/get_object_context`      | `get_object_context` | One object's graph context plus nearby objects and directly related edges. |
 | `robonix/system/scene/list_relations`          | `list_relations` | Relation edges, optionally filtered by relation type. |
+| `robonix/system/scene/update_object_label`     | `update_object_label` | Sticky label correction for one derived object. |
+| `robonix/system/scene/update_object_geometry`  | `update_object_geometry` | Replace one derived object's pose and bounding box. |
+| `robonix/system/scene/delete_object`           | `delete_object`  | Delete one incorrect derived object. |
+| `robonix/system/scene/flush_objects`           | `flush_objects`  | Clear all derived objects; the robot and annotations stay. |
 
 These are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
 

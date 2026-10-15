@@ -27,10 +27,10 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 | Command | What it does |
 | --- | --- |
-| `rbnx build [PKG]`        | Build a deploy or a single package (incl. ROS workspaces) |
+| `rbnx build [-f MANIFEST \| -p PKG \| -g NAME]` | Build a deploy or a single package (incl. ROS workspaces) |
 | `rbnx boot [-f MANIFEST]` | Bring up the full stack from a deploy manifest         |
 | `rbnx shutdown`           | Tear down what `rbnx boot` brought up                  |
-| `rbnx start PKG`          | Launch one package directly (used internally by boot)  |
+| `rbnx start [-p PKG]`     | Launch one package directly (used internally by boot)  |
 | `rbnx caps [-v]`          | List capabilities currently registered with atlas      |
 | `rbnx contracts`          | List contracts in the loaded registry                  |
 | `rbnx tools`              | List the MCP capabilities visible to Pilot's model     |
@@ -96,7 +96,7 @@ or `--sessions` to remove those too.
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
-Atlas, Executor, Soma, Pilot, Vitals, then Liaison. Their `system.<name>`
+Atlas, Executor, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
 manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or

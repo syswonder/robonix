@@ -1,10 +1,13 @@
 [workspace]
 # The 12 Robonix system components live one-per-directory under `system/`.
-# Four currently have a Rust implementation:
+# Seven currently have a Rust implementation:
 #   - atlas    (capability discovery)
-#   - executor (capability orchestration; embeds sentinel for v0.1)
+#   - executor (runs RTDL programs, dispatching each call to its provider)
 #   - liaison  (human-machine interaction)
-#   - pilot    (planning + decision + memory + world model)
+#   - pilot    (turns a task into an RTDL program and validates it)
+#   - scribe   (structured logging library)
+#   - soma     (body description; launches primitive and skill packages)
+#   - vitals   (onboard health)
 # Repo-side dev tooling lives under `tools/` (rbnx CLI + codegen).
 # Python-only system components (scene) and reference service implementations
 # (services/{memsearch,voiceprint,speech}) are managed by uv and not part of
