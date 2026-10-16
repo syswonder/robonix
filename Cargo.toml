@@ -1,16 +1,22 @@
 [workspace]
 # The 12 Robonix system components live one-per-directory under `system/`.
-# Four currently have a Rust implementation:
+# Eight currently have a Rust implementation:
 #   - atlas    (capability discovery)
+#   - chronos  (clock-domain models)
 #   - executor (capability orchestration; embeds sentinel for v0.1)
 #   - liaison  (human-machine interaction)
 #   - pilot    (planning + decision + memory + world model)
+#   - scribe   (logging)
+#   - soma     (body model)
+#   - vitals   (health monitoring)
 # Repo-side dev tooling lives under `tools/` (rbnx CLI + codegen).
 # Python-only system components (scene) and reference service implementations
 # (services/{memsearch,voiceprint,speech}) are managed by uv and not part of
 # this Cargo workspace.
 members = [
     "system/atlas",
+    "system/chronos",
+    "system/chronos/clock",
     "system/executor",
     "system/liaison",
     "system/pilot",
@@ -77,5 +83,6 @@ ratatui = "0.30.0"
 crossterm = "0.29.0"
 
 # Internal crates
+robonix-chronos-clock = { path = "system/chronos/clock" }
 robonix-codegen = { path = "tools/codegen" }
 robonix-scribe = { path = "system/scribe" }

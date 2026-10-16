@@ -1,0 +1,10 @@
+# Raw device time only; Chronos captures the reference at its own ingress.
+string domain_id
+string session_id
+uint64 device_generation
+uint64 sequence_id
+int64 device_timestamp_ns
+---
+# True only after the core accepts the observation, not merely queue admission.
+bool accepted
+string reason

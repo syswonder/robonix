@@ -1,0 +1,4 @@
+uint32 schema_version
+string domain_id
+---
+ClockStatus status

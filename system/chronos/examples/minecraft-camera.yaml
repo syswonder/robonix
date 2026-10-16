@@ -1,0 +1,40 @@
+# Driver prerequisite: existing camera capability must publish host_monotonic
+# device uptime (clock_emulation.realsense.time_base: host_monotonic and
+# clock_emulation.mapping_test.primary_timestamp_mode: device).
+# This file does not modify or launch the Minecraft deployment.
+chronos:
+  collect_observations: true
+  collect_ros_observations: true
+  core:
+    reference:
+      kind: linux_system
+    quality:
+      refresh_interval_ns: 100000000
+    domains:
+      minecraft_realsense:
+        capabilities:
+          - provider_id: minecraft_mod
+            contract_id: robonix/primitive/camera/rgb
+            transport: ros2
+            timestamp_field: header.stamp
+        timestamp:
+          event: acquisition
+          hardware: false
+          time_scale: device_uptime
+          resolution_ns: 1
+          uncertainty_ns: 1000000
+        strategy:
+          kind: affine_model
+          observation:
+            reference_at: host_receive_time
+            sampling_interval_ns: 100000000
+            fixed_delay_ns: 0
+            uncertainty_ns: 100000000
+          policy:
+            minimum_observations: 8
+            observation_window: 60
+            max_drift_ppm: 100000
+            max_residual_ns: 100000000
+            tracking_timeout_ns: 1000000000
+            holdover_duration_ns: 3000000000
+            max_uncertainty_ns: 500000000

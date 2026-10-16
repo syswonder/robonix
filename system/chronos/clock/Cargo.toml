@@ -1,0 +1,18 @@
+[package]
+name = "robonix-chronos-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Chronos reference and steady clock readings without system service dependencies"
+
+[features]
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.29.3", optional = true, features = ["abi3-py310"] }
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

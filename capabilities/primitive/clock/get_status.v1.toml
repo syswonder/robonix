@@ -1,0 +1,10 @@
+[contract]
+id = "robonix/primitive/clock/get_status"
+version = "1"
+kind = "primitive"
+idl = "clock/srv/GetClockStatus.srv"
+description = "Read the latest hardware clock status snapshot for one domain."
+cross_namespace = true
+
+[mode]
+type = "rpc"

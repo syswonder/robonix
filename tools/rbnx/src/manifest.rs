@@ -45,7 +45,9 @@ pub fn deploy_repo_dir_name(url: &str) -> String {
 
 /// Single source of truth for which `system:` keys are shipped binaries
 /// rather than packages under `<robonix_source>/system/<key>/`.
-pub const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
+pub const SYSTEM_BUILTINS: &[&str] = &[
+    "atlas", "chronos", "executor", "pilot", "liaison", "soma", "vitals",
+];
 
 pub fn is_builtin_system(name: &str) -> bool {
     SYSTEM_BUILTINS.contains(&name)

@@ -24,6 +24,7 @@ from typing import Any
 from .atlas_types import (
     Capability,
     CapabilityProvider,
+    CapabilityTimeDescriptor,
     Channel,
     ContractDescriptor,
     GrpcParams,
@@ -36,6 +37,7 @@ from .atlas_types import (
     from_pb_contract,
     from_pb_params,
     from_pb_provider,
+    from_pb_time_descriptor,
 )
 
 log = logging.getLogger("robonix_api.atlas")
@@ -252,6 +254,7 @@ class _Atlas:
         endpoint: str,
         params: GrpcParams | Ros2Params | McpParams | None = None,
         description: str = "",
+        time_descriptor: CapabilityTimeDescriptor | None = None,
     ) -> str:
         """Declare one Capability on a registered CapabilityProvider. Returns
         the authoritative endpoint Atlas stored (may differ from `endpoint`
@@ -259,14 +262,23 @@ class _Atlas:
         import grpc
         pb_params = self._params_to_pb(transport, params)
         try:
-            resp = self._wire_stub.DeclareCapability(self._wire_pb.DeclareCapabilityRequest(
+            request = self._wire_pb.DeclareCapabilityRequest(
                 provider_id=provider_id,
                 contract_id=contract_id,
                 transport=self._transport_enum(transport),
                 endpoint=endpoint,
                 params=pb_params,
                 description=description,
-            ))
+            )
+            if time_descriptor is not None:
+                if not hasattr(request, "time_descriptor"):
+                    raise RuntimeError(
+                        "Atlas stubs do not support capability time metadata; rebuild this package"
+                    )
+                request.time_descriptor.CopyFrom(
+                    self._time_descriptor_to_pb(time_descriptor)
+                )
+            resp = self._wire_stub.DeclareCapability(request)
             return resp.endpoint or endpoint
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.ALREADY_EXISTS:
@@ -274,6 +286,29 @@ class _Atlas:
                           provider_id, contract_id, _resolve_transport(transport).name)
                 return endpoint
             raise
+
+    def _time_descriptor_to_pb(
+        self, value: CapabilityTimeDescriptor
+    ):
+        """Validate and encode optional static timing metadata."""
+        if not value.domain_id.strip():
+            raise ValueError("time_descriptor.domain_id must be non-empty")
+        if not value.timestamp_semantics.strip():
+            raise ValueError("time_descriptor.timestamp_semantics must be non-empty")
+        if value.pipeline_delay_ns is not None and value.pipeline_delay_ns < 0:
+            raise ValueError("time_descriptor.pipeline_delay_ns must be non-negative")
+        if value.pipeline_uncertainty_ns < 0:
+            raise ValueError("time_descriptor.pipeline_uncertainty_ns must be non-negative")
+        message = self._wire_pb.CapabilityTimeDescriptor(
+            domain_id=value.domain_id.strip(),
+            timestamp_semantics=value.timestamp_semantics.strip(),
+            is_hardware_timestamped=value.is_hardware_timestamped,
+            pipeline_uncertainty_ns=value.pipeline_uncertainty_ns,
+            supports_per_point_timestamp=value.supports_per_point_timestamp,
+        )
+        if value.pipeline_delay_ns is not None:
+            message.pipeline_delay_ns = value.pipeline_delay_ns
+        return message
 
     def _params_to_pb(
         self,
@@ -325,7 +360,7 @@ class _Atlas:
                 contract_id=contract_id,
                 transport=self._transport_enum(transport),
                 namespace_prefix=namespace_prefix,
-            ))
+            ), timeout=5.0)
         except grpc.RpcError as e:
             log.warning("Query(kind=%r, id=%r, contract=%r): %s",
                         kind, id, contract_id, e)
@@ -475,11 +510,16 @@ class _Atlas:
             provider_id=provider_id,
             contract_id=contract_id,
             transport=self._transport_enum(transport),
-        ))
+        ), timeout=5.0)
         t = _resolve_transport(transport)
         params = (
             from_pb_params(t, resp.params)
             if resp.HasField("params") else None
+        )
+        time_descriptor = from_pb_time_descriptor(
+            resp.time_descriptor
+            if hasattr(resp, "time_descriptor") and resp.HasField("time_descriptor")
+            else None
         )
         return Channel(
             provider_id=provider_id,
@@ -488,13 +528,14 @@ class _Atlas:
             endpoint=resp.endpoint,
             channel_id=resp.channel_id,
             params=params,
+            time_descriptor=time_descriptor,
             _closer=self.disconnect_capability,
         )
 
     def disconnect_capability(self, channel_id: str) -> bool:
         try:
             resp = self._wire_stub.DisconnectCapability(
-                self._wire_pb.DisconnectCapabilityRequest(channel_id=channel_id)
+                self._wire_pb.DisconnectCapabilityRequest(channel_id=channel_id), timeout=2.0,
             )
             return bool(resp.was_open)
         except Exception as e:  # noqa: BLE001
