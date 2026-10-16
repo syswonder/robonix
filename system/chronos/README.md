@@ -316,14 +316,15 @@ The aggregate model snapshot includes current domain identity plus optional
 retained coefficients with their own generation and version, so consumers can
 detect parameters that predate a device reset or reference-clock step. Matching
 ROS-style IDL message definitions live under `capabilities/lib/chronos/msg`.
-The contracts under `capabilities/system/chronos` define two output streams:
+The contracts under `capabilities/system/chronos` define three output streams:
 
 | Contract | IDL message |
 | --- | --- |
+| `robonix/system/chronos/reference_time` | `chronos/msg/ReferenceQuality.msg` |
 | `robonix/system/chronos/quality` | `chronos/msg/ClockQualitySnapshot.msg` |
 | `robonix/system/chronos/conversion_models` | `chronos/msg/ClockModelsSnapshot.msg` |
 
-Both use `topic_out`, which codegen maps to a gRPC server stream with an empty
+All use `topic_out`, which codegen maps to a gRPC server stream with an empty
 request and snapshot messages as responses. The executable serves them over
 gRPC; these definitions do not create ROS topics.
 
@@ -360,8 +361,8 @@ Call `Chronos::reset_device_domain` when a device restart is confirmed; this
 creates a new generation and permits a restarted sequence counter. A declared
 counter wrap is extended automatically and is not guessed to be a restart.
 
-The reference source is selected by validated YAML. Only `linux_system` is
-accepted until another source is implemented:
+The reference source is selected by validated YAML. This example uses
+`linux_system`; see Simulation reference above for `ros_time`:
 
 ```yaml
 chronos:
