@@ -622,7 +622,7 @@ chronos:
                 String::new(),
                 " camera ".into(),
                 "x".repeat(129),
-                "界".repeat(43),
+                "\u{754c}".repeat(43),
             ] {
                 let yaml = DOMAIN_CONFIG.replace(&format!("{original}:"), &format!("'{id}':"));
                 let error = ChronosConfig::from_yaml(&yaml).unwrap_err();
