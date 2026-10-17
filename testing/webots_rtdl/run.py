@@ -79,4 +79,5 @@ async def main():
         if not r['pass']:
             raise SystemExit(1)
 
-asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())

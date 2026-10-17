@@ -106,6 +106,21 @@ def provider_main():
     mcp.run(transport='streamable-http')
 
 
+async def register_provider(atlas, contracts):
+    import atlas_pb2 as ap
+    await atlas.RegisterService(ap.RegisterRequest(id='fixture', namespace='robonix/service/navigation'))
+    await atlas.DeclareCapability(ap.DeclareCapabilityRequest(provider_id='fixture',
+        contract_id='robonix/lifecycle/driver', transport=1, endpoint='127.0.0.1:53182',
+        params=ap.TransportParams(grpc=ap.GrpcParams(proto_file='robonix_contracts.proto',
+            service_name='robonix.contracts.RobonixLifecycleDriver', method='/robonix.contracts.RobonixLifecycleDriver/Driver'))))
+    for contract in contracts:
+        await atlas.DeclareCapability(ap.DeclareCapabilityRequest(provider_id='fixture', contract_id=contract,
+            transport=3, endpoint='http://127.0.0.1:53181/mcp',
+            params=ap.TransportParams(mcp=ap.McpParams(input_schema_json='{"type":"object"}'))))
+    await atlas.SetLifecycleState(ap.SetLifecycleStateRequest(id='fixture', state=2))
+    await atlas.SetLifecycleState(ap.SetLifecycleStateRequest(id='fixture', state=3))
+
+
 async def suite():
     """Run a boundary matrix against isolated real Atlas/Executor processes."""
     import grpc
@@ -118,17 +133,7 @@ async def suite():
     options = [('grpc.enable_http_proxy', 0)]
     atlas_channel = grpc.aio.insecure_channel('127.0.0.1:53151', options=options)
     atlas = ar.AtlasStub(atlas_channel)
-    await atlas.RegisterService(ap.RegisterRequest(id='fixture', namespace='robonix/service/navigation'))
-    await atlas.DeclareCapability(ap.DeclareCapabilityRequest(provider_id='fixture',
-        contract_id='robonix/lifecycle/driver', transport=1, endpoint='127.0.0.1:53182',
-        params=ap.TransportParams(grpc=ap.GrpcParams(proto_file='robonix_contracts.proto',
-            service_name='robonix.contracts.RobonixLifecycleDriver', method='/robonix.contracts.RobonixLifecycleDriver/Driver'))))
-    for contract in [NAV, NAV+'/status', NAV+'/cancel', CAM, VERIFY]:
-        await atlas.DeclareCapability(ap.DeclareCapabilityRequest(provider_id='fixture', contract_id=contract,
-            transport=3, endpoint='http://127.0.0.1:53181/mcp',
-            params=ap.TransportParams(mcp=ap.McpParams(input_schema_json='{"type":"object"}'))))
-    await atlas.SetLifecycleState(ap.SetLifecycleStateRequest(id='fixture', state=2))
-    await atlas.SetLifecycleState(ap.SetLifecycleStateRequest(id='fixture', state=3))
+    await register_provider(atlas, [NAV, NAV+'/status', NAV+'/cancel', CAM, VERIFY])
     channel = grpc.aio.insecure_channel('127.0.0.1:53161', options=options)
     control_stub = rpc.RobonixSystemExecutorControlPlanStub(channel)
     active_stub = rpc.RobonixSystemExecutorListActivePlansStub(channel)

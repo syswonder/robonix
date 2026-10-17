@@ -5,7 +5,7 @@
 
 ## 测试分类：输入、输出、目的
 
-本文共有 **7 类测试/检查**：A、B、F 让 Pilot 使用真实模型生成 RTDL；C、G 手写 Executor 协议输入（G 还使用可控服务）；D 用模拟模型制造故障；E 检查代码本身。`analyze.py` 是第一类的结果分析步骤，不是另一类任务。
+本文共有 **8 类测试/检查**：A、B、F、H 让 Pilot 使用真实模型生成 RTDL；C、G 手写 Executor 协议输入（G 还使用可控服务）；D 用模拟模型制造故障；E 检查代码本身。`analyze.py` 是第一类的结果分析步骤，不是另一类任务。
 
 | 类别 | 用例数量 | 是否经过 Pilot | RTDL 从哪里来 | 是否在 Webots 执行动作 |
 |---|---|---|---|---|
@@ -15,8 +15,8 @@
 | D. Pilot 生成中失败与取消（补充） | 5 个用例 | 是 | 本地模拟模型返回预设 RTDL 片段 | 否，执行本地可观测命令 |
 | E. Rust 工作区检查 | 编译、格式、测试、Clippy 四项 | 不启动上述业务链路 | 不适用 | 否 |
 | F. 真实导航中的中断与取消 | 串行计划中断/取消、并行分支、跨会话隔离、同会话多计划隔离及重复执行 | 是 | 导航计划由真实模型生成；自然语言取消也由模型决定控制操作 | 是 |
-
 | G. Executor 取消边界与底层故障（补充） | 21 个用例，含重复与完成竞态 | 否 | 手写协议输入；可控测试服务 | 否 |
+| H. Potential advance from streamed node generation | 9 live trials, plus one warmup | Yes | Live model configured by `env.sh` | Yes, lidar and camera |
 
 ### A. 真实模型节点计数与流式执行
 
@@ -118,6 +118,290 @@ F3–F6 均读取原导航速度、将测试速度设为 100%、最终恢复原�
 共 **21 例**。故障例即使没有残留计划，只要服务仍在运行，就不能判为“动作取消正确”；脚本会保留响应和后台状态并将此项标为失败。可控服务仅用于复现故障，不把这些结果混称为真实 Webots 停车测试。
 
 A、B、F 的导航计划才是“Pilot 调用真实模型生成 RTDL 并在 Webots 执行”的证据。各类结果分别报告；A 的 55 次调用不包含其他类别。下面先给出 A 的任务明细，再给出执行步骤及实测结果。
+
+### H. Potential advance from streamed node generation
+
+Status: measured on 2026-10-10, 2026-10-13, 2026-10-14, 2026-10-16 and 2026-10-17 using the run-local scripts listed below. The repository's `latency.py` still implements the earlier paired comparison and does not produce this metric.
+
+Measure how much earlier the first executable RTDL node becomes available than the complete planning response within the same live generation. Run one streaming Pilot with the real Webots office world, Atlas, Soma, Executor and real lidar/camera drivers. Read the model configuration from `env.sh`. Pilot generates RTDL and submits nodes through its normal `ExecuteStream` path.
+
+Reuse `run.py` tasks with N=1, 5 and 10: one lidar call for N=1; N−1 lidar calls followed by camera for larger N. Attempt one N=5 warmup, then three formal trials per N, for nine formal attempts. Use a fresh session for each trial and run them sequentially. Wait at least five seconds after each trial and its cleanup before starting the next, including between warmup and formal trials. Record the source revision, model settings and available capability catalog.
+
+#### Timing and metric
+
+Capture the upstream SSE bytes as they arrive, with `time.monotonic_ns()` from one recording process. Associate decoded content deltas with the arrival timestamp of the chunk containing their final bytes. Preserve UTF-8 and SSE boundaries across chunks. Use the production `RtdlIncrementalParser` and the recorded capability targets to identify node availability from these deltas in a read-only analysis.
+
+| Timestamp | Definition |
+|---|---|
+| `t_request` | Recorded immediately before opening the upstream model request, after the recorder's API cooldown. |
+| `t_first_content` | Arrival of the first nonempty content delta in the initial planning response; reasoning deltas do not qualify. |
+| `t_first_do` | Arrival of the bytes that let the parser first emit a valid `NODE` carrying a complete executable `do`, including its capability and arguments. A `sequence` or `parallel` root does not qualify. |
+| `t_full` | Arrival of the last nonempty content delta in that same initial planning response, confirmed after normal stream termination and successful final parsing of the complete response. This includes the remaining response envelope and `task_update` text. |
+
+For each valid trial, calculate `potential_advance_s = (t_full - t_first_do) / 1e9`. This is the observed generation window during which the first executable node is already available. Subsequent model narration, Executor dispatch, handler entry and action completion are outside this metric.
+
+Also report elapsed time from `t_request` to first content, first executable node and the complete response, and `100 * (t_full - t_first_do) / (t_full - t_request)` as the window's percentage of this model-request interval. Time before first content includes network, queueing, input processing and any reasoning; it is not a measurement of pure thinking time. If the interface exposes reasoning deltas, record their first and last arrivals separately, along with reported reasoning-token usage when available. These are observed delivery times, not server-side inference timing. Pilot prompt preparation and subsequent narration are outside this request interval.
+
+Record normal stream termination separately from `t_full`, so a delayed terminal marker or connection close does not inflate the generation window. Measure arrivals independently of Pilot's waits for Executor submission. If both endpoints arrive in one chunk, report zero at the capture's resolution; do not infer timing inside that chunk or discard the sample.
+
+#### Validity, cleanup and reporting
+
+A valid generation has one complete, parseable sequence with exactly the requested N `do` nodes, matching capability order and arguments, an identifiable first executable node and normal model-stream termination. Retain malformed, incomplete, timed-out and incorrect-plan attempts with their errors; exclude them from the metric and generate no replacement samples. Report execution outcomes separately, so a downstream execution failure does not silently remove a valid generation measurement. The recorder must continue reading upstream within its timeout after Pilot disconnects, including when execution failure interrupts generation.
+
+Allow the initial planning response to finish before any test cleanup. After the plan finishes, use the existing `abort_turn` control if needed to end subsequent narration, wait for the original task RPC to close, and confirm zero active Executor plans before the next trial. If cleanup fails, preserve the measurement and stop before starting another task.
+
+Save task inputs, timestamped raw SSE chunks, decoded deltas, parser node events, both metric endpoints, termination evidence, Pilot events and Executor logs in a fresh output directory. List every attempt in execution order, with N, generation validity, potential advance when available, and execution outcome; label the warmup separately and retain failed attempts. Report valid/attempted counts and generation and execution failures separately. With only three attempts per N, report individual observations without medians or quartiles. The measurement describes the model stream received by the client and does not establish end-to-end user waiting-time savings.
+
+If Pilot corrects a rejected output, retain the initial-response validity result. As a supplementary observation, identify the response that produced the sole published plan by a unique match of tree structure, node descriptions, capability targets and arguments, with complete parsing, normal termination and arrival before plan publication. Report its first-do/full-response window and elapsed time from the trial's first upstream request to those endpoints. This interval includes earlier rejected replies, prompt preparation between requests, the recorder's API cooldowns and upstream delivery; it does not measure pure thinking or reclassify the initial response as valid. Leave the supplementary metric unavailable when the match is missing or ambiguous.
+
+#### Results: 2026-10-10
+
+Source revision `2acef09bde5b`, model `openai/gpt-6-luna` from `env.sh`, Webots `office.wbt` with TIAGo Lite. The deployment contained Atlas, Soma, Executor, one streaming Pilot and the real lidar/camera drivers. One N=5 warmup preceded nine formal attempts in the order `[1, 5, 10]` repeated three times. No failed attempt was replaced. The shortest measured interval after a trial's cleanup was 5.005 s; the recorder also enforced five seconds between upstream model requests, with an observed minimum of 5.002 s. All 19 model POSTs, including subsequent narration, returned HTTP 200; two streams failed to finish.
+
+| Attempt | N | Generation | Potential advance (s) | Successful calls |
+|---|---|---|---|---|
+| Warmup (`warmup-n5`) | 5 | Valid | 1.932 | 5 / 5 |
+| `trial-01-n1` | 1 | Valid | 0.954 | 1 / 1 |
+| `trial-02-n5` | 5 | Valid | 2.001 | 5 / 5 |
+| `trial-03-n10` | 10 | Valid | 3.243 | 10 / 10 |
+| `trial-04-n1` | 1 | Stream idle timeout | Unavailable | 1 / 1 |
+| `trial-05-n5` | 5 | Valid | 36.076 | 5 / 5 |
+| `trial-06-n10` | 10 | Valid | 2.357 | 10 / 10 |
+| `trial-07-n1` | 1 | Valid | 0.760 | 1 / 1 |
+| `trial-08-n5` | 5 | Valid | 12.612 | 5 / 5 |
+| `trial-09-n10` | 10 | Valid | 2.521 | 10 / 10 |
+
+Valid formal generations: N=1, 2/3; N=5, 3/3; N=10, 3/3. The two large N=5 observations remain in the results: the 36.076 s window includes multiple long content-arrival gaps, the largest 12.156 s. These values include upstream delivery pauses and the remaining initial response envelope; they do not demonstrate stable action-start or task-completion savings, or a monotonic relationship with node count.
+
+`trial-04-n1` stopped receiving content before the initial response completed. Pilot returned `VLM stream idle timeout`; independent capture continued to its 240 s limit without normal termination. That attempt has no generation metric, although its one lidar call had already succeeded. All 48 requested formal sensor calls succeeded exactly once, with matching Executor dispatch order; no leaf action failed or was canceled, and every trial ended with zero active plans. Separately, the subsequent narration for `trial-02-n5` failed to finish within the capture limit; its complete initial planning response remains valid. Neither interrupted stream is reported as a successful full conversation.
+
+Evidence is in `/tmp/robonix-streaming-benefit-20261010.4W2nV6/`: `results.json`, `summary.json`, `validation.json`, `provenance.json`, per-trial task/events/generation/dispatch files, raw `model-*.chunks.jsonl`, and component logs. `runner.py` captures and executes the experiment; `analyze.py` decodes SSE and computes the results; `replay.rs` and the saved `replay-binary` run the production parser without executing actions. The temporary Rust test module was removed before live trials, and production source was unchanged. Parser tests passed (16); an offline fixture verified split UTF-8/SSE, first-do emission, and exclusion of a delayed terminal marker. No live model requests were used for that fixture.
+
+#### Results: 2026-10-13
+
+Source revision `c52884959794`, model `qwen3.8-flash` loaded from the current `env.sh`, with the same office/TIAGo Lite sensor tasks and minimal live deployment. One N=5 warmup and nine formal attempts ran without replacement. Minimum trial spacing was 5.005 s; minimum spacing between upstream POSTs was 5.003 s. All 31 model POSTs returned HTTP 200 and ended normally. Pilot automatically corrected rejected outputs, up to twice; these requests and subsequent narration are included in that POST count.
+
+Only 1/9 formal initial responses met H validity: `trial-09-n10`. Three more tasks produced a valid plan after correction, and five formal tasks produced no executable plan. The warmup also failed. All 17 dispatched formal sensor calls succeeded exactly once, with no extra dispatches; every attempt ended with zero active plans.
+
+Initial-response observations, in seconds from the first upstream request; the reasoning span is the interval between the first and last received reasoning deltas, not pure server inference time.
+
+| Attempt | N | Initial reasoning delivery span (s) | First content (s) | Initial response |
+|---|---|---|---|---|
+| Warmup | 5 | 55.014 | 56.257 | Wrong operation/tree |
+| trial-01-n1 | 1 | 21.826 | 22.776 | Wrong operation/tree |
+| trial-02-n5 | 5 | 79.879 | 81.539 | Invalid args |
+| trial-03-n10 | 10 | 28.819 | 30.196 | Invalid cap |
+| trial-04-n1 | 1 | 11.230 | 12.804 | Wrong operation/tree |
+| trial-05-n5 | 5 | 99.449 | 100.811 | Wrong operation/tree |
+| trial-06-n10 | 10 | 36.555 | 37.715 | Wrong operation/tree |
+| trial-07-n1 | 1 | 11.723 | 14.325 | Wrong operation/tree |
+| trial-08-n5 | 5 | 4.164 | 6.731 | Wrong operation/tree |
+| trial-09-n10 | 10 | 25.551 | 26.956 | Valid |
+
+The next table describes the uniquely matched response that produced the published plan. First-do and full-response times are measured from the trial’s first upstream request, including earlier rejected outputs and the imposed API cooldowns. The window is within the matched response; its percentage uses the cumulative full-response time as denominator. Unavailable windows remain unavailable, rather than zero.
+
+| Attempt | Plan response POST # | First do (s) | Full plan response (s) | Advance (s) | Window (%) | Successful calls / requested |
+|---|---|---|---|---|---|---|
+| Warmup | — | — | — | — | — | 0 / 5 |
+| trial-01-n1 | 2 | 54.017 | 57.619 | 3.602 | 6.25 | 1 / 1 |
+| trial-02-n5 | — | — | — | — | — | 0 / 5 |
+| trial-03-n10 | — | — | — | — | — | 0 / 10 |
+| trial-04-n1 | 3 | 59.047 | 62.427 | 3.380 | 5.41 | 1 / 1 |
+| trial-05-n5 | 3 | 178.372 | 181.001 | 2.629 | 1.45 | 5 / 5 |
+| trial-06-n10 | — | — | — | — | — | 0 / 10 |
+| trial-07-n1 | — | — | — | — | — | 0 / 1 |
+| trial-08-n5 | — | — | — | — | — | 0 / 5 |
+| trial-09-n10 | 1 | 36.583 | 39.644 | 3.062 | 7.72 | 10 / 10 |
+
+For the sole valid initial response, N=10, reasoning deltas arrived from 0.751 to 26.302 s; first content arrived at 26.956 s, first executable do at 36.583 s, and the full response at 39.644 s. The 3.062 s window is 7.72% of that request interval. The other three measured windows are conditional corrected-plan observations; their percentages include retries and test cooldowns. These observations do not establish task-completion savings or a general upper bound for this model.
+
+Failures occurred during RTDL generation/validation: examples include missing `args`, missing `cap`, and `cancel_plan` with an invalid or absent target while no plan was active. The raw replies omitted these fields; they did not contain `args: null` or `cap: null`. Independent capture retained the complete upstream replies after Pilot stopped reading. HTTP success did not imply a usable plan.
+
+The recorded requests used `response_format.type=json_schema` with `strict=false`. The generic node schema required only `op`, `op_id` and `description`; it did not conditionally require `cap` and `args` for a `do`. The meta-operation schema required only `op`, allowing `cancel_plan` without `plan_id` at the schema level. Pilot's RTDL validator enforced the missing requirements and checked cancellation against the actual in-flight plans. This gap allows a reply to fit the supplied schema while failing RTDL validation; it does not establish why the model repeatedly chose cancellation instead of the requested sensor work.
+
+Evidence and reproduction scripts are in `/tmp/robonix-streaming-benefit-20261013.cxn3KQ/`: `results.json` retains all per-attempt initial and matched-plan timings, `validation.json` verifies spacing/dispatch/cleanup, and raw SSE, request bodies, parser events and component logs preserve each response. `runner.py`, `analyze.py`, `replay.rs` and the saved `replay-binary` reproduce execution and read-only analysis. Production source was restored before live trials; 16 parser tests and an offline fragmented UTF-8/SSE/reasoning fixture passed. The source revision differs from the 2026-10-10 run, so these runs are not a controlled model-only comparison.
+
+#### Results: 2026-10-13 (updated env.sh)
+
+Source revision `c52884959794`, model `qwen/qwen3.8-flash` and upstream `api.ofox.io` from the updated `env.sh`. Pilot and Executor binaries and the production parser source had the same SHA-256 hashes as the preceding 2026-10-13 run. The office/TIAGo Lite deployment, prompts and parser replay were reused. One N=5 warmup preceded nine formal attempts in the order `[1, 5, 10]` repeated three times, without replacement.
+
+Minimum trial spacing was 5.004 s; minimum upstream POST spacing was 5.002 s. All 19 model POSTs returned HTTP 200. Thirteen ended with normal stop/DONE/HTTP EOF; six reached the recorder timeout. The POST count includes correction requests and subsequent narration.
+
+Only 1/9 formal initial responses met H validity: `trial-02-n5` (N=1: 0/3; N=5: 1/3; N=10: 0/3). Two more tasks succeeded after one correction each, and six formal tasks produced no executable plan. The warmup failed during correction. All 11 dispatched formal sensor calls succeeded exactly once, with no extra dispatches or failed/canceled leaf actions. Every attempt ended with zero active plans.
+
+Initial-response times are in seconds from the first upstream request. The reasoning span measures first-to-last reasoning-delta arrival; for timed-out streams it covers only the received portion before the stall. It does not measure pure server inference time. A dash means no content arrived.
+
+| Attempt | N | Observed initial reasoning span (s) | First content (s) | Initial response |
+|---|---|---|---|---|
+| Warmup | 5 | 15.899 | 24.113 | Wrong cancellation |
+| trial-01-n1 | 1 | 23.687 | 31.335 | Wrong cancellation |
+| trial-02-n5 | 5 | 42.027 | 46.844 | Valid |
+| trial-03-n10 | 10 | 36.658 | 41.092 | Wrong cancellation |
+| trial-04-n1 | 1 | 38.886 | — | Stream timeout; no content |
+| trial-05-n5 | 5 | 114.815 | — | Stream timeout; no content |
+| trial-06-n10 | 10 | 64.102 | — | Stream timeout; no content |
+| trial-07-n1 | 1 | 3.615 | — | Stream timeout; no content |
+| trial-08-n5 | 5 | 59.033 | 60.732 | Missing cap and args |
+| trial-09-n10 | 10 | 22.835 | — | Stream timeout; no content |
+
+The next table uses the uniquely matched response that produced the published plan. First-do and full-response times start at the trial’s first upstream request and include rejected replies and imposed API cooldowns. The window is within the matched response; its percentage uses the cumulative full-response interval. Failed attempts have unavailable metrics.
+
+| Attempt | Plan response POST # | First do (s) | Full plan response (s) | Advance (s) | Window (%) | Successful calls / requested |
+|---|---|---|---|---|---|---|
+| Warmup | — | — | — | — | — | 0 / 5 |
+| trial-01-n1 | 2 | 91.257 | 93.779 | 2.522 | 2.69 | 1 / 1 |
+| trial-02-n5 | 1 | 52.330 | 53.355 | 1.026 | 1.92 | 5 / 5 |
+| trial-03-n10 | — | — | — | — | — | 0 / 10 |
+| trial-04-n1 | — | — | — | — | — | 0 / 1 |
+| trial-05-n5 | — | — | — | — | — | 0 / 5 |
+| trial-06-n10 | — | — | — | — | — | 0 / 10 |
+| trial-07-n1 | — | — | — | — | — | 0 / 1 |
+| trial-08-n5 | 2 | 125.758 | 127.622 | 1.864 | 1.46 | 5 / 5 |
+| trial-09-n10 | — | — | — | — | — | 0 / 10 |
+
+For the sole valid initial response, reasoning deltas arrived from 4.816 to 46.844 s, first content at 46.844 s, first executable do at 52.330 s, and the full response at 53.355 s. Its 1.026 s window is 1.92% of the request interval. The other two windows are conditional corrected-plan observations. Their cumulative intervals include the imposed cooldowns. These samples show a small available overlap relative to the recorded waiting time; they do not measure task-completion savings or establish a general model upper bound.
+
+`trial-04-n1`, `trial-05-n5`, `trial-06-n10`, `trial-07-n1` and `trial-09-n10` received reasoning but no content before the stream stalled. Pilot returned `VLM stream idle timeout`; independent capture continued to its 240 s timeout without normal termination. The warmup’s third POST also stalled during correction. `trial-03-n10` instead returned complete replies that attempted cancellation while no plan was active. `trial-08-n5` omitted `cap` and `args` in its initial do nodes and succeeded after correction. The captured schema still used `strict=false` with the same requirements described above. HTTP 200 and the updated model route did not ensure a valid, complete planning response.
+
+Evidence is in `/tmp/robonix-streaming-benefit-20261013-retry.kLZ52V/`: all ten attempts and per-response reasoning/content timings in `results.json`, spacing/dispatch/cleanup checks in `validation.json`, hashes and configuration in `provenance.json`, and raw requests/SSE, parser events and component logs. The saved `runner.py`, `analyze.py`, `validate.py`, `replay.rs` and `replay-binary` preserve execution and analysis. Replay analysis passed for the captured streams. Production Rust source was unchanged, and the test deployment was stopped after the run.
+
+#### Results: 2026-10-14 (Kimi)
+
+Source revision `c52884959794`, model `moonshotai/kimi-k3` and upstream `api.ofox.io` from the updated `env.sh`. Pilot and Executor binaries, production parser source, task prompts and capture/analysis scripts matched the preceding Qwen run. The office/TIAGo Lite deployment and saved production-parser replay were reused. One N=5 warmup preceded nine formal attempts in the order `[1, 5, 10]` repeated three times, without replacement.
+
+Minimum trial spacing was 5.004 s; minimum upstream POST spacing was 5.002 s. All 20 model POSTs returned HTTP 200. Fifteen ended with normal stop/DONE/HTTP EOF; five subsequent narration streams reached the recorder timeout. Every initial planning response ended normally.
+
+All 9/9 formal initial responses met H validity (3/3 for each N), and the warmup was valid. No output correction was needed. All 48 requested formal sensor calls and all five warmup calls succeeded exactly once, with matching dispatch order, no extra dispatches and no failed/canceled leaf actions. Every attempt ended with zero active plans.
+
+Times below are seconds from the initial upstream request. The reasoning span is first-to-last reasoning-delta arrival, not pure server inference time; the token count is reported by the interface. These observations do not establish that the models used equivalent thinking settings.
+
+| Attempt | N | Reasoning delivery span (s) | Reported reasoning tokens | First content (s) | Initial response |
+|---|---|---|---|---|---|
+| Warmup | 5 | 0.409 | 28 | 4.234 | Valid |
+| trial-01-n1 | 1 | 1.023 | 18 | 5.010 | Valid |
+| trial-02-n5 | 5 | 1.295 | 36 | 4.408 | Valid |
+| trial-03-n10 | 10 | 0.511 | 27 | 4.628 | Valid |
+| trial-04-n1 | 1 | 0.716 | 21 | 3.125 | Valid |
+| trial-05-n5 | 5 | 1.023 | 43 | 5.306 | Valid |
+| trial-06-n10 | 10 | 0.614 | 38 | 3.715 | Valid |
+| trial-07-n1 | 1 | 0.174 | 11 | 5.637 | Valid |
+| trial-08-n5 | 5 | 0.590 | 25 | 5.113 | Valid |
+| trial-09-n10 | 10 | 0.659 | 32 | 5.432 | Valid |
+
+All published plans uniquely matched the first response. First-do and full-response times start at that response’s upstream request. The window is full response minus first do; its percentage uses the full-response request interval. Subsequent narration, action completion and between-trial cooldowns are outside this interval.
+
+| Attempt | N | First do (s) | Full plan response (s) | Advance (s) | Window (%) | Successful calls / requested |
+|---|---|---|---|---|---|---|
+| Warmup | 5 | 6.282 | 10.609 | 4.327 | 40.78 | 5 / 5 |
+| trial-01-n1 | 1 | 7.391 | 9.053 | 1.662 | 18.36 | 1 / 1 |
+| trial-02-n5 | 5 | 7.342 | 14.479 | 7.137 | 49.29 | 5 / 5 |
+| trial-03-n10 | 10 | 8.505 | 18.216 | 9.711 | 53.31 | 10 / 10 |
+| trial-04-n1 | 1 | 4.953 | 7.937 | 2.984 | 37.59 | 1 / 1 |
+| trial-05-n5 | 5 | 7.866 | 13.499 | 5.633 | 41.73 | 5 / 5 |
+| trial-06-n10 | 10 | 7.242 | 14.243 | 7.001 | 49.16 | 10 / 10 |
+| trial-07-n1 | 1 | 19.051 | 20.756 | 1.706 | 8.22 | 1 / 1 |
+| trial-08-n5 | 5 | 8.820 | 14.194 | 5.374 | 37.86 | 5 / 5 |
+| trial-09-n10 | 10 | 8.374 | 16.780 | 8.406 | 50.09 | 10 / 10 |
+
+`trial-07-n1` retained a 10.649 s gap between content-delta arrivals before the first executable node, giving a 20.756 s complete response and an 8.22% window. This delay remains in the sample. The other formal observations also remain individual; no median or quartile was calculated.
+
+In this batch, short observed reasoning delivery and usable first responses left a larger relative overlap than the preceding Qwen batch. The overlap remains a potential generation window, not measured task-completion savings. Different model routes and default thinking behaviour prevent attributing the comparison to model inference speed alone.
+
+The subsequent narration streams for the warmup, `trial-01-n1`, `trial-04-n1`, `trial-06-n10` and `trial-07-n1` failed to finish within the 240 s capture timeout after the test’s abort control. Their complete initial planning responses remain valid. These attempts are not reported as successfully completed conversations. Cleanup and the original task RPC closure were checked before each next attempt.
+
+Evidence is in `/tmp/robonix-streaming-benefit-kimi-20261014.g3wfhgts/`: `results.json` retains every attempt and initial/matched-response timing, `validation.json` checks spacing/dispatch/cleanup, `provenance.json` records configuration and hashes, and `content-gaps.json` records arrival gaps. Raw requests/SSE, parser events and component logs are preserved with `runner.py`, `analyze.py`, `validate.py`, `replay.rs` and the saved `replay-binary`. Captured-stream replay and validation passed. Production Rust source was unchanged, and the test deployment was stopped.
+
+#### Results: 2026-10-16 (DeepSeek)
+
+Source revision `c52884959794`, model `deepseek/deepseek-v4.1-flash` and upstream `api.ofox.io` from the updated `env.sh`. Pilot and Executor binaries, production parser source, task prompts and capture/analysis scripts matched the preceding Kimi run. The office/TIAGo Lite deployment and saved production-parser replay were reused. One N=5 warmup preceded nine formal attempts in the order `[1, 5, 10]` repeated three times, without replacement.
+
+Minimum trial spacing was 5.005 s; minimum upstream POST spacing was 5.002 s. Nineteen model POSTs were attempted. Seventeen received HTTP 200 headers; two subsequent narration requests timed out before upstream response headers arrived. Fifteen POSTs ended with normal stop/DONE/HTTP EOF. The four timeout cases are described below.
+
+Formal initial validity was 8/9 (N=1: 3/3; N=5: 2/3; N=10: 3/3); the warmup was valid. Every published plan uniquely matched the initial response, with no output correction. All 43 dispatched formal sensor calls and five warmup calls succeeded exactly once, with matching dispatch order, no extra calls and no failed/canceled leaf actions. `trial-08-n5` dispatched no calls. Every attempt ended with zero active plans. Successful leaf actions are reported separately from task RPC status.
+
+Times below are seconds from the initial upstream request. The reasoning span measures first-to-last reasoning-delta arrival, not pure server inference time. For the timed-out sample it covers only the received portion before the stall; reasoning-token usage is unavailable. Token counts for other rows are reported by the interface.
+
+| Attempt | N | Reasoning delivery span (s) | Reported reasoning tokens | First content (s) | Initial response |
+|---|---|---|---|---|---|
+| Warmup | 5 | 0.785 | 116 | 2.288 | Valid |
+| trial-01-n1 | 1 | 2.048 | 289 | 3.962 | Valid |
+| trial-02-n5 | 5 | 1.419 | 95 | 27.649 | Valid |
+| trial-03-n10 | 10 | 2.049 | 282 | 4.230 | Valid |
+| trial-04-n1 | 1 | 1.520 | 235 | 17.168 | Valid |
+| trial-05-n5 | 5 | 0.546 | 65 | 2.540 | Valid |
+| trial-06-n10 | 10 | 2.764 | 334 | 4.341 | Valid |
+| trial-07-n1 | 1 | 3.139 | 104 | 9.821 | Valid |
+| trial-08-n5 | 5 | 11.423 | — | — | Stream timeout; no content |
+| trial-09-n10 | 10 | 0.716 | 110 | 3.263 | Valid |
+
+First-do and full-response times start at the initial upstream request. The window is full response minus first do; its percentage uses that full-response request interval. Subsequent narration, action completion and between-trial cooldowns are outside this interval. Unavailable endpoints remain unavailable.
+
+| Attempt | N | First do (s) | Full plan response (s) | Advance (s) | Window (%) | Successful calls / requested |
+|---|---|---|---|---|---|---|
+| Warmup | 5 | 3.112 | 4.951 | 1.839 | 37.14 | 5 / 5 |
+| trial-01-n1 | 1 | 4.846 | 6.382 | 1.536 | 24.07 | 1 / 1 |
+| trial-02-n5 | 5 | 37.645 | 40.927 | 3.282 | 8.02 | 5 / 5 |
+| trial-03-n10 | 10 | 5.367 | 7.309 | 1.942 | 26.56 | 10 / 10 |
+| trial-04-n1 | 1 | 17.915 | 18.444 | 0.529 | 2.87 | 1 / 1 |
+| trial-05-n5 | 5 | 3.775 | 5.385 | 1.610 | 29.89 | 5 / 5 |
+| trial-06-n10 | 10 | 5.570 | 8.479 | 2.909 | 34.31 | 10 / 10 |
+| trial-07-n1 | 1 | 10.090 | 19.139 | 9.050 | 47.28 | 1 / 1 |
+| trial-08-n5 | 5 | — | — | — | — | 0 / 5 |
+| trial-09-n10 | 10 | 4.287 | 7.181 | 2.894 | 40.30 | 10 / 10 |
+
+`trial-02-n5` first received reasoning at 26.230 s and content at 27.649 s; a 6.246 s content-arrival gap occurred before its first executable node. `trial-07-n1` retained an 8.845 s gap after its first do, accounting for most of its 9.050 s window. These arrival pauses remain in the individual samples and do not establish stable savings or pure inference timing. No median or quartile was calculated. Potential generation overlap is not measured task-completion savings.
+
+`trial-08-n5` received reasoning but no content, then stopped receiving data. Pilot returned `VLM stream idle timeout`; independent capture continued to its 240 s timeout without normal termination. A truncated SSE record produced a decode error; there was no complete planning response or executable plan to measure.
+
+The subsequent narration requests for `trial-02-n5` and `trial-07-n1` timed out before upstream headers arrived. The recorder returned HTTP 502 locally and the original task RPCs failed, although their initial responses were valid and their requested calls had already succeeded. `trial-04-n1` instead received part of its subsequent narration stream before capture timed out; its initial response and one call succeeded. These attempts are not reported as successfully completed conversations. Cleanup and RPC closure were checked before starting each next trial.
+
+Evidence is in `/tmp/robonix-streaming-benefit-deepseek-20261016.3ut3qtxs/`: `results.json` retains every attempt, timing and task RPC status; `validation.json` checks spacing/dispatch/cleanup; `provenance.json` records configuration and hashes; `content-gaps.json` records content-arrival gaps. Raw requests/SSE, parser events and component logs are preserved with `runner.py`, `analyze.py`, `validate.py`, `replay.rs` and the saved `replay-binary`. Captured-stream replay and validation passed. Production Rust source was unchanged, and the test deployment was stopped.
+
+#### Results: 2026-10-17 (Moonshot API)
+
+Source revision `c52884959794`, model `kimi-k3` and upstream `api.moonshot.cn` from the updated `env.sh`. Pilot and Executor binaries, production parser source, task prompts and capture/analysis scripts matched the preceding runs. The office/TIAGo Lite deployment and saved production-parser replay were reused. One N=5 warmup preceded nine formal attempts in the order `[1, 5, 10]` repeated three times, without replacement.
+
+Minimum trial spacing was 5.004 s; minimum upstream POST spacing was 5.002 s. Twenty-two POSTs were attempted: twenty returned HTTP 200 and ended with normal stop/DONE/HTTP EOF, and two returned HTTP 429. There were no stream timeouts or cleanup errors.
+
+All 9/9 formal attempts produced valid first HTTP 200 planning responses (3/3 for each N), and the warmup was valid. `trial-02-n5` received two HTTP 429 errors before that response; it was not successful on its first upstream POST. No RTDL output correction was needed. All 48 requested formal sensor calls and five warmup calls succeeded exactly once, with matching dispatch order, no extra calls and no failed/canceled leaf actions. All original task RPCs closed without errors; every attempt ended with zero active plans.
+
+The two rate-limit responses reported an account limit of three requests per minute. The existing transport retry mechanism obtained a planning response on the third POST for `trial-02-n5`. The five-second minimum spacing did not prevent those errors. Both failed requests and their cooldowns remain in the record.
+
+First-content times below start at each trial’s earliest upstream POST, including rate-limit retry waiting. Reasoning delivery spans measure first-to-last reasoning-delta arrival within the successful planning response, not pure server inference time. Token counts are reported by the interface.
+
+| Attempt | N | Reasoning delivery span (s) | Reported reasoning tokens | Cumulative first content (s) | Planning response |
+|---|---|---|---|---|---|
+| Warmup | 5 | 1.236 | 49 | 3.741 | Valid on first POST |
+| trial-01-n1 | 1 | 0.204 | 16 | 2.661 | Valid on first POST |
+| trial-02-n5 | 5 | 14.986 | 521 | 29.128 | Valid after two HTTP 429 retries |
+| trial-03-n10 | 10 | 1.024 | 35 | 10.463 | Valid on first POST |
+| trial-04-n1 | 1 | 1.016 | 44 | 4.143 | Valid on first POST |
+| trial-05-n5 | 5 | 0.512 | 30 | 4.651 | Valid on first POST |
+| trial-06-n10 | 10 | 0.661 | 31 | 9.721 | Valid on first POST |
+| trial-07-n1 | 1 | 0.582 | 22 | 4.006 | Valid on first POST |
+| trial-08-n5 | 5 | 1.535 | 61 | 5.020 | Valid on first POST |
+| trial-09-n10 | 10 | 0.284 | 30 | 11.066 | Valid on first POST |
+
+The next table also starts at the earliest upstream POST. The published plan uniquely matches the first successful model response. The window is within that response; its percentage uses cumulative full-response time, including preceding rate-limit requests and cooldowns. Subsequent narration, action completion and between-trial cooldowns are outside this interval.
+
+| Attempt | Plan response POST # | First do (s) | Full plan response (s) | Advance (s) | Window (%) | Successful calls / requested |
+|---|---|---|---|---|---|---|
+| Warmup | 1 | 7.836 | 13.571 | 5.734 | 42.26 | 5 / 5 |
+| trial-01-n1 | 1 | 4.529 | 8.075 | 3.546 | 43.91 | 1 / 1 |
+| trial-02-n5 | 3 | 34.887 | 43.326 | 8.439 | 19.48 | 5 / 5 |
+| trial-03-n10 | 1 | 14.144 | 24.765 | 10.620 | 42.89 | 10 / 10 |
+| trial-04-n1 | 1 | 6.702 | 10.082 | 3.380 | 33.53 | 1 / 1 |
+| trial-05-n5 | 1 | 7.424 | 12.237 | 4.813 | 39.33 | 5 / 5 |
+| trial-06-n10 | 1 | 12.238 | 20.466 | 8.229 | 40.21 | 10 / 10 |
+| trial-07-n1 | 1 | 6.157 | 9.229 | 3.072 | 33.29 | 1 / 1 |
+| trial-08-n5 | 1 | 8.674 | 13.496 | 4.822 | 35.73 | 5 / 5 |
+| trial-09-n10 | 1 | 14.321 | 22.612 | 8.291 | 36.67 | 10 / 10 |
+
+For `trial-02-n5`, the successful request alone took 33.073 s to deliver the full response, with an 8.439 s window (25.52%). Earlier HTTP 429 requests and waiting added 10.253 s, giving the cumulative 43.326 s interval and 19.48% shown above. `results.json` retains per-successful-request timing; `request-intervals.json` records the cumulative first-content timing and request offset. Transport retries are distinct from correcting an invalid RTDL reply.
+
+The largest gap between content-delta arrivals in any initial planning response was 0.588 s. All individual observations are retained without medians or quartiles. These are potential generation-overlap windows, not measured task-completion savings. Changing the endpoint and model identifier does not establish a controlled comparison of backend inference speed or identical model versions.
+
+Evidence is in `/tmp/robonix-streaming-benefit-moonshot-20261017.qrcwmioj/`: `results.json` retains every attempt, per-response timing and task RPC status; `validation.json` checks spacing/dispatch/cleanup; `provenance.json` records configuration and hashes; `request-intervals.json` and `content-gaps.json` record cumulative timing and arrival gaps. Raw requests/SSE, HTTP 429 bodies, parser events and component logs are preserved with `runner.py`, `analyze.py`, `validate.py`, `replay.rs` and the saved `replay-binary`. Captured-stream replay and validation passed. Production Rust source was unchanged, and the test deployment was stopped.
 
 ## A 类任务明细与覆盖范围
 

@@ -1,0 +1,46 @@
+--- a/system/pilot/src/planner.rs
++++ b/system/pilot/src/planner.rs
+@@ -1502,25 +1502,7 @@
+                     match item {
+                         Some(Ok(VlmStreamItem::TextDelta(delta))) => {
+                             if let Err(error) = parser.push(&delta) { stream_error = Some(error); break; }
+-                            // Submission checks execution feedback and revision;
+-                            // this loop handles steer and abort after the batch returns.
+-                            let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
+-                                client: &mut executor.streaming, forbidden: &forbidden,
+-                                revision: &forest_revision, expected_revision: planning_revision,
+-                            }).await;
+-                            match submission {
+-                                Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
+-                                Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
+-                                    stream_error = Some(anyhow::anyhow!("Executor node failed during submission")); break;
+-                                }
+-                                Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
+-                                    drop(stream);
+-                                    live.cancel(&mut executor.control).await?;
+-                                    should_plan = false;
+-                                    continue 'supervisor;
+-                                }
+-                                Ok(None) => {},
+-                            }
++                            let _ = parser.take_messages();
+                         }
+                         Some(Ok(VlmStreamItem::ReasoningDelta(delta))) => reasoning_bytes += delta.len(),
+                         Some(Ok(VlmStreamItem::ToolCall(call))) => { stream_error = Some(anyhow::anyhow!("tool_calls in RTDL mode: {}", call.function.name)); break; }
+@@ -1552,9 +1534,13 @@
+             {
+                 anyhow::bail!(problem);
+             }
+-            if !live.plan.nodes.is_empty() {
+-                anyhow::ensure!(parser.plan == live.plan, "incremental Plan mismatch");
+-                live.seal().await?;
++            if !parser.plan.nodes.is_empty() {
++                anyhow::ensure!(forest_revision.load(Ordering::Acquire) == planning_revision,
++                    "forest changed during generation");
++                anyhow::ensure!(plan_call_signatures(&parser.plan).is_disjoint(&forbidden),
++                    "call overlaps an active plan");
++                live.plan = parser.plan.clone();
++                live.output = Some(executor.graph.execute(tonic::Request::new(live.plan.clone())).await?.into_inner());
+             }
+             Ok(parsed)
+         }
