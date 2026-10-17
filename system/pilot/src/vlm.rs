@@ -408,11 +408,18 @@ fn rtdl_envelope_schema() -> Value {
     // requires: a schema that asks for less than the parser wants steers a
     // guided model into rejected rounds.
     //
+    // `anyOf`, not `oneOf`. Each alternative pins `op` to a one-value enum, so
+    // at most one can match and the two keywords accept the same set — but
+    // `anyOf` is the one structured-output backends implement (the outer `rtdl`
+    // alternative already uses it). On vLLM `oneOf` only worked because
+    // xgrammar reads it as `anyOf`. Adding an alternative that does not pin
+    // `op` would break the equivalence, and with it this reasoning.
+    //
     // An identifier is the same identifier whether JSON spells it 1 or "1", and
     // the parser stringifies either form.
     let identifier = || serde_json::json!({"type": ["string", "integer"]});
     let meta = serde_json::json!({
-        "oneOf": [
+        "anyOf": [
             {
                 "type": "object",
                 "properties": {
@@ -934,7 +941,7 @@ mod tests {
         // node's fields; leaving it out would describe cancelling a running
         // plan as malformed.
         let meta = &schema["$defs"]["meta"];
-        let ops = meta["oneOf"].as_array().expect("one schema per meta op");
+        let ops = meta["anyOf"].as_array().expect("one schema per meta op");
         assert_eq!(ops.len(), 3);
         let required = |name: &str| -> Vec<&str> {
             ops.iter()
