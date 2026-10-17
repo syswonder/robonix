@@ -318,8 +318,8 @@ impl RtdlIncrementalParser {
                 } else if ch == '"' {
                     self.in_string = false;
                     let token = &self.text[self.string_start..];
-                    // These values never contain RTDL children. Inspect their containers
-                    // once at closure, including legacy metadata ignored by full expansion.
+                    // These values never contain RTDL children, so inspect
+                    // their containers only once at closure.
                     const OPAQUE_KEYS: [&str; 10] = [
                         "args",
                         "op_id",
@@ -693,12 +693,7 @@ pub(crate) fn next_op_id() -> String {
 }
 
 #[cfg(test)]
-#[path = "reference.rs"]
-pub(crate) mod reference;
-
-#[cfg(test)]
 mod tests {
-    use super::reference::expand_rtdl_to_plan;
     use super::*;
 
     /// Provide one capability and a fresh per-test plan id sequence.
@@ -795,15 +790,28 @@ mod tests {
             assert_eq!(envelope.rtdl_description, "root");
             assert_eq!(envelope.rtdl, rtdl);
             assert_eq!(
-                envelope.task_update,
-                reference::parse_rtdl_assistant_response(&raw)
-                    .unwrap()
-                    .task_update
+                serde_json::to_value(&envelope.task_update).unwrap(),
+                serde_json::json!({
+                    "goal": "test",
+                    "success_criterion": "checked",
+                    "status": "done",
+                })
             );
             assert!(meta_op.is_none());
             assert_eq!(p.plan.plan_id, format!("{}-1", *planner::RUN_TAG));
             assert!(p.take_messages().is_empty());
-            assert_same(&p, &raw);
+            if rtdl["op"] == "sequence" {
+                assert_nodes(&p, &[(RTDL_SEQUENCE, &[], "root")]);
+            } else {
+                assert_nodes(
+                    &p,
+                    &[
+                        (RTDL_PARALLEL, &[1, 2], "root"),
+                        (RTDL_SEQUENCE, &[], "sequence of 0 step(s)"),
+                        (RTDL_PARALLEL, &[], "nested"),
+                    ],
+                );
+            }
         }
     }
 
@@ -885,79 +893,133 @@ mod tests {
         assert!(p.take_messages().is_empty());
     }
 
-    /// The production node decoder retains the full expander's acceptance and fallback behavior.
     #[test]
-    fn node_validation_matches_independent_expansion() {
-        for rtdl in [
-            serde_json::json!({"op": "do", "cap": "run", "args": {"v": [null, true, 1]}, "description": " trimmed "}),
-            serde_json::json!({"op": "sequence", "children": [{"op": "do", "cap": "run", "args": {}}]}),
-            serde_json::json!({"op": "do", "cap": "run", "args": {}, "description": null}),
-            serde_json::json!({"op": "do", "cap": "run"}),
-            serde_json::json!({"op": "do", "args": {}}),
-            serde_json::json!({"op": "do", "cap": "missing", "args": {}}),
-            serde_json::json!({"op": "do", "cap": "run", "args": []}),
-            serde_json::json!({"op": "do", "cap": "run", "args": {}, "out": "x"}),
-            serde_json::json!({"op": "sequence", "children": {}}),
-            serde_json::json!({"op": "parallel"}),
-            serde_json::json!({"op": "sequence", "children": [{"op": "cancel_all"}]}),
-            serde_json::json!({"op": 0}),
-            serde_json::json!({"op": "unknown"}),
+    fn node_validation_accepts_valid_calls_and_rejects_invalid_fields() {
+        for (rtdl, valid) in [
+            (
+                serde_json::json!({"op": "do", "cap": "run", "args": {"v": [null, true, 1]}, "description": " trimmed "}),
+                true,
+            ),
+            (
+                serde_json::json!({"op": "sequence", "children": [{"op": "do", "cap": "run", "args": {}}]}),
+                true,
+            ),
+            (
+                serde_json::json!({"op": "do", "cap": "run", "args": {}, "description": null}),
+                true,
+            ),
+            (serde_json::json!({"op": "do", "cap": "run"}), false),
+            (serde_json::json!({"op": "do", "args": {}}), false),
+            (
+                serde_json::json!({"op": "do", "cap": "missing", "args": {}}),
+                false,
+            ),
+            (
+                serde_json::json!({"op": "do", "cap": "run", "args": []}),
+                false,
+            ),
+            (
+                serde_json::json!({"op": "do", "cap": "run", "args": {}, "out": "x"}),
+                false,
+            ),
+            (serde_json::json!({"op": "sequence", "children": {}}), false),
+            (serde_json::json!({"op": "parallel"}), false),
+            (
+                serde_json::json!({"op": "sequence", "children": [{"op": "cancel_all"}]}),
+                false,
+            ),
+            (serde_json::json!({"op": 0}), false),
+            (serde_json::json!({"op": "unknown"}), false),
         ] {
             let mut p = parser();
-            let expected =
-                expand_rtdl_to_plan(&rtdl, &p.targets, "1".into(), "session".into(), 7, "root");
             let raw = serde_json::json!({"content": "", "rtdl_description": "root", "task_update": null, "rtdl": rtdl}).to_string();
             let actual = p.push(&raw).and_then(|()| p.finish());
-            assert_eq!(actual.is_ok(), expected.is_ok(), "{raw}: {actual:?}");
-            if actual.is_ok() {
-                assert_same(&p, &raw);
+            assert_eq!(actual.is_ok(), valid, "{raw}: {actual:?}");
+            if !valid {
+                continue;
+            }
+            if rtdl["op"] == "sequence" {
+                assert_nodes(
+                    &p,
+                    &[(RTDL_SEQUENCE, &[1], "root"), (RTDL_DO, &[], "call run")],
+                );
+            } else {
+                let description = if rtdl["description"].is_string() {
+                    "trimmed"
+                } else {
+                    "root"
+                };
+                assert_nodes(&p, &[(RTDL_DO, &[], description)]);
+                let args: Value =
+                    serde_json::from_str(&p.plan.nodes[0].call.as_ref().unwrap().args_json)
+                        .unwrap();
+                assert_eq!(args, rtdl["args"]);
             }
         }
     }
 
-    /// Compare all fields, reusing the incremental identity allocation in the independent expansion.
-    fn assert_same(parser: &RtdlIncrementalParser, raw: &str) {
-        let ids: std::collections::HashSet<_> = parser
-            .plan
-            .nodes
-            .iter()
-            .map(|node| node.op_id.as_str())
-            .collect();
+    fn assert_nodes(parser: &RtdlIncrementalParser, expected: &[(u32, &[u32], &str)]) {
+        let plan = &parser.plan;
+        assert_eq!(plan.plan_id, format!("{}-1", *planner::RUN_TAG));
+        assert_eq!(plan.session_id, "session");
+        assert_eq!(plan.round, 7);
+        assert_eq!(plan.root_index, 0);
+        assert_eq!(plan.nodes.len(), expected.len());
+        let ids: std::collections::HashSet<_> =
+            plan.nodes.iter().map(|node| node.op_id.as_str()).collect();
         assert!(!ids.contains(""));
-        assert_eq!(ids.len(), parser.plan.nodes.len());
-        let v: Value = serde_json::from_str(raw).unwrap();
-        let mut expected = expand_rtdl_to_plan(
-            &v["rtdl"],
-            &parser.targets,
-            parser.plan.plan_id.clone(),
-            "session".into(),
-            7,
-            v["rtdl_description"].as_str().unwrap(),
-        )
-        .unwrap();
-        for (a, b) in expected.nodes.iter_mut().zip(&parser.plan.nodes) {
-            a.op_id = b.op_id.clone();
+        assert_eq!(ids.len(), plan.nodes.len());
+        let mut call_index = 0;
+        for (node, (kind, children, description)) in plan.nodes.iter().zip(expected) {
+            assert_eq!(node.node_kind, *kind);
+            assert_eq!(node.children, *children);
+            assert_eq!(node.description, *description);
+            if *kind == RTDL_DO {
+                let call = node.call.as_ref().unwrap();
+                assert_eq!(call.call_id, format!("{}:{call_index}", plan.plan_id));
+                assert_eq!(call.provider_id, "executor");
+                assert_eq!(call.contract_id, "test/run");
+                call_index += 1;
+            } else {
+                assert!(node.call.is_none());
+            }
         }
-        assert_eq!(expected, parser.plan);
     }
 
     /// Exercise every UTF-8 split and character deltas with nested args and escaped structural text.
     #[test]
-    fn arbitrary_splits_and_unicode_match_complete_expansion() {
+    fn arbitrary_splits_preserve_unicode_and_tree_shape() {
         let raw = r#"{"content":"你好","rtdl_description":"root","task_update":null,"rtdl":{"description":"root","op":"sequence","children":[{"op":"do","cap":"run","args":{"x":[{"v":"引号\"\\{},[]\u4e2d"}]}},{"op":"parallel","description":"p","children":[{"args":{},"cap":"run","op":"do"}]}]}}"#;
+        let check = |p: &RtdlIncrementalParser| {
+            assert_nodes(
+                p,
+                &[
+                    (RTDL_SEQUENCE, &[1, 2], "root"),
+                    (RTDL_DO, &[], "call run"),
+                    (RTDL_PARALLEL, &[3], "p"),
+                    (RTDL_DO, &[], "call run"),
+                ],
+            );
+            let args: Value =
+                serde_json::from_str(&p.plan.nodes[1].call.as_ref().unwrap().args_json).unwrap();
+            assert_eq!(
+                args,
+                serde_json::from_str::<Value>(raw).unwrap()["rtdl"]["children"][0]["args"]
+            );
+        };
         for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
             let mut p = parser();
             p.push(&raw[..split]).unwrap();
             p.push(&raw[split..]).unwrap();
             p.finish().unwrap();
-            assert_same(&p, raw);
+            check(&p);
         }
         let mut p = parser();
         for ch in raw.chars() {
             p.push(&ch.to_string()).unwrap();
         }
         p.finish().unwrap();
-        assert_same(&p, raw);
+        check(&p);
     }
 
     /// The first call and its described ancestors can leave before later siblings exist.
@@ -991,7 +1053,13 @@ mod tests {
         assert!(!p.committed());
         p.push(&raw[split..]).unwrap();
         p.finish().unwrap();
-        assert_same(&p, raw);
+        assert_nodes(
+            &p,
+            &[
+                (RTDL_SEQUENCE, &[1], "late label"),
+                (RTDL_DO, &[], "call run"),
+            ],
+        );
     }
 
     /// Duplicate keys, unknown fields, and syntax errors cannot erase or resend a valid prefix.
@@ -1038,7 +1106,7 @@ mod tests {
 
     /// Escaped field names and deeply nested args obey the same validation and buffering rules.
     #[test]
-    fn escaped_args_key_and_deep_args_match_full_expansion() {
+    fn escaped_args_key_preserves_deep_args() {
         let mut args = serde_json::json!({"text": "你好"});
         for _ in 0..48 {
             args = serde_json::json!({"nested": args});
@@ -1051,12 +1119,14 @@ mod tests {
             p.push(&ch.to_string()).unwrap();
         }
         p.finish().unwrap();
-        assert_same(&p, &raw);
+        assert_nodes(&p, &[(RTDL_DO, &[], "d")]);
+        let actual: Value =
+            serde_json::from_str(&p.plan.nodes[0].call.as_ref().unwrap().args_json).unwrap();
+        assert_eq!(actual, args);
     }
 
-    /// Legacy opaque metadata containers must remain bounded without changing full-parse fallbacks.
     #[test]
-    fn container_metadata_preserves_complete_expansion() {
+    fn container_metadata_uses_root_description_fallback() {
         let array = serde_json::json!(vec![0; 4096]);
         let raw = format!(
             r#"{{"content":"","rtdl_description":"label","task_update":null,"rtdl":{{"op":"do","op_id":{array},"description":{array},"cap":"run","args":{{}}}}}}"#
@@ -1064,12 +1134,13 @@ mod tests {
         let mut p = parser();
         p.push(&raw).unwrap();
         p.finish().unwrap();
-        assert_same(&p, &raw);
+        assert_nodes(&p, &[(RTDL_DO, &[], "label")]);
+        assert_eq!(p.plan.nodes[0].call.as_ref().unwrap().args_json, "{}");
     }
 
     /// Permute all envelope fields, including a root label arriving after RTDL.
     #[test]
-    fn every_envelope_field_order_matches_full_expansion() {
+    fn every_envelope_field_order_preserves_tree_shape() {
         let fields = [
             r#""content":"hi""#,
             r#""rtdl_description":"label""#,
@@ -1103,7 +1174,10 @@ mod tests {
                             p.push(&ch.to_string()).unwrap();
                         }
                         p.finish().unwrap();
-                        assert_same(&p, &raw);
+                        assert_nodes(
+                            &p,
+                            &[(RTDL_SEQUENCE, &[1], "label"), (RTDL_DO, &[], "call run")],
+                        );
                     }
                 }
             }

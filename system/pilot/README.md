@@ -12,6 +12,8 @@ cargo build -p robonix-pilot
 
 The crate is part of the top-level Cargo workspace and is built / installed by `make build` and `make install` respectively.
 
+Run Pilot's tests with `cargo test -p robonix-pilot`. RTDL parser tests exercise the incremental parser used at runtime.
+
 ## Run
 
 Manual launch:

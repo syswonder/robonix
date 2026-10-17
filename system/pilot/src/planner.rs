@@ -2426,15 +2426,44 @@ mod tests {
         CapabilityCall, CapabilityCallResult, Plan, RtdlNode, RtdlNodeState, Task,
     };
     use crate::prompt::{MAX_INLINE_DESCRIPTION_CHARS, summarize_description};
-    use crate::rtdl_stream::next_op_id;
-    use crate::rtdl_stream::reference::{
-        expand_rtdl_to_plan, extract_json_object, parse_rtdl_assistant_response,
-    };
+    use crate::rtdl_stream::{RtdlIncrementalParser, next_op_id};
     use crate::vlm::{Message, VlmUsage};
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
+
+    fn parse_response(raw: &str) -> anyhow::Result<super::RtdlEnvelope> {
+        let mut parser = RtdlIncrementalParser::new(
+            CapabilityTargetMap::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            "s".into(),
+            0,
+        );
+        parser.push(raw)?;
+        parser.finish().map(|(envelope, _)| envelope)
+    }
+
+    fn parse_plan(
+        rtdl: &serde_json::Value,
+        targets: &CapabilityTargetMap,
+        round: u32,
+    ) -> anyhow::Result<Plan> {
+        let mut parser = RtdlIncrementalParser::new(
+            targets.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            "s".into(),
+            round,
+        );
+        parser.push(
+            &json!({
+                "content": "", "rtdl_description": "", "rtdl": rtdl, "task_update": null,
+            })
+            .to_string(),
+        )?;
+        parser.finish()?;
+        Ok(parser.plan)
+    }
 
     #[test]
     fn compaction_always_frees_a_quarter_of_the_room() {
@@ -2651,8 +2680,7 @@ mod tests {
                 {"op":"do","op_id":0,"description":"report","cap":"demo.test_report","args":{"report":"room"}}
             ]
         });
-        let plan =
-            expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "multi-step").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 1).unwrap();
         assert_eq!(super::plan_call_count(&plan), 3);
         assert_eq!(plan.round, 1);
     }
@@ -3186,20 +3214,14 @@ mod tests {
 
     #[test]
     fn rtdl_response_requires_exact_top_level_keys() {
-        // Old two-key envelope is now rejected.
-        let err = parse_rtdl_assistant_response(
-            r#"{"content":"x","rtdl":{"op":"sequence","children":[]}}"#,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("exactly `content`, `rtdl_description`, `rtdl`, and `task_update`")
-        );
+        let err = parse_response(r#"{"content":"x","rtdl":{"op":"sequence","children":[]}}"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("response requires four fields"));
     }
 
     #[test]
     fn rtdl_response_parses_full_envelope() {
-        let env = parse_rtdl_assistant_response(
+        let env = parse_response(
             r#"{
                 "content":"on it",
                 "rtdl_description":"fetch water",
@@ -3222,29 +3244,8 @@ mod tests {
     }
 
     #[test]
-    fn rtdl_response_tolerates_prose_preamble() {
-        // Observed real failure: the model narrates a line, then emits the JSON
-        // on the next line. The leading prose must be stripped, not rejected.
-        let env = parse_rtdl_assistant_response(
-            "Let me take a photo to check the scene, then turn left.\n{\"content\":\"on it\",\"rtdl_description\":\"turn\",\"rtdl\":{\"op\":\"sequence\",\"children\":[]},\"task_update\":null}",
-        )
-        .unwrap();
-        assert_eq!(env.content, "on it");
-        assert!(env.task_update.is_none());
-    }
-
-    #[test]
-    fn extract_json_object_skips_prose_and_braces_in_strings() {
-        // Leading prose dropped; a `}` inside a string value does not end it.
-        let got = extract_json_object("hi: {\"a\":\"x}y\",\"b\":1} trailing");
-        assert_eq!(got, Some("{\"a\":\"x}y\",\"b\":1}"));
-        // No object at all → None, so the caller still hits the real parse error.
-        assert_eq!(extract_json_object("no json here"), None);
-    }
-
-    #[test]
     fn rtdl_response_task_update_null_is_none() {
-        let env = parse_rtdl_assistant_response(
+        let env = parse_response(
             r#"{"content":"x","rtdl_description":"","rtdl":{"op":"sequence","children":[]},"task_update":null}"#,
         )
         .unwrap();
@@ -3291,9 +3292,9 @@ mod tests {
                 { "op": "do", "cap": "chassis_move", "args": { "linear": 0.1 } }
             ]
         });
-        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 7, "").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 7).unwrap();
 
-        assert_eq!(plan.plan_id, "p");
+        assert_eq!(plan.plan_id, format!("{}-1", *RUN_TAG));
         assert_eq!(plan.session_id, "s");
         assert_eq!(plan.round, 7);
         assert_eq!(plan.nodes.len(), 3);
@@ -3303,11 +3304,11 @@ mod tests {
         let first = plan.nodes[1].call.as_ref().unwrap();
         let second = plan.nodes[2].call.as_ref().unwrap();
         assert_eq!(plan.nodes[1].node_kind, RTDL_DO);
-        assert_eq!(first.call_id, "p:0");
+        assert_eq!(first.call_id, format!("{}:0", plan.plan_id));
         assert_eq!(first.provider_id, "cap-camera");
         assert_eq!(first.contract_id, "robonix/primitive/camera/snapshot");
         assert_eq!(first.args_json, "{}");
-        assert_eq!(second.call_id, "p:1");
+        assert_eq!(second.call_id, format!("{}:1", plan.plan_id));
         assert_eq!(second.args_json, r#"{"linear":0.1}"#);
     }
 
@@ -3336,13 +3337,19 @@ mod tests {
                 { "op": "do", "cap": "read_temp", "args": { "unit": "c" } }
             ]
         });
-        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 1).unwrap();
 
         assert_eq!(plan.root_index, 0);
         assert_eq!(plan.nodes[0].node_kind, RTDL_PARALLEL);
         assert_eq!(plan.nodes[0].children, vec![1, 2]);
-        assert_eq!(plan.nodes[1].call.as_ref().unwrap().call_id, "p:0");
-        assert_eq!(plan.nodes[2].call.as_ref().unwrap().call_id, "p:1");
+        assert_eq!(
+            plan.nodes[1].call.as_ref().unwrap().call_id,
+            format!("{}:0", plan.plan_id)
+        );
+        assert_eq!(
+            plan.nodes[2].call.as_ref().unwrap().call_id,
+            format!("{}:1", plan.plan_id)
+        );
     }
 
     #[test]
@@ -3367,7 +3374,7 @@ mod tests {
                 }
             ]
         });
-        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 1).unwrap();
         let summary = format_plan_summary(&plan).join("\n");
 
         assert!(summary.contains("[0] sequence"));
@@ -3405,21 +3412,26 @@ mod tests {
                 }
             ]
         });
-        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 1).unwrap();
         let calls: Vec<_> = plan
             .nodes
             .iter()
             .filter_map(|node| node.call.as_ref())
             .map(|call| call.call_id.as_str())
             .collect();
-        assert_eq!(calls, vec!["p:0", "p:1", "p:2"]);
+        assert_eq!(
+            calls,
+            (0..3)
+                .map(|index| format!("{}:{index}", plan.plan_id))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn rtdl_empty_sequence_generates_root_node() {
         let targets = CapabilityTargetMap::new();
         let rtdl = json!({ "op": "sequence", "children": [] });
-        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 0).unwrap();
 
         assert_eq!(plan.root_index, 0);
         assert_eq!(plan.nodes.len(), 1);
@@ -3443,8 +3455,8 @@ mod tests {
             "args": {},
             "out": { "image": "img" }
         });
-        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
-        assert!(err.to_string().contains("unexpected field `out`"));
+        let err = parse_plan(&rtdl, &targets, 0).unwrap_err();
+        assert!(err.to_string().contains("unexpected RTDL field `out`"));
     }
 
     #[test]
@@ -3473,7 +3485,7 @@ mod tests {
                 }
             ]
         });
-        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        let plan = parse_plan(&rtdl, &targets, 0).unwrap();
         assert_eq!(plan.nodes[0].description, "inspect the doorway");
         assert_eq!(
             plan.nodes[1].description,
@@ -3500,7 +3512,7 @@ mod tests {
     fn rtdl_rejects_parallel_non_array_children() {
         let targets = CapabilityTargetMap::new();
         let rtdl = json!({ "op": "parallel", "children": {} });
-        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
+        let err = parse_plan(&rtdl, &targets, 0).unwrap_err();
         assert!(err.to_string().contains("children must be an array"));
     }
 
@@ -3515,7 +3527,7 @@ mod tests {
             ),
         );
         let rtdl = json!({ "op": "do", "cap": "camera_snapshot", "args": [] });
-        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
+        let err = parse_plan(&rtdl, &targets, 0).unwrap_err();
         assert!(err.to_string().contains("args must be an object"));
     }
 
@@ -3523,8 +3535,8 @@ mod tests {
     fn rtdl_rejects_unknown_op() {
         let targets = CapabilityTargetMap::new();
         let rtdl = json!({ "op": "race", "children": [] });
-        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
-        assert!(err.to_string().contains("unknown operator"));
+        let err = parse_plan(&rtdl, &targets, 0).unwrap_err();
+        assert!(err.to_string().contains("unknown RTDL operator"));
     }
 
     /// Request history preserves authoritative state and the prior request prefix.
