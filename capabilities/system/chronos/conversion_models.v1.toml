@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/chronos/conversion_models"
+version = "1"
+kind = "service"
+idl = "chronos/msg/ClockModelsSnapshot.msg"
+description = "Versioned device-to-reference clock models with current domain status and retained coefficient identity for local conversion."
+
+[mode]
+type = "topic_out"

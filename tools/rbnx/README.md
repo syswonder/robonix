@@ -96,11 +96,32 @@ or `--sessions` to remove those too.
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
-Atlas, Executor, Soma, Pilot, Vitals, then Liaison. Their `system.<name>`
+Atlas, Chronos, Executor, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
 manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or
 skills.
+
+`system.chronos` enables the reference-time, clock-quality and conversion-model gRPC
+streams. Its `core` mapping configures the existing Chronos runtime; optional
+`listen`, `atlas_endpoint`, `provider_id`, and `log` select process settings.
+The default listen address is `127.0.0.1:50094` and provider id is `chronos`.
+The same endpoint accepts the `observe_device_timestamp` gRPC contract for raw
+device observations. `system.chronos.collect_observations` is the automatic
+collection master switch; `system.chronos.collect_ros_observations` explicitly
+enables ROS collection. Both default to false. With the master switch enabled,
+configured `query.adapter` domains use existing hardware clock interfaces and
+need no ROS Python dependencies. Standalone queries may omit capability bindings;
+driver queries may bind existing gRPC or ROS capabilities and wait for ACTIVE.
+ROS domains require both switches, a ROS-enabled `python3` environment, and one
+data capability per domain. Existing ROS deployments must add the ROS switch.
+Each ready domain starts independently; a missing ROS device does not hold up
+hardware queries. Query failures never fall back to ROS. Helpers are stopped
+and reaped with Chronos, and shutdown cancels pending discovery. Chronos becomes
+ACTIVE with reference quality before devices register. Copy the `chronos` mapping from
+`system/chronos/examples/minecraft-camera.yaml` into deployment `system.chronos`
+to enable the camera test; the driver must already publish the described device
+timestamp scale.
 
 For example, this enables Vitals without a separate terminal or global
 `RUST_LOG` setting:

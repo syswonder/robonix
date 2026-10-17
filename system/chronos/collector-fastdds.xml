@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>diagnostic_udp</transport_id>
+      <type>UDPv4</type>
+      <receiveBufferSize>4194304</receiveBufferSize>
+      <sendBufferSize>4194304</sendBufferSize>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="diagnostic_participant" is_default_profile="true">
+    <rtps>
+      <userTransports><transport_id>diagnostic_udp</transport_id></userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

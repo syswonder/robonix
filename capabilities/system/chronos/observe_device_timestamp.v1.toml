@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/chronos/observe_device_timestamp"
+version = "1"
+kind = "service"
+idl = "chronos/srv/ObserveDeviceTimestamp.srv"
+description = "Submit raw device time for host-receive pairing; consumers decide whether to use the resulting model."
+
+[mode]
+type = "rpc"

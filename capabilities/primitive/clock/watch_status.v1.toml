@@ -1,0 +1,10 @@
+[contract]
+id = "robonix/primitive/clock/watch_status"
+version = "1"
+kind = "primitive"
+idl = "clock/srv/WatchClockStatus.srv"
+description = "Watch ordered hardware clock status updates after an initial snapshot."
+cross_namespace = true
+
+[mode]
+type = "rpc_server_stream"

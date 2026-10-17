@@ -194,6 +194,23 @@ message TransportParams {
   }
 }
 
+// Optional machine-readable timing description for one sensor Capability.
+// This is static registration metadata, not a per-sample timestamp or dynamic
+// clock-health report. Capabilities that do not produce timestamped data omit
+// it; older providers remain valid when the field is absent.
+message CapabilityTimeDescriptor {
+  // Stable clock domain referenced by hardware status and Chronos models.
+  string domain_id = 1;
+  // Acquisition event represented by the payload timestamp, for example
+  // "exposure_midpoint" or "scan_start".
+  string timestamp_semantics = 2;
+  bool is_hardware_timestamped = 3;
+  // Present only when the pipeline delay is known and fixed.
+  optional uint64 pipeline_delay_ns = 4;
+  uint64 pipeline_uncertainty_ns = 5;
+  bool supports_per_point_timestamp = 6;
+}
+
 // -- Declare one Capability on a registered CapabilityProvider --------------------------
 //
 // To expose the same contract over multiple transports, call once per
@@ -270,6 +287,8 @@ message DeclareCapabilityRequest {
   // CAPABILITY.md is a separate, long-form per-CapabilityProvider
   // doc (see RegisterRequest.capability_md_path), surfaced alongside.
   string description = 6;
+  // Optional static timestamp binding for this Capability instance.
+  CapabilityTimeDescriptor time_descriptor = 7;
 }
 message DeclareCapabilityResponse {
   // Authoritative endpoint actually registered.
@@ -307,6 +326,8 @@ message Capability {
   // and its ContractDescriptor does not opt into cross-namespace use. Atlas
   // still accepts and serves the capability; this is diagnostic only.
   bool namespace_mismatch = 7;
+  // Static timestamp binding copied from DeclareCapabilityRequest.
+  CapabilityTimeDescriptor time_descriptor = 8;
 }
 
 // -- CapabilityProvider lifecycle --------------------------------------------
@@ -487,6 +508,9 @@ message ConnectCapabilityResponse {
   // method for gRPC; qos_profile for ROS 2; input_schema_json for
   // MCP). Saves the consumer a follow-up Query to resolve these.
   TransportParams params = 3;
+  // Returned from the same declaration record as endpoint and params so a
+  // provider restart cannot pair a stale Query result with a new endpoint.
+  CapabilityTimeDescriptor time_descriptor = 4;
 }
 
 // DisconnectCapability -- release a channel. Idempotent: unknown

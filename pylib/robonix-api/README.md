@@ -52,6 +52,13 @@ robonix-api and Atlas emit a visible warning unless the contract TOML marks it
 as `cross_namespace = true`. The warning is diagnostic and never blocks boot,
 discovery, or calls.
 
+`CapabilityTimeDescriptor` is optional on `declare_capability`,
+`declare_ros2_topic` and `create_publisher`. It binds a sensor capability to
+its existing clock domain and describes acquisition semantics and pipeline
+uncertainty. Query and Connect retain the descriptor. Rebuild package stubs
+and Atlas together before declaring time metadata; it is never silently
+discarded when the local generated schema lacks the field.
+
 Contract descriptors also expose `llm_callable`. It defaults to `true`; a
 contract may set it to `false` to keep its implementations out of Pilot's
 model-facing catalog without changing registration, discovery, or calls.
@@ -103,6 +110,11 @@ server socket owned by `robonix-api`. When it is a non-wildcard address and no
 advertise override is set, that same address is advertised to Atlas
 automatically. Cross-host deployments should retain `0.0.0.0` and set
 `ROBONIX_ADVERTISE_HOST` to the provider address reachable by consumers.
+
+Atlas discovery and connection calls have five-second real deadlines;
+channel release has a two-second deadline. Provider gRPC servers accept
+keepalive pings at one-second intervals so clients can detect broken
+transports while a robot operation waits through a simulation pause.
 
 ## Versioning
 

@@ -208,6 +208,31 @@ impl AtlasClient {
         params: pb::TransportParams,
         description: &str,
     ) -> Result<String> {
+        self.declare_capability_with_description_and_time(
+            provider_id,
+            contract_id,
+            transport,
+            endpoint,
+            params,
+            description,
+            None,
+        )
+        .await
+    }
+
+    /// Declare one Capability with optional structured sensor timing while
+    /// preserving the metadata-free APIs used by existing providers.
+    #[allow(clippy::too_many_arguments)] // Mirrors the existing declaration wire fields.
+    pub async fn declare_capability_with_description_and_time(
+        &mut self,
+        provider_id: &str,
+        contract_id: &str,
+        transport: pb::Transport,
+        endpoint: &str,
+        params: pb::TransportParams,
+        description: &str,
+        time_descriptor: Option<pb::CapabilityTimeDescriptor>,
+    ) -> Result<String> {
         let resp = self
             .inner
             .declare_capability(pb::DeclareCapabilityRequest {
@@ -217,6 +242,7 @@ impl AtlasClient {
                 endpoint: endpoint.to_string(),
                 params: Some(params),
                 description: description.to_string(),
+                time_descriptor,
             })
             .await
             .with_context(|| {
@@ -361,6 +387,26 @@ impl AtlasClient {
         contract_id: &str,
         transport: pb::Transport,
     ) -> Result<(String, String, pb::TransportParams)> {
+        let (channel_id, endpoint, params, _) = self
+            .connect_capability_with_time(consumer_id, provider_id, contract_id, transport)
+            .await?;
+        Ok((channel_id, endpoint, params))
+    }
+
+    /// Open a channel and return the timing descriptor from the same Atlas
+    /// declaration record as the endpoint and transport parameters.
+    pub async fn connect_capability_with_time(
+        &mut self,
+        consumer_id: &str,
+        provider_id: &str,
+        contract_id: &str,
+        transport: pb::Transport,
+    ) -> Result<(
+        String,
+        String,
+        pb::TransportParams,
+        Option<pb::CapabilityTimeDescriptor>,
+    )> {
         let resp = self
             .inner
             .connect_capability(pb::ConnectCapabilityRequest {
@@ -377,7 +423,12 @@ impl AtlasClient {
                 )
             })?;
         let r = resp.into_inner();
-        Ok((r.channel_id, r.endpoint, r.params.unwrap_or_default()))
+        Ok((
+            r.channel_id,
+            r.endpoint,
+            r.params.unwrap_or_default(),
+            r.time_descriptor,
+        ))
     }
 
     /// Release a previously-opened channel. Idempotent: returns `false`

@@ -32,6 +32,22 @@ calling remain available to other consumers. Omitted values default to `true`.
 
 The wire schema lives in [`proto/atlas.proto`](proto/atlas.proto).
 
+Sensor declarations may include the existing `CapabilityTimeDescriptor` with
+their clock domain, acquisition semantics and pipeline uncertainty. Atlas
+validates and retains it with the declaration, returns it in Query and Connect,
+and preserves the absence of a known fixed delay. This is static metadata;
+it does not ingest timestamps or establish clock synchronization.
+
+Atlas reads reference timestamps and local steady time through the in-process
+[`robonix-chronos-clock`](../chronos/clock/README.md) library, without requiring
+a running Chronos service. Registration, takeover, heartbeat, and channel
+creation return `UNAVAILABLE` before mutating state if reference time cannot
+be read, is unavailable, or cannot fit the unsigned timestamp. Unverified Linux
+reference time is accepted. Heartbeat eviction uses steady time, so reference
+clock steps cannot expire or extend a provider's timeout. A steady read failure
+or regression stops Atlas with an error rather than leaving eviction disabled.
+`AtlasRegistry::now_ms()` now returns `Result<u64, tonic::Status>`.
+
 ## Namespace diagnostics
 
 A provider's namespace is its primary grouping for discovery and operator
@@ -73,6 +89,14 @@ Configuration:
 - `--capabilities` / `ROBONIX_CAPABILITIES` — one or more contract directories,
   comma-separated. Defaults to the registered repo's `capabilities/`.
 - `--log` / `RUST_LOG` — env_logger filter. Defaults to `robonix_atlas=info`.
+
+Heartbeat eviction settings are `ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS` (default
+90000; 0 disables eviction), `ROBONIX_ATLAS_GC_AFTER_TERMINATED_MS` (default
+600000), and `ROBONIX_ATLAS_EVICTION_INTERVAL_MS` (default 10000).
+
+Run `cargo test -p robonix-atlas --test clock_failures` on Linux for real gRPC
+and Scribe failure/recovery tests. These compile a test-only `LD_PRELOAD` clock
+interposer with `cc` and run in an isolated subprocess; host time is unchanged.
 
 ## Out of scope (v0.1)
 

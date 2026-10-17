@@ -351,6 +351,22 @@ stop: "true"
     }
 
     #[test]
+    /// Chronos is a binary and receives its inline core config plus Atlas endpoint.
+    fn chronos_receives_manifest_configuration() {
+        assert!(is_builtin_system("chronos"));
+        let cfg: serde_yaml::Value = serde_yaml::from_str("listen: 127.0.0.1:50094\nprovider_id: chronos-test\ncore:\n  reference:\n    kind: linux_system\n").unwrap();
+        let args = system_cli_args("chronos", Some(&cfg), Some("127.0.0.1:50051"));
+        assert!(args.windows(2).any(|v| v == ["--atlas", "127.0.0.1:50051"]));
+        assert!(
+            args.windows(2)
+                .any(|v| v == ["--provider-id", "chronos-test"])
+        );
+        let json = &args[args.iter().position(|v| v == "--config-json").unwrap() + 1];
+        let config: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(config["core"]["reference"]["kind"], "linux_system");
+    }
+
+    #[test]
     fn vitals_receives_typed_manifest_fields() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
@@ -1569,6 +1585,7 @@ pub async fn execute(
             };
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
+                ("chronos", "robonix-chronos"),
                 ("executor", "robonix-executor"),
                 ("soma", "robonix-soma"),
                 ("vitals", "robonix-vitals"),
@@ -2301,6 +2318,16 @@ fn system_cli_args(
                 s("atlas").or_else(|| atlas_listen.map(str::to_string)),
             );
             push_pair(&mut out, "--pilot-endpoint", s("pilot_endpoint"));
+            push_pair(&mut out, "--log", s("log"));
+        }
+        "chronos" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas_endpoint").or_else(|| atlas_listen.map(str::to_string)),
+            );
+            push_pair(&mut out, "--provider-id", s("provider_id"));
             push_pair(&mut out, "--log", s("log"));
         }
         "soma" => {

@@ -10,6 +10,7 @@ name = "robonix-atlas"
 path = "src/main.rs"
 
 [dependencies]
+robonix-chronos-clock.workspace = true
 clap.workspace = true
 robonix-scribe.workspace = true
 serde.workspace = true
@@ -35,8 +36,10 @@ tonic-prost-build.workspace = true
 # NOTE: robonix-codegen build-dependency REMOVED (robonix-codegen RIDL codegen removed from server build)
 
 [dev-dependencies]
+libc = "0.2"
+tempfile = "3"
 # robonix-sdk dev-dep removed — Node-* wire schema retired and the SDK
 # is being replaced by a generated robonix-proto crate (task #31).
 # End-to-end tests will be rewritten against the new Atlas API there.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 serde_json.workspace = true

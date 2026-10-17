@@ -88,9 +88,36 @@ struct DeclaredEndpoint {
     /// Provider-supplied natural-language description for this
     /// Capability. Empty means "fall back to contract default".
     description: String,
+    /// Optional structured binding from this sensor stream to a clock domain.
+    time_descriptor: Option<CapabilityTimeDescriptorState>,
     /// Diagnostic only: this endpoint's contract is outside the provider's
     /// primary namespace without an explicit cross-namespace opt-in.
     namespace_mismatch: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityTimeDescriptorState {
+    domain_id: String,
+    timestamp_semantics: String,
+    is_hardware_timestamped: bool,
+    pipeline_delay_ns: Option<u64>,
+    pipeline_uncertainty_ns: u64,
+    supports_per_point_timestamp: bool,
+}
+
+impl From<&CapabilityTimeDescriptorState> for pb::CapabilityTimeDescriptor {
+    /// Copy stored static timing into the public protobuf without changing
+    /// optional fixed-delay presence.
+    fn from(value: &CapabilityTimeDescriptorState) -> Self {
+        Self {
+            domain_id: value.domain_id.clone(),
+            timestamp_semantics: value.timestamp_semantics.clone(),
+            is_hardware_timestamped: value.is_hardware_timestamped,
+            pipeline_delay_ns: value.pipeline_delay_ns,
+            pipeline_uncertainty_ns: value.pipeline_uncertainty_ns,
+            supports_per_point_timestamp: value.supports_per_point_timestamp,
+        }
+    }
 }
 
 fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S::Ok, S::Error> {
@@ -126,6 +153,9 @@ struct CapabilityProviderState {
     /// portable across the provider's / consumer's filesystem boundaries.
     capability_md: String,
     last_heartbeat_ms: u64,
+    /// Local Chronos steady time for eviction; never published as reference time.
+    #[serde(skip)]
+    last_heartbeat_steady_ns: u64,
     endpoints: Vec<DeclaredEndpoint>,
     /// Last value reported by SetLifecycleState. Providers remain REGISTERED
     /// until their lifecycle Driver explicitly publishes a transition.
@@ -146,6 +176,7 @@ impl CapabilityProviderState {
             params: Some((&e.params).into()),
             description: e.description.clone(),
             namespace_mismatch: e.namespace_mismatch,
+            time_descriptor: e.time_descriptor.as_ref().map(Into::into),
         }
     }
 }
@@ -347,11 +378,26 @@ impl AtlasRegistry {
 }
 
 impl AtlasRegistry {
-    pub fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+    /// Read Chronos reference milliseconds, rejecting read or quality failure.
+    pub fn now_ms() -> Result<u64, Status> {
+        Ok(Self::snapshot()?.0)
+    }
+
+    /// Pair reference milliseconds with local steady nanoseconds before mutation.
+    /// Unverified Linux time remains usable; unavailable or negative time does not.
+    fn snapshot() -> Result<(u64, u64), Status> {
+        let snapshot = robonix_chronos_clock::snapshot()
+            .map_err(|error| Status::unavailable(format!("Chronos time read failed: {error}")))?;
+        if !snapshot.reference.available {
+            return Err(Status::unavailable(format!(
+                "Chronos reference unavailable: {}",
+                snapshot.reference.reason
+            )));
+        }
+        let reference_ns = u64::try_from(snapshot.reference.timestamp_ns).map_err(|error| {
+            Status::unavailable(format!("Chronos timestamp out of range: {error}"))
+        })?;
+        Ok((reference_ns / 1_000_000, snapshot.steady.timestamp_ns))
     }
 
     fn assign_id() -> String {
@@ -409,6 +455,7 @@ impl AtlasRegistry {
                     existing.kind, kind
                 )));
             }
+            let (now_ms, steady_ns) = Self::snapshot()?;
             // Same-kind takeover. Drop the previous provider's endpoints
             // and pushed state; the caller will redeclare what it owns.
             // Channels targeting dropped Capabilities are also auto-closed.
@@ -417,7 +464,8 @@ impl AtlasRegistry {
             existing.registration_id = Uuid::new_v4().to_string();
             existing.capability_md_path = capability_md_path.trim().to_string();
             existing.capability_md = capability_md.to_string();
-            existing.last_heartbeat_ms = Self::now_ms();
+            existing.last_heartbeat_ms = now_ms;
+            existing.last_heartbeat_steady_ns = steady_ns;
             existing.endpoints.clear();
             existing.pushed_state = None;
             existing.state_detail.clear();
@@ -428,6 +476,7 @@ impl AtlasRegistry {
             );
             return Ok(provider_id);
         }
+        let (now_ms, steady_ns) = Self::snapshot()?;
         state.providers.insert(
             provider_id.clone(),
             CapabilityProviderState {
@@ -437,7 +486,8 @@ impl AtlasRegistry {
                 namespace,
                 capability_md_path: capability_md_path.trim().to_string(),
                 capability_md: capability_md.to_string(),
-                last_heartbeat_ms: Self::now_ms(),
+                last_heartbeat_ms: now_ms,
+                last_heartbeat_steady_ns: steady_ns,
                 endpoints: Vec::new(),
                 pushed_state: None,
                 state_detail: String::new(),
@@ -516,17 +566,19 @@ impl AtlasRegistry {
         Ok(prev)
     }
 
-    /// Updates `last_heartbeat_ms` to now. Returns the timestamp it set.
+    /// Update reference and steady heartbeat times together, returning reference ms.
+    /// Clock failure returns UNAVAILABLE without changing either time.
     pub async fn heartbeat(&self, provider_id: &str) -> Result<u64, Status> {
         let provider_id = Self::require("provider_id", provider_id)?;
-        let now = Self::now_ms();
         let mut state = self.inner.write().await;
         let provider = state
             .providers
             .get_mut(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
-        provider.last_heartbeat_ms = now;
-        Ok(now)
+        let (now_ms, steady_ns) = Self::snapshot()?;
+        provider.last_heartbeat_ms = now_ms;
+        provider.last_heartbeat_steady_ns = steady_ns;
+        Ok(now_ms)
     }
 
     /// Declare ONE transport for ONE contract on a registered provider. Returns
@@ -541,9 +593,35 @@ impl AtlasRegistry {
         params: pb::TransportParams,
         description: &str,
     ) -> Result<String, Status> {
+        self.declare_with_time(
+            provider_id,
+            contract_id,
+            transport,
+            proposed,
+            params,
+            description,
+            None,
+        )
+        .await
+    }
+
+    /// Declare one transport binding with optional structured sensor timing.
+    /// Existing callers use `declare`, which preserves the metadata-free path.
+    #[allow(clippy::too_many_arguments)] // Mirrors DeclareCapabilityRequest exactly.
+    pub async fn declare_with_time(
+        &self,
+        provider_id: &str,
+        contract_id: &str,
+        transport: Transport,
+        proposed: &str,
+        params: pb::TransportParams,
+        description: &str,
+        time_descriptor: Option<pb::CapabilityTimeDescriptor>,
+    ) -> Result<String, Status> {
         let provider_id = Self::require("provider_id", provider_id)?;
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
         let params = parse_params(transport, Some(params))?;
+        let time_descriptor = time_descriptor.map(parse_time_descriptor).transpose()?;
         let proposed = proposed.trim().to_string();
 
         let mut state = self.inner.write().await;
@@ -597,6 +675,7 @@ impl AtlasRegistry {
             endpoint: endpoint.clone(),
             params,
             description: description.to_string(),
+            time_descriptor,
             namespace_mismatch,
         });
         info!("[atlas] declare {provider_id} {contract_id} via {transport:?} -> {endpoint}");
@@ -699,7 +778,15 @@ impl AtlasRegistry {
         provider_id: &str,
         contract_id: &str,
         transport: Transport,
-    ) -> Result<(String, String, pb::TransportParams), Status> {
+    ) -> Result<
+        (
+            String,
+            String,
+            pb::TransportParams,
+            Option<pb::CapabilityTimeDescriptor>,
+        ),
+        Status,
+    > {
         let consumer_id = Self::require("consumer_id", consumer_id)?.to_string();
         let provider_id = Self::require("provider_id", provider_id)?.to_string();
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
@@ -725,7 +812,9 @@ impl AtlasRegistry {
             })?;
         let endpoint = ep.endpoint.clone();
         let params: pb::TransportParams = (&ep.params).into();
+        let time_descriptor = ep.time_descriptor.as_ref().map(Into::into);
 
+        let opened_at_ms = Self::now_ms()?;
         let channel_id = format!("ch-{}", Uuid::new_v4().simple());
         state.channels.insert(
             channel_id.clone(),
@@ -736,14 +825,14 @@ impl AtlasRegistry {
                 contract_id: contract_id.clone(),
                 transport,
                 endpoint: endpoint.clone(),
-                opened_at_ms: Self::now_ms(),
+                opened_at_ms,
             },
         );
         info!(
             "[atlas] connect '{consumer_id}' -> '{provider_id}' \
              {contract_id} via {transport:?} -> {endpoint} ({channel_id})"
         );
-        Ok((channel_id, endpoint, params))
+        Ok((channel_id, endpoint, params, time_descriptor))
     }
 
     /// Idempotent: returns `true` if a channel was removed, `false` if
@@ -781,6 +870,33 @@ impl AtlasRegistry {
         serde_json::to_string_pretty(&*state)
             .map_err(|e| Status::internal(format!("inspect serialise failed: {e}")))
     }
+}
+
+/// Validate required clock-domain and acquisition-event identities while
+/// retaining numeric zero as a valid exact delay or uncertainty.
+fn parse_time_descriptor(
+    value: pb::CapabilityTimeDescriptor,
+) -> Result<CapabilityTimeDescriptorState, Status> {
+    let domain_id = value.domain_id.trim();
+    let timestamp_semantics = value.timestamp_semantics.trim();
+    if domain_id.is_empty() {
+        return Err(Status::invalid_argument(
+            "time_descriptor.domain_id required",
+        ));
+    }
+    if timestamp_semantics.is_empty() {
+        return Err(Status::invalid_argument(
+            "time_descriptor.timestamp_semantics required",
+        ));
+    }
+    Ok(CapabilityTimeDescriptorState {
+        domain_id: domain_id.to_string(),
+        timestamp_semantics: timestamp_semantics.to_string(),
+        is_hardware_timestamped: value.is_hardware_timestamped,
+        pipeline_delay_ns: value.pipeline_delay_ns,
+        pipeline_uncertainty_ns: value.pipeline_uncertainty_ns,
+        supports_per_point_timestamp: value.supports_per_point_timestamp,
+    })
 }
 
 /// Whether Atlas can mint a fresh endpoint name for this transport without
@@ -935,6 +1051,115 @@ fn resolve_endpoint(
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    /// A steady regression stops eviction and its server before any state changes.
+    async fn eviction_regression_is_atomic_and_stops_server() {
+        let registry = Arc::new(AtlasRegistry::default());
+        registry
+            .register(
+                "clock-test",
+                pb::Kind::Service,
+                "robonix/service/test",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .declare(
+                "clock-test",
+                "robonix/service/test/stream",
+                Transport::Ros2,
+                "/clock_test",
+                ros2_params(),
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .connect(
+                "consumer",
+                "clock-test",
+                "robonix/service/test/stream",
+                Transport::Ros2,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .write()
+            .await
+            .providers
+            .get_mut("clock-test")
+            .unwrap()
+            .last_heartbeat_steady_ns = u64::MAX;
+        let before = registry.inspect_json().await.unwrap();
+        let error = eviction_loop(registry.clone(), 1, 1, 1).await.unwrap_err();
+        assert!(format!("{error:#}").contains("steady time regressed"));
+        assert_eq!(registry.inspect_json().await.unwrap(), before);
+
+        // Disabled eviction is an explicit deployment setting, not a failure.
+        if read_env_u64(
+            "ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS",
+            DEFAULT_HEARTBEAT_TIMEOUT_MS,
+        ) != 0
+        {
+            let interval_ms = read_env_u64(
+                "ROBONIX_ATLAS_EVICTION_INTERVAL_MS",
+                DEFAULT_EVICTION_INTERVAL_MS,
+            );
+            tokio::time::resume();
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = reserved.local_addr().unwrap();
+            drop(reserved);
+            let server = tokio::spawn(serve_atlas(registry.clone(), address));
+            let mut client = crate::client::AtlasClient::connect_with_retry(
+                address.to_string(),
+                50,
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+            // Establish a real HTTP/2 connection before the eviction timer fires.
+            client
+                .inner()
+                .query(pb::QueryRequest::default())
+                .await
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::advance(
+                std::time::Duration::from_millis(interval_ms)
+                    .saturating_add(std::time::Duration::from_millis(1)),
+            )
+            .await;
+            // Network shutdown needs real I/O readiness, not automatic timer jumps.
+            tokio::time::resume();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(6), server)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("steady time regressed"));
+            assert!(!format!("{error:#}").contains("shutdown timed out"));
+            assert_eq!(registry.inspect_json().await.unwrap(), before);
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    client.heartbeat("clock-test")
+                )
+                .await
+                .unwrap()
+                .is_err(),
+                "established connections must close"
+            );
+        }
+        assert_eq!(
+            Arc::strong_count(&registry),
+            1,
+            "eviction must release its registry"
+        );
+    }
 
     fn ros2_params() -> pb::TransportParams {
         pb::TransportParams {
@@ -1112,6 +1337,110 @@ mod endpoint_tests {
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].capabilities.len(), 1);
         assert!(providers[0].capabilities[0].namespace_mismatch);
+    }
+
+    /// Structured timing survives declaration, Query, and Connect as one
+    /// record while metadata-free declarations remain valid.
+    #[tokio::test]
+    async fn optional_time_descriptor_round_trips() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        let timing = pb::CapabilityTimeDescriptor {
+            domain_id: "camera_clock".into(),
+            timestamp_semantics: "exposure_midpoint".into(),
+            is_hardware_timestamped: true,
+            pipeline_delay_ns: Some(1_000),
+            pipeline_uncertainty_ns: 200,
+            supports_per_point_timestamp: false,
+        };
+        registry
+            .declare_with_time(
+                "front_camera",
+                "robonix/primitive/camera/rgb",
+                Transport::Ros2,
+                "/camera/rgb",
+                ros2_params(),
+                "",
+                Some(timing.clone()),
+            )
+            .await
+            .expect("timed declaration");
+        let providers = registry
+            .query(
+                "front_camera",
+                pb::Kind::Primitive,
+                "robonix/primitive/camera/rgb",
+                Transport::Ros2,
+            )
+            .await;
+        assert_eq!(
+            providers[0].capabilities[0].time_descriptor,
+            Some(timing.clone())
+        );
+        let (_, _, _, connected_timing) = registry
+            .connect(
+                "mapping",
+                "front_camera",
+                "robonix/primitive/camera/rgb",
+                Transport::Ros2,
+            )
+            .await
+            .expect("connect timed capability");
+        assert_eq!(connected_timing, Some(timing));
+    }
+
+    /// Supplying a partial descriptor fails explicitly, while omitting the
+    /// descriptor preserves the old declaration behavior.
+    #[tokio::test]
+    async fn time_descriptor_requires_domain_and_semantics() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "lidar",
+                pb::Kind::Primitive,
+                "robonix/primitive/lidar",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "lidar",
+                "robonix/primitive/lidar/lidar",
+                Transport::Ros2,
+                "/lidar/raw",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("legacy declaration");
+        let error = registry
+            .declare_with_time(
+                "lidar",
+                "robonix/primitive/lidar/points",
+                Transport::Ros2,
+                "/lidar/points",
+                ros2_params(),
+                "",
+                Some(pb::CapabilityTimeDescriptor {
+                    domain_id: "".into(),
+                    timestamp_semantics: "scan_start".into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect_err("empty timing domain");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -1575,6 +1904,7 @@ cross_namespace = true
                 capability_md_path: String::new(),
                 capability_md: String::new(),
                 last_heartbeat_ms: 0,
+                last_heartbeat_steady_ns: 0,
                 endpoints: vec![DeclaredEndpoint {
                     contract_id: "robonix/primitive/chassis/odom".to_string(),
                     transport: Transport::Ros2,
@@ -1583,6 +1913,7 @@ cross_namespace = true
                         qos_profile: "reliable".to_string(),
                     },
                     description: String::new(),
+                    time_descriptor: None,
                     namespace_mismatch: false,
                 }],
                 pushed_state: None,
@@ -1715,13 +2046,14 @@ impl pb::atlas_server::Atlas for AtlasService {
         let transport = parse_transport(r.transport)?;
         let endpoint = self
             .registry
-            .declare(
+            .declare_with_time(
                 &r.provider_id,
                 &r.contract_id,
                 transport,
                 &r.endpoint,
                 r.params.unwrap_or_default(),
                 &r.description,
+                r.time_descriptor,
             )
             .await?;
         Ok(Response::new(pb::DeclareCapabilityResponse { endpoint }))
@@ -1747,7 +2079,7 @@ impl pb::atlas_server::Atlas for AtlasService {
     ) -> Result<Response<pb::ConnectCapabilityResponse>, Status> {
         let r = req.into_inner();
         let transport = parse_transport(r.transport)?;
-        let (channel_id, endpoint, params) = self
+        let (channel_id, endpoint, params, time_descriptor) = self
             .registry
             .connect(&r.consumer_id, &r.provider_id, &r.contract_id, transport)
             .await?;
@@ -1755,6 +2087,7 @@ impl pb::atlas_server::Atlas for AtlasService {
             channel_id,
             endpoint,
             params: Some(params),
+            time_descriptor,
         }))
     }
 
@@ -1835,10 +2168,10 @@ async fn eviction_loop(
     timeout_ms: u64,
     gc_after_ms: u64,
     interval_ms: u64,
-) {
+) -> Result<()> {
     if timeout_ms == 0 {
         info!("[atlas] heartbeat eviction disabled (timeout=0)");
-        return;
+        return Ok(());
     }
     info!(
         "[atlas] heartbeat eviction: terminate-after={timeout_ms}ms \
@@ -1847,16 +2180,29 @@ async fn eviction_loop(
     let interval = std::time::Duration::from_millis(interval_ms);
     loop {
         tokio::time::sleep(interval).await;
-        let now = AtlasRegistry::now_ms();
         let mut state = registry.inner.write().await;
+        let now_ns = robonix_chronos_clock::steady_time()
+            .context("Chronos steady time read failed during heartbeat eviction")?
+            .timestamp_ns;
+        // Validate all ages before any lifecycle/channel mutation. A regression
+        // must stop this operation, rather than treating a provider as fresh.
+        let ages_ms: HashMap<String, u64> = state
+            .providers
+            .iter()
+            .map(|(id, provider)| {
+                let elapsed_ns = now_ns
+                    .checked_sub(provider.last_heartbeat_steady_ns)
+                    .context("Chronos steady time regressed during heartbeat eviction")?;
+                Ok((id.clone(), elapsed_ns / 1_000_000))
+            })
+            .collect::<Result<_>>()?;
 
         // Phase 1: lapsed → TERMINATED.
         let lapsed: Vec<String> = state
             .providers
             .iter()
-            .filter(|(_, provider)| {
-                now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms
-                    && provider.state() != pb::LifecycleState::StateTerminated
+            .filter(|(id, provider)| {
+                ages_ms[*id] > timeout_ms && provider.state() != pb::LifecycleState::StateTerminated
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1876,9 +2222,9 @@ async fn eviction_loop(
         let stale: Vec<String> = state
             .providers
             .iter()
-            .filter(|(_, provider)| {
+            .filter(|(id, provider)| {
                 provider.state() == pb::LifecycleState::StateTerminated
-                    && now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms + gc_after_ms
+                    && ages_ms[*id] > timeout_ms.saturating_add(gc_after_ms)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1890,9 +2236,9 @@ async fn eviction_loop(
 }
 
 /// Start the Atlas gRPC server on `listen` using the given registry.
-/// Spawns a background heartbeat-eviction task and exposes BOTH the new
-/// `Atlas` service and the deprecated `RobonixRuntime` shim on the same
-/// gRPC port.
+/// Supervise heartbeat eviction alongside the Atlas service. Steady clock
+/// failure or eviction task failure stops the server with an error. Dropping
+/// this future also cancels eviction, so it cannot retain an orphan registry.
 pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Result<()> {
     let timeout_ms = read_env_u64(
         "ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS",
@@ -1906,7 +2252,8 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
         "ROBONIX_ATLAS_EVICTION_INTERVAL_MS",
         DEFAULT_EVICTION_INTERVAL_MS,
     );
-    let _eviction_task = tokio::spawn(eviction_loop(
+    let mut eviction_tasks = tokio::task::JoinSet::new();
+    eviction_tasks.spawn(eviction_loop(
         Arc::clone(&registry),
         timeout_ms,
         gc_after_ms,
@@ -1916,10 +2263,29 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
     let svc = AtlasService::new(Arc::clone(&registry));
 
     info!("[atlas] gRPC listening on {listen}");
-    tonic::transport::Server::builder()
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let server = tonic::transport::Server::builder()
         .add_service(pb::atlas_server::AtlasServer::new(svc))
-        .serve(listen)
-        .await
-        .context("Atlas server failed")?;
-    Ok(())
+        .serve_with_shutdown(listen, async {
+            let _ = stopped.await;
+        });
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result.context("Atlas server failed"),
+        result = eviction_tasks.join_next(), if timeout_ms != 0 => {
+            let failure = match result {
+                Some(Ok(Err(error))) => error,
+                Some(Err(error)) => anyhow::Error::from(error).context("Atlas heartbeat eviction task failed"),
+                _ => anyhow::anyhow!("Atlas heartbeat eviction stopped unexpectedly"),
+            };
+            let _ = shutdown.send(());
+            // Drain accepted connections so embedded callers cannot keep using
+            // a registry whose mandatory eviction task has stopped.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
+                Ok(Ok(())) => Err(failure),
+                Ok(Err(error)) => Err(failure.context(format!("Atlas server shutdown also failed: {error}"))),
+                Err(_) => Err(failure.context("Atlas server shutdown timed out")),
+            }
+        }
+    }
 }
