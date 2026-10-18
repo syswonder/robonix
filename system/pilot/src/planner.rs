@@ -225,6 +225,12 @@ fn response_mode(task: &Task) -> &'static str {
     }
 }
 
+fn public_plan(plan: &Plan) -> Plan {
+    let mut public = plan.clone();
+    public.auth_session_token.clear();
+    public
+}
+
 /// Skip vector memory prefetch for trivial chit-chat (saves latency and noise).
 fn skip_memory_prefetch(user_text: &str) -> bool {
     let t = user_text.trim();
@@ -752,6 +758,7 @@ fn append_steer(
     task: Task,
     history: &mut Vec<Message>,
     current_task: &mut Option<TaskState>,
+    auth_session_token: &mut String,
 ) -> bool {
     let text = task.text.trim();
     if text.is_empty() {
@@ -767,6 +774,7 @@ fn append_steer(
         success_criterion: DEFAULT_SUCCESS_CRITERION.to_string(),
         status: "in_progress".to_string(),
     });
+    auth_session_token.clone_from(&task.auth_session_token);
     true
 }
 
@@ -774,10 +782,11 @@ fn drain_steers(
     steer_rx: &mut mpsc::Receiver<Task>,
     history: &mut Vec<Message>,
     current_task: &mut Option<TaskState>,
+    auth_session_token: &mut String,
 ) -> bool {
     let mut pulled = false;
     while let Ok(task) = steer_rx.try_recv() {
-        pulled |= append_steer(task, history, current_task);
+        pulled |= append_steer(task, history, current_task, auth_session_token);
     }
     pulled
 }
@@ -1044,6 +1053,7 @@ pub async fn run_turn(
     transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
+    let mut auth_session_token = task.auth_session_token.clone();
 
     macro_rules! return_interrupted {
         ($forest:expr) => {{
@@ -1215,7 +1225,12 @@ pub async fn run_turn(
                     steer = steer_rx.recv() => {
                         match steer {
                             Some(task) => {
-                                if append_steer(task, history, standing_task) {
+                                if append_steer(
+                                    task,
+                                    history,
+                                    standing_task,
+                                    &mut auth_session_token,
+                                ) {
                                     should_plan = true;
                                 }
                             }
@@ -1234,7 +1249,12 @@ pub async fn run_turn(
                 }
                 steer = steer_rx.recv() => {
                     if let Some(task) = steer
-                        && append_steer(task, history, standing_task)
+                        && append_steer(
+                            task,
+                            history,
+                            standing_task,
+                            &mut auth_session_token,
+                        )
                     {
                         // Re-plan now so the model can react (and decide
                         // whether to cancel any in-flight tree).
@@ -1349,7 +1369,12 @@ pub async fn run_turn(
 
         // Pull any steers that landed while we were busy (e.g. during the
         // previous VLM stream) so this round plans with the latest user input.
-        drain_steers(&mut steer_rx, history, standing_task);
+        drain_steers(
+            &mut steer_rx,
+            history,
+            standing_task,
+            &mut auth_session_token,
+        );
         transcript.record(history, standing_task.as_ref());
 
         // Re-discover capabilities from atlas every round so providers that
@@ -1532,8 +1557,18 @@ pub async fn run_turn(
                         }
                         steer = steer_rx.recv() => {
                             if let Some(task) = steer {
-                                append_steer(task, history, standing_task);
-                                drain_steers(&mut steer_rx, history, standing_task);
+                                append_steer(
+                                    task,
+                                    history,
+                                    standing_task,
+                                    &mut auth_session_token,
+                                );
+                                drain_steers(
+                                    &mut steer_rx,
+                                    history,
+                                    standing_task,
+                                    &mut auth_session_token,
+                                );
                             }
                             // The response being sampled was built without this
                             // input. Drop it before parsing or dispatching any
@@ -1895,7 +1930,8 @@ pub async fn run_turn(
             continue 'supervisor;
         }
 
-        let graph = graph.expect("non-meta RTDL response must carry a graph");
+        let mut graph = graph.expect("non-meta RTDL response must carry a graph");
+        graph.auth_session_token.clone_from(&auth_session_token);
 
         let calls = plan_call_count(&graph);
         let call_signatures = plan_call_signatures(&graph);
@@ -2043,7 +2079,7 @@ pub async fn run_turn(
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
-                PilotStreamBody::Plan(graph.clone()),
+                PilotStreamBody::Plan(public_plan(&graph)),
             )))
             .await;
         cancel_requested.extend(cancel_targets);
@@ -2442,6 +2478,7 @@ fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan 
             description: "recovery: no valid plan produced".to_string(),
         }],
         root_index: 0,
+        auth_session_token: String::new(),
     }
 }
 
@@ -2503,6 +2540,7 @@ fn expand_rtdl_to_plan(
         round,
         nodes,
         root_index,
+        auth_session_token: String::new(),
     })
 }
 
@@ -3213,7 +3251,7 @@ mod tests {
         feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
         is_legacy_plan_control_contract, is_terminal_executor_state,
         mixes_control_inspection_with_action, next_op_id, parse_meta_plan_op,
-        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures,
+        parse_rtdl_assistant_response, parse_task_update, plan_call_signatures, public_plan,
         record_dispatched_plan, rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, start_or_resume_task,
         task_is_session_end, upsert_terminal_result,
@@ -3704,20 +3742,24 @@ mod tests {
     fn steer_becomes_a_new_interaction_without_concatenating_old_goals() {
         let mut standing = None;
         let mut history = Vec::new();
+        let mut auth_session_token = String::new();
         start_or_resume_task(&mut standing, "perform step A, then step B");
         assert!(append_steer(
             Task {
                 text: "change of plan: stop after step A".into(),
+                auth_session_token: "steer-token".into(),
                 ..Default::default()
             },
             &mut history,
             &mut standing,
+            &mut auth_session_token,
         ));
 
         let state = standing.as_ref().unwrap();
         assert_eq!(state.goal, "change of plan: stop after step A");
         assert!(!state.goal.contains("perform step A"));
         assert_eq!(history.len(), 1);
+        assert_eq!(auth_session_token, "steer-token");
         assert_eq!(
             history[0].content.as_deref(),
             Some(
@@ -3731,6 +3773,7 @@ mod tests {
     fn steer_targets_one_plan_without_discarding_independent_work() {
         let mut standing = None;
         let mut history = Vec::new();
+        let mut auth_session_token = String::new();
         start_or_resume_task(&mut standing, "go to the meeting room");
 
         let mut forest = HashMap::new();
@@ -3760,6 +3803,7 @@ mod tests {
             },
             &mut history,
             &mut standing,
+            &mut auth_session_token,
         ));
         assert_eq!(
             standing.as_ref().unwrap().goal,
@@ -4001,6 +4045,7 @@ mod tests {
             audio_data: Vec::new(),
             context_json: ctx.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         }
     }
 
@@ -4035,6 +4080,16 @@ mod tests {
         assert!(!skip_memory_prefetch("find me a red cup"));
     }
 
+    #[test]
+    fn public_plan_redacts_internal_auth_credential() {
+        let mut internal = single_do_plan("run_command");
+        internal.auth_session_token = "reusable-secret".into();
+
+        let public = public_plan(&internal);
+        assert!(public.auth_session_token.is_empty());
+        assert_eq!(internal.auth_session_token, "reusable-secret");
+    }
+
     fn single_do_plan(contract_leaf: &str) -> Plan {
         Plan {
             plan_id: "p".into(),
@@ -4053,6 +4108,7 @@ mod tests {
                 op_id: "op_1".into(),
                 description: "control action".into(),
             }],
+            auth_session_token: String::new(),
         }
     }
 

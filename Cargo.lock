@@ -3251,6 +3251,7 @@ name = "robonix-executor"
 version = "1.1.0-beta.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "nix 0.31.3",
  "prost",
@@ -3259,6 +3260,7 @@ dependencies = [
  "robonix-atlas",
  "robonix-codegen",
  "robonix-scribe",
+ "robonix-sentinel",
  "serde",
  "serde_json",
  "serde_yaml",

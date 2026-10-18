@@ -427,6 +427,50 @@ listen: 127.0.0.1:50095
     }
 
     #[test]
+    fn executor_rule_paths_resolve_from_the_manifest_directory() {
+        let manifest_dir = PathBuf::from("/tmp/robonix-deployment");
+        let mut system = HashMap::from([(
+            "executor".to_string(),
+            serde_yaml::from_str(
+                r#"
+sentinel_rules: data/sentinel-rules.json
+sentinel_rules_seed: sentinel-rules.v1.json
+"#,
+            )
+            .expect("executor config"),
+        )]);
+
+        resolve_executor_rule_paths(&mut system, &manifest_dir);
+        let args = system_cli_args("executor", system.get("executor"), None);
+        let config_json = args
+            .windows(2)
+            .find(|pair| pair[0] == "--config-json")
+            .map(|pair| pair[1].as_str())
+            .expect("--config-json");
+        let forwarded: serde_json::Value =
+            serde_json::from_str(config_json).expect("Executor config JSON");
+
+        assert_eq!(
+            forwarded["sentinel_rules"].as_str(),
+            Some(
+                manifest_dir
+                    .join("data/sentinel-rules.json")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            forwarded["sentinel_rules_seed"].as_str(),
+            Some(
+                manifest_dir
+                    .join("sentinel-rules.v1.json")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[test]
     fn provider_failure_ignores_later_shutdown_noise() {
         let path = std::env::temp_dir().join(format!(
             "rbnx-provider-failure-{}.log",
@@ -909,6 +953,36 @@ fn ensure_soma_defaults(
         }
         let joined = manifest_dir.join(p);
         *v = Value::String(joined.to_string_lossy().into_owned());
+    }
+}
+
+fn resolve_executor_rule_paths(
+    system: &mut HashMap<String, serde_yaml::Value>,
+    manifest_dir: &Path,
+) {
+    let Some(executor) = system
+        .get_mut("executor")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    for key in ["sentinel_rules", "sentinel_rules_seed"] {
+        let yaml_key = serde_yaml::Value::String(key.to_owned());
+        let Some(path) = executor
+            .get(&yaml_key)
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        if path.is_relative() {
+            executor.insert(
+                yaml_key,
+                serde_yaml::Value::String(manifest_dir.join(path).to_string_lossy().into_owned()),
+            );
+        }
     }
 }
 
@@ -1443,6 +1517,9 @@ pub async fn execute(
     let soma_implied = !deploy.primitive.is_empty() || !deploy.skill.is_empty();
     if (soma_declared || soma_implied) && !skip_system {
         ensure_soma_defaults(&mut deploy.system, &manifest_dir, &manifest_path);
+    }
+    if !skip_system {
+        resolve_executor_rule_paths(&mut deploy.system, &manifest_dir);
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));

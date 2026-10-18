@@ -916,6 +916,7 @@ mod tests {
                     description: "take snapshot".into(),
                 },
             ],
+            auth_session_token: String::new(),
         };
         runtime.record_plan_ops(&plan).await;
         runtime
@@ -963,6 +964,7 @@ mod tests {
                     op_id: "1".into(),
                     description: "drive to the kitchen".into(),
                 }],
+                auth_session_token: String::new(),
             })
             .await;
         runtime.register_plan("p2").await;

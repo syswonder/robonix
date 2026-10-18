@@ -100,7 +100,8 @@ Atlas, Executor, Keystone, Soma, Vitals, Pilot, then Liaison. Their `system.<nam
 manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or
-skills.
+skills. Relative `system.executor.sentinel_rules` and `sentinel_rules_seed`
+paths are resolved from the deployment manifest directory.
 
 For example, this enables Vitals without a separate terminal or global
 `RUST_LOG` setting:

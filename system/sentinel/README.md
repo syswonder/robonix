@@ -1,8 +1,8 @@
 # Sentinel - capability-call policy
 
 Sentinel provides the transport-independent rule model and policy evaluation
-for capability calls. Executor and Atlas do not invoke Sentinel yet, so these
-rules are not enforced by the current call path.
+for capability calls. Executor evaluates the active rules immediately before
+dispatching each RTDL `do` node.
 
 Rules can match a contract wildcard, exact Keystone users or roles, local-time
 windows, typed call arguments, and typed robot context. The highest-priority
@@ -30,9 +30,9 @@ performed. For example:
 The `~1` escape represents `/` inside a JSON Pointer component. Argument
 predicates use the same schema but address the capability's `args_json` root.
 
-The `list_rules` and `replace_rules` capability contracts describe the rule
-management interface. Their provider and persistence behavior will be added
-with the runtime integration.
+Executor serves the `list_rules` and `replace_rules` capability contracts from
+the Sentinel management endpoint. Replacements are validated and persisted
+before they become active.
 
 Run the policy tests from the repository root:
 

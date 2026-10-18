@@ -42,6 +42,12 @@ system:
     # robonix-client polls Executor for authoritative active RTDL plans.
     # Bind externally on trusted LAN/Tailscale deployments.
     listen: 0.0.0.0:50061
+    # robonix-client reaches Sentinel management through Atlas.
+    sentinel_listen: 0.0.0.0:50062
+    # Active rules belong to this robot and survive source-tree rebuilds.
+    sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
+    # The checked-in baseline is copied only when active rules are absent.
+    sentinel_rules_seed: sentinel-rules.v1.json
     # verifier.
     verification:
       overlap: true

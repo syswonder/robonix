@@ -87,9 +87,10 @@ hands-free mode is enabled and resolves the session before every voice capture.
 If the account's voice guard is disabled, the voice turn skips Voiceprint; if it
 is enabled, Voiceprint must identify the logged-in account above Keystone's
 configured threshold.
-Liaison removes the token before forwarding and replaces caller-supplied identity
-fields with the Keystone account. The local Liaison access policy is used only
-when Keystone is not configured.
+Liaison removes the token from `context_json`, replaces caller-supplied identity
+fields with the Keystone account, and forwards the validated credential in the
+internal `Task.auth_session_token` field. The local Liaison access policy is
+used only when Keystone is not configured.
 
 Manifest configuration cannot provide a login token. When Keystone is
 configured, hands-free mode therefore starts disabled until an authenticated

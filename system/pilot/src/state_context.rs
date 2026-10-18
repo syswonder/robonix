@@ -91,6 +91,7 @@ async fn query_scene(
             description: "Read Scene spatial context before planning".into(),
         }],
         root_index: 0,
+        auth_session_token: String::new(),
     };
     let query = async {
         let mut stream = graph

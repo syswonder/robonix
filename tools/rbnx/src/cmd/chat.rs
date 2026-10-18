@@ -1693,6 +1693,7 @@ fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pi
         })
         .to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     }
 }
 
@@ -1718,6 +1719,7 @@ fn build_control_task(
         audio_data: vec![],
         context_json: ctx.to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     }
 }
 

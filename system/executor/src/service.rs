@@ -19,6 +19,9 @@ use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::{PlanRuntime, StopWhen};
 use crate::rtdl_wire::{self, NodeEventContext};
+use crate::sentinel_runtime::{
+    SENTINEL_PROVIDER_ID, SentinelIdentity, SentinelRuntime, resolve_session_identity,
+};
 use crate::verification::{self, VerificationPolicy};
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
@@ -136,6 +139,7 @@ pub struct ExecutorServiceImpl {
     ///      handlers instead of going through MCP loopback.
     provider_id: String,
     runtime: PlanRuntime,
+    sentinel: SentinelRuntime,
     verification: Arc<VerificationPolicy>,
 }
 
@@ -143,15 +147,27 @@ impl ExecutorServiceImpl {
     pub fn new(
         atlas: AtlasClient,
         provider_id: String,
+        sentinel: SentinelRuntime,
         verification: Arc<VerificationPolicy>,
     ) -> Self {
         Self {
             atlas,
             provider_id,
             runtime: PlanRuntime::default(),
+            sentinel,
             verification,
         }
     }
+}
+
+#[derive(Clone)]
+struct ExecutionContext {
+    atlas: AtlasClient,
+    provider_id: String,
+    runtime: PlanRuntime,
+    sentinel: SentinelRuntime,
+    identity: SentinelIdentity,
+    verification: Arc<VerificationPolicy>,
 }
 
 #[tonic::async_trait]
@@ -162,13 +178,25 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
         &self,
         request: Request<Plan>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        let plan = request.into_inner();
+        let mut plan = request.into_inner();
         validate_plan(&plan).map_err(Status::invalid_argument)?;
+        let identity = if plan.auth_session_token.is_empty() {
+            SentinelIdentity::default()
+        } else {
+            resolve_session_identity(&self.atlas, &self.provider_id, &plan.auth_session_token)
+                .await?
+        };
+        plan.auth_session_token.clear();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let atlas = self.atlas.clone();
-        let provider_id = self.provider_id.clone();
         let runtime = self.runtime.clone();
-        let verification = Arc::clone(&self.verification);
+        let context = ExecutionContext {
+            atlas: self.atlas.clone(),
+            provider_id: self.provider_id.clone(),
+            runtime: runtime.clone(),
+            sentinel: self.sentinel.clone(),
+            identity,
+            verification: Arc::clone(&self.verification),
+        };
 
         tokio::spawn(async move {
             let plan_id = plan.plan_id.clone();
@@ -180,10 +208,7 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
                 Arc::clone(&plan),
                 plan.root_index as usize,
                 tx.clone(),
-                atlas,
-                provider_id,
-                runtime.clone(),
-                verification,
+                context,
             )
             .await;
             let verification_failed = wait_for_verifiers(execution.verifiers).await;
@@ -208,12 +233,12 @@ fn execute_node(
     plan: Arc<Plan>,
     node_index: usize,
     tx: Sender<Result<RtdlEvent, Status>>,
-    atlas: AtlasClient,
-    provider_id: String,
-    runtime: PlanRuntime,
-    verification: Arc<VerificationPolicy>,
+    context: ExecutionContext,
 ) -> ExecuteNodeFuture {
     Box::pin(async move {
+        let atlas = context.atlas.clone();
+        let provider_id = context.provider_id.clone();
+        let runtime = context.runtime.clone();
         let node = &plan.nodes[node_index];
         let node_ctx = node_event_context(&plan, node_index);
         let op_id = node.op_id.clone();
@@ -257,10 +282,7 @@ fn execute_node(
                         Arc::clone(&plan),
                         *child as usize,
                         tx.clone(),
-                        atlas.clone(),
-                        provider_id.clone(),
-                        runtime.clone(),
-                        verification.clone(),
+                        context.clone(),
                     )
                     .await;
                     any_failed |= child_execution.failed;
@@ -287,22 +309,10 @@ fn execute_node(
                 for child in &node.children {
                     let child_plan = Arc::clone(&plan);
                     let child_tx = tx.clone();
-                    let child_atlas = atlas.clone();
-                    let child_provider_id = provider_id.clone();
-                    let child_runtime = runtime.clone();
-                    let child_verification = verification.clone();
+                    let child_context = context.clone();
                     let child_index = *child as usize;
                     handles.push(tokio::spawn(async move {
-                        execute_node(
-                            child_plan,
-                            child_index,
-                            child_tx,
-                            child_atlas,
-                            child_provider_id,
-                            child_runtime,
-                            child_verification,
-                        )
-                        .await
+                        execute_node(child_plan, child_index, child_tx, child_context).await
                     }));
                 }
                 let mut any_failed = false;
@@ -337,16 +347,7 @@ fn execute_node(
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                execute_call(
-                    call,
-                    node_ctx.clone(),
-                    tx,
-                    atlas,
-                    provider_id.clone(),
-                    runtime.clone(),
-                    verification,
-                )
-                .await
+                execute_call(call, node_ctx.clone(), tx, context).await
             }
             _ => {
                 warn!(
@@ -501,11 +502,54 @@ async fn execute_call(
     call: &CapabilityCall,
     node: NodeEventContext,
     tx: Sender<Result<RtdlEvent, Status>>,
-    mut atlas: AtlasClient,
-    provider_id: String,
-    runtime: PlanRuntime,
-    verification: Arc<VerificationPolicy>,
+    context: ExecutionContext,
 ) -> NodeExecution {
+    let ExecutionContext {
+        mut atlas,
+        provider_id,
+        runtime,
+        sentinel,
+        identity,
+        verification,
+    } = context;
+    let decision = sentinel
+        .check(
+            &atlas,
+            SENTINEL_PROVIDER_ID,
+            &call.contract_id,
+            &call.args_json,
+            &identity,
+        )
+        .await;
+    if !decision.allow {
+        let result = CapabilityCallResult {
+            call_id: call.call_id.clone(),
+            provider_id: call.provider_id.clone(),
+            contract_id: call.contract_id.clone(),
+            success: false,
+            output: String::new(),
+            error: format!(
+                "Sentinel denied capability call by rule '{}': {}",
+                decision.rule_id, decision.reason
+            ),
+        };
+        warn!(
+            "[sentinel] denied call_id={} contract='{}' rule='{}': {}",
+            call.call_id, call.contract_id, decision.rule_id, decision.reason
+        );
+        runtime
+            .record_op_state(&node.plan_id, &node.op_id, RtdlNodeStateEnum::Failed as u32)
+            .await;
+        let _ = tx
+            .send(Ok(rtdl_wire::node_state_from_result(
+                &node,
+                result,
+                RtdlNodeStateEnum::Failed as u32,
+            )))
+            .await;
+        return NodeExecution::finished(true);
+    }
+
     // Log the args too (bounded) so the log shows what each call requested —
     // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
     // and any cap call. Truncated to keep large payloads (images, file content)
@@ -928,16 +972,18 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutorServiceImpl, MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION, MODULE_HEALTH_TTL_MS,
-        OverlapVerifier, PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
-        complete_operator, execute_call, executor_health_report, leaf_terminal_state,
-        send_operator_state, send_stop_on_enter, validate_plan, wait_for_verifiers,
+        ExecutionContext, ExecutorServiceImpl, MODULE_HEALTH_OK, MODULE_HEALTH_SCHEMA_VERSION,
+        MODULE_HEALTH_TTL_MS, OverlapVerifier, PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE,
+        RtdlNodeStateEnum, complete_operator, execute_call, executor_health_report,
+        leaf_terminal_state, send_operator_state, send_stop_on_enter, validate_plan,
+        wait_for_verifiers,
     };
     use crate::config::VerificationRule;
     use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
     use crate::rtdl_wire::NodeEventContext;
+    use crate::sentinel_runtime::{SentinelIdentity, SentinelRuntime};
     use crate::verification::VerificationPolicy;
     use robonix_atlas::client::AtlasClient;
     use robonix_atlas::service::{AtlasRegistry, serve_atlas};
@@ -946,6 +992,25 @@ mod tests {
     use std::time::Duration;
     use tokio_stream::StreamExt;
     use tonic::Request;
+
+    fn sentinel_runtime() -> SentinelRuntime {
+        SentinelRuntime::load(std::env::temp_dir().join(format!(
+            "executor-sentinel-service-test-{}.json",
+            uuid::Uuid::new_v4()
+        )))
+        .unwrap()
+    }
+
+    fn sentinel_runtime_with_rules(raw: &str) -> SentinelRuntime {
+        let path = std::env::temp_dir().join(format!(
+            "executor-sentinel-service-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, raw).unwrap();
+        let runtime = SentinelRuntime::load(path.clone()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        runtime
+    }
 
     fn call(id: &str) -> CapabilityCall {
         CapabilityCall {
@@ -978,6 +1043,58 @@ mod tests {
         assert!(module.module_key.is_empty());
         assert!(module.source.is_empty());
         assert_eq!(module.received_ts_ns, 0);
+    }
+
+    #[tokio::test]
+    async fn sentinel_denial_stops_before_provider_dispatch() {
+        let atlas_addr = reserve_address();
+        let atlas_server =
+            tokio::spawn(serve_atlas(Arc::new(AtlasRegistry::default()), atlas_addr));
+        let atlas = AtlasClient::connect_with_retry(
+            format!("http://{atlas_addr}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("connect test Atlas");
+        let runtime = PlanRuntime::default();
+        runtime.register_plan("p").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        let execution = execute_call(
+            &call("p:1"),
+            NodeEventContext {
+                plan_id: "p".into(),
+                node_index: 1,
+                node_kind: RTDL_DO,
+                op_id: "op_1".into(),
+                description: "deny before dispatch".into(),
+            },
+            tx,
+            ExecutionContext {
+                atlas,
+                provider_id: "executor".into(),
+                runtime,
+                sentinel: sentinel_runtime_with_rules(
+                    r#"[{"id":"deny-test","effect":"deny","conditions":{"contract":"robonix/test/cap"}}]"#,
+                ),
+                identity: SentinelIdentity::default(),
+                verification: Arc::new(VerificationPolicy::new(false, Vec::new())),
+            },
+        )
+        .await;
+
+        assert!(execution.failed);
+        let state = rx.recv().await.unwrap().unwrap().node_state.unwrap();
+        assert_eq!(state.state, RtdlNodeStateEnum::Failed as u32);
+        assert!(
+            state
+                .leaf_result
+                .unwrap()
+                .error
+                .contains("Sentinel denied capability call by rule 'deny-test'")
+        );
+        atlas_server.abort();
     }
 
     /// Aggregate failures without serializing the background verifiers.
@@ -1071,18 +1188,22 @@ mod tests {
                 description: "verify synchronously".into(),
             },
             tx,
-            atlas,
-            "executor".into(),
-            runtime,
-            Arc::new(VerificationPolicy::new(
-                false,
-                vec![VerificationRule {
-                    target_contract_id: contract_id.into(),
-                    target_provider_id: None,
-                    verifier_provider_id: "missing_verifier".into(),
-                    verifier_args: serde_json::json!({}),
-                }],
-            )),
+            ExecutionContext {
+                atlas,
+                provider_id: "executor".into(),
+                runtime,
+                sentinel: sentinel_runtime(),
+                identity: SentinelIdentity::default(),
+                verification: Arc::new(VerificationPolicy::new(
+                    false,
+                    vec![VerificationRule {
+                        target_contract_id: contract_id.into(),
+                        target_provider_id: None,
+                        verifier_provider_id: "missing_verifier".into(),
+                        verifier_args: serde_json::json!({}),
+                    }],
+                )),
+            },
         )
         .await;
 
@@ -1220,6 +1341,7 @@ mod tests {
         let service = ExecutorServiceImpl::new(
             atlas,
             "executor".into(),
+            sentinel_runtime(),
             Arc::new(VerificationPolicy::new(
                 true,
                 vec![VerificationRule {
@@ -1268,6 +1390,7 @@ mod tests {
                 },
             ],
             root_index: 0,
+            auth_session_token: String::new(),
         };
         let mut stream = service
             .execute(Request::new(plan))
@@ -1341,6 +1464,7 @@ mod tests {
             round: 0,
             nodes,
             root_index,
+            auth_session_token: String::new(),
         }
     }
 

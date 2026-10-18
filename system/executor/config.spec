@@ -29,6 +29,30 @@ properties:
       advertised to Atlas as 127.0.0.1 on the same port. When absent, Executor
       reads ROBONIX_EXECUTOR_LISTEN, then binds 127.0.0.1:50061.
 
+  sentinel_listen:
+    type: string
+    default: 127.0.0.1:50062
+    description: >-
+      Socket address the Sentinel rule-management services bind to. When
+      absent, Executor binds 127.0.0.1 with its own port incremented by one.
+      ROBONIX_SENTINEL_LISTEN overrides this value.
+
+  sentinel_rules:
+    type: string
+    default: rbnx-boot/data/sentinel-rules.json
+    description: >-
+      Robot-local Sentinel rule file. When absent, Executor uses
+      $ROBONIX_DATA_DIR/sentinel-rules.json, or
+      rbnx-boot/data/sentinel-rules.json when that environment variable is
+      unset. ROBONIX_SENTINEL_RULES overrides this value.
+
+  sentinel_rules_seed:
+    type: string
+    description: >-
+      Optional initial Sentinel rule file. Executor validates and copies it to
+      sentinel_rules only when the active rule file does not exist.
+      ROBONIX_SENTINEL_RULES_SEED overrides this value.
+
   atlas:
     type: string
     description: >-

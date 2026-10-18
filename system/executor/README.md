@@ -20,14 +20,17 @@ by `make build` and `make install` respectively.
 Manual launch:
 
 ```sh
-robonix-executor --atlas 127.0.0.1:50051 --listen 127.0.0.1:50072
+robonix-executor --atlas 127.0.0.1:50051 --listen 127.0.0.1:50061
 ```
 
 Important configuration:
 
 - `--atlas` / `ROBONIX_ATLAS_ENDPOINT`: Atlas endpoint. Defaults to `127.0.0.1:50051`.
-- `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50072`.
+- `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50061`.
+- `--sentinel-listen` / `ROBONIX_SENTINEL_LISTEN`: Sentinel rule-management gRPC listen address. Defaults to `127.0.0.1` with the Executor port incremented by one.
 - `--id` / `ROBONIX_EXECUTOR_PROVIDER_ID`: provider id registered with Atlas. Defaults to `executor`.
+- `--sentinel-rules` / `ROBONIX_SENTINEL_RULES`: robot-local Sentinel rule file. Defaults to `$ROBONIX_DATA_DIR/sentinel-rules.json`, or `rbnx-boot/data/sentinel-rules.json` when the data directory is unset.
+- `--sentinel-rules-seed` / `ROBONIX_SENTINEL_RULES_SEED`: optional initial Sentinel rule file. Executor validates and copies it only when the active rule file does not exist.
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_executor=info`.
 
 Result verification rules live in the deployment manifest's `system.executor`
@@ -53,6 +56,14 @@ startup. `verifier_args` must be a JSON/YAML object and is forwarded unchanged
 inside the verifier request. `overlap` applies to the entire verification
 configuration and defaults to `false`, preserving synchronous verification.
 
+Sentinel rules are loaded when Executor starts. Authenticated administrators
+can list or atomically replace the active rules through
+`robonix/system/sentinel/list_rules` and
+`robonix/system/sentinel/replace_rules`. These services use a separate endpoint
+because Atlas requires endpoints to be unique across providers. Executor starts
+with an empty rule set when the configured rule file does not exist and no seed
+is configured. Later starts preserve rules replaced through the admin service.
+
 ## RTDL Execution
 
 Executor interprets `Plan.nodes` from `Plan.root_index`:
@@ -63,9 +74,19 @@ Executor interprets `Plan.nodes` from `Plan.root_index`:
   failed branch does not cancel sibling branches.
 - `do`: dispatches one `CapabilityCall`.
 
+Before dispatching a `do` node, Executor evaluates the active Sentinel rules
+against its arguments, the Keystone identity resolved for the Plan, the local
+time, and any required Soma, Vitals, or Scene state. A denied or indeterminate
+decision fails the node without invoking its provider.
+
 Every `Plan.nodes` entry must include non-empty `op_id` and `description`
 fields. Executor copies both fields into every `RtdlNodeState` so callers can
 match execution results back to the original RTDL node.
+
+When `Plan.auth_session_token` is non-empty, Executor resolves it through
+Keystone before reporting that the plan started. Executor rejects an invalid
+session and clears a valid credential before executing the tree. Empty
+credentials preserve local deployments without Keystone.
 
 Executor keeps an in-process table of active RTDL plans. The builtin
 `cancel_plan` capability can mark a plan as cancelled by `plan_id`; `sequence`
@@ -73,11 +94,14 @@ skips children that have not started yet, `parallel` shares the cancellation
 state across branches, and the target plan still emits `plan_complete` with
 `any_failed=true`.
 
-Executor declares two gRPC contracts:
+Executor declares the following gRPC contracts:
 
 - `robonix/system/executor/execute`: Pilot submits one `Plan` and receives an
   `RtdlEvent` stream.
+- `robonix/system/executor/control_plan`: controls one active RTDL plan.
+- `robonix/system/executor/list_active_plans`: lists active RTDL plans.
 - `robonix/system/executor/cancel_all_plans`: cancels every active RTDL plan.
+- `robonix/system/executor/get_health`: reports Executor module health.
 
 The Execute stream emits `RtdlEvent` messages:
 

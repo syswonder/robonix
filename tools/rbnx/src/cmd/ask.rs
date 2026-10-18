@@ -57,6 +57,7 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
         audio_data: vec![],
         context_json: String::new(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     };
     let mut stream = client
         .submit_task(Request::new(task))
