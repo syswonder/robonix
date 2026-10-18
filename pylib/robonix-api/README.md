@@ -79,7 +79,7 @@ shared only; direct exact-legacy launches use legacy when that service exists.
 
 ## What's in the box
 
-- **`ATLAS`** — module-level singleton client (`ATLAS.register_primitive`, `ATLAS.declare_capability`, `ATLAS.find_capability`, `ATLAS.connect_capability`, ...)
+- **`ATLAS`** — module-level singleton client (`ATLAS.register_primitive` / `register_service` / `register_skill`, `ATLAS.declare_capability`, `ATLAS.query_primitives` / `query_services` / `query_skills`, `ATLAS.find_capability`, `ATLAS.connect_capability`, ...)
 - **`Primitive` / `Service` / `Skill`** — provider base classes with `on_init` / `on_activate` / `on_deactivate` / `on_shutdown` decorators
 - **`@provider.provides_grpc(contract)` / `@provider.provides_mcp(contract)`** — Layer-2 sugar for typed handlers
 - **`Ok` / `Err` / `Deferred`** — lifecycle return values
