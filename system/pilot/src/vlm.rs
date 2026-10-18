@@ -47,21 +47,35 @@ fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> b
     .any(|field| body.contains(field))
 }
 
-/// Downgrade a `json_schema` response format to `json_object`.
+/// Step a rejected `response_format` down one rung: `json_schema` to
+/// `json_object`, then `json_object` to none.
 ///
-/// A provider that does not implement schema-guided output still implements
-/// `json_object`, and the planner's reply must stay parseable as JSON: dropping
-/// the format outright would let a rejection turn every later reply into prose.
-/// Returns whether anything changed.
-fn downgrade_response_format(body: &mut Value) -> bool {
-    let Some(format) = body.get_mut("response_format") else {
-        return false;
-    };
-    if format.get("type").and_then(Value::as_str) != Some("json_schema") {
-        return false;
+/// A provider that does not implement schema-guided output usually still
+/// implements `json_object`, and the planner's reply should stay parseable as
+/// JSON while it can. Some implement neither in the form sent: Anthropic's
+/// OpenAI-compatible endpoint takes only a strict schema, which an RTDL `do`
+/// node's open `args` cannot be, and no `json_object`. Without a format the
+/// prompt still asks for the envelope and Pilot's parser admits it. Returns
+/// the format now in force, or `None` when there was nothing left to drop.
+fn downgrade_response_format(body: &mut Value) -> Option<&'static str> {
+    let obj = body.as_object_mut()?;
+    match obj
+        .get("response_format")?
+        .get("type")
+        .and_then(Value::as_str)
+    {
+        Some("json_schema") => {
+            obj.insert(
+                "response_format".to_string(),
+                serde_json::json!({"type": "json_object"}),
+            );
+            Some("json_object")
+        }
+        _ => {
+            obj.remove("response_format");
+            Some("none")
+        }
     }
-    *format = serde_json::json!({"type": "json_object"});
-    true
 }
 
 fn open_retry_delay(
@@ -368,6 +382,9 @@ pub enum ReplyShape {
     /// The RTDL envelope, described to the provider as a JSON schema so the
     /// shape is carried by the request rather than only by prose in the prompt.
     RtdlEnvelope,
+    /// The RTDL envelope asked for as any JSON object, for a provider that
+    /// answered the schema with nothing.
+    RtdlJsonObject,
 }
 
 /// The RTDL envelope as a JSON schema.
@@ -501,6 +518,7 @@ fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
                 strict: Some(false),
             },
         }),
+        ReplyShape::RtdlJsonObject => Some(ResponseFormat::JsonObject),
     }
 }
 
@@ -645,7 +663,9 @@ impl VlmClient {
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
-        let mut compatibility_fallback_attempted = false;
+        // Optional fields go on the first rejection; the response format can
+        // need a second step (see downgrade_response_format).
+        let mut compatibility_fallbacks = 0_u8;
         let response = loop {
             let response = self
                 .inner
@@ -667,27 +687,51 @@ impl VlmClient {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
-            if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
-                let downgraded = downgrade_response_format(&mut request_body);
+            // Providers word a refused response_format in their own way
+            // (MiniMax: "Mismatch type string with value array"), so any 400 or
+            // 422 to a request carrying one steps it down; an unrelated error
+            // costs one more request and is reported as it was.
+            let format_refused = matches!(status.as_u16(), 400 | 422)
+                && request_body.get("response_format").is_some();
+            if (format_refused || rejects_optional_request_fields(status, &text))
+                && compatibility_fallbacks < 2
+            {
+                // Drop an optional field only when the error names it: removing
+                // the cache key with a refused format would forgo prompt
+                // caching, and stream_options the usage report, on every
+                // later request of the stream.
+                let lowered = text.to_ascii_lowercase();
+                let names_format =
+                    lowered.contains("response_format") || lowered.contains("json_schema");
+                let downgraded = if format_refused || names_format {
+                    downgrade_response_format(&mut request_body)
+                } else {
+                    None
+                };
                 let mut dropped: Vec<&str> = Vec::new();
                 if let Some(body) = request_body.as_object_mut() {
-                    for field in ["stream_options", "prompt_cache_key", "prompt_cache_options"] {
-                        if body.remove(field).is_some() {
+                    for (field, named) in [
+                        ("stream_options", "stream_options"),
+                        ("stream_options", "include_usage"),
+                        ("prompt_cache_key", "prompt_cache_key"),
+                        ("prompt_cache_options", "prompt_cache_options"),
+                    ] {
+                        if lowered.contains(named) && body.remove(field).is_some() {
                             dropped.push(field);
                         }
                     }
                 }
-                if dropped.is_empty() && !downgraded {
+                if dropped.is_empty() && downgraded.is_none() {
                     bail!("open VLM chat stream: HTTP {status}: {text}");
                 }
                 // Name what changed rather than "retrying without them": a
                 // downgrade is not a removal, and a run that later reads as
                 // schema-guided needs this line to say it was not.
-                if downgraded {
+                if let Some(now) = downgraded {
                     robonix_scribe::warn!(
-                        "[pilot/vlm] upstream rejected response_format json_schema with HTTP \
-                         {status}; downgrading to json_object for the rest of this stream. \
-                         RTDL shape is no longer schema-guided; admission still runs in Pilot. \
+                        "[pilot/vlm] upstream rejected response_format with HTTP {status}; \
+                         response_format is now {now} for the rest of this stream. RTDL shape \
+                         is no longer schema-guided; admission still runs in Pilot. \
                          Upstream said: {text}"
                     );
                 }
@@ -698,7 +742,7 @@ impl VlmClient {
                         dropped.join(", ")
                     );
                 }
-                compatibility_fallback_attempted = true;
+                compatibility_fallbacks += 1;
                 continue;
             }
             if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
@@ -972,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_without_schema_support_falls_back_to_a_json_object() {
+    fn a_rejected_response_format_steps_down_to_json_object_then_none() {
         // Dropping the format outright would let one rejection turn every later
         // planning reply into prose.
         assert!(rejects_optional_request_fields(
@@ -982,10 +1026,13 @@ mod tests {
         let mut body = serde_json::json!({
             "response_format": {"type": "json_schema", "json_schema": {"name": "rtdl_envelope"}}
         });
-        assert!(downgrade_response_format(&mut body));
+        assert_eq!(downgrade_response_format(&mut body), Some("json_object"));
         assert_eq!(body["response_format"]["type"], "json_object");
         // Already downgraded, or never schema-shaped: nothing to do.
-        assert!(!downgrade_response_format(&mut body));
+        // Anthropic's endpoint refuses json_object too: drop the format.
+        assert_eq!(downgrade_response_format(&mut body), Some("none"));
+        assert!(body.get("response_format").is_none());
+        assert_eq!(downgrade_response_format(&mut body), None);
     }
 
     #[test]

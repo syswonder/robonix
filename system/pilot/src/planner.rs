@@ -1549,6 +1549,7 @@ pub async fn run_turn(
         // recovery plan) instead of crashing the whole turn. The loop yields a
         // valid (narration, tree label, plan, id) tuple for the forest dispatch.
         let mut correction: Option<String> = None;
+        let mut reply_shape = ReplyShape::RtdlEnvelope;
         let (assistant_content, rtdl_description, graph, meta_op, plan_id, task_fields, recovered) = loop {
             let mut request_history = history.clone();
             if !runtime_context.is_empty() {
@@ -1576,12 +1577,7 @@ pub async fn run_turn(
             let (content, raw_tool_calls) = loop {
                 let mut stream = match tokio::time::timeout(
                     vlm_idle_timeout(),
-                    vlm.chat_stream(
-                        &messages,
-                        &[],
-                        Some(vlm.prompt_cache_key()),
-                        ReplyShape::RtdlEnvelope,
-                    ),
+                    vlm.chat_stream(&messages, &[], Some(vlm.prompt_cache_key()), reply_shape),
                 )
                 .await
                 {
@@ -1715,6 +1711,11 @@ pub async fn run_turn(
                 Ok(env) => env,
                 Err(e) if correction.is_none() => {
                     warn!("[pilot/rtdl] parse failed round={round}, retrying once: {e:#}");
+                    // Some providers answer a schema-guided request carrying
+                    // an image with nothing at all; ask for plain JSON instead.
+                    if raw_content.trim().is_empty() {
+                        reply_shape = ReplyShape::RtdlJsonObject;
+                    }
                     correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
                     continue;
                 }
@@ -2645,6 +2646,19 @@ fn expand_rtdl_node(
             Ok(node_index)
         }
         "do" => {
+            // A call without parameters is sometimes written without `args`,
+            // and schema-guided output can give a leaf an empty `children`:
+            // both mean the same plain call.
+            let mut obj = obj.clone();
+            if obj
+                .get("children")
+                .and_then(|c| c.as_array())
+                .is_some_and(Vec::is_empty)
+            {
+                obj.remove("children");
+            }
+            obj.entry("args").or_insert_with(|| serde_json::json!({}));
+            let obj = &obj;
             reject_unknown_node_keys(obj, path, op, &["cap", "args"])?;
             let cap = obj
                 .get("cap")
@@ -4451,6 +4465,25 @@ mod tests {
         });
         let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
         assert!(err.to_string().contains("unexpected field `out`"));
+    }
+
+    #[test]
+    fn rtdl_reads_a_leaf_without_args_or_with_empty_children_as_a_plain_call() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
+        );
+        let rtdl = json!({"op": "do", "op_id": 0, "description": "snap", "cap": "camera_snapshot", "children": []});
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        assert_eq!(plan.nodes[0].call.as_ref().unwrap().args_json, "{}");
+        let rtdl =
+            json!({"op": "do", "cap": "camera_snapshot", "args": {}, "children": [{"op": "do"}]});
+        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
+        assert!(err.to_string().contains("unexpected field `children`"));
     }
 
     #[test]
