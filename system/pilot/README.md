@@ -78,9 +78,13 @@ Use the smaller effective limit when a model card and an inference-server settin
 
 ## Prompt assets
 
-On every planning round the model sees `RTDL_PROTOCOL_REMINDER` (in `src/planner.rs`), the standing system prompt, and the response JSON schema (`rtdl_envelope_schema` in `src/vlm.rs`). The reminder is the same on every round so the prompt prefix stays cacheable. `rtdl_protocol.md` is not sent to the model.
+`rtdl_protocol.md` is not sent to the model and does not affect what it is told. On every planning round the model sees:
 
-Pilot's standing system prompt is built in `src/planner.rs`. Prompt assembly and usage accounting live in `src/prompt.rs`; each round's section list supplies both context-budget estimates and request rendering.
+- the standing system prompt, built by `build_system_prompt` in `src/planner.rs`;
+- `RTDL_PROTOCOL_REMINDER` in `src/planner.rs`, the same text on every round so the prompt prefix stays cacheable;
+- the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`.
+
+`assemble_planning_messages` in `src/prompt.rs` puts them in order with the history and the live sections; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
