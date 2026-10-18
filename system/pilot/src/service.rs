@@ -16,7 +16,8 @@ use crate::pb::module_health::{
 use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
-use crate::planner::{self, ExecutorConn, HistoryBudget, TaskState};
+use crate::planner::{self, ExecutorConn, HistoryBudget, SessionForest};
+use crate::tasks::TaskList;
 use crate::transcript::Transcript;
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
@@ -105,7 +106,9 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
 /// LLM conversation history per `session_id`. Grows across turns; never
 /// expired; active turns compact history against the model context window.
 type Histories = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<Message>>>>>>;
-type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<Option<TaskState>>>>>>;
+type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<TaskList>>>>>;
+/// RTDL trees per `session_id`: they outlive the turn that dispatched them.
+type Forests = Arc<Mutex<HashMap<String, Arc<Mutex<SessionForest>>>>>;
 /// Transcript per `session_id`, kept for as long as its history.
 type Transcripts = Arc<Mutex<HashMap<String, Arc<Mutex<Transcript>>>>>;
 
@@ -178,10 +181,11 @@ pub struct PilotServiceImpl {
     vlm: VlmClient,
     history_budget: HistoryBudget,
     histories: Histories,
-    /// Harness-owned standing goal per session. It survives a transport turn
-    /// that pauses for user input, so the next message cannot silently replace
-    /// unfinished work with a model-authored summary.
+    /// The tasks of each session (see `tasks`). They survive a transport turn
+    /// that pauses for user input.
     task_states: TaskStates,
+    /// The RTDL trees of each session, supervised across turns.
+    forests: Forests,
     transcripts: Transcripts,
     /// Per-session cancellation senders. `abort_turn` Task signals this
     /// without holding the history lock.
@@ -213,6 +217,7 @@ impl PilotServiceImpl {
             history_budget,
             histories: Arc::new(Mutex::new(HashMap::new())),
             task_states: Arc::new(Mutex::new(HashMap::new())),
+            forests: Arc::new(Mutex::new(HashMap::new())),
             transcripts: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             steers: Arc::new(Mutex::new(HashMap::new())),
@@ -230,8 +235,9 @@ impl PilotServiceImpl {
         session_id: &str,
     ) -> (
         Arc<Mutex<Vec<Message>>>,
-        Arc<Mutex<Option<TaskState>>>,
+        Arc<Mutex<TaskList>>,
         Arc<Mutex<Transcript>>,
+        Arc<Mutex<SessionForest>>,
     ) {
         let known = self.histories.lock().await.contains_key(session_id);
         let restored = if known {
@@ -246,6 +252,7 @@ impl PilotServiceImpl {
         let mut histories = self.histories.lock().await;
         let mut task_states = self.task_states.lock().await;
         let mut transcripts = self.transcripts.lock().await;
+        let mut forests = self.forests.lock().await;
         if !histories.contains_key(session_id) {
             if let Some(restored) = &restored {
                 info!(
@@ -253,23 +260,43 @@ impl PilotServiceImpl {
                     restored.history.len()
                 );
             }
-            let (history, task) = restored.map_or((Vec::new(), None), |r| (r.history, r.task));
+            let (history, task) =
+                restored.map_or((Vec::new(), TaskList::default()), |r| (r.history, r.task));
             transcripts.insert(
                 session_id.to_string(),
-                Arc::new(Mutex::new(Transcript::new(
-                    session_id,
-                    &history,
-                    task.as_ref(),
-                ))),
+                Arc::new(Mutex::new(Transcript::new(session_id, &history, &task))),
             );
             histories.insert(session_id.to_string(), Arc::new(Mutex::new(history)));
             task_states.insert(session_id.to_string(), Arc::new(Mutex::new(task)));
         }
+        let forest = forests
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(SessionForest::default())))
+            .clone();
         (
             histories[session_id].clone(),
             task_states[session_id].clone(),
             transcripts[session_id].clone(),
+            forest,
         )
+    }
+
+    /// Cancel the trees a session left running when no turn is active. A turn
+    /// that holds the forest is stopped through its own cancel signal instead.
+    async fn stop_idle_session_plans(&self, session_id: &str) -> usize {
+        let Some(forest) = self.forests.lock().await.get(session_id).cloned() else {
+            return 0;
+        };
+        let Ok(mut forest) = forest.try_lock() else {
+            return 0;
+        };
+        match build_executor_conn(self.atlas.clone(), &self.provider_id).await {
+            Ok(mut executor) => forest.cancel_running(&mut executor).await,
+            Err(error) => {
+                error!("[pilot] cannot reach Executor to stop session {session_id}: {error:#}");
+                0
+            }
+        }
     }
 
     async fn accept_task_id_once(&self, session_id: &str, task_id: &str) -> bool {
@@ -372,12 +399,25 @@ impl RobonixSystemPilot for PilotServiceImpl {
             } else {
                 false
             };
-            debug!("[pilot] session-scoped stop session {id} (turn_signaled={turn_signaled})");
+            // With no turn running, the session's trees may still be: stop them here.
+            let stopped = if turn_signaled {
+                0
+            } else {
+                self.stop_idle_session_plans(&id).await
+            };
+            debug!(
+                "[pilot] session-scoped stop session {id} (turn_signaled={turn_signaled}, idle_plans_stopped={stopped})"
+            );
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
             let message = if turn_signaled {
                 "stop requested for this session; its active RTDL plans are being cancelled"
+                    .to_string()
+            } else if stopped > 0 {
+                format!(
+                    "stop requested for this session; {stopped} RTDL plan(s) left running by earlier turns are being cancelled"
+                )
             } else {
-                "no active turn exists for this session"
+                "no active turn or running plan exists for this session".to_string()
             };
             let _ = tx
                 .send(Ok(pack(
@@ -385,7 +425,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                     PilotStreamBody::Status(SessionStatusEvent {
                         session_id: id.clone(),
                         state: SessionState::Completed as u32,
-                        message: message.to_string(),
+                        message,
                     }),
                 )))
                 .await;
@@ -456,7 +496,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             return Ok(Response::new(rx));
         }
 
-        let (history_arc, task_state_arc, transcript_arc) =
+        let (history_arc, task_state_arc, transcript_arc, forest_arc) =
             self.get_or_create_session(&task.session_id).await;
         let plan_seq = Arc::clone(&self.plan_seq);
         // what is tokio's tx and rx:
@@ -514,12 +554,14 @@ impl RobonixSystemPilot for PilotServiceImpl {
             };
 
             let mut history = history_arc.lock().await;
-            let mut standing_task = task_state_arc.lock().await;
+            let mut tasks = task_state_arc.lock().await;
             let mut transcript = transcript_arc.lock().await;
+            let mut forest = forest_arc.lock().await;
             let result = planner::run_turn(
                 &task,
                 &mut history,
-                &mut standing_task,
+                &mut tasks,
+                &mut forest,
                 &vlm,
                 &mut executor,
                 &mut atlas_for_turn,
@@ -533,7 +575,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             )
             .await;
             // Every exit, including errors and interrupts, archives the turn.
-            transcript.record(&history, standing_task.as_ref());
+            transcript.record(&history, &tasks);
             if let Err(e) = result {
                 error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;

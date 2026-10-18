@@ -78,13 +78,34 @@ Use the smaller effective limit when a model card and an inference-server settin
 
 ## Prompt assets
 
-`rtdl_protocol.md` is not sent to the model and does not affect what it is told. On every planning round the model sees:
+On every planning round the model sees, in this order:
 
 - the standing system prompt, built by `build_system_prompt` in `src/planner.rs`;
 - `RTDL_PROTOCOL_REMINDER` in `src/planner.rs`, the same text on every round so the prompt prefix stays cacheable;
-- the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`.
+- the session history, which only grows (see Tasks below);
+- the live sections of the round (catalog changes, in-flight trees, Executor snapshot, embodiment and environment);
+- the task status board, the request's tail, rebuilt every round and never written into history;
+- the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`, sent as the request's `response_format`.
 
-`assemble_planning_messages` in `src/prompt.rs` puts them in order with the history and the live sections; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering.
+`assemble_planning_messages` in `src/prompt.rs` puts them in order; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering. There is no other prompt text: no protocol file is sent.
+
+## Tasks
+
+The user's messages arrive one at a time. A task is one piece of work the user asked for: the user's messages about it (the request, then every correction, addition or answer), the goal and success criterion the model has drawn from them, its status (`in_progress`, `done`, `failed`, `superseded`), and the RTDL trees dispatched for it. Several tasks can be open at once; every tree belongs to exactly one task. `src/tasks.rs` keeps them per session, and the transcript keeps them across a restart.
+
+Pilot owns identity and facts: message ids (`m1`, `m2`, …), task ids (`T1`, `T2`, …), the user's words, which task each message and tree is filed under, and how each tree ended. A message enters history once, as `User message m7 (filed under T2): …`, and a `Pilot task record` line is appended when a task changes. Compaction keeps the messages of open tasks verbatim. The model owns the judgement, through three reply fields:
+
+| Field | Meaning |
+| --- | --- |
+| `messages` | Refiles new messages: `[{"message":"m7","task":"new"}]` starts a task, `[{"message":"m7","task":"T1"}]` moves the message to another open task. Without it a new message stays under the newest open task. Only messages that arrived since the model's last reply can be refiled. |
+| `task` | The task the reply's tree belongs to: an open task id, `"new"` for the task the reply creates, or `null` when it dispatches no tree. A tree with no usable `task` is filed under the newest open task and the model is told so. |
+| `task_updates` | `[{"task":"T1","goal":"…","success_criterion":"…","status":"…","status_reason":"…"}]`, each field but `task` optional. A task cannot close while one of its trees runs, or in the reply that dispatches its tree; an item naming an unknown or closed task is rejected. Rejected items are fed back to the model and the others still apply. |
+
+A reply gives its fields in the order `content`, `messages`, `task`, `rtdl_description`, `rtdl`, `task_updates`: what dispatch needs comes before `rtdl`, so a streaming planner knows a tree's task when the tree starts, and what needs to know what was dispatched comes after it. Pilot applies them in that order. Pilot's `serde_json` has `preserve_order` so that the schema's properties reach the provider in that order.
+
+The previous contract's `task_update` object is still read for one release: it updates the newest open task, and its `goal` is ignored.
+
+A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
@@ -110,11 +131,13 @@ When Pilot receives a task for a session it has no history for, such as after a 
 
 ## RTDL Planning Flow
 
-Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object with exactly four keys: `content` (text shown to the user), `rtdl_description` (a short label for the tree), `rtdl` (the tree), and `task_update` (`null`, or the task's `goal`, `success_criterion`, and `status` of `in_progress` or `done`):
+Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object: `content` (text shown to the user), `messages`, `task`, `rtdl_description` (a short label for the tree), `rtdl` (the tree) and `task_updates`; the task fields are described under Tasks above:
 
 ```json
 {
   "content": "I will inspect the current scene.",
+  "messages": [],
+  "task": "T1",
   "rtdl_description": "inspect the scene",
   "rtdl": {
     "op": "sequence",
@@ -126,7 +149,7 @@ Pilot no longer sends OpenAI `tools` / function schemas as the primary planning 
       }
     ]
   },
-  "task_update": null
+  "task_updates": []
 }
 ```
 
@@ -145,6 +168,8 @@ Parallel example:
 ```json
 {
   "content": "I will inspect both signals.",
+  "messages": [],
+  "task": "T1",
   "rtdl_description": "inspect camera and health",
   "rtdl": {
     "op": "parallel",
@@ -153,21 +178,20 @@ Parallel example:
       { "op": "do", "cap": "tiago_health.health_state", "args": {} }
     ]
   },
-  "task_update": null
+  "task_updates": []
 }
 ```
 
 An empty sequence means the model is dispatching no new tree this round:
 
 ```json
-{ "content": "Done.", "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_update": null }
+{ "content": "Done.", "messages": [], "task": null, "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_updates": [] }
 ```
 
-Pilot accepts it only when it does not contradict the task state. With
-`task_update.status: "in_progress"` and nothing running — neither this turn's
-dispatches nor any plan in Executor's active-plan snapshot — the model claims the
-task is advancing while nothing will run, so the reply is rejected
+Pilot accepts it only when it does not contradict the task state. When a task
+update keeps a task `in_progress` and nothing runs — neither this session's trees
+nor any plan in Executor's active-plan snapshot — the model claims the task is
+advancing while nothing will run, so the reply is rejected
 (`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
-the turn ends with what the model said. The per-round reminder states the
-pairing rule: an empty sequence goes with `task_update: null` or
-`status: "done"`, or stands while a running tree is waited on.
+the turn ends with what the model said. An empty sequence with no task update is
+an answer or a question to the user.

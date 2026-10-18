@@ -570,36 +570,44 @@ def build_envelope(step: dict, caps: list[str], vars_: dict[str, Any], unresolve
     if compiled is None:
         compiled = {"op": "sequence", "op_id": 0, "description": "unresolved", "children": []}
 
-    task_update = step.get("task_update")
-    if not task_update and step.get("status"):
-        task_update = {
-            "goal": step.get("goal", "ci scenario"),
-            "success_criterion": step.get("success_criterion", "scripted steps complete"),
-            "status": step.get("status"),
-        }
+    # Scenario steps name their task updates in the current reply contract;
+    # a step that only gives `status` updates the scenario's single task T1.
+    task_updates = step.get("task_updates")
+    if task_updates is None and step.get("status"):
+        update = {"task": step.get("task", "T1"), "status": step.get("status")}
+        if step.get("success_criterion"):
+            update["success_criterion"] = step["success_criterion"]
+        task_updates = [update]
+    dispatches = bool(compiled.get("children")) or compiled.get("op") == "do"
     return {
         "content": step.get("content", ""),
+        "messages": step.get("messages", []),
+        "task": step.get("task", "T1") if dispatches else None,
         "rtdl_description": step.get("rtdl_description", compiled.get("description", "ci")),
         "rtdl": compiled,
-        "task_update": task_update,
+        "task_updates": task_updates or [],
     }
 
 
 def terminal_envelope(note: str) -> dict:
     return {
         "content": note,
+        "messages": [],
+        "task": None,
         "rtdl_description": "ci-done",
         "rtdl": {"op": "sequence", "op_id": 0, "description": "wait", "children": []},
-        "task_update": {"goal": "ci scenario", "success_criterion": "scripted steps complete", "status": "done"},
+        "task_updates": [{"task": "T1", "status": "done", "status_reason": "scripted steps complete"}],
     }
 
 
 def wait_envelope(note: str = "waiting for prior RTDL leaf result") -> dict:
     return {
         "content": note,
+        "messages": [],
+        "task": None,
         "rtdl_description": "ci-wait",
         "rtdl": {"op": "sequence", "op_id": 0, "description": "wait", "children": []},
-        "task_update": {"goal": "ci scenario", "success_criterion": "scripted steps complete", "status": "in_progress"},
+        "task_updates": [],
     }
 
 

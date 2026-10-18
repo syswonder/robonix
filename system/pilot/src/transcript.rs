@@ -6,7 +6,7 @@
 // sees; the transcript keeps every one of them, and holds enough to rebuild the
 // session's history and task state after Pilot restarts.
 
-use crate::planner::TaskState;
+use crate::tasks::TaskList;
 use crate::vlm::Message;
 use robonix_scribe::{ts_fmt, warn};
 use serde_json::{Value, json};
@@ -26,7 +26,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// - `session`: first line of the file, with `session_id` and `pilot_version`.
 /// - `message`: one history message (`role`, `content`, ...). An image is
 ///   recorded by size only, as `image_bytes`.
-/// - `task_state`: the session's task state after it changed (`task`, or null).
+/// - `task_state`: the session's task list after it changed (`task`); a file
+///   written before task lists holds a single task state there instead.
 /// - `compaction`: history was compacted; `history` is the full history that
 ///   replaced it, and the counts say what was evicted and pinned.
 ///
@@ -37,8 +38,8 @@ pub struct Transcript {
     session_id: String,
     /// History messages before this index are already in the file.
     written: usize,
-    /// The task state last queued for the file.
-    task: Option<TaskState>,
+    /// The task list last queued for the file.
+    task: TaskList,
     /// Records not yet on disk because a write failed; retried first.
     pending: Vec<Value>,
 }
@@ -46,7 +47,7 @@ pub struct Transcript {
 /// A session rebuilt from its transcript.
 pub struct Restored {
     pub history: Vec<Message>,
-    pub task: Option<TaskState>,
+    pub task: TaskList,
 }
 
 impl Transcript {
@@ -54,29 +55,29 @@ impl Transcript {
     /// already on disk: a new, empty session, or one just restored from it.
     /// Keep one per session for as long as the session lives, so records a
     /// failed write left behind are retried by later turns.
-    pub fn new(session_id: &str, history: &[Message], task: Option<&TaskState>) -> Self {
+    pub fn new(session_id: &str, history: &[Message], task: &TaskList) -> Self {
         Self {
             path: path_for(session_id),
             session_id: session_id.to_string(),
             written: history.len(),
-            task: task.cloned(),
+            task: task.clone(),
             pending: Vec::new(),
         }
     }
 
     /// Append every history message not yet in the file, then the task state
     /// if it changed.
-    pub fn record(&mut self, history: &[Message], task: Option<&TaskState>) {
+    pub fn record(&mut self, history: &[Message], task: &TaskList) {
         // History only shrinks through compaction, which resets `written`;
         // clamp anyway so a shorter history never skips new messages.
         let start = self.written.min(history.len());
         self.pending
             .extend(history[start..].iter().map(message_record));
         self.written = history.len();
-        if self.task.as_ref() != task {
+        if &self.task != task {
             self.pending
                 .push(json!({ "ts": now(), "kind": "task_state", "task": task }));
-            self.task = task.cloned();
+            self.task = task.clone();
         }
         self.flush();
     }
@@ -178,7 +179,7 @@ fn replay(path: &std::path::Path) -> Option<Restored> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut restored = Restored {
         history: Vec::new(),
-        task: None,
+        task: TaskList::default(),
     };
     let mut skipped = 0usize;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -191,9 +192,17 @@ fn replay(path: &std::path::Path) -> Option<Restored> {
             Some("message") => parse_message(&record)
                 .map(|message| restored.history.push(message))
                 .is_some(),
-            Some("task_state") => serde_json::from_value(record["task"].clone())
-                .map(|task| restored.task = task)
-                .is_ok(),
+            // Null (no task yet), a task list, or the single task state of a
+            // file written before task lists.
+            Some("task_state") => match record["task"].clone() {
+                Value::Null => {
+                    restored.task = TaskList::default();
+                    true
+                }
+                task => TaskList::from_record(task)
+                    .map(|task| restored.task = task)
+                    .is_some(),
+            },
             Some("compaction") => record["history"]
                 .as_array()
                 .and_then(|messages| messages.iter().map(parse_message).collect())
@@ -275,7 +284,7 @@ mod tests {
             path: dir.join("s.jsonl"),
             session_id: "s".to_string(),
             written: 0,
-            task: None,
+            task: TaskList::default(),
             pending: Vec::new(),
         }
     }
@@ -291,20 +300,20 @@ mod tests {
     fn replaying_the_file_rebuilds_history_and_task_across_a_compaction() {
         let dir = tempfile::tempdir().unwrap();
         let mut transcript = transcript_in(dir.path());
-        let mut task = None;
-        crate::planner::start_or_resume_task(&mut task, "fetch the cup");
+        let mut task = TaskList::default();
+        task.receive("fetch the cup");
 
         let mut history = vec![Message::user("task"), Message::assistant("step 1")];
-        transcript.record(&history, task.as_ref());
+        transcript.record(&history, &task);
         history.push(Message::user_with_image("look", "aGVsbG8=".to_string()));
-        transcript.record(&history, task.as_ref());
-        transcript.record(&history, task.as_ref());
+        transcript.record(&history, &task);
+        transcript.record(&history, &task);
 
         // Compaction replaces all but the last message with a summary.
         history = vec![Message::user("summary"), Message::user("look")];
         transcript.record_compaction(&history, 2, 0, true);
         history.push(Message::assistant("step 2"));
-        transcript.record(&history, task.as_ref());
+        transcript.record(&history, &task);
 
         let text = std::fs::read_to_string(&transcript.path).unwrap();
         let kinds: Vec<String> = text
@@ -334,6 +343,22 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_written_before_task_lists_restores_its_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let old = [
+            r#"{"kind":"session"}"#,
+            r#"{"kind":"message","role":"user","content":"User task (authoritative): fetch the cup"}"#,
+            r#"{"kind":"task_state","task":{"goal":"fetch the cup","success_criterion":"cup delivered","status":"in_progress"}}"#,
+        ];
+        std::fs::write(&path, old.join("\n") + "\n").unwrap();
+        let restored = replay(&path).unwrap();
+        assert_eq!(restored.task.tasks.len(), 1);
+        assert_eq!(restored.task.messages[0].text, "fetch the cup");
+        assert_eq!(restored.task.tasks[0].success_criterion, "cup delivered");
+    }
+
+    #[test]
     fn distinct_session_ids_get_distinct_files() {
         let names: Vec<PathBuf> = ["caf\u{e9}", "caf\u{e8}", "a/b", "a_b", "a%2Fb"]
             .iter()
@@ -354,11 +379,11 @@ mod tests {
             path: blocked.join("s.jsonl"),
             session_id: "s".to_string(),
             written: 0,
-            task: None,
+            task: TaskList::default(),
             pending: Vec::new(),
         };
         let mut history = vec![Message::user("one")];
-        transcript.record(&history, None);
+        transcript.record(&history, &TaskList::default());
         history = vec![Message::user("summary")];
         transcript.record_compaction(&history, 1, 0, false);
         assert_eq!(transcript.pending.len(), 2);
@@ -368,7 +393,7 @@ mod tests {
         std::fs::create_dir(&blocked).unwrap();
         std::fs::write(&transcript.path, "{\"kind\":\"session\"}\n{\"kind\":\"mess").unwrap();
         history.push(Message::assistant("two"));
-        transcript.record(&history, None);
+        transcript.record(&history, &TaskList::default());
         assert!(transcript.pending.is_empty());
 
         let restored = replay(&transcript.path).unwrap();

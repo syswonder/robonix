@@ -56,8 +56,10 @@ Top-level fields:
 | `retry_delay_s` | Relative sleep before re-serving this step after a prior result failed this step's full expectations. |
 | `content` | Assistant narration in the RTDL envelope. |
 | `rtdl_description` | Envelope-level RTDL label. |
-| `status` | Shorthand for `task_update.status`; typically `in_progress` or `done`. |
-| `task_update` | Optional explicit task update object. |
+| `status` | Shorthand for one task update of `task` (default `T1`); typically `done`. |
+| `task` | The task the step's tree belongs to; default `T1`, the scenario's first task. |
+| `task_updates` | Optional explicit task updates, as in the reply contract (`[{"task":"T1","status":"done"}]`). |
+| `messages` | Optional refiling of new user messages, as in the reply contract. |
 | `rtdl` | The RTDL tree for this VLM round. Required unless the step only marks `done`. |
 
 Example with multiple RTDL leaves in one VLM round:

@@ -380,13 +380,6 @@ pub enum ReplyShape {
 /// that costs a contract its type surface. The schema therefore guides the
 /// model; admission stays with Pilot's own validator, which resolves every call
 /// against the catalog before a plan is dispatched.
-/// How long a `task_update` field may be.
-///
-/// It has to admit an honest restatement of a long instruction and refuse a
-/// copy of the prompt. The EB-Habitat task text with its seventy-entry action
-/// catalogue is about 3.6 KB; a restatement of it fits in a line.
-const TASK_FIELD_MAX_CHARS: usize = 400;
-
 fn rtdl_envelope_schema() -> Value {
     let node = serde_json::json!({
         "type": "object",
@@ -449,31 +442,44 @@ fn rtdl_envelope_schema() -> Value {
             },
         ],
     });
+    // Properties in the order a reply should give them, which `preserve_order`
+    // keeps on the wire: what dispatch needs (`messages`, `task`) before
+    // `rtdl`, so a streaming planner knows a tree's task when the tree starts,
+    // and `task_updates`, which need to know what was dispatched, after it.
+    // No goal is copied from the user: Pilot keeps the user's words, and
+    // `goal` is the model's own statement, so it has no length cap to match.
+    let task_ref = || serde_json::json!({"type": ["string", "integer"]});
     serde_json::json!({
         "type": "object",
         "properties": {
             "content": {"type": "string"},
+            "messages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"message": identifier(), "task": task_ref()},
+                    "required": ["message", "task"],
+                },
+            },
+            "task": {"type": ["string", "integer", "null"]},
             "rtdl_description": {"type": "string"},
             "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
-            // `goal` and `success_criterion` are restatements, not transcripts.
-            // Without an upper bound a model may copy the task text back --
-            // deepseek-v3.2 returned the whole prompt, action catalogue
-            // included, on every round, hit the 4096-token output ceiling and
-            // had its JSON truncated mid-string. A model that summarises, as
-            // 4o-mini does, spends 109-155 tokens on the same field.
-            "task_update": {
-                "type": ["object", "null"],
-                "properties": {
-                    "goal": {"type": "string", "maxLength": TASK_FIELD_MAX_CHARS},
-                    "success_criterion": {
-                        "type": "string", "maxLength": TASK_FIELD_MAX_CHARS,
+            "task_updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task": task_ref(),
+                        "goal": {"type": "string"},
+                        "success_criterion": {"type": "string"},
+                        "status": {"type": "string", "enum": ["in_progress", "done", "failed", "superseded"]},
+                        "status_reason": {"type": "string"},
                     },
-                    "status": {"type": "string", "enum": ["in_progress", "done"]},
+                    "required": ["task"],
                 },
-                "required": ["goal", "success_criterion", "status"],
             },
         },
-        "required": ["content", "rtdl_description", "rtdl", "task_update"],
+        "required": ["content", "messages", "task", "rtdl_description", "rtdl", "task_updates"],
         "$defs": {"node": node, "meta": meta},
     })
 }

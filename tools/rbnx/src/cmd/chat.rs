@@ -69,6 +69,9 @@ struct ForestView {
     goal: String,
     success_criterion: String,
     status: String,
+    /// Every task of the session; empty from a Pilot older than task lists,
+    /// which sends only the goal above.
+    tasks: Vec<crate::pb::pilot::TaskSummary>,
     /// In-dispatch order; each is one RTDL tree of the current turn.
     plans: Vec<PlanView>,
 }
@@ -88,6 +91,7 @@ impl ForestView {
         self.goal.clear();
         self.success_criterion.clear();
         self.status.clear();
+        self.tasks.clear();
         self.plans.clear();
     }
 
@@ -166,28 +170,67 @@ fn forest_panel_lines(forest: &ForestView) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         ))
     };
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(header("Goal"));
-    lines.push(Line::from(if forest.goal.is_empty() {
-        "(none yet)".to_string()
-    } else {
-        forest.goal.clone()
-    }));
-    if !forest.success_criterion.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("done when: {}", forest.success_criterion),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    let (status_txt, status_style) = match forest.status.as_str() {
-        "done" => ("done", Style::default().fg(Color::Green)),
-        "in_progress" => ("in_progress", Style::default().fg(Color::Yellow)),
-        _ => ("—", Style::default().fg(Color::DarkGray)),
+    let status_style = |status: &str| match status {
+        "done" => Style::default().fg(Color::Green),
+        "failed" => Style::default().fg(Color::Red),
+        "in_progress" => Style::default().fg(Color::Yellow),
+        _ => Style::default().fg(Color::DarkGray),
     };
-    lines.push(Line::from(vec![
-        Span::raw("status: "),
-        Span::styled(status_txt.to_string(), status_style),
-    ]));
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if forest.tasks.is_empty() {
+        lines.push(header("Goal"));
+        lines.push(Line::from(if forest.goal.is_empty() {
+            "(none yet)".to_string()
+        } else {
+            forest.goal.clone()
+        }));
+        if !forest.success_criterion.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("done when: {}", forest.success_criterion),
+                dim,
+            )));
+        }
+        let status = if forest.status.is_empty() {
+            "—"
+        } else {
+            forest.status.as_str()
+        };
+        lines.push(Line::from(vec![
+            Span::raw("status: "),
+            Span::styled(status.to_string(), status_style(status)),
+        ]));
+    } else {
+        lines.push(header("Tasks"));
+        for task in &forest.tasks {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", task.task_id),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("[{}] ", task.status), status_style(&task.status)),
+                Span::raw(task.goal.clone()),
+            ]));
+            if task.status == "in_progress" && !task.success_criterion.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  done when: {}", task.success_criterion),
+                    dim,
+                )));
+            }
+            if !task.status_reason.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", task.status_reason),
+                    dim,
+                )));
+            }
+            if !task.plan_ids.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  plans: {}", task.plan_ids.join(", ")),
+                    dim,
+                )));
+            }
+        }
+    }
     lines.push(Line::from(""));
     lines.push(header("Forest"));
     if forest.plans.is_empty() {
@@ -2212,6 +2255,7 @@ fn apply_pilot_event(
                 let mut f = forest.borrow_mut();
                 f.goal = ts.goal.clone();
                 f.success_criterion = ts.success_criterion.clone();
+                f.tasks = ts.tasks.clone();
                 f.status = ts.status.clone();
             }
         }
