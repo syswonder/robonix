@@ -69,14 +69,16 @@ robonix-atlas --listen 127.0.0.1:50051 \
 
 Configuration:
 
-- `--listen` / `ROBONIX_ATLAS_LISTEN` — gRPC listen address. Default `127.0.0.1:50051`.
-- `--capabilities` / `ROBONIX_CAPABILITIES` — one or more contract directories,
-  comma-separated. Defaults to the registered repo's `capabilities/`.
-- `--log` / `RUST_LOG` — env_logger filter. Defaults to `robonix_atlas=info`.
-
-## Out of scope (v0.1)
-
-Atlas does not own transport (see [nexus](../nexus/)), time (see
-[chronos](../chronos/)), or persistent logs (see [scribe](../scribe/)).
-Atlas's heartbeat eviction half-covers what [vitals](../vitals/) will
-own in v0.2.
+- `--listen` / `ROBONIX_ATLAS_LISTEN` — gRPC listen address. Default
+  `0.0.0.0:50051`, so Atlas is reachable from other hosts. Atlas has no
+  authentication: any client that can reach the port can register, query, and
+  change lifecycle state. Bind it to `127.0.0.1` or firewall the port when
+  other hosts do not need it.
+- `--capabilities` / `ROBONIX_ATLAS_CAPABILITIES` — one or more contract directories,
+  comma-separated. When unset, Atlas uses `$ROBONIX_SOURCE_PATH/capabilities`;
+  when that is unset too, the contract registry is empty and `QueryContract`
+  returns `found=false`.
+- `log` — Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the
+  `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back
+  to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but
+  not applied.

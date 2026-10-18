@@ -34,7 +34,7 @@ Common configuration:
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
-- `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_pilot=info`.
+- `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
 - `ROBONIX_SESSION_DIR`: where session transcripts are kept (see Session transcripts). `rbnx boot` sets it; defaults to `./sessions`.
