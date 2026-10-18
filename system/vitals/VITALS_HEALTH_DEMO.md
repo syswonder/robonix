@@ -25,7 +25,7 @@ Use one Atlas endpoint for every process:
 | Executor | `127.0.0.1:50061` |
 | Pilot | `127.0.0.1:50071` |
 | Soma health source | `127.0.0.1:50092` |
-| Vitals | `127.0.0.1:50091` |
+| Vitals | `127.0.0.1:50093` |
 
 ## Build
 
@@ -129,7 +129,7 @@ cd /path/to/robonix
 
 cargo run -p robonix-vitals -- \
   --atlas 127.0.0.1:50051 \
-  --listen 127.0.0.1:50091 \
+  --listen 127.0.0.1:50093 \
   --thresholds-path system/vitals/thresholds/example_thresholds.yaml \
   --log robonix_vitals=info
 ```
@@ -197,7 +197,7 @@ grpcurl -plaintext \
   -import-path "$PROTO_DIR" \
   -proto robonix_contracts.proto \
   -d '{}' \
-  127.0.0.1:50091 \
+  127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsGet/GetVitals | jq
 ```
 
@@ -214,7 +214,7 @@ grpcurl -plaintext \
   -import-path "$PROTO_DIR" \
   -proto robonix_contracts.proto \
   -d '{}' \
-  127.0.0.1:50091 \
+  127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsModulesGet/GetModuleHealthSnapshot | jq
 ```
 
@@ -245,7 +245,7 @@ grpcurl -plaintext \
   -import-path "$PROTO_DIR" \
   -proto robonix_contracts.proto \
   -d '{}' \
-  127.0.0.1:50091 \
+  127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsModulesGet/GetModuleHealthSnapshot | jq
 ```
 

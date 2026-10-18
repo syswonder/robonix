@@ -1927,7 +1927,7 @@ pub async fn run_turn(
 
         // Apply progress only after the harness knows whether this response can
         // safely finish. A model cannot mark a task done while it is also
-        // dispatching work or while an older tree remains in flight.
+        // dispatching work in the same response.
         let task_state_changed = if let Some(updated) = task_update {
             info!(
                 "[pilot/rtdl] task_update goal='{}' status='{}'",
@@ -2133,9 +2133,9 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
     out
 }
 
-/// Compact contract reminder for rounds after the first. The complete frozen
-/// protocol is sent on round zero; later requests keep only the wire grammar
-/// and harness invariants that are required to parse and admit the next plan.
+/// The RTDL protocol text sent on every planning round: the wire grammar and
+/// the harness invariants needed to parse and admit the next plan. It stays
+/// byte-identical across rounds so the prompt cache can reuse it.
 const RTDL_PROTOCOL_REMINDER: &str = r#"## RTDL output (same frozen contract as round 0)
 Reply with exactly one JSON object and no surrounding prose:
 {"content":"...","rtdl_description":"...","rtdl":<node>,"task_update":null|{"goal":"...","success_criterion":"...","status":"in_progress"|"done"}}
@@ -2150,7 +2150,7 @@ Plan control is the entire rtdl value, never a nested node or capability: cancel
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
-Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call. task_update.goal must exactly copy Current user interaction. Use status=done only when its success criterion is verified and its relevant tree is no longer running.
+Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call. task_update.goal must exactly copy the latest User task or User steer instruction. Use status=done only when its success criterion is verified and its relevant tree is no longer running.
 "#;
 
 fn rtdl_protocol(full: bool) -> &'static str {
@@ -3141,11 +3141,6 @@ by planning capability calls available to you.
   work covered by that tree, or when continuing that same tree is unsafe. A
   failure in an independent monitoring, greeting, observation, or query branch
   is not permission to cancel navigation or another physical task.
-- For any boundary stop, select the explicitly requested step from the ordered
-  in-flight RTDL step list and call `builtin_stop_plan_at` once. The target may
-  be any step in the plan; never assume it means the currently running step.
-  Use `on_complete` for 'after step X' and `on_enter` for 'before step X'.
-  Bind X itself; never substitute X's predecessor or successor.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - Some later messages may be labelled `Executor feedback for the current task`.
   Treat those as results of capability calls you already planned, not as new
@@ -3162,7 +3157,7 @@ by planning capability calls available to you.
   just to confirm unchanged data.
 
 ## Interaction and execution lifetime
-The harness owns the latest instruction shown in \"Current user interaction\".
+The harness owns the latest instruction, the newest \"User task\" or \"User steer\" message.
 Copy it exactly into a non-null `task_update.goal`; `task_update` reports
 progress and never replaces user intent. Older conversation remains in message
 history. Independently running work appears only in \"In-flight RTDL trees\"
