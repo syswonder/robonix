@@ -78,7 +78,7 @@ Use the smaller effective limit when a model card and an inference-server settin
 
 ## Prompt assets
 
-The VLM-facing RTDL envelope rules live in `rtdl_protocol.md` and are embedded via `include_str!`. Planning uses the same bounded grammar/admission reminder on every round to preserve the cacheable prefix; corrective retries can include the full protocol.
+On every planning round the model sees `RTDL_PROTOCOL_REMINDER` (in `src/planner.rs`), the standing system prompt, and the response JSON schema (`rtdl_envelope_schema` in `src/vlm.rs`). The reminder is the same on every round so the prompt prefix stays cacheable. `rtdl_protocol.md` is not sent to the model.
 
 Pilot's standing system prompt is built in `src/planner.rs`. Prompt assembly and usage accounting live in `src/prompt.rs`; each round's section list supplies both context-budget estimates and request rendering.
 
@@ -164,6 +164,6 @@ Pilot accepts it only when it does not contradict the task state. With
 dispatches nor any plan in Executor's active-plan snapshot — the model claims the
 task is advancing while nothing will run, so the reply is rejected
 (`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
-the turn ends with what the model said. The protocol and the per-round reminder
-state the pairing rule: an empty sequence goes with `task_update: null` or
+the turn ends with what the model said. The per-round reminder states the
+pairing rule: an empty sequence goes with `task_update: null` or
 `status: "done"`, or stands while a running tree is waited on.

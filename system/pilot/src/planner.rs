@@ -1927,7 +1927,7 @@ pub async fn run_turn(
 
         // Apply progress only after the harness knows whether this response can
         // safely finish. A model cannot mark a task done while it is also
-        // dispatching work or while an older tree remains in flight.
+        // dispatching work in the same response.
         let task_state_changed = if let Some(updated) = task_update {
             info!(
                 "[pilot/rtdl] task_update goal='{}' status='{}'",
@@ -2133,9 +2133,9 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
     out
 }
 
-/// Compact contract reminder for rounds after the first. The complete frozen
-/// protocol is sent on round zero; later requests keep only the wire grammar
-/// and harness invariants that are required to parse and admit the next plan.
+/// The RTDL protocol text sent on every planning round: the wire grammar and
+/// the harness invariants needed to parse and admit the next plan. It stays
+/// byte-identical across rounds so the prompt cache can reuse it.
 const RTDL_PROTOCOL_REMINDER: &str = r#"## RTDL output (same frozen contract as round 0)
 Reply with exactly one JSON object and no surrounding prose:
 {"content":"...","rtdl_description":"...","rtdl":<node>,"task_update":null|{"goal":"...","success_criterion":"...","status":"in_progress"|"done"}}
