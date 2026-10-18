@@ -48,10 +48,10 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + 3D-AABB IoU drives the concept-graphs merge pipeline: `compute_spatial_similarities` + `compute_visual_similarities` + `aggregate_similarities` + `merge_detections_to_objects`. Three hard gates filter the agg_sim matrix:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
    * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
-   * **Threshold** — agg_sim < 0.55 → spawn new object instead.
+   * **Threshold** — agg_sim < 0.85 (`merge_threshold`) → spawn new object instead.
 5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
-Periodic cleanup (every 30 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
+Periodic cleanup (every 10 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
 
 ## Deployment targets (x86 / Jetson)
 
@@ -524,7 +524,7 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
 | `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
-| `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
+| `SCENE_CG_MERGE_THRESHOLD` | `0.85` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
 | `SCENE_CG_CROSS_CLASS_CENTROID_MAX_M` | `0.5` | per-tick class-gate bypass radius: a detection within this of an existing object may merge despite a different class label (handles YOLO label flicker on one fixture) |
@@ -540,8 +540,8 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_VLM_CACHE_MAX_AGE_SEC` | `120` | maximum age of a successful detection cache entry when new camera messages continue to arrive; a frozen camera message never spends an expiry inference, and `0` disables reuse across new messages |
 | `SCENE_VLM_FAILURE_BACKOFF_BASE_SEC` / `SCENE_VLM_FAILURE_BACKOFF_MAX_SEC` | `max(detect period, 5)` / `60` | bounded exponential retry window for visual-tier detection failures |
 | `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_BASE_SEC` / `SCENE_GRAPH_IMAGE_FAILURE_BACKOFF_MAX_SEC` | `30` / `300` | bounded exponential retry window for whole-scene image-relation failures |
-| `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
-| `SCENE_WEB_HOST` | `0.0.0.0` | Web UI bind host; set `127.0.0.1` on a robot/control workstation to keep the operator surface local-only. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
+| `SCENE_WEB_PORT` | `50107` | web UI port |
+| `SCENE_WEB_HOST` | `127.0.0.1` | Web UI bind host. The UI has no authentication and can edit map data; set `0.0.0.0` to reach it from another machine. An explicit Scene config file's `web_host` takes precedence when that launch path provides one. |
 | `SCENE_WEB_VIEWER` | `rerun` | `rerun` draws the 3D and 2D map pages with rerun (the scene docker image ships `rerun-sdk` and its browser bundle; without them the pages say why); `off` never starts it. Config key: `web_viewer`. |
 | `SCENE_RERUN_GRPC_PORT` | `9876` | Port the 3D page reads log data from. The 2D page reads the next port up (`9877` by default), so forward both. |
 | `SCENE_RERUN_PERIOD_S` | `1.0` | How often the map is published. A tick now sends only what changed, so this sets how quickly the robot's own marker follows it rather than how much data the viewer holds. Raise it when watching over a forwarded connection. |
@@ -569,7 +569,7 @@ is **loaded** (see "Map library" below for the epoch rules). Each row carries
 a caption vector embedded with the open_clip text encoder already loaded for
 perception (512-d, shared with the per-object image features), so a future
 object-search layer can reuse the table. The DB is scene-owned — a separate
-file/process from `system/memory`'s memsearch DB — and lives under the
+file/process from `services/memsearch`'s DB — and lives under the
 host-mounted `/data/robonix`, which also makes the scene-graph JSON caches
 survive boots.
 
@@ -647,7 +647,7 @@ below).
 | `robonix/system/scene/delete_object`           | `delete_object`  | Delete one incorrect derived object. |
 | `robonix/system/scene/flush_objects`           | `flush_objects`  | Clear all derived objects; the robot and annotations stay. |
 
-These are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
+These are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. The MCP port is picked at startup and registered with Atlas; Scene logs it as `MCP HTTP serving on <host>:<port>`. Example:
 
 Both goal tools resolve `robonix/system/soma/footprint` through Atlas and use
 the returned polygon. Until Soma publishes valid geometry, they fail closed
@@ -655,7 +655,7 @@ with `Soma footprint unavailable`; Scene never substitutes a simulator-sized
 disc. The web state exposes the same polygon as `robot_footprint`.
 
 ```bash
-curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
+curl -s http://127.0.0.1:<mcp-port>/mcp/ -H "Content-Type: application/json" \
      -H "Accept: application/json, text/event-stream" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
          "name":"list_objects","arguments":{}}}'
@@ -685,7 +685,7 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 **Robot pose in the web UI doesn't match rviz** — compare `/api/state`'s robot frame with the `header.frame_id` published by the selected `service/map/pose` or odometry provider. Scene withholds the robot pose when that source frame is absent instead of guessing a TF endpoint.
 
-**Lots of duplicate objects across the room ("ghosting")** — lower `SCENE_CG_MERGE_THRESHOLD` (default 0.55). Or raise `SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g. big tables) that span >1.5 m.
+**Lots of duplicate objects across the room ("ghosting")** — lower `SCENE_CG_MERGE_THRESHOLD` (default 0.85). Or raise `SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g. big tables) that span >1.5 m.
 
 **One physical object shows as several same-class records** (e.g. one keyboard → three) — raise `SCENE_CG_SAME_CLASS_MERGE_DIST_M` so the lenient same-class proximity collapse folds them; `0` disables it.
 
