@@ -9,9 +9,8 @@
 #   - soma     (body description; launches primitive and skill packages)
 #   - vitals   (onboard health)
 # Repo-side dev tooling lives under `tools/` (rbnx CLI + codegen).
-# Python-only system components (scene) and reference service implementations
-# (services/{memsearch,voiceprint,speech}) are managed by uv and not part of
-# this Cargo workspace.
+# Python packages (system/scene, services/*, pylib/*) are uv workspace members
+# listed in the root pyproject.toml, not part of this Cargo workspace.
 members = [
     "system/atlas",
     "system/executor",
