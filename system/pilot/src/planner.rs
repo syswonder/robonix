@@ -3587,6 +3587,23 @@ mod tests {
     }
 
     #[test]
+    fn the_minimal_schema_shaped_meta_ops_parse() {
+        // The minimal shape `vlm::rtdl_envelope_schema` describes must parse;
+        // the other half of this contract is asserted next to the schema.
+        for op in [
+            json!({"op": "cancel_plan", "plan_id": "3"}),
+            json!({"op": "cancel_all"}),
+            json!({"op": "stop_plan_at", "plan_id": "3", "target_op_id": "5"}),
+        ] {
+            assert!(
+                parse_meta_plan_op(&op).unwrap().is_some(),
+                "the schema's minimal shape for {} must parse",
+                op["op"]
+            );
+        }
+    }
+
+    #[test]
     fn a_meta_op_id_may_arrive_unquoted() {
         // JSON spells an identifier either 1 or "1", and Pilot puts it back on
         // the wire as a string either way. Rejecting the unquoted form cost
