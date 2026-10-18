@@ -477,6 +477,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let vlm = self.vlm.clone();
         let history_budget = self.history_budget.clone();
         let session_id = task.session_id.clone();
+        let auth_session_token = task.auth_session_token.clone();
         let cancels = Arc::clone(&self.cancels);
         let steers = Arc::clone(&self.steers);
 
@@ -499,19 +500,20 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 .await;
 
             let mut atlas_for_turn = atlas.clone();
-            let mut executor = match build_executor_conn(atlas, &provider_id).await {
-                Ok(e) => e,
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(Status::unavailable(format!(
-                            "cannot reach Executor via atlas: {e:#}"
-                        ))))
-                        .await;
-                    cancels.lock().await.remove(&session_id);
-                    steers.lock().await.remove(&session_id);
-                    return;
-                }
-            };
+            let mut executor =
+                match build_executor_conn(atlas, &provider_id, &auth_session_token).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(Status::unavailable(format!(
+                                "cannot reach Executor via atlas: {e:#}"
+                            ))))
+                            .await;
+                        cancels.lock().await.remove(&session_id);
+                        steers.lock().await.remove(&session_id);
+                        return;
+                    }
+                };
 
             let mut history = history_arc.lock().await;
             let mut standing_task = task_state_arc.lock().await;
@@ -583,6 +585,7 @@ fn pilot_health_report(provider_id: &str) -> ModuleHealthReport {
 async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
+    auth_session_token: &str,
 ) -> anyhow::Result<ExecutorConn> {
     let (_, executor_provider_id, exec_ch) = atlas_client::connect_to_capability(
         &mut atlas,
@@ -614,6 +617,7 @@ async fn build_executor_conn(
         graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
         control: RobonixSystemExecutorControlPlanClient::new(control_ch),
         active: RobonixSystemExecutorListActivePlansClient::new(active_ch),
+        auth_session_token: auth_session_token.to_owned(),
     })
 }
 

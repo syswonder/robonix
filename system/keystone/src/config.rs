@@ -8,8 +8,8 @@ use robonix_keystone::DEFAULT_VOICE_THRESHOLD;
 use serde::Deserialize;
 
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
-/// Keep Keystone reachable by clients running on other hosts.
-pub const DEFAULT_LISTEN: &str = "0.0.0.0:50095";
+/// Keep Keystone private to the robot host unless a deployment opts in.
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:50095";
 pub const DEFAULT_PROVIDER_ID: &str = "keystone";
 pub const KEYSTONE_NAMESPACE: &str = "robonix/system/keystone";
 

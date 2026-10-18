@@ -24,6 +24,8 @@ pub struct ExecutorConfig {
     pub sentinel_listen: String,
     pub id: String,
     pub sentinel_rules: PathBuf,
+    pub sentinel_rules_seed: Option<PathBuf>,
+    pub require_keystone: bool,
     pub verification: VerificationConfig,
 }
 
@@ -67,7 +69,7 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_EXECUTOR_LISTEN")]
     pub listen: Option<String>,
 
-    /// Address the robot-local Sentinel management gRPC service binds to.
+    /// Loopback address the robot-local Sentinel management gRPC service binds to.
     #[arg(long, env = "ROBONIX_SENTINEL_LISTEN")]
     pub sentinel_listen: Option<String>,
 
@@ -82,6 +84,10 @@ pub struct Args {
     /// Optional versioned seed copied to `sentinel_rules` only on first boot.
     #[arg(long, env = "ROBONIX_SENTINEL_RULES_SEED")]
     pub sentinel_rules_seed: Option<PathBuf>,
+
+    /// Require a live Keystone session for plan execution and plan-control requests.
+    #[arg(long, env = "ROBONIX_EXECUTOR_REQUIRE_KEYSTONE")]
+    pub require_keystone: Option<bool>,
 
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
@@ -116,6 +122,8 @@ struct FileConfig {
     #[serde(default)]
     sentinel_rules_seed: Option<PathBuf>,
     #[serde(default)]
+    require_keystone: Option<bool>,
+    #[serde(default)]
     verification: Option<VerificationConfig>,
 }
 
@@ -127,6 +135,8 @@ struct ManifestConfig {
     sentinel_rules: Option<PathBuf>,
     #[serde(default)]
     sentinel_rules_seed: Option<PathBuf>,
+    #[serde(default)]
+    require_keystone: Option<bool>,
     #[serde(default)]
     verification: Option<VerificationConfig>,
 }
@@ -158,6 +168,15 @@ impl ExecutorConfig {
             .or(file_cfg.sentinel_listen)
             .map(Ok)
             .unwrap_or_else(|| default_sentinel_listen(&listen))?;
+        let sentinel_address: std::net::SocketAddr = sentinel_listen
+            .parse()
+            .with_context(|| format!("invalid Sentinel listen address '{sentinel_listen}'"))?;
+        if sentinel_address.ip() != std::net::Ipv4Addr::LOCALHOST {
+            bail!(
+                "Sentinel management must listen on 127.0.0.1, got '{}'",
+                sentinel_listen
+            );
+        }
         let data_dir = std::env::var_os("ROBONIX_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("rbnx-boot/data"));
@@ -170,7 +189,11 @@ impl ExecutorConfig {
             .sentinel_rules_seed
             .or(manifest_cfg.sentinel_rules_seed)
             .or(file_cfg.sentinel_rules_seed);
-        bootstrap_sentinel_rules(&sentinel_rules, sentinel_rules_seed.as_deref())?;
+        let require_keystone = args
+            .require_keystone
+            .or(manifest_cfg.require_keystone)
+            .or(file_cfg.require_keystone)
+            .unwrap_or(false);
         Ok(Self {
             atlas_endpoint: args
                 .atlas
@@ -184,6 +207,8 @@ impl ExecutorConfig {
                 .or(file_cfg.id)
                 .unwrap_or_else(|| DEFAULT_EXECUTOR_PROVIDER_ID.to_string()),
             sentinel_rules,
+            sentinel_rules_seed,
+            require_keystone,
             verification,
         })
     }
@@ -202,7 +227,7 @@ fn default_sentinel_listen(listen: &str) -> Result<String> {
 
 /// Initialize a robot-local policy from a checked-in seed without replacing
 /// a policy already managed through Sentinel's admin API.
-fn bootstrap_sentinel_rules(path: &Path, seed: Option<&Path>) -> Result<()> {
+pub(crate) fn bootstrap_sentinel_rules(path: &Path, seed: Option<&Path>) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
@@ -323,6 +348,7 @@ mod tests {
             id: None,
             sentinel_rules: None,
             sentinel_rules_seed: None,
+            require_keystone: None,
             config: None,
             log: None,
             config_json: config_json.map(str::to_string),
@@ -351,16 +377,34 @@ mod tests {
     fn parses_manifest_sentinel_config() {
         let cfg = ExecutorConfig::resolve(args(Some(
             r#"{
-                "sentinel_listen": "0.0.0.0:51062",
+                "sentinel_listen": "127.0.0.1:51062",
                 "sentinel_rules": "/var/lib/robonix/sentinel-rules.json"
             }"#,
         )))
         .unwrap();
-        assert_eq!(cfg.sentinel_listen, "0.0.0.0:51062");
+        assert_eq!(cfg.sentinel_listen, "127.0.0.1:51062");
         assert_eq!(
             cfg.sentinel_rules,
             PathBuf::from("/var/lib/robonix/sentinel-rules.json")
         );
+    }
+
+    #[test]
+    fn rejects_external_sentinel_listen() {
+        let error = ExecutorConfig::resolve(args(Some(r#"{"sentinel_listen":"0.0.0.0:50062"}"#)))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must listen on 127.0.0.1"));
+    }
+
+    #[test]
+    fn require_keystone_defaults_off_and_reads_manifest() {
+        let cfg = ExecutorConfig::resolve(args(None)).expect("default config");
+        assert!(!cfg.require_keystone);
+
+        let cfg = ExecutorConfig::resolve(args(Some(r#"{"require_keystone":true}"#)))
+            .expect("manifest config");
+        assert!(cfg.require_keystone);
     }
 
     #[test]
@@ -383,6 +427,15 @@ mod tests {
         .to_string();
 
         let config = ExecutorConfig::resolve(args(Some(&config_json))).expect("seeded config");
+        assert!(
+            !target.exists(),
+            "resolving config must not write Sentinel rules"
+        );
+        bootstrap_sentinel_rules(
+            &config.sentinel_rules,
+            config.sentinel_rules_seed.as_deref(),
+        )
+        .expect("bootstrap rules");
         assert_eq!(config.sentinel_rules, target);
         assert_eq!(
             std::fs::read_to_string(&target).expect("bootstrapped rules"),
@@ -390,7 +443,13 @@ mod tests {
         );
 
         std::fs::write(&target, "[]\n").expect("admin-managed replacement");
-        ExecutorConfig::resolve(args(Some(&config_json))).expect("existing rules config");
+        let config =
+            ExecutorConfig::resolve(args(Some(&config_json))).expect("existing rules config");
+        bootstrap_sentinel_rules(
+            &config.sentinel_rules,
+            config.sentinel_rules_seed.as_deref(),
+        )
+        .expect("existing rules remain untouched");
         assert_eq!(
             std::fs::read_to_string(&target).expect("preserved rules"),
             "[]\n"
@@ -415,7 +474,12 @@ mod tests {
         })
         .to_string();
 
-        let error = ExecutorConfig::resolve(args(Some(&config_json))).unwrap_err();
+        let config = ExecutorConfig::resolve(args(Some(&config_json))).expect("seeded config");
+        let error = bootstrap_sentinel_rules(
+            &config.sentinel_rules,
+            config.sentinel_rules_seed.as_deref(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("validate Sentinel rules seed"));
         assert!(!target.exists());
         std::fs::remove_dir_all(temp).expect("remove test directory");

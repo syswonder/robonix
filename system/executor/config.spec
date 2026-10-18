@@ -33,9 +33,9 @@ properties:
     type: string
     default: 127.0.0.1:50062
     description: >-
-      Socket address the Sentinel rule-management services bind to. When
-      absent, Executor binds 127.0.0.1 with its own port incremented by one.
-      ROBONIX_SENTINEL_LISTEN overrides this value.
+      Loopback socket address the Sentinel rule-management services bind to.
+      The address must use 127.0.0.1. When absent, Executor uses its own port
+      incremented by one. ROBONIX_SENTINEL_LISTEN overrides this value.
 
   sentinel_rules:
     type: string
@@ -52,6 +52,16 @@ properties:
       Optional initial Sentinel rule file. Executor validates and copies it to
       sentinel_rules only when the active rule file does not exist.
       ROBONIX_SENTINEL_RULES_SEED overrides this value.
+
+  require_keystone:
+    type: boolean
+    default: false
+    description: >-
+      Require a live Keystone session on plan execution and plan-control
+      requests. rbnx boot derives this from Liaison's effective
+      system.liaison.keystone_endpoint or ROBONIX_KEYSTONE_ENDPOINT setting and
+      rejects an explicit value that disagrees. ROBONIX_EXECUTOR_REQUIRE_KEYSTONE
+      overrides the manifest value.
 
   atlas:
     type: string

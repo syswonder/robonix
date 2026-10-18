@@ -140,6 +140,7 @@ pub struct ExecutorServiceImpl {
     provider_id: String,
     runtime: PlanRuntime,
     sentinel: SentinelRuntime,
+    require_keystone: bool,
     verification: Arc<VerificationPolicy>,
 }
 
@@ -148,6 +149,7 @@ impl ExecutorServiceImpl {
         atlas: AtlasClient,
         provider_id: String,
         sentinel: SentinelRuntime,
+        require_keystone: bool,
         verification: Arc<VerificationPolicy>,
     ) -> Self {
         Self {
@@ -155,8 +157,21 @@ impl ExecutorServiceImpl {
             provider_id,
             runtime: PlanRuntime::default(),
             sentinel,
+            require_keystone,
             verification,
         }
+    }
+
+    async fn authenticate_control_session(&self, token: &str) -> Result<(), Status> {
+        if token.is_empty() {
+            if self.require_keystone {
+                return Err(Status::unauthenticated("login session is required"));
+            }
+            return Ok(());
+        }
+        resolve_session_identity(&self.atlas, &self.provider_id, token)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -180,6 +195,9 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
     ) -> Result<Response<Self::ExecuteStream>, Status> {
         let mut plan = request.into_inner();
         validate_plan(&plan).map_err(Status::invalid_argument)?;
+        if self.require_keystone && plan.auth_session_token.is_empty() {
+            return Err(Status::unauthenticated("login session is required"));
+        }
         let identity = if plan.auth_session_token.is_empty() {
             SentinelIdentity::default()
         } else {
@@ -743,8 +761,11 @@ fn log_success(call: &CapabilityCall, result: &CapabilityCallResult) {
 impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
     async fn cancel_all(
         &self,
-        _request: Request<crate::pb::executor::CancelAllRequest>,
+        request: Request<crate::pb::executor::CancelAllRequest>,
     ) -> Result<Response<CancelAllResponse>, Status> {
+        let request = request.into_inner();
+        self.authenticate_control_session(&request.session_token)
+            .await?;
         let mut atlas = self.atlas.clone();
         let success = self
             .runtime
@@ -775,6 +796,8 @@ impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
         request: Request<crate::pb::executor::ControlPlanRequest>,
     ) -> Result<Response<ControlPlanResponse>, Status> {
         let request = request.into_inner();
+        self.authenticate_control_session(&request.session_token)
+            .await?;
         let mut atlas = self.atlas.clone();
         let response = match request.action.as_str() {
             "cancel" => {
@@ -979,8 +1002,11 @@ mod tests {
         wait_for_verifiers,
     };
     use crate::config::VerificationRule;
+    use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
+    use crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlan;
     use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
+    use crate::pb::executor::{CancelAllRequest, ControlPlanRequest};
     use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
     use crate::rtdl_wire::NodeEventContext;
     use crate::sentinel_runtime::{SentinelIdentity, SentinelRuntime};
@@ -1094,6 +1120,91 @@ mod tests {
                 .error
                 .contains("Sentinel denied capability call by rule 'deny-test'")
         );
+        atlas_server.abort();
+    }
+
+    #[tokio::test]
+    async fn require_keystone_rejects_empty_session() {
+        let atlas_addr = reserve_address();
+        let atlas_server =
+            tokio::spawn(serve_atlas(Arc::new(AtlasRegistry::default()), atlas_addr));
+        let atlas = AtlasClient::connect_with_retry(
+            format!("http://{atlas_addr}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("connect test Atlas");
+        let service = ExecutorServiceImpl::new(
+            atlas,
+            "executor".into(),
+            sentinel_runtime(),
+            true,
+            Arc::new(VerificationPolicy::new(false, Vec::new())),
+        );
+        let plan = Plan {
+            plan_id: "empty-session".into(),
+            session_id: "test".into(),
+            round: 0,
+            nodes: vec![RtdlNode {
+                node_kind: RTDL_SEQUENCE,
+                children: Vec::new(),
+                call: None,
+                op_id: "root".into(),
+                description: "empty session".into(),
+            }],
+            root_index: 0,
+            auth_session_token: String::new(),
+        };
+
+        let error = service
+            .execute(Request::new(plan))
+            .await
+            .expect_err("empty session should be rejected");
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+        atlas_server.abort();
+    }
+
+    #[tokio::test]
+    async fn require_keystone_rejects_empty_control_sessions() {
+        let atlas_addr = reserve_address();
+        let atlas_server =
+            tokio::spawn(serve_atlas(Arc::new(AtlasRegistry::default()), atlas_addr));
+        let atlas = AtlasClient::connect_with_retry(
+            format!("http://{atlas_addr}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("connect test Atlas");
+        let service = ExecutorServiceImpl::new(
+            atlas,
+            "executor".into(),
+            sentinel_runtime(),
+            true,
+            Arc::new(VerificationPolicy::new(false, Vec::new())),
+        );
+
+        let control_error = service
+            .control_plan(Request::new(ControlPlanRequest {
+                session_token: String::new(),
+                action: "cancel".into(),
+                plan_id: "p".into(),
+                op_id: String::new(),
+                when: String::new(),
+                wait_ms: 0,
+            }))
+            .await
+            .expect_err("empty control session should be rejected");
+        assert_eq!(control_error.code(), tonic::Code::Unauthenticated);
+
+        let cancel_error = service
+            .cancel_all(Request::new(CancelAllRequest {
+                session_token: String::new(),
+            }))
+            .await
+            .expect_err("empty cancel-all session should be rejected");
+        assert_eq!(cancel_error.code(), tonic::Code::Unauthenticated);
         atlas_server.abort();
     }
 
@@ -1342,6 +1453,7 @@ mod tests {
             atlas,
             "executor".into(),
             sentinel_runtime(),
+            false,
             Arc::new(VerificationPolicy::new(
                 true,
                 vec![VerificationRule {

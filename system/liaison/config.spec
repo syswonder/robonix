@@ -40,8 +40,9 @@ properties:
     type: string
     description: >-
       Keystone endpoint. When set, external text, control, push-to-talk voice,
-      and hands-free requests require a live Keystone login session. Environment
-      fallback: ROBONIX_KEYSTONE_ENDPOINT.
+      and hands-free requests require a live Keystone login session. rbnx boot
+      also derives Executor's require_keystone mode from this value or its
+      ROBONIX_KEYSTONE_ENDPOINT fallback.
 
   log:
     type: string

@@ -1,3 +1,4 @@
+string session_token
 string action
 string plan_id
 string op_id

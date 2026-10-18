@@ -16,10 +16,10 @@ properties:
 
   listen:
     type: string
-    default: 0.0.0.0:50095
+    default: 127.0.0.1:50095
     description: >-
-      gRPC listen address. Use a loopback address when remote account clients
-      do not connect to Keystone directly.
+      gRPC listen address. Bind an unspecified address only when remote
+      account clients must connect directly on a trusted network.
 
   provider_id:
     type: string

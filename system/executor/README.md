@@ -27,10 +27,11 @@ Important configuration:
 
 - `--atlas` / `ROBONIX_ATLAS_ENDPOINT`: Atlas endpoint. Defaults to `127.0.0.1:50051`.
 - `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50061`.
-- `--sentinel-listen` / `ROBONIX_SENTINEL_LISTEN`: Sentinel rule-management gRPC listen address. Defaults to `127.0.0.1` with the Executor port incremented by one.
+- `--sentinel-listen` / `ROBONIX_SENTINEL_LISTEN`: Sentinel rule-management gRPC listen address. The address must use `127.0.0.1`; the default port is the Executor port incremented by one.
 - `--id` / `ROBONIX_EXECUTOR_PROVIDER_ID`: provider id registered with Atlas. Defaults to `executor`.
 - `--sentinel-rules` / `ROBONIX_SENTINEL_RULES`: robot-local Sentinel rule file. Defaults to `$ROBONIX_DATA_DIR/sentinel-rules.json`, or `rbnx-boot/data/sentinel-rules.json` when the data directory is unset.
 - `--sentinel-rules-seed` / `ROBONIX_SENTINEL_RULES_SEED`: optional initial Sentinel rule file. Executor validates and copies it only when the active rule file does not exist.
+- `--require-keystone` / `ROBONIX_EXECUTOR_REQUIRE_KEYSTONE`: require a live Keystone session on plan execution and plan-control requests. Defaults to off; `rbnx boot` derives it from Liaison's effective Keystone configuration and rejects an explicit mismatch.
 - `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_executor=info`.
 
 Result verification rules live in the deployment manifest's `system.executor`
@@ -85,8 +86,11 @@ match execution results back to the original RTDL node.
 
 When `Plan.auth_session_token` is non-empty, Executor resolves it through
 Keystone before reporting that the plan started. Executor rejects an invalid
-session and clears a valid credential before executing the tree. Empty
-credentials preserve local deployments without Keystone.
+session and clears a valid credential before executing the tree. When
+`require_keystone` is enabled, an empty token is rejected with
+`UNAUTHENTICATED`; the same requirement applies to `control_plan` and
+`cancel_all_plans`. When disabled, empty credentials preserve local
+deployments without Keystone.
 
 Executor keeps an in-process table of active RTDL plans. The builtin
 `cancel_plan` capability can mark a plan as cancelled by `plan_id`; `sequence`

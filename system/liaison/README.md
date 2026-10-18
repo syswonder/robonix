@@ -84,6 +84,9 @@ When `ROBONIX_KEYSTONE_ENDPOINT` or `system.liaison.keystone_endpoint` is set,
 external text, control, push-to-talk voice, and hands-free enable requests must
 include a Keystone login token. Liaison retains the validated token while
 hands-free mode is enabled and resolves the session before every voice capture.
+`rbnx boot` turns this same setting into Executor's `require_keystone` mode so
+both boundaries reject a missing session rather than allowing direct Executor
+callers to bypass Liaison.
 If the account's voice guard is disabled, the voice turn skips Voiceprint; if it
 is enabled, Voiceprint must identify the logged-in account above Keystone's
 configured threshold.

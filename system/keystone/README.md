@@ -41,7 +41,7 @@ Keystone is a built-in system component:
 ```yaml
 system:
   keystone:
-    listen: 0.0.0.0:50095
+    listen: 127.0.0.1:50095
     log: info
     database: ${HOME}/.robonix/data/keystone.db
     bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
@@ -51,15 +51,15 @@ system:
     keystone_endpoint: 127.0.0.1:50095
 ```
 
-Clients may discover Keystone through Atlas and connect to its account API
-directly. Restrict the listener at deployment time when remote access is not
-required.
+Clients may discover Keystone through Atlas. The default listener is
+robot-local; bind an unspecified address only when remote account clients must
+connect directly on a trusted network.
 
 Optional configuration can be passed in the `system.keystone` mapping:
 
 | Field | Default | Purpose |
 |---|---|---|
-| `listen` | `0.0.0.0:50095` | Keystone gRPC listener |
+| `listen` | `127.0.0.1:50095` | Keystone gRPC listener |
 | `database` | `$ROBONIX_DATA_DIR/keystone.db` | SQLite database |
 | `bootstrap_credentials_file` | `$ROBONIX_DATA_DIR/keystone-bootstrap-admin.txt` | generated first-login credential file |
 | `bootstrap_admin_username` | `admin` | first administrator username |

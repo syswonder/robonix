@@ -5,6 +5,11 @@ Both Webots manifests declare two paths:
 - `sentinel_rules` is the robot-local policy managed by Sentinel.
 - `sentinel_rules_seed` is the checked-in `sentinel-rules.v1.json` baseline.
 
+## Management endpoint
+
+Both Webots manifests bind Sentinel management to `127.0.0.1:50062`. Only an
+authenticated administrator on the robot host can list or replace rules.
+
 On the first boot, Executor validates the versioned seed and copies it to the
 robot-local path. Later boots never overwrite that file, so rule replacements
 made through the administrator API survive rebuilds and alternate worktrees.

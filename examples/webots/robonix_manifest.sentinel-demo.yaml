@@ -16,7 +16,7 @@ system:
 
   executor:
     listen: 127.0.0.1:50061
-    sentinel_listen: 0.0.0.0:50062
+    sentinel_listen: 127.0.0.1:50062
     sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
     sentinel_rules_seed: sentinel-rules.v1.json
     log: info

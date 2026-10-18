@@ -44,6 +44,7 @@ pub struct ExecutorConn {
     pub graph: RobonixSystemExecutorExecuteClient<Channel>,
     pub control: RobonixSystemExecutorControlPlanClient<Channel>,
     pub active: RobonixSystemExecutorListActivePlansClient<Channel>,
+    pub auth_session_token: String,
 }
 
 type CapabilityTarget = (String, String);
@@ -411,6 +412,7 @@ async fn cancel_forest_plans(
         let cancel = executor
             .control
             .control_plan(Request::new(ControlPlanRequest {
+                session_token: executor.auth_session_token.clone(),
                 action: "cancel".to_string(),
                 plan_id: target.clone(),
                 op_id: String::new(),
@@ -524,6 +526,7 @@ fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<MetaPlanOp>> {
 async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> Result<String> {
     let request = match op {
         MetaPlanOp::Cancel { plan_id, wait_ms } => ControlPlanRequest {
+            session_token: executor.auth_session_token.clone(),
             action: "cancel".to_string(),
             plan_id: plan_id.clone(),
             op_id: String::new(),
@@ -531,6 +534,7 @@ async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> R
             wait_ms: *wait_ms,
         },
         MetaPlanOp::CancelAll { wait_ms } => ControlPlanRequest {
+            session_token: executor.auth_session_token.clone(),
             action: "cancel_all".to_string(),
             plan_id: String::new(),
             op_id: String::new(),
@@ -542,6 +546,7 @@ async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> R
             op_id,
             when,
         } => ControlPlanRequest {
+            session_token: executor.auth_session_token.clone(),
             action: "stop_at".to_string(),
             plan_id: plan_id.clone(),
             op_id: op_id.clone(),
@@ -1053,7 +1058,9 @@ pub async fn run_turn(
     transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
-    let mut auth_session_token = task.auth_session_token.clone();
+    executor
+        .auth_session_token
+        .clone_from(&task.auth_session_token);
 
     macro_rules! return_interrupted {
         ($forest:expr) => {{
@@ -1229,7 +1236,7 @@ pub async fn run_turn(
                                     task,
                                     history,
                                     standing_task,
-                                    &mut auth_session_token,
+                                    &mut executor.auth_session_token,
                                 ) {
                                     should_plan = true;
                                 }
@@ -1253,7 +1260,7 @@ pub async fn run_turn(
                             task,
                             history,
                             standing_task,
-                            &mut auth_session_token,
+                            &mut executor.auth_session_token,
                         )
                     {
                         // Re-plan now so the model can react (and decide
@@ -1373,7 +1380,7 @@ pub async fn run_turn(
             &mut steer_rx,
             history,
             standing_task,
-            &mut auth_session_token,
+            &mut executor.auth_session_token,
         );
         transcript.record(history, standing_task.as_ref());
 
@@ -1561,13 +1568,13 @@ pub async fn run_turn(
                                     task,
                                     history,
                                     standing_task,
-                                    &mut auth_session_token,
+                                    &mut executor.auth_session_token,
                                 );
                                 drain_steers(
                                     &mut steer_rx,
                                     history,
                                     standing_task,
-                                    &mut auth_session_token,
+                                    &mut executor.auth_session_token,
                                 );
                             }
                             // The response being sampled was built without this
@@ -1931,7 +1938,9 @@ pub async fn run_turn(
         }
 
         let mut graph = graph.expect("non-meta RTDL response must carry a graph");
-        graph.auth_session_token.clone_from(&auth_session_token);
+        graph
+            .auth_session_token
+            .clone_from(&executor.auth_session_token);
 
         let calls = plan_call_count(&graph);
         let call_signatures = plan_call_signatures(&graph);

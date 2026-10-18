@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
     info!("robonix-executor starting");
 
     let cfg = ExecutorConfig::resolve(parsed)?;
+    config::bootstrap_sentinel_rules(&cfg.sentinel_rules, cfg.sentinel_rules_seed.as_deref())?;
     let sentinel = SentinelRuntime::load(cfg.sentinel_rules.clone())
         .with_context(|| format!("load Sentinel rules '{}'", cfg.sentinel_rules.display()))?;
 
@@ -243,7 +244,13 @@ async fn main() -> Result<()> {
         verification.len()
     );
     let sentinel_svc = SentinelServiceImpl::new(atlas.clone(), sentinel.clone());
-    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone(), sentinel, verification);
+    let svc = ExecutorServiceImpl::new(
+        atlas,
+        cfg.id.clone(),
+        sentinel,
+        cfg.require_keystone,
+        verification,
+    );
     info!("executor gRPC on {listen_addr}");
     info!("sentinel gRPC on {sentinel_listen_addr}");
     info!("robonix-executor ready on {listen_addr}");
