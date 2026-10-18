@@ -52,7 +52,7 @@ Declare Vitals in the deployment manifest's existing `system:` block:
 ```yaml
 system:
   vitals:
-    listen: 127.0.0.1:50092
+    listen: 127.0.0.1:50093
     log: info
 ```
 
@@ -65,9 +65,6 @@ manifest, followed by an optional YAML config file and compiled defaults.
 ```bash
 rbnx boot -f /path/to/deploy/robonix_manifest.yaml
 ```
-
-The Webots example uses `127.0.0.1:50093` because port `50092` is reserved for
-voiceprint in that deployment.
 
 ### With real SOMA (production)
 
@@ -82,7 +79,7 @@ robonix-soma --atlas 127.0.0.1:50051 \
 
 # Terminal 3: Vitals (auto-discovers SOMA health stream via Atlas)
 robonix-vitals --atlas 127.0.0.1:50051 \
-  --listen 127.0.0.1:50092 \
+  --listen 127.0.0.1:50093 \
   --thresholds-path system/vitals/thresholds/example_thresholds.yaml \
   --log info
 ```
@@ -98,7 +95,7 @@ grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
   robonix.contracts.RobonixSystemSomaGetHealth/GetHealth
 
 # Vitals normalized snapshot
-grpcurl -plaintext -d '{}' 127.0.0.1:50092 \
+grpcurl -plaintext -d '{}' 127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsGet/GetVitals
 ```
 
@@ -201,7 +198,7 @@ and a `health_piper` primitive package created in your deployment per the
 ```yaml
 primitive:
   - name: health_piper
-    path: /home/xjy/roboarm/robonix/primitives/health_piper   # absolute path (no ~)
+    path: /path/to/deploy/primitives/health_piper   # absolute path (no ~)
     config:
       can_port: can0
 ```
@@ -216,7 +213,7 @@ cargo run --release -p robonix-atlas -- \
 # Terminal 2: Vitals (starts gRPC server immediately, retries SOMA in background)
 cargo run --release -p robonix-vitals -- \
   --atlas 127.0.0.1:50051 \
-  --listen 127.0.0.1:50092 \
+  --listen 127.0.0.1:50093 \
   --thresholds-path system/vitals/thresholds/example_thresholds.yaml \
   --log info
 
@@ -235,7 +232,7 @@ grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
   robonix.contracts.RobonixSystemSomaGetHealth/GetHealth
 
 # Vitals normalized snapshot — should contain Piper arm body health
-grpcurl -plaintext -d '{}' 127.0.0.1:50092 \
+grpcurl -plaintext -d '{}' 127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsGet/GetVitals
 ```
 
@@ -246,7 +243,7 @@ Expected: `GetVitals` returns a `VitalsSnapshot` with `bodies[0]` containing
 
 ```bash
 # Vitals side
-grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
+grpcurl -plaintext -d '{}' 127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsGet/GetVitals
 
 # Mock Soma side
