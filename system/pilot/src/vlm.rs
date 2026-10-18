@@ -768,7 +768,9 @@ impl VlmClient {
         tokio::spawn(async move {
             let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
             let mut finish = "stop".to_string();
-            let mut buf = String::new();
+            // Bytes, not text: a chunk can end inside a multi-byte character,
+            // and only a whole line is decoded.
+            let mut buf: Vec<u8> = Vec::new();
             let mut done = false;
             while !done {
                 let chunk = tokio::select! {
@@ -780,9 +782,8 @@ impl VlmClient {
                 };
                 match chunk {
                     Ok(bytes) => {
-                        buf.push_str(&String::from_utf8_lossy(&bytes));
-                        while let Some(pos) = buf.find('\n') {
-                            let line: String = buf.drain(..=pos).collect();
+                        buf.extend_from_slice(&bytes);
+                        while let Some(line) = take_line(&mut buf) {
                             match process_stream_line(
                                 line.trim_end(),
                                 &mut tc_acc,
@@ -811,9 +812,10 @@ impl VlmClient {
                     }
                 }
             }
-            if !buf.trim().is_empty()
+            let rest = String::from_utf8_lossy(&buf);
+            if !rest.trim().is_empty()
                 && let Err(e) =
-                    process_stream_line(buf.trim_end(), &mut tc_acc, &mut finish, &tx).await
+                    process_stream_line(rest.trim_end(), &mut tc_acc, &mut finish, &tx).await
             {
                 let _ = tx.send(Err(e)).await;
                 return;
@@ -849,11 +851,25 @@ mod tests {
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
         downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
-        rejects_optional_request_fields, response_format_for,
+        rejects_optional_request_fields, response_format_for, take_line,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Duration;
+
+    #[test]
+    fn a_character_split_across_chunks_is_decoded_whole() {
+        let line = "data: {\"content\":\"机器人\"}\n".as_bytes(); // i18n-ok
+        let cut = line.len() - 5; // inside the last character
+        let mut buf = line[..cut].to_vec();
+        assert_eq!(take_line(&mut buf), None);
+        buf.extend_from_slice(&line[cut..]);
+        assert_eq!(
+            take_line(&mut buf).as_deref(),
+            Some("data: {\"content\":\"机器人\"}\n") // i18n-ok
+        );
+        assert!(buf.is_empty());
+    }
 
     #[test]
     fn reads_context_window_from_common_provider_metadata_shapes() {
@@ -1110,6 +1126,14 @@ struct AccumulatedToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+/// The next whole line of an SSE body, decoded; `None` until a newline
+/// has arrived, so a character split across chunks is never cut.
+fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+    let pos = buf.iter().position(|&b| b == b'\n')?;
+    let raw: Vec<u8> = buf.drain(..=pos).collect();
+    Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
 async fn process_stream_line(
