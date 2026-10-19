@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/chronos/reference_time"
+version = "1"
+kind = "service"
+idl = "chronos/msg/ReferenceQuality.msg"
+description = "Selected reference time and generation; paused simulation time is not extrapolated."
+
+[mode]
+type = "topic_out"

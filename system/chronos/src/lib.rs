@@ -4,10 +4,12 @@
 //!
 //! It reads configured operating-system clocks without modifying them, while
 //! callers provide device/reference observations for deterministic estimation.
-//! The runtime exposes coherent quality and model snapshots in process.
+//! The Linux executable exposes cached quality and models over gRPC.
 
 mod config;
 mod core;
+#[cfg(target_os = "linux")]
+pub mod grpc;
 mod model;
 #[cfg(target_os = "linux")]
 mod quality_runtime;
