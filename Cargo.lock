@@ -3177,7 +3177,9 @@ dependencies = [
 name = "robonix-chronos"
 version = "1.1.0"
 dependencies = [
+ "libc",
  "robonix-chronos-clock",
+ "robonix-scribe",
  "serde",
  "serde_yaml",
  "thiserror 2.0.18",

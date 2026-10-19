@@ -6,7 +6,11 @@ license.workspace = true
 description = "Robonix Chronos clock-domain models"
 
 [dependencies]
+robonix-scribe.workspace = true
 serde_yaml.workspace = true
 robonix-chronos-clock = { workspace = true, features = ["serde"] }
 serde.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
