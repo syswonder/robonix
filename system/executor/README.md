@@ -20,15 +20,15 @@ by `make build` and `make install` respectively.
 Manual launch:
 
 ```sh
-robonix-executor --atlas 127.0.0.1:50051 --listen 127.0.0.1:50072
+robonix-executor --atlas 127.0.0.1:50051 --listen 127.0.0.1:50061
 ```
 
 Important configuration:
 
 - `--atlas` / `ROBONIX_ATLAS_ENDPOINT`: Atlas endpoint. Defaults to `127.0.0.1:50051`.
-- `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50072`.
+- `--listen` / `ROBONIX_EXECUTOR_LISTEN`: Executor gRPC listen address. Defaults to `127.0.0.1:50061`.
 - `--id` / `ROBONIX_EXECUTOR_PROVIDER_ID`: provider id registered with Atlas. Defaults to `executor`.
-- `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_executor=info`.
+- `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 
 Result verification rules live in the deployment manifest's `system.executor`
 block. A rule is optional; calls with no matching rule keep their original
@@ -73,11 +73,17 @@ skips children that have not started yet, `parallel` shares the cancellation
 state across branches, and the target plan still emits `plan_complete` with
 `any_failed=true`.
 
-Executor declares two gRPC contracts:
+Executor declares five gRPC contracts:
 
 - `robonix/system/executor/execute`: Pilot submits one `Plan` and receives an
   `RtdlEvent` stream.
+- `robonix/system/executor/control_plan`: applies one RTDL meta operation to
+  active plans without creating another plan.
+- `robonix/system/executor/list_active_plans`: returns the RTDL plans Executor
+  currently owns, without creating a plan.
 - `robonix/system/executor/cancel_all_plans`: cancels every active RTDL plan.
+- `robonix/system/executor/get_health`: returns Executor's module health report
+  for Vitals.
 
 The Execute stream emits `RtdlEvent` messages:
 

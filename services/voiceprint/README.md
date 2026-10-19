@@ -1,27 +1,28 @@
-# robonix/system/voiceprint
+# robonix/service/voiceprint
 
-ECAPA-TDNN speaker-identification service. Implements the frozen v0.1
-capability `robonix/service/voiceprint/identify` (one-shot `Identify`)
-consumed by Liaison's voice-gating path, and adds two package-private
-admin RPCs (`Enroll`, `ListEnrolled`) for off-line enrollment tooling.
+ECAPA-TDNN speaker-identification service. It serves
+`robonix/service/voiceprint/identify`, which Liaison's voice-gating path
+calls, and the enrollment contracts `enroll`, `list`, and `delete`, which
+`rbnx chat` uses to manage enrolled speakers.
 
 ## Layout
 
 ```
-system/voiceprint/
-  proto/voiceprint.proto         # package-private gRPC schema
+services/voiceprint/
+  config.spec                    # manifest config schema
+  package_manifest.yaml
   voiceprint_service/            # Python package
     __init__.py                  # bootstraps gRPC stubs on first import
     engine.py                    # ECAPA-TDNN wrapper
-    service.py                   # gRPC servicer + entry point
+    service.py                   # gRPC servicers + entry point
   scripts/build.sh               # uv venv + codegen + model pre-download
-  tests/                         # unittest suite (Enroll → Identify → Reject)
+  tests/                         # unittest suite
 ```
 
 ## Build
 
 ```bash
-cd system/voiceprint
+cd services/voiceprint
 bash scripts/build.sh
 ```
 
@@ -44,8 +45,6 @@ Environment variables:
 
 | Variable               | Default              | Meaning                              |
 |------------------------|----------------------|--------------------------------------|
-| `VOICEPRINT_PORT`      | `50092`              | gRPC listen port                     |
-| `VOICEPRINT_BIND_ADDR` | `0.0.0.0`            | gRPC bind address                    |
 | `VOICEPRINT_DATA_DIR`  | `rbnx-build/data`    | location of `enrolled.json`          |
 | `VOICEPRINT_THRESHOLD` | `0.25`               | cosine-similarity gate for `is_known` |
 | `VOICEPRINT_DEVICE`    | auto (`cuda:0`/`cpu`) | torch device for ECAPA-TDNN          |
@@ -57,16 +56,19 @@ bash scripts/build.sh   # one-time; pulls ECAPA-TDNN weights
 rbnx-build/venv/bin/python -m unittest discover -s tests -v
 ```
 
-The suite mirrors the original out-of-tree `test_tui.py` voiceprint-gating
-flow: enrol `liukaile` + `com`, identify the matching second sample of
-each as accepted, identify `change.wav` (un-enrolled) as rejected.
+The suite covers threshold and device configuration, concurrent enrollment,
+rollback when persisting fails, and model loading on activate and deactivate.
 
-## Capability contract
+## Capability contracts
 
-This package serves
-[`capabilities/system/speech/voiceprint.v1.toml`](../../capabilities/system/speech/voiceprint.v1.toml),
-whose IDL is
-[`capabilities/lib/voiceprint/srv/Identify.srv`](../../capabilities/lib/voiceprint/srv/Identify.srv).
-The two extra RPCs (`Enroll`, `ListEnrolled`) are package-private and are
-NOT registered as Atlas capabilities; they exist only on the local
-service port for admin tooling.
+All four contracts are registered with Atlas under the `voiceprint` provider
+and share one gRPC listener; `list` is also exposed over MCP:
+
+- [`identify.v1.toml`](../../capabilities/service/voiceprint/identify.v1.toml) — `Identify`
+- [`enroll.v1.toml`](../../capabilities/service/voiceprint/enroll.v1.toml) — `Enroll`
+- [`list.v1.toml`](../../capabilities/service/voiceprint/list.v1.toml) — `ListEnrolled`
+- [`delete.v1.toml`](../../capabilities/service/voiceprint/delete.v1.toml) — `DeleteEnrolled`
+
+The IDL lives in [`capabilities/lib/voiceprint/srv/`](../../capabilities/lib/voiceprint/srv/).
+The listen ports are picked at startup and registered with Atlas; the bind
+address follows `ROBONIX_PROVIDER_BIND_HOST` (see the robonix-api README).

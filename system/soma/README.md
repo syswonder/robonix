@@ -4,7 +4,7 @@ Soma loads a single robot's `soma.yaml` and referenced URDF, then exposes them
 to other Robonix components over gRPC. `rbnx boot` reads the same
 `robonix_manifest.yaml` to decide which primitive and skill packages to run;
 Soma spawns them through `rbnx start` in two stages (see
-`docs/soma_two_stage_bringup.md`).
+`docs/docs/architecture/deployment-and-startup.md`).
 
 Soma preserves the self-description as raw YAML and URDF for consumers. It
 also interprets the existing `robot.components` tree when normalizing a

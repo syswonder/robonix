@@ -34,7 +34,7 @@ Common configuration:
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
-- `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_pilot=info`.
+- `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
 - `ROBONIX_SESSION_DIR`: where session transcripts are kept (see Session transcripts). `rbnx boot` sets it; defaults to `./sessions`.
@@ -78,11 +78,15 @@ Use the smaller effective limit when a model card and an inference-server settin
 
 ## Prompt assets
 
-The VLM-facing RTDL envelope rules live in `rtdl_protocol.md` and are embedded via `include_str!`. Planning uses the same bounded grammar/admission reminder on every round to preserve the cacheable prefix; corrective retries can include the full protocol.
+`rtdl_protocol.md` is not sent to the model and does not affect what it is told. On every planning round the model sees:
+
+- the standing system prompt, built by `build_system_prompt` in `src/planner.rs`;
+- `RTDL_PROTOCOL_REMINDER` in `src/planner.rs`, the same text on every round so the prompt prefix stays cacheable;
+- the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`.
+
+`assemble_planning_messages` in `src/prompt.rs` puts them in order with the history and the live sections; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering.
 
 Pilot preserves each `do.bind` name when expanding RTDL into a Plan. Executor stores the successful result in that tree's execution context; later arguments and conditions can reference it with `{"var":"name","path":["field"]}`.
-
-Pilot's standing system prompt is built in `src/planner.rs`. Prompt assembly and usage accounting live in `src/prompt.rs`; each round's section list supplies both context-budget estimates and request rendering.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
@@ -108,21 +112,23 @@ When Pilot receives a task for a session it has no history for, such as after a 
 
 ## RTDL Planning Flow
 
-Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object:
+Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object with exactly four keys: `content` (text shown to the user), `rtdl_description` (a short label for the tree), `rtdl` (the tree), and `task_update` (`null`, or the task's `goal`, `success_criterion`, and `status` of `in_progress` or `done`):
 
 ```json
 {
   "content": "I will inspect the current scene.",
+  "rtdl_description": "inspect the scene",
   "rtdl": {
     "op": "sequence",
     "children": [
       {
         "op": "do",
-        "cap": "camera_snapshot",
+        "cap": "tiago_camera.camera_snapshot",
         "args": {}
       }
     ]
-  }
+  },
+  "task_update": null
 }
 ```
 
@@ -130,7 +136,7 @@ MVP RTDL supports only:
 
 - `sequence`: ordered children.
 - `parallel`: concurrent children. Executor waits for every child and does not cancel sibling branches when one fails.
-- `do`: one capability call, where `cap` is the unique `capability_name` shown in the prompt and `args` is a JSON object.
+- `do`: one capability call, where `cap` is the `capability_name` shown in the prompt, `<provider_id>.<area>_<name>` (for example `tiago_camera.camera_snapshot` for `robonix/primitive/camera/snapshot`), and `args` is a JSON object.
 
 Pilot buffers the full assistant JSON before showing user-visible text, validates the RTDL, expands it into an arena-style `Plan { nodes, root_index }`, sends that `Plan` to Liaison, and dispatches it to Executor. Executor interprets `sequence`, `parallel`, and `do` nodes directly.
 
@@ -141,20 +147,22 @@ Parallel example:
 ```json
 {
   "content": "I will inspect both signals.",
+  "rtdl_description": "inspect camera and health",
   "rtdl": {
     "op": "parallel",
     "children": [
-      { "op": "do", "cap": "camera_snapshot", "args": {} },
-      { "op": "do", "cap": "battery_status", "args": {} }
+      { "op": "do", "cap": "tiago_camera.camera_snapshot", "args": {} },
+      { "op": "do", "cap": "tiago_health.health_state", "args": {} }
     ]
-  }
+  },
+  "task_update": null
 }
 ```
 
 An empty sequence means the model is dispatching no new tree this round:
 
 ```json
-{ "content": "Done.", "rtdl": { "op": "sequence", "children": [] } }
+{ "content": "Done.", "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_update": null }
 ```
 
 Pilot accepts it only when it does not contradict the task state. With
@@ -162,8 +170,8 @@ Pilot accepts it only when it does not contradict the task state. With
 dispatches nor any plan in Executor's active-plan snapshot — the model claims the
 task is advancing while nothing will run, so the reply is rejected
 (`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
-the turn ends with what the model said. The protocol and the per-round reminder
-state the pairing rule: an empty sequence goes with `task_update: null` or
+the turn ends with what the model said. The per-round reminder states the
+pairing rule: an empty sequence goes with `task_update: null` or
 `status: "done"`, or stands while a running tree is waited on.
 
 ## RTDL conditions and loops

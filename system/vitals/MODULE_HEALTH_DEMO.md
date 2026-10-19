@@ -116,7 +116,7 @@ cd /path/to/robonix
 
 cargo run -p robonix-vitals -- \
   --atlas 127.0.0.1:50051 \
-  --listen 127.0.0.1:50091 \
+  --listen 127.0.0.1:50093 \
   --thresholds-path system/vitals/thresholds/soma_mock.yaml \
   --log robonix_vitals=info
 ```
@@ -134,9 +134,9 @@ robonix/system/vitals/modules/get
 Vitals should print lines like:
 
 ```text
-declared GetVitals at 127.0.0.1:50091
-declared StreamVitals at 127.0.0.1:50091
-declared ModuleHealthSnapshot at 127.0.0.1:50091
+declared GetVitals at 127.0.0.1:50093
+declared StreamVitals at 127.0.0.1:50093
+declared ModuleHealthSnapshot at 127.0.0.1:50093
 connected to Soma provider 'mock-soma' through Atlas
 connected to Soma StreamHealth
 module health poll connected: executor (robonix/system/executor/get_health)
@@ -173,7 +173,7 @@ grpcurl -plaintext \
   -import-path "$PROTO_DIR" \
   -proto robonix_contracts.proto \
   -d '{}' \
-  127.0.0.1:50091 \
+  127.0.0.1:50093 \
   robonix.contracts.RobonixSystemVitalsModulesGet/GetModuleHealthSnapshot | jq
 ```
 
@@ -329,7 +329,7 @@ This demo uses:
 | Atlas | `50051` |
 | Executor | `50061` |
 | Pilot | `50071` |
-| Vitals | `50091` |
+| Vitals | `50093` |
 | Mock Soma | `50092` |
 
 Stop the old process or replace all affected ports consistently.

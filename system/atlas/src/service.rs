@@ -189,8 +189,8 @@ impl CapabilityProviderState {
     }
 }
 
-/// Whether `prev → next` matches the v0.1 lifecycle FSM (see
-/// `docs/src/architecture/provider-lifecycle.md`). `Unspecified` as `prev`
+/// Whether `prev → next` matches the v0.1 lifecycle FSM (see the lifecycle
+/// section of `docs/docs/developer-guide.md`). `Unspecified` as `prev`
 /// means "fresh provider, never pushed state" — accept any first transition.
 fn is_legal_transition(prev: pb::LifecycleState, next: pb::LifecycleState) -> bool {
     use pb::LifecycleState::*;
