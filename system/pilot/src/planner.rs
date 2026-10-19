@@ -3109,7 +3109,7 @@ fn log_node_state(plan_id: &str, ns: &RtdlNodeState) {
         ));
     }
     line.push_str(&terminal_node_detail(ns));
-    debug!("{line}");
+    info!("{line}");
 }
 
 /// Pick the plan-level completion state shown in the forest completion log.

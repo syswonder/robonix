@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -125,6 +126,7 @@ struct OverlapVerifier {
     runtime: PlanRuntime,
     policy: Arc<VerificationPolicy>,
     original: CapabilityCallResult,
+    started_at: Instant,
 }
 
 /// `AtlasClient` is cheap to clone — each Execute RPC clones it so per-plan
@@ -167,7 +169,13 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
         request: Request<Plan>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
         let plan = request.into_inner();
-        validate_plan(&plan).map_err(Status::invalid_argument)?;
+        if let Err(error) = validate_plan(&plan) {
+            warn!(
+                "[executor/rtdl] plan_id={} plan rejected: {}",
+                plan.plan_id, error
+            );
+            return Err(Status::invalid_argument(error));
+        }
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
@@ -175,7 +183,18 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
         let verification = Arc::clone(&self.verification);
 
         tokio::spawn(async move {
+            let started_at = Instant::now();
             let plan_id = plan.plan_id.clone();
+            let call_count = plan.nodes.iter().filter(|node| node.call.is_some()).count();
+            info!(
+                "[executor/rtdl] plan_id={} session_id={} round={} plan start root={} nodes={} calls={}",
+                plan_id,
+                plan.session_id,
+                plan.round,
+                plan.root_index,
+                plan.nodes.len(),
+                call_count
+            );
             let plan = Arc::new(plan);
             runtime.register_plan(&plan_id).await;
             runtime.record_plan_ops(&plan).await;
@@ -194,10 +213,28 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
             let cancelled = runtime.is_cancelled(&plan_id).await;
             runtime.complete_plan(&plan_id).await;
 
+            let any_failed = execution.failed || verification_failed || cancelled;
+            let state = if cancelled {
+                "Canceled"
+            } else if any_failed {
+                "Failed"
+            } else {
+                "Succeeded"
+            };
+            info!(
+                "[executor/rtdl] plan_id={} plan end state={} duration_ms={} execution_failed={} verification_failed={} canceled={}",
+                plan_id,
+                state,
+                started_at.elapsed().as_millis(),
+                execution.failed,
+                verification_failed,
+                cancelled
+            );
+
             let _ = tx
                 .send(Ok(rtdl_wire::plan_complete(
                     plan_id,
-                    execution.failed || verification_failed || cancelled,
+                    any_failed,
                 )))
                 .await;
         });
@@ -221,7 +258,23 @@ fn execute_node(
         let node = &plan.nodes[node_index];
         let node_ctx = node_event_context(&plan, node_index);
         let op_id = node.op_id.clone();
+        info!(
+            "[executor/rtdl] plan_id={} node={} op_id={} kind={} enter children={} desc='{}'",
+            plan.plan_id,
+            node_index,
+            op_id,
+            rtdl_node_kind_name(node.node_kind),
+            node.children.len(),
+            log_preview(&node.description, 160)
+        );
         if runtime.is_cancelled(&plan.plan_id).await {
+            info!(
+                "[executor/rtdl] plan_id={} node={} op_id={} kind={} skipped reason='plan canceled before entry'",
+                plan.plan_id,
+                node_index,
+                op_id,
+                rtdl_node_kind_name(node.node_kind)
+            );
             if is_operator_node(node.node_kind) {
                 send_operator_state(
                     &tx,
@@ -503,6 +556,10 @@ fn execute_node(
                 let args = match crate::expression::eval_value(&args, &context.snapshot().await) {
                     Ok(args) => args,
                     Err(error) => {
+                        warn!(
+                            "[executor/rtdl] plan_id={} node={} op_id={} kind=do failed before dispatch: argument evaluation: {}",
+                            plan.plan_id, node_index, op_id, error
+                        );
                         let result = CapabilityCallResult {
                             call_id: original.call_id.clone(),
                             provider_id: original.provider_id.clone(),
@@ -577,6 +634,41 @@ fn is_operator_node(node_kind: u32) -> bool {
     )
 }
 
+fn rtdl_node_kind_name(node_kind: u32) -> &'static str {
+    match node_kind {
+        RTDL_SEQUENCE => "sequence",
+        RTDL_PARALLEL => "parallel",
+        RTDL_DO => "do",
+        RTDL_IF => "if",
+        RTDL_REPEAT => "repeat",
+        RTDL_WHILE => "while",
+        _ => "unknown",
+    }
+}
+
+fn rtdl_state_name(state: u32) -> &'static str {
+    match RtdlNodeStateEnum::try_from(state as i32) {
+        Ok(RtdlNodeStateEnum::Pending) => "Pending",
+        Ok(RtdlNodeStateEnum::Running) => "Running",
+        Ok(RtdlNodeStateEnum::Verifying) => "Verifying",
+        Ok(RtdlNodeStateEnum::Succeeded) => "Succeeded",
+        Ok(RtdlNodeStateEnum::Failed) => "Failed",
+        Ok(RtdlNodeStateEnum::Canceled) => "Canceled",
+        Ok(RtdlNodeStateEnum::Timeout) => "Timeout",
+        Ok(RtdlNodeStateEnum::Paused) => "Paused",
+        Err(_) => "Unknown",
+    }
+}
+
+fn log_preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
 /// Map a completed leaf call to its RTDL state. Cancellation wins over the
 /// provider result: a command terminated by cancel_plan normally returns
 /// success=false, but that is an expected CANCELED outcome, not a FAILED tool.
@@ -644,6 +736,15 @@ async fn send_operator_state(
         "RTDL {op} op_id={} {reason}: {}",
         node.op_id, node.description
     );
+    info!(
+        "[executor/rtdl] plan_id={} node={} op_id={} kind={} state={} detail='{}'",
+        node.plan_id,
+        node.node_index,
+        node.op_id,
+        op,
+        rtdl_state_name(state),
+        log_preview(&detail, 240)
+    );
     runtime
         .record_op_state(&node.plan_id, &node.op_id, state)
         .await;
@@ -708,19 +809,21 @@ async fn execute_call(
     verification: Arc<VerificationPolicy>,
     bind: &str,
 ) -> NodeExecution {
+    let started_at = Instant::now();
     // Log the args too (bounded) so the log shows what each call requested —
     // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
     // and any cap call. Truncated to keep large payloads (images, file content)
     // from bloating the log.
-    let args_preview: String = call.args_json.chars().take(256).collect();
-    let args_ellipsis = if call.args_json.len() > 256 {
-        "…"
-    } else {
-        ""
-    };
     info!(
-        "[executor] dispatching call_id={} provider='{}' contract='{}' args={}{}",
-        call.call_id, call.provider_id, call.contract_id, args_preview, args_ellipsis,
+        "[executor/rtdl] plan_id={} node={} op_id={} kind=do dispatching call_id={} provider='{}' contract='{}' bind='{}' args={}",
+        node.plan_id,
+        node.node_index,
+        node.op_id,
+        call.call_id,
+        call.provider_id,
+        call.contract_id,
+        bind,
+        log_preview(&call.args_json, 256),
     );
 
     // Mark the op running so get_plan_status shows the in-flight node. Live
@@ -789,6 +892,15 @@ async fn execute_call(
             )))
             .await;
         log_success(call, &result);
+        info!(
+            "[executor/rtdl] plan_id={} node={} op_id={} kind=do call_id={} state=Verifying duration_ms={} provider_success=true output_bytes={}",
+            node.plan_id,
+            node.node_index,
+            node.op_id,
+            call.call_id,
+            started_at.elapsed().as_millis(),
+            result.output.len()
+        );
 
         let verifier = tokio::spawn(
             OverlapVerifier {
@@ -800,6 +912,7 @@ async fn execute_call(
                 runtime,
                 policy: verification,
                 original: result,
+                started_at,
             }
             .run(),
         );
@@ -834,6 +947,24 @@ async fn execute_call(
             .await
             .store(bind, &result.output)
             .await;
+        let value_type = match serde_json::from_str::<serde_json::Value>(&result.output) {
+            Ok(serde_json::Value::Null) => "null",
+            Ok(serde_json::Value::Bool(_)) => "boolean",
+            Ok(serde_json::Value::Number(_)) => "number",
+            Ok(serde_json::Value::String(_)) => "string",
+            Ok(serde_json::Value::Array(_)) => "array",
+            Ok(serde_json::Value::Object(_)) => "object",
+            Err(_) => "string",
+        };
+        info!(
+            "[executor/rtdl] plan_id={} node={} op_id={} kind=do bind stored name='{}' value_type={} output_bytes={}",
+            node.plan_id,
+            node.node_index,
+            node.op_id,
+            bind,
+            value_type,
+            result.output.len()
+        );
     }
     runtime
         .record_op_state(&node.plan_id, &node.op_id, state)
@@ -846,6 +977,19 @@ async fn execute_call(
         )))
         .await;
     let failed = !result.success;
+
+    info!(
+        "[executor/rtdl] plan_id={} node={} op_id={} kind=do end call_id={} state={} duration_ms={} provider_success={} output_bytes={} error='{}'",
+        node.plan_id,
+        node.node_index,
+        node.op_id,
+        call.call_id,
+        rtdl_state_name(state),
+        started_at.elapsed().as_millis(),
+        result.success,
+        result.output.len(),
+        log_preview(&result.error, 240)
+    );
 
     if result.success {
         log_success(call, &result);
@@ -884,6 +1028,18 @@ impl OverlapVerifier {
                 state,
             )))
             .await;
+        info!(
+            "[executor/rtdl] plan_id={} node={} op_id={} kind=do verification end call_id={} state={} duration_ms={} success={} output_bytes={} error='{}'",
+            self.node.plan_id,
+            self.node.node_index,
+            self.node.op_id,
+            self.call.call_id,
+            rtdl_state_name(state),
+            self.started_at.elapsed().as_millis(),
+            verified.success,
+            verified.output.len(),
+            log_preview(&verified.error, 240)
+        );
         if !verified.success {
             warn!(
                 "[executor] '{}' verification finalized call_id={} as failed: {}",
