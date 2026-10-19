@@ -86,13 +86,16 @@ struct PlanView {
 }
 
 impl ForestView {
-    /// Reset for a brand-new top-level turn (a fresh user message, not a steer).
+    /// Reset for a brand-new top-level turn (a fresh user message, not a
+    /// steer). A Pilot with task lists keeps its tasks and their trees across
+    /// turns and resends them, so they stay on the panel.
     fn begin_turn(&mut self) {
         self.goal.clear();
         self.success_criterion.clear();
         self.status.clear();
-        self.tasks.clear();
-        self.plans.clear();
+        if self.tasks.is_empty() {
+            self.plans.clear();
+        }
     }
 
     fn plan_mut(&mut self, plan_id: &str) -> Option<&mut PlanView> {
@@ -201,6 +204,8 @@ fn forest_panel_lines(forest: &ForestView) -> Vec<Line<'static>> {
             Span::styled(status.to_string(), status_style(status)),
         ]));
     } else {
+        // Each task with its own trees under it, so which tree serves which
+        // task reads straight off the panel.
         lines.push(header("Tasks"));
         for task in &forest.tasks {
             lines.push(Line::from(vec![
@@ -209,27 +214,49 @@ fn forest_panel_lines(forest: &ForestView) -> Vec<Line<'static>> {
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("[{}] ", task.status), status_style(&task.status)),
-                Span::raw(task.goal.clone()),
+                Span::raw(if task.goal.is_empty() {
+                    "(goal not stated yet)".to_string()
+                } else {
+                    task.goal.clone()
+                }),
             ]));
             if task.status == "in_progress" && !task.success_criterion.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("  done when: {}", task.success_criterion),
+                    format!("   done when: {}", task.success_criterion),
                     dim,
                 )));
             }
             if !task.status_reason.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("  {}", task.status_reason),
+                    format!("   {}", task.status_reason),
                     dim,
                 )));
             }
-            if !task.plan_ids.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("  plans: {}", task.plan_ids.join(", ")),
-                    dim,
-                )));
+            for plan_id in &task.plan_ids {
+                match forest.plans.iter().find(|pv| &pv.plan_id == plan_id) {
+                    Some(pv) => tree_lines(pv, "   ", &mut lines),
+                    None => lines.push(Line::from(Span::styled(format!("   plan {plan_id}"), dim))),
+                }
             }
         }
+        let unfiled: Vec<&PlanView> = forest
+            .plans
+            .iter()
+            .filter(|pv| {
+                !forest
+                    .tasks
+                    .iter()
+                    .any(|t| t.plan_ids.contains(&pv.plan_id))
+            })
+            .collect();
+        if !unfiled.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(header("Unfiled trees"));
+            for pv in unfiled {
+                tree_lines(pv, "", &mut lines);
+            }
+        }
+        return lines;
     }
     lines.push(Line::from(""));
     lines.push(header("Forest"));
@@ -240,27 +267,35 @@ fn forest_panel_lines(forest: &ForestView) -> Vec<Line<'static>> {
         )));
     }
     for pv in &forest.plans {
-        let (marker, head_style) = if pv.done {
-            if pv.any_failed {
-                ("✗", Style::default().fg(Color::Red))
-            } else {
-                ("✓", Style::default().fg(Color::Green))
-            }
-        } else {
-            (
-                "▸",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{marker} plan {}", pv.plan_id),
-            head_style,
-        )));
-        forest_node_lines(pv, pv.plan.root_index as usize, "", true, true, &mut lines);
+        tree_lines(pv, "", &mut lines);
     }
     lines
+}
+
+/// One tree: a header with its state, then its nodes, all indented by `indent`.
+fn tree_lines(pv: &PlanView, indent: &str, out: &mut Vec<Line<'static>>) {
+    let (marker, state, style) = match (pv.done, pv.any_failed) {
+        (true, true) => ("✗", "failed", Style::default().fg(Color::Red)),
+        (true, false) => ("✓", "succeeded", Style::default().fg(Color::Green)),
+        _ => (
+            "▸",
+            "running",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    out.push(Line::from(vec![
+        Span::raw(indent.to_string()),
+        Span::styled(format!("{marker} plan {} · {state}", pv.plan_id), style),
+    ]));
+    let mut nodes = Vec::new();
+    forest_node_lines(pv, pv.plan.root_index as usize, "", true, true, &mut nodes);
+    for line in nodes {
+        let mut spans = vec![Span::raw(format!("{indent}  "))];
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
 }
 
 fn forest_node_lines(
@@ -1839,7 +1874,6 @@ async fn run_text_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
     use crate::pb::pilot::PilotEvent;
     use tonic::Status;
 
@@ -1847,28 +1881,10 @@ async fn run_text_intent_with_esc_abort(
     let liaison_ep = liaison_endpoint.to_string();
     let task = build_text_task(session_id, user_id, user_msg);
 
-    let _stream_task = tokio::spawn(async move {
-        let mut client = match RobonixSystemLiaisonSubmitClient::connect(liaison_ep.clone()).await {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
-                return;
-            }
-        };
-        let stream = match client.submit_task(tonic::Request::new(task)).await {
-            Ok(r) => r.into_inner(),
-            Err(e) => {
-                let _ = tx.send(Err(e)).await;
-                return;
-            }
-        };
-        let mut stream = stream;
-        while let Some(item) = stream.next().await {
-            if tx.send(item).await.is_err() {
-                break;
-            }
-        }
-    });
+    // Steers forward into the same channel; the turn ends when the first
+    // message's stream and every steer's stream have closed.
+    let steers = tx.downgrade();
+    tokio::spawn(forward_submit(liaison_ep.clone(), task, tx));
 
     // Mid-task input: the user can keep typing while the turn runs. Enter sends
     // the text as a steer (a new Task on the same session); pilot routes it to
@@ -1918,14 +1934,11 @@ async fn run_text_intent_with_esc_abort(
                                         role: Role::User,
                                         text: format!("(steer) {steer}"),
                                     });
-                                    if let Err(e) =
-                                        send_steer(liaison_endpoint, session_id, user_id, &steer)
-                                            .await
-                                    {
-                                        messages.borrow_mut().push(ChatMessage {
-                                            role: Role::Status,
-                                            text: format!("steer failed: {e:#}"),
-                                        });
+                                    // The steer's own stream carries what Pilot
+                                    // does for it: read it here, never block on it.
+                                    if let Some(tx) = steers.upgrade() {
+                                        let task = build_text_task(session_id, user_id, &steer);
+                                        tokio::spawn(forward_submit(liaison_ep.clone(), task, tx));
                                     }
                                     *scroll = 0;
                                     draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
@@ -1958,6 +1971,36 @@ async fn run_text_intent_with_esc_abort(
 
 /// Submit `text` as a mid-task steer on an already-running session. Pilot routes
 /// it to the live turn's steer queue and returns an empty stream, which we drain.
+/// Submit a task to Liaison and forward its event stream into `tx`.
+async fn forward_submit(
+    liaison_ep: String,
+    task: crate::pb::pilot::Task,
+    tx: tokio::sync::mpsc::Sender<Result<crate::pb::pilot::PilotEvent, tonic::Status>>,
+) {
+    use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
+    let mut client = match RobonixSystemLiaisonSubmitClient::connect(liaison_ep).await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx
+                .send(Err(tonic::Status::unavailable(e.to_string())))
+                .await;
+            return;
+        }
+    };
+    let mut stream = match client.submit_task(tonic::Request::new(task)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+            return;
+        }
+    };
+    while let Some(item) = stream.next().await {
+        if tx.send(item).await.is_err() {
+            break;
+        }
+    }
+}
+
 async fn send_steer(
     liaison_endpoint: &str,
     session_id: &str,
@@ -2205,8 +2248,12 @@ fn apply_pilot_event(
         }
         EVT_FINAL_TEXT => {
             let t = event.final_text.clone();
-            let has_agent = m.last().is_some_and(|x| matches!(x.role, Role::Agent));
-            if !has_agent && !t.is_empty() {
+            // Skip only a repeat of the narration just shown: with several
+            // tasks, the final answer can follow another task's narration.
+            let repeat = m
+                .last()
+                .is_some_and(|x| matches!(x.role, Role::Agent) && x.text == t);
+            if !repeat && !t.is_empty() {
                 m.push(ChatMessage {
                     role: Role::Agent,
                     text: t,
@@ -2417,8 +2464,11 @@ fn draw(
         let area = f.area();
         let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
         // Split the body into chat (left) + live RTDL forest panel (right).
+        // The panel takes two fifths of a wide terminal, so a task's goal and
+        // its trees fit; never narrower than it used to be.
+        let panel_w = (chunks[0].width * 2 / 5).max(46);
         let body =
-            Layout::horizontal([Constraint::Min(24), Constraint::Length(46)]).split(chunks[0]);
+            Layout::horizontal([Constraint::Min(24), Constraint::Length(panel_w)]).split(chunks[0]);
 
         let mut lines: Vec<Line> = Vec::new();
         for msg in messages {
