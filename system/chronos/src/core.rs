@@ -315,6 +315,14 @@ impl ChronosCore {
         Ok(result)
     }
 
+    /// Return a domain generation for binding queued observations to resets.
+    pub(crate) fn domain_generation(&self, domain_id: &str) -> Result<u64, ChronosError> {
+        self.domains
+            .get(domain_id)
+            .map(|record| record.generation)
+            .ok_or_else(|| ChronosError::UnknownDomain(domain_id.to_string()))
+    }
+
     /// Return current status with age measured only against monotonic input.
     pub fn status(
         &self,
