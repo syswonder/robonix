@@ -58,8 +58,8 @@ Top-level fields:
 | `rtdl_description` | Envelope-level RTDL label. |
 | `status` | Shorthand for one task update of `task` (default `T1`); typically `done`. |
 | `task` | The task the step's tree belongs to; default `T1`, the scenario's first task. |
-| `task_updates` | Optional explicit task updates, as in the reply contract (`[{"task":"T1","status":"done"}]`). |
-| `messages` | Optional refiling of new user messages, as in the reply contract. |
+| `task_updates` | Optional explicit task updates, as in the reply contract (`[{"task_id":"T1","status":"done"}]`). |
+| `message_updates` | Optional refiling of new user messages, as in the reply contract. |
 | `rtdl` | The RTDL tree for this VLM round. Required unless the step only marks `done`. |
 
 Example with multiple RTDL leaves in one VLM round:

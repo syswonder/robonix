@@ -98,13 +98,13 @@ assistant returns exactly one JSON object in `content`:
 ```json
 {
   "content": "narration",
-  "messages": [],
-  "task": "T1",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
   "rtdl_description": "label",
   "rtdl": {"op":"sequence","op_id":0,"description":"...","children":[
     {"op":"do","op_id":0,"description":"...","cap":"<provider>.<area>_<leaf>","args":{...}}
   ]},
-  "task_updates": [{"task":"T1","status":"in_progress|done|failed|superseded"}]
+  "task_updates": [{"task_id":"T1","status":"in_progress|done|failed|superseded"}]
 }
 ```
 

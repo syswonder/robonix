@@ -443,8 +443,9 @@ fn rtdl_envelope_schema() -> Value {
         ],
     });
     // Properties in the order a reply should give them, which `preserve_order`
-    // keeps on the wire: what dispatch needs (`messages`, `task`) before
-    // `rtdl`, so a streaming planner knows a tree's task when the tree starts,
+    // keeps on the wire: what dispatch needs (`message_updates`,
+    // `rtdl_parent_task_id`) before `rtdl`, so a streaming planner knows a tree's
+    // task when the tree starts,
     // and `task_updates`, which need to know what was dispatched, after it.
     // No goal is copied from the user: Pilot keeps the user's words, and
     // `goal` is the model's own statement, so it has no length cap to match.
@@ -453,15 +454,15 @@ fn rtdl_envelope_schema() -> Value {
         "type": "object",
         "properties": {
             "content": {"type": "string"},
-            "messages": {
+            "message_updates": {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": {"message": identifier(), "task": task_ref()},
-                    "required": ["message", "task"],
+                    "properties": {"message_id": identifier(), "parent_task_id": task_ref()},
+                    "required": ["message_id", "parent_task_id"],
                 },
             },
-            "task": {"type": ["string", "integer", "null"]},
+            "rtdl_parent_task_id": {"type": ["string", "integer", "null"]},
             "rtdl_description": {"type": "string"},
             "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
             "task_updates": {
@@ -469,17 +470,17 @@ fn rtdl_envelope_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "task": task_ref(),
+                        "task_id": task_ref(),
                         "goal": {"type": "string"},
                         "success_criterion": {"type": "string"},
                         "status": {"type": "string", "enum": ["in_progress", "done", "failed", "superseded"]},
                         "status_reason": {"type": "string"},
                     },
-                    "required": ["task"],
+                    "required": ["task_id"],
                 },
             },
         },
-        "required": ["content", "messages", "task", "rtdl_description", "rtdl", "task_updates"],
+        "required": ["content", "message_updates", "rtdl_parent_task_id", "rtdl_description", "rtdl", "task_updates"],
         "$defs": {"node": node, "meta": meta},
     })
 }

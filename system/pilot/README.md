@@ -97,11 +97,13 @@ Pilot owns identity and facts: message ids (`m1`, `m2`, …), task ids (`T1`, `T
 
 | Field | Meaning |
 | --- | --- |
-| `messages` | Refiles new messages: `[{"message":"m7","task":"new"}]` starts a task, `[{"message":"m7","task":"T1"}]` moves the message to another open task. Without it a new message stays under the newest open task. Only messages that arrived since the model's last reply can be refiled. |
-| `task` | The task the reply's tree belongs to: an open task id, `"new"` for the task the reply creates, or `null` when it dispatches no tree. A tree with no usable `task` is filed under the newest open task and the model is told so. |
-| `task_updates` | `[{"task":"T1","goal":"…","success_criterion":"…","status":"…","status_reason":"…"}]`, each field but `task` optional. A task cannot close while one of its trees runs, or in the reply that dispatches its tree; an item naming an unknown or closed task is rejected. Rejected items are fed back to the model and the others still apply. |
+| `message_updates` | Refiles new messages: `[{"message_id":"m7","parent_task_id":"new"}]` starts a task, `[{"message_id":"m7","parent_task_id":"T1"}]` moves the message to another open task. Without it a new message stays under the newest open task. Only messages that arrived since the model's last reply can be refiled. |
+| `rtdl_parent_task_id` | The task the reply's tree belongs to: an open task id, `"new"` for the task the reply creates, or `null` when it dispatches no tree. A tree with no usable `rtdl_parent_task_id` is filed under the newest open task and the model is told so. A tree holds one task's steps only: when several tasks need steps at once, the model dispatches one task's tree, and Pilot asks again at once while another open task has no tree running. |
+| `task_updates` | `[{"task_id":"T1","goal":"…","success_criterion":"…","status":"…","status_reason":"…"}]`, each field but `task_id` optional. A task cannot close while one of its trees runs, or in the reply that dispatches its tree; an item naming an unknown or closed task is rejected. Rejected items are fed back to the model and the others still apply. |
 
-A reply gives its fields in the order `content`, `messages`, `task`, `rtdl_description`, `rtdl`, `task_updates`: what dispatch needs comes before `rtdl`, so a streaming planner knows a tree's task when the tree starts, and what needs to know what was dispatched comes after it. Pilot applies them in that order. Pilot's `serde_json` has `preserve_order` so that the schema's properties reach the provider in that order.
+Every `"new"` in one reply names the same task: the one its `message_updates` start, which Pilot creates and gives the next id. A reply therefore creates at most one task, and `rtdl_parent_task_id` or `task_updates` naming `"new"` without a message filed under it is rejected.
+
+A reply gives its fields in the order `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl`, `task_updates`: what dispatch needs comes before `rtdl`, so a streaming planner knows a tree's task when the tree starts, and what needs to know what was dispatched comes after it. Pilot applies them in that order. Pilot's `serde_json` has `preserve_order` so that the schema's properties reach the provider in that order.
 
 The previous contract's `task_update` object is still read for one release: it updates the newest open task, and its `goal` is ignored.
 
@@ -131,13 +133,13 @@ When Pilot receives a task for a session it has no history for, such as after a 
 
 ## RTDL Planning Flow
 
-Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object: `content` (text shown to the user), `messages`, `task`, `rtdl_description` (a short label for the tree), `rtdl` (the tree) and `task_updates`; the task fields are described under Tasks above:
+Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object: `content` (text shown to the user), `message_updates`, `rtdl_parent_task_id`, `rtdl_description` (a short label for the tree), `rtdl` (the tree) and `task_updates`; the task fields are described under Tasks above:
 
 ```json
 {
   "content": "I will inspect the current scene.",
-  "messages": [],
-  "task": "T1",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
   "rtdl_description": "inspect the scene",
   "rtdl": {
     "op": "sequence",
@@ -168,8 +170,8 @@ Parallel example:
 ```json
 {
   "content": "I will inspect both signals.",
-  "messages": [],
-  "task": "T1",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
   "rtdl_description": "inspect camera and health",
   "rtdl": {
     "op": "parallel",
@@ -185,7 +187,7 @@ Parallel example:
 An empty sequence means the model is dispatching no new tree this round:
 
 ```json
-{ "content": "Done.", "messages": [], "task": null, "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_updates": [] }
+{ "content": "Done.", "message_updates": [], "rtdl_parent_task_id": null, "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_updates": [] }
 ```
 
 Pilot accepts it only when it does not contradict the task state. When a task

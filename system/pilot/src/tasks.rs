@@ -11,13 +11,14 @@
 //
 // Pilot owns identity and facts: message and task ids, the user's words, which
 // task each message and tree is filed under, and what the trees did. The model
-// owns the judgement, through three reply fields: `messages` (which task each
-// new message belongs to), `task` (which task the reply's tree serves) and
-// `task_updates` (goal, success criterion and status). Everything is matched by
+// owns the judgement, through three reply fields: `message_updates` (which task
+// each new message belongs to), `rtdl_parent_task_id` (which task the reply's tree
+// serves) and `task_updates` (goal, success criterion and status). A task the
+// reply creates is named "new" there, and Pilot gives it its id. Everything is matched by
 // id, never by comparing text.
 //
 // A streaming planner learns a reply in order, so the fields that dispatch
-// needs (`messages`, `task`) come before `rtdl` and the ones that need to know
+// needs (`message_updates`, `rtdl_parent_task_id`) come before `rtdl` and the ones that need to know
 // what was dispatched (`task_updates`) after it; the calls below follow that
 // order: `file_messages`, then `attach_tree`, then `apply_updates`.
 
@@ -32,11 +33,12 @@ pub(crate) const SUPERSEDED: &str = "superseded";
 const STATUSES: [&str; 4] = [IN_PROGRESS, DONE, FAILED, SUPERSEDED];
 
 /// The reply fields this module reads, in the order a reply should give them
-/// relative to `rtdl`: `messages` and `task` before it, `task_updates` after.
-/// `task_update` is the single-task object of the previous contract.
-pub(crate) const REPLY_FIELDS: [&str; 4] = ["messages", "task", "task_updates", "task_update"];
-/// What a reply writes for a task that the same reply creates.
+/// relative to `rtdl`: `message_updates` and `rtdl_parent_task_id` before it,
+/// `task_updates` after.
+/// Names the task a reply creates; Pilot gives it its id.
 const NEW: &str = "new";
+pub(crate) const REPLY_FIELDS: [&str; 3] =
+    ["message_updates", "rtdl_parent_task_id", "task_updates"];
 
 pub(crate) const DEFAULT_SUCCESS_CRITERION: &str =
     "The user's request is completed and the result has been verified.";
@@ -118,9 +120,7 @@ pub(crate) struct TaskFields {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TaskUpdate {
-    /// `None` only for the previous contract's `task_update`: the newest open
-    /// task.
-    pub task: Option<TaskRef>,
+    pub task: TaskRef,
     pub goal: Option<String>,
     pub success_criterion: Option<String>,
     pub status: Option<String>,
@@ -411,16 +411,17 @@ impl TaskList {
     ) -> Result<String, String> {
         match named {
             TaskRef::New => new_task.map(str::to_string).ok_or_else(|| {
-                "`task` is \"new\" but no message was filed under a new task".to_string()
+                "`rtdl_parent_task_id` is \"new\" but no message was filed under a new task"
+                    .to_string()
             }),
             TaskRef::Id(id) => match self.task(id) {
                 Some(task) if task.is_open() => Ok(id.clone()),
                 Some(task) => Err(format!(
-                    "`task` names {id}, which is already {}",
+                    "`rtdl_parent_task_id` names {id}, which is already {}",
                     task.status
                 )),
                 None => Err(format!(
-                    "`task` names {id}, which does not exist; open tasks: {}",
+                    "`rtdl_parent_task_id` names {id}, which does not exist; open tasks: {}",
                     self.open_ids()
                 )),
             },
@@ -451,6 +452,14 @@ impl TaskList {
             .map(|tree| tree.task.as_str())
     }
 
+    /// Whether an open task other than `task` has no tree running: it waits
+    /// for a reply of its own, since a tree serves one task.
+    pub(crate) fn others_waiting(&self, task: &str) -> bool {
+        self.tasks
+            .iter()
+            .any(|t| t.is_open() && t.id != task && self.running_trees(&t.id).is_empty())
+    }
+
     fn running_trees(&self, task: &str) -> Vec<&str> {
         self.trees
             .iter()
@@ -469,25 +478,14 @@ impl TaskList {
         applied: &mut Applied,
     ) {
         for update in updates {
-            let id = match &update.task {
-                None => match self.newest_open() {
-                    Some(task) => task.id.clone(),
-                    None => {
-                        applied.rejected.push(
-                            "a task update named no task and none is in progress".to_string(),
-                        );
-                        continue;
-                    }
-                },
-                Some(named) => match self.tree_owner(named, new_task) {
-                    Ok(id) => id,
-                    Err(problem) => {
-                        applied
-                            .rejected
-                            .push(problem.replace("`task`", "a task update"));
-                        continue;
-                    }
-                },
+            let id = match self.tree_owner(&update.task, new_task) {
+                Ok(id) => id,
+                Err(problem) => {
+                    applied
+                        .rejected
+                        .push(problem.replace("`rtdl_parent_task_id`", "a task update"));
+                    continue;
+                }
             };
             if let Some(status) = update.status.as_deref()
                 && (status == DONE || status == FAILED)
@@ -571,7 +569,7 @@ impl TaskList {
             .map(|tree| serde_json::json!({"plan_id": tree.plan_id, "state": tree.state}))
             .collect();
         let record = serde_json::json!({
-            "task": task.id,
+            "task_id": task.id,
             "goal": task.goal,
             "success_criterion": task.success_criterion,
             "status": task.status,
@@ -630,7 +628,7 @@ impl TaskList {
         }
         let unanswered = self.unanswered();
         if !unanswered.is_empty() {
-            out.push_str("New messages since your last reply, filed by default; refile one in `messages` if it belongs to another open task or starts a new one:\n");
+            out.push_str("New messages since your last reply, filed by default; refile one in `message_updates` if it belongs to another open task or starts a new one:\n");
             for message in unanswered {
                 out.push_str(&format!(
                     "- {} → {}: {}\n",
@@ -736,30 +734,30 @@ fn object<'a>(value: &'a Value, field: &str, keys: &[&str]) -> Result<&'a Map<St
 /// streaming parser can call this on the fields it has so far.
 pub(crate) fn parse_task_fields(envelope: &Map<String, Value>) -> Result<TaskFields> {
     let mut fields = TaskFields::default();
-    match envelope.get("messages") {
+    match envelope.get("message_updates") {
         None | Some(Value::Null) => {}
         Some(Value::Array(items)) => {
             for (i, item) in items.iter().enumerate() {
-                let field = format!("messages[{i}]");
-                let item = object(item, &field, &["message", "task"])?;
+                let field = format!("message_updates[{i}]");
+                let item = object(item, &field, &["message_id", "parent_task_id"])?;
                 let message = message_id(
-                    item.get("message").unwrap_or(&Value::Null),
-                    &format!("{field}.message"),
+                    item.get("message_id").unwrap_or(&Value::Null),
+                    &format!("{field}.message_id"),
                 )?;
                 let Some(task) = task_ref(
-                    item.get("task").unwrap_or(&Value::Null),
-                    &format!("{field}.task"),
+                    item.get("parent_task_id").unwrap_or(&Value::Null),
+                    &format!("{field}.parent_task_id"),
                 )?
                 else {
-                    bail!("`{field}.task` must name a task id or \"new\"");
+                    bail!("`{field}.parent_task_id` must name a task id or \"new\"");
                 };
                 fields.messages.push((message, task));
             }
         }
-        Some(_) => bail!("`messages` must be an array"),
+        Some(_) => bail!("`message_updates` must be an array"),
     }
-    if let Some(value) = envelope.get("task") {
-        fields.task = task_ref(value, "task")?;
+    if let Some(value) = envelope.get("rtdl_parent_task_id") {
+        fields.task = task_ref(value, "rtdl_parent_task_id")?;
     }
     match envelope.get("task_updates") {
         None | Some(Value::Null) => {}
@@ -770,7 +768,7 @@ pub(crate) fn parse_task_fields(envelope: &Map<String, Value>) -> Result<TaskFie
                     item,
                     &field,
                     &[
-                        "task",
+                        "task_id",
                         "goal",
                         "success_criterion",
                         "status",
@@ -778,14 +776,14 @@ pub(crate) fn parse_task_fields(envelope: &Map<String, Value>) -> Result<TaskFie
                     ],
                 )?;
                 let Some(task) = task_ref(
-                    item.get("task").unwrap_or(&Value::Null),
-                    &format!("{field}.task"),
+                    item.get("task_id").unwrap_or(&Value::Null),
+                    &format!("{field}.task_id"),
                 )?
                 else {
-                    bail!("`{field}.task` must name a task id or \"new\"");
+                    bail!("`{field}.task_id` must name a task id or \"new\"");
                 };
                 fields.updates.push(TaskUpdate {
-                    task: Some(task),
+                    task,
                     goal: string(item.get("goal"), &format!("{field}.goal"))?,
                     success_criterion: string(
                         item.get("success_criterion"),
@@ -801,28 +799,6 @@ pub(crate) fn parse_task_fields(envelope: &Map<String, Value>) -> Result<TaskFie
         }
         Some(_) => bail!("`task_updates` must be an array"),
     }
-    // The previous contract's single update: the newest open task, its `goal`
-    // ignored (Pilot keeps the user's words; a summary in it is not a goal).
-    match envelope.get("task_update") {
-        None | Some(Value::Null) => {}
-        Some(value) => {
-            let legacy = object(
-                value,
-                "task_update",
-                &["goal", "success_criterion", "status"],
-            )?;
-            fields.updates.push(TaskUpdate {
-                task: None,
-                goal: None,
-                success_criterion: string(
-                    legacy.get("success_criterion"),
-                    "task_update.success_criterion",
-                )?,
-                status: status(legacy.get("status"), "task_update.status")?,
-                status_reason: None,
-            });
-        }
-    }
     Ok(fields)
 }
 
@@ -837,7 +813,7 @@ mod tests {
 
     fn update(task: &str, status: &str) -> TaskUpdate {
         TaskUpdate {
-            task: Some(TaskRef::Id(task.to_string())),
+            task: TaskRef::Id(task.to_string()),
             goal: None,
             success_criterion: None,
             status: Some(status.to_string()),
@@ -876,13 +852,13 @@ mod tests {
         list.receive("bring the red cup");
         reply(
             &mut list,
-            json!({"task": "T1", "task_updates": [{"task": "T1", "goal": "bring the red cup"}]}),
+            json!({"rtdl_parent_task_id": "T1", "task_updates": [{"task_id": "T1", "goal": "bring the red cup"}]}),
             Some("p1"),
         );
         list.receive("no, the blue one");
         reply(
             &mut list,
-            json!({"task_updates": [{"task": "T1", "goal": "bring the blue cup"}]}),
+            json!({"task_updates": [{"task_id": "T1", "goal": "bring the blue cup"}]}),
             None,
         );
         assert_eq!(list.tasks.len(), 1);
@@ -894,13 +870,13 @@ mod tests {
     fn a_new_message_can_start_a_new_task_with_its_tree_and_status_in_the_same_reply() {
         let mut list = TaskList::default();
         list.receive("patrol the meeting room");
-        reply(&mut list, json!({"task": "T1"}), Some("p1"));
+        reply(&mut list, json!({"rtdl_parent_task_id": "T1"}), Some("p1"));
         list.receive("what time is it");
         let applied = reply(
             &mut list,
             json!({
-                "messages": [{"message": "m2", "task": "new"}],
-                "task_updates": [{"task": "new", "goal": "tell the time", "status": "done", "status_reason": "answered"}]
+                "message_updates": [{"message_id": "m2", "parent_task_id": "new"}],
+                "task_updates": [{"task_id": "new", "goal": "tell the time", "status": "done", "status_reason": "answered"}]
             }),
             None,
         );
@@ -912,6 +888,23 @@ mod tests {
     }
 
     #[test]
+    fn a_task_without_a_running_tree_waits_for_its_own_reply() {
+        let mut list = TaskList::default();
+        list.receive("visit three points and take photos");
+        reply(&mut list, json!({"rtdl_parent_task_id": "T1"}), Some("p1"));
+        list.receive("is there a whiteboard in the meeting room");
+        reply(
+            &mut list,
+            json!({"message_updates": [{"message_id": "m2", "parent_task_id": "new"}]}),
+            None,
+        );
+        assert!(list.others_waiting("T1"));
+        reply(&mut list, json!({"rtdl_parent_task_id": "T2"}), Some("p2"));
+        assert!(!list.others_waiting("T2"));
+        assert!(!list.others_waiting("T1"));
+    }
+
+    #[test]
     fn a_message_can_go_to_an_older_open_task() {
         let mut list = TaskList::default();
         list.receive("bring the cup");
@@ -919,13 +912,13 @@ mod tests {
         list.receive("open the window");
         reply(
             &mut list,
-            json!({"messages": [{"message": "m2", "task": "new"}], "task": "new"}),
+            json!({"message_updates": [{"message_id": "m2", "parent_task_id": "new"}], "rtdl_parent_task_id": "new"}),
             Some("p2"),
         );
         list.receive("make the cup the blue one");
         let applied = reply(
             &mut list,
-            json!({"messages": [{"message": 3, "task": 1}]}),
+            json!({"message_updates": [{"message_id": 3, "parent_task_id": 1}]}),
             None,
         );
         assert!(applied.rejected.is_empty(), "{:?}", applied.rejected);
@@ -939,13 +932,13 @@ mod tests {
         list.receive("one");
         reply(
             &mut list,
-            json!({"task_updates": [{"task": "T1", "status": "done"}]}),
+            json!({"task_updates": [{"task_id": "T1", "status": "done"}]}),
             None,
         );
         list.receive("two");
         let applied = reply(
             &mut list,
-            json!({"messages": [{"message": "m1", "task": "new"}, {"message": "m2", "task": "T1"}]}),
+            json!({"message_updates": [{"message_id": "m1", "parent_task_id": "new"}, {"message_id": "m2", "parent_task_id": "T1"}]}),
             None,
         );
         assert_eq!(applied.rejected.len(), 2, "{:?}", applied.rejected);
@@ -958,13 +951,13 @@ mod tests {
         list.receive("first");
         reply(
             &mut list,
-            json!({"task_updates": [{"task": "T1", "status": "done"}]}),
+            json!({"task_updates": [{"task_id": "T1", "status": "done"}]}),
             None,
         );
         list.receive("second");
         reply(
             &mut list,
-            json!({"messages": [{"message": "m2", "task": "new"}]}),
+            json!({"message_updates": [{"message_id": "m2", "parent_task_id": "new"}]}),
             None,
         );
         assert_eq!(list.tasks.len(), 2);
@@ -975,13 +968,13 @@ mod tests {
     fn done_while_a_tree_of_the_task_runs_is_rejected_for_that_item_only() {
         let mut list = TaskList::default();
         list.receive("navigate");
-        reply(&mut list, json!({"task": "T1"}), Some("p1"));
+        reply(&mut list, json!({"rtdl_parent_task_id": "T1"}), Some("p1"));
         list.receive("say hello");
         let applied = reply(
             &mut list,
             json!({
-                "messages": [{"message": "m2", "task": "new"}],
-                "task_updates": [{"task": "T1", "status": "done"}, {"task": "new", "status": "done"}]
+                "message_updates": [{"message_id": "m2", "parent_task_id": "new"}],
+                "task_updates": [{"task_id": "T1", "status": "done"}, {"task_id": "new", "status": "done"}]
             }),
             None,
         );
@@ -1001,7 +994,7 @@ mod tests {
         list.receive("look around");
         let applied = reply(
             &mut list,
-            json!({"task": "T1", "task_updates": [{"task": "T1", "status": "done"}]}),
+            json!({"rtdl_parent_task_id": "T1", "task_updates": [{"task_id": "T1", "status": "done"}]}),
             Some("p1"),
         );
         assert_eq!(applied.rejected.len(), 1);
@@ -1015,7 +1008,7 @@ mod tests {
         assert!(list.messages[0].text.chars().count() > 400);
         let applied = reply(
             &mut list,
-            json!({"task_updates": [{"task": "T1", "status": "done"}]}),
+            json!({"task_updates": [{"task_id": "T1", "status": "done"}]}),
             None,
         );
         assert!(applied.rejected.is_empty());
@@ -1023,33 +1016,21 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_task_update_applies_to_the_newest_open_task_without_its_goal() {
-        let mut list = TaskList::default();
-        list.receive("the user's own words");
-        reply(
-            &mut list,
-            json!({"task_update": {"goal": "a summary", "success_criterion": "c", "status": "done"}}),
-            None,
-        );
-        let task = list.task("T1").unwrap();
-        assert_eq!(task.status, DONE);
-        assert_eq!(task.goal, "");
-        assert_eq!(task.success_criterion, "c");
-    }
-
-    #[test]
     fn task_fields_accept_ids_as_strings_or_integers_and_reject_bad_shapes() {
         let parsed =
-            fields(json!({"task": 2, "messages": [{"message": 7, "task": "NEW"}]})).unwrap();
+            fields(json!({"rtdl_parent_task_id": 2, "message_updates": [{"message_id": 7, "parent_task_id": "NEW"}]})).unwrap();
         assert_eq!(parsed.task, Some(TaskRef::Id("T2".into())));
         assert_eq!(parsed.messages, [("m7".to_string(), TaskRef::New)]);
-        assert!(fields(json!({"task": {}})).is_err());
-        assert!(fields(json!({"messages": [{"message": "m1"}]})).is_err());
+        assert!(fields(json!({"rtdl_parent_task_id": {}})).is_err());
+        assert!(fields(json!({"message_updates": [{"message_id": "m1"}]})).is_err());
         assert!(fields(json!({"task_updates": [{"status": "done"}]})).is_err());
-        assert!(fields(json!({"task_updates": [{"task": "T1", "status": "finished"}]})).is_err());
-        assert!(fields(json!({"task_updates": [{"task": "T1", "extra": 1}]})).is_err());
+        assert!(
+            fields(json!({"task_updates": [{"task_id": "T1", "status": "finished"}]})).is_err()
+        );
+        assert!(fields(json!({"task_updates": [{"task_id": "T1", "extra": 1}]})).is_err());
         assert_eq!(
-            fields(json!({"task": null, "messages": [], "task_updates": []})).unwrap(),
+            fields(json!({"rtdl_parent_task_id": null, "message_updates": [], "task_updates": []}))
+                .unwrap(),
             TaskFields::default()
         );
     }
@@ -1093,13 +1074,13 @@ mod tests {
         list.receive("old request");
         reply(
             &mut list,
-            json!({"task_updates": [{"task": "T1", "goal": "old", "status": "done"}]}),
+            json!({"task_updates": [{"task_id": "T1", "goal": "old", "status": "done"}]}),
             None,
         );
         list.receive("go to the kitchen");
         reply(
             &mut list,
-            json!({"task_updates": [{"task": "T2", "goal": "reach the kitchen"}]}),
+            json!({"task_updates": [{"task_id": "T2", "goal": "reach the kitchen"}]}),
             Some("p4"),
         );
         list.receive("the one upstairs");

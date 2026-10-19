@@ -247,7 +247,7 @@ async fn apply_task_fields(
             None => {
                 let id = fallback();
                 applied.rejected.push(format!(
-                    "plan {plan_id} was filed under {} because `task` was missing; name the task of every tree you dispatch",
+                    "plan {plan_id} was filed under {} because `rtdl_parent_task_id` was missing; name the task of every tree you dispatch",
                     id.as_deref().unwrap_or("no task")
                 ));
                 id
@@ -2017,7 +2017,7 @@ pub async fn run_turn(
         }
         // File the reply's messages, attach its tree to its task, then apply
         // its updates: a task cannot close while its own tree runs.
-        apply_task_fields(
+        let owner = apply_task_fields(
             &task_fields,
             (calls > 0).then_some((plan_id.as_str(), rtdl_description.as_str())),
             tasks,
@@ -2143,7 +2143,12 @@ pub async fn run_turn(
                 .await;
             break;
         }
-        // should_plan stays false: wait for this tree (and any others) to report.
+        // A tree serves one task, so another open task with no tree running is
+        // waiting for a reply of its own: ask now rather than after this tree
+        // reports. Otherwise wait for this tree (and any others) to report.
+        should_plan = owner
+            .as_deref()
+            .is_some_and(|task| tasks.others_waiting(task));
     }
 
     // ── 8. Mark turn complete ─────────────────────────────────────────────────
@@ -2209,20 +2214,20 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
 /// byte-identical across rounds so the prompt cache can reuse it.
 const RTDL_PROTOCOL_REMINDER: &str = r#"## RTDL output
 Reply with exactly one JSON object and no surrounding prose, with its fields in this order:
-{"content":"...","messages":[...],"task":"T1"|"new"|null,"rtdl_description":"...","rtdl":<node or plan-control op>,"task_updates":[...]}
+{"content":"...","message_updates":[...],"rtdl_parent_task_id":"T1"|"new"|null,"rtdl_description":"...","rtdl":<node or plan-control op>,"task_updates":[...]}
 
 Nodes are exactly one of:
 - {"op":"sequence","op_id":0,"description":"...","children":[...]}
 - {"op":"parallel","op_id":0,"description":"...","children":[...]}
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
-Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
+Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose a task's known dependent steps into one sequence and its independent steps into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan or cancel_all using an exact listed plan_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
 Tasks (ids from the status board):
-- messages: [], or refile a new message: [{"message":"m7","task":"new"|"T1"}].
-- task: the task of the tree in rtdl, "new", or null with no tree.
-- task_updates: [{"task":"T1","goal":"..","success_criterion":"..","status":"in_progress"|"done"|"failed"|"superseded","status_reason":".."}]; a task with a running plan cannot close.
+- message_updates: [], or refile a new message: [{"message_id":"m7","parent_task_id":"new"|"T1"}].
+- rtdl_parent_task_id: the task the tree in rtdl serves, "new", or null with no tree.
+- task_updates: [{"task_id":"T1","goal":"..","success_criterion":"..","status":"in_progress"|"done"|"failed"|"superseded","status_reason":".."}]; a task with a running plan cannot close.
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
@@ -2238,7 +2243,7 @@ struct RtdlEnvelope {
     rtdl_description: String,
     /// The tree, or a plan-control meta op.
     rtdl: serde_json::Value,
-    /// `messages`, `task` and `task_updates` (see `tasks`).
+    /// `message_updates`, `rtdl_parent_task_id` and `task_updates` (see `tasks`).
     task_fields: TaskFields,
 }
 
@@ -2356,7 +2361,7 @@ fn build_rtdl_retry_prompt(
          Previous response preview: {}\n\n\
          Fix the RTDL error and retry the same user request exactly once. If the error \
          mentions an unknown capability, do not repeat that capability. Return ONLY a JSON object \
-         with `content`, `messages`, `task`, `rtdl_description`, `rtdl` and `task_updates`. The reply MUST begin \
+         with `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl` and `task_updates`. The reply MUST begin \
          with `{{` and end with `}}`: no prose, narration, or markdown fences before or after it (put \
          any user-facing text inside `content`). Use only \
          capability_name values from this list; do not invent provider names, method names, or \
@@ -3200,10 +3205,12 @@ leave unrelated running plans alone. If a new message conflicts with a running
 plan, cancel that plan before dispatching its replacement.
 
 A new message is filed under the newest open task, which is right for a
-correction, an addition or an answer to your question. Refile it in `messages`
-only when it is a separate request (`\"new\"`) or belongs to an older open task;
-only the board's new messages can be refiled. Name the task of every tree you
-dispatch in `task`. In `task_updates`, write `goal` as your current
+correction, an addition or an answer to your question. Refile it in
+`message_updates` only when it is a separate request (`\"new\"`) or belongs to
+an older open task; only the board's new messages can be refiled. Name the task
+of every tree you dispatch in `rtdl_parent_task_id`. A tree holds that task's
+steps only, never another task's: when several tasks need steps now, dispatch
+one task's tree and Pilot asks you again at once for the others. In `task_updates`, write `goal` as your current
 understanding of the task from all its messages and revise it when a message
 changes it. Close a task as `done` when its success criterion is verified,
 `failed` when it cannot be done, `superseded` when a newer request replaces it
@@ -3430,7 +3437,8 @@ mod tests {
 
     #[test]
     fn later_round_protocol_is_compact_but_keeps_admission_rules() {
-        assert!(RTDL_PROTOCOL_REMINDER.len() < 2_000);
+        // The task fields' names are spelled out, which costs a few characters.
+        assert!(RTDL_PROTOCOL_REMINDER.len() < 2_100);
         for required in [
             "capability_name",
             "sequence",
@@ -3438,7 +3446,7 @@ mod tests {
             "cancel_plan",
             "plan_id/call_id",
             // The task fields and their order must reach the model every round.
-            r#""messages":[...],"task":"T1"|"new"|null"#,
+            r#""message_updates":[...],"rtdl_parent_task_id":"T1"|"new"|null"#,
             "task_updates",
             "status board",
             "a task with a running plan cannot close",
@@ -4140,11 +4148,11 @@ mod tests {
         let env = parse_rtdl_assistant_response(
             r#"{
                 "content":"on it",
-                "messages":[{"message":"m2","task":"new"}],
-                "task":"new",
+                "message_updates":[{"message_id":"m2","parent_task_id":"new"}],
+                "rtdl_parent_task_id":"new",
                 "rtdl_description":"fetch water",
                 "rtdl":{"op":"sequence","children":[]},
-                "task_updates":[{"task":"new","goal":"bring water","success_criterion":"cup by user"}]
+                "task_updates":[{"task_id":"new","goal":"bring water","success_criterion":"cup by user"}]
             }"#,
         )
         .unwrap();
@@ -4164,7 +4172,7 @@ mod tests {
         // Observed real failure: the model narrates a line, then emits the JSON
         // on the next line. The leading prose must be stripped, not rejected.
         let env = parse_rtdl_assistant_response(
-            "Let me take a photo to check the scene, then turn left.\n{\"content\":\"on it\",\"rtdl_description\":\"turn\",\"rtdl\":{\"op\":\"sequence\",\"children\":[]},\"task_update\":null}",
+            "Let me take a photo to check the scene, then turn left.\n{\"content\":\"on it\",\"rtdl_description\":\"turn\",\"rtdl\":{\"op\":\"sequence\",\"children\":[]}}",
         )
         .unwrap();
         assert_eq!(env.content, "on it");
@@ -4187,22 +4195,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(env.task_fields, TaskFields::default());
-    }
-
-    #[test]
-    fn the_previous_task_update_is_still_read_and_still_checked() {
-        let env = parse_rtdl_assistant_response(
-            r#"{"content":"x","rtdl_description":"","rtdl":{"op":"sequence","children":[]},"task_update":{"goal":"a summary","success_criterion":"c","status":"done"}}"#,
-        )
-        .unwrap();
-        assert_eq!(env.task_fields.updates.len(), 1);
-        assert_eq!(env.task_fields.updates[0].task, None);
-        assert_eq!(env.task_fields.updates[0].goal, None);
-        let err = parse_rtdl_assistant_response(
-            r#"{"content":"x","rtdl_description":"","rtdl":{"op":"sequence","children":[]},"task_update":{"goal":"g","success_criterion":"c","status":"paused"}}"#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("status"), "{err}");
     }
 
     #[test]
@@ -4370,7 +4362,7 @@ mod tests {
     fn keeps_in_progress() -> TaskFields {
         TaskFields {
             updates: vec![TaskUpdate {
-                task: Some(TaskRef::Id("T1".into())),
+                task: TaskRef::Id("T1".into()),
                 goal: None,
                 success_criterion: None,
                 status: Some("in_progress".into()),
@@ -4588,7 +4580,7 @@ mod tests {
         let record = history.last().unwrap().content.as_deref().unwrap();
         let (_, json) = record.split_once(": ").unwrap();
         let record: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(record["task"], "T1");
+        assert_eq!(record["task_id"], "T1");
         assert_eq!(record["messages"], json!(["m1"]));
         append_request_context(&mut history, "runtime round 1", None);
         let second = assemble_planning_messages(1, true, &stable, &history);
