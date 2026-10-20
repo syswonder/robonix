@@ -36,6 +36,7 @@ pub struct VirtualClockSnapshot {
 pub struct VirtualClock {
     reference: Option<LinuxSystemReference>,
     generation: Option<u64>,
+    max_uncertainty_ns: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -43,6 +44,7 @@ impl VirtualClock {
     /// Validate and construct the selected reference-clock implementation.
     pub fn new(config: ReferenceConfig) -> Result<Self, ChronosConfigError> {
         config.validate()?;
+        let max_uncertainty_ns = config.max_uncertainty_ns;
         let reference = match config.kind {
             ReferenceSourceKind::LinuxSystem => Some(LinuxSystemReference::new(config)?),
             ReferenceSourceKind::RosTime => None,
@@ -50,6 +52,7 @@ impl VirtualClock {
         Ok(Self {
             reference,
             generation: None,
+            max_uncertainty_ns,
         })
     }
 
@@ -62,14 +65,16 @@ impl VirtualClock {
     pub fn snapshot(&mut self) -> Result<VirtualClockSnapshot, ReferenceError> {
         let Some(reference) = &mut self.reference else {
             let mut reference = crate::ros_reference_time()?;
+            let steady = self.steady_time()?;
+            if reference.available && reference.uncertainty_ns > self.max_uncertainty_ns {
+                reference.available = false;
+                reference.reason = "reference clock uncertainty exceeds configured limit".into();
+            }
             reference.generation_changed = self
                 .generation
                 .is_some_and(|generation| generation != reference.generation);
             self.generation = Some(reference.generation);
-            return Ok(VirtualClockSnapshot {
-                reference,
-                steady: self.steady_time()?,
-            });
+            return Ok(VirtualClockSnapshot { reference, steady });
         };
         let (sample, status) = reference.sample_with_status()?;
         Ok(VirtualClockSnapshot {

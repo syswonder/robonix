@@ -2,6 +2,8 @@
 
 #![cfg(target_os = "linux")]
 
+mod support;
+
 use robonix_chronos_clock::{
     ChronosConfigError, ReferenceConfig, ReferenceSourceKind, VirtualClock,
 };
@@ -76,4 +78,60 @@ fn ros_reference_keeps_pause_zero_and_generation_separate_from_wall_time() {
     update_reference_time(reading(0, 11)).unwrap();
     assert!(clock.reference_time().unwrap().generation_changed);
     assert!(!clock.reference_time().unwrap().generation_changed);
+
+    update_reference_time(reading(500, 11)).unwrap();
+    let mut unavailable = reading(0, 11);
+    unavailable.available = false;
+    update_reference_time(unavailable).unwrap();
+    assert!(!clock.reference_time().unwrap().available);
+    assert!(update_reference_time(reading(250, 11)).is_err());
+    update_reference_time(reading(500, 11)).unwrap();
+    assert!(clock.reference_time().unwrap().available);
+
+    robonix_chronos_clock::configure_reference(ReferenceConfig {
+        kind: ReferenceSourceKind::RosTime,
+        max_uncertainty_ns: 1,
+        ..config()
+    })
+    .unwrap();
+    let mut uncertain = reading(500, 11);
+    uncertain.uncertainty_ns = 2;
+    update_reference_time(uncertain).unwrap();
+    let status = robonix_chronos_clock::reference_time().unwrap();
+    assert!(!status.available);
+    assert!(status.reason.contains("uncertainty"));
+    assert!(robonix_chronos_clock::reference_timestamp_ns().is_err());
+    update_reference_time(reading(500, 11)).unwrap();
+    assert_eq!(
+        robonix_chronos_clock::reference_timestamp_ns().unwrap(),
+        500
+    );
+}
+
+#[test]
+fn ros_generation_change_survives_failed_snapshot() {
+    support::run_case("ros_generation_change_survives_failed_snapshot", || {
+        use robonix_chronos_clock::{VirtualReferenceTime, update_reference_time};
+        let mut clock = VirtualClock::new(ReferenceConfig {
+            kind: ReferenceSourceKind::RosTime,
+            ..config()
+        })
+        .unwrap();
+        let reading = |generation| VirtualReferenceTime {
+            timestamp_ns: 0,
+            generation,
+            generation_changed: false,
+            uncertainty_ns: 1,
+            available: true,
+            verified: false,
+            reason: "ROS time".into(),
+        };
+        update_reference_time(reading(10)).unwrap();
+        clock.snapshot().unwrap();
+        update_reference_time(reading(11)).unwrap();
+        support::mode(16);
+        assert!(clock.snapshot().is_err());
+        assert!(clock.snapshot().unwrap().reference.generation_changed);
+        assert!(!clock.snapshot().unwrap().reference.generation_changed);
+    });
 }

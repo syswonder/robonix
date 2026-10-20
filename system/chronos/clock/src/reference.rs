@@ -190,7 +190,7 @@ pub struct LinuxSystemReference {
 
 #[cfg(target_os = "linux")]
 impl LinuxSystemReference {
-    /// Construct the only reference source currently accepted by configuration.
+    /// Construct a Linux system-time observer with validated quality limits.
     pub fn new(config: ReferenceConfig) -> Result<Self, ChronosConfigError> {
         config.validate()?;
         Ok(Self {
