@@ -1206,7 +1206,17 @@ jobs:
               source /opt/ros/humble/setup.bash
               export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
               export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
-              exec ros2 bag record -o /tmp/'"$1"' --include-hidden-topics -e "^/(plan|local_plan|map|tf|tf_static|cmd_vel.*|odom.*|local_costmap/costmap|global_costmap/costmap|.*depth.*points.*)$" >/tmp/'"$1"'.log 2>&1'
+              exec ros2 bag record -o /tmp/'"$1"' --include-hidden-topics -e "^/(plan|local_plan|map|tf|tf_static|cmd_vel.*|odom.*|local_costmap/costmap|global_costmap/costmap)$" >/tmp/'"$1"'.log 2>&1'
+            # The raw depth cloud is gigabytes a run; its rate is what matters.
+            docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
+              source /opt/ros/humble/setup.bash
+              export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+              export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+              for t in $(ros2 topic list | grep -E "depth.*points"); do
+                echo "== $t"; timeout 12 ros2 topic hz "$t" --window 20 | tail -3
+              done' > "$RUNNER_TEMP/$1-depth-rate.txt" 2>&1 || true
+            mkdir -p "$GITHUB_WORKSPACE/testing/logs/nav-bags"
+            cp "$RUNNER_TEMP/$1-depth-rate.txt" "$GITHUB_WORKSPACE/testing/logs/nav-bags/" || true
           }
           nav_bag_stop() {
             docker exec "$ROBONIX_SIM_CONTAINER" pkill -INT -f "[r]os2 bag record -o /tmp/$1" || true
@@ -1530,7 +1540,17 @@ jobs:
               source /opt/ros/humble/setup.bash
               export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
               export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
-              exec ros2 bag record -o /tmp/'"$1"' --include-hidden-topics -e "^/(plan|local_plan|map|tf|tf_static|cmd_vel.*|odom.*|local_costmap/costmap|global_costmap/costmap|.*depth.*points.*)$" >/tmp/'"$1"'.log 2>&1'
+              exec ros2 bag record -o /tmp/'"$1"' --include-hidden-topics -e "^/(plan|local_plan|map|tf|tf_static|cmd_vel.*|odom.*|local_costmap/costmap|global_costmap/costmap)$" >/tmp/'"$1"'.log 2>&1'
+            # The raw depth cloud is gigabytes a run; its rate is what matters.
+            docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
+              source /opt/ros/humble/setup.bash
+              export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+              export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+              for t in $(ros2 topic list | grep -E "depth.*points"); do
+                echo "== $t"; timeout 12 ros2 topic hz "$t" --window 20 | tail -3
+              done' > "$RUNNER_TEMP/$1-depth-rate.txt" 2>&1 || true
+            mkdir -p "$GITHUB_WORKSPACE/testing/logs/nav-bags"
+            cp "$RUNNER_TEMP/$1-depth-rate.txt" "$GITHUB_WORKSPACE/testing/logs/nav-bags/" || true
           }
           nav_bag_stop() {
             docker exec "$ROBONIX_SIM_CONTAINER" pkill -INT -f "[r]os2 bag record -o /tmp/$1" || true
