@@ -109,9 +109,13 @@ controller_server:
     controller_plugins: ["FollowPath"]
 
     # Progress checker parameters
+    # A turn in place toward the goal's heading is progress too. The simple
+    # checker counts only distance, so it aborted the final rotation over
+    # and over and the goal was never reached.
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
+      plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.5
+      required_movement_angle: 0.5
       movement_time_allowance: 10.0
     # Goal checker parameters
     #precise_goal_checker:
@@ -135,7 +139,9 @@ controller_server:
       max_vel_theta: 1.0
       min_speed_xy: 0.0
       max_speed_xy: 0.26
-      min_speed_theta: 0.0
+      # Turning in place slower than this does not move TIAGo's base in
+      # Webots; RotateToGoal slowed to 0.05 rad/s and dithered there.
+      min_speed_theta: 0.2
       # Add high threshold velocity for turtlebot 3 issue.
       # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
       acc_lim_x: 2.5
