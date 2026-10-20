@@ -642,6 +642,7 @@ jobs:
               $((26000 + candidate_suffix))
               $((27000 + candidate_suffix))
               $((28000 + candidate_suffix))
+              $((29000 + candidate_suffix))
             )
 
             busy=0
@@ -678,12 +679,13 @@ jobs:
           nav2_port=$((26000 + suffix))
           scene_web_port=$((27000 + suffix))
           soma_port=$((28000 + suffix))
+          audio_port=$((29000 + suffix))
           ros_domain_id=$((90 + (suffix % 100)))
           runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_KEY}"
           rm -rf "$runtime_dir"
           mkdir -p "$runtime_dir"
 
-          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port},${soma_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port},${soma_port},${audio_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
@@ -691,6 +693,9 @@ jobs:
             echo "PILOT_PORT=$pilot_port"
             echo "LIAISON_PORT=$liaison_port"
             echo "SOMA_PORT=$soma_port"
+            # The audio bridge defaults to 60002, which other tenants of a
+            # shared runner may hold.
+            echo "AUDIO_CLIENT_LISTEN_PORT=$audio_port"
             echo "FAKE_VLM_PORT=$fake_vlm_port"
             echo "MAPPING_GRPC_PORT=$mapping_port"
             echo "NAV2_DRIVER_PORT=$nav2_port"
