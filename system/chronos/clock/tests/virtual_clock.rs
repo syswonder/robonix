@@ -110,7 +110,7 @@ fn ros_reference_keeps_pause_zero_and_generation_separate_from_wall_time() {
 
 #[test]
 fn ros_generation_change_survives_failed_snapshot() {
-    support::run_case("ros_generation_change_survives_failed_snapshot", || {
+    let _ = support::run_case("ros_generation_change_survives_failed_snapshot", || {
         use robonix_chronos_clock::{VirtualReferenceTime, update_reference_time};
         let mut clock = VirtualClock::new(ReferenceConfig {
             kind: ReferenceSourceKind::RosTime,
@@ -134,4 +134,42 @@ fn ros_generation_change_survives_failed_snapshot() {
         assert!(clock.snapshot().unwrap().reference.generation_changed);
         assert!(!clock.snapshot().unwrap().reference.generation_changed);
     });
+}
+
+#[test]
+fn wall_timestamp_warns_on_quality_and_rejects_failed_reads() {
+    if let Some(output) = support::run_case(
+        "wall_timestamp_warns_on_quality_and_rejects_failed_reads",
+        || {
+            use robonix_chronos_clock::{reference_timestamp_ns, wall_time, wall_timestamp_ns};
+
+            support::mode(4);
+            let sample = wall_time().unwrap();
+            assert!(!sample.available);
+            assert!(sample.uncertainty_ns > 1_000_000);
+            for _ in 0..3 {
+                assert!(wall_timestamp_ns().unwrap() > 0);
+            }
+            assert!(reference_timestamp_ns().is_err());
+
+            support::mode(1);
+            assert!(wall_timestamp_ns().is_err());
+            support::mode(2);
+            assert!(wall_timestamp_ns().is_err());
+            support::mode(16);
+            assert!(wall_timestamp_ns().is_err());
+            support::mode(0);
+            assert!(wall_timestamp_ns().unwrap() > 0);
+        },
+    ) {
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr
+                .matches("Chronos warning: wall clock quality degraded")
+                .count(),
+            1
+        );
+        assert!(stderr.contains("uncertainty_ns="));
+        assert!(stderr.contains("returning timestamp"));
+    }
 }

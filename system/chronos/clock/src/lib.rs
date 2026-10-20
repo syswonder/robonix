@@ -24,6 +24,9 @@ static CLOCK: std::sync::Mutex<Option<VirtualClock>> = std::sync::Mutex::new(Non
 #[cfg(target_os = "linux")]
 static WALL: std::sync::Mutex<Option<VirtualClock>> = std::sync::Mutex::new(None);
 
+static WALL_QUALITY_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "linux")]
 struct ReferenceCache {
     latest: Option<VirtualReferenceTime>,
@@ -117,8 +120,25 @@ pub fn wall_time() -> std::io::Result<VirtualReferenceTime> {
     ))
 }
 
+/// Return valid wall timestamps despite degraded sampling quality, warning on stderr.
 pub fn wall_timestamp_ns() -> std::io::Result<u64> {
-    available_timestamp(wall_time()?)
+    use std::sync::atomic::Ordering;
+
+    let reference = wall_time()?;
+    let timestamp = u64::try_from(reference.timestamp_ns).map_err(std::io::Error::other)?;
+    if reference.available {
+        WALL_QUALITY_WARNED.store(false, Ordering::Relaxed);
+    } else if !WALL_QUALITY_WARNED.swap(true, Ordering::Relaxed) {
+        use std::io::Write;
+        // Logging can read this clock recursively; diagnostics must not fail the read.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Chronos warning: wall clock quality degraded (uncertainty_ns={}): {}; returning timestamp",
+            reference.uncertainty_ns,
+            reference.reason,
+        );
+    }
+    Ok(timestamp)
 }
 
 /// Read a paired snapshot from the selected process-local reference.
