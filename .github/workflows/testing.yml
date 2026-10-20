@@ -787,7 +787,7 @@ jobs:
             # Same mirrors the checkout uses: large GitHub and Hugging Face
             # transfers from this runner get cut off mid-stream.
             docker build --network=host -f "$df" --build-arg BASE_IMAGE="$ROBONIX_SCENE_IMAGE" \
-              --build-arg GITHUB_PREFIX=https://ghfast.top/ --build-arg HF_ENDPOINT=https://hf-mirror.com \
+              --build-arg GITHUB_PREFIX="${RBNX_GH_MIRROR-https://ghfast.top/}" --build-arg HF_ENDPOINT=https://hf-mirror.com \
               -t "$tag" system/scene/docker
           fi
           docker run --rm --entrypoint sh "$tag" -c 'test -d /opt/dualmap/utils'

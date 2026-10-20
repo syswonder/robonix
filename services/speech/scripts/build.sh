@@ -178,7 +178,9 @@ if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     MODEL_DIR="$BUILD/models/$MODEL_NAME"
     ARCHIVE="$BUILD/models/$MODEL_NAME.tar.bz2"
     OFFICIAL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$MODEL_NAME.tar.bz2"
-    MIRROR_URL="https://ghfast.top/$OFFICIAL_URL"
+    # RBNX_GH_MIRROR is the GitHub mirror prefix rbnx uses; empty skips it.
+    GH_MIRROR="${RBNX_GH_MIRROR-https://ghfast.top/}"
+    MIRROR_URL="${GH_MIRROR:+${GH_MIRROR%/}/}$OFFICIAL_URL"
     mkdir -p "$BUILD/models"
     if [[ ! -f "$MODEL_DIR/tokens.txt" ]]; then
         echo "[build] downloading Speech wake-word model ($MODEL_NAME)"
