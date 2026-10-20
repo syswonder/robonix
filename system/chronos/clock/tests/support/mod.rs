@@ -3,10 +3,10 @@
 use std::process::Command;
 
 /// Run clock fault injection in an isolated test process without changing host time.
-pub fn run_case(name: &str, exercise: fn()) {
+pub fn run_case(name: &str, exercise: fn()) -> Option<std::process::Output> {
     if std::env::var("ROBONIX_CLOCK_TEST_CHILD").as_deref() == Ok(name) {
         exercise();
-        return;
+        return None;
     }
     let directory = tempfile::tempdir().unwrap();
     let library = directory.path().join("clock_failure.so");
@@ -39,6 +39,7 @@ pub fn run_case(name: &str, exercise: fn()) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    Some(output)
 }
 
 /// Select a fault using the loaded fixture's atomic mode switch.

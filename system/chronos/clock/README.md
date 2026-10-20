@@ -8,4 +8,6 @@ For caller-supplied simulation time, select `ReferenceSourceKind::RosTime` and i
 
 Injected readings respect `max_uncertainty_ns`. An unavailable reading does not erase the last available timestamp used to reject backward time in the same generation. Generation changes remain observable after a failed snapshot read.
 
-Run `cargo test -p robonix-chronos-clock`.
+`wall_timestamp_ns()` returns a valid timestamp even when sampling uncertainty exceeds the quality limit. It writes a warning directly to stderr once until a healthy read occurs; no logger is required. `wall_time()` retains quality metadata for callers to inspect. Actual clock-read failures and out-of-range timestamps still return errors. `reference_timestamp_ns()` continues to reject unavailable reference time.
+
+Run `cargo test -p robonix-chronos-clock` on Linux with `cc` available for the isolated clock-failure fixture.

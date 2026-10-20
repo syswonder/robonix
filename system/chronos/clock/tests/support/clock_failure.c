@@ -19,5 +19,23 @@ int clock_gettime(clockid_t clock, struct timespec *value) {
         errno = EIO;
         return -1;
     }
-    return ((int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime"))(clock, value);
+    int result = ((int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime"))(clock, value);
+    if (result == 0 && clock == CLOCK_REALTIME && selected == 2) {
+        value->tv_sec = -1;
+    }
+    return result;
+}
+
+// Distinguish poor sampling quality from an actual failed clock operation.
+int clock_getres(clockid_t clock, struct timespec *value) {
+    if (clock == CLOCK_REALTIME && atomic_load(&mode) == 1) {
+        errno = EIO;
+        return -1;
+    }
+    if (clock == CLOCK_REALTIME && atomic_load(&mode) == 4) {
+        value->tv_sec = 0;
+        value->tv_nsec = 2000000;
+        return 0;
+    }
+    return ((int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_getres"))(clock, value);
 }
