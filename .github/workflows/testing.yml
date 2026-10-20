@@ -1198,9 +1198,30 @@ jobs:
         run: |
           set -o pipefail
           export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
+          # Record what nav2 saw, so a failed navigation can be read back:
+          # the plans, both costmaps, velocity, odometry, TF and the depth
+          # cloud. Stopped with SIGINT so the bag is closed properly.
+          nav_bag_start() {
+            docker exec -d "$ROBONIX_SIM_CONTAINER" bash -lc '
+              source /opt/ros/humble/setup.bash
+              export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+              export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+              exec ros2 bag record -o /tmp/'"$1"' --include-hidden-topics -e "^/(plan|local_plan|map|tf|tf_static|cmd_vel.*|odom.*|local_costmap/costmap|global_costmap/costmap|.*depth.*points.*)$" >/tmp/'"$1"'.log 2>&1'
+          }
+          nav_bag_stop() {
+            docker exec "$ROBONIX_SIM_CONTAINER" pkill -INT -f "[r]os2 bag record -o /tmp/$1" || true
+            sleep 5
+            mkdir -p "$GITHUB_WORKSPACE/testing/logs/nav-bags"
+            docker cp "$ROBONIX_SIM_CONTAINER:/tmp/$1" "$GITHUB_WORKSPACE/testing/logs/nav-bags/$1" || true
+            docker cp "$ROBONIX_SIM_CONTAINER:/tmp/$1.log" "$GITHUB_WORKSPACE/testing/logs/nav-bags/$1.log" || true
+          }
+          nav_bag_start nav-first
+          rc=0
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
             --first object_navigation \
-            --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out"
+            --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out" || rc=$?
+          nav_bag_stop nav-first
+          [ "$rc" -eq 0 ] || exit "$rc"
           # Surface the one-line RESULT for the reusable-workflow output / bot.
           echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
 
@@ -1501,10 +1522,31 @@ jobs:
           fi
           cat "$map_readiness"
 
+          # Record what nav2 saw, so a failed navigation can be read back:
+          # the plans, both costmaps, velocity, odometry, TF and the depth
+          # cloud. Stopped with SIGINT so the bag is closed properly.
+          nav_bag_start() {
+            docker exec -d "$ROBONIX_SIM_CONTAINER" bash -lc '
+              source /opt/ros/humble/setup.bash
+              export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+              export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+              exec ros2 bag record -o /tmp/'"$1"' --include-hidden-topics -e "^/(plan|local_plan|map|tf|tf_static|cmd_vel.*|odom.*|local_costmap/costmap|global_costmap/costmap|.*depth.*points.*)$" >/tmp/'"$1"'.log 2>&1'
+          }
+          nav_bag_stop() {
+            docker exec "$ROBONIX_SIM_CONTAINER" pkill -INT -f "[r]os2 bag record -o /tmp/$1" || true
+            sleep 5
+            mkdir -p "$GITHUB_WORKSPACE/testing/logs/nav-bags"
+            docker cp "$ROBONIX_SIM_CONTAINER:/tmp/$1" "$GITHUB_WORKSPACE/testing/logs/nav-bags/$1" || true
+            docker cp "$ROBONIX_SIM_CONTAINER:/tmp/$1.log" "$GITHUB_WORKSPACE/testing/logs/nav-bags/$1.log" || true
+          }
+          nav_bag_start nav-restart
+          rc=0
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server "$ROBONIX_CI_ATLAS" \
             --first object_navigation \
             --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.restart.json" \
-            | tee "$RUNNER_TEMP/scenarios.restart.out"
+            | tee "$RUNNER_TEMP/scenarios.restart.out" || rc=$?
+          nav_bag_stop nav-restart
+          [ "$rc" -eq 0 ] || exit "$rc"
 
       - name: Capture runtime logs
         if: always()

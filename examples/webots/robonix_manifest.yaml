@@ -166,7 +166,7 @@ service:
   # contracts consumed by Navigation and Scene.
   - name: mapping
     url: https://github.com/syswonder/service-map-rbnx
-    branch: main
+    branch: fix/load-into-localization-node
     config:
       use_sim_time: true
       # 2-D lidar scan matching; RTAB-Map's walls drift over a long session.
