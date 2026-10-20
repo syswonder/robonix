@@ -25,7 +25,16 @@ static CLOCK: std::sync::Mutex<Option<VirtualClock>> = std::sync::Mutex::new(Non
 static WALL: std::sync::Mutex<Option<VirtualClock>> = std::sync::Mutex::new(None);
 
 #[cfg(target_os = "linux")]
-static ROS_REFERENCE: std::sync::Mutex<Option<VirtualReferenceTime>> = std::sync::Mutex::new(None);
+struct ReferenceCache {
+    latest: Option<VirtualReferenceTime>,
+    last_available: Option<(u64, i64)>,
+}
+
+#[cfg(target_os = "linux")]
+static ROS_REFERENCE: std::sync::Mutex<ReferenceCache> = std::sync::Mutex::new(ReferenceCache {
+    latest: None,
+    last_available: None,
+});
 
 /// Select the process-local reference source before starting its consumers.
 #[cfg(target_os = "linux")]
@@ -34,9 +43,11 @@ pub fn configure_reference(config: ReferenceConfig) -> std::io::Result<()> {
     let mut selected = CLOCK
         .lock()
         .map_err(|_| std::io::Error::other("Chronos clock lock poisoned"))?;
-    *ROS_REFERENCE
+    let mut cache = ROS_REFERENCE
         .lock()
-        .map_err(|_| std::io::Error::other("Chronos reference lock poisoned"))? = None;
+        .map_err(|_| std::io::Error::other("Chronos reference lock poisoned"))?;
+    cache.latest = None;
+    cache.last_available = None;
     *selected = Some(clock);
     Ok(())
 }
@@ -50,21 +61,26 @@ pub fn update_reference_time(reference: VirtualReferenceTime) -> std::io::Result
             "reference requires a nonnegative timestamp and a positive generation",
         ));
     }
-    let mut latest = ROS_REFERENCE
+    let mut cache = ROS_REFERENCE
         .lock()
         .map_err(|_| std::io::Error::other("Chronos reference lock poisoned"))?;
     if reference.available
-        && latest.as_ref().is_some_and(|previous| {
-            previous.generation == reference.generation
-                && reference.timestamp_ns < previous.timestamp_ns
-        })
+        && cache
+            .last_available
+            .is_some_and(|(generation, timestamp_ns)| {
+                generation == reference.generation && reference.timestamp_ns < timestamp_ns
+            })
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "reference time regressed without a generation change",
         ));
     }
-    *latest = Some(reference);
+    // Unavailable readings must not erase the last usable timestamp in a generation.
+    if reference.available {
+        cache.last_available = Some((reference.generation, reference.timestamp_ns));
+    }
+    cache.latest = Some(reference);
     Ok(())
 }
 
@@ -75,6 +91,7 @@ fn ros_reference_time() -> Result<VirtualReferenceTime, ReferenceError> {
         .map_err(|_| ReferenceError::ClockRead {
             errno: libc::EOWNERDEAD,
         })?
+        .latest
         .clone()
         .unwrap_or(VirtualReferenceTime {
             timestamp_ns: 0,
