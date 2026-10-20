@@ -707,6 +707,12 @@ jobs:
             echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_KEY}-nav2"
             echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_KEY}-explore"
             echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_KEY}-scene"
+            # Package images get ci- names too, so a build here never
+            # replaces the images other deployments on the host run.
+            echo "ROBONIX_SCENE_IMAGE=ci-robonix-scene"
+            echo "ROBONIX_MAPPING_IMAGE=ci-robonix-mapping"
+            echo "ROBONIX_NAV2_IMAGE=ci-robonix-nav2"
+            echo "ROBONIX_EXPLORE_IMAGE=ci-robonix-explore"
             echo "ROBONIX_CI_RUNTIME_DIR=$runtime_dir"
             echo "AGENT_MEMORY_DIR=$runtime_dir/agent_memory"
             echo "AGENT_MILVUS_URI=$runtime_dir/agent_milvus.db"
@@ -767,29 +773,28 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$SCENE_PERCEPTION_BACKEND" = "concept_graphs" ]; then
-            echo "ROBONIX_SCENE_IMAGE=robonix-scene" >> "$GITHUB_ENV"
             exit 0
           fi
           # DualMap is a layer over the scene image. Tag it by the Dockerfile
           # and the base image it was built from, so it is rebuilt exactly
           # when either changes and reused otherwise (it downloads ~400 MB).
           df=system/scene/docker/Dockerfile.dualmap
-          base_id="$(docker image inspect robonix-scene --format '{{.Id}}')"
-          tag="robonix-scene-dualmap:ci-$( { cat "$df"; echo "$base_id"; } | sha256sum | cut -c1-12)"
+          base_id="$(docker image inspect "$ROBONIX_SCENE_IMAGE" --format '{{.Id}}')"
+          tag="ci-robonix-scene-dualmap:$( { cat "$df"; echo "$base_id"; } | sha256sum | cut -c1-12)"
           if docker image inspect "$tag" >/dev/null 2>&1; then
             echo "reusing $tag"
           else
             # Same mirrors the checkout uses: large GitHub and Hugging Face
             # transfers from this runner get cut off mid-stream.
-            docker build --network=host -f "$df" --build-arg BASE_IMAGE=robonix-scene \
+            docker build --network=host -f "$df" --build-arg BASE_IMAGE="$ROBONIX_SCENE_IMAGE" \
               --build-arg GITHUB_PREFIX=https://ghfast.top/ --build-arg HF_ENDPOINT=https://hf-mirror.com \
               -t "$tag" system/scene/docker
           fi
           docker run --rm --entrypoint sh "$tag" -c 'test -d /opt/dualmap/utils'
           # Drop the tags earlier Dockerfiles or base images produced. Usually
           # there are none, which must not fail the step under pipefail.
-          for old in $(docker images robonix-scene-dualmap --format '{{.Tag}}' | grep '^ci-' || true); do
-            [ "$old" = "${tag#*:}" ] || docker rmi "robonix-scene-dualmap:$old" >/dev/null 2>&1 || true
+          for old in $(docker images ci-robonix-scene-dualmap --format '{{.Tag}}' || true); do
+            [ "$old" = "${tag#*:}" ] || docker rmi "ci-robonix-scene-dualmap:$old" >/dev/null 2>&1 || true
           done
           echo "ROBONIX_SCENE_IMAGE=$tag" >> "$GITHUB_ENV"
 
