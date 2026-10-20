@@ -255,7 +255,9 @@ pub enum Commands {
         #[arg(long)]
         out_dir: Option<PathBuf>,
         /// Python interpreter used for grpcio-tools generation and import validation.
-        /// Precedence: this flag, RBNX_CODEGEN_PYTHON, then `python3`.
+        /// Precedence: this flag, then RBNX_CODEGEN_PYTHON; it must have the pinned
+        /// protobuf, grpcio-tools and grpcio. Without either, rbnx uses the toolchain
+        /// it manages under the robonix home.
         #[arg(long, value_name = "PATH")]
         python: Option<PathBuf>,
     },
