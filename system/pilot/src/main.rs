@@ -33,6 +33,7 @@ mod prompt;
 mod service;
 mod soma_context;
 mod state_context;
+mod tasks;
 mod transcript;
 mod vlm;
 

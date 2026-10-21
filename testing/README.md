@@ -93,16 +93,18 @@ sending diagnostic context to the LLM.
 
 Pilot does **not** drive the VLM in OpenAI `tool_calls` mode — it hard-errors on
 that (`planner.rs`: "VLM returned tool_calls in RTDL mode"). Instead the
-assistant returns exactly one JSON object in `content` with four keys:
+assistant returns exactly one JSON object in `content`:
 
 ```json
 {
   "content": "narration",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
   "rtdl_description": "label",
   "rtdl": {"op":"sequence","op_id":0,"description":"...","children":[
     {"op":"do","op_id":0,"description":"...","cap":"<provider>.<area>_<leaf>","args":{...}}
   ]},
-  "task_update": {"goal":"...","success_criterion":"...","status":"in_progress|done"}
+  "task_updates": [{"task_id":"T1","status":"in_progress|done|failed|superseded"}]
 }
 ```
 

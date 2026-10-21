@@ -170,3 +170,32 @@ def test_room_goal_accepts_ros_signed_int8_sequence():
         _footprint(0.1, 0.1),
         yaw_candidates=room_yaw_candidates(room),
     ) is None
+
+
+def test_object_goal_skips_poses_navigation_cannot_stand_on():
+    """A table top the lidar does not see: free on the map, inscribed in the
+    navigation costmap. The approach pose must not be taken from under it."""
+    grid = _grid()
+    costmap = _grid()
+    cost = np.zeros((30, 30), dtype=np.int8)
+    cost[:15, :] = 99  # the robot's side, y < 0, is under the table top
+    costmap.data = cost.tobytes()
+    without = object_goal(
+        grid,
+        target_x=0.0,
+        target_y=0.0,
+        preferred_approach_yaw=math.pi / 2,
+        minimum_standoff_m=0.3,
+        footprint=_footprint(0.1, 0.1),
+    )
+    with_costmap = object_goal(
+        grid,
+        target_x=0.0,
+        target_y=0.0,
+        preferred_approach_yaw=math.pi / 2,
+        minimum_standoff_m=0.3,
+        footprint=_footprint(0.1, 0.1),
+        nav_costmap=costmap,
+    )
+    assert without is not None and without[1] < 0.0
+    assert with_costmap is not None and with_costmap[1] >= 0.0

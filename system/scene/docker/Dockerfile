@@ -205,13 +205,16 @@ RUN without-proxy pip install --upgrade "protobuf==6.33.6"
 ARG HTTP_PROXY_HOST
 ARG HTTPS_PROXY_HOST
 ARG NO_PROXY_HOST
+# GitHub mirror prefix (RBNX_GH_MIRROR in scripts/build.sh); empty clones
+# from github.com directly.
+ARG GITHUB_PREFIX=https://ghfast.top/
 
 # concept-graphs source from the ali-dev branch.
 # git clone: use proxy.
 RUN set -eux; \
     rm -rf /opt/concept-graphs; \
     with-build-proxy git clone --depth 1 --branch ali-dev \
-        https://ghfast.top/https://github.com/concept-graphs/concept-graphs.git \
+        ${GITHUB_PREFIX}https://github.com/concept-graphs/concept-graphs.git \
         /opt/concept-graphs \
     || ( \
         rm -rf /opt/concept-graphs && \

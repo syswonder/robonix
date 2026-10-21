@@ -768,6 +768,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
         preferred_approach_yaw=approach_ang,
         minimum_standoff_m=footprint.circumscribed_radius_m + target_radius_m,
         footprint=footprint,
+        nav_costmap=_nav_costmap(grid_frame),
     )
     if found is None:
         return GoalNear_Response(
@@ -779,6 +780,21 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
         reachable=True, x=float(gx), y=float(gy), yaw=float(yaw),
         reason=f"approach pose for '{target.label}' ({req.object_id})",
     )
+
+
+def _nav_costmap(frame: str):
+    """Navigation's latest costmap when it is in `frame`, else None."""
+    if _HUB is None or not _HUB.has("nav_costmap"):
+        return None
+    try:
+        costmap, _stamp, count = _HUB.latest("nav_costmap")
+    except Exception:  # noqa: BLE001
+        return None
+    if costmap is None or count == 0 or not costmap.info.width or not costmap.info.height:
+        return None
+    if str(getattr(costmap.header, "frame_id", "") or "").strip() != frame:
+        return None
+    return costmap
 
 
 @mcp_contract(mcp, contract_id="robonix/system/scene/goal_region")
