@@ -47,21 +47,35 @@ fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> b
     .any(|field| body.contains(field))
 }
 
-/// Downgrade a `json_schema` response format to `json_object`.
+/// Step a rejected `response_format` down one rung: `json_schema` to
+/// `json_object`, then `json_object` to none.
 ///
-/// A provider that does not implement schema-guided output still implements
-/// `json_object`, and the planner's reply must stay parseable as JSON: dropping
-/// the format outright would let a rejection turn every later reply into prose.
-/// Returns whether anything changed.
-fn downgrade_response_format(body: &mut Value) -> bool {
-    let Some(format) = body.get_mut("response_format") else {
-        return false;
-    };
-    if format.get("type").and_then(Value::as_str) != Some("json_schema") {
-        return false;
+/// A provider that does not implement schema-guided output usually still
+/// implements `json_object`, and the planner's reply should stay parseable as
+/// JSON while it can. Some implement neither in the form sent: Anthropic's
+/// OpenAI-compatible endpoint takes only a strict schema, which an RTDL `do`
+/// node's open `args` cannot be, and no `json_object`. Without a format the
+/// prompt still asks for the envelope and Pilot's parser admits it. Returns
+/// the format now in force, or `None` when there was nothing left to drop.
+fn downgrade_response_format(body: &mut Value) -> Option<&'static str> {
+    let obj = body.as_object_mut()?;
+    match obj
+        .get("response_format")?
+        .get("type")
+        .and_then(Value::as_str)
+    {
+        Some("json_schema") => {
+            obj.insert(
+                "response_format".to_string(),
+                serde_json::json!({"type": "json_object"}),
+            );
+            Some("json_object")
+        }
+        _ => {
+            obj.remove("response_format");
+            Some("none")
+        }
     }
-    *format = serde_json::json!({"type": "json_object"});
-    true
 }
 
 fn open_retry_delay(
@@ -368,6 +382,9 @@ pub enum ReplyShape {
     /// The RTDL envelope, described to the provider as a JSON schema so the
     /// shape is carried by the request rather than only by prose in the prompt.
     RtdlEnvelope,
+    /// The RTDL envelope asked for as any JSON object, for a provider that
+    /// answered the schema with nothing.
+    RtdlJsonObject,
 }
 
 /// The RTDL envelope as a JSON schema.
@@ -485,6 +502,41 @@ fn rtdl_envelope_schema() -> Value {
     })
 }
 
+/// Claude caches a prompt only up to an explicit `cache_control` breakpoint.
+/// Mark the system prompt and the two newest messages: the newest is the
+/// per-round context, which is not kept in history, so the one before it is
+/// the prefix the next round shares.
+fn add_claude_cache_breakpoints(model: &str, body: &mut Value) {
+    let model = model.to_ascii_lowercase();
+    if !(model.starts_with("anthropic/") || model.contains("claude")) {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let newest = messages.len().saturating_sub(2);
+    for (index, message) in messages.iter_mut().enumerate() {
+        let system = index == 0 && message.get("role").and_then(Value::as_str) == Some("system");
+        let Some(content) = message
+            .get_mut("content")
+            .filter(|_| system || index >= newest)
+        else {
+            continue;
+        };
+        if let Some(text) = content.as_str() {
+            *content = serde_json::json!([{"type": "text", "text": text}]);
+        }
+        if let Some(part) = content.as_array_mut().and_then(|parts| {
+            parts
+                .iter_mut()
+                .rev()
+                .find(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+        }) {
+            part["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+    }
+}
+
 /// The `response_format` a reply shape needs, if any.
 ///
 /// Prose carries none: the chat API rejects `json_object` unless the messages
@@ -501,6 +553,7 @@ fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
                 strict: Some(false),
             },
         }),
+        ReplyShape::RtdlJsonObject => Some(ResponseFormat::JsonObject),
     }
 }
 
@@ -642,10 +695,13 @@ impl VlmClient {
                 serde_json::json!({"mode": "implicit", "ttl": "30m"}),
             );
         }
+        add_claude_cache_breakpoints(&self.model, &mut request_body);
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
-        let mut compatibility_fallback_attempted = false;
+        // Optional fields go on the first rejection; the response format can
+        // need a second step (see downgrade_response_format).
+        let mut compatibility_fallbacks = 0_u8;
         let response = loop {
             let response = self
                 .inner
@@ -667,27 +723,51 @@ impl VlmClient {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
-            if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
-                let downgraded = downgrade_response_format(&mut request_body);
+            // Providers word a refused response_format in their own way
+            // (MiniMax: "Mismatch type string with value array"), so any 400 or
+            // 422 to a request carrying one steps it down; an unrelated error
+            // costs one more request and is reported as it was.
+            let format_refused = matches!(status.as_u16(), 400 | 422)
+                && request_body.get("response_format").is_some();
+            if (format_refused || rejects_optional_request_fields(status, &text))
+                && compatibility_fallbacks < 2
+            {
+                // Drop an optional field only when the error names it: removing
+                // the cache key with a refused format would forgo prompt
+                // caching, and stream_options the usage report, on every
+                // later request of the stream.
+                let lowered = text.to_ascii_lowercase();
+                let names_format =
+                    lowered.contains("response_format") || lowered.contains("json_schema");
+                let downgraded = if format_refused || names_format {
+                    downgrade_response_format(&mut request_body)
+                } else {
+                    None
+                };
                 let mut dropped: Vec<&str> = Vec::new();
                 if let Some(body) = request_body.as_object_mut() {
-                    for field in ["stream_options", "prompt_cache_key", "prompt_cache_options"] {
-                        if body.remove(field).is_some() {
+                    for (field, named) in [
+                        ("stream_options", "stream_options"),
+                        ("stream_options", "include_usage"),
+                        ("prompt_cache_key", "prompt_cache_key"),
+                        ("prompt_cache_options", "prompt_cache_options"),
+                    ] {
+                        if lowered.contains(named) && body.remove(field).is_some() {
                             dropped.push(field);
                         }
                     }
                 }
-                if dropped.is_empty() && !downgraded {
+                if dropped.is_empty() && downgraded.is_none() {
                     bail!("open VLM chat stream: HTTP {status}: {text}");
                 }
                 // Name what changed rather than "retrying without them": a
                 // downgrade is not a removal, and a run that later reads as
                 // schema-guided needs this line to say it was not.
-                if downgraded {
+                if let Some(now) = downgraded {
                     robonix_scribe::warn!(
-                        "[pilot/vlm] upstream rejected response_format json_schema with HTTP \
-                         {status}; downgrading to json_object for the rest of this stream. \
-                         RTDL shape is no longer schema-guided; admission still runs in Pilot. \
+                        "[pilot/vlm] upstream rejected response_format with HTTP {status}; \
+                         response_format is now {now} for the rest of this stream. RTDL shape \
+                         is no longer schema-guided; admission still runs in Pilot. \
                          Upstream said: {text}"
                     );
                 }
@@ -698,7 +778,7 @@ impl VlmClient {
                         dropped.join(", ")
                     );
                 }
-                compatibility_fallback_attempted = true;
+                compatibility_fallbacks += 1;
                 continue;
             }
             if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
@@ -724,7 +804,9 @@ impl VlmClient {
         tokio::spawn(async move {
             let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
             let mut finish = "stop".to_string();
-            let mut buf = String::new();
+            // Bytes, not text: a chunk can end inside a multi-byte character,
+            // and only a whole line is decoded.
+            let mut buf: Vec<u8> = Vec::new();
             let mut done = false;
             while !done {
                 let chunk = tokio::select! {
@@ -736,9 +818,8 @@ impl VlmClient {
                 };
                 match chunk {
                     Ok(bytes) => {
-                        buf.push_str(&String::from_utf8_lossy(&bytes));
-                        while let Some(pos) = buf.find('\n') {
-                            let line: String = buf.drain(..=pos).collect();
+                        buf.extend_from_slice(&bytes);
+                        while let Some(line) = take_line(&mut buf) {
                             match process_stream_line(
                                 line.trim_end(),
                                 &mut tc_acc,
@@ -767,9 +848,10 @@ impl VlmClient {
                     }
                 }
             }
-            if !buf.trim().is_empty()
+            let rest = String::from_utf8_lossy(&buf);
+            if !rest.trim().is_empty()
                 && let Err(e) =
-                    process_stream_line(buf.trim_end(), &mut tc_acc, &mut finish, &tx).await
+                    process_stream_line(rest.trim_end(), &mut tc_acc, &mut finish, &tx).await
             {
                 let _ = tx.send(Err(e)).await;
                 return;
@@ -801,15 +883,50 @@ impl VlmClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_breakpoints_mark_the_system_prompt_and_the_two_newest_messages() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "plan"},
+            {"role": "user", "content": [{"type": "text", "text": "board"}, {"type": "image_url", "image_url": {"url": "x"}}]}
+        ]});
+        let other = body.clone();
+        super::add_claude_cache_breakpoints("anthropic/claude-sonnet-5.5", &mut body);
+        let m = &body["messages"];
+        assert_eq!(m[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(m[1]["content"], "old");
+        assert_eq!(m[2]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(m[3]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(m[3]["content"][1].get("cache_control").is_none());
+        let mut body = other.clone();
+        super::add_claude_cache_breakpoints("openai/gpt-6.1-sol", &mut body);
+        assert_eq!(body, other);
+    }
+
     use super::{
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
         downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
-        rejects_optional_request_fields, response_format_for,
+        rejects_optional_request_fields, response_format_for, take_line,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Duration;
+
+    #[test]
+    fn a_character_split_across_chunks_is_decoded_whole() {
+        let line = "data: {\"content\":\"机器人\"}\n".as_bytes(); // i18n-ok
+        let cut = line.len() - 5; // inside the last character
+        let mut buf = line[..cut].to_vec();
+        assert_eq!(take_line(&mut buf), None);
+        buf.extend_from_slice(&line[cut..]);
+        assert_eq!(
+            take_line(&mut buf).as_deref(),
+            Some("data: {\"content\":\"机器人\"}\n") // i18n-ok
+        );
+        assert!(buf.is_empty());
+    }
 
     #[test]
     fn reads_context_window_from_common_provider_metadata_shapes() {
@@ -972,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_without_schema_support_falls_back_to_a_json_object() {
+    fn a_rejected_response_format_steps_down_to_json_object_then_none() {
         // Dropping the format outright would let one rejection turn every later
         // planning reply into prose.
         assert!(rejects_optional_request_fields(
@@ -982,10 +1099,13 @@ mod tests {
         let mut body = serde_json::json!({
             "response_format": {"type": "json_schema", "json_schema": {"name": "rtdl_envelope"}}
         });
-        assert!(downgrade_response_format(&mut body));
+        assert_eq!(downgrade_response_format(&mut body), Some("json_object"));
         assert_eq!(body["response_format"]["type"], "json_object");
         // Already downgraded, or never schema-shaped: nothing to do.
-        assert!(!downgrade_response_format(&mut body));
+        // Anthropic's endpoint refuses json_object too: drop the format.
+        assert_eq!(downgrade_response_format(&mut body), Some("none"));
+        assert!(body.get("response_format").is_none());
+        assert_eq!(downgrade_response_format(&mut body), None);
     }
 
     #[test]
@@ -1063,6 +1183,14 @@ struct AccumulatedToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+/// The next whole line of an SSE body, decoded; `None` until a newline
+/// has arrived, so a character split across chunks is never cut.
+fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+    let pos = buf.iter().position(|&b| b == b'\n')?;
+    let raw: Vec<u8> = buf.drain(..=pos).collect();
+    Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
 async fn process_stream_line(
