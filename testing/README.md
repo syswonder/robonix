@@ -44,6 +44,7 @@ planning boundary.
 | `build_report_from_artifacts.py` | canonical report builder used by both direct Webots workflow runs and ChatOps Pages publishing. |
 | `collect_diagnostic_context.py` | collects bounded PR metadata/diff plus relevant logs for failure/success analysis; it does not upload the whole repository. |
 | `llm_diagnose.py` | calls the configured DeepSeek-compatible chat endpoint and writes `llm-analysis.json`; failures are non-fatal. |
+| `model_bench/` | scores language models as Pilot's planner on a booted Robonix with a mocked world; see its README. |
 | `logs/` | per-run traces (git-ignored). |
 | `report/` | generated report files (git-ignored). |
 

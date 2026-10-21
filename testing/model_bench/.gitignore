@@ -1,0 +1,6 @@
+results/
+.images/
+logs/
+.deploy*/
+.venv/
+__pycache__/
