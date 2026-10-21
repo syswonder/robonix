@@ -371,6 +371,10 @@ class DualMapDetector(ConceptGraphsDetector):
                                                  "ground_slab": 0, "class_outlier": 0,
                                                  "overlapping": 0}
         known = self._known_ground()
+        # Held back by the ground gate is not gone: kept live, neither updated
+        # nor evicted (see _apply_snapshot). After a restart the new map grows
+        # around objects already registered, which would otherwise flicker out.
+        held = set()
         # Promotion moves a track to the global map with the same uid; show both maps.
         tracks = list(getattr(self._lm, "local_map", []) or [])
         if self._gm is not None:
@@ -382,6 +386,7 @@ class DualMapDetector(ConceptGraphsDetector):
             all_objects.append(d)
             if known is not None and not self._on_known_ground(d, known):
                 dropped["unmapped"] += 1
+                held.add(d["id"])
                 continue
             if d["num_detections"] < self._min_observations:
                 dropped["observations"] += 1
@@ -396,6 +401,7 @@ class DualMapDetector(ConceptGraphsDetector):
         objects = self._absorb_overlapping(objects, dropped)
         self._map_objects = objects
         self._all_objects = all_objects
+        self._held_uuids = held
         n = len(objects)
         self.last_tick_s = time.monotonic() - t0
         if n != self._last_lm_size or self._tick_idx % 25 == 0:

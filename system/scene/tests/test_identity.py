@@ -177,6 +177,25 @@ def test_apply_snapshot_cross_tick_rebind():
     print("  [PASS] test_apply_snapshot_cross_tick_rebind")
 
 
+def test_apply_snapshot_keeps_objects_held_by_the_ground_gate():
+    """DualMap drops a track on ground the map has not observed before the
+    snapshot. After a restart the new map grows round objects already
+    registered; held back is not gone, so the record stays visible."""
+    reg = ObjectRegistry()
+    det = _make_detector(reg)
+    run = asyncio.new_event_loop().run_until_complete
+
+    run(det._apply_snapshot([_snap("u1", "table", (1.0, 0.0, 0.4)),
+                             _snap("u2", "chair", (2.0, 0.0, 0.4))]))
+    run(det._apply_snapshot([], frozenset({"u1"})))
+    table = next(o for o in reg.all_objects() if o.label == "table")
+    chair = next(o for o in reg.all_objects() if o.label == "chair")
+    assert table.missing is False, "a gated track must not be evicted"
+    assert table.observation_count == 1, "nor updated"
+    assert chair.missing is True, "an absent, ungated track still is"
+    print("  [PASS] test_apply_snapshot_keeps_objects_held_by_the_ground_gate")
+
+
 def test_apply_snapshot_ttl_prune():
     """A soft-evicted object not re-detected within the TTL is hard-pruned."""
     reg = ObjectRegistry()
@@ -293,6 +312,7 @@ if __name__ == "__main__":
     test_prune_expired()
     test_parse_merge_class_groups()
     test_apply_snapshot_cross_tick_rebind()
+    test_apply_snapshot_keeps_objects_held_by_the_ground_gate()
     test_apply_snapshot_ttl_prune()
     test_apply_snapshot_follows_a_registry_merge()
     test_the_map_gate_admits_but_never_evicts()

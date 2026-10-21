@@ -2078,19 +2078,21 @@ class ConceptGraphsDetector:
         # serializes with the snapshot reader (same asyncio.Lock).
         try:
             asyncio.run_coroutine_threadsafe(
-                self._apply_snapshot(snapshots), self._asyncio_loop,
+                self._apply_snapshot(snapshots, frozenset(getattr(self, "_held_uuids", ()))),
+                self._asyncio_loop,
             )
         except Exception as e:  # noqa: BLE001
             log.debug("schedule registry update failed: %s", e)
 
-    async def _apply_snapshot(self, snapshots: list[dict]) -> None:
+    async def _apply_snapshot(self, snapshots: list[dict], held: frozenset = frozenset()) -> None:
         """Reconcile concept-graphs MapObjectList state into the registry
-        **incrementally**."""
+        **incrementally**. ``held`` are uuids the backend gated out before the
+        snapshot; like a rejected snapshot they stay live."""
         now = time.time()
         # A rejected snapshot below is not evidence that its object is gone:
         # visible absence decides that. Its uuid stays live, so a registered
         # object is neither updated nor evicted while the gate rejects it.
-        live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
+        live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")} | held
         # The same occupancy gate the DualMap backend applies, on the object's
         # own points: an object standing on ground the map has never observed
         # cannot have been seen there.

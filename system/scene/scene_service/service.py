@@ -69,13 +69,17 @@ logging.basicConfig(
 log = logging.getLogger("scene-service")
 # Scribe's bridge later resets the root logger's level and handlers, so this
 # logger keeps its own level and, in a container (whose console rbnx pipes to
-# scribe), its own console handler.
-log.setLevel(_LOG_LEVEL)
+# scribe), its own console handler. So do the "scene.*" loggers of the
+# perception backends and gates ("[scene-dualmap] tick ...").
+_backends = logging.getLogger("scene")
+for _logger in (log, _backends):
+    _logger.setLevel(_LOG_LEVEL)
 if Path("/.dockerenv").exists():
     _console = logging.StreamHandler()
     _console.setFormatter(
         logging.Formatter("[scene-service] %(levelname)s %(message)s"))
     log.addHandler(_console)
+    _backends.addHandler(_console)
 
 
 _lifecycle = SceneLifecycleRuntime(log)
