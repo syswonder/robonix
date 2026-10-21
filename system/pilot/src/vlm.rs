@@ -502,6 +502,41 @@ fn rtdl_envelope_schema() -> Value {
     })
 }
 
+/// Claude caches a prompt only up to an explicit `cache_control` breakpoint.
+/// Mark the system prompt and the two newest messages: the newest is the
+/// per-round context, which is not kept in history, so the one before it is
+/// the prefix the next round shares.
+fn add_claude_cache_breakpoints(model: &str, body: &mut Value) {
+    let model = model.to_ascii_lowercase();
+    if !(model.starts_with("anthropic/") || model.contains("claude")) {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let newest = messages.len().saturating_sub(2);
+    for (index, message) in messages.iter_mut().enumerate() {
+        let system = index == 0 && message.get("role").and_then(Value::as_str) == Some("system");
+        let Some(content) = message
+            .get_mut("content")
+            .filter(|_| system || index >= newest)
+        else {
+            continue;
+        };
+        if let Some(text) = content.as_str() {
+            *content = serde_json::json!([{"type": "text", "text": text}]);
+        }
+        if let Some(part) = content.as_array_mut().and_then(|parts| {
+            parts
+                .iter_mut()
+                .rev()
+                .find(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+        }) {
+            part["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+    }
+}
+
 /// The `response_format` a reply shape needs, if any.
 ///
 /// Prose carries none: the chat API rejects `json_object` unless the messages
@@ -660,6 +695,7 @@ impl VlmClient {
                 serde_json::json!({"mode": "implicit", "ttl": "30m"}),
             );
         }
+        add_claude_cache_breakpoints(&self.model, &mut request_body);
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
@@ -847,6 +883,27 @@ impl VlmClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_breakpoints_mark_the_system_prompt_and_the_two_newest_messages() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "plan"},
+            {"role": "user", "content": [{"type": "text", "text": "board"}, {"type": "image_url", "image_url": {"url": "x"}}]}
+        ]});
+        let other = body.clone();
+        super::add_claude_cache_breakpoints("anthropic/claude-sonnet-5.5", &mut body);
+        let m = &body["messages"];
+        assert_eq!(m[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(m[1]["content"], "old");
+        assert_eq!(m[2]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(m[3]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(m[3]["content"][1].get("cache_control").is_none());
+        let mut body = other.clone();
+        super::add_claude_cache_breakpoints("openai/gpt-6.1-sol", &mut body);
+        assert_eq!(body, other);
+    }
+
     use super::{
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
