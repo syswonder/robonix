@@ -194,23 +194,25 @@ if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
         rm -f "$ARCHIVE"
     fi
     "$PY" -c 'import sherpa_onnx; print("[build] sherpa-onnx", sherpa_onnx.__version__)'
-    ASR_NAME=sherpa-onnx-streaming-paraformer-bilingual-zh-en
-    ASR_DIR="$BUILD/models/$ASR_NAME"
-    ASR_ARCHIVE="$BUILD/models/$ASR_NAME.tar.bz2"
-    ASR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$ASR_NAME.tar.bz2"
-    if [[ ! -f "$ASR_DIR/tokens.txt" ]]; then
-        echo "[build] downloading streaming ASR model ($ASR_NAME)"
-        rm -f "$ASR_ARCHIVE"
-        if ! curl -fL --retry 3 --connect-timeout 15 -o "$ASR_ARCHIVE" "${GH_MIRROR:+${GH_MIRROR%/}/}$ASR_URL"; then
+    if [[ "$BACKEND" == "local" ]]; then
+        ASR_NAME=sherpa-onnx-streaming-paraformer-bilingual-zh-en
+        ASR_DIR="$BUILD/models/$ASR_NAME"
+        ASR_ARCHIVE="$BUILD/models/$ASR_NAME.tar.bz2"
+        ASR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$ASR_NAME.tar.bz2"
+        if [[ ! -f "$ASR_DIR/tokens.txt" ]]; then
+            echo "[build] downloading streaming ASR model ($ASR_NAME)"
             rm -f "$ASR_ARCHIVE"
-            curl -fL --retry 3 --connect-timeout 15 -o "$ASR_ARCHIVE" "$ASR_URL"
+            if ! curl -fL --retry 3 --connect-timeout 15 -o "$ASR_ARCHIVE" "${GH_MIRROR:+${GH_MIRROR%/}/}$ASR_URL"; then
+                rm -f "$ASR_ARCHIVE"
+                curl -fL --retry 3 --connect-timeout 15 -o "$ASR_ARCHIVE" "$ASR_URL"
+            fi
+            bzip2 -t "$ASR_ARCHIVE"
+            tar -xjf "$ASR_ARCHIVE" -C "$BUILD/models"
+            rm -f "$ASR_ARCHIVE"
         fi
-        bzip2 -t "$ASR_ARCHIVE"
-        tar -xjf "$ASR_ARCHIVE" -C "$BUILD/models"
-        rm -f "$ASR_ARCHIVE"
+        # Only the int8 encoder/decoder are used at runtime.
+        rm -f "$ASR_DIR/encoder.onnx" "$ASR_DIR/decoder.onnx"
     fi
-    # Only the int8 encoder/decoder are used at runtime.
-    rm -f "$ASR_DIR/encoder.onnx" "$ASR_DIR/decoder.onnx"
 else
     echo "[build] skipping wake-word model download (SKIP_MODEL_DOWNLOAD=1)."
 fi
