@@ -26,8 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// - `session`: first line of the file, with `session_id` and `pilot_version`.
 /// - `message`: one history message (`role`, `content`, ...). An image is
 ///   recorded by size only, as `image_bytes`.
-/// - `task_state`: the session's task list after it changed (`task`); a file
-///   written before task lists holds a single task state there instead.
+/// - `task_state`: the session's task list after it changed (`task`).
 /// - `compaction`: history was compacted; `history` is the full history that
 ///   replaced it, and the counts say what was evicted and pinned.
 ///
@@ -192,8 +191,7 @@ fn replay(path: &std::path::Path) -> Option<Restored> {
             Some("message") => parse_message(&record)
                 .map(|message| restored.history.push(message))
                 .is_some(),
-            // Null (no task yet), a task list, or the single task state of a
-            // file written before task lists.
+            // Null (no task yet) or a task list.
             Some("task_state") => match record["task"].clone() {
                 Value::Null => {
                     restored.task = TaskList::default();
@@ -340,22 +338,6 @@ mod tests {
         let restored = replay(&transcript.path).unwrap();
         assert_eq!(contents(&restored.history), ["summary", "look", "step 2"]);
         assert_eq!(restored.task, task);
-    }
-
-    #[test]
-    fn a_transcript_written_before_task_lists_restores_its_task() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let old = [
-            r#"{"kind":"session"}"#,
-            r#"{"kind":"message","role":"user","content":"User task (authoritative): fetch the cup"}"#,
-            r#"{"kind":"task_state","task":{"goal":"fetch the cup","success_criterion":"cup delivered","status":"in_progress"}}"#,
-        ];
-        std::fs::write(&path, old.join("\n") + "\n").unwrap();
-        let restored = replay(&path).unwrap();
-        assert_eq!(restored.task.tasks.len(), 1);
-        assert_eq!(restored.task.messages[0].text, "fetch the cup");
-        assert_eq!(restored.task.tasks[0].success_criterion, "cup delivered");
     }
 
     #[test]

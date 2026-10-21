@@ -155,39 +155,16 @@ impl Applied {
     }
 }
 
-/// The single task state of transcripts written before task lists.
-#[derive(Deserialize)]
-struct LegacyTaskState {
-    goal: String,
-    success_criterion: String,
-    status: String,
-}
-
 impl TaskList {
-    /// The list a transcript recorded: a task list, or the single task state of
-    /// a transcript written before task lists, which becomes a one-task list.
+    /// The list a transcript recorded.
     pub(crate) fn from_record(value: Value) -> Option<Self> {
-        if value.get("tasks").is_some() {
-            let mut list: Self = serde_json::from_value(value).ok()?;
-            // Nothing reports on the trees of a Pilot that restarted.
-            for tree in &mut list.trees {
-                if tree.state == TREE_RUNNING {
-                    tree.state = TREE_LOST.to_string();
-                }
+        let mut list: Self = serde_json::from_value(value).ok()?;
+        // Nothing reports on the trees of a Pilot that restarted.
+        for tree in &mut list.trees {
+            if tree.state == TREE_RUNNING {
+                tree.state = TREE_LOST.to_string();
             }
-            return Some(list);
         }
-        let legacy: LegacyTaskState = serde_json::from_value(value).ok()?;
-        let mut list = Self::default();
-        let task_id = list.receive(&legacy.goal)?.task.clone();
-        list.answered();
-        let task = list.task_mut(&task_id)?;
-        task.success_criterion = legacy.success_criterion;
-        task.status = if STATUSES.contains(&legacy.status.as_str()) {
-            legacy.status
-        } else {
-            IN_PROGRESS.to_string()
-        };
         Some(list)
     }
 
@@ -1021,18 +998,12 @@ mod tests {
     }
 
     #[test]
-    fn an_old_single_task_state_restores_as_a_one_task_list() {
-        let list = TaskList::from_record(json!({
-            "goal": "fetch the cup", "success_criterion": "cup delivered", "status": "in_progress"
-        }))
-        .unwrap();
-        assert_eq!(list.messages[0].text, "fetch the cup");
-        assert_eq!(list.tasks[0].success_criterion, "cup delivered");
-        assert!(list.unanswered().is_empty());
-        let mut list = list;
+    fn a_restored_list_does_not_wait_on_trees_of_the_previous_pilot() {
+        let mut list = TaskList::default();
+        list.receive("fetch the cup");
+        list.answered();
         list.attach_tree("T1", "p1", "tree");
         let mut restored = TaskList::from_record(serde_json::to_value(&list).unwrap()).unwrap();
-        // A tree left running by the previous Pilot does not hold its task open.
         assert_eq!(restored.trees[0].state, TREE_LOST);
         let mut applied = Applied::default();
         restored.apply_updates(&[update("T1", DONE)], None, &mut applied);
