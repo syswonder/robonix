@@ -1,0 +1,21 @@
+# Metadata is static until restart. Discover supported operations through Atlas;
+# each configurable flag permits non-default settings in that operation's request
+# and is false when the operation is absent.
+# Width bounds apply to the current fingertips and configuration, not nominal
+# mechanical limits. A valid range is finite with 0 <= min <= max; zero width
+# need not be reachable. Restart after changing fingertips or configuration.
+# Force bounds are the achievable normal grip force per gripping face, N: a
+# hardware capability, not the configured relative_effort or a measurement.
+---
+bool ok                  # Query succeeded; metadata valid, not motion readiness.
+string message           # Reason when ok = false; metadata then has no meaning.
+bool grip_effort_configurable # Grip accepts non-default relative_effort.
+bool move_speed_configurable
+bool grip_speed_configurable
+bool open_speed_configurable
+bool opening_width_range_valid # False: range unknown; ignore both bounds.
+float64 min_opening_width_m     # Minimum permitted clear width between gripping faces, m.
+float64 max_opening_width_m     # Maximum permitted clear width between gripping faces, m.
+bool gripping_force_range_valid # False: range unknown; ignore both bounds.
+float64 min_gripping_force_n    # Minimum achievable grip force per gripping face, N.
+float64 max_gripping_force_n    # Maximum achievable grip force per gripping face, N.

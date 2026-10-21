@@ -1,0 +1,6 @@
+# Drive to the configured open endpoint. This is not a stop,
+# torque-off, sensor-zeroing or calibration command. Observe state for arrival.
+float64 relative_speed # 0 = configured default; (0,1] = relative speed setting.
+---
+bool ok                # Accepted and dispatched, not proof that the jaws opened.
+string message         # Human-readable reason on rejection or dispatch failure.
