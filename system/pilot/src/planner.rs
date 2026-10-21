@@ -2212,8 +2212,7 @@ Nodes are exactly one of:
 - {"op":"repeat","op_id":0,"description":"...","count":0..10000,"body":<node>}
 - {"op":"while","op_id":0,"description":"...","condition":<expr>,"max_iterations":1..10000,"body":<node>}
 do may set bind. References: {"var":"name","path":["field",0]}; conditions: {"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}, or booleans. Bindings contain successful output; later sequential calls and loops overwrite them. Read only earlier completed nodes, never sibling parallel branches.
-Every node needs a description and op_id=0; Pilot assigns the real ID. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
-Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose every currently-known dependent step into one sequence and every independent step into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence paired with task_update: null or status=done; in_progress with nothing running is rejected.
+Every node needs a description and op_id=0; Pilot assigns the real ID. Do not add node fields. Compose dependent steps into one sequence and independent steps into one parallel tree. With no new call, return an empty sequence paired with task_update: null or status=done; in_progress with nothing running is rejected.
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 

@@ -1414,7 +1414,7 @@ mod tests {
     use robonix_atlas::service::{AtlasRegistry, serve_atlas};
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio_stream::StreamExt;
     use tonic::Request;
 
@@ -1974,6 +1974,7 @@ mod tests {
                 output: "done".into(),
                 error: String::new(),
             },
+            started_at: Instant::now(),
         };
 
         assert!(verifier.run().await);
@@ -2027,6 +2028,7 @@ mod tests {
                 output: "done".into(),
                 error: String::new(),
             },
+            started_at: Instant::now(),
         };
 
         assert!(!verifier.run().await);
