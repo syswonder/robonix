@@ -25,7 +25,7 @@ Provides 5 RPCs across 5 gRPC service contracts (from robonix_contracts.proto):
 
 Backend engines:
   - Whisper (transformers pipeline)  -- one-shot ASR, GPU FP16, high accuracy
-  - FunASR Paraformer-zh-streaming   -- streaming ASR, 600ms granularity
+  - sherpa-onnx int8 Paraformer      -- bilingual streaming ASR on CPU
   - Configured local/cloud backend   -- TTS synthesis, 16 kHz mono pcm_s16le
 
 Audio adaptation:
@@ -44,8 +44,8 @@ Environment variables:
   ASR_DEVICE         Torch device: cuda | cpu (default: cuda)
   ASR_CHUNK_LENGTH   Whisper chunk length in seconds (default: 30.0)
   ASR_BATCH_SIZE     Whisper batch size (default: 4)
-  FUNASR_MODEL       FunASR model name or path (default: paraformer-zh-streaming)
-  FUNASR_CHUNK_SIZE  Paraformer chunk_size as JSON (default: [0,10,5])
+  SHERPA_ASR_DIR     Streaming Paraformer model directory
+  SHERPA_ASR_THREADS CPU inference threads (default: 2)
   TTS_VOICE          Edge TTS voice name (default: zh-CN-XiaoxiaoNeural)
   TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY
                      Tencent Cloud credentials when SPEECH_BACKEND=tencent
@@ -207,6 +207,8 @@ class WhisperASRBackend:
         import torch
         from transformers import pipeline as hf_pipeline
 
+        # Keep torch diagnostics off the streaming-only startup path.
+        check_torch_cuda()
         model_path = os.environ.get("ASR_MODEL", "openai/whisper-large-v3")
         device = os.environ.get("ASR_DEVICE", "cuda")
         chunk_length = float(os.environ.get("ASR_CHUNK_LENGTH", "30.0"))
@@ -295,185 +297,75 @@ class MockASRBackend:
         return {"text": "[mock] hello world", "confidence": 1.0}
 
 
-# -- ASR Backend (FunASR Paraformer streaming) --------------------------------
+# -- ASR Backend (sherpa-onnx streaming) -------------------------------------
 
-class FunASRStreamingBackend:
-    """Streaming ASR backend using FunASR Paraformer-zh-streaming.
-
-    Designed for real-time chunk-by-chunk recognition. The model processes
-    fixed-size audio chunks and maintains streaming state via a cache dict.
-
-    Model parameters:
-      - Model: paraformer-zh-streaming (or FUNASR_MODEL env override)
-      - chunk_size: [0, 10, 5] -- 0 left context, 10 current (600ms), 5 right (300ms)
-      - chunk_stride: 10 x 960 = 9600 samples = 600ms at 16kHz
-      - encoder_chunk_look_back: 4 (retain 4 past encoder chunks)
-      - decoder_chunk_look_back: 1 (retain 1 past decoder chunk)
-
-    The cache dict is passed across recognize_chunk() calls within a single
-    stream session. Each Stream gRPC call gets its own cache.
-
-    Config (environment):
-        FUNASR_MODEL      -- model name or local path
-        FUNASR_CHUNK_SIZE -- JSON array [left, current, right]
-    """
+class SherpaStreamingBackend:
+    """CPU int8 paraformer with incremental partials and a final tail event."""
 
     def __init__(self):
-        from funasr import AutoModel
-
-        model_name = os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
-        chunk_size_str = os.environ.get("FUNASR_CHUNK_SIZE", "[0,10,5]")
-        # Try GPU first, fall back to CPU on init failure (typically
-        # `CUDA error: out of memory` because scene's YOLO+SAM+CLIP
-        # already saturated the card). FUNASR_DEVICE pins one device
-        # explicitly and skips the fallback.
-        device_pref = os.environ.get("FUNASR_DEVICE", "auto")
-        try:
-            self.chunk_size = json.loads(chunk_size_str)
-        except json.JSONDecodeError:
-            self.chunk_size = [0, 10, 5]
-
-        self.chunk_stride = self.chunk_size[1] * 960
-
-        if device_pref == "auto":
-            try:
-                import torch
-                cuda_available = torch.cuda.is_available()
-            except Exception:
-                cuda_available = False
-            candidates = ["cuda", "cpu"] if cuda_available else ["cpu"]
-        else:
-            candidates = [device_pref]
-
-        last_err = None
-        for device in candidates:
-            log.info(
-                "Loading FunASR model %s on %s (chunk_size=%s, stride=%d samples)...",
-                model_name, device, self.chunk_size, self.chunk_stride,
-            )
-            try:
-                self.model = AutoModel(
-                    model=model_name,
-                    device=device,
-                    hub_kwargs={"local_files_only": True},
-                )
-                self.device = device
-                log.info("FunASR model loaded on %s.", device)
-                return
-            except Exception as e:
-                last_err = e
-                log.warning("FunASR load on %s failed: %s", device, e)
-        raise RuntimeError(
-            f"FunASR failed to load on any of {candidates}: {last_err}"
-        )
-
-    def recognize_chunk(
-        self,
-        audio_chunk: bytes,
-        cache: dict,
-        is_final: bool = False,
-        encoding: str = "pcm_s16le",
-        sample_rate: int = 16000,
-    ) -> list[dict]:
-        """Process one audio chunk through the streaming Paraformer.
-
-        Args:
-            audio_chunk: Raw PCM bytes (already adapted to 16kHz mono pcm_s16le).
-                Chunk size should be ~600ms (9600 samples x 2 bytes = 19200 bytes)
-                for optimal granularity, but any size works.
-            cache: Mutable dict maintained across chunks in one session.
-                The model stores encoder/decoder state here. Must be the same
-                dict for all chunks in one Stream call.
-            is_final: True on the last call to flush remaining state.
-                Send empty audio_chunk with is_final=True to get the final result.
-            encoding: Audio encoding (default pcm_s16le).
-            sample_rate: Sample rate (default 16000).
-
-        Returns:
-            List of dicts, each with "text" (str) and "confidence" (float).
-            May be empty if the chunk is too short for a recognition event.
-            On is_final=True, returns the final transcription.
-        """
         import numpy as np
+        import sherpa_onnx
 
-        if encoding == "pcm_s16le":
-            audio = np.frombuffer(audio_chunk, dtype=np.int16)
-        elif encoding == "pcm_f32le":
-            audio = (np.frombuffer(audio_chunk, dtype=np.float32) * 32768).astype(np.int16)
-        else:
-            buf = io.BytesIO(audio_chunk)
-            with wave.open(buf, "rb") as wf:
-                frames = wf.readframes(wf.getnframes())
-                audio = np.frombuffer(frames, dtype=np.int16)
-
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        results = self.model.generate(
-            input=audio,
-            cache=cache,
-            is_final=is_final,
-            chunk_size=self.chunk_size,
-            encoder_chunk_look_back=4,
-            decoder_chunk_look_back=1,
-            disable_pbar=True,
-            disable_log=True,
-        )
-        # [profile-asr] per-chunk FunASR inference time. Each chunk is ~0.6s of
-        # audio; infer_ms >> 600 means the model can't keep up in real time
-        # (e.g. running on CPU instead of GPU).
+        package_root = Path(__file__).resolve().parents[1]
+        model_dir = Path(os.environ.get(
+            "SHERPA_ASR_DIR",
+            str(package_root / "rbnx-build" / "models"
+                / "sherpa-onnx-streaming-paraformer-bilingual-zh-en"),
+        ))
+        threads = max(1, int(os.environ.get("SHERPA_ASR_THREADS", "2")))
         log.info(
-            "[profile-asr] chunk infer %.1f ms (%d samples, is_final=%s)",
-            (_time.perf_counter() - _t0) * 1000.0, int(audio.shape[0]), is_final,
+            "Loading sherpa-onnx streaming paraformer from %s (threads=%d)...",
+            model_dir, threads,
         )
-
-        outputs = []
-        for res in results:
-            if isinstance(res, dict):
-                text = res.get("text", "")
-            else:
-                text = str(res)
-            outputs.append({"text": text, "confidence": 0.9})
-        return outputs
+        self._recognizer = sherpa_onnx.OnlineRecognizer.from_paraformer(
+            tokens=os.environ.get("SHERPA_ASR_TOKENS", str(model_dir / "tokens.txt")),
+            encoder=os.environ.get("SHERPA_ASR_ENCODER", str(model_dir / "encoder.int8.onnx")),
+            decoder=os.environ.get("SHERPA_ASR_DECODER", str(model_dir / "decoder.int8.onnx")),
+            num_threads=threads,
+        )
+        self._np = np
+        log.info("sherpa-onnx streaming ASR loaded.")
 
     def recognize_stream(self, pcm_chunks: Iterable[bytes]) -> Iterator[dict]:
-        """Recognize a stream of 16 kHz mono pcm_s16le chunks.
-
-        The public backend shape matches TencentRealtimeASRBackend:
-        callers provide arbitrary PCM chunks and receive Robonix ASR event
-        dictionaries. Internally FunASR still needs stride-sized frames, so
-        this adapter buffers input before calling recognize_chunk().
-        """
-        cache: dict = {}
-        frame_buf = bytearray()
-        stride_bytes = self.chunk_stride * 2
-
+        np = self._np
+        recognizer = self._recognizer
+        stream = recognizer.create_stream()
+        emitted = ""
         for chunk in pcm_chunks:
             if not chunk:
                 continue
-            frame_buf.extend(chunk)
-            while len(frame_buf) >= stride_bytes:
-                frame = bytes(frame_buf[:stride_bytes])
-                del frame_buf[:stride_bytes]
-                for result in self.recognize_chunk(frame, cache, is_final=False):
-                    text = result.get("text", "")
-                    if text:
-                        yield {
-                            "event_type": 0,
-                            "text": text,
-                            "confidence": result.get("confidence", 0.0),
-                            "is_final": False,
-                        }
-
-        for result in self.recognize_chunk(bytes(frame_buf), cache, is_final=True):
-            text = result.get("text", "")
-            if text:
+            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+            stream.accept_waveform(16000, samples)
+            while recognizer.is_ready(stream):
+                recognizer.decode_stream(stream)
+            text = recognizer.get_result(stream)
+            # Revisions cannot be represented by append-only partial events.
+            if text.startswith(emitted) and len(text) > len(emitted):
                 yield {
-                    "event_type": 1,
-                    "text": text,
-                    "confidence": result.get("confidence", 0.0),
-                    "is_final": True,
+                    "event_type": 0,
+                    "text": text[len(emitted):],
+                    "confidence": 0.9,
+                    "is_final": False,
                 }
+                emitted = text
+
+        stream.input_finished()
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+        text = recognizer.get_result(stream)
+        if not text and not emitted:
+            return
+        if emitted and not text.startswith(emitted):
+            # A revised transcript requires the complete final text.
+            yield {"event_type": 1, "text": text, "confidence": 0.9, "is_final": True}
+        else:
+            # Consumers still need a terminal event when the tail is empty.
+            yield {
+                "event_type": 1,
+                "text": text[len(emitted):],
+                "confidence": 0.9,
+                "is_final": True,
+            }
 
 
 class MockASRStreamingBackend:
@@ -796,10 +688,9 @@ class SpeechAsrStreamServicer(SpeechAsrStreamBase):
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
                 "Streaming ASR backend not available. "
-                "Set FUNASR_MODEL to a local model path with pre-downloaded weights, "
-                "or set SPEECH_BACKEND=tencent/custom/mock. "
-                "Current FUNASR_MODEL="
-                + os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
+                "Build the Speech package to download the local model, "
+                "set SHERPA_ASR_DIR to an existing model directory, "
+                "or set SPEECH_BACKEND=tencent/custom/mock."
             )
             return
 
@@ -1400,9 +1291,6 @@ _CFG_ENV_MAP = {
     "asr_device":        "ASR_DEVICE",
     "asr_chunk_length":  "ASR_CHUNK_LENGTH",
     "asr_batch_size":    "ASR_BATCH_SIZE",
-    "funasr_model":      "FUNASR_MODEL",
-    "funasr_device":     "FUNASR_DEVICE",
-    "funasr_chunk_size": "FUNASR_CHUNK_SIZE",
     "tts_voice":         "TTS_VOICE",
     "default_speaker_provider_id": "SPEECH_DEFAULT_SPEAKER_PROVIDER_ID",
     "tencent_asr_appid": "TENCENT_ASR_APPID",
@@ -1508,10 +1396,10 @@ def init(cfg):
             asr = None
         else:
             asr = _try_backend("Whisper ASR", WhisperASRBackend)
-        asr_stream = _try_backend("FunASR (streaming)", FunASRStreamingBackend)
+        asr_stream = _try_backend("sherpa-onnx (streaming)", SherpaStreamingBackend)
+        asr_stream_label = "sherpa-onnx streaming ASR"
         tts = _try_backend("Edge TTS", EdgeTTSBackend)
         asr_label = "Whisper ASR"
-        asr_stream_label = "FunASR streaming ASR"
         tts_label = "Edge TTS"
 
     _asr_servicer.asr_backend = asr
@@ -1576,7 +1464,6 @@ def init(cfg):
 
 
 def main() -> int:
-    check_torch_cuda()
     speech.run()
     return 0
 

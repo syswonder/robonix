@@ -1,6 +1,6 @@
 # robonix/service/voiceprint
 
-ECAPA-TDNN speaker-identification service. It serves
+CPU CAM++ speaker-identification service using sherpa-onnx. It serves
 `robonix/service/voiceprint/identify`, which Liaison's voice-gating path
 calls, and the enrollment contracts `enroll`, `list`, and `delete`, which
 `rbnx chat` uses to manage enrolled speakers.
@@ -13,7 +13,7 @@ services/voiceprint/
   package_manifest.yaml
   voiceprint_service/            # Python package
     __init__.py                  # bootstraps gRPC stubs on first import
-    engine.py                    # ECAPA-TDNN wrapper
+    engine.py                    # CAM++ ONNX embedding extractor
     service.py                   # gRPC servicers + entry point
   scripts/build.sh               # uv venv + codegen + model pre-download
   tests/                         # unittest suite
@@ -31,9 +31,8 @@ The build phase:
 1. Creates `rbnx-build/venv/` via `uv venv` + `uv sync`.
 2. Runs `rbnx codegen --mcp` with the venv interpreter and import-tests the
    generated contract modules under `rbnx-build/codegen/`.
-3. Pre-downloads ECAPA-TDNN (`speechbrain/spkrec-ecapa-voxceleb`) into
-   `rbnx-build/models/`. Set `SKIP_MODEL_DOWNLOAD=1` to skip; set
-   `HF_ENDPOINT=https://hf-mirror.com` (default) for runner environments where direct model downloads are unreliable.
+3. Downloads the CAM++ ONNX model into `rbnx-build/models/campplus_zh.onnx`.
+   Set `SKIP_MODEL_DOWNLOAD=1` to skip the model download and verification.
 
 ## Run
 
@@ -46,17 +45,20 @@ Environment variables:
 | Variable               | Default              | Meaning                              |
 |------------------------|----------------------|--------------------------------------|
 | `VOICEPRINT_DATA_DIR`  | `rbnx-build/data`    | location of `enrolled.json`          |
-| `VOICEPRINT_THRESHOLD` | `0.25`               | cosine-similarity gate for `is_known` |
-| `VOICEPRINT_DEVICE`    | auto (`cuda:0`/`cpu`) | torch device for ECAPA-TDNN          |
+| `VOICEPRINT_THRESHOLD` | `0.55`               | cosine-similarity gate for `is_known` |
+| `VOICEPRINT_MODEL`     | `rbnx-build/models/campplus_zh.onnx` | CAM++ ONNX model path |
+
+Existing ECAPA enrollment vectors are incompatible with CAM++. Re-enroll
+users after upgrading; the `enrolled.json` schema stays unchanged.
 
 ## Test
 
 ```bash
-bash scripts/build.sh   # one-time; pulls ECAPA-TDNN weights
+bash scripts/build.sh   # one-time; downloads CAM++ weights
 rbnx-build/venv/bin/python -m unittest discover -s tests -v
 ```
 
-The suite covers threshold and device configuration, concurrent enrollment,
+The suite covers threshold configuration, concurrent enrollment,
 rollback when persisting fails, and model loading on activate and deactivate.
 
 ## Capability contracts
