@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from robonix_api import Ok, Primitive, Service, Skill
@@ -118,14 +119,18 @@ def handler(provider_id: str, cid: str, schema: dict):
 
     def call(req: Input) -> dict:
         start = time.time()
-        record = {"provider": provider_id, "contract": cid, "args": req, "case": state().get("case"), "start": start}
+        execution_id = uuid.uuid4().hex
+        record = {"provider": provider_id, "contract": cid, "args": req, "case": state().get("case"), "start": start,
+                  "execution_id": execution_id}
         try:
             out = answer(cid, req)
             record.update(ok=True)
-            return out
+            # The executor result identifies this invocation even when Pilot's
+            # own context reads use the same provider, contract and arguments.
+            return {**out, "_bench_execution_id": execution_id}
         except Exception as e:  # the leaf fails the way a real provider's would
             record.update(ok=False, error=str(e))
-            raise
+            raise RuntimeError(f"{e} [bench_execution_id={execution_id}]") from e
         finally:
             record["end"] = time.time()
             with _lock, CALLS.open("a") as f:

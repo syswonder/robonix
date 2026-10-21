@@ -35,6 +35,7 @@ import yaml
 HERE = Path(__file__).resolve().parent
 
 STATE_FAILED = 2  # PilotEvent status.state
+SCORING_VERSION = 2
 OUT_OF_CREDIT = re.compile(r"credit balance|insufficient|余额不足", re.I)  # i18n-ok
 
 
@@ -163,34 +164,51 @@ def run_case(a, world: Path, case: dict, tag: str) -> dict:
     session = str(uuid.uuid4())
     started = time.time()
     first = ask(a.rbnx, a.server, case["task"], session)
-    events: list[dict] = []
+    turns: list[list[dict]] = []
     if steer := w.get("steer"):
         time.sleep(steer["after_s"])
-        events += events_of(ask(a.rbnx, a.server, steer["task"], session), a.timeout)
-    events = events_of(first, a.timeout) + events
+        turns.append(events_of(ask(a.rbnx, a.server, steer["task"], session), a.timeout))
+    turns.insert(0, events_of(first, a.timeout))
+    events = [event for turn in turns for event in turn]
     elapsed = time.time() - started
 
     plans = [c for e in events if e.get("plan") for c in e["plan"].get("calls", [])]
-    calls = []
+    planned_calls = []
     for c in plans:
         try:
             args = json.loads(c.get("args_json") or "{}")
         except json.JSONDecodeError:
             args = {}
-        calls.append({"contract": c["contract_id"], "provider": c.get("provider_id"), "args": args, "call_id": c.get("call_id")})
-    # When the world ran each dispatched call; Pilot's own state reads are
-    # in the log too, and match no dispatched call.
-    ran, used = lines_of(world / "calls.jsonl", tag), set()
-    for c in calls:
-        for i, r in enumerate(ran):
-            if i not in used and r["contract"] == c["contract"] and r["args"] == c["args"]:
-                used.add(i)
-                c.update(start=r["start"], end=r["end"], ok=r["ok"])
+        planned_calls.append({"contract": c["contract_id"], "provider": c.get("provider_id"), "args": args, "call_id": c.get("call_id")})
+    # A dispatched plan can contain leaves that cancellation prevents from running.
+    calls = []
+    ran = lines_of(world / "calls.jsonl", tag)
+    completed = {
+        leaf["call_id"]: leaf
+        for event in events for result in (event.get("batch_result") or {}).get("results", [])
+        if (leaf := result.get("leaf_result"))
+    }
+    for c in planned_calls:
+        leaf = completed.get(c["call_id"])
+        if leaf is None:
+            continue
+        for r in ran:
+            execution_id = r.get("execution_id")
+            if (execution_id and r["provider"] == c["provider"] and r["contract"] == c["contract"]
+                    and any(execution_id in (leaf.get(field) or "") for field in ("output", "error"))):
+                calls.append({**c, "args": r["args"], "start": r["start"], "end": r["end"], "ok": r["ok"], "executed": True})
                 break
+        else:
+            # Executor builtins have leaf results but no mock-provider timing log.
+            if c["contract"].startswith("robonix/system/executor/builtin/"):
+                calls.append({**c, "ok": leaf["success"], "executed": True})
+    calls.sort(key=lambda c: c.get("start", float("inf")))
     vlm = [{k: v for k, v in r.items() if k != "case"} for r in lines_of(world / "vlm.jsonl", tag)]
     finals = [e["final_text"] for e in events if e.get("final_text")]
     return {
         "calls": calls,
+        "planned_calls": planned_calls,
+        "finished": all(any(e.get("event_kind") == 4 for e in turn) for turn in turns),
         "final": finals[-1] if finals else "",
         "failed": any((e.get("status") or {}).get("state") == STATE_FAILED for e in events),
         "vlm": vlm,
@@ -232,11 +250,17 @@ def is_(contract: str, entry) -> bool:
 
 def check(case: dict, run: dict) -> list[str]:
     exp, fails = case.get("expect", {}), []
-    calls = run["calls"]
+    calls = sorted(
+        (c for c in run["calls"] if c.get("executed") is True
+         or (c.get("start") is not None and c.get("end") is not None)),
+        key=lambda c: c.get("start") if c.get("start") is not None else float("inf"),
+    )
     names = [c["contract"] for c in calls]
     of = lambda entry: [c for c in calls if is_(c["contract"], entry)]  # noqa: E731
     if run["failed"]:
         fails.append("Pilot reported the task FAILED")
+    if not run.get("finished", True):
+        fails.append("Pilot did not finish every submitted turn")
     # Pilot's own words when no reply of the model gave a valid plan.
     if run["final"].startswith("I couldn't produce a valid robot plan"):
         fails.append("Pilot got no valid plan from the model")
@@ -260,13 +284,16 @@ def check(case: dict, run: dict) -> list[str]:
         if len(of(cid)) > n:
             fails.append(f"{cid} called {len(of(cid))} times, expected at most {n}")
     for order in exp.get("orders", []):
+        if any(c.get("start") is None for c in calls if any(is_(c["contract"], entry) for entry in order)):
+            fails.append(f"order: missing execution timing for {order}")
+            continue
         it = iter(names)
         if not all(any(is_(n, want) for n in it) for want in order):
             fails.append(f"order: wanted {order}, ran {names}")
     if "overlap" in exp:
         # Run side by side: each entry's first call overlaps every other's.
         firsts = [next(iter(of(e)), None) for e in exp["overlap"]]
-        if any(c is None or "start" not in c for c in firsts):
+        if any(c is None or c.get("start") is None or c.get("end") is None for c in firsts):
             fails.append("overlap: a call is missing")
         elif max(c["start"] for c in firsts) >= min(c["end"] for c in firsts):
             fails.append("overlap: the calls ran one after another")
@@ -344,13 +371,16 @@ def main() -> None:
         # Results are written after every case, and a rerun resumes: a run
         # stopped halfway is not paid for twice.
         path = out / (re.sub(r"[^A-Za-z0-9._-]", "_", f"{label}@{host}") + ".json")
-        results = json.loads(path.read_text())["results"] if path.exists() else []
+        previous = json.loads(path.read_text()) if path.exists() else None
+        if previous is not None and previous.get("meta", {}).get("scoring_version") != SCORING_VERSION:
+            sys.exit(f"{path}: results use an older scoring version; preserve them and choose a new --out directory")
+        results = previous["results"] if previous is not None else []
         done = {(r["id"], r["rep"]) for r in results}
         (world / "target.json").write_text(json.dumps({"env_file": str(Path(a.env_file).resolve()), "model": model}))
         vision = probe_vision(base, key, model, Path(a.images))
         if vision.startswith("error"):
             sys.exit(f"{model}: the endpoint did not answer the vision probe ({vision}); not running")
-        meta = {"model": label, "endpoint_model": model, "host": host, "formats": probe_formats(base, key, model), "modalities": ["text", "image"] if vision == "image" else ["text"],
+        meta = {"model": label, "endpoint_model": model, "host": host, "scoring_version": SCORING_VERSION, "formats": probe_formats(base, key, model), "modalities": ["text", "image"] if vision == "image" else ["text"],
                 "robonix_commit": git("rev-parse", "HEAD") or None, "cases_sha256": cases_sha256(Path(a.cases)),
                 "date": time.strftime("%Y-%m-%d")}
         for case in cases:
@@ -369,7 +399,8 @@ def main() -> None:
                 fails = check(case, run)
                 results.append({
                     "id": case["id"], "rep": rep, "fails": fails, "pilot_failed": run["failed"], "elapsed_s": run["elapsed_s"],
-                    "attempts": attempt + 1, "calls": [{k: c.get(k) for k in ("contract", "args", "start", "end", "ok")} for c in run["calls"]],
+                    "attempts": attempt + 1, "calls": [{k: c.get(k) for k in ("contract", "args", "start", "end", "ok", "executed")} for c in run["calls"]],
+                    "planned_calls": run["planned_calls"], "finished": run["finished"],
                     "final": run["final"], "vlm": run["vlm"],
                 })
                 print(f"   {'FAIL' if fails else 'JUDGE' if 'judge' in case else 'PASS'} {case['id']:<28} {run['elapsed_s']:>6.1f}s {'; '.join(fails)[:160]}", flush=True)

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MulanPSL-2.0 -->
 # Pilot model microbench
 
-Runs language models as Robonix's planner on a running Robonix whose world is mocked. Atlas, Executor, Pilot and Soma run as deployed (`rbnx boot`); Pilot plans with the model under test; Executor runs the plans; the world's providers answer from a fixed office floor. A case is checked only from what happened: what Pilot dispatched is checked by program, what its answer says is judged by a fixed judge model. Following SkVM (SOSP '26, arXiv 2604.03088), cases are grouped by capability (`dim`) and level, so a model gets a profile rather than a single number.
+Runs language models as Robonix's planner on a running Robonix whose world is mocked. Atlas, Executor, Pilot and Soma run as deployed (`rbnx boot`); Pilot plans with the model under test; Executor runs the plans; the world's providers answer from a fixed office floor. Executed calls are checked by program, and Pilot's answer is judged by a fixed judge model. Following SkVM (SOSP '26, arXiv 2604.03088), cases are grouped by capability (`dim`) and level, so a model gets a profile rather than a single number.
 
 This directory holds the bench only. A result file records each case's calls, answer, verdicts and model requests; Robonix Hub scores and ranks the files submitted to it.
 
@@ -13,7 +13,7 @@ This directory holds the bench only. A result file records each case's calls, an
 | `world/mock_provider.py` | One provider, booted by `rbnx boot` like any package. It registers the contracts the Webots deployment had for it (`fixtures/catalog.json`: same ids, argument schemas and descriptions) and answers from the world. Every call is logged with its arguments and when it ran |
 | `world/scene.py`, `fixtures/scene.yaml` | The office floor (open office, meeting room, pantry; 22 objects, several of each class; `on_top_of`, `under`, `near`), answered in Scene's shapes (`list_objects`, `find`, `list_regions`, `list_relations`, `goal_near`, `goal_region`, ...) |
 | `proxy.py` | Pilot's VLM endpoint. Forwards each request, streamed, to the model under test; records the `response_format` Pilot sent, the status, the latency, whether the reply was empty, the token usage and whether it was Pilot's corrective retry |
-| `bench.py` | Gives each case to Pilot with `rbnx ask`, then checks what Pilot dispatched from its events, the world's call log and the proxy's record |
+| `bench.py` | Gives each case to Pilot with `rbnx ask`, then checks executed calls from its events, the world's call log and the proxy's record |
 | `judge.py` | Judges Pilot's final answers against each case's assertions |
 | `cases.yaml` | The cases and the judge's instructions |
 
@@ -23,13 +23,13 @@ The camera returns the case's image: COCO val2017, fetched at run time into `.im
 
 A case passes when Pilot did not report the task failed, Pilot got a valid plan from the model (its answer is not its own "I couldn't produce a valid robot plan"), every `expect` check holds, and every `judge` assertion holds.
 
-`expect` is checked by program from what Pilot dispatched, as BFCL and tau-bench check calls and state rather than words:
+`expect` is checked against plan leaves matched to the mock providers' execution log, ordered by their actual start times. Each mock response carries an opaque `_bench_execution_id`; an injected failure includes the same identifier in its error. The executor's leaf result links that invocation to its plan call, so Pilot's own context reads cannot be mistaken for planned executions. Executor builtin leaf results establish an attempt without mock-provider timing; they cannot satisfy ordering or overlap checks. Unexecuted plan leaves do not count. Provider calls that returned an error still count as attempts, so failure-handling cases can check them. Each submitted turn must reach Pilot's final-text event, including a turn with an empty answer.
 
 | Key | Holds when |
 |---|---|
-| `calls`, `no_calls`, `no_calls_at_all` | each listed contract was dispatched (a list entry: any one of them), none of these was, nothing was |
-| `count`, `at_least`, `at_most` | how many times a contract was dispatched |
-| `orders` | these contracts were dispatched in this order; others may come between |
+| `calls`, `no_calls`, `no_calls_at_all` | each listed contract ran (a list entry: any one of them), none of these ran, nothing ran |
+| `count`, `at_least`, `at_most` | how many times a contract ran |
+| `orders` | these contracts started in this order; others may come between |
 | `overlap` | these calls ran side by side in the world (their run times overlap) |
 | `args`, `args_seq`, `args_not` | some call, the i-th call, no call of a contract has these argument values (`approx` with `tol`, `contains`, `one_of`, or exact) |
 | `answered` | Pilot gave a final answer |
@@ -37,6 +37,14 @@ A case passes when Pilot did not report the task failed, Pilot got a valid plan 
 `judge` covers what the answer says, which no keyword list checks reliably. As in tau2-bench's `nl_assertions`, the case gives the ground truth (`facts`: what the scene, the camera frame or an injected failure really was) and yes/no statements about the answer (`assert`). `judge.py` asks a fixed judge model, at temperature 0, to decide each statement from the task, the facts and Pilot's answer. The judge model is recorded with the results.
 
 A case is run again, up to twice, when the route to the model failed (a timeout, a rate limit, a server error): that says nothing about the model.
+
+Results record `meta.scoring_version: 2`, executed `calls`, diagnostic `planned_calls`, and whether every submitted turn emitted a final-text event. That event does not establish physical task completion. The runner refuses to append to older result files; keep those files and use a new output directory. Scores produced by the earlier planned-call checks must be revalidated before comparison or publication.
+
+The scoring regression tests need no service stack or model API:
+
+```sh
+python3 -m unittest discover -s testing -p 'test_model_bench.py' -v
+```
 
 ## Running
 
