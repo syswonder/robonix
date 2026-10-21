@@ -3,9 +3,9 @@
 # Voiceprint service build phase.
 #
 # Robonix package convention: every Python package gets a uv-managed venv
-# under rbnx-build/. Build phase installs deps + pre-warms the ECAPA-TDNN
-# model so the runtime (`start:`) only activates the venv and serves —
-# no downloads at request time.
+# under rbnx-build/. Build phase installs deps + downloads the CAM++
+# speaker-embedding model so the runtime (`start:`) only activates the venv
+# and serves — no downloads at request time.
 #
 # gRPC stubs are generated below by the `rbnx codegen -p <pkg> --mcp`
 # step, which materialises atlas-managed contract bundles into
@@ -19,7 +19,7 @@
 # Layout under rbnx-build/:
 #   rbnx-build/venv/                per-package Python venv (uv)
 #   rbnx-build/codegen/proto_gen/   atlas-managed stubs (created by `rbnx codegen`)
-#   rbnx-build/models/              ECAPA-TDNN weights
+#   rbnx-build/models/              CAM++ speaker-embedding weights
 #   rbnx-build/data/                runtime state (enrolled.json)
 
 set -euo pipefail
@@ -37,8 +37,6 @@ VENV="$BUILD/venv"
 MODELS="$BUILD/models"
 DATA="$BUILD/data"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
-IS_JETSON=0
-[[ -f /etc/nv_tegra_release ]] && IS_JETSON=1
 
 if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
@@ -51,81 +49,23 @@ if ! command -v uv >/dev/null 2>&1; then
     echo "[build] error: 'uv' not found on PATH. Install: https://docs.astral.sh/uv/" >&2
     exit 1
 fi
-if [[ "$IS_JETSON" == "1" && -d "$VENV" ]] \
-    && ! grep -q '^include-system-site-packages = true$' "$VENV/pyvenv.cfg"; then
-    echo "[build] Jetson: recreating venv with host CUDA Python packages"
-    rm -rf "$VENV"
-fi
 if [[ ! -d "$VENV" ]]; then
     echo "[build] uv venv → $VENV"
-    if [[ "$IS_JETSON" == "1" ]]; then
-        uv venv --system-site-packages "$VENV"
-    else
-        uv venv "$VENV"
-    fi
-fi
-
-# This venv's site-packages (robust to the python minor version).
-SITEPKG="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null || echo "$VENV/lib/python3.10/site-packages")"
-
-# Jetson rebuild safety: a prior build (step 2b) may have left host-torch
-# SYMLINKS in this venv. Remove them BEFORE uv sync — otherwise uv, seeing the
-# deleted dist-info, reinstalls torch and writes THROUGH the symlink into the
-# host's shared JetPack torch tree, corrupting the system torch. Re-linked below.
-if [[ -f /etc/nv_tegra_release ]]; then
-    for _m in torch torchaudio torchvision torchgen functorch torio; do
-        [[ -L "$SITEPKG/$_m" ]] && rm -f "$SITEPKG/$_m"
-    done
+    uv venv "$VENV"
 fi
 
 # ── 2. uv sync (deps from pyproject.toml + workspace uv.lock) ──────────────
 echo "[build] uv sync (pyproject.toml → $VENV)"
-SYNC_ARGS=(--active --no-managed-python)
-if [[ "$IS_JETSON" == "1" ]]; then
-    SYNC_ARGS+=(
-        --no-install-package torch
-        --no-install-package torchaudio
-        --no-install-package torchvision
-    )
-fi
-VIRTUAL_ENV="$PKG/$VENV" uv sync "${SYNC_ARGS[@]}"
+VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
 
-# SpeechBrain declares torch/torchaudio as unconditional dependencies. On
-# Jetson those transitive requirements resolve to large, incompatible PyPI
-# CUDA wheels even though the package itself uses JetPack Torch. Install only
-# the small pure-Python SpeechBrain wheel; all of its non-Torch dependencies
-# are declared explicitly in pyproject.toml.
-if [[ "$IS_JETSON" == "1" ]]; then
-    uv pip install --python "$VENV/bin/python" --no-deps "speechbrain==1.1.0"
-fi
-
-# ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
-# On Jetson (aarch64), PyPI's torch is built against a CUDA version that does
-# NOT match the JetPack driver, so torch.cuda.is_available() is False and the
-# ECAPA-TDNN speaker model runs on CPU (slow enrol/identify). JetPack ships a
-# working CUDA torch on the host python; reuse it by symlinking the torch
-# family into this venv (other deps stay from uv). Resolve each module's dir
-# from the host python so it works regardless of install location.
-# Disable with VOICEPRINT_SKIP_JETSON_TORCH=1.
-if [[ -f /etc/nv_tegra_release && "${VOICEPRINT_SKIP_JETSON_TORCH:-}" != "1" ]]; then
-    SP="$SITEPKG"
-    if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
-        HOSTPY="${VOICEPRINT_HOST_PYTHON:-python3}"
-        if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
-            echo "[build] Jetson: venv torch is CPU-only — linking host JetPack CUDA torch"
-            for mod in torch torchaudio torchvision torchgen functorch torio; do
-                d="$("$HOSTPY" -c "import os,importlib.util as u; s=u.find_spec('$mod'); print(os.path.dirname(s.origin) if s and s.origin else '')" 2>/dev/null || true)"
-                [[ -n "$d" && -d "$d" ]] || continue
-                rm -rf "$SP/$mod" "$SP/$mod"-*.dist-info
-                ln -sfn "$d" "$SP/$mod"
-                echo "[build]   linked $mod ← $d"
-            done
-            "$VENV/bin/python" -c 'import torch; print("[build]   venv torch.cuda.is_available() =", torch.cuda.is_available())' || true
-        else
-            echo "[build] WARNING: on Jetson but host python has no CUDA torch; running on CPU (slow)." >&2
-        fi
-    fi
-fi
+# The plain `sherpa-onnx` wheel does not bundle the native onnxruntime core
+# library; install the complete, version-matched wheel set like the speech
+# service build does. PyPI and the default TUNA mirror publish Linux
+# x86_64/aarch64 wheels for all three packages.
+SHERPA_ONNX_INDEX_URL="${SHERPA_ONNX_INDEX_URL:-$UV_INDEX_URL}"
+uv pip install --python "$VENV/bin/python" \
+    --index-url "$SHERPA_ONNX_INDEX_URL" \
+    sherpa-onnx==1.13.4 sherpa-onnx-bin==1.13.4 sherpa-onnx-core==1.13.4
 
 # ── 3. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
 FLAGS=(--mcp)
@@ -146,29 +86,34 @@ import voiceprint_pb2
 print("[build] generated Voiceprint gRPC and MCP imports OK")
 PY
 
-# ── 4. Pre-warm ECAPA-TDNN weights from ModelScope (skip with SKIP_MODEL_DOWNLOAD=1) ─
-# Fetch from ModelScope, not HuggingFace: hf_hub's metadata HEAD only follows
-# same-host redirects, and the reachable hf-mirror.com bounces resolve/main to
-# huggingface.co with a cross-host 308 that no hf_hub version follows, so every
-# HF path can fail in restricted runner environments. ModelScope's SDK has no such issue (it's also
-# where the speech service pulls FunASR). This populates ~/.cache/modelscope so
-# the service loads offline at startup; engine.py resolves the same repo.
-PY="$VENV/bin/python"
+# ── 4. Pre-download the CAM++ speaker-embedding model (skip with SKIP_MODEL_DOWNLOAD=1) ─
+# k2-fsa hosts the 3D-Speaker CAM++ zh-cn 16k ONNX weights on the
+# sherpa-onnx "speaker-recongition-models" release tag (sic). ghfast.top
+# mirrors GitHub for CN runners; fall back to the official URL.
+SPEAKER_MODEL="$MODELS/campplus_zh.onnx"
+SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
-    echo "[build] loading ECAPA-TDNN from ModelScope and verifying one embedding"
-    PYTHONPATH="$PKG:$PKG/rbnx-build/codegen/proto_gen" "$PY" - <<'PY'
+    if [[ ! -f "$SPEAKER_MODEL" ]]; then
+        echo "[build] downloading CAM++ speaker-embedding model"
+        if ! curl -fL --retry 3 --connect-timeout 15 -o "$SPEAKER_MODEL" "https://ghfast.top/$SPEAKER_URL"; then
+            rm -f "$SPEAKER_MODEL"
+            curl -fL --retry 3 --connect-timeout 15 -o "$SPEAKER_MODEL" "$SPEAKER_URL"
+        fi
+    fi
+    "$VENV/bin/python" - <<'PY'
 import numpy as np
-from voiceprint_service.engine import EcapaTdnnEngine
+from voiceprint_service.engine import SpeakerEmbeddingEngine
 
-source = EcapaTdnnEngine._resolve_source()
-engine = EcapaTdnnEngine()
-embedding = engine.extract_from_file(f"{source}/example1.wav")
+engine = SpeakerEmbeddingEngine()
+t = np.arange(8000, dtype=np.float32) / 8000.0
+pcm = (np.sin(2 * np.pi * 440.0 * t) * 32000).astype(np.int16).tobytes()
+embedding = engine.extract_from_pcm(pcm)
 if embedding.shape != (192,) or not np.isfinite(embedding).all():
-    raise RuntimeError(f"invalid ECAPA-TDNN embedding: shape={embedding.shape}")
-print(f"[build]   ECAPA-TDNN ready on {engine.device}; embedding shape={embedding.shape}")
+    raise RuntimeError(f"invalid CAM++ embedding: shape={embedding.shape}")
+print(f"[build]   CAM++ ready; embedding shape={embedding.shape}")
 PY
 else
-    echo "[build] SKIP_MODEL_DOWNLOAD=1 — skipping ECAPA-TDNN download."
+    echo "[build] SKIP_MODEL_DOWNLOAD=1 — skipping CAM++ download."
 fi
 
 echo "[build] done."

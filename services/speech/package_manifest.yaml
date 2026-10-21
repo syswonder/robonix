@@ -1,5 +1,5 @@
 # Robonix speech service — ASR/TTS + Dialog manager. The default backend is
-# local (Whisper one-shot + FunASR streaming + Edge TTS); `speech_backend:
+# local (Whisper one-shot + sherpa-onnx streaming + Edge TTS); `speech_backend:
 # tencent` switches ASR/TTS to Tencent Cloud APIs. Declares 5 data-plane gRPC contracts
 # and a driver lifecycle contract so `rbnx boot` ships the boot
 # manifest's `system: speech: {...}` block as Driver(CMD_INIT, config_json).
@@ -11,9 +11,6 @@
 #   asr_device:        str   — cuda | cpu (default: cuda)
 #   asr_chunk_length:  float — Whisper long-form chunk seconds (default: 30.0)
 #   asr_batch_size:    int   — Whisper batch (default: 4)
-#   funasr_model:      str   — FunASR model id (default: paraformer-zh-streaming)
-#   funasr_device:     str   — auto | cuda | cpu (default: auto — try GPU then fall back to CPU on OOM)
-#   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
 #   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
 #   default_speaker_provider_id: str — provider id used by speech/speak when
 #       its request target is empty; explicit request target overrides this
@@ -49,8 +46,7 @@ start: |
   export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
   # Don't redirect stdout/stderr — `rbnx boot` already captures both
   # into rbnx-boot/logs/system_speech.log. A second redirect here would
-  # split the log in half and leave the boot-side log empty, which is
-  # exactly what bit us debugging the FunASR loader.
+  # split the log in half and leave the boot-side log empty.
   exec rbnx-build/venv/bin/python -m speech_service.service
 
 stop: |

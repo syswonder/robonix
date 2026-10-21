@@ -1,7 +1,7 @@
 """Audio format adaptation utilities for the speech service.
 
 This module is the upper-layer adaptation layer between the audio_driver
-(primitive, hardware) and the ASR backends (Whisper, FunASR). Its job is to
+(primitive, hardware) and the ASR backends (Whisper, sherpa-onnx). Its job is to
 normalize ANY audio format the lower layer sends into the exact format
 the ASR backends expect: **16 kHz mono pcm_s16le**.
 
@@ -43,7 +43,7 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# Target format — all ASR backends (Whisper, FunASR) expect this exact format.
+# Target format — all ASR backends (Whisper, sherpa-onnx) expect this exact format.
 # The adapt_audio() function converts any input to these parameters.
 TARGET_SAMPLE_RATE = 16000   # Hz — standard telephony/ASR sample rate
 TARGET_CHANNELS = 1          # mono
@@ -84,7 +84,7 @@ def adapt_audio(
     """Normalise audio to 16 kHz mono pcm_s16le for ASR backends.
 
     This is the core adaptation function. It converts any input format
-    to the exact format required by Whisper and FunASR backends.
+    to the exact format required by Whisper and sherpa-onnx backends.
 
     Pipeline:
       1. _decode_to_float() — decode raw bytes → float32 ndarray in [-1, 1]
