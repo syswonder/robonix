@@ -101,7 +101,7 @@ pub(crate) struct Tree {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TaskList {
+pub(crate) struct TaskTable {
     pub messages: Vec<UserMessage>,
     pub tasks: Vec<Task>,
     pub trees: Vec<Tree>,
@@ -155,7 +155,7 @@ impl Applied {
     }
 }
 
-impl TaskList {
+impl TaskTable {
     /// The list a transcript recorded.
     pub(crate) fn from_record(value: Value) -> Option<Self> {
         let mut list: Self = serde_json::from_value(value).ok()?;
@@ -430,7 +430,7 @@ impl TaskList {
 
     /// Record how a tree ended (`succeeded`, `failed` or `canceled`) and return
     /// its task.
-    pub(crate) fn tree_finished(&mut self, plan_id: &str, state: &str) -> Option<String> {
+    pub(crate) fn reap_tree(&mut self, plan_id: &str, state: &str) -> Option<String> {
         let tree = self.trees.iter_mut().find(|tree| tree.plan_id == plan_id)?;
         tree.state = state.to_string();
         Some(tree.task.clone())
@@ -445,7 +445,7 @@ impl TaskList {
 
     /// Whether an open task other than `task` has no tree running: it waits
     /// for a reply of its own, since a tree serves one task.
-    pub(crate) fn others_waiting(&self, task: &str) -> bool {
+    pub(crate) fn others_runnable(&self, task: &str) -> bool {
         self.tasks
             .iter()
             .any(|t| t.is_open() && t.id != task && self.running_trees(&t.id).is_empty())
@@ -779,7 +779,7 @@ mod tests {
     }
 
     /// One reply applied in streaming order.
-    fn reply(list: &mut TaskList, value: Value, plan: Option<&str>) -> Applied {
+    fn reply(list: &mut TaskTable, value: Value, plan: Option<&str>) -> Applied {
         let fields = fields(value).unwrap();
         let mut applied = Applied::default();
         let new_task = list.file_messages(&fields.messages, &mut applied);
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn corrections_and_answers_stay_in_the_task_by_default() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("bring the red cup");
         reply(
             &mut list,
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn a_new_message_can_start_a_new_task_with_its_tree_and_status_in_the_same_reply() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("patrol the meeting room");
         reply(&mut list, json!({"rtdl_parent_task_id": "T1"}), Some("p1"));
         list.receive("what time is it");
@@ -838,7 +838,7 @@ mod tests {
 
     #[test]
     fn a_task_without_a_running_tree_waits_for_its_own_reply() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("visit three points and take photos");
         reply(&mut list, json!({"rtdl_parent_task_id": "T1"}), Some("p1"));
         list.receive("is there a whiteboard in the meeting room");
@@ -847,15 +847,15 @@ mod tests {
             json!({"message_updates": [{"message_id": "m2", "parent_task_id": "new"}]}),
             None,
         );
-        assert!(list.others_waiting("T1"));
+        assert!(list.others_runnable("T1"));
         reply(&mut list, json!({"rtdl_parent_task_id": "T2"}), Some("p2"));
-        assert!(!list.others_waiting("T2"));
-        assert!(!list.others_waiting("T1"));
+        assert!(!list.others_runnable("T2"));
+        assert!(!list.others_runnable("T1"));
     }
 
     #[test]
     fn a_message_can_go_to_an_older_open_task() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("bring the cup");
         reply(&mut list, json!({}), Some("p1"));
         list.receive("open the window");
@@ -877,7 +877,7 @@ mod tests {
 
     #[test]
     fn only_new_messages_can_be_refiled_and_only_to_open_tasks() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("one");
         reply(
             &mut list,
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn a_message_alone_in_its_default_task_becomes_the_new_task_without_an_empty_one() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("first");
         reply(
             &mut list,
@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn done_while_a_tree_of_the_task_runs_is_rejected_for_that_item_only() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("navigate");
         // Not even in the reply that dispatches the tree.
         let applied = reply(
@@ -937,7 +937,7 @@ mod tests {
         assert!(applied.rejected[0].contains("p1"));
         assert!(list.task("T1").unwrap().is_open());
         assert_eq!(list.task("T2").unwrap().status, DONE);
-        assert_eq!(list.tree_finished("p1", "succeeded").as_deref(), Some("T1"));
+        assert_eq!(list.reap_tree("p1", "succeeded").as_deref(), Some("T1"));
         let mut applied = Applied::default();
         list.apply_updates(&[update("T1", DONE)], None, &mut applied);
         assert!(applied.rejected.is_empty());
@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn an_instruction_longer_than_four_hundred_characters_can_be_done() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive(&"check every shelf in the kitchen ".repeat(20));
         assert!(list.messages[0].text.chars().count() > 400);
         let applied = reply(
@@ -979,7 +979,7 @@ mod tests {
 
     #[test]
     fn unknown_and_closed_tasks_are_reported_with_the_open_ones() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("one");
         assert!(
             list.tree_owner(&TaskRef::Id("T9".into()), None)
@@ -999,11 +999,11 @@ mod tests {
 
     #[test]
     fn a_restored_list_does_not_wait_on_trees_of_the_previous_pilot() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("fetch the cup");
         list.answered();
         list.attach_tree("T1", "p1", "tree");
-        let mut restored = TaskList::from_record(serde_json::to_value(&list).unwrap()).unwrap();
+        let mut restored = TaskTable::from_record(serde_json::to_value(&list).unwrap()).unwrap();
         assert_eq!(restored.trees[0].state, TREE_LOST);
         let mut applied = Applied::default();
         restored.apply_updates(&[update("T1", DONE)], None, &mut applied);
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[test]
     fn records_and_the_board_name_tasks_messages_and_plans_by_id() {
-        let mut list = TaskList::default();
+        let mut list = TaskTable::default();
         list.receive("old request");
         reply(
             &mut list,

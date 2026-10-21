@@ -17,7 +17,7 @@ use crate::pb::pilot::{
     BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::planner::{self, ExecutorConn, HistoryBudget, SessionForest};
-use crate::tasks::TaskList;
+use crate::tasks::TaskTable;
 use crate::transcript::Transcript;
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
@@ -106,7 +106,7 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
 /// LLM conversation history per `session_id`. Grows across turns; never
 /// expired; active turns compact history against the model context window.
 type Histories = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<Message>>>>>>;
-type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<TaskList>>>>>;
+type TaskStates = Arc<Mutex<HashMap<String, Arc<Mutex<TaskTable>>>>>;
 /// RTDL trees per `session_id`: they outlive the turn that dispatched them.
 type Forests = Arc<Mutex<HashMap<String, Arc<Mutex<SessionForest>>>>>;
 /// Transcript per `session_id`, kept for as long as its history.
@@ -189,7 +189,7 @@ pub struct PilotServiceImpl {
     transcripts: Transcripts,
     /// Per-session cancellation senders. `abort_turn` Task signals this
     /// without holding the history lock.
-    cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    term_signals: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     /// Per-session steer queues. A Task submitted while a turn is already
     /// running for that session is pushed here as a mid-task steer instead of
     /// starting a second turn; the running `run_turn` drains it.
@@ -219,7 +219,7 @@ impl PilotServiceImpl {
             task_states: Arc::new(Mutex::new(HashMap::new())),
             forests: Arc::new(Mutex::new(HashMap::new())),
             transcripts: Arc::new(Mutex::new(HashMap::new())),
-            cancels: Arc::new(Mutex::new(HashMap::new())),
+            term_signals: Arc::new(Mutex::new(HashMap::new())),
             steers: Arc::new(Mutex::new(HashMap::new())),
             seen_task_ids: Arc::new(Mutex::new(HashMap::new())),
             plan_seq: Arc::new(AtomicU64::new(0)),
@@ -235,7 +235,7 @@ impl PilotServiceImpl {
         session_id: &str,
     ) -> (
         Arc<Mutex<Vec<Message>>>,
-        Arc<Mutex<TaskList>>,
+        Arc<Mutex<TaskTable>>,
         Arc<Mutex<Transcript>>,
         Arc<Mutex<SessionForest>>,
     ) {
@@ -261,7 +261,7 @@ impl PilotServiceImpl {
                 );
             }
             let (history, task) =
-                restored.map_or((Vec::new(), TaskList::default()), |r| (r.history, r.task));
+                restored.map_or((Vec::new(), TaskTable::default()), |r| (r.history, r.task));
             transcripts.insert(
                 session_id.to_string(),
                 Arc::new(Mutex::new(Transcript::new(session_id, &history, &task))),
@@ -283,7 +283,7 @@ impl PilotServiceImpl {
 
     /// Cancel the trees a session left running when no turn is active. A turn
     /// that holds the forest is stopped through its own cancel signal instead.
-    async fn stop_idle_session_plans(&self, session_id: &str) -> usize {
+    async fn kill_idle_trees(&self, session_id: &str) -> usize {
         let Some(forest) = self.forests.lock().await.get(session_id).cloned() else {
             return 0;
         };
@@ -387,7 +387,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
 
         if task_is_abort_turn(&task) {
             let id = task.session_id.clone();
-            let turn_signaled = if let Some(tx) = self.cancels.lock().await.get(&id) {
+            let turn_signaled = if let Some(tx) = self.term_signals.lock().await.get(&id) {
                 tx.send_if_modified(|interrupted| {
                     if *interrupted {
                         false
@@ -403,7 +403,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             let stopped = if turn_signaled {
                 0
             } else {
-                self.stop_idle_session_plans(&id).await
+                self.kill_idle_trees(&id).await
             };
             debug!(
                 "[pilot] session-scoped stop session {id} (turn_signaled={turn_signaled}, idle_plans_stopped={stopped})"
@@ -517,11 +517,14 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let vlm = self.vlm.clone();
         let history_budget = self.history_budget.clone();
         let session_id = task.session_id.clone();
-        let cancels = Arc::clone(&self.cancels);
+        let term_signals = Arc::clone(&self.term_signals);
         let steers = Arc::clone(&self.steers);
 
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        cancels.lock().await.insert(session_id.clone(), cancel_tx);
+        let (cancel_tx, term_signal) = watch::channel(false);
+        term_signals
+            .lock()
+            .await
+            .insert(session_id.clone(), cancel_tx);
         // `steer_tx`/`steer_rx` were created above; the sender is already
         // registered in `self.steers` under the atomic check, and `steer_rx`
         // moves into the turn below to drain mid-task steers.
@@ -547,7 +550,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                             "cannot reach Executor via atlas: {e:#}"
                         ))))
                         .await;
-                    cancels.lock().await.remove(&session_id);
+                    term_signals.lock().await.remove(&session_id);
                     steers.lock().await.remove(&session_id);
                     return;
                 }
@@ -567,7 +570,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 &mut atlas_for_turn,
                 &provider_id,
                 &tx,
-                cancel_rx,
+                term_signal,
                 steer_rx,
                 plan_seq,
                 &history_budget,
@@ -581,7 +584,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
             }
 
-            cancels.lock().await.remove(&session_id);
+            term_signals.lock().await.remove(&session_id);
             steers.lock().await.remove(&session_id);
         });
 

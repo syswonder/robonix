@@ -20,7 +20,7 @@ use crate::prompt::{
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::state_context;
-use crate::tasks::{self, Applied, TaskFields, TaskList};
+use crate::tasks::{self, Applied, TaskFields, TaskTable};
 use crate::transcript::Transcript;
 use crate::vlm::{Message, ReplyShape, VlmClient, VlmStreamItem};
 use anyhow::{Context, Result, anyhow};
@@ -154,7 +154,7 @@ impl HistoryBudget {
 
 /// Take in a user message (a request or a steer): file it with the session's
 /// tasks and put it in history once, labelled with its id and task.
-fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut TaskList) -> bool {
+fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
     let Some(message) = tasks.receive(&task.text) else {
         return false;
     };
@@ -168,7 +168,7 @@ fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut Tas
 
 /// The client's view of the tasks: the latest user message's task in the
 /// fields older clients read, and every task.
-fn task_state_event(tasks: &TaskList) -> TaskStateEvent {
+fn task_state_event(tasks: &TaskTable) -> TaskStateEvent {
     let latest = tasks.latest_message_task();
     TaskStateEvent {
         goal: latest
@@ -198,7 +198,7 @@ fn task_state_event(tasks: &TaskList) -> TaskStateEvent {
 async fn send_task_state(
     tx: &mpsc::Sender<Result<PilotEvent, tonic::Status>>,
     session_id: &str,
-    tasks: &TaskList,
+    tasks: &TaskTable,
 ) {
     let _ = tx
         .send(Ok(service::pack(
@@ -215,7 +215,7 @@ async fn send_task_state(
 async fn apply_task_fields(
     fields: &TaskFields,
     tree: Option<(&str, &str)>,
-    tasks: &mut TaskList,
+    tasks: &mut TaskTable,
     history: &mut Vec<Message>,
     tx: &mpsc::Sender<Result<PilotEvent, tonic::Status>>,
     session_id: &str,
@@ -267,7 +267,7 @@ async fn apply_task_fields(
 
 /// Whether the turn still has to wait: some tree of an open task is running.
 /// A tree Pilot cannot place under a task counts, so it is never abandoned.
-fn waits_on_trees(forest: &SessionForest, tasks: &TaskList) -> bool {
+fn waits_on_trees(forest: &SessionForest, tasks: &TaskTable) -> bool {
     forest.trees.keys().any(|plan_id| {
         tasks
             .task_of_tree(plan_id)
@@ -331,7 +331,7 @@ struct TreeMeta {
     /// True when this tree is purely control ops (only `cancel_plan` /
     /// `cancel_all_plans`). Such trees are NOT advertised to the LLM as
     /// cancellable in-flight work — a cancel is not itself a task tree, and
-    /// listing it makes the model cancel its own cancels in a loop.
+    /// listing it makes the model cancel its own term_signals in a loop.
     control_only: bool,
     /// Canonical provider/contract/args signatures for calls in this tree.
     /// The harness rejects a second tree containing an identical call while
@@ -352,7 +352,7 @@ struct TreeStep {
 
 /// Events fed from per-tree driver tasks back to the supervisor loop. One
 /// `drive_plan` task runs per dispatched tree and streams these.
-enum ForestEvent {
+enum TreeInterrupt {
     /// A node changed state — forwarded for live visualisation. Carries the
     /// originating tree's `plan_id`. The state is boxed because it is much
     /// larger than the other variant's payload.
@@ -363,7 +363,7 @@ enum ForestEvent {
     /// A tree finished (or its Execute stream ended/errored). Carries one
     /// full `RtdlNodeState` record for every node that reached a terminal
     /// state (leaf and non-leaf), collected from the tree.
-    PlanDone {
+    Completion {
         plan_id: String,
         results: Vec<RtdlNodeState>,
         any_failed: bool,
@@ -371,7 +371,7 @@ enum ForestEvent {
         /// CANCELED), as opposed to running to natural success/failure. A
         /// cancellation fulfils a prior decision and carries no new info, so the
         /// supervisor must NOT trigger a fresh planning round for it — otherwise
-        /// "cancel old plan → PlanDone → replan → model re-cancels" becomes a
+        /// "cancel old plan → Completion → replan → model re-term_signals" becomes a
         /// self-sustaining storm with monotonically growing plan ids.
         canceled: bool,
     },
@@ -386,9 +386,9 @@ enum ForestEvent {
 pub struct SessionForest {
     trees: HashMap<String, TreeMeta>,
     /// Trees whose cancellation Pilot has asked for and not yet seen finish.
-    cancel_requested: HashSet<String>,
-    events_tx: mpsc::UnboundedSender<ForestEvent>,
-    events_rx: mpsc::UnboundedReceiver<ForestEvent>,
+    kill_pending: HashSet<String>,
+    interrupt_tx: mpsc::UnboundedSender<TreeInterrupt>,
+    interrupt_rx: mpsc::UnboundedReceiver<TreeInterrupt>,
     /// Bumped by every terminal node state, so a reply sampled before one is
     /// recognised as stale.
     revision: Arc<AtomicU64>,
@@ -396,12 +396,12 @@ pub struct SessionForest {
 
 impl Default for SessionForest {
     fn default() -> Self {
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
         Self {
             trees: HashMap::new(),
-            cancel_requested: HashSet::new(),
-            events_tx,
-            events_rx,
+            kill_pending: HashSet::new(),
+            interrupt_tx,
+            interrupt_rx,
             revision: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -410,35 +410,35 @@ impl Default for SessionForest {
 impl SessionForest {
     /// Cancel every task tree still running, as a stop from the user does when
     /// no turn is active, and return how many were asked to stop. Their
-    /// `PlanDone` arrives later and is taken in by the next turn.
+    /// `Completion` arrives later and is taken in by the next turn.
     pub(crate) async fn cancel_running(&mut self, executor: &mut ExecutorConn) -> usize {
         let targets: Vec<String> = self
             .trees
             .iter()
-            .filter(|(id, meta)| !meta.control_only && !self.cancel_requested.contains(*id))
+            .filter(|(id, meta)| !meta.control_only && !self.kill_pending.contains(*id))
             .map(|(id, _)| id.clone())
             .collect();
         cancel_forest_plans(executor, &self.trees).await;
-        self.cancel_requested.extend(targets.iter().cloned());
+        self.kill_pending.extend(targets.iter().cloned());
         targets.len()
     }
 }
 
-/// Take one forest event into the session: a leaf's final result goes into
+/// Handle one tree interrupt: a leaf's final result goes into
 /// history, a finished tree leaves the forest and its batch goes to the
 /// client, the tree's task records how it ended, and node states are
 /// forwarded for the live view. Returns whether a planning round is now due.
-async fn absorb_forest_event(
-    event: ForestEvent,
+async fn handle_interrupt(
+    event: TreeInterrupt,
     forest: &mut SessionForest,
     history: &mut Vec<Message>,
-    tasks: &mut TaskList,
+    tasks: &mut TaskTable,
     round: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<PilotEvent, tonic::Status>>,
 ) -> bool {
     match event {
-        ForestEvent::NodeState {
+        TreeInterrupt::NodeState {
             plan_id,
             node_state,
         } => {
@@ -468,7 +468,7 @@ async fn absorb_forest_event(
             // storms.
             let replan = is_terminal_executor_state(ns.state)
                 && ns.state != RtdlNodeStateEnum::Succeeded as u32
-                && !forest.cancel_requested.contains(&plan_id)
+                && !forest.kill_pending.contains(&plan_id)
                 && tasks.any_open();
             log_node_state(&plan_id, &ns);
             // Moving `ns` last avoids cloning its (possibly large) leaf_result.
@@ -480,14 +480,14 @@ async fn absorb_forest_event(
                 .await;
             replan
         }
-        ForestEvent::PlanDone {
+        TreeInterrupt::Completion {
             plan_id,
             results,
             any_failed,
             canceled,
         } => {
             forest.trees.remove(&plan_id);
-            let requested_cancellation = forest.cancel_requested.remove(&plan_id);
+            let requested_cancellation = forest.kill_pending.remove(&plan_id);
             if requested_cancellation {
                 history.push(Message::user(&format!(
                     "Pilot harness event: the requested cancellation of RTDL plan \
@@ -506,7 +506,7 @@ async fn absorb_forest_event(
             } else {
                 "succeeded"
             };
-            if let Some(task) = tasks.tree_finished(&plan_id, ended)
+            if let Some(task) = tasks.reap_tree(&plan_id, ended)
                 && let Some(record) = tasks.record(&task)
             {
                 history.push(Message::user(&record));
@@ -532,7 +532,7 @@ async fn absorb_forest_event(
             should_replan_after_plan_done(
                 canceled,
                 requested_cancellation,
-                forest.cancel_requested.is_empty(),
+                forest.kill_pending.is_empty(),
                 tasks.any_open(),
             )
         }
@@ -541,12 +541,12 @@ async fn absorb_forest_event(
 
 /// Drive one dispatched plan's Execute stream to completion, forwarding node
 /// states for visualisation and collecting terminal results. Sends exactly one
-/// `PlanDone` when the stream ends. Runs as its own task so the supervisor loop
+/// `Completion` when the stream ends. Runs as its own task so the supervisor loop
 /// never blocks on a single tree — concurrent trees form the forest.
 async fn drive_plan(
     plan: Plan,
     mut client: RobonixSystemExecutorExecuteClient<Channel>,
-    events_tx: mpsc::UnboundedSender<ForestEvent>,
+    interrupt_tx: mpsc::UnboundedSender<TreeInterrupt>,
     forest_revision: Arc<AtomicU64>,
 ) {
     let plan_id = plan.plan_id.clone();
@@ -555,7 +555,7 @@ async fn drive_plan(
         Err(e) => {
             warn!("[pilot/forest] plan_id={plan_id} Execute RPC failed: {e}");
             forest_revision.fetch_add(1, Ordering::Release);
-            let _ = events_tx.send(ForestEvent::PlanDone {
+            let _ = interrupt_tx.send(TreeInterrupt::Completion {
                 plan_id,
                 results: Vec::new(),
                 any_failed: true,
@@ -581,7 +581,7 @@ async fn drive_plan(
                     && let Some(ns) = event.node_state
                 {
                     // Forward every node state for live viz.
-                    let _ = events_tx.send(ForestEvent::NodeState {
+                    let _ = interrupt_tx.send(TreeInterrupt::NodeState {
                         plan_id: plan_id.clone(),
                         node_state: Box::new(ns.clone()),
                     });
@@ -613,7 +613,7 @@ async fn drive_plan(
     }
 
     forest_revision.fetch_add(1, Ordering::Release);
-    let _ = events_tx.send(ForestEvent::PlanDone {
+    let _ = interrupt_tx.send(TreeInterrupt::Completion {
         plan_id,
         results,
         any_failed,
@@ -853,14 +853,14 @@ fn plan_steps(plan: &Plan) -> Vec<TreeStep> {
 
 fn build_forest_block(
     forest: &HashMap<String, TreeMeta>,
-    cancel_requested: &HashSet<String>,
-    tasks: &TaskList,
+    kill_pending: &HashSet<String>,
+    tasks: &TaskTable,
 ) -> String {
     // Only real task trees are cancellable in-flight work; hide pure control
-    // (cancel-only) trees so the model never tries to cancel its own cancels.
+    // (cancel-only) trees so the model never tries to cancel its own term_signals.
     let mut entries: Vec<(&String, &TreeMeta)> = forest
         .iter()
-        .filter(|(plan_id, meta)| !meta.control_only && !cancel_requested.contains(*plan_id))
+        .filter(|(plan_id, meta)| !meta.control_only && !kill_pending.contains(*plan_id))
         .collect();
     if entries.is_empty() {
         return String::new();
@@ -886,7 +886,7 @@ fn build_forest_block(
          the user's named boundary literally: `after X` means X/on_complete and \
          `before X` means X/on_enter. Never rewrite `after X` as `before` its \
          successor because those are not equivalent in branching/parallel trees. It \
-         cancels the whole plan when execution reaches that op. Cancel/stop each \
+         term_signals the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Do not reuse these ids for new trees. If an in-flight plan \
          is already executing the same goal, do not cancel or re-issue it; wait \
@@ -993,7 +993,7 @@ async fn fetch_executor_active_snapshot(executor: &mut ExecutorConn) -> (String,
 /// running. Draining is non-blocking; returns whether anything was pulled so
 /// the caller knows to re-plan. The model decides for itself whether the steer
 /// requires a root plan-control meta op.
-fn append_steer(task: Task, history: &mut Vec<Message>, tasks: &mut TaskList) -> bool {
+fn append_steer(task: Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
     let pulled = receive_user_message(&task, history, tasks);
     if pulled {
         info!("[pilot/steer] mid-task input: {}", task.text.trim());
@@ -1004,7 +1004,7 @@ fn append_steer(task: Task, history: &mut Vec<Message>, tasks: &mut TaskList) ->
 fn drain_steers(
     steer_rx: &mut mpsc::Receiver<Task>,
     history: &mut Vec<Message>,
-    tasks: &mut TaskList,
+    tasks: &mut TaskTable,
 ) -> bool {
     let mut pulled = false;
     while let Ok(task) = steer_rx.try_recv() {
@@ -1028,7 +1028,7 @@ async fn compact_history(
     non_history_tokens: usize,
     cache_epoch: u64,
     transcript: &mut Transcript,
-    tasks: &TaskList,
+    tasks: &TaskTable,
 ) -> bool {
     let Some(room) = budget.room(non_history_tokens) else {
         return false;
@@ -1177,7 +1177,7 @@ fn feed_results_into_history(
 /// RTDL is a custom planning protocol rather than an OpenAI tool call, so the
 /// model's structured plan is otherwise lost when only `content` is appended to
 /// chat history. That made a successful physical step look unexecuted on the
-/// mandatory post-PlanDone round and allowed the same user step to be planned a
+/// mandatory post-Completion round and allowed the same user step to be planned a
 /// second time from the robot's new state.
 fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: &str) {
     let calls: Vec<serde_json::Value> = plan
@@ -1214,14 +1214,14 @@ fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: 
 pub async fn run_turn(
     task: &Task,
     history: &mut Vec<Message>,
-    tasks: &mut TaskList,
+    tasks: &mut TaskTable,
     forest: &mut SessionForest,
     vlm: &VlmClient,
     executor: &mut ExecutorConn,
     atlas: &mut AtlasClient,
     consumer_id: &str,
     tx: &mpsc::Sender<Result<PilotEvent, tonic::Status>>,
-    mut cancel_rx: watch::Receiver<bool>,
+    mut term_signal: watch::Receiver<bool>,
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
     history_budget: &HistoryBudget,
@@ -1331,8 +1331,8 @@ pub async fn run_turn(
     // `done` (or was never set, i.e. chit-chat) AND no tree is still running.
     // The session's trees outlive turns. Take in what trees from earlier turns
     // reported since the last turn ended, before planning.
-    while let Ok(event) = forest.events_rx.try_recv() {
-        absorb_forest_event(event, forest, history, tasks, round, &session_id, tx).await;
+    while let Ok(event) = forest.interrupt_rx.try_recv() {
+        handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await;
     }
     let mut should_plan = true;
     let mut catalog_view = CatalogView::default();
@@ -1351,7 +1351,7 @@ pub async fn run_turn(
         // Archive what the last iteration added, before anything can compact it.
         transcript.record(history, tasks);
         // Check for hard interrupt at the top of every iteration.
-        if *cancel_rx.borrow() {
+        if *term_signal.borrow() {
             return_interrupted!(&forest.trees);
         }
 
@@ -1375,7 +1375,7 @@ pub async fn run_turn(
                 // cancel-only tree) into an unbounded VLM/reply/cancel loop.
                 tokio::select! {
                     biased;
-                    _ = cancel_rx.changed() => {
+                    _ = term_signal.changed() => {
                         return_interrupted!(&forest.trees);
                     }
                     steer = steer_rx.recv() => {
@@ -1395,7 +1395,7 @@ pub async fn run_turn(
             // a steer arrives, or a cancel.
             tokio::select! {
                 biased;
-                _ = cancel_rx.changed() => {
+                _ = term_signal.changed() => {
                     return_interrupted!(&forest.trees);
                 }
                 steer = steer_rx.recv() => {
@@ -1407,10 +1407,10 @@ pub async fn run_turn(
                         should_plan = true;
                     }
                 }
-                ev = forest.events_rx.recv() => {
+                ev = forest.interrupt_rx.recv() => {
                     // The session holds a sender, so the channel never closes.
                     if let Some(event) = ev
-                        && absorb_forest_event(event, forest, history, tasks, round, &session_id, tx).await
+                        && handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await
                     {
                         should_plan = true;
                     }
@@ -1456,7 +1456,7 @@ pub async fn run_turn(
         // with its compact form avoids the old full-on-round-zero rewrite that
         // made the second provider request cold.
         let protocol_prompt = RTDL_PROTOCOL_REMINDER;
-        let forest_block = build_forest_block(&forest.trees, &forest.cancel_requested, tasks);
+        let forest_block = build_forest_block(&forest.trees, &forest.kill_pending, tasks);
         let (executor_active_block, executor_plan_count) =
             fetch_executor_active_snapshot(executor).await;
         // Only instructions that never change sit before history.
@@ -1609,7 +1609,7 @@ pub async fn run_turn(
                     tokio::select! {
                         biased;
                         // Cancel takes priority — checked before every new VLM token.
-                        _ = cancel_rx.changed() => {
+                        _ = term_signal.changed() => {
                             drop(stream);
                             return_interrupted!(&forest.trees);
                         }
@@ -1749,7 +1749,7 @@ pub async fn run_turn(
                     // with cancel_all while nothing runs; executing that and
                     // replanning kept a turn going forever.
                     if let Some(problem) =
-                        meta_op_problem(&meta_op, &forest.trees, &forest.cancel_requested)
+                        meta_op_problem(&meta_op, &forest.trees, &forest.kill_pending)
                     {
                         if correction.is_none() {
                             warn!(
@@ -1922,7 +1922,7 @@ pub async fn run_turn(
             }
             apply_task_fields(&task_fields, None, tasks, history, tx, &session_id).await;
 
-            forest.cancel_requested.extend(targets.iter().cloned());
+            forest.kill_pending.extend(targets.iter().cloned());
             let result = execute_meta_plan_op(executor, &meta_op).await;
             round += 1;
             match result {
@@ -1941,14 +1941,14 @@ pub async fn run_turn(
                             }),
                         )))
                         .await;
-                    // PlanDone is the durable boundary. Replan only after every
+                    // Completion is the durable boundary. Replan only after every
                     // target in this control batch has left the forest.
                     should_plan = targets.is_empty();
                 }
                 Err(error) => {
                     warn!("[pilot/control] meta operation failed: {error:#}");
                     for target in &targets {
-                        forest.cancel_requested.remove(target);
+                        forest.kill_pending.remove(target);
                     }
                     history.push(Message::user(&format!(
                         "Pilot plan-control failure: {error:#}. The operation was not accepted; inspect the current In-flight trees before deciding whether to retry."
@@ -1973,7 +1973,7 @@ pub async fn run_turn(
             continue 'supervisor;
         }
         if let Some(target) =
-            invalid_cancel_target(&cancel_targets, &forest.trees, &forest.cancel_requested)
+            invalid_cancel_target(&cancel_targets, &forest.trees, &forest.kill_pending)
         {
             warn!("[pilot/harness] suppressed stale or duplicate cancel for plan {target}");
             history.push(Message::user(
@@ -2072,7 +2072,7 @@ pub async fn run_turn(
                 warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
                 break;
             }
-            // should_plan stays false: wait for a forest event, or for a steer
+            // should_plan stays false: wait for a tree interrupt, or for a steer
             // when an in-progress task has intentionally produced no new tree.
             continue;
         }
@@ -2094,7 +2094,7 @@ pub async fn run_turn(
                 PilotStreamBody::Plan(graph.clone()),
             )))
             .await;
-        forest.cancel_requested.extend(cancel_targets);
+        forest.kill_pending.extend(cancel_targets);
         record_dispatched_plan(history, &graph, &rtdl_description);
         forest.trees.insert(
             plan_id.clone(),
@@ -2108,7 +2108,7 @@ pub async fn run_turn(
         tokio::spawn(drive_plan(
             graph,
             executor.graph.clone(),
-            forest.events_tx.clone(),
+            forest.interrupt_tx.clone(),
             Arc::clone(&forest.revision),
         ));
         info!(
@@ -2133,7 +2133,7 @@ pub async fn run_turn(
         // reports. Otherwise wait for this tree (and any others) to report.
         should_plan = owner
             .as_deref()
-            .is_some_and(|task| tasks.others_waiting(task));
+            .is_some_and(|task| tasks.others_runnable(task));
     }
 
     // ── 8. Mark turn complete ─────────────────────────────────────────────────
@@ -2748,7 +2748,7 @@ fn plan_cancel_targets(plan: &Plan) -> Vec<String> {
 fn meta_op_problem(
     op: &MetaPlanOp,
     forest: &HashMap<String, TreeMeta>,
-    cancel_requested: &HashSet<String>,
+    kill_pending: &HashSet<String>,
 ) -> Option<String> {
     if forest.is_empty() {
         return Some(
@@ -2760,7 +2760,7 @@ fn meta_op_problem(
         );
     }
     if let Some(target) =
-        invalid_cancel_target(&op.cancellation_targets(forest), forest, cancel_requested)
+        invalid_cancel_target(&op.cancellation_targets(forest), forest, kill_pending)
     {
         return Some(format!(
             "Plan-control target {target} is not active or is already stopping. Re-read In-flight trees and choose a \
@@ -2783,10 +2783,10 @@ fn meta_op_problem(
 fn invalid_cancel_target(
     targets: &[String],
     forest: &HashMap<String, TreeMeta>,
-    cancel_requested: &HashSet<String>,
+    kill_pending: &HashSet<String>,
 ) -> Option<String> {
     targets.iter().find_map(|target| {
-        let invalid = cancel_requested.contains(target)
+        let invalid = kill_pending.contains(target)
             || forest.get(target).is_none_or(|meta| meta.control_only);
         invalid.then(|| target.clone())
     })
@@ -3220,7 +3220,7 @@ for a running plan. Concretely:
 - Close a task as `done` only once its criterion is met, or as `failed` once
   you've exhausted reasonable attempts and report the blocker. 'Done.' with no
   verification is wrong — verify first.
-- On the very rare case where the user explicitly cancels, you may stop
+- On the very rare case where the user explicitly term_signals, you may stop
   early; otherwise keep going.
 - For every action-producing RTDL response, put one concise user-facing progress
   update in `content` that says what is happening now. Do not repeat an unchanged
@@ -3235,7 +3235,7 @@ for a running plan. Concretely:
 mod tests {
     use super::{
         CapabilityTargetMap, CatalogView, HistoryBudget, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
-        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskList, TreeMeta, TreeStep, UsageTotals,
+        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskTable, TreeMeta, TreeStep, UsageTotals,
         append_request_context, append_steer, assemble_planning_messages,
         build_capability_target_map, build_display_capabilities, build_forest_block,
         compact_tool_result, configured_vlm_idle_timeout, duplicate_in_flight_signature,
@@ -3714,7 +3714,7 @@ mod tests {
 
     #[test]
     fn a_steer_is_filed_under_the_open_task_and_enters_history_once_with_its_id() {
-        let mut tasks = TaskList::default();
+        let mut tasks = TaskTable::default();
         let mut history = Vec::new();
         assert!(append_steer(
             Task {
@@ -3747,7 +3747,7 @@ mod tests {
 
     #[test]
     fn steer_targets_one_plan_without_discarding_independent_work() {
-        let mut tasks = TaskList::default();
+        let mut tasks = TaskTable::default();
         let mut history = Vec::new();
         tasks.receive("go to the meeting room");
         tasks.answered();
@@ -3832,7 +3832,7 @@ mod tests {
                 ],
             },
         );
-        let prompt = build_forest_block(&forest, &HashSet::new(), &TaskList::default());
+        let prompt = build_forest_block(&forest, &HashSet::new(), &TaskTable::default());
         assert!(prompt.contains("op_id=op-restaurant"));
         assert!(prompt.contains("move to meeting room"));
         assert!(prompt.contains("target is the currently running step"));
@@ -4559,7 +4559,7 @@ mod tests {
         );
 
         history.push(Message::assistant("I will inspect the room."));
-        let mut tasks = TaskList::default();
+        let mut tasks = TaskTable::default();
         tasks.receive("inspect the room");
         history.push(Message::user(&tasks.record("T1").unwrap()));
         let record = history.last().unwrap().content.as_deref().unwrap();
