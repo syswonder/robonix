@@ -126,6 +126,9 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("pose", "robonix/service/map/pose", "PoseWithCovarianceStamped"),
     ("odom", "robonix/primitive/chassis/odom", "Odometry"),
     ("occupancy_grid", "robonix/service/map/occupancy_grid", "OccupancyGrid"),
+    # Navigation's costmap, which also marks what its depth camera sees, so
+    # goal_near does not pick a pose Navigation cannot stand on.
+    ("nav_costmap", "robonix/service/navigation/costmap", "OccupancyGrid"),
     # Mapping's latched {map_id, mode, generation}, for _lifecycle_watch; the
     # hub skips it when the generated `map` package is missing.
     ("map_lifecycle", "robonix/service/map/lifecycle", "MapLifecycle"),
