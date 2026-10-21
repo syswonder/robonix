@@ -769,6 +769,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
         minimum_standoff_m=footprint.circumscribed_radius_m + target_radius_m,
         footprint=footprint,
         nav_costmap=_nav_costmap(grid_frame),
+        robot_xy=(float(robot.pose.x), float(robot.pose.y)) if robot is not None else None,
     )
     if found is None:
         return GoalNear_Response(

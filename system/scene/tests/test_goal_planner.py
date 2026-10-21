@@ -139,6 +139,35 @@ def test_object_goal_approaches_from_the_robot_side_of_a_wall():
     assert y < 0.5
 
 
+def test_object_goal_stays_where_the_robot_can_drive_to():
+    """An object whose centre lands past a wall, in space never observed.
+
+    By angle, the cells between the wall and the object are on the robot's
+    side and nearest the object, but they are unknown space behind the wall
+    and no plan reaches them. With the robot's position the pose is taken
+    from the free space connected to it.
+    """
+    grid = _grid()
+    data = np.zeros((30, 30), dtype=np.int8)
+    data[20, :] = 100  # the wall: y in [0.5, 0.6)
+    data[21:, :] = -1  # never observed behind it
+    grid.data = data.tobytes()
+    target_x, target_y = 0.0, 1.0  # past the wall
+    robot_x, robot_y = 0.0, -1.0
+    kwargs = dict(
+        target_x=target_x,
+        target_y=target_y,
+        preferred_approach_yaw=math.atan2(target_y - robot_y, target_x - robot_x),
+        minimum_standoff_m=0.19,
+        footprint=_footprint(0.1, 0.1),
+    )
+    behind = object_goal(grid, **kwargs)
+    assert behind is not None and behind[1] > 0.6
+    result = object_goal(grid, robot_xy=(robot_x, robot_y), **kwargs)
+    assert result is not None
+    assert result[1] < 0.5
+
+
 def test_object_goal_falls_back_to_the_far_side_when_the_near_side_is_full():
     """With no room on the robot's side the far side is still returned."""
     grid = _grid()
