@@ -232,10 +232,7 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
             );
 
             let _ = tx
-                .send(Ok(rtdl_wire::plan_complete(
-                    plan_id,
-                    any_failed,
-                )))
+                .send(Ok(rtdl_wire::plan_complete(plan_id, any_failed)))
                 .await;
         });
 
