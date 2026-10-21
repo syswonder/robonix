@@ -155,12 +155,12 @@ impl HistoryBudget {
 /// Take in a user message (a request or a steer): file it with the session's
 /// tasks and put it in history once, labelled with its id and task.
 fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut TaskList) -> bool {
-    let Some((id, _)) = tasks.receive(&task.text) else {
+    let Some(message) = tasks.receive(&task.text) else {
         return false;
     };
     history.push(Message::user(&format!(
         "{}\n{}",
-        tasks.message_line(&id),
+        message.line(),
         response_mode(task)
     )));
     true
@@ -224,54 +224,39 @@ async fn apply_task_fields(
     let new_task = tasks.file_messages(&fields.messages, &mut applied);
     let mut owner = None;
     if let Some((plan_id, description)) = tree {
-        let named = fields
-            .task
-            .as_ref()
-            .map(|named| tasks.tree_owner(named, new_task.as_deref()));
-        let fallback = || {
+        let named = match &fields.task {
+            Some(named) => tasks.tree_owner(named, new_task.as_deref()),
+            None => Err("`rtdl_parent_task_id` was missing".to_string()),
+        };
+        owner = named.as_ref().ok().cloned().or_else(|| {
             tasks
                 .newest_open()
                 .or_else(|| tasks.tasks.last())
                 .map(|task| task.id.clone())
-        };
-        let id = match named {
-            Some(Ok(id)) => Some(id),
-            Some(Err(problem)) => {
-                let id = fallback();
-                applied.rejected.push(format!(
-                    "{problem}; plan {plan_id} was filed under {}",
-                    id.as_deref().unwrap_or("no task")
-                ));
-                id
-            }
-            None => {
-                let id = fallback();
-                applied.rejected.push(format!(
-                    "plan {plan_id} was filed under {} because `rtdl_parent_task_id` was missing; name the task of every tree you dispatch",
-                    id.as_deref().unwrap_or("no task")
-                ));
-                id
-            }
-        };
-        if let Some(id) = &id {
-            tasks.attach_tree(id, plan_id, description);
-            applied.changed.push(id.clone());
+        });
+        if let Err(problem) = named {
+            applied.rejected.push(format!(
+                "{problem}; plan {plan_id} was filed under {}; name the task of every tree you dispatch",
+                owner.as_deref().unwrap_or("no task")
+            ));
         }
-        owner = id;
+        if let Some(id) = &owner {
+            tasks.attach_tree(id, plan_id, description);
+            applied.touch(id);
+        }
     }
     tasks.apply_updates(&fields.updates, new_task.as_deref(), &mut applied);
     tasks.answered();
-    applied.changed.dedup();
     for id in &applied.changed {
         if let Some(record) = tasks.record(id) {
             history.push(Message::user(&record));
         }
     }
     if !applied.rejected.is_empty() {
-        warn!("[pilot/tasks] rejected: {}", applied.rejected.join("; "));
+        let rejected = applied.rejected.join("; ");
+        warn!("[pilot/tasks] rejected: {rejected}");
         history.push(Message::user(&format!(
-            "Pilot harness feedback on task fields: {}.",
-            applied.rejected.join("; ")
+            "Pilot harness feedback on task fields: {rejected}."
         )));
     }
     if !applied.changed.is_empty() {
@@ -2222,7 +2207,7 @@ Nodes are exactly one of:
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
 Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose a task's known dependent steps into one sequence and its independent steps into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
 
-Plan control is the entire rtdl value, never a nested node or capability: cancel_plan or cancel_all using an exact listed plan_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
+Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
 Tasks (ids from the status board):
 - message_updates: [], or refile a new message: [{"message_id":"m7","parent_task_id":"new"|"T1"}].
@@ -2388,7 +2373,7 @@ fn build_rtdl_retry_prompt(
     }
     p.push_str(
         "\nIf no further capability call is needed, use \
-         {\"op\":\"sequence\",\"children\":[]} as `rtdl` with `task: null`, and close a \
+         {\"op\":\"sequence\",\"children\":[]} as `rtdl` with `rtdl_parent_task_id: null`, and close a \
          finished task in `task_updates`. If the user's requested action cannot be performed \
          using the listed capabilities, explain the missing capability in `content`, return an \
          empty RTDL sequence and close that task as `failed`, instead of inventing a capability.\n",
@@ -2769,7 +2754,7 @@ fn meta_op_problem(
         return Some(
             "No plan is in flight, so there is nothing to cancel or stop; the plan-control op was not executed. \
              Plan control is only for plans listed in In-flight trees. If the request is answered, put the answer \
-             in content and return an empty sequence as rtdl with task: null; if it needs robot work, \
+             in content and return an empty sequence as rtdl with rtdl_parent_task_id: null; if it needs robot work, \
              return that work as an RTDL tree."
                 .to_string(),
         );

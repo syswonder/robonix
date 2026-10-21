@@ -93,7 +93,7 @@ On every planning round the model sees, in this order:
 
 The user's messages arrive one at a time. A task is one piece of work the user asked for: the user's messages about it (the request, then every correction, addition or answer), the goal and success criterion the model has drawn from them, its status (`in_progress`, `done`, `failed`, `superseded`), and the RTDL trees dispatched for it. Several tasks can be open at once; every tree belongs to exactly one task. `src/tasks.rs` keeps them per session, and the transcript keeps them across a restart.
 
-Pilot owns identity and facts: message ids (`m1`, `m2`, …), task ids (`T1`, `T2`, …), the user's words, which task each message and tree is filed under, and how each tree ended. A message enters history once, as `User message m7 (filed under T2): …`, and a `Pilot task record` line is appended when a task changes. Compaction keeps the messages of open tasks verbatim. The model owns the judgement, through three reply fields:
+Pilot owns identity and facts: message ids (`m1`, `m2`, …), task ids (`T1`, `T2`, …), the user's words, which task each message and tree is filed under, and how each tree ended. A message enters history once, as `User message m7 (filed under T2): …`, and a `Pilot task record` line is appended when a task changes. Compaction keeps the open tasks' messages before anything else, newest first when they do not all fit. The model owns the judgement, through three reply fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -104,8 +104,6 @@ Pilot owns identity and facts: message ids (`m1`, `m2`, …), task ids (`T1`, `T
 Every `"new"` in one reply names the same task: the one its `message_updates` start, which Pilot creates and gives the next id. A reply therefore creates at most one task, and `rtdl_parent_task_id` or `task_updates` naming `"new"` without a message filed under it is rejected.
 
 A reply gives its fields in the order `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl`, `task_updates`: what dispatch needs comes before `rtdl`, so a streaming planner knows a tree's task when the tree starts, and what needs to know what was dispatched comes after it. Pilot applies them in that order. Pilot's `serde_json` has `preserve_order` so that the schema's properties reach the provider in that order.
-
-The previous contract's `task_update` object is still read for one release: it updates the newest open task, and its `goal` is ignored.
 
 A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 

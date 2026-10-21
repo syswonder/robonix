@@ -32,11 +32,11 @@ pub(crate) const FAILED: &str = "failed";
 pub(crate) const SUPERSEDED: &str = "superseded";
 const STATUSES: [&str; 4] = [IN_PROGRESS, DONE, FAILED, SUPERSEDED];
 
+/// Names the task a reply creates; Pilot gives it its id.
+const NEW: &str = "new";
 /// The reply fields this module reads, in the order a reply should give them
 /// relative to `rtdl`: `message_updates` and `rtdl_parent_task_id` before it,
 /// `task_updates` after.
-/// Names the task a reply creates; Pilot gives it its id.
-const NEW: &str = "new";
 pub(crate) const REPLY_FIELDS: [&str; 3] =
     ["message_updates", "rtdl_parent_task_id", "task_updates"];
 
@@ -48,6 +48,7 @@ const CLOSED_TASKS_SHOWN: usize = 5;
 const CLOSED_GOAL_CHARS: usize = 80;
 
 const TREE_RUNNING: &str = "running";
+const TREE_LOST: &str = "lost";
 
 /// One user message, verbatim.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +72,16 @@ pub(crate) struct Task {
     pub status: String,
     /// Why the model closed the task.
     pub status_reason: String,
+}
+
+impl UserMessage {
+    /// How the message enters history: once, with its id and task.
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "User message {} (filed under {}): {}",
+            self.id, self.task, self.text
+        )
+    }
 }
 
 impl Task {
@@ -137,7 +148,7 @@ pub(crate) struct Applied {
 }
 
 impl Applied {
-    fn touch(&mut self, task: &str) {
+    pub(crate) fn touch(&mut self, task: &str) {
         if !self.changed.iter().any(|id| id == task) {
             self.changed.push(task.to_string());
         }
@@ -157,11 +168,18 @@ impl TaskList {
     /// a transcript written before task lists, which becomes a one-task list.
     pub(crate) fn from_record(value: Value) -> Option<Self> {
         if value.get("tasks").is_some() {
-            return serde_json::from_value(value).ok();
+            let mut list: Self = serde_json::from_value(value).ok()?;
+            // Nothing reports on the trees of a Pilot that restarted.
+            for tree in &mut list.trees {
+                if tree.state == TREE_RUNNING {
+                    tree.state = TREE_LOST.to_string();
+                }
+            }
+            return Some(list);
         }
         let legacy: LegacyTaskState = serde_json::from_value(value).ok()?;
         let mut list = Self::default();
-        let (_, task_id) = list.receive(&legacy.goal)?;
+        let task_id = list.receive(&legacy.goal)?.task.clone();
         list.answered();
         let task = list.task_mut(&task_id)?;
         task.success_criterion = legacy.success_criterion;
@@ -253,8 +271,8 @@ impl TaskList {
     /// Take in a user message (a request or a steer). It is filed under the
     /// newest open task, since corrections and answers are the common case, or
     /// under a new task when none is open; the model may refile it in its next
-    /// reply. Returns the message id and its task; empty text is ignored.
-    pub(crate) fn receive(&mut self, text: &str) -> Option<(String, String)> {
+    /// reply. Empty text is ignored.
+    pub(crate) fn receive(&mut self, text: &str) -> Option<&UserMessage> {
         let text = text.trim();
         if text.is_empty() {
             return None;
@@ -263,13 +281,12 @@ impl TaskList {
             Some(task) => task.id.clone(),
             None => self.new_task(),
         };
-        let id = format!("m{}", self.messages.len() + 1);
         self.messages.push(UserMessage {
-            id: id.clone(),
+            id: format!("m{}", self.messages.len() + 1),
             text: text.to_string(),
-            task: task.clone(),
+            task,
         });
-        Some((id, task))
+        self.messages.last()
     }
 
     /// The model has replied to every message so far: their filing is final.
@@ -305,14 +322,9 @@ impl TaskList {
             };
             let from = self.messages[index].task.clone();
             let to = match target {
-                TaskRef::New => match &new_task {
-                    Some(id) => id.clone(),
-                    None => {
-                        let id = self.reuse_or_create_for(moves, &from);
-                        new_task = Some(id.clone());
-                        id
-                    }
-                },
+                TaskRef::New => new_task
+                    .get_or_insert_with(|| self.reuse_or_create_for(moves, &from))
+                    .clone(),
                 TaskRef::Id(id) => match self.task(id) {
                     Some(task) if task.is_open() => id.clone(),
                     Some(task) => {
@@ -347,7 +359,9 @@ impl TaskList {
     fn reuse_or_create_for(&mut self, moves: &[(String, TaskRef)], from: &str) -> String {
         let going_new: Vec<&str> = moves
             .iter()
-            .filter(|(_, target)| *target == TaskRef::New)
+            .filter(|(message, target)| {
+                *target == TaskRef::New && self.unanswered_index(message).is_some()
+            })
             .map(|(message, _)| message.as_str())
             .collect();
         let only_these = self
@@ -499,25 +513,15 @@ impl TaskList {
                     continue;
                 }
             }
-            let Some(task) = self.task_mut(&id) else {
-                continue;
-            };
+            let task = self.task_mut(&id).expect("tree_owner found the task");
             let before = task.clone();
-            if let Some(goal) = update
-                .goal
-                .as_deref()
-                .map(str::trim)
-                .filter(|goal| !goal.is_empty())
-            {
-                task.goal = goal.to_string();
-            }
-            if let Some(criterion) = update
-                .success_criterion
-                .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-            {
-                task.success_criterion = criterion.to_string();
+            for (value, field) in [
+                (&update.goal, &mut task.goal),
+                (&update.success_criterion, &mut task.success_criterion),
+            ] {
+                if let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    *field = value.to_string();
+                }
             }
             if let Some(status) = update
                 .status
@@ -538,30 +542,9 @@ impl TaskList {
         }
     }
 
-    /// How a user message enters history: once, with its id and task.
-    pub(crate) fn message_line(&self, message_id: &str) -> String {
-        let Some(message) = self
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-        else {
-            return String::new();
-        };
-        format!(
-            "User message {} (filed under {}): {}",
-            message.id, message.task, message.text
-        )
-    }
-
     /// A task's current state as one history line, written when it changes.
     pub(crate) fn record(&self, task_id: &str) -> Option<String> {
         let task = self.task(task_id)?;
-        let messages: Vec<&str> = self
-            .messages
-            .iter()
-            .filter(|message| message.task == task.id)
-            .map(|message| message.id.as_str())
-            .collect();
         let plans: Vec<Value> = self
             .trees
             .iter()
@@ -574,7 +557,7 @@ impl TaskList {
             "success_criterion": task.success_criterion,
             "status": task.status,
             "status_reason": task.status_reason,
-            "messages": messages,
+            "messages": self.message_ids(&task.id),
             "plans": plans,
         });
         Some(format!(
@@ -604,13 +587,10 @@ impl TaskList {
                 "- {}: in_progress\n  goal: {goal}\n  success criterion: {}\n",
                 task.id, task.success_criterion
             ));
-            let messages: Vec<&str> = self
-                .messages
-                .iter()
-                .filter(|message| message.task == task.id)
-                .map(|message| message.id.as_str())
-                .collect();
-            out.push_str(&format!("  messages: {}\n", messages.join(", ")));
+            out.push_str(&format!(
+                "  messages: {}\n",
+                self.message_ids(&task.id).join(", ")
+            ));
             let trees: Vec<&Tree> = self
                 .trees
                 .iter()
@@ -821,14 +801,6 @@ mod tests {
         }
     }
 
-    fn messages_of<'a>(list: &'a TaskList, task: &str) -> Vec<&'a str> {
-        list.messages
-            .iter()
-            .filter(|m| m.task == task)
-            .map(|m| m.id.as_str())
-            .collect()
-    }
-
     /// One reply applied in streaming order.
     fn reply(list: &mut TaskList, value: Value, plan: Option<&str>) -> Applied {
         let fields = fields(value).unwrap();
@@ -862,7 +834,7 @@ mod tests {
             None,
         );
         assert_eq!(list.tasks.len(), 1);
-        assert_eq!(messages_of(&list, "T1"), ["m1", "m2"]);
+        assert_eq!(list.message_ids("T1"), ["m1", "m2"]);
         assert_eq!(list.tasks[0].goal, "bring the blue cup");
     }
 
@@ -881,8 +853,8 @@ mod tests {
             None,
         );
         assert!(applied.rejected.is_empty(), "{:?}", applied.rejected);
-        assert_eq!(messages_of(&list, "T1"), ["m1"]);
-        assert_eq!(messages_of(&list, "T2"), ["m2"]);
+        assert_eq!(list.message_ids("T1"), ["m1"]);
+        assert_eq!(list.message_ids("T2"), ["m2"]);
         assert_eq!(list.task("T2").unwrap().status, DONE);
         assert!(list.task("T1").unwrap().is_open());
     }
@@ -922,7 +894,7 @@ mod tests {
             None,
         );
         assert!(applied.rejected.is_empty(), "{:?}", applied.rejected);
-        assert_eq!(messages_of(&list, "T1"), ["m1", "m3"]);
+        assert_eq!(list.message_ids("T1"), ["m1", "m3"]);
         assert_eq!(list.task_of_tree("p2"), Some("T2"));
     }
 
@@ -961,14 +933,20 @@ mod tests {
             None,
         );
         assert_eq!(list.tasks.len(), 2);
-        assert_eq!(messages_of(&list, "T2"), ["m2"]);
+        assert_eq!(list.message_ids("T2"), ["m2"]);
     }
 
     #[test]
     fn done_while_a_tree_of_the_task_runs_is_rejected_for_that_item_only() {
         let mut list = TaskList::default();
         list.receive("navigate");
-        reply(&mut list, json!({"rtdl_parent_task_id": "T1"}), Some("p1"));
+        // Not even in the reply that dispatches the tree.
+        let applied = reply(
+            &mut list,
+            json!({"rtdl_parent_task_id": "T1", "task_updates": [{"task_id": "T1", "status": "done"}]}),
+            Some("p1"),
+        );
+        assert_eq!(applied.rejected.len(), 1);
         list.receive("say hello");
         let applied = reply(
             &mut list,
@@ -986,19 +964,6 @@ mod tests {
         let mut applied = Applied::default();
         list.apply_updates(&[update("T1", DONE)], None, &mut applied);
         assert!(applied.rejected.is_empty());
-    }
-
-    #[test]
-    fn a_task_cannot_close_in_the_reply_that_dispatches_its_tree() {
-        let mut list = TaskList::default();
-        list.receive("look around");
-        let applied = reply(
-            &mut list,
-            json!({"rtdl_parent_task_id": "T1", "task_updates": [{"task_id": "T1", "status": "done"}]}),
-            Some("p1"),
-        );
-        assert_eq!(applied.rejected.len(), 1);
-        assert!(list.task("T1").unwrap().is_open());
     }
 
     #[test]
@@ -1064,8 +1029,14 @@ mod tests {
         assert_eq!(list.messages[0].text, "fetch the cup");
         assert_eq!(list.tasks[0].success_criterion, "cup delivered");
         assert!(list.unanswered().is_empty());
-        let value = serde_json::to_value(&list).unwrap();
-        assert_eq!(TaskList::from_record(value).unwrap(), list);
+        let mut list = list;
+        list.attach_tree("T1", "p1", "tree");
+        let mut restored = TaskList::from_record(serde_json::to_value(&list).unwrap()).unwrap();
+        // A tree left running by the previous Pilot does not hold its task open.
+        assert_eq!(restored.trees[0].state, TREE_LOST);
+        let mut applied = Applied::default();
+        restored.apply_updates(&[update("T1", DONE)], None, &mut applied);
+        assert!(applied.rejected.is_empty());
     }
 
     #[test]
@@ -1085,7 +1056,7 @@ mod tests {
         );
         list.receive("the one upstairs");
         assert_eq!(
-            list.message_line("m3"),
+            list.messages[2].line(),
             "User message m3 (filed under T2): the one upstairs"
         );
         let record = list.record("T2").unwrap();

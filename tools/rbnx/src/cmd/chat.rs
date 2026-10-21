@@ -1903,13 +1903,13 @@ async fn run_text_intent_with_esc_abort(
                         apply_pilot_event(&messages, forest, &event)?;
                         draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, 0, true)?;
                     }
+                    // A failed stream ends by itself; the others keep the turn going.
                     Some(Err(e)) => {
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
                             text: format!("Liaison stream error: {e}"),
                         });
                         draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, 0, true)?;
-                        break;
                     }
                 }
             }
@@ -1969,8 +1969,6 @@ async fn run_text_intent_with_esc_abort(
     Ok(())
 }
 
-/// Submit `text` as a mid-task steer on an already-running session. Pilot routes
-/// it to the live turn's steer queue and returns an empty stream, which we drain.
 /// Submit a task to Liaison and forward its event stream into `tx`.
 async fn forward_submit(
     liaison_ep: String,
@@ -2001,6 +1999,8 @@ async fn forward_submit(
     }
 }
 
+/// Submit `text` as a mid-task steer on an already-running session. Pilot routes
+/// it to the live turn's steer queue and returns an empty stream, which we drain.
 async fn send_steer(
     liaison_endpoint: &str,
     session_id: &str,
