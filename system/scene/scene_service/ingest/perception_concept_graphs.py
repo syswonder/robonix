@@ -256,12 +256,21 @@ def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained, prof
         log.warning("MobileSAM load failed: %s", e)
         return (None,) * 6
     try:
+        from torchvision.transforms import ConvertImageDtype
+
+        precision = "fp32"
+        if device == "cuda" and os.environ.get(
+            "SCENE_CLIP_FP32", ""
+        ).strip() not in ("1", "true", "yes"):
+            precision = "pure_fp16"
         clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-            cm, pretrained=cp,
+            cm, pretrained=cp, device=device, precision=precision,
         )
-        clip_model = clip_model.to(device).eval()
+        clip_model.eval()
+        if precision == "pure_fp16":
+            clip_preprocess.transforms.append(ConvertImageDtype(torch.float16))
+        log.info("[scene-cg] open_clip %s/%s loaded on %s (%s)", cm, cp, device, precision)
         clip_tokenizer = open_clip.get_tokenizer(cm)
-        log.info("[scene-cg] open_clip %s/%s loaded on %s", cm, cp, device)
     except Exception as e:  # noqa: BLE001
         log.warning("open_clip load failed: %s", e)
         return (None,) * 6
@@ -748,7 +757,7 @@ class ConceptGraphsDetector:
 
         with torch.no_grad():
             tokens = self._clip_tokenizer(texts).to(self._device)
-            feats = self._clip_model.encode_text(tokens)
+            feats = self._clip_model.encode_text(tokens).float()
             feats = feats / feats.norm(dim=-1, keepdim=True)
             return feats.cpu().tolist()
 
@@ -1086,6 +1095,7 @@ class ConceptGraphsDetector:
                 self._clip_model, self._clip_preprocess, self._clip_tokenizer,
                 clip_classes, self._device,
             )
+            image_feats = image_feats.astype(np.float32, copy=False)
         except Exception as e:  # noqa: BLE001
             # Log the full traceback once; later failures are counted.
             if not getattr(self, "_clip_fail_logged", False):

@@ -76,8 +76,7 @@ def _load_service():
     class FakeEngine:
         instances = []
 
-        def __init__(self, device=None) -> None:
-            self.device = device
+        def __init__(self) -> None:
             self.close_calls = 0
             self.__class__.instances.append(self)
 
@@ -114,7 +113,7 @@ def _load_service():
     package = types.ModuleType("voiceprint_service")
     package.__path__ = [str(PACKAGE_ROOT / "voiceprint_service")]
     engine = types.ModuleType("voiceprint_service.engine")
-    engine.EcapaTdnnEngine = FakeEngine
+    engine.SpeakerEmbeddingEngine = FakeEngine
 
     module_name = f"voiceprint_service._runtime_test_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, SERVICE_PATH)
@@ -176,40 +175,31 @@ class ThresholdValidationTest(unittest.TestCase):
         self.assertEqual(module._threshold_value, 0.4)
 
 
-class DeviceConfigTest(unittest.TestCase):
-    def test_environment_device_remains_a_compatibility_fallback(self) -> None:
+class RuntimeConfigTest(unittest.TestCase):
+    def test_repeated_identical_config_keeps_database_and_model(self) -> None:
         module, fake_engine = _load_service()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ,
-            {"VOICEPRINT_DEVICE": "cpu"},
-        ):
-            self.assertIsInstance(module.init({"data_dir": tmp}), _Ok)
-            self.assertIsInstance(module.activate(), _Ok)
-
-        self.assertEqual(fake_engine.instances[0].device, "cpu")
-
-    def test_explicit_device_takes_precedence_over_environment(self) -> None:
-        module, fake_engine = _load_service()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ,
-            {"VOICEPRINT_DEVICE": "cuda:0"},
-        ):
-            self.assertIsInstance(
-                module.init({"data_dir": tmp, "device": "cpu"}),
-                _Ok,
-            )
-            self.assertIsInstance(module.activate(), _Ok)
-
-        self.assertEqual(fake_engine.instances[0].device, "cpu")
-
-    def test_invalid_device_fails_init(self) -> None:
-        module, _ = _load_service()
         with tempfile.TemporaryDirectory() as tmp:
-            result = module.init({"data_dir": tmp, "device": ""})
+            cfg = {"data_dir": tmp, "threshold": 0.55}
+            self.assertIsInstance(module.init(cfg), _Ok)
+            self.assertIsInstance(module.activate(), _Ok)
+            database, engine = module._db, module._engine
+            self.assertIsInstance(module.init(cfg), _Ok)
+            self.assertIs(module._db, database)
+            self.assertIs(module._engine, engine)
+            self.assertEqual(len(fake_engine.instances), 1)
 
-        self.assertIsInstance(result, _Err)
-        self.assertIn("device must be a non-empty string or null", result.message)
-        self.assertIsNone(module._db)
+    def test_changed_config_fails_without_replacing_database(self) -> None:
+        for key, changed in (("data_dir", "other"), ("threshold", 0.7)):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                module, _ = _load_service()
+                cfg = {"data_dir": tmp, "threshold": 0.55}
+                self.assertIsInstance(module.init(cfg), _Ok)
+                database = module._db
+                result = module.init({**cfg, key: changed})
+                self.assertIsInstance(result, _Err)
+                self.assertIn("different configuration", result.message)
+                self.assertIs(module._db, database)
+                self.assertEqual(module._threshold_value, 0.55)
 
 
 class EnrolledDBConcurrencyTest(unittest.TestCase):
@@ -340,7 +330,7 @@ class LifecycleResourceTest(unittest.TestCase):
         module, fake_engine = _load_service()
         with tempfile.TemporaryDirectory() as tmp:
             init_result = module.init(
-                {"data_dir": tmp, "threshold": 0.3, "device": "cpu"},
+                {"data_dir": tmp, "threshold": 0.3},
             )
 
             self.assertIsInstance(init_result, _Ok)
@@ -353,7 +343,6 @@ class LifecycleResourceTest(unittest.TestCase):
             self.assertEqual(len(fake_engine.instances), 1)
             engine = fake_engine.instances[0]
             self.assertIs(module._engine, engine)
-            self.assertEqual(engine.device, "cpu")
 
             deactivate_result = module.deactivate()
             self.assertIsInstance(deactivate_result, _Ok)

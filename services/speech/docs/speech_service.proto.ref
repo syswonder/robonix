@@ -84,7 +84,7 @@ service SpeechAsr {
   rpc Recognize (RecognizeRequest) returns (RecognizeResponse);
 
   // Bidirectional streaming: chunk-by-chunk audio → partial/final results.
-  // Backend: FunASR Paraformer-zh-streaming (600ms granularity, 300ms lookahead).
+  // Backend: sherpa-onnx int8 Paraformer (CPU, bilingual zh-en).
   rpc RecognizeStream (stream RecognizeStreamRequest) returns (stream RecognizeStreamResponse);
 }
 

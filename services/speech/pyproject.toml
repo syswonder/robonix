@@ -25,12 +25,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # Local inference is deliberately optional. Cloud deployments must not pull
-# Torch, FunASR, Transformers, or model weights merely to use Tencent ASR/TTS.
+# Torch, Transformers, or model weights merely to use Tencent ASR/TTS.
 local = [
     "torch>=2.0; platform_machine != 'aarch64'",
     "torchaudio>=2.0; platform_machine != 'aarch64'",
     "transformers>=4.30",
-    "funasr>=1.0",
     "edge-tts>=6.1",
     "opencc-python-reimplemented>=0.1.7",
 ]
