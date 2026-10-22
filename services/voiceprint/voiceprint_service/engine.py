@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""CPU CAM++ embeddings; model weights are downloaded at build time."""
+"""CAM++ embeddings; model weights are downloaded at build time."""
 from __future__ import annotations
 
 import io
@@ -21,22 +21,23 @@ _DEFAULT_MODEL = (
 
 
 class SpeakerEmbeddingEngine:
-    """sherpa-onnx CAM++ speaker-embedding model (CPU, 192-dim output)."""
+    """sherpa-onnx CAM++ speaker-embedding model (192-dim output)."""
 
     def __init__(self, model_path: Optional[Path] = None) -> None:
         path = Path(model_path or os.environ.get("VOICEPRINT_MODEL", "") or _DEFAULT_MODEL)
         if not path.is_file():
             raise FileNotFoundError(f"speaker-embedding model not found: {path}")
+        provider = os.environ.get("VOICEPRINT_PROVIDER", "cpu")
         config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
             model=str(path),
             num_threads=1,
-            provider="cpu",
+            provider=provider,
         )
         self.model_path = path
         self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
         log.info(
-            "CAM++ speaker embedding loaded from %s (dim=%d)",
-            path, self.extractor.dim,
+            "CAM++ speaker embedding loaded from %s (dim=%d, requested provider=%s)",
+            path, self.extractor.dim, provider,
         )
 
     # -- public extraction -------------------------------------------------
