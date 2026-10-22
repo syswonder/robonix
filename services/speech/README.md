@@ -72,10 +72,25 @@ modes so existing audio speaker primitives can play the response directly.
 
 The build downloads the bilingual int8 Paraformer model into
 `rbnx-build/models/sherpa-onnx-streaming-paraformer-bilingual-zh-en`.
-Streaming inference runs on CPU without loading torch. `SHERPA_ASR_DIR`
+Streaming inference defaults to CPU without loading torch. `SHERPA_ASR_DIR`
 selects a different model directory; `SHERPA_ASR_ENCODER`,
 `SHERPA_ASR_DECODER` and `SHERPA_ASR_TOKENS` override individual files.
 `SHERPA_ASR_THREADS` defaults to 2.
+
+`SHERPA_ASR_PROVIDER` selects the sherpa-onnx execution provider (default:
+`cpu`). To request CUDA, install a GPU-enabled sherpa-onnx 1.13.4 build
+compatible with the board, driver and model into this package's venv after
+`rbnx build`, then export `SHERPA_ASR_PROVIDER=cuda` before starting the
+service. Reapply the GPU runtime installation after rebuilding: the build
+script installs the default CPU wheel set. Installing `onnxruntime-gpu`
+alone does not replace the native runtime linked by sherpa-onnx.
+
+Provider strings are passed directly to sherpa-onnx, without board-specific
+selection. Its build and model determine which providers work. Logs show
+the requested provider; unsupported providers or operators may fall back
+to CPU. The bundled int8 Paraformer can execute partly on CPU even when
+CUDA is selected, so profile the target board before choosing it. This
+setting does not change Whisper, wake-word detection or TTS.
 
 ## Wake word
 

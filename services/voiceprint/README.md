@@ -1,6 +1,6 @@
 # robonix/service/voiceprint
 
-CPU CAM++ speaker-identification service using sherpa-onnx. It serves
+CAM++ speaker-identification service using sherpa-onnx, with CPU inference by default. It serves
 `robonix/service/voiceprint/identify`, which Liaison's voice-gating path
 calls, and the enrollment contracts `enroll`, `list`, and `delete`, which
 `rbnx chat` uses to manage enrolled speakers.
@@ -47,6 +47,20 @@ Environment variables:
 | `VOICEPRINT_DATA_DIR`  | `rbnx-build/data`    | location of `enrolled.json`          |
 | `VOICEPRINT_THRESHOLD` | `0.55`               | cosine-similarity gate for `is_known` |
 | `VOICEPRINT_MODEL`     | `rbnx-build/models/campplus_zh.onnx` | CAM++ ONNX model path |
+| `VOICEPRINT_PROVIDER`  | `cpu` | sherpa-onnx execution provider; use `cuda` with a compatible GPU runtime |
+
+For GPU inference, install a GPU-enabled sherpa-onnx 1.13.4 build compatible
+with the board, driver and model into this package's venv after `rbnx build`,
+then export `VOICEPRINT_PROVIDER=cuda` before starting the service. Reapply
+the GPU runtime installation after rebuilding: the build script installs the
+default CPU wheel set. Installing `onnxruntime-gpu` alone does not replace
+the native runtime linked by sherpa-onnx.
+
+Other provider strings are passed directly to sherpa-onnx; support depends
+on its build and the model. Startup logs show the requested provider, not
+proof of GPU execution: sherpa-onnx may fall back to CPU for unsupported
+providers or operators. Verify execution and recalibrate the similarity
+threshold before changing providers in a deployment.
 
 Existing ECAPA enrollment vectors are incompatible with CAM++. Re-enroll
 users after upgrading; the `enrolled.json` schema stays unchanged.

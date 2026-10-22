@@ -46,6 +46,7 @@ Environment variables:
   ASR_BATCH_SIZE     Whisper batch size (default: 4)
   SHERPA_ASR_DIR     Streaming Paraformer model directory
   SHERPA_ASR_THREADS CPU inference threads (default: 2)
+  SHERPA_ASR_PROVIDER sherpa-onnx execution provider (default: cpu)
   TTS_VOICE          Edge TTS voice name (default: zh-CN-XiaoxiaoNeural)
   TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY
                      Tencent Cloud credentials when SPEECH_BACKEND=tencent
@@ -300,7 +301,7 @@ class MockASRBackend:
 # -- ASR Backend (sherpa-onnx streaming) -------------------------------------
 
 class SherpaStreamingBackend:
-    """CPU int8 paraformer with incremental partials and a final tail event."""
+    """Paraformer with incremental partials and a final tail event."""
 
     def __init__(self):
         import numpy as np
@@ -313,6 +314,7 @@ class SherpaStreamingBackend:
                 / "sherpa-onnx-streaming-paraformer-bilingual-zh-en"),
         ))
         threads = max(1, int(os.environ.get("SHERPA_ASR_THREADS", "2")))
+        provider = os.environ.get("SHERPA_ASR_PROVIDER", "cpu")
         log.info(
             "Loading sherpa-onnx streaming paraformer from %s (threads=%d)...",
             model_dir, threads,
@@ -322,9 +324,10 @@ class SherpaStreamingBackend:
             encoder=os.environ.get("SHERPA_ASR_ENCODER", str(model_dir / "encoder.int8.onnx")),
             decoder=os.environ.get("SHERPA_ASR_DECODER", str(model_dir / "decoder.int8.onnx")),
             num_threads=threads,
+            provider=provider,
         )
         self._np = np
-        log.info("sherpa-onnx streaming ASR loaded.")
+        log.info("sherpa-onnx streaming ASR loaded (requested provider=%s).", provider)
 
     def recognize_stream(self, pcm_chunks: Iterable[bytes]) -> Iterator[dict]:
         np = self._np
