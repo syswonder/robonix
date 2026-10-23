@@ -369,12 +369,23 @@ def main() -> int:
             dimension_detail,
         )
         meta_origin = origin_meta(meta)
-        if meta_origin is not None:
-            dx = abs(float(live.get("origin_x") or 0.0) - meta_origin[0])
-            dy = abs(float(live.get("origin_y") or 0.0) - meta_origin[1])
-            check("loaded_map_origin_matches_saved_meta",
-                  dx <= args.origin_tolerance and dy <= args.origin_tolerance,
-                  f"dx={dx:.4f} dy={dy:.4f} meta={meta_origin} live=({live.get('origin_x')},{live.get('origin_y')})",
+        res = float(meta.get("resolution") or live.get("resolution") or 0.0)
+        if meta_origin is not None and res > 0 and expected_w > 0 and expected_h > 0:
+            # The loaded grid must hold the saved one where it was saved. It
+            # may be larger: slam_toolbox's localization node draws the live
+            # scan on top, and the robot can see past the last scan the graph
+            # kept, so equal origins were never a property of a correct load.
+            lx0 = float(live.get("origin_x") or 0.0)
+            ly0 = float(live.get("origin_y") or 0.0)
+            lx1 = lx0 + live_w * float(live.get("resolution") or res)
+            ly1 = ly0 + live_h * float(live.get("resolution") or res)
+            sx0, sy0 = meta_origin
+            sx1, sy1 = sx0 + expected_w * res, sy0 + expected_h * res
+            tol = args.origin_tolerance
+            check("loaded_map_covers_saved_map",
+                  lx0 <= sx0 + tol and ly0 <= sy0 + tol and lx1 >= sx1 - tol and ly1 >= sy1 - tol,
+                  f"saved=[{sx0:.2f},{sy0:.2f}]..[{sx1:.2f},{sy1:.2f}] "
+                  f"live=[{lx0:.2f},{ly0:.2f}]..[{lx1:.2f},{ly1:.2f}]",
                   results)
 
     if args.delete_after:

@@ -34,7 +34,7 @@ def init(cfg: dict):
     if not primitive.wait_for_topic(topic, "LaserScan", 30.0):
         return Deferred(f"no LaserScan on {topic} yet")
     primitive.create_publisher(
-        contract_id="robonix/primitive/lidar/lidar2d",
+        contract_id="robonix/primitive/lidar/lidar",
         topic=topic,
         msg_type="LaserScan",
     )
@@ -79,7 +79,7 @@ shared only; direct exact-legacy launches use legacy when that service exists.
 
 ## What's in the box
 
-- **`ATLAS`** — module-level singleton client (`ATLAS.register`, `ATLAS.find_primitive`, `ATLAS.connect`, ...)
+- **`ATLAS`** — module-level singleton client (`ATLAS.register_primitive` / `register_service` / `register_skill`, `ATLAS.declare_capability`, `ATLAS.query_primitives` / `query_services` / `query_skills`, `ATLAS.find_capability`, `ATLAS.connect_capability`, ...)
 - **`Primitive` / `Service` / `Skill`** — provider base classes with `on_init` / `on_activate` / `on_deactivate` / `on_shutdown` decorators
 - **`@provider.provides_grpc(contract)` / `@provider.provides_mcp(contract)`** — Layer-2 sugar for typed handlers
 - **`Ok` / `Err` / `Deferred`** — lifecycle return values

@@ -77,7 +77,10 @@ while time.time() < deadline:
 raise SystemExit("executor did not listen within 10s")
 PY
 
-PROTO_SOURCE="$(find "$ROOT/target" -path '*/out/robonix_contracts.proto' -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+# Executor's own build output: every crate writes a robonix_contracts.proto,
+# and some (Soma's) hold only the contracts that crate uses, so the newest one
+# overall was sometimes a file without the Executor service.
+PROTO_SOURCE="$(find "$ROOT/target" -path '*/robonix-executor-*/out/robonix_contracts.proto' -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
 if [[ -z "$PROTO_SOURCE" || ! -d "$PROTO_SOURCE" ]]; then
   echo "generated proto source not found; build Executor first" >&2
   exit 2

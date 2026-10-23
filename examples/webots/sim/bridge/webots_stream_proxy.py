@@ -33,7 +33,8 @@ async def proxy(client) -> None:
 
             async def client_to_upstream() -> None:
                 async for message in client:
-                    await upstream.send(message)
+                    if message in ("w3d", "w3d;broadcast"):
+                        await upstream.send("w3d;broadcast")
 
             async def upstream_to_client() -> None:
                 nonlocal dropped_messages, dropped_bytes

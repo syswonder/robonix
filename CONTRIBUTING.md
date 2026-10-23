@@ -63,12 +63,10 @@ license compatibility before submission.
   tests for Python runtime changes.
 - When functionality changes in a Rust component under `system/*` or
   `tools/*`, update that component's README in the same contribution.
-- Do not hand-edit generated documentation under `docs/src/reference/`.
+- Do not hand-edit generated documentation under `docs/docs/reference/`.
   Change the contracts, IDL, or generator inputs and regenerate it.
 
-The repository requires a comment for a function or method body longer than
-five lines. Describe at least its behavior and document side effects or
-constraints that are not evident from the signature.
+Comments follow `comments-explain-why` in `.agents/guidelines/maintainability.md`.
 
 ## Build and validation
 
@@ -206,6 +204,10 @@ must:
    effects;
 4. link related issues, for example with `Closes #123`; and
 5. include screenshots or terminal output for CLI, TUI, or web UI changes.
+
+One PR is one logical change; it lands as one squashed commit whose message is
+the PR title and description. Split larger work into dependent PRs. Rebase on
+`dev` instead of merging `dev` into a PR branch.
 
 Do not commit credentials, model keys, generated secrets, build artifacts, or
 unrelated local changes. All required checks must pass before merge.

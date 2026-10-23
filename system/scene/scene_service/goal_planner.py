@@ -319,6 +319,23 @@ def _ring_cells(center_x: int, center_y: int, radius: int) -> Iterable[tuple[int
 FAR_SIDE_SLACK_M = 1.0
 
 
+# Navigation's costmap marks a cell 99 where the robot's inscribed circle
+# would touch an obstacle and 100 where the cell itself is one.
+NAV_COSTMAP_INSCRIBED = 99
+
+
+def _nav_cost_ok(costmap, x: float, y: float) -> bool:
+    """Whether Navigation could stand the robot at (x, y): its costmap cell is
+    unknown, outside the costmap, or below the inscribed cost."""
+    width, height, resolution, origin_x, origin_y = _grid_metadata(costmap)
+    gx = math.floor((x - origin_x) / resolution)
+    gy = math.floor((y - origin_y) / resolution)
+    if not (0 <= gx < width and 0 <= gy < height):
+        return True
+    cost = int(_grid_array(costmap, width=width, height=height)[gy, gx])
+    return cost < 0 or cost < NAV_COSTMAP_INSCRIBED
+
+
 def object_goal(
     grid_msg,
     *,
@@ -327,8 +344,16 @@ def object_goal(
     preferred_approach_yaw: float | None,
     minimum_standoff_m: float,
     footprint: RobotFootprint,
+    nav_costmap=None,
 ) -> tuple[float, float, float] | None:
-    """Find the nearest map cell whose real footprint can approach an object."""
+    """Find the nearest map cell whose real footprint can approach an object.
+
+    `nav_costmap`, when given, is Navigation's own costmap in the grid's frame.
+    The map grid can be the lidar's plane alone, while Navigation also marks
+    what its depth camera sees, a table top over free floor for one; a pose
+    that is free on the map but inside Navigation's inscribed cost is a goal
+    it can never reach, so such cells are skipped.
+    """
     width, height, resolution, origin_x, origin_y = _grid_metadata(grid_msg)
     grid = _grid_array(grid_msg, width=width, height=height)
     # Unexplored cells are allowed, occupied ones are not; Nav2 decides the rest.
@@ -384,7 +409,7 @@ def object_goal(
                 origin_x=origin_x,
                 origin_y=origin_y,
                 polygon=candidate,
-            ):
+            ) and (nav_costmap is None or _nav_cost_ok(nav_costmap, x, y)):
                 if not is_far_side:
                     return x, y, yaw
                 far_side, far_side_ring = (x, y, yaw), ring

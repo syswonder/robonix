@@ -69,6 +69,26 @@ struct OpMeta {
     contract_id: String,
 }
 
+impl From<&RtdlNode> for OpMeta {
+    fn from(node: &RtdlNode) -> Self {
+        Self {
+            op_id: node.op_id.clone(),
+            description: node.description.clone(),
+            node_kind: node.node_kind,
+            provider_id: node
+                .call
+                .as_ref()
+                .map(|call| call.provider_id.clone())
+                .unwrap_or_default(),
+            contract_id: node
+                .call
+                .as_ref()
+                .map(|call| call.contract_id.clone())
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// Calls claimed under the plan lock for cancellation after releasing it.
 struct CancelSnapshot {
     /// Calls removed from the plan's tracking table to receive cancel requests.
@@ -124,21 +144,7 @@ impl PlanRuntime {
         if run.ops.is_empty() {
             run.description = node.description.clone();
         }
-        run.ops.push(OpMeta {
-            op_id: node.op_id.clone(),
-            description: node.description.clone(),
-            node_kind: node.node_kind,
-            provider_id: node
-                .call
-                .as_ref()
-                .map(|c| c.provider_id.clone())
-                .unwrap_or_default(),
-            contract_id: node
-                .call
-                .as_ref()
-                .map(|c| c.contract_id.clone())
-                .unwrap_or_default(),
-        });
+        run.ops.push(OpMeta::from(node));
         true
     }
 
@@ -146,25 +152,7 @@ impl PlanRuntime {
     /// the op_ids/descriptions the LLM may target. Called right after
     /// `register_plan`. No-op if the plan is not in the active table.
     pub async fn record_plan_ops(&self, plan: &Plan) {
-        let ops: Vec<OpMeta> = plan
-            .nodes
-            .iter()
-            .map(|n| OpMeta {
-                op_id: n.op_id.clone(),
-                description: n.description.clone(),
-                node_kind: n.node_kind,
-                provider_id: n
-                    .call
-                    .as_ref()
-                    .map(|call| call.provider_id.clone())
-                    .unwrap_or_default(),
-                contract_id: n
-                    .call
-                    .as_ref()
-                    .map(|call| call.contract_id.clone())
-                    .unwrap_or_default(),
-            })
-            .collect();
+        let ops: Vec<OpMeta> = plan.nodes.iter().map(OpMeta::from).collect();
         let description = plan
             .nodes
             .get(plan.root_index as usize)

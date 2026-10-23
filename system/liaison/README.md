@@ -51,8 +51,15 @@ User
   `VoiceEvent` state, ASR, voiceprint, Pilot, and TTS progress.
 - `robonix/system/liaison/voice/finish`: ends microphone capture for an
   in-flight voice session and submits the transcript recognized so far.
+- `robonix/system/liaison/handsfree/set_enabled`: enables or disables the
+  robot-local wake-word interaction mode.
+- `robonix/system/liaison/handsfree/status`: reads the wake-word interaction
+  state.
+- `robonix/system/liaison/handsfree/events`: streams events from hands-free
+  voice turns.
 
-All three contracts are registered by the `liaison` provider id.
+All six contracts are registered by the `liaison` provider id, which also
+declares the shared lifecycle Driver contract.
 
 A voice turn normally ends on the ASR backend's own end-of-utterance
 detection. Continuous background noise can keep that from ever firing, which

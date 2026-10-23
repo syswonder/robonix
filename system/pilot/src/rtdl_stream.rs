@@ -5,6 +5,7 @@ use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
 use crate::planner::{
     self, CapabilityTargetMap, MetaPlanOp, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlEnvelope,
 };
+use crate::tasks::{self, TaskFields};
 use anyhow::{Result, bail, ensure};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -69,7 +70,9 @@ impl Partial {
 
 /// Strict prefix reader: EOF is incomplete; duplicate keys and malformed tokens are errors.
 struct Reader<'a> {
+    /// Buffered JSON prefix, which may end inside a value.
     text: &'a str,
+    /// Next byte to inspect within the prefix.
     pos: usize,
 }
 
@@ -221,28 +224,49 @@ impl Reader<'_> {
     }
 }
 
+/// One validated node ready to extend the contiguous execution prefix.
 struct Candidate {
+    /// Node metadata and any complete capability call.
     node: RtdlNode,
+    /// Previously discovered parent's arena index, absent for the root.
     parent: Option<usize>,
+    /// Whether this node's complete JSON object has arrived.
     closed: bool,
 }
 
 /// One model response, with a single immutable-identity arena and pending wire messages.
 pub(crate) struct RtdlIncrementalParser {
+    /// Model output retained for prefix validation and failure diagnostics.
     text: String,
+    /// Current catalog names and their executable provider/contract targets.
     targets: CapabilityTargetMap,
+    /// Shared source of plan ids, allocated only when a tree is admitted.
     sequence: Arc<AtomicU64>,
+    /// Contiguous validated arena with immutable node and call identities.
     pub(crate) plan: Plan,
+    /// Completed task fields received before the current RTDL prefix.
+    pub(crate) task_fields: TaskFields,
+    /// Accepted operators already closed on the incremental input.
     closed: Vec<bool>,
+    /// Newly admitted wire messages awaiting submission to Executor.
     pending: Vec<ExecuteStreamInput>,
+    /// Whether the structural scanner is inside a JSON string.
     in_string: bool,
+    /// Whether the next character belongs to a JSON escape sequence.
     escaped: bool,
+    /// Whether the complete outer reply object has been validated.
     complete: bool,
+    /// Validated reply consumed once by finish.
     envelope: Option<RtdlEnvelope>,
+    /// Whether an invalid prefix has made further input inadmissible.
     failed: bool,
+    /// Current JSON nesting depth, including opaque call arguments.
     scan_depth: usize,
+    /// Depth of an opaque container whose internals cannot release RTDL nodes.
     args_depth: Option<usize>,
+    /// Starting byte of the current string, used to recognize opaque keys.
     string_start: usize,
+    /// Whether the preceding string identifies an opaque value.
     args_key: bool,
 }
 
@@ -263,6 +287,7 @@ impl RtdlIncrementalParser {
                 round,
                 ..Default::default()
             },
+            task_fields: TaskFields::default(),
             closed: vec![],
             pending: vec![],
             in_string: false,
@@ -403,7 +428,8 @@ impl RtdlIncrementalParser {
         };
         for key in fields.keys() {
             ensure!(
-                ["content", "rtdl", "rtdl_description", "task_update"].contains(&key.as_str()),
+                ["content", "rtdl", "rtdl_description"].contains(&key.as_str())
+                    || tasks::REPLY_FIELDS.contains(&key.as_str()),
                 "unknown response field `{key}`"
             );
         }
@@ -412,30 +438,18 @@ impl RtdlIncrementalParser {
                 ensure!(value.string().is_some(), "{name} must be a string");
             }
         }
-        let mut task_update = None;
-        if let Some(update) = fields.get("task_update") {
-            match update {
-                Partial::Scalar(Value::Null) => {}
-                Partial::Object(members, _) => {
-                    for (key, value) in members {
-                        ensure!(
-                            ["goal", "success_criterion", "status"].contains(&key.as_str()),
-                            "unknown task_update field `{key}`"
-                        );
-                        ensure!(
-                            value.string().is_some(),
-                            "task_update.{key} must be a string"
-                        );
-                    }
-                    if let Some(value) = update.value() {
-                        task_update = Some(planner::parse_task_update(&value)?);
-                    }
-                }
-                _ => bail!("task_update must be null or an object"),
-            }
-        }
+        let task_values = tasks::REPLY_FIELDS
+            .iter()
+            .filter_map(|key| Some(((*key).to_string(), fields.get(*key)?.value()?)))
+            .collect();
+        self.task_fields = tasks::parse_task_fields(&task_values)?;
         if complete {
-            ensure!(fields.len() == 4, "response requires four fields");
+            ensure!(
+                ["content", "rtdl_description", "rtdl"]
+                    .iter()
+                    .all(|key| fields.contains_key(*key)),
+                "response requires content, rtdl_description and rtdl"
+            );
         }
         let Some(rtdl) = fields.get("rtdl") else {
             return Ok(());
@@ -453,11 +467,18 @@ impl RtdlIncrementalParser {
                     .into(),
                 rtdl_description: label.expect("validated description").into(),
                 rtdl: rtdl.value().expect("complete RTDL"),
-                task_update,
+                task_fields: self.task_fields.clone(),
             });
             self.complete = true;
         }
         let submit = candidates.iter().any(|c| c.node.node_kind == RTDL_DO);
+        if !complete
+            && !["message_updates", "rtdl_parent_task_id"]
+                .iter()
+                .all(|key| fields.get(*key).is_some_and(Partial::closed))
+        {
+            return Ok(());
+        }
         if candidates.is_empty() || (!submit && !complete) {
             return Ok(());
         }
@@ -562,11 +583,11 @@ impl RtdlIncrementalParser {
             ensure!(
                 ["op", "op_id", "description"].contains(&key.as_str())
                     || if op == "do" {
-                        ["cap", "args"].contains(&key.as_str())
+                        ["cap", "args", "children"].contains(&key.as_str())
                     } else {
                         key == "children"
                     },
-                "unexpected RTDL field `{key}`"
+                "unexpected field `{key}` in RTDL"
             );
         }
         let description = fields
@@ -582,6 +603,12 @@ impl RtdlIncrementalParser {
             if !closed {
                 return Ok(false);
             }
+            ensure!(
+                fields.get("children").is_none_or(
+                    |value| matches!(value, Partial::Array(items, true) if items.is_empty())
+                ),
+                "unexpected field `children` on a do node"
+            );
             out.push(Candidate {
                 node: self.parse_do_node(
                     fields,
@@ -640,7 +667,8 @@ impl RtdlIncrementalParser {
             .ok_or_else(|| anyhow::anyhow!("do.cap must be a string"))?;
         let args = fields
             .get("args")
-            .and_then(Partial::value)
+            .map(Partial::value)
+            .unwrap_or_else(|| Some(Value::Object(Map::new())))
             .filter(Value::is_object)
             .ok_or_else(|| anyhow::anyhow!("do.args must be an object"))?;
         let (provider_id, contract_id) = self
@@ -711,11 +739,11 @@ mod tests {
     #[test]
     fn finish_enforces_envelope_schema() {
         let valid = serde_json::json!({
-            "content": "done", "rtdl_description": "", "task_update": null,
+            "content": "done", "rtdl_description": "", "message_updates": [], "rtdl_parent_task_id": "T1", "task_updates": [],
             "rtdl": {"op": "sequence", "children": []}
         });
         let mut invalid = Vec::new();
-        for key in ["content", "rtdl_description", "rtdl", "task_update"] {
+        for key in ["content", "rtdl_description", "rtdl"] {
             let mut missing = valid.clone();
             missing.as_object_mut().unwrap().remove(key);
             invalid.push(missing);
@@ -726,22 +754,12 @@ mod tests {
             ("rtdl_description", serde_json::json!([])),
             ("rtdl", serde_json::json!(null)),
             ("rtdl", serde_json::json!([])),
-            ("task_update", serde_json::json!([])),
+            ("task_updates", serde_json::json!({})),
+            ("message_updates", serde_json::json!([{"message_id":"m1"}])),
+            ("rtdl_parent_task_id", serde_json::json!([])),
             (
-                "task_update",
-                serde_json::json!({"goal": "g", "status": "done"}),
-            ),
-            (
-                "task_update",
-                serde_json::json!({"goal": 1, "success_criterion": "c", "status": "done"}),
-            ),
-            (
-                "task_update",
-                serde_json::json!({"goal": "g", "success_criterion": "c", "status": "bad"}),
-            ),
-            (
-                "task_update",
-                serde_json::json!({"goal": "g", "success_criterion": "c", "status": "done", "extra": 1}),
+                "task_updates",
+                serde_json::json!([{"task_id":"T1","status":"bad"}]),
             ),
         ] {
             let mut wrong = valid.clone();
@@ -761,7 +779,7 @@ mod tests {
         let mut p = parser();
         p.push(&valid.to_string()).unwrap();
         let (envelope, meta_op) = p.finish().unwrap();
-        assert!(envelope.task_update.is_none());
+        assert!(envelope.task_fields.updates.is_empty());
         assert!(meta_op.is_none());
     }
 
@@ -777,7 +795,7 @@ mod tests {
         ] {
             let raw = serde_json::json!({
                 "content": "done", "rtdl_description": "root", "rtdl": rtdl,
-                "task_update": {"goal": "test", "success_criterion": "checked", "status": "done"}
+                "message_updates": [], "rtdl_parent_task_id": "T1", "task_updates": [{"task_id":"T1","goal": "test", "success_criterion": "checked", "status": "done"}]
             })
             .to_string();
             let mut p = parser();
@@ -790,12 +808,12 @@ mod tests {
             assert_eq!(envelope.rtdl_description, "root");
             assert_eq!(envelope.rtdl, rtdl);
             assert_eq!(
-                serde_json::to_value(&envelope.task_update).unwrap(),
-                serde_json::json!({
-                    "goal": "test",
-                    "success_criterion": "checked",
-                    "status": "done",
-                })
+                envelope.task_fields.updates[0].goal.as_deref(),
+                Some("test")
+            );
+            assert_eq!(
+                envelope.task_fields.updates[0].status.as_deref(),
+                Some("done")
             );
             assert!(meta_op.is_none());
             assert_eq!(p.plan.plan_id, format!("{}-1", *planner::RUN_TAG));
@@ -828,7 +846,7 @@ mod tests {
             let mut p = parser();
             p.push(
                 &serde_json::json!({
-                    "content": "", "rtdl_description": "control", "task_update": null, "rtdl": rtdl
+                    "content": "", "rtdl_description": "control", "message_updates": [], "rtdl_parent_task_id": "T1", "task_updates": [], "rtdl": rtdl
                 })
                 .to_string(),
             )
@@ -862,7 +880,7 @@ mod tests {
     #[test]
     fn finish_keeps_submitted_node_identities() {
         let mut p = parser();
-        p.push(r#"{"content":"work","rtdl_description":"root","task_update":null,"rtdl":{"op":"sequence","description":"root","children":[{"op":"do","cap":"run","args":{}}"#).unwrap();
+        p.push(r#"{"content":"work","rtdl_description":"root","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"op":"sequence","description":"root","children":[{"op":"do","cap":"run","args":{}}"#).unwrap();
         let prefix = p.plan.clone();
         assert_eq!(p.take_messages().len(), 3);
         p.push("]}}").unwrap();
@@ -883,7 +901,7 @@ mod tests {
     #[test]
     fn finish_does_not_release_calls_from_a_truncated_response() {
         let mut p = parser();
-        p.push(r#"{"content":"work","task_update":null,"rtdl":{"op":"do","cap":"run","args":{}},"rtdl_description":"late""#).unwrap();
+        p.push(r#"{"content":"work","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"op":"do","cap":"run","args":{}},"rtdl_description":"late""#).unwrap();
         let before = p.plan.clone();
         assert!(before.nodes.is_empty());
         assert!(p.take_messages().is_empty());
@@ -908,7 +926,7 @@ mod tests {
                 serde_json::json!({"op": "do", "cap": "run", "args": {}, "description": null}),
                 true,
             ),
-            (serde_json::json!({"op": "do", "cap": "run"}), false),
+            (serde_json::json!({"op": "do", "cap": "run"}), true),
             (serde_json::json!({"op": "do", "args": {}}), false),
             (
                 serde_json::json!({"op": "do", "cap": "missing", "args": {}}),
@@ -932,7 +950,7 @@ mod tests {
             (serde_json::json!({"op": "unknown"}), false),
         ] {
             let mut p = parser();
-            let raw = serde_json::json!({"content": "", "rtdl_description": "root", "task_update": null, "rtdl": rtdl}).to_string();
+            let raw = serde_json::json!({"content": "", "rtdl_description": "root", "message_updates": [], "rtdl_parent_task_id": "T1", "task_updates": [], "rtdl": rtdl}).to_string();
             let actual = p.push(&raw).and_then(|()| p.finish());
             assert_eq!(actual.is_ok(), valid, "{raw}: {actual:?}");
             if !valid {
@@ -953,7 +971,12 @@ mod tests {
                 let args: Value =
                     serde_json::from_str(&p.plan.nodes[0].call.as_ref().unwrap().args_json)
                         .unwrap();
-                assert_eq!(args, rtdl["args"]);
+                assert_eq!(
+                    args,
+                    rtdl.get("args")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}))
+                );
             }
         }
     }
@@ -989,7 +1012,7 @@ mod tests {
     /// Exercise every UTF-8 split and character deltas with nested args and escaped structural text.
     #[test]
     fn arbitrary_splits_preserve_unicode_and_tree_shape() {
-        let raw = r#"{"content":"你好","rtdl_description":"root","task_update":null,"rtdl":{"description":"root","op":"sequence","children":[{"op":"do","cap":"run","args":{"x":[{"v":"引号\"\\{},[]\u4e2d"}]}},{"op":"parallel","description":"p","children":[{"args":{},"cap":"run","op":"do"}]}]}}"#;
+        let raw = r#"{"content":"你好","rtdl_description":"root","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"description":"root","op":"sequence","children":[{"op":"do","cap":"run","args":{"x":[{"v":"引号\"\\{},[]\u4e2d"}]}},{"op":"parallel","description":"p","children":[{"args":{},"cap":"run","op":"do"}]}]}}"#;
         let check = |p: &RtdlIncrementalParser| {
             assert_nodes(
                 p,
@@ -1026,7 +1049,7 @@ mod tests {
     #[test]
     fn emits_prefix_before_response_completion() {
         let mut p = parser();
-        p.push(r#"{"rtdl":{"op":"sequence","description":"root","children":[{"op":"do","cap":"run","args":{}}"#).unwrap();
+        p.push(r#"{"message_updates":[],"rtdl_parent_task_id":"T1","rtdl":{"op":"sequence","description":"root","children":[{"op":"do","cap":"run","args":{}}"#).unwrap();
         assert_eq!(p.plan.nodes.len(), 2);
         assert_eq!(
             p.take_messages()
@@ -1043,10 +1066,32 @@ mod tests {
         assert_eq!(p.plan.nodes.len(), 2);
     }
 
+    #[test]
+    fn waits_for_task_ownership_before_releasing_a_tree() {
+        let mut p = parser();
+        p.push(r#"{"content":"work","rtdl_description":"root","rtdl":{"op":"do","cap":"run","args":{}},"message_updates":[{"message_id":"m2","parent_task_id":"new"}]"#).unwrap();
+        assert!(p.take_messages().is_empty());
+        p.push(r#", "rtdl_parent_task_id":"new","task_updates":["#)
+            .unwrap();
+        assert_eq!(p.take_messages().len(), 2);
+        assert_eq!(p.task_fields.task, Some(tasks::TaskRef::New));
+        assert_eq!(
+            p.task_fields.messages,
+            vec![("m2".into(), tasks::TaskRef::New)]
+        );
+        assert!(p.task_fields.updates.is_empty());
+        let prefix = p.plan.clone();
+        p.push(r#"{"task_id":"new","status":"done"}]}"#).unwrap();
+        let (envelope, _) = p.finish().unwrap();
+        assert_eq!(envelope.task_fields.updates[0].task, tasks::TaskRef::New);
+        assert_eq!(p.plan, prefix);
+        assert!(p.take_messages().is_empty());
+    }
+
     /// Closed descendants wait until later ancestor metadata and root fallback labels are known.
     #[test]
     fn late_ancestor_fields_and_root_label_are_cached() {
-        let raw = r#"{"rtdl":{"children":[{"args":{},"cap":"run","op":"do"}],"op":"sequence"},"rtdl_description":"late label","content":"","task_update":null}"#;
+        let raw = r#"{"rtdl":{"children":[{"args":{},"cap":"run","op":"do"}],"op":"sequence"},"rtdl_description":"late label","content":"","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[]}"#;
         let split = raw.find(",\"rtdl_description\"").unwrap();
         let mut p = parser();
         p.push(&raw[..split]).unwrap();
@@ -1065,7 +1110,7 @@ mod tests {
     /// Duplicate keys, unknown fields, and syntax errors cannot erase or resend a valid prefix.
     #[test]
     fn rejects_bad_tails_and_never_submits_unclosed_do() {
-        let prefix = r#"{"rtdl":{"op":"sequence","description":"root","children":[{"op":"do","cap":"run","args":{}}"#;
+        let prefix = r#"{"message_updates":[],"rtdl_parent_task_id":"T1","rtdl":{"op":"sequence","description":"root","children":[{"op":"do","cap":"run","args":{}}"#;
         for tail in [",]}}", "]},\"rtdl\":{}", "]},\"unknown\":1}"] {
             let mut p = parser();
             assert!(p.push(&format!("{prefix}{tail}")).is_err());
@@ -1112,7 +1157,7 @@ mod tests {
             args = serde_json::json!({"nested": args});
         }
         let raw = format!(
-            r#"{{"content":"","rtdl_description":"d","task_update":null,"rtdl":{{"op":"do","cap":"run","a\u0072gs":{args}}}}}"#
+            r#"{{"content":"","rtdl_description":"d","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{{"op":"do","cap":"run","a\u0072gs":{args}}}}}"#
         );
         let mut p = parser();
         for ch in raw.chars() {
@@ -1129,7 +1174,7 @@ mod tests {
     fn container_metadata_uses_root_description_fallback() {
         let array = serde_json::json!(vec![0; 4096]);
         let raw = format!(
-            r#"{{"content":"","rtdl_description":"label","task_update":null,"rtdl":{{"op":"do","op_id":{array},"description":{array},"cap":"run","args":{{}}}}}}"#
+            r#"{{"content":"","rtdl_description":"label","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{{"op":"do","op_id":{array},"description":{array},"cap":"run","args":{{}}}}}}"#
         );
         let mut p = parser();
         p.push(&raw).unwrap();
@@ -1144,7 +1189,7 @@ mod tests {
         let fields = [
             r#""content":"hi""#,
             r#""rtdl_description":"label""#,
-            r#""task_update":null"#,
+            r#""message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[]"#,
             r#""rtdl":{"children":[{"args":{},"cap":"run","op":"do"}],"op":"sequence"}"#,
         ];
         for a in 0..4 {
@@ -1198,7 +1243,7 @@ mod tests {
         let mut p = parser();
         assert!(
             p.push(&format!(
-                r#"{{"rtdl":{{"op":"sequence","description":"root","children":[{nodes}]}}}}"#
+                r#"{{"message_updates":[],"rtdl_parent_task_id":"T1","rtdl":{{"op":"sequence","description":"root","children":[{nodes}]}}}}"#
             ))
             .is_err()
         );

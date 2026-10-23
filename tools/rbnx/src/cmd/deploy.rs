@@ -1365,8 +1365,8 @@ pub async fn execute(
     }
 
     // soma owns primitive + skill bring-up (see
-    // docs/soma_two_stage_bringup.md). If the manifest declares ANY
-    // primitive or skill, we MUST start a soma — otherwise those
+    // docs/docs/architecture/deployment-and-startup.md). If the manifest
+    // declares ANY primitive or skill, we MUST start a soma — otherwise those
     // packages are silently never spawned (boot looks "OK" because rbnx
     // got through atlas/executor/pilot, but the robot stays dead).
     //

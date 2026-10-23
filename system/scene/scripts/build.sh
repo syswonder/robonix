@@ -342,6 +342,7 @@ DOCKER_BUILD_FLAGS=(
     --pull=false
     --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}"
     --build-arg "ROS_BASE_IMAGE=${ROS_BASE_IMAGE}"
+    --build-arg "GITHUB_PREFIX=${GH_MIRROR:+${GH_MIRROR%/}/}"
 )
 if [[ -n "$SCENE_BUILDKIT_SYNTAX" ]]; then
     DOCKER_BUILD_FLAGS+=(--build-arg "BUILDKIT_SYNTAX=${SCENE_BUILDKIT_SYNTAX}")
@@ -428,7 +429,6 @@ if [[ "$TARGET" == "x86-docker" && "${SCENE_PERCEPTION_BACKEND:-}" != "concept_g
     echo "[build] DualMap layer -> robonix-scene-dualmap"
     docker build "${DOCKER_BUILD_FLAGS[@]}" -f docker/Dockerfile.dualmap \
         --build-arg BASE_IMAGE="$IMG" \
-        --build-arg GITHUB_PREFIX="${GH_MIRROR:+${GH_MIRROR%/}/}" \
         --build-arg HF_ENDPOINT="$HF_MIRROR" \
         -t robonix-scene-dualmap docker/
 fi

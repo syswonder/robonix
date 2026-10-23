@@ -19,21 +19,34 @@ pub(crate) enum SubmissionInterrupt {
     Failed,
 }
 
+/// Admission context checked before each streamed node is submitted.
 pub(crate) struct SubmissionGuard<'a> {
+    /// Executor connection receiving this response's tree.
     pub client: &'a mut RobonixSystemExecutorExecuteStreamClient<Channel>,
+    /// Calls already running in other trees and unavailable for redispatch.
     pub forbidden: &'a HashSet<String>,
+    /// Execution changes that can invalidate a reply before submission.
     pub revision: &'a AtomicU64,
+    /// Execution revision observed when this planning request began.
     pub expected_revision: u64,
 }
 
+/// One submitted tree's input, observed output, and exact accepted node arena.
 #[derive(Default)]
 pub(crate) struct StreamExecution {
+    /// Open incremental input; dropped after sealing or requesting cancellation.
     input: Option<mpsc::Sender<ExecuteStreamInput>>,
+    /// Execution output retained for the session driver after generation ends.
     pub(crate) output: Option<Streaming<RtdlEvent>>,
+    /// Events received during generation and awaiting session processing.
     pub(crate) events: VecDeque<RtdlEvent>,
+    /// Only the nodes actually submitted to Executor, with their assigned ids.
     pub(crate) plan: Plan,
+    /// Operators already closed, indexed by their accepted arena position.
     closed: Vec<bool>,
+    /// Whether Executor has reported plan_complete.
     pub(crate) complete: bool,
+    /// Whether output was lost before terminal execution evidence arrived.
     pub(crate) transport_failed: bool,
 }
 
@@ -64,71 +77,64 @@ impl StreamExecution {
                     _ = std::future::ready(()) => break,
                 }
             }
-            self.send(vec![message], guard.client, guard.forbidden)
-                .await?;
+            self.send(message, guard.client, guard.forbidden).await?;
         }
         Ok(None)
     }
 
     /// Send accepted messages once and mirror only the actual submitted arena.
-    pub(crate) async fn send(
+    async fn send(
         &mut self,
-        messages: Vec<ExecuteStreamInput>,
+        message: ExecuteStreamInput,
         client: &mut RobonixSystemExecutorExecuteStreamClient<Channel>,
         forbidden: &HashSet<String>,
     ) -> Result<()> {
-        for message in messages {
-            if message.message_kind == EXECUTE_STREAM_START {
-                ensure!(self.input.is_none(), "stream already started");
-                let (tx, rx) = mpsc::channel(1024);
-                tx.send(message.clone()).await?;
-                let response = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    client.execute_stream(ReceiverStream::new(rx)),
-                )
-                .await??;
-                self.output = Some(response.into_inner());
-                self.input = Some(tx);
-                self.plan = Plan {
-                    plan_id: message.plan_id,
-                    session_id: message.session_id,
-                    round: message.round,
-                    ..Default::default()
-                };
-                continue;
+        if message.message_kind == EXECUTE_STREAM_START {
+            ensure!(self.input.is_none(), "stream already started");
+            let (tx, rx) = mpsc::channel(1024);
+            tx.send(message.clone()).await?;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.execute_stream(ReceiverStream::new(rx)),
+            )
+            .await??;
+            self.output = Some(response.into_inner());
+            self.input = Some(tx);
+            self.plan = Plan {
+                plan_id: message.plan_id,
+                session_id: message.session_id,
+                round: message.round,
+                ..Default::default()
+            };
+            return Ok(());
+        }
+        if message.message_kind == EXECUTE_STREAM_NODE {
+            let node = message.node.as_ref().expect("parser NODE");
+            if let Some(call) = &node.call {
+                ensure!(
+                    !forbidden.contains(&crate::planner::call_signature(call)),
+                    "capability call is already in flight"
+                );
             }
-            if message.message_kind == EXECUTE_STREAM_NODE {
-                let node = message.node.as_ref().expect("parser NODE");
-                if node.call.is_some() {
-                    let single = Plan {
-                        nodes: vec![node.clone()],
-                        ..Default::default()
-                    };
-                    ensure!(
-                        crate::planner::plan_call_signatures(&single).is_disjoint(forbidden),
-                        "capability call is already in flight"
-                    );
+        }
+        self.input
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("stream is closed"))?
+            .send(message.clone())
+            .await?;
+        match message.message_kind {
+            EXECUTE_STREAM_NODE => {
+                let node = message.node.expect("parser NODE");
+                if message.has_parent {
+                    self.plan.nodes[message.parent_index as usize]
+                        .children
+                        .push(message.node_index);
                 }
+                self.closed.push(node.node_kind == 2);
+                self.plan.nodes.push(node);
             }
-            self.input
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("stream is closed"))?
-                .send(message.clone())
-                .await?;
-            match message.message_kind {
-                EXECUTE_STREAM_NODE => {
-                    let node = message.node.expect("parser NODE");
-                    if message.has_parent {
-                        self.plan.nodes[message.parent_index as usize]
-                            .children
-                            .push(message.node_index);
-                    }
-                    self.closed.push(node.node_kind == 2);
-                    self.plan.nodes.push(node);
-                }
-                EXECUTE_STREAM_CLOSE => self.closed[message.node_index as usize] = true,
-                _ => {}
-            }
+            EXECUTE_STREAM_CLOSE => self.closed[message.node_index as usize] = true,
+            _ => {}
         }
         Ok(())
     }
@@ -243,9 +249,8 @@ impl StreamExecution {
                 robonix_scribe::warn!("[pilot/stream] cancellation drain timed out: {error}")
             }
         }
-        self.output.take();
-        if !self.complete {
-            self.transport_failed = true;
+        if self.complete || self.transport_failed {
+            self.output.take();
         }
         Ok(())
     }
@@ -257,7 +262,10 @@ mod tests {
     use crate::pb::contracts::robonix_system_executor_control_plan_server::{
         RobonixSystemExecutorControlPlan, RobonixSystemExecutorControlPlanServer,
     };
-    use crate::pb::executor::ControlPlanResponse;
+    use crate::pb::contracts::robonix_system_executor_execute_stream_server::{
+        RobonixSystemExecutorExecuteStream, RobonixSystemExecutorExecuteStreamServer,
+    };
+    use crate::pb::executor::{ControlPlanResponse, RtdlPlanComplete};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -267,6 +275,8 @@ mod tests {
         input: Arc<Mutex<mpsc::Receiver<ExecuteStreamInput>>>,
         /// Whether to simulate a failed cancellation RPC.
         reject: bool,
+        /// Whether cancellation has already finished all accepted work.
+        completed: bool,
     }
 
     #[tonic::async_trait]
@@ -288,7 +298,7 @@ mod tests {
             }
             Ok(tonic::Response::new(ControlPlanResponse {
                 success: true,
-                completed: true,
+                completed: self.completed,
                 ..Default::default()
             }))
         }
@@ -311,6 +321,7 @@ mod tests {
                     .add_service(RobonixSystemExecutorControlPlanServer::new(CancelControl {
                         input: Arc::clone(&input),
                         reject,
+                        completed: true,
                     }))
                     .serve_with_incoming(incoming),
             );
@@ -338,6 +349,102 @@ mod tests {
             ));
             server.abort();
         }
+    }
+
+    /// An accepted synchronous call that reports completion after the drain window.
+    struct DeferredExecution {
+        /// Releases the terminal event only after cancellation has returned.
+        finish: Arc<tokio::sync::Notify>,
+    }
+
+    #[tonic::async_trait]
+    impl RobonixSystemExecutorExecuteStream for DeferredExecution {
+        type ExecuteStreamStream = ReceiverStream<Result<RtdlEvent, tonic::Status>>;
+
+        async fn execute_stream(
+            &self,
+            _request: tonic::Request<Streaming<ExecuteStreamInput>>,
+        ) -> Result<tonic::Response<Self::ExecuteStreamStream>, tonic::Status> {
+            let (tx, rx) = mpsc::channel(1);
+            let finish = Arc::clone(&self.finish);
+            tokio::spawn(async move {
+                finish.notified().await;
+                let _ = tx
+                    .send(Ok(RtdlEvent {
+                        event_kind: 2,
+                        plan_complete: Some(RtdlPlanComplete {
+                            plan_id: "partial".into(),
+                            any_failed: false,
+                        }),
+                        ..Default::default()
+                    }))
+                    .await;
+            });
+            Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_drain_timeout_keeps_output_for_the_session() {
+        let (input, rx) = mpsc::channel(8);
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures_util::stream::unfold(listener, |listener| async {
+            let stream = listener.accept().await.map(|(stream, _)| stream);
+            Some((stream, listener))
+        });
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(RobonixSystemExecutorControlPlanServer::new(CancelControl {
+                    input: Arc::new(Mutex::new(rx)),
+                    reject: false,
+                    completed: false,
+                }))
+                .add_service(RobonixSystemExecutorExecuteStreamServer::new(
+                    DeferredExecution {
+                        finish: Arc::clone(&finish),
+                    },
+                ))
+                .serve_with_incoming(incoming),
+        );
+        let channel = Channel::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = RobonixSystemExecutorExecuteStreamClient::new(channel.clone());
+        let (_, request) = mpsc::channel(1);
+        let output = client
+            .execute_stream(ReceiverStream::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut live = StreamExecution {
+            input: Some(input),
+            output: Some(output),
+            plan: Plan {
+                plan_id: "partial".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        live.cancel(&mut RobonixSystemExecutorControlPlanClient::new(channel))
+            .await
+            .unwrap();
+
+        assert!(!live.complete);
+        assert!(!live.transport_failed);
+        assert!(live.output.is_some());
+        finish.notify_one();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), live.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.plan_complete.unwrap().plan_id, "partial");
+        server.abort();
     }
 
     /// A transport already removed during cleanup must report EOF to the forest driver.
