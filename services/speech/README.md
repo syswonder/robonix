@@ -10,6 +10,11 @@ Backends:
 - `custom`: load ASR/TTS backend classes from `module:Class` environment
   variables without changing Liaison or speech capability contracts.
 
+Local Edge TTS requires `edge-tts>=7.3.1` for the current upstream handshake.
+Rebuild Speech to update an existing package environment. If synthesis returns
+HTTP 403, check its installed version before retrying; older versions may use
+the rejected handshake. See the [upstream fix](https://github.com/rany2/edge-tts/pull/492).
+
 Tencent Cloud mode:
 
 1. Open the Tencent Cloud ASR console and activate Automatic Speech Recognition.
