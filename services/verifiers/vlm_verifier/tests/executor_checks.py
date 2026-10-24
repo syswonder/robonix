@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import shlex
 from unittest.mock import patch
 
 import grpc
@@ -29,7 +30,7 @@ async def ready(endpoint):
         await asyncio.wait_for(channel.channel_ready(), 10)
 
 
-async def check(entry, mcp_port, model):
+async def check(entry, mcp_port, model, overlap=False):
     """Assert one terminal result per node, original output, and fail-closed errors."""
     root = Path(__file__).resolve().parents[4]
     atlas_bin = os.environ.get("VLM_TEST_ATLAS_BIN", str(Path.home()/".cargo/bin/robonix-atlas"))
@@ -69,21 +70,24 @@ async def check(entry, mcp_port, model):
                             id=provider, state=pb.STATE_INACTIVE))
                         await atlas.SetLifecycleState(pb.SetLifecycleStateRequest(
                             id=provider, state=pb.STATE_ACTIVE))
-                    config = {"verification": [{
+                    config = {"verification": {"overlap": overlap, "rules": [{
                         "target_contract_id": "robonix/system/executor/builtin/run_command",
                         "target_provider_id": "executor",
                         "verifier_provider_id": "vlm_verifier",
                         "verifier_args": {"camera_provider_id": "wrist"},
-                    }]}
+                    }]}}
                     processes.append(subprocess.Popen([
                         executor_bin, "--atlas", atlas_endpoint, "--listen", executor_endpoint,
                         "--id", "executor", "--config-json", json.dumps(config),
-                    ], stdout=log, stderr=log))
+                    ], stdout=log, stderr=log, env=dict(os.environ, ROBONIX_WORKSPACE=work)))
                     await ready(executor_endpoint)
                     with patch.dict(os.environ, {"ROBONIX_ATLAS": atlas_endpoint}), patch.object(entry, "ATLAS", CameraDirectory()):
                         async with grpc.aio.insecure_channel(executor_endpoint) as channel:
                             stub = contracts.RobonixSystemExecutorExecuteStub(channel)
                             for mode in ("passed", "rejected", "malformed", "missing_camera"):
+                                target_marker = Path(work)/f"{mode}-target"
+                                successor_marker = Path(work)/f"{mode}-successor"
+                                model.wait_for_marker = str(successor_marker) if overlap else None
                                 model.verdict = (
                                     '{"passed":"true","detail":"invalid"}' if mode == "malformed"
                                     else {"passed": mode == "passed", "detail": "visual evidence"})
@@ -93,28 +97,43 @@ async def check(entry, mcp_port, model):
                                     await atlas.Unregister(pb.UnregisterRequest(id="wrist"))
                                 plan = pilot_pb2.Plan(
                                     plan_id=mode, session_id="vlm-smoke", root_index=0,
-                                    nodes=[pilot_pb2.RtdlNode(
+                                    nodes=[pilot_pb2.RtdlNode(node_kind=0, op_id="sequence", description="Verify before continuing", children=[1, 2]), pilot_pb2.RtdlNode(
                                         node_kind=2, op_id="pick", description="Pick up the red object",
                                         call=pilot_pb2.CapabilityCall(
                                             call_id=mode+":pick", provider_id="executor",
                                             contract_id="robonix/system/executor/builtin/run_command",
-                                            args_json=json.dumps({"command": "printf original-marker"}),
-                                        ))])
+                                            args_json=json.dumps({"command": "# Record target execution.\nprintf reached > " + shlex.quote(str(target_marker)) + "\n# Return the original output.\nprintf original-marker"}),
+                                        )), pilot_pb2.RtdlNode(node_kind=2, op_id="successor", description="Record successor",
+                                            call=pilot_pb2.CapabilityCall(call_id=mode+":successor", provider_id="executor",
+                                                contract_id="robonix/system/executor/builtin/write_file",
+                                                args_json=json.dumps({"path": str(successor_marker), "content": "reached"})))])
                                 terminal = []
+                                verifying = []
+                                calls_before = model.calls
                                 async for event in stub.Execute(plan, timeout=20):
                                     if event.HasField("node_state"):
                                         ns = event.node_state
-                                        if ns.state in (2, 3, 4):
+                                        if ns.op_id == "pick" and ns.state == 7:
+                                            verifying.append(ns)
+                                        if ns.op_id == "pick" and ns.state in (2, 3, 4):
                                             terminal.append(ns)
                                 assert len(terminal) == 1, terminal
                                 result = terminal[0].leaf_result
                                 assert result.success is (mode == "passed"), result
-                                assert "original-marker" in result.output, result
+                                assert target_marker.exists() is (mode != "missing_camera")
+                                assert bool(verifying) is (overlap and mode != "missing_camera")
+                                assert successor_marker.exists() is (mode == "passed" or (overlap and mode != "missing_camera"))
+                                assert model.calls - calls_before == (0 if mode == "missing_camera" else 1)
+                                if mode == "missing_camera":
+                                    assert not result.output, result
+                                else:
+                                    assert "original-marker" in result.output, result
                                 if mode == "rejected":
                                     assert result.error.startswith("result verification failed:"), result
                                 if mode in ("malformed", "missing_camera"):
                                     assert result.error.startswith("result verification unavailable:"), result
-                    print("PASS: real Atlas + Executor + VLM Verifier; pass/reject/unavailable, one terminal, original output")
+                                print(f"PASS: overlap={overlap} {mode}; target={target_marker.exists()} successor={successor_marker.exists()}")
+                    model.wait_for_marker = None
             except BaseException:
                 log.flush()
                 log.seek(0)
