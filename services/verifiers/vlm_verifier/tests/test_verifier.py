@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -28,16 +29,8 @@ class ParsingTests(unittest.TestCase):
         self.assertIn("do not require the complete gripper body", prompt)
         self.assertIn("without two identifiable opposing jaws is insufficient", prompt)
 
-    def test_vlm_context_explains_the_verification_target(self):
-        """Identify target-defining fields separately from supporting context."""
-        text = vlm.describe_context(envelope())
-        target_section, supporting_section = text.split("Supporting call context", 1)
-        for field in ("target_contract_id", "target_description", "target_args"):
-            self.assertIn(field, target_section)
-        for field in ("target_provider_id", "target_output"):
-            self.assertIn(field, supporting_section)
-        self.assertIn("never as visual proof", supporting_section)
-        self.assertIn(json.dumps(envelope()["target_args"]), text)
+    def test_vlm_context_contains_only_task_intent(self):
+        self.assertEqual(vlm.describe_context(envelope()), "Task: Pick up the red bottle")
 
     def test_context_json_or_string(self):
         for value in ({}, [], "original text", None):
@@ -222,6 +215,61 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
             await core.verify("call", json.dumps(envelope()), AsyncMock(return_value=b"x"),
                               AsyncMock(return_value={"passed": True, "detail": "x"}))
         self.assertEqual(budgets, [50, 5, 40])
+
+
+class ServicePhaseTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from vlm_verifier import service
+        self.service = service
+        self.cache = {}
+        self.config = vlm.VlmConfig("http://localhost/v1", "test-secret", "fake-vision")
+        self.capture = AsyncMock(return_value=b"image")
+        self.judge = AsyncMock(return_value={"passed": True, "detail": "visible"})
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        for target, name, value in ((service, "_config", self.config),
+                                    (service, "_before_images", self.cache),
+                                    (service, "CAMERAS", SimpleNamespace(capture=self.capture)),
+                                    (service.vlm, "judge", self.judge),
+                                    (service.camera, "save_verification_frame", Mock(return_value=Path("frame.jpg")))):
+            stack.enter_context(patch.object(target, name, value))
+
+    async def request(self, phase, provider="wrist"):
+        data = envelope(provider)
+        data["phase"] = phase
+        return await self.service.verify(self.service.Verify_Request(call_id="call", args_json=json.dumps(data)))
+
+    async def test_before_and_after_send_one_ordered_pair(self):
+        self.capture.side_effect = [b"before", b"after"]
+        self.assertTrue((await self.request("before")).passed)
+        self.judge.assert_not_called()
+        self.assertTrue((await self.request("after")).passed)
+        self.assertEqual(self.judge.call_args.args[2:], (b"before", b"after"))
+        self.judge.assert_awaited_once()
+        self.assertFalse(self.cache)
+
+    async def test_missing_duplicate_mismatched_and_consumed_before_fail_closed(self):
+        with self.assertRaises(ValueError):
+            await self.request(None)
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after")
+        await self.request("before")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("before")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after", "other")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after")
+        self.judge.assert_not_called()
+
+    async def test_pending_cache_is_bounded_and_expired_images_are_removed(self):
+        now = self.service.time.monotonic()
+        self.cache.update({str(i): (now, {}, b"image") for i in range(64)})
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("before")
+        self.cache.update({str(i): (float("-inf"), {}, b"image") for i in range(64)})
+        await self.request("before")
+        self.assertEqual(list(self.cache), ["call"])
 
 
 if __name__ == "__main__":
