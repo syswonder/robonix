@@ -13,3 +13,4 @@ start: bash scripts/start.sh
 
 capabilities:
   - name: robonix/service/verifier/verify
+    transport: mcp

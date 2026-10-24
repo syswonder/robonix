@@ -32,17 +32,31 @@ stop: docker rm -f "${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 
 capabilities:
   - name: robonix/system/scene/list_objects
+    transport: mcp
   - name: robonix/system/scene/get_robot_context
+    transport: mcp
   - name: robonix/system/scene/list_regions
+    transport: mcp
   - name: robonix/system/scene/goal_near
+    transport: mcp
   - name: robonix/system/scene/goal_region
+    transport: mcp
   # Deprecated alias of goal_region, kept for older callers.
   - name: robonix/system/scene/goal_room
+    transport: mcp
   - name: robonix/system/scene/find
+    transport: mcp
   - name: robonix/system/scene/get_scene_graph
+    transport: mcp
   - name: robonix/system/scene/get_object_context
+    transport: mcp
   - name: robonix/system/scene/list_relations
+    transport: mcp
   - name: robonix/system/scene/update_object_label
+    transport: mcp
   - name: robonix/system/scene/update_object_geometry
+    transport: mcp
   - name: robonix/system/scene/delete_object
+    transport: mcp
   - name: robonix/system/scene/flush_objects
+    transport: mcp

@@ -55,6 +55,12 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 Run `rbnx <cmd> --help` for full flags.
 
+Each package manifest capability declares `transport: mcp`, `grpc`, or `ros2`,
+or a non-empty list such as `transport: [grpc, ros2]`. `rbnx validate` rejects
+invalid or duplicate transports, repeated contracts, and transports incompatible
+with an available contract TOML's mode. An omitted transport warns and remains
+accepted while existing packages migrate; `manifestVersion` stays `1`.
+
 `rbnx install [--github REPO \| --path DIR]`, `rbnx list`, and `rbnx info NAME`
 manage system-installed packages. They are legacy commands, hidden from
 `rbnx --help`; deployment manifests with `rbnx build` and `rbnx boot` replace
@@ -66,6 +72,12 @@ them `pilot-hidden`, because they remain registered and callable by system
 consumers.
 
 ### What a boot leaves behind
+
+During boot, `rbnx` compares package manifest transport declarations with Atlas
+registrations, including Soma-managed primitives and skills. It warns once per
+mismatch; missing registrations are reported only while the package is ACTIVE.
+A manifest without transport declarations gets one warning and skips comparison.
+These diagnostics do not fail startup.
 
 `rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
 anything. Each package records what the manifest asked for and what that

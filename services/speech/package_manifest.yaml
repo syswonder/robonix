@@ -62,11 +62,20 @@ stop: |
 
 capabilities:
   - name: robonix/service/speech/driver
+    transport: grpc
   - name: robonix/service/speech/asr
+    transport: grpc
   - name: robonix/service/speech/asr_stream
+    transport: grpc
   - name: robonix/service/speech/wake_word
+    transport: grpc
   - name: robonix/service/speech/tts
+    transport: grpc
   - name: robonix/service/speech/tts_stream
+    transport: grpc
   - name: robonix/service/speech/dialog
+    transport: grpc
   - name: robonix/service/speech/list_speakers
+    transport: mcp
   - name: robonix/service/speech/speak
+    transport: mcp

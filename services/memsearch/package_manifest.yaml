@@ -30,6 +30,10 @@ stop: |
 
 capabilities:
   - name: robonix/service/memory/driver
+    transport: grpc
   - name: robonix/service/memory/save
+    transport: mcp
   - name: robonix/service/memory/search
+    transport: mcp
   - name: robonix/service/memory/compact
+    transport: mcp

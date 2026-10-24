@@ -30,5 +30,8 @@ start: |
 
 capabilities:
   - name: robonix/service/memory/remember
+    transport: mcp
   - name: robonix/service/memory/hybrid_search
+    transport: mcp
   - name: robonix/service/memory/promote
+    transport: mcp
