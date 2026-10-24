@@ -56,7 +56,12 @@ stop: |
 
 capabilities:
   - name: robonix/service/voiceprint/driver
+    transport: grpc
   - name: robonix/service/voiceprint/identify
+    transport: grpc
   - name: robonix/service/voiceprint/enroll
+    transport: grpc
   - name: robonix/service/voiceprint/list
+    transport: [grpc, mcp]
   - name: robonix/service/voiceprint/delete
+    transport: grpc

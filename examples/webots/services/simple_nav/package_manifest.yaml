@@ -28,5 +28,8 @@ stop: |
 
 capabilities:
   - name: robonix/service/navigation/navigate
+    transport: mcp
   - name: robonix/service/navigation/navigate/status
+    transport: mcp
   - name: robonix/service/navigation/navigate/cancel
+    transport: mcp

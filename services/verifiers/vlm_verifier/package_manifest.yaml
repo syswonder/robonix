@@ -11,3 +11,4 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 capabilities:
   - name: robonix/service/verifier/verify
+    transport: mcp
