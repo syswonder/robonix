@@ -38,6 +38,11 @@ tiago_camera = Primitive(id="tiago_camera", namespace="robonix/primitive/camera"
 state_lock = threading.Lock()
 intrinsics_lock = threading.Lock()
 latest_rgb_jpeg: bytes | None = None
+# When the latest RGB frame arrived (monotonic), and the topic it came from.
+latest_rgb_at = 0.0
+rgb_topic_name = ""
+# A snapshot older than this is re-read from the topic, never served stale.
+MAX_FRAME_AGE_S = 1.0
 latest_depth_jpeg: bytes | None = None
 extrinsics_pub = None  # rclpy publisher for the latched TF
 intrinsics_pub = None  # rclpy publisher for the latched CameraInfo
@@ -89,13 +94,34 @@ def ros_image_to_jpeg(msg) -> bytes:
 
 
 def on_rgb(msg):
-    global latest_rgb_jpeg
+    global latest_rgb_jpeg, latest_rgb_at
     try:
+        jpeg = ros_image_to_jpeg(msg)
         with state_lock:
-            latest_rgb_jpeg = ros_image_to_jpeg(msg)
+            latest_rgb_jpeg = jpeg
+            latest_rgb_at = time.monotonic()
         publish_intrinsics_if_needed("rgb")
     except Exception as e:
         print(f"[tiago_camera] RGB conversion error: {e}", flush=True)
+
+
+def fresh_rgb_jpeg(timeout_s: float) -> bytes:
+    """One RGB frame read now through a short-lived subscription."""
+    from robonix_api.ros import RosBackend
+    from sensor_msgs.msg import Image as RosImage  # type: ignore
+    got: list = []
+    ready = threading.Event()
+    backend = RosBackend.get()
+    sub = backend.create_subscription(
+        RosImage, rgb_topic_name, lambda m: (got.append(m), ready.set()), "best_effort")
+    try:
+        if not ready.wait(timeout_s):
+            raise RuntimeError(f"no RGB frame on {rgb_topic_name} within {timeout_s:.0f} s")
+    finally:
+        backend.node.destroy_subscription(sub)
+    jpeg = ros_image_to_jpeg(got[0])
+    print("[tiago_camera] snapshot re-read a fresh frame; the subscription had stopped", flush=True)
+    return jpeg
 
 
 def on_depth(msg):
@@ -196,9 +222,11 @@ def snapshot(msg: Empty) -> Image:
     Contract: robonix/primitive/camera/snapshot."""
     _ = msg
     with state_lock:
-        data = latest_rgb_jpeg
-    if data is None:
-        raise RuntimeError("no RGB image received yet")
+        data, age = latest_rgb_jpeg, time.monotonic() - latest_rgb_at
+    if data is None or age > MAX_FRAME_AGE_S:
+        # The long-lived subscription can stop delivering while the topic
+        # still publishes; read one frame afresh rather than return an old one.
+        data = fresh_rgb_jpeg(timeout_s=3.0)
     return jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame")
     )
@@ -325,6 +353,8 @@ def init(cfg):
         cfg, "intrinsics_publish_interval_s", "TIAGO_CAMERA_INTRINSICS_PUBLISH_INTERVAL_S", 0.5
     )
 
+    global rgb_topic_name
+    rgb_topic_name = rgb_topic
     # subscribe RGB + depth (we own both contracts; declare manually below)
     tiago_camera.create_subscription("robonix/primitive/camera/rgb",
                             topic=rgb_topic, msg_type="Image",
