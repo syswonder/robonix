@@ -48,58 +48,63 @@ const FAULT_ERROR: u32 = 2;
 /// consume their gRPC HealthState streams, aggregate into
 /// SomaHealthSnapshot, and publish them through Soma's snapshot service.
 pub async fn start_health_collector(
-    mut atlas: AtlasClient,
+    atlas: AtlasClient,
     body: Arc<SomaBody>,
     service: Arc<SomaService>,
 ) -> Result<()> {
     use robonix_atlas::pb as atlas_pb;
 
-    info!("[soma-health] discovering health primitives...");
-
-    // Discover providers implementing robonix/primitive/health/stream.
-    let capabilities = atlas
-        .flatten_capabilities(
-            "robonix/primitive/health/stream",
-            "",
-            atlas_pb::Transport::Grpc,
-        )
-        .await
-        .context("discover health primitives")?;
-
-    if capabilities.is_empty() {
-        info!("[soma-health] no health primitives found; using runtime-state fallback");
-        return Ok(());
-    }
-
-    // Deduplicate by provider_id.
-    let mut seen = std::collections::HashSet::new();
-    let providers: Vec<_> = capabilities
-        .into_iter()
-        .filter(|c| seen.insert(c.provider_id.clone()))
-        .collect();
-
-    info!(
-        "[soma-health] found {} health primitive(s)",
-        providers.len()
-    );
-
-    for cap in providers {
-        let provider_id = cap.provider_id.clone();
-        let body = Arc::clone(&body);
-        let service = Arc::clone(&service);
-        let mut atlas = atlas.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = consume_primitive_stream(&mut atlas, &provider_id, body, service).await
+    tokio::spawn(async move {
+        let mut atlas = atlas;
+        let mut discovered = std::collections::HashSet::new();
+        loop {
+            match atlas
+                .flatten_capabilities(
+                    "robonix/primitive/health/stream",
+                    "",
+                    atlas_pb::Transport::Grpc,
+                )
+                .await
             {
-                robonix_scribe::warn!(
-                    "[soma-health] primitive '{}' stream ended: {e:#}",
-                    provider_id
-                );
+                Ok(capabilities) => {
+                    for capability in capabilities {
+                        let provider_id = capability.provider_id;
+                        if !discovered.insert(provider_id.clone()) {
+                            continue;
+                        }
+                        info!("[soma-health] found health primitive '{provider_id}'");
+                        let mut provider_atlas = atlas.clone();
+                        let body = Arc::clone(&body);
+                        let service = Arc::clone(&service);
+                        tokio::spawn(async move {
+                            loop {
+                                if let Err(error) = consume_primitive_stream(
+                                    &mut provider_atlas,
+                                    &provider_id,
+                                    Arc::clone(&body),
+                                    Arc::clone(&service),
+                                )
+                                .await
+                                {
+                                    robonix_scribe::warn!(
+                                        "[soma-health] primitive '{}' stream ended: {error:#}; retrying",
+                                        provider_id
+                                    );
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        });
+                    }
+                }
+                Err(error) => {
+                    robonix_scribe::warn!(
+                        "[soma-health] health provider discovery failed: {error:#}; retrying"
+                    );
+                }
             }
-        });
-    }
-
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
     Ok(())
 }
 
@@ -236,7 +241,7 @@ fn health_state_to_snapshot(
     let metrics = described_metrics(body, &readings);
     let faults = described_faults(body, &readings, now_ns);
 
-    if (safety_state != SAFETY_NORMAL || !faults.is_empty())
+    if (safety_state != SAFETY_NORMAL || faults.iter().any(|fault| fault.active))
         && let Some(root) = components.first_mut()
     {
         root.health = HEALTH_ERROR;
@@ -290,7 +295,7 @@ fn observed_component(
     let error_code = control_code(readings, &status.id, "error");
     status.present = present;
     status.online = online;
-    status.health = if error_code != 0 || !present || !online {
+    status.health = if error_code != 0 || !present || online_control == Some(false) {
         HEALTH_ERROR
     } else if observed || online_control.is_some() {
         HEALTH_OK
@@ -304,14 +309,16 @@ fn observed_component(
     };
     if error_code != 0 {
         status.detail = format!("error_code=0x{error_code:X}");
-    } else if !present || !online {
+    } else if !present || online_control == Some(false) {
         status.detail = format!("present={present}; online={online}");
+    } else if !observed && online_control.is_none() {
+        status.detail = "no health reading in this frame".to_string();
     }
     status
 }
 
 /// Convert a Soma component type label into the stable wire enum value.
-fn component_kind(component_type: &str) -> u32 {
+pub(super) fn component_kind(component_type: &str) -> u32 {
     match component_type.trim().to_ascii_lowercase().as_str() {
         "body" | "mobile_base" => KIND_BODY,
         "arm" => KIND_ARM,
@@ -390,7 +397,7 @@ fn described_power_source(
     }
 }
 
-/// Convert non-actuator component readings into thresholdable Soma metrics.
+/// Preserve control observations and non-actuator telemetry, including absent controls.
 fn described_metrics(
     body: &SomaBody,
     readings: &HashMap<&str, &crate::pb::health::SensorReading>,
@@ -399,8 +406,24 @@ fn described_metrics(
     for component in &body.components {
         if matches!(
             component_kind(&component.component_type),
-            KIND_JOINT | KIND_WHEEL | KIND_BATTERY
+            KIND_JOINT | KIND_WHEEL
         ) {
+            for (suffix, name) in [
+                ("enabled", "torque_enabled"),
+                ("communication_ok", "communication_ok"),
+                ("error", "vendor_error_code"),
+            ] {
+                metrics.push(Metric {
+                    component_id: component.id.clone(),
+                    name: name.to_string(),
+                    value: child_reading(readings, &component.id, suffix)
+                        .and_then(|reading| observed_scalar(reading.current_a, "control")),
+                    source_key: format!("{}/{suffix}", component.id),
+                });
+            }
+            continue;
+        }
+        if component_kind(&component.component_type) == KIND_BATTERY {
             continue;
         }
         let Some(reading) = readings.get(component.id.as_str()).copied() else {
@@ -440,7 +463,7 @@ fn push_metric(metrics: &mut Vec<Metric>, component_id: &str, name: &str, value:
     }
 }
 
-/// Convert non-zero component error controls into active fault records.
+/// Report observed error controls, including explicit inactive clear records.
 fn described_faults(
     body: &SomaBody,
     readings: &HashMap<&str, &crate::pb::health::SensorReading>,
@@ -449,12 +472,14 @@ fn described_faults(
     body.components
         .iter()
         .filter_map(|component| {
-            let error_code = control_code(readings, &component.id, "error");
-            (error_code != 0).then(|| FaultState {
+            let reading = child_reading(readings, &component.id, "error")?;
+            let observed = observed_scalar(reading.current_a, "code")?;
+            let error_code = observed.value as u32;
+            Some(FaultState {
                 component_id: component.id.clone(),
                 fault_id: "device_fault".to_string(),
                 severity: FAULT_ERROR,
-                active: true,
+                active: error_code != 0,
                 clearable: true,
                 onset_ts_ns: now_ns,
                 vendor_code: error_code,
@@ -568,6 +593,51 @@ mod tests {
     use crate::pb::health::{HealthState, SensorReading};
     use std::path::PathBuf;
 
+    #[test]
+    /// Sparse frames retain absent controls and report explicit error recovery.
+    fn sparse_actuator_controls_are_not_inferred_from_temperature() {
+        let body = webots_body();
+        let component_id = "body/base/left_wheel";
+        let frame = |readings| HealthState {
+            voltage: -1.0,
+            remaining_s: -1,
+            readings,
+            ..Default::default()
+        };
+        let partial = health_state_to_snapshot(
+            &frame(vec![reading(component_id, 32.0, -1.0, -1.0)]),
+            &body,
+            1,
+        );
+        for name in ["torque_enabled", "communication_ok", "vendor_error_code"] {
+            assert!(
+                partial
+                    .metrics
+                    .iter()
+                    .find(|metric| metric.component_id == component_id && metric.name == name)
+                    .unwrap()
+                    .value
+                    .is_none()
+            );
+        }
+        let recovered = health_state_to_snapshot(
+            &frame(vec![
+                reading(component_id, 32.0, -1.0, -1.0),
+                reading(&format!("{component_id}/error"), -1.0, -1.0, 0.0),
+            ]),
+            &body,
+            2,
+        );
+        let clear = recovered
+            .faults
+            .iter()
+            .find(|fault| fault.component_id == component_id)
+            .unwrap();
+        assert!(!clear.active);
+        assert_eq!(clear.fault_id, "device_fault");
+        assert_eq!(recovered.components[0].health, HEALTH_OK);
+    }
+
     fn webots_body() -> SomaBody {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -637,7 +707,7 @@ mod tests {
                 .value,
             82.0
         );
-        assert!(snapshot.faults.is_empty());
+        assert!(snapshot.faults.iter().all(|fault| !fault.active));
         assert_eq!(
             snapshot.safety.as_ref().expect("safety").aggregate_state,
             SAFETY_NORMAL
@@ -650,6 +720,53 @@ mod tests {
                 && component.kind == KIND_WHEEL
                 && component.health == HEALTH_OK
         }));
+    }
+
+    #[test]
+    /// Missing readings do not certify a described component or create a fault.
+    fn missing_component_readings_are_unknown_not_an_immediate_fault() {
+        let state = HealthState {
+            voltage: -1.0,
+            charging: false,
+            remaining_s: -1,
+            readings: vec![reading("body", 36.0, -1.0, -1.0)],
+        };
+
+        let snapshot = health_state_to_snapshot(&state, &webots_body(), 1);
+        let camera = snapshot
+            .components
+            .iter()
+            .find(|component| component.id == "body/head_camera")
+            .expect("described camera");
+
+        assert_eq!(camera.health, HEALTH_UNKNOWN);
+        assert!(!camera.online);
+        assert!(camera.detail.contains("no health reading"));
+    }
+
+    #[test]
+    /// An explicit offline reading remains distinguishable from missing data.
+    fn explicit_offline_component_reading_is_a_fault() {
+        let state = HealthState {
+            voltage: -1.0,
+            charging: false,
+            remaining_s: -1,
+            readings: vec![
+                reading("body", 36.0, -1.0, -1.0),
+                reading("body/head_camera/online", -1.0, -1.0, 0.0),
+            ],
+        };
+
+        let snapshot = health_state_to_snapshot(&state, &webots_body(), 1);
+        let camera = snapshot
+            .components
+            .iter()
+            .find(|component| component.id == "body/head_camera")
+            .expect("described camera");
+
+        assert_eq!(camera.health, HEALTH_ERROR);
+        assert!(!camera.online);
+        assert!(camera.detail.contains("online=false"));
     }
 
     /// Existing suffix-only actuator producers remain valid with a component tree.
