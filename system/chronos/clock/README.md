@@ -4,10 +4,12 @@ In-process Linux wall and steady clock readings with uncertainty and clock gener
 
 Use `reference_time()`, `steady_time()`, `wall_time()` or `snapshot()` from `robonix_chronos_clock`. Reads return errors instead of fabricated timestamps. Steady timestamps are local to the host.
 
-For caller-supplied simulation time, select `ReferenceSourceKind::RosTime` and inject `VirtualReferenceTime` readings with `update_reference_time()`. Zero is valid; paused readings are retained without extrapolation. Backward time requires a new generation. This library does not subscribe to ROS.
+For caller-supplied simulation time, call `configure_reference()` with `ReferenceSourceKind::RosTime` before starting consumers, then inject `VirtualReferenceTime` readings with `update_reference_time()`. Zero is valid; paused timestamps are retained without extrapolation. Cached readings become unavailable after `max_status_age_ns` without another injection. This library does not subscribe to ROS.
 
-Injected readings respect `max_uncertainty_ns`. An unavailable reading does not erase the last available timestamp used to reject backward time in the same generation. Generation changes remain observable after a failed snapshot read.
+Injection applies the process-wide `max_uncertainty_ns` limit before updating the last available timestamp used to reject backward time in the same generation. Unavailable readings preserve that timestamp. Older generations are rejected, and backward time requires a newer generation. The first actual reading establishes the generation without reporting a change. Generation changes remain observable after a failed snapshot read.
+
+Linux reference sampling uses `CLOCK_BOOTTIME` to bound uncertainty and detect wall-clock steps, so suspend alone does not change generation. Snapshot steady time uses the enclosing `CLOCK_MONOTONIC` midpoint; `steady_time()` also uses MONOTONIC, which excludes suspend. Freshness is evaluated at sampling completion. Poisoned reference ownership is reported separately from OS clock-read errors.
 
 `wall_timestamp_ns()` returns a valid timestamp even when sampling uncertainty exceeds the quality limit. It writes a warning directly to stderr once until a healthy read occurs; no logger is required. `wall_time()` retains quality metadata for callers to inspect. Actual clock-read failures and out-of-range timestamps still return errors. `reference_timestamp_ns()` continues to reject unavailable reference time.
 
-Run `cargo test -p robonix-chronos-clock` on Linux with `cc` available for the isolated clock-failure fixture.
+Run `cargo test --locked -p robonix-chronos-clock -- --nocapture` and `cargo clippy -p robonix-chronos-clock --all-targets -- -D warnings`. Linux integration tests require `cc` for the isolated clock-failure fixture. macOS runs the deterministic unit tests; runtime clock reads require Linux.

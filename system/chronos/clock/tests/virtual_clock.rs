@@ -8,14 +8,8 @@ use robonix_chronos_clock::{
     ChronosConfigError, ReferenceConfig, ReferenceSourceKind, VirtualClock,
 };
 
-/// Select the Linux reference without service configuration or initialization.
 fn config() -> ReferenceConfig {
-    ReferenceConfig {
-        kind: ReferenceSourceKind::LinuxSystem,
-        max_uncertainty_ns: 1_000_000,
-        max_status_age_ns: 2_000_000_000,
-        max_clock_step_ns: 100_000_000,
-    }
+    ReferenceConfig::default()
 }
 
 #[test]
@@ -66,6 +60,7 @@ fn ros_reference_keeps_pause_zero_and_generation_separate_from_wall_time() {
     let first = clock.snapshot().unwrap();
     assert_eq!(first.reference.timestamp_ns, 0);
     assert!(first.reference.available);
+    assert!(!first.reference.generation_changed);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let paused = clock.snapshot().unwrap();
     assert_eq!(paused.reference.timestamp_ns, 0);
@@ -94,6 +89,7 @@ fn ros_reference_keeps_pause_zero_and_generation_separate_from_wall_time() {
         ..config()
     })
     .unwrap();
+    update_reference_time(reading(100, 11)).unwrap();
     let mut uncertain = reading(500, 11);
     uncertain.uncertainty_ns = 2;
     update_reference_time(uncertain).unwrap();
@@ -101,11 +97,59 @@ fn ros_reference_keeps_pause_zero_and_generation_separate_from_wall_time() {
     assert!(!status.available);
     assert!(status.reason.contains("uncertainty"));
     assert!(robonix_chronos_clock::reference_timestamp_ns().is_err());
-    update_reference_time(reading(500, 11)).unwrap();
+    update_reference_time(reading(250, 11)).unwrap();
     assert_eq!(
         robonix_chronos_clock::reference_timestamp_ns().unwrap(),
-        500
+        250
     );
+}
+
+#[test]
+fn ros_staleness_and_generation_order() {
+    let _ = support::run_case("ros_staleness_and_generation_order", || {
+        use robonix_chronos_clock::{
+            VirtualReferenceTime, configure_reference, reference_time, update_reference_time,
+        };
+        configure_reference(ReferenceConfig {
+            kind: ReferenceSourceKind::RosTime,
+            max_status_age_ns: 50_000_000,
+            ..config()
+        })
+        .unwrap();
+        assert!(!reference_time().unwrap().available);
+        let reading = |generation, available| VirtualReferenceTime {
+            timestamp_ns: 100,
+            generation,
+            generation_changed: false,
+            uncertainty_ns: 1,
+            available,
+            verified: false,
+            reason: "ROS time".into(),
+        };
+        update_reference_time(reading(11, true)).unwrap();
+        let first = reference_time().unwrap();
+        assert!(first.available);
+        assert!(!first.generation_changed);
+        for available in [true, false] {
+            assert!(update_reference_time(reading(10, available)).is_err());
+            assert_eq!(reference_time().unwrap(), first);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let stale = reference_time().unwrap();
+        assert!(!stale.available);
+        assert!(stale.reason.contains("stale"));
+        assert_eq!(stale.timestamp_ns, first.timestamp_ns);
+        assert_eq!(stale.generation, first.generation);
+        assert!(!stale.generation_changed);
+        update_reference_time(reading(11, true)).unwrap();
+        assert_eq!(reference_time().unwrap(), first);
+        update_reference_time(reading(12, false)).unwrap();
+        assert!(update_reference_time(reading(11, true)).is_err());
+        let unavailable = reference_time().unwrap();
+        assert_eq!(unavailable.generation, 12);
+        assert!(unavailable.generation_changed);
+        assert!(!unavailable.available);
+    });
 }
 
 #[test]

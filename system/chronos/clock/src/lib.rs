@@ -29,19 +29,25 @@ static WALL_QUALITY_WARNED: std::sync::atomic::AtomicBool =
 
 #[cfg(target_os = "linux")]
 struct ReferenceCache {
-    latest: Option<VirtualReferenceTime>,
+    latest: Option<(VirtualReferenceTime, u64)>,
     last_available: Option<(u64, i64)>,
+    max_uncertainty_ns: u64,
 }
 
 #[cfg(target_os = "linux")]
-static ROS_REFERENCE: std::sync::Mutex<ReferenceCache> = std::sync::Mutex::new(ReferenceCache {
-    latest: None,
-    last_available: None,
-});
+static ROS_REFERENCE: std::sync::LazyLock<std::sync::Mutex<ReferenceCache>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(ReferenceCache {
+            latest: None,
+            last_available: None,
+            max_uncertainty_ns: ReferenceConfig::default().max_uncertainty_ns,
+        })
+    });
 
 /// Select the process-local reference source before starting its consumers.
 #[cfg(target_os = "linux")]
 pub fn configure_reference(config: ReferenceConfig) -> std::io::Result<()> {
+    let max_uncertainty_ns = config.max_uncertainty_ns;
     let clock = VirtualClock::new(config).map_err(std::io::Error::other)?;
     let mut selected = CLOCK
         .lock()
@@ -51,13 +57,14 @@ pub fn configure_reference(config: ReferenceConfig) -> std::io::Result<()> {
         .map_err(|_| std::io::Error::other("Chronos reference lock poisoned"))?;
     cache.latest = None;
     cache.last_available = None;
+    cache.max_uncertainty_ns = max_uncertainty_ns;
     *selected = Some(clock);
     Ok(())
 }
 
 /// Install a received reference reading without extrapolating from real elapsed time.
 #[cfg(target_os = "linux")]
-pub fn update_reference_time(reference: VirtualReferenceTime) -> std::io::Result<()> {
+pub fn update_reference_time(mut reference: VirtualReferenceTime) -> std::io::Result<()> {
     if reference.generation == 0 || reference.timestamp_ns < 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -67,6 +74,20 @@ pub fn update_reference_time(reference: VirtualReferenceTime) -> std::io::Result
     let mut cache = ROS_REFERENCE
         .lock()
         .map_err(|_| std::io::Error::other("Chronos reference lock poisoned"))?;
+    if cache
+        .latest
+        .as_ref()
+        .is_some_and(|(latest, _)| reference.generation < latest.generation)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "reference generation regressed",
+        ));
+    }
+    if reference.available && reference.uncertainty_ns > cache.max_uncertainty_ns {
+        reference.available = false;
+        reference.reason = "reference clock uncertainty exceeds configured limit".into();
+    }
     if reference.available
         && cache
             .last_available
@@ -79,32 +100,22 @@ pub fn update_reference_time(reference: VirtualReferenceTime) -> std::io::Result
             "reference time regressed without a generation change",
         ));
     }
+    let received_ns = reference::read_linux_monotonic_ns().map_err(std::io::Error::other)?;
     // Unavailable readings must not erase the last usable timestamp in a generation.
     if reference.available {
         cache.last_available = Some((reference.generation, reference.timestamp_ns));
     }
-    cache.latest = Some(reference);
+    cache.latest = Some((reference, received_ns));
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn ros_reference_time() -> Result<VirtualReferenceTime, ReferenceError> {
+fn ros_reference_time() -> Result<Option<(VirtualReferenceTime, u64)>, ReferenceError> {
     Ok(ROS_REFERENCE
         .lock()
-        .map_err(|_| ReferenceError::ClockRead {
-            errno: libc::EOWNERDEAD,
-        })?
+        .map_err(|_| ReferenceError::Poisoned)?
         .latest
-        .clone()
-        .unwrap_or(VirtualReferenceTime {
-            timestamp_ns: 0,
-            generation: 1,
-            generation_changed: false,
-            uncertainty_ns: 0,
-            available: false,
-            verified: false,
-            reason: "/clock has not supplied reference time".into(),
-        }))
+        .clone())
 }
 
 /// Read Linux wall time independently of the selected robot reference source.
@@ -214,5 +225,22 @@ pub fn steady_time() -> std::io::Result<VirtualSteadyTime> {
             std::io::ErrorKind::Unsupported,
             "Chronos clock reads require Linux",
         ))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn poisoned_reference_lock_is_not_a_clock_read_error() {
+        let result = std::thread::spawn(|| {
+            let _cache = super::ROS_REFERENCE.lock().unwrap();
+            panic!("poison the reference cache");
+        })
+        .join();
+        assert!(result.is_err());
+        assert_eq!(
+            super::ros_reference_time().unwrap_err(),
+            super::ReferenceError::Poisoned
+        );
     }
 }

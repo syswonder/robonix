@@ -2,7 +2,10 @@
 
 use thiserror::Error;
 
-use crate::config::{ChronosConfigError, ReferenceConfig};
+#[cfg(target_os = "linux")]
+use crate::config::ChronosConfigError;
+#[cfg(any(target_os = "linux", test))]
+use crate::config::ReferenceConfig;
 
 /// One bounded read of the selected reference clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,25 +33,31 @@ pub struct ReferenceStatus {
 pub enum ReferenceError {
     #[error("Linux clock read failed with errno {errno}")]
     ClockRead { errno: i32 },
+    #[error("Chronos reference lock poisoned")]
+    Poisoned,
     #[error("monotonic clock moved backward during reference sampling")]
     MonotonicRegression,
     #[error("reference clock arithmetic overflow")]
     Overflow,
 }
 
+#[cfg(any(target_os = "linux", test))]
 trait ClockReader {
     fn monotonic_ns(&mut self) -> Result<u64, ReferenceError>;
+    fn boottime_ns(&mut self) -> Result<u64, ReferenceError>;
     fn realtime_ns(&mut self) -> Result<i64, ReferenceError>;
     fn realtime_resolution_ns(&mut self) -> Result<u64, ReferenceError>;
 }
 
-#[derive(Debug, Clone)]
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug)]
 struct ObservedSample {
     reference_timestamp_ns: i64,
-    steady_received_ns: u64,
+    boottime_received_ns: u64,
     uncertainty_ns: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 struct ReferenceObserver<R> {
     config: ReferenceConfig,
@@ -57,8 +66,8 @@ struct ReferenceObserver<R> {
     last_sample: Option<ObservedSample>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl<R: ClockReader> ReferenceObserver<R> {
-    /// Construct an observer at the first reference generation.
     fn new(config: ReferenceConfig, reader: R) -> Self {
         Self {
             config,
@@ -68,21 +77,26 @@ impl<R: ClockReader> ReferenceObserver<R> {
         }
     }
 
-    /// Bracket one realtime read with monotonic reads and evaluate discontinuity.
-    fn sample(&mut self) -> Result<ReferenceSample, ReferenceError> {
+    fn sample(&mut self) -> Result<(ReferenceSample, ReferenceStatus), ReferenceError> {
         let steady_before = self.reader.monotonic_ns()?;
+        let boot_before = self.reader.boottime_ns()?;
         let reference_timestamp_ns = self.reader.realtime_ns()?;
+        let boot_after = self.reader.boottime_ns()?;
         let steady_after = self.reader.monotonic_ns()?;
-        if steady_after < steady_before {
+        let resolution = self.reader.realtime_resolution_ns()?;
+        let now = self.reader.boottime_ns()?;
+        if steady_after < steady_before || boot_after < boot_before || now < boot_after {
             return Err(ReferenceError::MonotonicRegression);
         }
-        let span = steady_after - steady_before;
-        let steady_received_ns = steady_before + span / 2;
-        let bracket_uncertainty = span / 2 + span % 2;
-        let resolution = self.reader.realtime_resolution_ns()?;
+        let span = boot_after - boot_before;
+        let boottime_received_ns = boot_before + span / 2;
+        let steady_received_ns = steady_before + (steady_after - steady_before) / 2;
+        // Both the reference comparison and the exposed steady pair need a bound.
+        let bracket_span = span.max(steady_after - steady_before);
+        let bracket_uncertainty = bracket_span / 2 + bracket_span % 2;
         let uncertainty_ns = bracket_uncertainty.saturating_add(resolution);
         let generation_changed =
-            self.reference_changed(reference_timestamp_ns, steady_received_ns, uncertainty_ns)?;
+            self.reference_changed(reference_timestamp_ns, boottime_received_ns, uncertainty_ns)?;
         if generation_changed {
             self.generation = self
                 .generation
@@ -91,20 +105,20 @@ impl<R: ClockReader> ReferenceObserver<R> {
         }
         self.last_sample = Some(ObservedSample {
             reference_timestamp_ns,
-            steady_received_ns,
+            boottime_received_ns,
             uncertainty_ns,
         });
-        Ok(ReferenceSample {
+        let sample = ReferenceSample {
             reference_timestamp_ns,
             steady_received_ns,
             uncertainty_ns,
             generation: self.generation,
             generation_changed,
-        })
+        };
+        Ok((sample, self.status_at(now)?))
     }
 
-    /// Return status at a supplied monotonic time for deterministic evaluation.
-    fn status_at(&self, now_steady_ns: u64) -> Result<ReferenceStatus, ReferenceError> {
+    fn status_at(&self, now_boottime_ns: u64) -> Result<ReferenceStatus, ReferenceError> {
         let Some(sample) = self.last_sample.as_ref() else {
             return Ok(ReferenceStatus {
                 generation: self.generation,
@@ -115,8 +129,8 @@ impl<R: ClockReader> ReferenceObserver<R> {
                 reason: "no reference clock sample".to_string(),
             });
         };
-        let age = now_steady_ns
-            .checked_sub(sample.steady_received_ns)
+        let age = now_boottime_ns
+            .checked_sub(sample.boottime_received_ns)
             .ok_or(ReferenceError::MonotonicRegression)?;
         let fresh = age <= self.config.max_status_age_ns;
         let precise = sample.uncertainty_ns <= self.config.max_uncertainty_ns;
@@ -141,18 +155,18 @@ impl<R: ClockReader> ReferenceObserver<R> {
     fn reference_changed(
         &self,
         reference_timestamp_ns: i64,
-        steady_received_ns: u64,
+        boottime_received_ns: u64,
         uncertainty_ns: u64,
     ) -> Result<bool, ReferenceError> {
         let Some(previous) = self.last_sample.as_ref() else {
             return Ok(false);
         };
-        let steady_delta = steady_received_ns
-            .checked_sub(previous.steady_received_ns)
+        let boot_delta = boottime_received_ns
+            .checked_sub(previous.boottime_received_ns)
             .ok_or(ReferenceError::MonotonicRegression)?;
         let reference_delta =
             i128::from(reference_timestamp_ns) - i128::from(previous.reference_timestamp_ns);
-        let deviation = (reference_delta - i128::from(steady_delta)).abs();
+        let deviation = (reference_delta - i128::from(boot_delta)).abs();
         let step_limit = i128::from(self.config.max_clock_step_ns)
             + i128::from(previous.uncertainty_ns)
             + i128::from(uncertainty_ns);
@@ -170,6 +184,11 @@ impl ClockReader for LinuxClockReader {
         read_linux_monotonic_ns()
     }
 
+    fn boottime_ns(&mut self) -> Result<u64, ReferenceError> {
+        let value = read_clock_ns(libc::CLOCK_BOOTTIME)?;
+        u64::try_from(value).map_err(|_| ReferenceError::Overflow)
+    }
+
     fn realtime_ns(&mut self) -> Result<i64, ReferenceError> {
         let value = read_clock_ns(libc::CLOCK_REALTIME)?;
         i64::try_from(value).map_err(|_| ReferenceError::Overflow)
@@ -181,7 +200,7 @@ impl ClockReader for LinuxClockReader {
     }
 }
 
-/// Read-only observer for Linux `CLOCK_REALTIME`, bounded by `CLOCK_MONOTONIC`.
+/// Read-only observer for Linux `CLOCK_REALTIME`, bounded by `CLOCK_BOOTTIME`.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct LinuxSystemReference {
@@ -200,24 +219,19 @@ impl LinuxSystemReference {
 
     /// Read one bounded Linux system-time sample.
     pub fn sample(&mut self) -> Result<ReferenceSample, ReferenceError> {
-        self.observer.sample()
+        self.observer.sample().map(|(sample, _)| sample)
     }
 
-    /// Sample reference time and evaluate quality at its monotonic midpoint.
-    ///
-    /// Using the paired midpoint keeps the returned status deterministic for
-    /// this observation and avoids adding a second status-age clock read.
+    /// Evaluate freshness at completion, including time spent reading resolution.
     pub fn sample_with_status(
         &mut self,
     ) -> Result<(ReferenceSample, ReferenceStatus), ReferenceError> {
-        let sample = self.observer.sample()?;
-        let status = self.observer.status_at(sample.steady_received_ns)?;
-        Ok((sample, status))
+        self.observer.sample()
     }
 
-    /// Evaluate freshness and quality using the current Linux monotonic time.
+    /// Evaluate freshness and quality including time spent suspended.
     pub fn status(&mut self) -> Result<ReferenceStatus, ReferenceError> {
-        let now = self.observer.reader.monotonic_ns()?;
+        let now = self.observer.reader.boottime_ns()?;
         self.observer.status_at(now)
     }
 }
@@ -282,6 +296,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeClockReader {
         monotonic: VecDeque<u64>,
+        boottime: VecDeque<u64>,
         realtime: VecDeque<i64>,
         resolution_ns: u64,
     }
@@ -289,6 +304,10 @@ mod tests {
     impl ClockReader for FakeClockReader {
         fn monotonic_ns(&mut self) -> Result<u64, ReferenceError> {
             self.monotonic.pop_front().ok_or(ReferenceError::Overflow)
+        }
+
+        fn boottime_ns(&mut self) -> Result<u64, ReferenceError> {
+            self.boottime.pop_front().ok_or(ReferenceError::Overflow)
         }
 
         fn realtime_ns(&mut self) -> Result<i64, ReferenceError> {
@@ -311,33 +330,36 @@ mod tests {
     }
 
     #[test]
-    /// Monotonic bracketing contributes half its span plus clock resolution.
+    /// BOOTTIME bounds uncertainty independently of the MONOTONIC midpoint.
     fn brackets_linux_system_sample() {
         let reader = FakeClockReader {
             monotonic: VecDeque::from([100, 110]),
+            boottime: VecDeque::from([1_100, 1_110, 1_110]),
             realtime: VecDeque::from([1_000]),
             resolution_ns: 4,
         };
         let mut observer = ReferenceObserver::new(config(), reader);
-        let sample = observer.sample().unwrap();
+        let (sample, status) = observer.sample().unwrap();
         assert_eq!(sample.reference_timestamp_ns, 1_000);
         assert_eq!(sample.steady_received_ns, 105);
         assert_eq!(sample.uncertainty_ns, 9);
         assert_eq!(sample.generation, 1);
         assert!(!sample.generation_changed);
+        assert_eq!(status.last_sample_age_ns, Some(5));
     }
 
     #[test]
-    /// A realtime step relative to monotonic elapsed time starts a generation.
+    /// A realtime step relative to BOOTTIME starts a generation.
     fn clock_step_changes_reference_generation() {
         let reader = FakeClockReader {
             monotonic: VecDeque::from([100, 100, 200, 200]),
+            boottime: VecDeque::from([100, 100, 100, 200, 200, 200]),
             realtime: VecDeque::from([1_000, 2_000]),
             resolution_ns: 1,
         };
         let mut observer = ReferenceObserver::new(config(), reader);
         observer.sample().unwrap();
-        let stepped = observer.sample().unwrap();
+        let (stepped, _) = observer.sample().unwrap();
         assert_eq!(stepped.generation, 2);
         assert!(stepped.generation_changed);
     }
@@ -351,12 +373,20 @@ mod tests {
         ] {
             let reader = FakeClockReader {
                 monotonic: VecDeque::from(monotonic),
+                boottime: VecDeque::from([
+                    monotonic[0],
+                    monotonic[1],
+                    monotonic[1],
+                    monotonic[2],
+                    monotonic[3],
+                    monotonic[3],
+                ]),
                 realtime: VecDeque::from(realtime),
                 resolution_ns: 1,
             };
             let mut observer = ReferenceObserver::new(config(), reader);
             observer.sample().unwrap();
-            let current = observer.sample().unwrap();
+            let (current, _) = observer.sample().unwrap();
             assert_eq!(current.generation, 1);
             assert!(!current.generation_changed);
         }
@@ -368,12 +398,13 @@ mod tests {
         for second_reference in [1_400, 1_001] {
             let reader = FakeClockReader {
                 monotonic: VecDeque::from([0, 0, 100, 300]),
+                boottime: VecDeque::from([0, 0, 0, 100, 300, 300]),
                 realtime: VecDeque::from([1_000, second_reference]),
                 resolution_ns: 1,
             };
             let mut observer = ReferenceObserver::new(config(), reader);
             observer.sample().unwrap();
-            assert!(observer.sample().unwrap().generation_changed);
+            assert!(observer.sample().unwrap().0.generation_changed);
         }
     }
 
@@ -386,12 +417,20 @@ mod tests {
         ] {
             let reader = FakeClockReader {
                 monotonic: VecDeque::from(monotonic),
+                boottime: VecDeque::from([
+                    monotonic[0],
+                    monotonic[1],
+                    monotonic[1],
+                    monotonic[2],
+                    monotonic[3],
+                    monotonic[3],
+                ]),
                 realtime: VecDeque::from(realtime),
                 resolution_ns: 1,
             };
             let mut observer = ReferenceObserver::new(config(), reader);
             observer.sample().unwrap();
-            let stepped = observer.sample().unwrap();
+            let (stepped, _) = observer.sample().unwrap();
             assert_eq!(stepped.generation, 2);
             assert!(stepped.generation_changed);
         }
@@ -402,6 +441,7 @@ mod tests {
     fn status_reports_unverified_and_stale_reference() {
         let reader = FakeClockReader {
             monotonic: VecDeque::from([100, 100]),
+            boottime: VecDeque::from([100, 100, 100]),
             realtime: VecDeque::from([1_000]),
             resolution_ns: 1,
         };
@@ -414,5 +454,103 @@ mod tests {
         let stale = observer.status_at(201).unwrap();
         assert!(!stale.available);
         assert!(stale.reason.contains("stale"));
+    }
+
+    #[test]
+    fn sampling_completion_can_already_be_stale() {
+        let reader = FakeClockReader {
+            monotonic: VecDeque::from([100, 110]),
+            boottime: VecDeque::from([100, 110, 206]),
+            realtime: VecDeque::from([1_000]),
+            resolution_ns: 1,
+        };
+        let mut observer = ReferenceObserver::new(config(), reader);
+        let (_, status) = observer.sample().unwrap();
+        assert_eq!(status.last_sample_age_ns, Some(101));
+        assert!(!status.available);
+        assert!(status.reason.contains("stale"));
+    }
+
+    #[test]
+    fn outer_steady_bracket_stalls_are_included_in_uncertainty() {
+        let reader = FakeClockReader {
+            monotonic: VecDeque::from([0, 100_000_000]),
+            boottime: VecDeque::from([100_000_000, 100_000_000, 100_000_000]),
+            realtime: VecDeque::from([1_000_000_000]),
+            resolution_ns: 1,
+        };
+        let mut observer = ReferenceObserver::new(ReferenceConfig::default(), reader);
+        let (sample, status) = observer.sample().unwrap();
+        assert_eq!(sample.steady_received_ns, 50_000_000);
+        assert_eq!(sample.uncertainty_ns, 50_000_001);
+        assert!(!status.available);
+    }
+
+    #[test]
+    fn suspend_preserves_generation_but_does_not_hide_a_step() {
+        for step in [0_i64, 5_000_000_000, -2_000_000_000] {
+            let reader = FakeClockReader {
+                monotonic: VecDeque::from([0, 0, 100, 100, 200, 200]),
+                boottime: VecDeque::from([
+                    0,
+                    0,
+                    0,
+                    30_000_000_100,
+                    30_000_000_100,
+                    30_000_000_100,
+                    30_000_000_200,
+                    30_000_000_200,
+                    30_000_000_200,
+                ]),
+                realtime: VecDeque::from([
+                    10_000_000_000,
+                    40_000_000_100 + step,
+                    40_000_000_200 + step,
+                ]),
+                resolution_ns: 1,
+            };
+            let mut observer = ReferenceObserver::new(config(), reader);
+            observer.sample().unwrap();
+            let (resumed, _) = observer.sample().unwrap();
+            assert_eq!(resumed.generation_changed, step != 0);
+            assert_eq!(resumed.steady_received_ns, 100);
+            let (next, _) = observer.sample().unwrap();
+            assert_eq!(next.generation, if step == 0 { 1 } else { 2 });
+            assert!(!next.generation_changed);
+        }
+    }
+
+    #[test]
+    fn completion_read_failure_preserves_generation_change() {
+        let reader = FakeClockReader {
+            monotonic: VecDeque::from([0, 0, 100, 100, 200, 200]),
+            boottime: VecDeque::from([0, 0, 0, 100, 100]),
+            realtime: VecDeque::from([1_000, 2_000, 2_100]),
+            resolution_ns: 1,
+        };
+        let mut observer = ReferenceObserver::new(config(), reader);
+        observer.sample().unwrap();
+        assert!(observer.sample().is_err());
+        observer.reader.boottime = VecDeque::from([200, 200, 200]);
+        let (sample, _) = observer.sample().unwrap();
+        assert_eq!(sample.generation, 2);
+        assert!(sample.generation_changed);
+    }
+
+    #[test]
+    fn shared_frequency_adjustments_preserve_generation_at_long_intervals() {
+        for seconds in [1, 1_800] {
+            let elapsed = seconds * 1_000_000_000_u64;
+            let adjusted = elapsed + elapsed / 2_000;
+            let reader = FakeClockReader {
+                monotonic: VecDeque::from([0, 0, adjusted, adjusted]),
+                boottime: VecDeque::from([0, 0, 0, adjusted, adjusted, adjusted]),
+                realtime: VecDeque::from([1_000_000_000, 1_000_000_000 + adjusted as i64]),
+                resolution_ns: 1,
+            };
+            let mut observer = ReferenceObserver::new(ReferenceConfig::default(), reader);
+            observer.sample().unwrap();
+            assert!(!observer.sample().unwrap().0.generation_changed);
+        }
     }
 }

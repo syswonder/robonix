@@ -37,6 +37,7 @@ pub struct VirtualClock {
     reference: Option<LinuxSystemReference>,
     generation: Option<u64>,
     max_uncertainty_ns: u64,
+    max_status_age_ns: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -45,6 +46,7 @@ impl VirtualClock {
     pub fn new(config: ReferenceConfig) -> Result<Self, ChronosConfigError> {
         config.validate()?;
         let max_uncertainty_ns = config.max_uncertainty_ns;
+        let max_status_age_ns = config.max_status_age_ns;
         let reference = match config.kind {
             ReferenceSourceKind::LinuxSystem => Some(LinuxSystemReference::new(config)?),
             ReferenceSourceKind::RosTime => None,
@@ -53,6 +55,7 @@ impl VirtualClock {
             reference,
             generation: None,
             max_uncertainty_ns,
+            max_status_age_ns,
         })
     }
 
@@ -64,8 +67,30 @@ impl VirtualClock {
     /// itself cannot be completed.
     pub fn snapshot(&mut self) -> Result<VirtualClockSnapshot, ReferenceError> {
         let Some(reference) = &mut self.reference else {
-            let mut reference = crate::ros_reference_time()?;
+            let cached = crate::ros_reference_time()?;
             let steady = self.steady_time()?;
+            let Some((mut reference, received_ns)) = cached else {
+                return Ok(VirtualClockSnapshot {
+                    reference: VirtualReferenceTime {
+                        timestamp_ns: 0,
+                        generation: 1,
+                        generation_changed: false,
+                        uncertainty_ns: 0,
+                        available: false,
+                        verified: false,
+                        reason: "/clock has not supplied reference time".into(),
+                    },
+                    steady,
+                });
+            };
+            let age = steady
+                .timestamp_ns
+                .checked_sub(received_ns)
+                .ok_or(ReferenceError::MonotonicRegression)?;
+            if reference.available && age > self.max_status_age_ns {
+                reference.available = false;
+                reference.reason = "reference clock sample is stale".into();
+            }
             if reference.available && reference.uncertainty_ns > self.max_uncertainty_ns {
                 reference.available = false;
                 reference.reason = "reference clock uncertainty exceeds configured limit".into();
