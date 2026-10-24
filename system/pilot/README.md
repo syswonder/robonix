@@ -107,6 +107,8 @@ A reply gives its fields in the order `content`, `message_updates`, `rtdl_parent
 
 A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 
+Pilot preserves each `do.bind` name when expanding RTDL into a Plan. Executor stores the successful result in that tree's execution context; later arguments and conditions can reference it with `{"var":"name","path":["field"]}`.
+
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
 Atlas discovery still runs before every planning round. Pilot omits contracts whose `[contract]` metadata sets `llm_callable = false` from the model-facing catalog and target map, while leaving them available to Executor and other Atlas consumers. An omitted field, including metadata from an older Atlas, defaults to visible. When the remaining provider, contract, description, and schema fields are unchanged, Pilot reuses the rendered capability catalog. The startup-cached Soma YAML is serialized as compact JSON while the authoritative URDF remains unchanged.
@@ -193,5 +195,13 @@ update keeps a task `in_progress` and nothing runs — neither this session's tr
 nor any plan in Executor's active-plan snapshot — the model claims the task is
 advancing while nothing will run, so the reply is rejected
 (`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
-the turn ends with what the model said. An empty sequence with no task update is
-an answer or a question to the user.
+the turn ends with what the model said. The per-round reminder states the
+pairing rule: an empty sequence goes with `task_update: null` or
+`status: "done"`, or stands while a running tree is waited on.
+
+## RTDL conditions and loops
+
+RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `body`), and bounded `while` (`condition`, `max_iterations`, `body`). A `do.bind` stores successful, verified output in the plan's execution context. Reference it with `{"var":"name","path":["field",0]}` in arguments or conditions. Conditions accept booleans and `{"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}` expressions. Missing values and non-boolean conditions fail explicitly.
+
+Variables are isolated per plan; loops update the same binding each iteration. Bound calls wait for verification even under overlap mode, and loop iterations wait for all descendant verification. Parallel siblings must be independent; their results may be consumed after the join. Repeat counts are 0–10000 and while requires a 1–10000 iteration limit. A while condition still true at the limit fails. See [the protocol](../pilot/rtdl_protocol.md) for the complete grammar.
+The `[pilot/rtdl]` plan tree logs include repeat counts, while limits, condition expressions and do binding names. Expressions and binding names use bounded previews. `[pilot/forest]` logs every Executor node-state event at info level and summarizes the completed plan. Compare the planned fields and forest events with Executor's `[executor/rtdl]` records to check what actually ran.

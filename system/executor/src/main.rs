@@ -14,6 +14,8 @@
 
 mod config;
 mod dispatch;
+mod execution_context;
+mod expression;
 mod pb;
 mod plan_runtime;
 mod rtdl_wire;

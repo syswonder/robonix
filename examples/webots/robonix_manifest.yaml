@@ -209,6 +209,7 @@ service:
       # rotation guard inside that boundary so path-alignment turns are not
       # mistaken for a stuck final-yaw correction.
       guard_terminal_xy_m: 0.20
+      guard_terminal_timeout_s: 60
       provider_ids:
         map: mapping
         odom: tiago_chassis

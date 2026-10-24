@@ -53,6 +53,9 @@ type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 const RTDL_DO: u32 = 2;
+const RTDL_IF: u32 = 3;
+const RTDL_REPEAT: u32 = 4;
+const RTDL_WHILE: u32 = 5;
 
 pub(crate) struct DisplayCapability<'a> {
     pub(crate) display_name: String,
@@ -2206,7 +2209,11 @@ Nodes are exactly one of:
 - {"op":"sequence","op_id":0,"description":"...","children":[...]}
 - {"op":"parallel","op_id":0,"description":"...","children":[...]}
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
-Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose a task's known dependent steps into one sequence and its independent steps into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
+- {"op":"if","op_id":0,"description":"...","condition":<expr>,"then":<node>,"else":<optional node>}
+- {"op":"repeat","op_id":0,"description":"...","count":0..10000,"body":<node>}
+- {"op":"while","op_id":0,"description":"...","condition":<expr>,"max_iterations":1..10000,"body":<node>}
+do may set bind. References: {"var":"name","path":["field",0]}; conditions: {"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}, or booleans. Bindings contain successful output; later sequential calls and loops overwrite them. Read only earlier completed nodes, never sibling parallel branches.
+Every node needs a description and op_id=0; Pilot assigns the real ID. Do not add node fields. Compose dependent steps into one sequence and independent steps into one parallel tree. With no new call, return an empty sequence paired with task_update: null or status=done; in_progress with nothing running is rejected.
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan, cancel_all, or stop_plan_at using an exact listed plan_id/op_id, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
@@ -2465,6 +2472,10 @@ fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan 
             call: None,
             op_id: "recovery".to_string(),
             description: "recovery: no valid plan produced".to_string(),
+            condition_json: "".to_string(),
+            bind: "".to_string(),
+            repeat_count: 0,
+            max_iterations: 0,
         }],
         root_index: 0,
     }
@@ -2572,8 +2583,11 @@ fn reject_unknown_node_keys(
 ) -> Result<()> {
     const OPTIONAL: [&str; 2] = ["op_id", "description"];
     for key in obj.keys() {
-        let known =
-            key == "op" || required.contains(&key.as_str()) || OPTIONAL.contains(&key.as_str());
+        let known = key == "op"
+            || required.contains(&key.as_str())
+            || OPTIONAL.contains(&key.as_str())
+            || op == "do" && key == "bind"
+            || op == "if" && key == "else";
         if !known {
             anyhow::bail!("{path}: {op} node has unexpected field `{key}`");
         }
@@ -2604,6 +2618,75 @@ fn expand_rtdl_node(
         .ok_or_else(|| anyhow::anyhow!("{path}.op must be a string"))?;
 
     match op {
+        "if" | "repeat" | "while" => {
+            let required: &[&str] = match op {
+                "if" => &["condition", "then"],
+                "repeat" => &["count", "body"],
+                _ => &["condition", "body", "max_iterations"],
+            };
+            reject_unknown_node_keys(obj, path, op, required)?;
+            let condition_json = if let Some(condition) = obj.get("condition") {
+                crate::expression::validate_expr(condition).map_err(anyhow::Error::msg)?;
+                serde_json::to_string(condition)?
+            } else {
+                String::new()
+            };
+            let limit_key = if op == "repeat" {
+                "count"
+            } else {
+                "max_iterations"
+            };
+            let limit = if op == "if" {
+                0
+            } else {
+                obj[limit_key]
+                    .as_u64()
+                    .filter(|count| *count <= 10_000 && (op != "while" || *count > 0))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{path}.{limit_key} must be an integer in {}..=10000",
+                            if op == "while" { 1 } else { 0 }
+                        )
+                    })? as u32
+            };
+            let node_index = nodes.len() as u32;
+            nodes.push(RtdlNode {
+                node_kind: match op {
+                    "if" => RTDL_IF,
+                    "repeat" => RTDL_REPEAT,
+                    _ => RTDL_WHILE,
+                },
+                op_id: next_op_id(),
+                description: pick_description(obj, path, root_description, op.to_string()),
+                condition_json,
+                repeat_count: if op == "repeat" { limit } else { 0 },
+                max_iterations: if op == "while" { limit } else { 0 },
+                ..Default::default()
+            });
+            let body_key = if op == "if" { "then" } else { "body" };
+            let mut children = vec![expand_rtdl_node(
+                &obj[body_key],
+                &format!("{path}.{body_key}"),
+                target_map,
+                plan_id,
+                root_description,
+                next_call,
+                nodes,
+            )?];
+            if let Some(otherwise) = obj.get("else") {
+                children.push(expand_rtdl_node(
+                    otherwise,
+                    &format!("{path}.else"),
+                    target_map,
+                    plan_id,
+                    root_description,
+                    next_call,
+                    nodes,
+                )?);
+            }
+            nodes[node_index as usize].children = children;
+            Ok(node_index)
+        }
         "sequence" | "parallel" => {
             reject_unknown_node_keys(obj, path, op, &["children"])?;
             let children = obj
@@ -2628,6 +2711,10 @@ fn expand_rtdl_node(
                 call: None,
                 op_id: next_op_id(),
                 description,
+                condition_json: "".to_string(),
+                bind: "".to_string(),
+                repeat_count: 0,
+                max_iterations: 0,
             });
             let mut child_indices = Vec::with_capacity(children.len());
             for (idx, child) in children.iter().enumerate() {
@@ -2668,6 +2755,15 @@ fn expand_rtdl_node(
                 .get("args")
                 .filter(|x| x.is_object())
                 .ok_or_else(|| anyhow::anyhow!("{path}.args must be an object"))?;
+            crate::expression::validate_expr(args).map_err(anyhow::Error::msg)?;
+            let bind = match obj.get("bind") {
+                None => String::new(),
+                Some(value) => value
+                    .as_str()
+                    .filter(|name| !name.is_empty() && name.trim() == *name)
+                    .ok_or_else(|| anyhow!("{path}.bind must be a non-empty string"))?
+                    .to_string(),
+            };
             let (provider_id, contract_id) = target_map
                 .get(cap)
                 .cloned()
@@ -2687,6 +2783,10 @@ fn expand_rtdl_node(
                 }),
                 op_id: next_op_id(),
                 description,
+                condition_json: "".to_string(),
+                bind,
+                repeat_count: 0,
+                max_iterations: 0,
             });
             Ok(node_index)
         }
@@ -2836,6 +2936,9 @@ fn rtdl_node_kind_name(kind: u32) -> String {
         RTDL_SEQUENCE => "sequence".to_string(),
         RTDL_PARALLEL => "parallel".to_string(),
         RTDL_DO => "do".to_string(),
+        RTDL_IF => "if".to_string(),
+        RTDL_REPEAT => "repeat".to_string(),
+        RTDL_WHILE => "while".to_string(),
         _ => format!("unknown({kind})"),
     }
 }
@@ -2964,6 +3067,22 @@ fn append_plan_node_summary(plan: &Plan, node_index: usize, depth: usize, out: &
             compact_preview(&call.args_json, 240)
         ));
     }
+    match node.node_kind {
+        RTDL_IF | RTDL_WHILE => {
+            line.push_str(&format!(
+                " condition={}",
+                compact_preview(&node.condition_json, 240)
+            ));
+            if node.node_kind == RTDL_WHILE {
+                line.push_str(&format!(" max_iterations={}", node.max_iterations));
+            }
+        }
+        RTDL_REPEAT => line.push_str(&format!(" count={}", node.repeat_count)),
+        RTDL_DO if !node.bind.is_empty() => {
+            line.push_str(&format!(" bind={}", compact_preview(&node.bind, 160)));
+        }
+        _ => {}
+    }
     out.push(line);
     for child in &node.children {
         append_plan_node_summary(plan, *child as usize, depth + 1, out);
@@ -3027,7 +3146,7 @@ fn log_node_state(plan_id: &str, ns: &RtdlNodeState) {
         ));
     }
     line.push_str(&terminal_node_detail(ns));
-    debug!("{line}");
+    info!("{line}");
 }
 
 /// Pick the plan-level completion state shown in the forest completion log.
@@ -3436,8 +3555,7 @@ mod tests {
 
     #[test]
     fn later_round_protocol_is_compact_but_keeps_admission_rules() {
-        // The task fields' names are spelled out, which costs a few characters.
-        assert!(RTDL_PROTOCOL_REMINDER.len() < 2_100);
+        assert!(RTDL_PROTOCOL_REMINDER.len() < 3_000);
         for required in [
             "capability_name",
             "sequence",
@@ -4084,6 +4202,7 @@ mod tests {
                 }),
                 op_id: "op_1".into(),
                 description: "control action".into(),
+                ..Default::default()
             }],
         }
     }
@@ -4194,6 +4313,165 @@ mod tests {
         )
         .unwrap();
         assert_eq!(env.task_fields, TaskFields::default());
+    }
+
+    #[tokio::test]
+    #[ignore = "build robonix-atlas and robonix-executor binaries before running"]
+    async fn rtdl_controls_cross_the_executor_rpc_boundary() {
+        struct Processes(Vec<std::process::Child>);
+        impl Drop for Processes {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        fn address() -> std::net::SocketAddr {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let atlas_address = address();
+        let executor_address = address();
+        let mut processes = Processes(Vec::new());
+        processes.0.push(
+            std::process::Command::new(root.join("target/debug/robonix-atlas"))
+                .args(["--listen", &atlas_address.to_string(), "--capabilities"])
+                .arg(root.join("capabilities"))
+                .current_dir(work.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let _atlas = robonix_atlas::client::AtlasClient::connect_with_retry(
+            format!("http://{atlas_address}"),
+            100,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        processes.0.push(
+            std::process::Command::new(root.join("target/debug/robonix-executor"))
+                .args([
+                    "--atlas",
+                    &atlas_address.to_string(),
+                    "--listen",
+                    &executor_address.to_string(),
+                    "--id",
+                    "executor-rtdl-test",
+                    "--config-json",
+                    r#"{"verification":{"rules":[]}}"#,
+                ])
+                .current_dir(work.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let endpoint = format!("http://{executor_address}");
+        let mut connection = None;
+        for _ in 0..100 {
+            match super::RobonixSystemExecutorExecuteClient::connect(endpoint.clone()).await {
+                Ok(client) => {
+                    connection = Some(client);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let targets = HashMap::from([(
+            "executor.run_command".into(),
+            (
+                "executor-rtdl-test".into(),
+                "robonix/system/executor/builtin/run_command".into(),
+            ),
+        )]);
+        let tree = json!({"op":"sequence","children":[
+            {"op":"do","cap":"executor.run_command","bind":"observation",
+             "args":{"command":"printf '{\"ready\":false}'"}},
+            {"op":"while","condition":{"op":"not","args":[{"var":"observation","path":["ready"]}]},"max_iterations":3,
+             "body":{"op":"do","cap":"executor.run_command","bind":"observation",
+                     "args":{"command":"printf '{\"ready\":true,\"command\":\"printf repeated\"}'"}}},
+            {"op":"repeat","count":3,"body":{"op":"do","cap":"executor.run_command",
+             "args":{"command":{"var":"observation","path":["command"]}}}},
+            {"op":"if","condition":{"var":"observation","path":["ready"]},
+             "then":{"op":"do","cap":"executor.run_command","args":{"command":"printf selected"}},
+             "else":{"op":"do","cap":"executor.run_command","args":{}}}
+        ]});
+        let plan = expand_rtdl_to_plan(
+            &tree,
+            &targets,
+            "rpc-smoke".into(),
+            "smoke".into(),
+            0,
+            "conditions and loops",
+        )
+        .unwrap();
+        let mut stream = connection
+            .expect("Executor startup")
+            .execute(tonic::Request::new(plan))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut outputs = Vec::new();
+        let mut complete = false;
+        while let Some(event) = stream.message().await.unwrap() {
+            if let Some(result) = event.node_state.and_then(|state| state.leaf_result) {
+                assert!(result.success, "{}", result.error);
+                outputs.push(result.output);
+            }
+            if let Some(result) = event.plan_complete {
+                assert!(!result.any_failed);
+                complete = true;
+            }
+        }
+        assert!(complete);
+        assert_eq!(outputs.len(), 6);
+        assert_eq!(
+            outputs.iter().filter(|value| *value == "repeated").count(),
+            3
+        );
+        assert_eq!(outputs.last().unwrap(), "selected");
+    }
+
+    #[test]
+    fn rtdl_expands_nested_controls_and_rebindings() {
+        let targets = HashMap::from([(
+            "demo.observe".into(),
+            ("demo".into(), "robonix/test/observe".into()),
+        )]);
+        let tree = json!({"op":"sequence","children":[
+            {"op":"do","cap":"demo.observe","args":{},"bind":"observation"},
+            {"op":"while","condition":{"op":"eq","args":[{"var":"observation","path":["ready"]},false]},"max_iterations":3,
+             "body":{"op":"repeat","count":2,"body":{"op":"do","cap":"demo.observe","args":{},"bind":"observation"}}},
+            {"op":"if","condition":{"var":"observation","path":["ready"]},
+             "then":{"op":"sequence","children":[]},"else":{"op":"sequence","children":[]}}
+        ]});
+        let plan =
+            expand_rtdl_to_plan(&tree, &targets, "p".into(), "s".into(), 0, "observe").unwrap();
+        assert_eq!(plan.nodes[2].node_kind, super::RTDL_WHILE);
+        assert_eq!(plan.nodes[2].max_iterations, 3);
+        assert_eq!(plan.nodes[3].repeat_count, 2);
+        assert_eq!(plan.nodes[4].bind, "observation");
+        assert_eq!(plan.nodes[5].children.len(), 2);
+        for tree in [
+            json!({"op":"while","condition":true,"body":{"op":"sequence","children":[]}}),
+            json!({"op":"repeat","count":-1,"body":{"op":"sequence","children":[]}}),
+            json!({"op":"if","condition":{"op":"unknown","args":[]},"then":{"op":"sequence","children":[]}}),
+        ] {
+            assert!(
+                expand_rtdl_to_plan(&tree, &targets, "p".into(), "s".into(), 0, "bad").is_err()
+            );
+        }
     }
 
     #[test]

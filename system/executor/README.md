@@ -197,3 +197,12 @@ Executor declares builtin MCP capabilities under
   right after the op's call finishes. `op_id`s are the per-node identifiers
   surfaced in `RtdlNodeState` events. Setting a stop point on a plan that is no
   longer active is a success no-op; an `op_id` that never executes never fires.
+
+
+## RTDL conditions and loops
+
+RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `body`), and bounded `while` (`condition`, `max_iterations`, `body`). A `do.bind` stores successful, verified output in the plan's execution context. Reference it with `{"var":"name","path":["field",0]}` in arguments or conditions. Conditions accept booleans and `{"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}` expressions. Missing values and non-boolean conditions fail explicitly.
+
+Variables are isolated per plan; loops update the same binding each iteration. Bound calls wait for verification even under overlap mode, and loop iterations wait for all descendant verification. Parallel siblings must be independent; their results may be consumed after the join. Repeat counts are 0–10000 and while requires a 1–10000 iteration limit. A while condition still true at the limit fails. See [the protocol](../pilot/rtdl_protocol.md) for the complete grammar.
+
+Control execution writes `[executor/rtdl]` info records for the complete execution path. Plan records include session, round, tree and call counts, final state and elapsed time. Node records include the node kind and description; `do` records include the resolved arguments, provider, contract, binding name, final state and elapsed time. Binding records report the stored name, JSON value type and byte size. Control nodes also report their configured limit, condition result, selected branch, iteration start and completion, and exit reason. Condition evaluation errors and exhausted while limits produce warning records. Read these with `rbnx logs -t executor`; previews are bounded and execution-context values are not dumped.

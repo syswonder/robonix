@@ -89,6 +89,10 @@ async fn query_scene(
             }),
             op_id: "scene_snapshot".into(),
             description: "Read Scene spatial context before planning".into(),
+            condition_json: "".to_string(),
+            bind: "".to_string(),
+            repeat_count: 0,
+            max_iterations: 0,
         }],
         root_index: 0,
     };

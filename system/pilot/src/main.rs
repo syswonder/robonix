@@ -21,6 +21,10 @@
 
 mod config;
 mod discovery;
+// Pilot shares Executor's expression grammar for admission.
+#[allow(dead_code)]
+#[path = "../../executor/src/expression.rs"]
+mod expression;
 mod history;
 mod memory;
 mod pb;
