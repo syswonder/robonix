@@ -96,7 +96,15 @@ class RosBackend:
     def create_subscription(self, msg_type: type, topic: str,
                             callback: Callable[[Any], None], qos=10):
         self._ensure_started()
-        return self._node.create_subscription(msg_type, topic, callback, self.qos(qos))
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup  # type: ignore
+        # Each subscription gets its own group. With the node's default group
+        # shared, a subscription destroyed while one of its callbacks is still
+        # queued (wait_for_topic does this) can leave the group marked busy,
+        # and rclpy then never runs any other callback in it again.
+        return self._node.create_subscription(
+            msg_type, topic, callback, self.qos(qos),
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
 
     def wait_for_topic(
         self, topic: str, msg_type: type, timeout_s: float,
