@@ -47,21 +47,35 @@ fn rejects_optional_request_fields(status: reqwest::StatusCode, body: &str) -> b
     .any(|field| body.contains(field))
 }
 
-/// Downgrade a `json_schema` response format to `json_object`.
+/// Step a rejected `response_format` down one rung: `json_schema` to
+/// `json_object`, then `json_object` to none.
 ///
-/// A provider that does not implement schema-guided output still implements
-/// `json_object`, and the planner's reply must stay parseable as JSON: dropping
-/// the format outright would let a rejection turn every later reply into prose.
-/// Returns whether anything changed.
-fn downgrade_response_format(body: &mut Value) -> bool {
-    let Some(format) = body.get_mut("response_format") else {
-        return false;
-    };
-    if format.get("type").and_then(Value::as_str) != Some("json_schema") {
-        return false;
+/// A provider that does not implement schema-guided output usually still
+/// implements `json_object`, and the planner's reply should stay parseable as
+/// JSON while it can. Some implement neither in the form sent: Anthropic's
+/// OpenAI-compatible endpoint takes only a strict schema, which an RTDL `do`
+/// node's open `args` cannot be, and no `json_object`. Without a format the
+/// prompt still asks for the envelope and Pilot's parser admits it. Returns
+/// the format now in force, or `None` when there was nothing left to drop.
+fn downgrade_response_format(body: &mut Value) -> Option<&'static str> {
+    let obj = body.as_object_mut()?;
+    match obj
+        .get("response_format")?
+        .get("type")
+        .and_then(Value::as_str)
+    {
+        Some("json_schema") => {
+            obj.insert(
+                "response_format".to_string(),
+                serde_json::json!({"type": "json_object"}),
+            );
+            Some("json_object")
+        }
+        _ => {
+            obj.remove("response_format");
+            Some("none")
+        }
     }
-    *format = serde_json::json!({"type": "json_object"});
-    true
 }
 
 fn open_retry_delay(
@@ -368,6 +382,9 @@ pub enum ReplyShape {
     /// The RTDL envelope, described to the provider as a JSON schema so the
     /// shape is carried by the request rather than only by prose in the prompt.
     RtdlEnvelope,
+    /// The RTDL envelope asked for as any JSON object, for a provider that
+    /// answered the schema with nothing.
+    RtdlJsonObject,
 }
 
 /// The RTDL envelope as a JSON schema.
@@ -380,13 +397,6 @@ pub enum ReplyShape {
 /// that costs a contract its type surface. The schema therefore guides the
 /// model; admission stays with Pilot's own validator, which resolves every call
 /// against the catalog before a plan is dispatched.
-/// How long a `task_update` field may be.
-///
-/// It has to admit an honest restatement of a long instruction and refuse a
-/// copy of the prompt. The EB-Habitat task text with its seventy-entry action
-/// catalogue is about 3.6 KB; a restatement of it fits in a line.
-const TASK_FIELD_MAX_CHARS: usize = 400;
-
 fn rtdl_envelope_schema() -> Value {
     let node = serde_json::json!({
         "type": "object",
@@ -403,46 +413,118 @@ fn rtdl_envelope_schema() -> Value {
     // A plan-control meta op replaces the whole tree rather than sitting inside
     // one, and carries none of a node's fields. Leaving it out of the schema
     // would tell the model that cancelling a running plan is malformed.
+    //
+    // One alternative per op, requiring exactly the fields `parse_meta_plan_op`
+    // requires: a schema that asks for less than the parser wants steers a
+    // guided model into rejected rounds.
+    //
+    // `anyOf`, not `oneOf`. Each alternative pins `op` to a one-value enum, so
+    // at most one can match and the two keywords accept the same set — but
+    // `anyOf` is the one structured-output backends implement (the outer `rtdl`
+    // alternative already uses it). On vLLM `oneOf` only worked because
+    // xgrammar reads it as `anyOf`. Adding an alternative that does not pin
+    // `op` would break the equivalence, and with it this reasoning.
+    //
+    // An identifier is the same identifier whether JSON spells it 1 or "1", and
+    // the parser stringifies either form.
+    let identifier = || serde_json::json!({"type": ["string", "integer"]});
     let meta = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "op": {"type": "string", "enum": ["cancel_plan", "cancel_all"]},
-            // An identifier is the same identifier whether JSON spells it 1 or
-            // "1". Demanding the quoted form cost four of thirty-five planning
-            // rounds in one deepseek episode, for a value Pilot then stringifies
-            // anyway.
-            "plan_id": {"type": ["string", "integer"]},
-            "wait_ms": {"type": "integer"},
-        },
-        "required": ["op"],
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["cancel_plan"]},
+                    "plan_id": identifier(),
+                    "wait_ms": {"type": "integer"},
+                },
+                "required": ["op", "plan_id"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["cancel_all"]},
+                    "wait_ms": {"type": "integer"},
+                },
+                "required": ["op"],
+            },
+        ],
     });
+    // Properties in the order a reply should give them, which `preserve_order`
+    // keeps on the wire: what dispatch needs (`message_updates`,
+    // `rtdl_parent_task_id`) before `rtdl`, so a streaming planner knows a tree's
+    // task when the tree starts,
+    // and `task_updates`, which need to know what was dispatched, after it.
+    // No goal is copied from the user: Pilot keeps the user's words, and
+    // `goal` is the model's own statement, so it has no length cap to match.
+    let task_ref = || serde_json::json!({"type": ["string", "integer"]});
     serde_json::json!({
         "type": "object",
         "properties": {
             "content": {"type": "string"},
+            "message_updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"message_id": identifier(), "parent_task_id": task_ref()},
+                    "required": ["message_id", "parent_task_id"],
+                },
+            },
+            "rtdl_parent_task_id": {"type": ["string", "integer", "null"]},
             "rtdl_description": {"type": "string"},
             "rtdl": {"anyOf": [{"$ref": "#/$defs/node"}, {"$ref": "#/$defs/meta"}]},
-            // `goal` and `success_criterion` are restatements, not transcripts.
-            // Without an upper bound a model may copy the task text back --
-            // deepseek-v3.2 returned the whole prompt, action catalogue
-            // included, on every round, hit the 4096-token output ceiling and
-            // had its JSON truncated mid-string. A model that summarises, as
-            // 4o-mini does, spends 109-155 tokens on the same field.
-            "task_update": {
-                "type": ["object", "null"],
-                "properties": {
-                    "goal": {"type": "string", "maxLength": TASK_FIELD_MAX_CHARS},
-                    "success_criterion": {
-                        "type": "string", "maxLength": TASK_FIELD_MAX_CHARS,
+            "task_updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": task_ref(),
+                        "goal": {"type": "string"},
+                        "success_criterion": {"type": "string"},
+                        "status": {"type": "string", "enum": ["in_progress", "done", "failed", "superseded"]},
+                        "status_reason": {"type": "string"},
                     },
-                    "status": {"type": "string", "enum": ["in_progress", "done"]},
+                    "required": ["task_id"],
                 },
-                "required": ["goal", "success_criterion", "status"],
             },
         },
-        "required": ["content", "rtdl_description", "rtdl", "task_update"],
+        "required": ["content", "message_updates", "rtdl_parent_task_id", "rtdl_description", "rtdl", "task_updates"],
         "$defs": {"node": node, "meta": meta},
     })
+}
+
+/// Claude caches a prompt only up to an explicit `cache_control` breakpoint.
+/// Mark the system prompt and the two newest messages: the newest is the
+/// per-round context, which is not kept in history, so the one before it is
+/// the prefix the next round shares.
+fn add_claude_cache_breakpoints(model: &str, body: &mut Value) {
+    let model = model.to_ascii_lowercase();
+    if !(model.starts_with("anthropic/") || model.contains("claude")) {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let newest = messages.len().saturating_sub(2);
+    for (index, message) in messages.iter_mut().enumerate() {
+        let system = index == 0 && message.get("role").and_then(Value::as_str) == Some("system");
+        let Some(content) = message
+            .get_mut("content")
+            .filter(|_| system || index >= newest)
+        else {
+            continue;
+        };
+        if let Some(text) = content.as_str() {
+            *content = serde_json::json!([{"type": "text", "text": text}]);
+        }
+        if let Some(part) = content.as_array_mut().and_then(|parts| {
+            parts
+                .iter_mut()
+                .rev()
+                .find(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+        }) {
+            part["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+    }
 }
 
 /// The `response_format` a reply shape needs, if any.
@@ -461,6 +543,7 @@ fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
                 strict: Some(false),
             },
         }),
+        ReplyShape::RtdlJsonObject => Some(ResponseFormat::JsonObject),
     }
 }
 
@@ -602,10 +685,13 @@ impl VlmClient {
                 serde_json::json!({"mode": "implicit", "ttl": "30m"}),
             );
         }
+        add_claude_cache_breakpoints(&self.model, &mut request_body);
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut retry_index = 0;
-        let mut compatibility_fallback_attempted = false;
+        // Optional fields go on the first rejection; the response format can
+        // need a second step (see downgrade_response_format).
+        let mut compatibility_fallbacks = 0_u8;
         let response = loop {
             let response = self
                 .inner
@@ -627,27 +713,51 @@ impl VlmClient {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
-            if rejects_optional_request_fields(status, &text) && !compatibility_fallback_attempted {
-                let downgraded = downgrade_response_format(&mut request_body);
+            // Providers word a refused response_format in their own way
+            // (MiniMax: "Mismatch type string with value array"), so any 400 or
+            // 422 to a request carrying one steps it down; an unrelated error
+            // costs one more request and is reported as it was.
+            let format_refused = matches!(status.as_u16(), 400 | 422)
+                && request_body.get("response_format").is_some();
+            if (format_refused || rejects_optional_request_fields(status, &text))
+                && compatibility_fallbacks < 2
+            {
+                // Drop an optional field only when the error names it: removing
+                // the cache key with a refused format would forgo prompt
+                // caching, and stream_options the usage report, on every
+                // later request of the stream.
+                let lowered = text.to_ascii_lowercase();
+                let names_format =
+                    lowered.contains("response_format") || lowered.contains("json_schema");
+                let downgraded = if format_refused || names_format {
+                    downgrade_response_format(&mut request_body)
+                } else {
+                    None
+                };
                 let mut dropped: Vec<&str> = Vec::new();
                 if let Some(body) = request_body.as_object_mut() {
-                    for field in ["stream_options", "prompt_cache_key", "prompt_cache_options"] {
-                        if body.remove(field).is_some() {
+                    for (field, named) in [
+                        ("stream_options", "stream_options"),
+                        ("stream_options", "include_usage"),
+                        ("prompt_cache_key", "prompt_cache_key"),
+                        ("prompt_cache_options", "prompt_cache_options"),
+                    ] {
+                        if lowered.contains(named) && body.remove(field).is_some() {
                             dropped.push(field);
                         }
                     }
                 }
-                if dropped.is_empty() && !downgraded {
+                if dropped.is_empty() && downgraded.is_none() {
                     bail!("open VLM chat stream: HTTP {status}: {text}");
                 }
                 // Name what changed rather than "retrying without them": a
                 // downgrade is not a removal, and a run that later reads as
                 // schema-guided needs this line to say it was not.
-                if downgraded {
+                if let Some(now) = downgraded {
                     robonix_scribe::warn!(
-                        "[pilot/vlm] upstream rejected response_format json_schema with HTTP \
-                         {status}; downgrading to json_object for the rest of this stream. \
-                         RTDL shape is no longer schema-guided; admission still runs in Pilot. \
+                        "[pilot/vlm] upstream rejected response_format with HTTP {status}; \
+                         response_format is now {now} for the rest of this stream. RTDL shape \
+                         is no longer schema-guided; admission still runs in Pilot. \
                          Upstream said: {text}"
                     );
                 }
@@ -658,7 +768,7 @@ impl VlmClient {
                         dropped.join(", ")
                     );
                 }
-                compatibility_fallback_attempted = true;
+                compatibility_fallbacks += 1;
                 continue;
             }
             if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
@@ -756,6 +866,27 @@ impl VlmClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_breakpoints_mark_the_system_prompt_and_the_two_newest_messages() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "plan"},
+            {"role": "user", "content": [{"type": "text", "text": "board"}, {"type": "image_url", "image_url": {"url": "x"}}]}
+        ]});
+        let other = body.clone();
+        super::add_claude_cache_breakpoints("anthropic/claude-sonnet-5.5", &mut body);
+        let m = &body["messages"];
+        assert_eq!(m[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(m[1]["content"], "old");
+        assert_eq!(m[2]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(m[3]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(m[3]["content"][1].get("cache_control").is_none());
+        let mut body = other.clone();
+        super::add_claude_cache_breakpoints("openai/gpt-6.1-sol", &mut body);
+        assert_eq!(body, other);
+    }
+
     use super::{
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
@@ -903,29 +1034,20 @@ mod tests {
         // node's fields; leaving it out would describe cancelling a running
         // plan as malformed.
         let meta = &schema["$defs"]["meta"];
-        assert_eq!(meta["properties"]["op"]["enum"][0], "cancel_plan");
-        for op in meta["properties"]["op"]["enum"].as_array().unwrap() {
-            let mut rtdl = serde_json::json!({"op": op});
-            if op == "cancel_plan" {
-                rtdl["plan_id"] = serde_json::json!("active-plan");
-            }
-            let mut parser = crate::rtdl_stream::RtdlIncrementalParser::new(
-                std::collections::HashMap::new(),
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                "schema-control".into(),
-                0,
-            );
-            parser
-                .push(
-                    &serde_json::json!({
-                        "content": "", "rtdl_description": "", "task_update": null, "rtdl": rtdl,
-                    })
-                    .to_string(),
-                )
-                .unwrap();
-            assert!(parser.finish().unwrap().1.is_some(), "{op}");
-            assert!(parser.take_messages().is_empty());
-        }
+        let ops = meta["anyOf"].as_array().expect("one schema per meta op");
+        assert_eq!(ops.len(), 2);
+        let required = |name: &str| -> Vec<&str> {
+            ops.iter()
+                .find(|op| op["properties"]["op"]["enum"][0] == name)
+                .unwrap_or_else(|| panic!("no schema for {name}"))["required"]
+                .as_array()
+                .expect("required list")
+                .iter()
+                .map(|field| field.as_str().expect("field name"))
+                .collect()
+        };
+        assert_eq!(required("cancel_plan"), ["op", "plan_id"]);
+        assert_eq!(required("cancel_all"), ["op"]);
         let alternatives = schema["properties"]["rtdl"]["anyOf"]
             .as_array()
             .expect("rtdl accepts a node or a meta op");
@@ -933,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_without_schema_support_falls_back_to_a_json_object() {
+    fn a_rejected_response_format_steps_down_to_json_object_then_none() {
         // Dropping the format outright would let one rejection turn every later
         // planning reply into prose.
         assert!(rejects_optional_request_fields(
@@ -943,10 +1065,13 @@ mod tests {
         let mut body = serde_json::json!({
             "response_format": {"type": "json_schema", "json_schema": {"name": "rtdl_envelope"}}
         });
-        assert!(downgrade_response_format(&mut body));
+        assert_eq!(downgrade_response_format(&mut body), Some("json_object"));
         assert_eq!(body["response_format"]["type"], "json_object");
         // Already downgraded, or never schema-shaped: nothing to do.
-        assert!(!downgrade_response_format(&mut body));
+        // Anthropic's endpoint refuses json_object too: drop the format.
+        assert_eq!(downgrade_response_format(&mut body), Some("none"));
+        assert!(body.get("response_format").is_none());
+        assert_eq!(downgrade_response_format(&mut body), None);
     }
 
     #[test]

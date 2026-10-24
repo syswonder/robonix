@@ -31,6 +31,7 @@ mod service;
 mod soma_context;
 mod state_context;
 mod stream_execution;
+mod tasks;
 mod transcript;
 mod vlm;
 

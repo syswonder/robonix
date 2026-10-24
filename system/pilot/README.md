@@ -36,7 +36,7 @@ Common configuration:
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
-- `--log`: env_logger filter. Falls back to `RUST_LOG`, then `robonix_pilot=info`.
+- `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
 - `ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS`: maximum time without a VLM stream event before ending the turn and canceling its submitted plan. Defaults to `30` seconds and is clamped to `5..=300`. Non-empty `reasoning_content` deltas refresh this timer but are not appended to the assistant JSON.
@@ -81,9 +81,36 @@ Use the smaller effective limit when a model card and an inference-server settin
 
 ## Prompt assets
 
-The full RTDL envelope rules are documented in `rtdl_protocol.md`. Planning sends the compact `RTDL_PROTOCOL_REMINDER` from `src/planner.rs` on every round to preserve the cacheable prefix.
+On every planning round the model sees, in this order:
 
-Pilot's standing system prompt is built in `src/planner.rs`. Prompt assembly and usage accounting live in `src/prompt.rs`; each round's section list supplies both context-budget estimates and request rendering.
+- the standing system prompt, built by `build_system_prompt` in `src/planner.rs`;
+- `RTDL_PROTOCOL_REMINDER` in `src/planner.rs`, the same text on every round so the prompt prefix stays cacheable;
+- the session history, which only grows (see Tasks below);
+- the live sections of the round (catalog changes, in-flight trees, Executor snapshot, embodiment and environment);
+- the task status board, the request's tail, rebuilt every round and never written into history;
+- the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`, sent as the request's `response_format`.
+
+`assemble_planning_messages` in `src/prompt.rs` puts them in order; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering. There is no other prompt text: no protocol file is sent.
+
+## Tasks
+
+The user's messages arrive one at a time. A task is one piece of work the user asked for: the user's messages about it (the request, then every correction, addition or answer), the goal and success criterion the model has drawn from them, its status (`in_progress`, `done`, `failed`, `superseded`), and the RTDL trees dispatched for it. Several tasks can be open at once; every tree belongs to exactly one task. `src/tasks.rs` keeps them per session, and the transcript keeps them across a restart.
+
+Pilot owns identity and facts: message ids (`m1`, `m2`, …), task ids (`T1`, `T2`, …), the user's words, which task each message and tree is filed under, and how each tree ended. A message enters history once, as `User message m7 (filed under T2): …`, and a `Pilot task record` line is appended when a task changes. Compaction keeps the open tasks' messages before anything else, newest first when they do not all fit. The model owns the judgement, through three reply fields:
+
+| Field | Meaning |
+| --- | --- |
+| `message_updates` | Refiles new messages: `[{"message_id":"m7","parent_task_id":"new"}]` starts a task, `[{"message_id":"m7","parent_task_id":"T1"}]` moves the message to another open task. Without it a new message stays under the newest open task. Only messages that arrived since the model's last reply can be refiled. |
+| `rtdl_parent_task_id` | The task the reply's tree belongs to: an open task id, `"new"` for the task the reply creates, or `null` when it dispatches no tree. A tree with no usable `rtdl_parent_task_id` is filed under the newest open task and the model is told so. A tree holds one task's steps only: when several tasks need steps at once, the model dispatches one task's tree, and Pilot asks again at once while another open task has no tree running. |
+| `task_updates` | `[{"task_id":"T1","goal":"…","success_criterion":"…","status":"…","status_reason":"…"}]`, each field but `task_id` optional. A task cannot close while one of its trees runs, or in the reply that dispatches its tree; an item naming an unknown or closed task is rejected. Rejected items are fed back to the model and the others still apply. |
+
+Every `"new"` in one reply names the same task: the one its `message_updates` start, which Pilot creates and gives the next id. A reply therefore creates at most one task, and `rtdl_parent_task_id` or `task_updates` naming `"new"` without a message filed under it is rejected.
+
+A reply gives its fields in the order `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl`, `task_updates`: what dispatch needs comes before `rtdl`, so a streaming planner knows a tree's task when the tree starts, and what needs to know what was dispatched comes after it. Pilot applies them in that order. Pilot's `serde_json` has `preserve_order` so that the schema's properties reach the provider in that order.
+
+Streaming waits for complete `message_updates` and `rtdl_parent_task_id` before releasing nodes. Pilot files those messages and attaches the submitted tree once, then applies the trailing `task_updates`; `"new"` still refers to the same task. Canceled or invalid response prefixes stay in the session's forest so their results and task ownership survive the turn.
+
+A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
@@ -109,21 +136,25 @@ When Pilot receives a task for a session it has no history for, such as after a 
 
 ## RTDL Planning Flow
 
-Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object:
+Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object: `content` (text shown to the user), `message_updates`, `rtdl_parent_task_id`, `rtdl_description` (a short label for the tree), `rtdl` (the tree) and `task_updates`; the task fields are described under Tasks above:
 
 ```json
 {
   "content": "I will inspect the current scene.",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
+  "rtdl_description": "inspect the scene",
   "rtdl": {
     "op": "sequence",
     "children": [
       {
         "op": "do",
-        "cap": "camera_snapshot",
+        "cap": "tiago_camera.camera_snapshot",
         "args": {}
       }
     ]
-  }
+  },
+  "task_updates": []
 }
 ```
 
@@ -131,7 +162,7 @@ MVP RTDL supports only:
 
 - `sequence`: ordered children.
 - `parallel`: concurrent children. Executor waits for every child and does not cancel sibling branches when one fails.
-- `do`: one capability call, where `cap` is the unique `capability_name` shown in the prompt and `args` is a JSON object.
+- `do`: one capability call, where `cap` is the `capability_name` shown in the prompt, `<provider_id>.<area>_<name>` (for example `tiago_camera.camera_snapshot` for `robonix/primitive/camera/snapshot`), and `args` is a JSON object.
 
 Pilot parses RTDL incrementally and submits complete nodes to Executor through `execute_stream`, so execution can begin before the model finishes its response. User-visible text waits for the complete response to validate. Invalid model output, including malformed or truncated JSON, unknown capabilities, and invalid RTDL, triggers up to two correction requests per planning round. Pilot first cancels this attempt's submitted plan and records observed execution results, then sends the error and a short cancellation notice back to the model through the existing planning loop. Each correction refreshes runtime context and counts toward `ROBONIX_PILOT_MAX_TOOL_ROUNDS`.
 
@@ -142,18 +173,30 @@ Parallel example:
 ```json
 {
   "content": "I will inspect both signals.",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
+  "rtdl_description": "inspect camera and health",
   "rtdl": {
     "op": "parallel",
     "children": [
-      { "op": "do", "cap": "camera_snapshot", "args": {} },
-      { "op": "do", "cap": "battery_status", "args": {} }
+      { "op": "do", "cap": "tiago_camera.camera_snapshot", "args": {} },
+      { "op": "do", "cap": "tiago_health.health_state", "args": {} }
     ]
-  }
+  },
+  "task_updates": []
 }
 ```
 
-An empty sequence means the model is done for the turn:
+An empty sequence means the model is dispatching no new tree this round:
 
 ```json
-{ "content": "Done.", "rtdl": { "op": "sequence", "children": [] } }
+{ "content": "Done.", "message_updates": [], "rtdl_parent_task_id": null, "rtdl_description": "", "rtdl": { "op": "sequence", "children": [] }, "task_updates": [] }
 ```
+
+Pilot accepts it only when it does not contradict the task state. When a task
+update keeps a task `in_progress` and nothing runs — neither this session's trees
+nor any plan in Executor's active-plan snapshot — the model claims the task is
+advancing while nothing will run, so the reply is rejected
+(`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
+the turn ends with what the model said. An empty sequence with no task update is
+an answer or a question to the user.
