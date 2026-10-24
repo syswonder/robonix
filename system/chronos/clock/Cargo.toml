@@ -6,8 +6,6 @@ license.workspace = true
 description = "Chronos reference and steady clock readings without system service dependencies"
 
 [dependencies]
-serde.workspace = true
-serde_yaml.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
