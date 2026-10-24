@@ -10,6 +10,8 @@ import json
 import os
 import socket
 import threading
+import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -33,6 +35,8 @@ from vlm_verifier import service as entry
 class ModelHandler(BaseHTTPRequestHandler):
     verdict = {"passed": True, "detail": "target visibly held"}
     calls = 0
+    expected_colors = ("red", "blue")
+    wait_for_marker = None
 
     def log_message(self, *args):
         pass
@@ -41,11 +45,20 @@ class ModelHandler(BaseHTTPRequestHandler):
         """Validate actual model wire payload and return the chosen verdict."""
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         assert self.path == "/v1/chat/completions"
-        image_url = data["messages"][1]["content"][1]["image_url"]["url"]
-        image = PillowImage.open(io.BytesIO(base64.b64decode(image_url.split(",")[1])))
-        # The shared latest frame is red.
-        red, green, blue = image.getpixel((0, 0))
-        assert red > 240 and blue < 10
+        content = data["messages"][1]["content"]
+        assert content[1]["text"] == "BEFORE capability execution"
+        assert content[3]["text"] == "AFTER capability execution"
+        urls = [item["image_url"]["url"] for item in content if item["type"] == "image_url"]
+        assert len(urls) == 2
+        for url, color in zip(urls, self.expected_colors):
+            image = PillowImage.open(io.BytesIO(base64.b64decode(url.split(",")[1])))
+            red, green, blue = image.getpixel((0, 0))
+            assert (red > 240 and blue < 10) if color == "red" else (blue > 240 and red < 10)
+        if self.wait_for_marker:
+            deadline = time.monotonic() + 5
+            while not Path(self.wait_for_marker).exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert Path(self.wait_for_marker).exists(), "overlap did not run the successor during VLM evaluation"
         type(self).calls += 1
         content = self.verdict if isinstance(self.verdict, str) else json.dumps(self.verdict)
         response = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
@@ -70,11 +83,12 @@ async def main():
     stopped = threading.Event()
     executor = SingleThreadedExecutor(context=context)
     executor.add_node(node)
+    color = [[255, 0, 0]]
 
     def publish():
         """Continuously publish the frame retained by the verifier's shared cache."""
         msg = Image(height=4, width=4, encoding="rgb8", step=12,
-                    data=[255, 0, 0] * 16)
+                    data=color[0] * 16)
         publisher.publish(msg)
 
     node.create_timer(0.05, publish)
@@ -121,13 +135,24 @@ async def main():
                     await client.initialize()
 
                     async def call(provider="wrist"):
-                        """Call."""
                         payload = dict(
                             target_provider_id="pick", target_contract_id="robonix/skill/pick/pick",
                             target_description="Pick the red object",
                             target_args={"object_name": "red object"}, target_output={"success": True},
                             verifier_args={"camera_provider_id": provider},
                         )
+                        color[0] = [255, 0, 0]
+                        await asyncio.sleep(0.1)
+                        payload["phase"] = "before"
+                        before = await client.call_tool("verify", {
+                            "call_id": "smoke", "args_json": json.dumps(payload),
+                        })
+                        if before.isError:
+                            return before
+                        assert json.loads(before.content[0].text)["passed"] is True
+                        color[0] = [0, 0, 255]
+                        await asyncio.sleep(0.1)
+                        payload["phase"] = "after"
                         return await client.call_tool("verify", {
                             "call_id": "smoke", "args_json": json.dumps(payload),
                         })
@@ -145,15 +170,21 @@ async def main():
                     assert ModelHandler.calls == before
                     assert len(channels) == 1
                     assert channels[0].close.call_count == 0
-                    print("PASS: shared latest ROS frame, MCP pass/reject/errors, HTTP VLM, channel reuse")
+                    print("PASS: ordered before/after ROS images, MCP pass/reject/errors, one HTTP VLM call per pair")
                     if os.environ.get("VLM_TEST_EXECUTOR_BIN"):
                         from executor_checks import check
                         entry.CAMERAS.close()
                         entry.CAMERAS = camera.CameraPool(lambda: entry.ATLAS, entry.service.id)
+                        color[0] = [255, 0, 0]
+                        ModelHandler.expected_colors = ("red", "red")
                         await check(entry, port, ModelHandler)
+                        entry.CAMERAS.close()
+                        entry.CAMERAS = camera.CameraPool(lambda: entry.ATLAS, entry.service.id)
+                        await check(entry, port, ModelHandler, overlap=True)
                     entry.shutdown()
                     assert channels[0].close.call_count == 1
     finally:
+        entry.shutdown()
         server.should_exit = True
         await server_task
         sock.close()

@@ -18,6 +18,7 @@ use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
 
 pub const VERIFY_CONTRACT_ID: &str = "robonix/service/verifier/verify";
+const VLM_VERIFIER_PROVIDER_ID: &str = "vlm_verifier";
 const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Immutable rule set shared by all concurrently executing plans.
@@ -67,6 +68,32 @@ struct VerifyResponse {
     detail: String,
 }
 
+/// VLM verification requires an acknowledged before image prior to dispatch.
+pub async fn capture_before(
+    policy: &VerificationPolicy,
+    call: &CapabilityCall,
+    node: &NodeEventContext,
+    self_provider_id: &str,
+    atlas: &mut AtlasClient,
+    runtime: &PlanRuntime,
+) -> Result<(), String> {
+    let Some(rule) = policy.rule_for(call) else {
+        return Ok(());
+    };
+    if rule.verifier_provider_id != VLM_VERIFIER_PROVIDER_ID {
+        return Ok(());
+    }
+    let verifier_call = build_verifier_call(rule, call, &node.description, None);
+    let response = request_verdict(&verifier_call, node, self_provider_id, atlas, runtime).await?;
+    if !response.passed {
+        return Err(format!(
+            "before image capture rejected: {}",
+            response.detail
+        ));
+    }
+    Ok(())
+}
+
 /// Verify a successful result when a rule matches. The verifier call itself
 /// goes straight through dispatch and is never recursively verified.
 pub async fn verify_result(
@@ -82,13 +109,26 @@ pub async fn verify_result(
         return original;
     };
 
-    let verifier_call = build_verifier_call(rule, call, &node.description, &original);
+    let verifier_call = build_verifier_call(rule, call, &node.description, Some(&original));
+    match request_verdict(&verifier_call, node, self_provider_id, atlas, runtime).await {
+        Ok(verdict) => apply_verdict(original, verdict),
+        Err(reason) => unavailable(original, reason),
+    }
+}
+
+async fn request_verdict(
+    verifier_call: &CapabilityCall,
+    node: &NodeEventContext,
+    self_provider_id: &str,
+    atlas: &mut AtlasClient,
+    runtime: &PlanRuntime,
+) -> Result<VerifyResponse, String> {
     info!(
-        "[executor/verification] call_id={} target='{}' verifier='{}'",
-        call.call_id, call.contract_id, rule.verifier_provider_id
+        "[executor/verification] call_id={} verifier='{}'",
+        verifier_call.call_id, verifier_call.provider_id
     );
     let response = dispatch::dispatch_with_timeout(
-        &verifier_call,
+        verifier_call,
         self_provider_id,
         atlas,
         runtime,
@@ -97,28 +137,18 @@ pub async fn verify_result(
     )
     .await;
     if !response.success {
-        return unavailable(
-            original,
-            format!(
-                "verifier '{}' failed: {}",
-                rule.verifier_provider_id, response.error
-            ),
-        );
+        return Err(format!(
+            "verifier '{}' failed: {}",
+            verifier_call.provider_id, response.error
+        ));
     }
 
-    let parsed: VerifyResponse = match serde_json::from_str(&response.output) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return unavailable(
-                original,
-                format!(
-                    "verifier '{}' returned invalid response: {error}",
-                    rule.verifier_provider_id
-                ),
-            );
-        }
-    };
-    apply_verdict(original, parsed)
+    serde_json::from_str(&response.output).map_err(|error| {
+        format!(
+            "verifier '{}' returned invalid response: {error}",
+            verifier_call.provider_id
+        )
+    })
 }
 
 /// Build the common two-field Verify request. The nested payload stays opaque
@@ -127,18 +157,26 @@ fn build_verifier_call(
     rule: &VerificationRule,
     call: &CapabilityCall,
     description: &str,
-    result: &CapabilityCallResult,
+    result: Option<&CapabilityCallResult>,
 ) -> CapabilityCall {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "target_provider_id": call.provider_id,
         "target_contract_id": call.contract_id,
         "target_description": description,
         "target_args": json_or_string(&call.args_json),
-        "target_output": json_or_string(&result.output),
+        "target_output": result.map(|result| json_or_string(&result.output)),
         "verifier_args": rule.verifier_args,
     });
+    let before = result.is_none();
+    if rule.verifier_provider_id == VLM_VERIFIER_PROVIDER_ID {
+        payload["phase"] = serde_json::json!(if before { "before" } else { "after" });
+    }
     CapabilityCall {
-        call_id: format!("{}:verify", call.call_id),
+        call_id: if before {
+            format!("{}:verify:before", call.call_id)
+        } else {
+            format!("{}:verify", call.call_id)
+        },
         provider_id: rule.verifier_provider_id.clone(),
         contract_id: VERIFY_CONTRACT_ID.to_string(),
         args_json: serde_json::json!({
@@ -257,7 +295,7 @@ mod tests {
             &rule(None, "vlm_verifier"),
             &call(),
             "place bottle",
-            &result(),
+            Some(&result()),
         );
         let outer: serde_json::Value = serde_json::from_str(&verify.args_json).unwrap();
         let payload: serde_json::Value =
@@ -266,10 +304,34 @@ mod tests {
         assert_eq!(payload["target_args"]["object"], "bottle");
         assert_eq!(payload["target_output"]["accepted"], true);
         assert_eq!(payload["target_description"], "place bottle");
+        assert_eq!(payload["phase"], "after");
         assert_eq!(
             payload["verifier_args"]["camera_provider_id"],
             "front_camera"
         );
+    }
+
+    #[test]
+    fn before_request_uses_same_target_identity_without_a_result() {
+        let request =
+            build_verifier_call(&rule(None, "vlm_verifier"), &call(), "place bottle", None);
+        let outer: serde_json::Value = serde_json::from_str(&request.args_json).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(outer["args_json"].as_str().unwrap()).unwrap();
+        assert_eq!(outer["call_id"], call().call_id);
+        assert_eq!(payload["phase"], "before");
+        assert!(payload["target_output"].is_null());
+        assert_eq!(payload["target_args"]["object"], "bottle");
+        let other = build_verifier_call(
+            &rule(None, "scene_verifier"),
+            &call(),
+            "place bottle",
+            Some(&result()),
+        );
+        let outer: serde_json::Value = serde_json::from_str(&other.args_json).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(outer["args_json"].as_str().unwrap()).unwrap();
+        assert!(payload.get("phase").is_none());
     }
 
     #[test]

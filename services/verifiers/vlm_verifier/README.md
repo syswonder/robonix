@@ -3,7 +3,7 @@
 A generic visual result verification service. Provider ID: `vlm_verifier`.
 MCP contract: `robonix/service/verifier/verify`.
 
-The service takes the latest RGB image from the camera selected by an Executor
+The service takes the latest RGB images before and after a capability through an Executor
 verification rule and asks a vision model whether the intended result is visible.
 It has no robot-specific grasp logic and does not move the robot.
 
@@ -73,10 +73,12 @@ profile enables only `pick`, not `put_down`.
 
 ## Runtime flow
 
-1. Executor waits for the target capability to finish. A failed target returns
+1. For provider ID `vlm_verifier`, Executor first invokes this interface with
+   `phase: "before"` and waits for capture acknowledgement before running the cap.
+   Executor then waits for the target capability to finish. A failed target returns
    its original failure without invoking a verifier.
 2. After a successful target call, Executor matches a verification rule and
-   invokes the configured verifier over MCP before emitting the final node state.
+   invokes the configured verifier over MCP with `phase: "after"` before emitting the final node state.
 3. The verifier parses the action description, arguments, output, and camera
    provider from the request.
 4. It queries Atlas for that exact provider's
@@ -85,10 +87,14 @@ profile enables only `pick`, not `put_down`.
    no snapshot RPC, default-topic fallback, or camera substitution.
 5. It converts the image into JPEG, saves the exact JPEG with private file
    permissions under `$SCRIBE_LOG_DIR/vlm_verifier-frames/`, and sends those
-   same bytes with the action context to the configured
+   saved before and after images with labels and the action context to the configured
    `<base_url>/chat/completions` endpoint.
 6. It accepts only a JSON object containing exactly a boolean `passed` and a
    nonempty string `detail`. Executor then reports one final result.
+
+The existing `overlap` controls only the after request. When enabled, later
+actions may affect the cached image read by after and can execute before a
+rejection. Camera capture keeps its original latest-frame behavior.
 
 A passing response looks like this:
 
@@ -105,7 +111,7 @@ at the intended destination. An invisible target, wrong object, or ambiguous
 evidence returns `passed=false`. The original capability's success flag is
 not visual proof. For a wrist-mounted camera, two opposing jaw tips visibly
 flanking or contacting the target can establish a grasp without the complete
-gripper body being in frame. A single image cannot establish continuing grip
+gripper body being in frame. Two snapshots cannot establish continuing grip
 stability.
 
 | Outcome | Executor result |
@@ -138,6 +144,7 @@ The decoded `args_json` envelope is:
 
 ```json
 {
+  "phase": "after",
   "target_provider_id": "pick",
   "target_contract_id": "robonix/skill/pick/pick",
   "target_description": "Pick up the red bottle",
@@ -147,6 +154,7 @@ The decoded `args_json` envelope is:
 }
 ```
 
+`phase` must be `before` or `after`; before uses null for `target_output`.
 The description and provider/contract IDs must be nonempty strings.
 `target_args` and `target_output` are required and retain Executor's parsed JSON
 values or original strings.
@@ -165,7 +173,7 @@ values or original strings.
 - Fixed deadlines: 50 seconds overall, 5 seconds for observation, and 40 seconds
   for VLM evaluation, below Executor's 60-second verification timeout.
   These are implementation constants, not configurable YAML fields.
-- One image and one model request per verification. No retries or multiple-view voting.
+- Two ordered images and one model request per completed verification. No retries or multiple-view voting.
 
 ## Build and start
 
