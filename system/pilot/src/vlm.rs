@@ -447,16 +447,6 @@ fn rtdl_envelope_schema() -> Value {
                 },
                 "required": ["op"],
             },
-            {
-                "type": "object",
-                "properties": {
-                    "op": {"type": "string", "enum": ["stop_plan_at"]},
-                    "plan_id": identifier(),
-                    "target_op_id": identifier(),
-                    "when": {"type": "string", "enum": ["on_enter", "on_complete"]},
-                },
-                "required": ["op", "plan_id", "target_op_id"],
-            },
         ],
     });
     // Properties in the order a reply should give them, which `preserve_order`
@@ -804,9 +794,9 @@ impl VlmClient {
         tokio::spawn(async move {
             let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
             let mut finish = "stop".to_string();
-            // Bytes, not text: a chunk can end inside a multi-byte character,
-            // and only a whole line is decoded.
-            let mut buf: Vec<u8> = Vec::new();
+            // HTTP chunks may end inside a UTF-8 character. Decode only after
+            // a complete SSE line arrives (or the transport reaches EOF).
+            let mut buf = Vec::new();
             let mut done = false;
             while !done {
                 let chunk = tokio::select! {
@@ -819,15 +809,9 @@ impl VlmClient {
                 match chunk {
                     Ok(bytes) => {
                         buf.extend_from_slice(&bytes);
-                        while let Some(line) = take_line(&mut buf) {
-                            match process_stream_line(
-                                line.trim_end(),
-                                &mut tc_acc,
-                                &mut finish,
-                                &tx,
-                            )
-                            .await
-                            {
+                        while let Some(pos) = buf.iter().position(|byte| *byte == b'\n') {
+                            let line: Vec<u8> = buf.drain(..=pos).collect();
+                            match process_stream_line(&line, &mut tc_acc, &mut finish, &tx).await {
                                 Ok(true) => {
                                     done = true;
                                     break;
@@ -848,10 +832,9 @@ impl VlmClient {
                     }
                 }
             }
-            let rest = String::from_utf8_lossy(&buf);
-            if !rest.trim().is_empty()
-                && let Err(e) =
-                    process_stream_line(rest.trim_end(), &mut tc_acc, &mut finish, &tx).await
+            if !done
+                && !buf.is_empty()
+                && let Err(e) = process_stream_line(&buf, &mut tc_acc, &mut finish, &tx).await
             {
                 let _ = tx.send(Err(e)).await;
                 return;
@@ -908,25 +891,11 @@ mod tests {
         AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
         downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
-        rejects_optional_request_fields, response_format_for, take_line,
+        rejects_optional_request_fields, response_format_for,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Duration;
-
-    #[test]
-    fn a_character_split_across_chunks_is_decoded_whole() {
-        let line = "data: {\"content\":\"机器人\"}\n".as_bytes(); // i18n-ok
-        let cut = line.len() - 5; // inside the last character
-        let mut buf = line[..cut].to_vec();
-        assert_eq!(take_line(&mut buf), None);
-        buf.extend_from_slice(&line[cut..]);
-        assert_eq!(
-            take_line(&mut buf).as_deref(),
-            Some("data: {\"content\":\"机器人\"}\n") // i18n-ok
-        );
-        assert!(buf.is_empty());
-    }
 
     #[test]
     fn reads_context_window_from_common_provider_metadata_shapes() {
@@ -1066,7 +1035,7 @@ mod tests {
         // plan as malformed.
         let meta = &schema["$defs"]["meta"];
         let ops = meta["anyOf"].as_array().expect("one schema per meta op");
-        assert_eq!(ops.len(), 3);
+        assert_eq!(ops.len(), 2);
         let required = |name: &str| -> Vec<&str> {
             ops.iter()
                 .find(|op| op["properties"]["op"]["enum"][0] == name)
@@ -1077,11 +1046,8 @@ mod tests {
                 .map(|field| field.as_str().expect("field name"))
                 .collect()
         };
-        // Exactly what `parse_meta_plan_op` requires per op: `stop_plan_at`
-        // without its ids is well-formed here and unparseable there.
         assert_eq!(required("cancel_plan"), ["op", "plan_id"]);
         assert_eq!(required("cancel_all"), ["op"]);
-        assert_eq!(required("stop_plan_at"), ["op", "plan_id", "target_op_id"]);
         let alternatives = schema["properties"]["rtdl"]["anyOf"]
             .as_array()
             .expect("rtdl accepts a node or a meta op");
@@ -1130,16 +1096,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_thinking_chunk_without_content_still_reaches_the_consumer() {
-        // Nothing is emitted for such a chunk on dev, so the planner sees
-        // silence while a reasoning model thinks and its idle timer fires.
+        // Thinking must refresh the idle timer without entering the reply text.
         for field in ["reasoning_content", "reasoning"] {
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
             let mut finish = String::new();
             process_stream_line(
-                &format!(
+                format!(
                     r#"data: {{"choices":[{{"delta":{{"{field}":"weighing the options"}}}}]}}"#
-                ),
+                )
+                .as_bytes(),
                 &mut calls,
                 &mut finish,
                 &tx,
@@ -1150,6 +1116,7 @@ mod tests {
                 panic!("{field}: expected a reasoning delta");
             };
             assert_eq!(delta, "weighing the options");
+            assert!(rx.try_recv().is_err());
         }
     }
 
@@ -1159,7 +1126,7 @@ mod tests {
         let mut calls = BTreeMap::<u32, AccumulatedToolCall>::new();
         let mut finish = String::new();
         process_stream_line(
-            r#"data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":900}}}"#,
+            br#"data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":900}}}"#,
             &mut calls,
             &mut finish,
             &tx,
@@ -1176,6 +1143,112 @@ mod tests {
             })))
         ));
     }
+
+    /// Exercise the real HTTP receiver with deliberately fragmented response bytes.
+    async fn receive_http_chunks(chunks: Vec<Vec<u8>>) -> Vec<anyhow::Result<VlmStreamItem>> {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 4096];
+            loop {
+                let count = socket.read(&mut bytes).await.unwrap();
+                assert!(count > 0, "client closed before sending its request");
+                request.extend_from_slice(&bytes[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
+            for chunk in chunks {
+                socket
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&chunk).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+        let client = super::VlmClient {
+            inner: reqwest::Client::builder().no_proxy().build().unwrap(),
+            api_base: format!("http://{address}"),
+            api_key: "local-test".into(),
+            model: "local-test".into(),
+            configured_context_window_tokens: None,
+            prompt_cache_key: "local-test".into(),
+        };
+        let stream = client
+            .chat_stream(&[super::Message::user("test")], &[], None, ReplyShape::Text)
+            .await
+            .unwrap();
+        let items = tokio::time::timeout(Duration::from_secs(10), stream.collect::<Vec<_>>())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        items
+    }
+
+    /// UTF-8 content must survive splits inside every Chinese and emoji character.
+    #[tokio::test]
+    async fn http_stream_preserves_fragmented_utf8() {
+        let text = r#"{"content":"按顺序完成🤖","args":{"name":"厨房"}}"#; // i18n-ok: multibyte UTF-8 test fixture
+        let body = format!(
+            "data: {}\r\n\r\ndata: [DONE]",
+            json!({"choices":[{"delta":{"content":text}}]})
+        );
+        let items = receive_http_chunks(body.bytes().map(|b| vec![b]).collect()).await;
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], Ok(VlmStreamItem::TextDelta(value)) if value == text));
+        assert!(matches!(&items[1], Ok(VlmStreamItem::Finish)));
+    }
+
+    /// Invalid or truncated UTF-8 fails explicitly instead of mutating model output.
+    #[tokio::test]
+    async fn http_stream_rejects_invalid_utf8() {
+        for suffix in [b"\n".as_slice(), b"".as_slice()] {
+            let mut body = b"data: {\"choices\":[{\"delta\":{\"content\":\"".to_vec();
+            body.push(0xe4);
+            body.extend_from_slice(suffix);
+            let items = receive_http_chunks(vec![body]).await;
+            assert_eq!(items.len(), 1);
+            assert!(matches!(&items[0], Err(error) if error.to_string().contains("invalid UTF-8")));
+        }
+    }
+
+    /// A final SSE line without a newline still retains split multibyte text.
+    #[tokio::test]
+    async fn http_stream_preserves_utf8_at_eof() {
+        let body = format!(
+            "data: {}",
+            json!({"choices":[{"delta":{"content":"中文"}}]}) // i18n-ok: multibyte UTF-8 test fixture
+        );
+        let split = body.find('文').unwrap() + 1; // i18n-ok: multibyte UTF-8 test fixture
+        let items = receive_http_chunks(vec![
+            body.as_bytes()[..split].to_vec(),
+            body.as_bytes()[split..].to_vec(),
+        ])
+        .await;
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], Ok(VlmStreamItem::TextDelta(value)) if value == "中文")); // i18n-ok: multibyte UTF-8 test fixture
+        assert!(matches!(&items[1], Ok(VlmStreamItem::Finish)));
+    }
 }
 
 #[derive(Default)]
@@ -1185,21 +1258,17 @@ struct AccumulatedToolCall {
     arguments: String,
 }
 
-/// The next whole line of an SSE body, decoded; `None` until a newline
-/// has arrived, so a character split across chunks is never cut.
-fn take_line(buf: &mut Vec<u8>) -> Option<String> {
-    let pos = buf.iter().position(|&b| b == b'\n')?;
-    let raw: Vec<u8> = buf.drain(..=pos).collect();
-    Some(String::from_utf8_lossy(&raw).into_owned())
-}
-
+/// Decode a complete SSE line, rejecting invalid UTF-8, and forward visible
+/// output plus activity. Provider reasoning is never copied into assistant text.
 async fn process_stream_line(
-    line: &str,
+    line: &[u8],
     tc_acc: &mut BTreeMap<u32, AccumulatedToolCall>,
     finish: &mut String,
     tx: &tokio::sync::mpsc::Sender<Result<VlmStreamItem>>,
 ) -> Result<bool> {
-    let line = line.trim();
+    let line = std::str::from_utf8(line)
+        .context("VLM SSE line contains invalid UTF-8")?
+        .trim();
     if line.is_empty() || line.starts_with(':') {
         return Ok(false);
     }

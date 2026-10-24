@@ -12,6 +12,8 @@ cargo build -p robonix-pilot
 
 The crate is part of the top-level Cargo workspace and is built / installed by `make build` and `make install` respectively.
 
+Run Pilot's tests with `cargo test -p robonix-pilot`. RTDL parser tests exercise the incremental parser used at runtime.
+
 ## Run
 
 Manual launch:
@@ -37,6 +39,7 @@ Common configuration:
 - `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
+- `ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS`: maximum time without a VLM stream event before ending the turn and canceling its submitted plan. Defaults to `30` seconds and is clamped to `5..=300`. Non-empty `reasoning_content` deltas refresh this timer but are not appended to the assistant JSON.
 - `ROBONIX_SESSION_DIR`: where session transcripts are kept (see Session transcripts). `rbnx boot` sets it; defaults to `./sessions`.
 
 ## Context capacity: automatic, visible, and overrideable
@@ -105,6 +108,8 @@ Every `"new"` in one reply names the same task: the one its `message_updates` st
 
 A reply gives its fields in the order `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl`, `task_updates`: what dispatch needs comes before `rtdl`, so a streaming planner knows a tree's task when the tree starts, and what needs to know what was dispatched comes after it. Pilot applies them in that order. Pilot's `serde_json` has `preserve_order` so that the schema's properties reach the provider in that order.
 
+Streaming waits for complete `message_updates` and `rtdl_parent_task_id` before releasing nodes. Pilot files those messages and attaches the submitted tree once, then applies the trailing `task_updates`; `"new"` still refers to the same task. Canceled or invalid response prefixes stay in the session's forest so their results and task ownership survive the turn.
+
 A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
@@ -117,7 +122,7 @@ A planning request is split so that its prefix is cacheable. The system message 
 
 Both Soma blocks are projected onto what a planner acts on. From the body description that drops the `urdf` file reference — a path in the provider's own filesystem namespace, pointing at the kinematics this crate already declines to inject — the `footprint` collision polygon that navigation rather than the planner consumes, and the description of each exported capability, which the capability catalog in the same prompt already carries verbatim; the component-to-capability mapping stays, since the catalog does not say which part of the body offers a capability. From the live health snapshot it drops fields at an absent value, which the prompt's own "missing means unknown" rule already covers. `dimensions`, sensor `placement`, `can_do` / `cannot_do`, and the deployment notes are body facts and remain.
 
-The catalog prints each capability's name, the opening paragraph of its description, and its argument schema. A description longer than that paragraph — a provider that wrote its request/response manual into the description field rather than a `CAPABILITY.md` — is summarized, and the entry carries a `more:` line naming the `provider_id` to pass to the Executor's `read_capability_doc` builtin for the full text. The catalog ships on every planning request while a manual ships only when the model decides it needs that provider, so one verbose provider cannot tax every call for the whole system.
+The catalog prints each capability's name, the opening paragraph of its description, and its argument schema. A description longer than that paragraph — a provider that wrote its request/response manual into the description field rather than a `CAPABILITY.md` — is summarized, and the entry carries a `more:` line naming the `provider_id` to pass to the Executor's `read_capability_doc` builtin for the full text. The catalog stays in history, with later rounds appending only changes. A manual is fetched when the model requests it.
 
 Every request writes a `[pilot/prompt]` JSON log with text bytes and four-byte token estimates for standing context, RTDL protocol, current runtime-context sections (including the capability catalog record, when there is one), and full ordered history. Pilot supplies one opaque `prompt_cache_key` for the **lifetime of the running Pilot deployment**, rather than one key per task: the unchanged system prefix and completed histories can route to the same cache across independent tasks without using a user/session identifier. The message-ordering test asserts that a later normal planning request is an exact extension of the prior wire-message sequence; this is the code-level reusable-prefix invariant. Compatible providers also report exact input, output, total, cached-input, and uncached-input tokens through streaming usage. Pilot logs those values per request together with `cache_hit` and `cache_hit_ratio`, plus cumulative token totals, cache-hit request counts, and the cumulative cache-hit ratio for the interaction. Provider-reported cache ratio remains a runtime measurement: routing, TTL expiry, provider cache granularity, and a newly appended suffix make it distinct from code-level prefix reuse. Pricing is not hard-coded because an OpenAI-compatible proxy may route the same model name to differently priced backends; the logged totals can be priced against the operator's actual provider contract. The fake VLM's reported usage is explicitly a deterministic four-byte estimate, not a production tokenizer result. A provider that rejects a named optional cache/usage field with HTTP 400 or 422 is retried once without those fields; unrelated client errors are returned unchanged.
 
@@ -159,7 +164,7 @@ MVP RTDL supports only:
 - `parallel`: concurrent children. Executor waits for every child and does not cancel sibling branches when one fails.
 - `do`: one capability call, where `cap` is the `capability_name` shown in the prompt, `<provider_id>.<area>_<name>` (for example `tiago_camera.camera_snapshot` for `robonix/primitive/camera/snapshot`), and `args` is a JSON object.
 
-Pilot buffers the full assistant JSON before showing user-visible text, validates the RTDL, expands it into an arena-style `Plan { nodes, root_index }`, sends that `Plan` to Liaison, and dispatches it to Executor. Executor interprets `sequence`, `parallel`, and `do` nodes directly.
+Pilot parses RTDL incrementally and submits complete nodes to Executor through `execute_stream`, so execution can begin before the model finishes its response. User-visible text waits for the complete response to validate. Invalid model output, including malformed or truncated JSON, unknown capabilities, and invalid RTDL, triggers up to two correction requests per planning round. Pilot first cancels this attempt's submitted plan and records observed execution results, then sends the error and a short cancellation notice back to the model through the existing planning loop. Each correction refreshes runtime context and counts toward `ROBONIX_PILOT_MAX_TOOL_ROUNDS`.
 
 Pilot forwards `VERIFYING` node states for live visibility but does not put them in LLM history or `BatchResult`. Once verification finishes, the final leaf result is written to history exactly once; a final failure triggers replanning immediately. `BatchResult` contains only the latest final state for each node.
 

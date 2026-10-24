@@ -68,3 +68,5 @@ env.sh
 develop_specs/
 
 *.egg-info/
+
+testing/webots_rtdl

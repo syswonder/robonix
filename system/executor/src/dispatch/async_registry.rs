@@ -4,9 +4,12 @@
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 
+/// Required companion contracts used to poll and cancel an asynchronous capability.
 #[derive(Debug, Clone)]
 pub struct AsyncGroup {
+    /// Contract ID queried for the progress and final result of an execution.
     pub status_contract: String,
+    /// Contract ID called to request cancellation of an execution.
     pub cancel_contract: String,
 }
 

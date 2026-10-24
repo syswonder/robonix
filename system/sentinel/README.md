@@ -15,8 +15,7 @@ to the selected primitive, service, or skill provider. The only safety-related
 controls in the current path are local to the components that already exist,
 for example:
 
-- Executor plan cancellation and stop points (`cancel_plan`, `stop_plan_at`,
-  `cancel_all_plans`).
+- Executor plan cancellation (`cancel_plan`, `cancel_all_plans`).
 - Liaison access control for text/API users and voiceprint-verified speakers
   before work enters Pilot/TTS.
 - Provider-side validation in individual primitives and services.
