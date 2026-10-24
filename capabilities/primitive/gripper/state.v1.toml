@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/gripper/state"
+version = "1"
+kind = "primitive"
+idl = "gripper/msg/GripperState.msg"
+description = "Publish independent observations of opening width in metres and contact state."
+
+[mode]
+type = "topic_out"

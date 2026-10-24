@@ -1,0 +1,8 @@
+# Close adaptively to establish contact, without a target opening. Observe
+# state for contact; a holding observation is not proof of task-level success.
+float64 relative_effort # 0 = configured default; (0,1] = device-relative setting.
+                        # Not measured force, newtons, or a safety force limit.
+float64 relative_speed  # 0 = configured default; (0,1] = relative speed setting.
+---
+bool ok                 # Accepted and dispatched, not proof of contact.
+string message          # Human-readable reason on rejection or dispatch failure.
