@@ -1208,7 +1208,7 @@ mod tests {
     /// UTF-8 content must survive splits inside every Chinese and emoji character.
     #[tokio::test]
     async fn http_stream_preserves_fragmented_utf8() {
-        let text = r#"{"content":"按顺序完成🤖","args":{"name":"厨房"}}"#;
+        let text = r#"{"content":"按顺序完成🤖","args":{"name":"厨房"}}"#; // i18n-ok: multibyte UTF-8 test fixture
         let body = format!(
             "data: {}\r\n\r\ndata: [DONE]",
             json!({"choices":[{"delta":{"content":text}}]})
@@ -1237,16 +1237,16 @@ mod tests {
     async fn http_stream_preserves_utf8_at_eof() {
         let body = format!(
             "data: {}",
-            json!({"choices":[{"delta":{"content":"中文"}}]})
+            json!({"choices":[{"delta":{"content":"中文"}}]}) // i18n-ok: multibyte UTF-8 test fixture
         );
-        let split = body.find('文').unwrap() + 1;
+        let split = body.find('文').unwrap() + 1; // i18n-ok: multibyte UTF-8 test fixture
         let items = receive_http_chunks(vec![
             body.as_bytes()[..split].to_vec(),
             body.as_bytes()[split..].to_vec(),
         ])
         .await;
         assert_eq!(items.len(), 2);
-        assert!(matches!(&items[0], Ok(VlmStreamItem::TextDelta(value)) if value == "中文"));
+        assert!(matches!(&items[0], Ok(VlmStreamItem::TextDelta(value)) if value == "中文")); // i18n-ok: multibyte UTF-8 test fixture
         assert!(matches!(&items[1], Ok(VlmStreamItem::Finish)));
     }
 }

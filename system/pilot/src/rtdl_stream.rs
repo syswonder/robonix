@@ -1012,7 +1012,7 @@ mod tests {
     /// Exercise every UTF-8 split and character deltas with nested args and escaped structural text.
     #[test]
     fn arbitrary_splits_preserve_unicode_and_tree_shape() {
-        let raw = r#"{"content":"你好","rtdl_description":"root","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"description":"root","op":"sequence","children":[{"op":"do","cap":"run","args":{"x":[{"v":"引号\"\\{},[]\u4e2d"}]}},{"op":"parallel","description":"p","children":[{"args":{},"cap":"run","op":"do"}]}]}}"#;
+        let raw = r#"{"content":"你好","rtdl_description":"root","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"description":"root","op":"sequence","children":[{"op":"do","cap":"run","args":{"x":[{"v":"引号\"\\{},[]\u4e2d"}]}},{"op":"parallel","description":"p","children":[{"args":{},"cap":"run","op":"do"}]}]}}"#; // i18n-ok: multibyte UTF-8 test fixture
         let check = |p: &RtdlIncrementalParser| {
             assert_nodes(
                 p,
@@ -1152,7 +1152,7 @@ mod tests {
     /// Escaped field names and deeply nested args obey the same validation and buffering rules.
     #[test]
     fn escaped_args_key_preserves_deep_args() {
-        let mut args = serde_json::json!({"text": "你好"});
+        let mut args = serde_json::json!({"text": "你好"}); // i18n-ok: multibyte UTF-8 test fixture
         for _ in 0..48 {
             args = serde_json::json!({"nested": args});
         }
