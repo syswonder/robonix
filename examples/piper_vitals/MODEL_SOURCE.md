@@ -14,8 +14,10 @@ The generator expands the gripper file's single Xacro include, removes
 collision geometry, rewrites `package://agx_arm_description/...` Mesh URIs to
 URDF-local relative paths, copies only referenced visual assets, and records
 their hashes in `model/manifest.json`. Generated files under `model/meshes/`
-are tracked robot-model assets. Update the URDF, Mesh files, manifest, source
-revision, and license information together whenever the model is regenerated.
+are tracked robot-model assets because this bundle remains below the small
+model thresholds in `system/soma/ROBOT_MODEL_ASSETS.md`. Update the URDF, Mesh
+files, manifest, source revision, and license information together whenever the
+model is regenerated.
 
 The path mapping is stable and resolved relative to
 `model/piper_with_gripper.urdf`:

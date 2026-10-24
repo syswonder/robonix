@@ -28,6 +28,7 @@ roxmltree = "0.21.1"
 robonix-atlas = { path = "../atlas" }
 robonix-cli = { path = "../../tools/rbnx" }
 robonix-scribe.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 nix = { version = "0.31", features = ["signal", "process", "fs"] }
 
