@@ -248,8 +248,20 @@ def is_(contract: str, entry) -> bool:
     return contract in entry if isinstance(entry, list) else contract == entry
 
 
+def completion_fails(final: str, failed: bool, finished: bool = True) -> list[str]:
+    fails = []
+    if failed:
+        fails.append("Pilot reported the task FAILED")
+    if finished is False:
+        fails.append("Pilot did not finish every submitted turn")
+    if not final.strip():
+        fails.append("no final answer")
+    return fails
+
+
 def check(case: dict, run: dict) -> list[str]:
-    exp, fails = case.get("expect", {}), []
+    exp = case.get("expect", {})
+    fails = completion_fails(run["final"], run["failed"], run.get("finished", True))
     calls = sorted(
         (c for c in run["calls"] if c.get("executed") is True
          or (c.get("start") is not None and c.get("end") is not None)),
@@ -257,17 +269,11 @@ def check(case: dict, run: dict) -> list[str]:
     )
     names = [c["contract"] for c in calls]
     of = lambda entry: [c for c in calls if is_(c["contract"], entry)]  # noqa: E731
-    if run["failed"]:
-        fails.append("Pilot reported the task FAILED")
-    if not run.get("finished", True):
-        fails.append("Pilot did not finish every submitted turn")
     # Pilot's own words when no reply of the model gave a valid plan.
     if run["final"].startswith("I couldn't produce a valid robot plan"):
         fails.append("Pilot got no valid plan from the model")
     if exp.get("no_calls_at_all") and calls:
         fails.append(f"expected no calls, got {names}")
-    if exp.get("answered") and not run["final"].strip():
-        fails.append("no final answer")
     for entry in exp.get("calls", []):
         if not of(entry):
             fails.append(f"missing call {entry}")
