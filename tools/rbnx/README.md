@@ -74,6 +74,9 @@ and saves the session in `~/.robonix/session.yaml` (mode `0600` on Unix).
 `ROBONIX_SESSION_TOKEN`. `rbnx logout` revokes the session and removes the file.
 Without Keystone, both commands use the local OS user without login. Remote
 connections need a trusted network or encrypted tunnel because gRPC has no TLS.
+Liaison, Pilot, and Executor each control Keystone enforcement with their own
+`require_keystone` setting. `rbnx boot` passes these settings independently;
+CLI/environment overrides apply before manifest values.
 
 `rbnx tools` follows contract metadata and omits entries marked
 `llm_callable = false`; `rbnx contracts` still lists those contracts and marks
@@ -149,6 +152,10 @@ system:
 
 - `ROBONIX_ATLAS` — atlas endpoint, default `localhost:50051`.
 - `ROBONIX_SESSION_TOKEN` — Keystone session token for automation; overrides `rbnx login` state.
+- `ROBONIX_LIAISON_REQUIRE_KEYSTONE`,
+  `ROBONIX_EXECUTOR_REQUIRE_KEYSTONE`, and
+  `ROBONIX_PILOT_REQUIRE_KEYSTONE` — override the corresponding component's
+  manifest `require_keystone` value.
 - `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
   to pilot at boot.
 - `ROBONIX_DRIVER_INIT_TIMEOUT_S` — seconds `rbnx boot` waits for a package's

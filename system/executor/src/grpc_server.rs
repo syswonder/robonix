@@ -75,11 +75,11 @@ impl ExecutorServiceImpl {
 
     /// Resolve a request credential while allowing anonymous local execution only when configured.
     async fn authenticate_session(&self, token: &str) -> Result<SentinelIdentity, Status> {
-        if token.is_empty() {
-            if self.require_keystone {
-                return Err(Status::unauthenticated("login session is required"));
-            }
+        if !self.require_keystone {
             return Ok(SentinelIdentity::default());
+        }
+        if token.is_empty() {
+            return Err(Status::unauthenticated("login session is required"));
         }
         resolve_session_identity(&self.atlas, &self.provider_id, token).await
     }

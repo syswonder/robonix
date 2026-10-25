@@ -20,6 +20,7 @@ system:
     sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
     sentinel_rules_seed: sentinel-rules.v1.json
     log: info
+    require_keystone: true
 
 # Keeping the simulated camera under primitive preserves the normal package
 # semantics. rbnx therefore injects Soma automatically; Scene/navigation are

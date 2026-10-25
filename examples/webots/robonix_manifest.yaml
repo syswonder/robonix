@@ -58,6 +58,7 @@ system:
           verifier_args:
             scene_provider_id: scene
             check_yaw: true
+    require_keystone: true
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071
@@ -65,12 +66,14 @@ system:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
+    require_keystone: true
   # health monitoring layer
   vitals:
     listen: 127.0.0.1:50093
     log: info
   liaison:
     listen: 0.0.0.0:50081
+    require_keystone: true
     keystone_endpoint: 127.0.0.1:50095
 
 # after booted all the system components, start the devices (primitives)

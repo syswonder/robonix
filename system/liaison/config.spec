@@ -1,8 +1,9 @@
 # The `system.liaison:` block of robonix_manifest.yaml. rbnx boot passes the
 # whole block to robonix-liaison as --config-json and also turns listen, atlas,
 # pilot_endpoint, keystone_endpoint and log into CLI flags. The hands-free keys
-# are read from the JSON; a value of the wrong type stops Liaison at startup
-# ("parse liaison hands-free config"). Other keys are ignored.
+# and require_keystone are read from the JSON; a value of the wrong type stops
+# Liaison at startup. CLI/environment overrides apply before the manifest value.
+# Other keys are ignored.
 #
 # Access control (ROBONIX_LIAISON_ACCESS_ENABLED, ROBONIX_LIAISON_ALLOWED_USERS,
 # ROBONIX_LIAISON_VOICE_THRESHOLD) is read from the environment only.
@@ -36,13 +37,21 @@ properties:
       Pilot endpoint used when Atlas cannot resolve Pilot. Environment
       fallback: ROBONIX_PILOT_ENDPOINT. `localhost` is rewritten to 127.0.0.1.
 
+  require_keystone:
+    type: boolean
+    default: false
+    description: >-
+      Require a live Keystone session for external text, control,
+      push-to-talk voice, and hands-free requests. This setting is independent
+      of Executor and Pilot. --require-keystone or
+      ROBONIX_LIAISON_REQUIRE_KEYSTONE overrides the manifest value.
+
   keystone_endpoint:
     type: string
     description: >-
-      Keystone endpoint. When set, external text, control, push-to-talk voice,
-      and hands-free requests require a live Keystone login session. rbnx boot
-      also derives Executor's require_keystone mode from this value or its
-      ROBONIX_KEYSTONE_ENDPOINT fallback.
+      Optional Keystone fallback endpoint. Liaison first discovers Keystone
+      through Atlas. This address does not enable authentication.
+      ROBONIX_KEYSTONE_ENDPOINT overrides this value when no CLI flag is passed.
 
   log:
     type: string
@@ -61,8 +70,9 @@ properties:
       Listen for a wake word at startup. Takes effect only when both
       handsfree_mic_provider_id and handsfree_speaker_provider_id are set;
       otherwise hands-free mode starts disabled. A client can switch it on
-      later and choose the providers at that point. When Keystone is configured,
-      startup remains disabled until a client supplies a live login session.
+      later and choose the providers at that point. When require_keystone is
+      enabled, startup remains disabled until a client supplies a live login
+      session.
 
   handsfree_mic_provider_id:
     type: string

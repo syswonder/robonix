@@ -66,6 +66,7 @@ use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info, warn};
+use serde::Deserialize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -261,7 +262,7 @@ pub struct LiaisonPipeline {
     atlas: Arc<Mutex<AtlasClient>>,
     access: Arc<AccessControlConfig>,
     keystone: Arc<keystone_gateway::KeystoneGateway>,
-    enforce_keystone: bool,
+    require_keystone: bool,
 }
 
 impl LiaisonPipeline {
@@ -273,14 +274,14 @@ impl LiaisonPipeline {
         atlas: Arc<Mutex<AtlasClient>>,
         access: Arc<AccessControlConfig>,
         keystone: Arc<keystone_gateway::KeystoneGateway>,
-        enforce_keystone: bool,
+        require_keystone: bool,
     ) -> Self {
         Self {
             pilot_endpoint_default: pilot_endpoint_default.into(),
             atlas,
             access,
             keystone,
-            enforce_keystone,
+            require_keystone,
         }
     }
 
@@ -289,20 +290,13 @@ impl LiaisonPipeline {
         &self,
         mut task: Task,
     ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>, Status> {
-        if self.enforce_keystone {
+        if self.require_keystone {
             authenticate_task(&self.keystone, &mut task).await?;
         } else {
-            task.auth_session_token.clear();
-            if let Ok(mut context) = serde_json::from_str::<serde_json::Value>(&task.context_json)
-                && let Some(object) = context.as_object_mut()
-                && object.remove("session_token").is_some()
-            {
-                task.context_json = serde_json::to_string(&context)
-                    .map_err(|error| Status::internal(error.to_string()))?;
-            }
+            forward_session_token(&mut task)?;
         }
         ensure_user_id(&mut task);
-        if !self.enforce_keystone {
+        if !self.require_keystone {
             let user_id = task_user_id(&task);
             match self.access.authorize_user(&user_id) {
                 AccessDecision::Allow {
@@ -363,6 +357,27 @@ impl LiaisonPipeline {
         });
         Ok(rx)
     }
+}
+
+/// Move a public-contract token to Pilot's typed credential field without
+/// interpreting it when Liaison does not perform the authentication check.
+fn forward_session_token(task: &mut Task) -> Result<(), Status> {
+    let Ok(mut context) = serde_json::from_str::<serde_json::Value>(&task.context_json) else {
+        return Ok(());
+    };
+    let Some(object) = context.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(token) = object
+        .remove("session_token")
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|value| !value.is_empty())
+    {
+        task.auth_session_token = token;
+    }
+    task.context_json =
+        serde_json::to_string(&context).map_err(|error| Status::internal(error.to_string()))?;
+    Ok(())
 }
 
 /// Resolve the login token and install Keystone's canonical identity.
@@ -530,7 +545,7 @@ impl RobonixSystemLiaisonVoiceFinish for LiaisonServiceImpl {
         let req = request.into_inner();
         let keystone = self
             .pipeline
-            .enforce_keystone
+            .require_keystone
             .then(|| Arc::clone(&self.pipeline.keystone));
         let session_id = req.session_id.trim().to_string();
         if session_id.is_empty() {
@@ -568,7 +583,7 @@ impl RobonixSystemLiaisonVoice for LiaisonServiceImpl {
         self.handsfree.suspend_capture().await;
         let keystone = self
             .pipeline
-            .enforce_keystone
+            .require_keystone
             .then(|| Arc::clone(&self.pipeline.keystone));
         let stream = match voice::start_voice_session(
             req,
@@ -619,7 +634,7 @@ impl RobonixSystemLiaisonHandsfreeSetEnabled for LiaisonServiceImpl {
         request: Request<SetHandsfreeRequest>,
     ) -> Result<Response<SetHandsfreeResponse>, Status> {
         let request = request.into_inner();
-        if self.pipeline.enforce_keystone {
+        if self.pipeline.require_keystone {
             self.pipeline
                 .keystone
                 .resolve_session(&request.session_token)
@@ -818,8 +833,11 @@ struct Args {
     #[arg(long = "pilot-endpoint")]
     pilot_endpoint: Option<String>,
 
-    /// Keystone endpoint. Providing this requires login sessions for external
-    /// text, control, push-to-talk voice, and hands-free requests.
+    /// Require a live Keystone session for external Liaison requests.
+    #[arg(long = "require-keystone", env = "ROBONIX_LIAISON_REQUIRE_KEYSTONE")]
+    require_keystone: Option<bool>,
+
+    /// Optional Keystone fallback endpoint; this does not enable authentication.
     #[arg(long = "keystone-endpoint", env = "ROBONIX_KEYSTONE_ENDPOINT")]
     keystone_endpoint: Option<String>,
 
@@ -837,6 +855,14 @@ struct Args {
     config_json: Option<String>,
 }
 
+/// Liaison settings decoded from the `system.liaison` manifest block.
+#[derive(Default, Deserialize)]
+struct ManifestConfig {
+    /// Whether Liaison requires Keystone before forwarding external requests.
+    #[serde(default)]
+    require_keystone: Option<bool>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -844,6 +870,17 @@ async fn main() -> Result<()> {
     // --config-json) to scribe's file sink before the first log line.
     robonix_scribe::init_from_config("liaison", args.config_json.as_deref());
     info!("robonix-liaison starting");
+    let manifest_cfg: ManifestConfig = args
+        .config_json
+        .as_deref()
+        .map(serde_json::from_str::<ManifestConfig>)
+        .transpose()
+        .context("parse liaison config")?
+        .unwrap_or_default();
+    let require_keystone = args
+        .require_keystone
+        .or(manifest_cfg.require_keystone)
+        .unwrap_or(false);
 
     let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
         env_first(
@@ -869,7 +906,6 @@ async fn main() -> Result<()> {
         };
         raw.replace("localhost", "127.0.0.1")
     };
-    let enforce_keystone = args.keystone_endpoint.is_some();
     let keystone_endpoint = args
         .keystone_endpoint
         .clone()
@@ -1020,7 +1056,7 @@ async fn main() -> Result<()> {
         Arc::clone(&atlas),
         Arc::clone(&access),
         Arc::clone(&keystone),
-        enforce_keystone,
+        require_keystone,
     ));
     let handsfree_config = args
         .config_json
@@ -1034,7 +1070,7 @@ async fn main() -> Result<()> {
         Arc::clone(&atlas),
         pilot_http.clone(),
         Arc::clone(&access),
-        enforce_keystone.then(|| Arc::clone(&keystone)),
+        require_keystone.then(|| Arc::clone(&keystone)),
     );
     handsfree.spawn();
 
@@ -1373,6 +1409,22 @@ mod tests {
         let user_id = v["user_id"].as_str().unwrap();
         assert!(user_id.starts_with("local:"));
         assert_eq!(v["modality"], "text");
+    }
+
+    #[test]
+    fn unchecked_forwarding_preserves_the_caller_token() {
+        let mut task = Task {
+            context_json: r#"{"foo":"bar","session_token":"caller-token"}"#.into(),
+            auth_session_token: String::new(),
+            ..Default::default()
+        };
+
+        forward_session_token(&mut task).unwrap();
+
+        let context: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
+        assert_eq!(task.auth_session_token, "caller-token");
+        assert_eq!(context["foo"], "bar");
+        assert!(context.get("session_token").is_none());
     }
 
     #[test]

@@ -6,6 +6,9 @@
 # in the manifest has `$VAR` / `${VAR}` expanded first, and an unset variable
 # becomes an empty string.
 #
+# Executor also reads `require_keystone` and `verification` from the JSON.
+# A wrong type for either stops Executor at startup.
+#
 # `status: enabled | disabled` is read by rbnx, not by Executor. Executor
 # cannot be disabled; `status: disabled` stops the boot.
 #
@@ -52,16 +55,6 @@ properties:
       Optional initial Sentinel rule file. Executor validates and copies it to
       sentinel_rules only when the active rule file does not exist.
       ROBONIX_SENTINEL_RULES_SEED overrides this value.
-
-  require_keystone:
-    type: boolean
-    default: false
-    description: >-
-      Require a live Keystone session on plan execution and plan-control
-      requests. rbnx boot derives this from Liaison's effective
-      system.liaison.keystone_endpoint or ROBONIX_KEYSTONE_ENDPOINT setting and
-      rejects an explicit value that disagrees. ROBONIX_EXECUTOR_REQUIRE_KEYSTONE
-      overrides the manifest value.
 
   atlas:
     type: string
@@ -142,3 +135,12 @@ properties:
                 the target call's provider, contract, node description,
                 arguments and output. Any other JSON type stops Executor at
                 startup.
+
+  require_keystone:
+    type: boolean
+    default: false
+    description: >-
+      Require a live Keystone session on plan execution and plan-control
+      requests. This setting is independent of Liaison and Pilot.
+      --require-keystone or ROBONIX_EXECUTOR_REQUIRE_KEYSTONE overrides the
+      manifest value.

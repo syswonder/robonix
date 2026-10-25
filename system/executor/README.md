@@ -25,19 +25,20 @@ cargo build -p robonix-executor
 | `--config` | `ROBONIX_CONFIG_PATH` | Optional YAML with a subset of the same settings |
 | `--config-json` | — | `system.executor` manifest block passed by `rbnx` |
 
-Connection settings use CLI > flag environment variable > YAML > default.
-`ROBONIX_ATLAS` is an additional fallback before YAML. Manifest verification
-settings override YAML verification settings.
+Connection settings use CLI > flag environment variable > manifest > YAML >
+default. `ROBONIX_ATLAS` is an additional fallback before YAML. Manifest
+verification settings override YAML verification settings.
 
 Logging uses Scribe: `system.executor.log` (via `--config-json`) overrides
 `SCRIBE_FILE_LEVEL` (default `info`); `SCRIBE_CONSOLE_LEVEL` defaults to `warn`.
 
 ## Keystone and Sentinel
 
-Executor revalidates a nonempty session token with Keystone even when
-`require_keystone` is off. When required, complete plans, incremental streams,
-`control_plan`, and `cancel_all_plans` reject missing or invalid sessions.
-`list_active_plans` remains a read-only unauthenticated query.
+When `require_keystone` is on, complete plans, incremental streams,
+`control_plan`, and `cancel_all_plans` require a live session. When it is off,
+those entry points accept anonymous requests without contacting Keystone and
+leave any forwarded credential uninterpreted. `list_active_plans` remains a
+read-only unauthenticated query in either mode.
 
 Every `do` call is checked against the active Sentinel policy before dispatch.
 Denied and indeterminate decisions fail the node without calling its provider.

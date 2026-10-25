@@ -1,8 +1,8 @@
 # Keystone
 
-Keystone is Robonix's core system component for user identity. Liaison
-uses it to authenticate text, voice, and hands-free interactions before they
-reach Pilot.
+Keystone is Robonix's core system component for user identity. Liaison, Pilot,
+and Executor can each require it to authenticate requests at their own entry
+point.
 
 Keystone stores user accounts, roles, voice-guard settings, and login sessions
 in SQLite. Passwords are hashed with Argon2; only session token hashes are
@@ -25,10 +25,11 @@ after the first login; Keystone then removes the credential file.
 
 ## Deployment configuration
 
-Configure Keystone under `system.keystone` in the deployment manifest. Set
-`system.liaison.keystone_endpoint` to its listen address to require client
-login. Keystone gRPC has no TLS; remote connections need a trusted network or
-encrypted tunnel.
+Configure Keystone under `system.keystone` in the deployment manifest.
+Liaison, Pilot, and Executor each have an independent `require_keystone`
+setting. Set `system.liaison.keystone_endpoint` when Liaison should use this
+instance as its connection fallback. Keystone gRPC has no TLS; remote
+connections need a trusted network or encrypted tunnel.
 
 Configuration fields:
 
@@ -44,7 +45,7 @@ Configuration fields:
 
 ## Access behavior
 
-When Liaison is configured with Keystone:
+When Liaison requires Keystone:
 
 - Text turns require a live session.
 - When a user's voice guard is off, authenticated voice turns skip Voiceprint.

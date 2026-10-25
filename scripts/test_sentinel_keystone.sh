@@ -203,6 +203,7 @@ wait_for_port "$VLM_ADDR" "$VLM_PID"
 "$PILOT_BIN" \
   --atlas "$ATLAS_ADDR" \
   --listen "$PILOT_ADDR" \
+  --require-keystone true \
   --vlm-upstream "http://$VLM_ADDR/v1" \
   --vlm-api-key test-only \
   --vlm-model test-model \
@@ -215,6 +216,7 @@ wait_for_port "$PILOT_ADDR" "$PILOT_PID"
   --atlas "$ATLAS_ADDR" \
   --listen "$LIAISON_ADDR" \
   --pilot-endpoint "$PILOT_ADDR" \
+  --require-keystone true \
   --keystone-endpoint "$KEYSTONE_ADDR" \
   >"$LIAISON_LOG" 2>&1 &
 LIAISON_PID=$!
@@ -238,7 +240,7 @@ cp "$PROTO_SOURCE"/*.proto "$PROTO_GEN/"
 
 PYTHONPATH="$PROTO_GEN${PYTHONPATH:+:$PYTHONPATH}" "$TEST_PYTHON" - \
   "$KEYSTONE_ADDR" "$SENTINEL_ADDR" "$EXECUTOR_ADDR" "$BOOTSTRAP_FILE" \
-  "$OPERATOR_PASSWORD_FILE" "$ADMIN_TOKEN_FILE" "$LIAISON_ADDR" <<'PY'
+  "$OPERATOR_PASSWORD_FILE" "$ADMIN_TOKEN_FILE" "$LIAISON_ADDR" "$PILOT_ADDR" <<'PY'
 import json
 import os
 import pathlib
@@ -256,7 +258,7 @@ import sentinel_pb2
 if not __debug__:
     raise SystemExit("the test requires Python assertions")
 
-keystone_endpoint, sentinel_endpoint, executor_endpoint, bootstrap_file, operator_password_file, admin_token_file, liaison_endpoint = sys.argv[1:]
+keystone_endpoint, sentinel_endpoint, executor_endpoint, bootstrap_file, operator_password_file, admin_token_file, liaison_endpoint, pilot_endpoint = sys.argv[1:]
 bootstrap_path = pathlib.Path(bootstrap_file)
 credentials = dict(
     line.split("=", 1)
@@ -371,6 +373,34 @@ with grpc.insecure_channel(liaison_endpoint) as channel:
             "Liaison forwarded an unauthenticated task to Pilot",
         )
 print("PASS Liaison protected text submission and both hands-free transitions")
+
+with grpc.insecure_channel(pilot_endpoint) as channel:
+    submit = contracts.RobonixSystemPilotStub(channel)
+    for bad_token in ("", "invalid-session"):
+        for context in ("{}", '{"abort_turn":true}'):
+            expect_rpc_error(
+                grpc.StatusCode.UNAUTHENTICATED,
+                lambda bad_token=bad_token, context=context: list(submit.SubmitTask(
+                    pilot_pb2.Task(
+                        session_id="direct-pilot-test",
+                        text="direct task",
+                        context_json=context,
+                        auth_session_token=bad_token,
+                    ),
+                    timeout=5,
+                )),
+                "Pilot accepted an unauthenticated direct task",
+            )
+    response = list(submit.SubmitTask(
+        pilot_pb2.Task(
+            session_id="direct-pilot-test",
+            context_json='{"abort_turn":true}',
+            auth_session_token=token,
+        ),
+        timeout=5,
+    ))
+    assert response and response[0].status.session_id == "direct-pilot-test", response
+print("PASS Pilot authenticated direct task and stop requests")
 
 with grpc.insecure_channel(sentinel_endpoint) as channel:
     list_rules = contracts.RobonixSystemSentinelListRulesStub(channel)

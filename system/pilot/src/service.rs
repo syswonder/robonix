@@ -7,9 +7,11 @@ use crate::pb::contracts::{
     robonix_system_executor_control_plan_client::RobonixSystemExecutorControlPlanClient,
     robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
     robonix_system_executor_list_active_plans_client::RobonixSystemExecutorListActivePlansClient,
+    robonix_system_keystone_get_profile_client::RobonixSystemKeystoneGetProfileClient,
     robonix_system_pilot_get_health_server::RobonixSystemPilotGetHealth,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
+use crate::pb::keystone::GetProfileRequest;
 use crate::pb::module_health::{
     GetModuleHealthRequest, GetModuleHealthResponse, ModuleHealth, ModuleHealthReport,
 };
@@ -22,10 +24,11 @@ use crate::transcript::Transcript;
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
-use robonix_scribe::{debug, error, info};
+use robonix_scribe::{debug, error, info, warn};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -178,6 +181,8 @@ pub struct PilotServiceImpl {
     /// `ConnectCapability` so the channel record reflects who is using
     /// the executor.
     provider_id: String,
+    /// Whether SubmitTask must authenticate through Keystone.
+    require_keystone: bool,
     vlm: VlmClient,
     history_budget: HistoryBudget,
     histories: Histories,
@@ -207,12 +212,14 @@ impl PilotServiceImpl {
     pub fn new(
         atlas: AtlasClient,
         provider_id: String,
+        require_keystone: bool,
         vlm: VlmClient,
         history_budget: HistoryBudget,
     ) -> Self {
         Self {
             atlas,
             provider_id,
+            require_keystone,
             vlm,
             history_budget,
             histories: Arc::new(Mutex::new(HashMap::new())),
@@ -224,6 +231,65 @@ impl PilotServiceImpl {
             seen_task_ids: Arc::new(Mutex::new(HashMap::new())),
             plan_seq: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    async fn authenticate_task(&self, task: &mut Task) -> Result<(), Status> {
+        if !self.require_keystone {
+            return Ok(());
+        }
+        if task.auth_session_token.is_empty() {
+            return Err(Status::unauthenticated("login session is required"));
+        }
+        let mut atlas = self.atlas.clone();
+        let (channel_id, _, channel) = tokio::time::timeout(
+            Duration::from_millis(250),
+            atlas_client::connect_to_capability(
+                &mut atlas,
+                &self.provider_id,
+                "robonix/system/keystone/get_profile",
+            ),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("resolve Keystone timed out"))?
+        .map_err(|error| Status::unavailable(format!("resolve Keystone: {error:#}")))?;
+        let response = match tokio::time::timeout(
+            Duration::from_secs(2),
+            RobonixSystemKeystoneGetProfileClient::new(channel).get_profile(GetProfileRequest {
+                session_token: task.auth_session_token.clone(),
+            }),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Status::deadline_exceeded(
+                "Keystone profile lookup timed out",
+            )),
+        };
+        match tokio::time::timeout(
+            Duration::from_millis(250),
+            atlas.disconnect_capability(&channel_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => warn!("disconnect Atlas channel '{channel_id}' failed: {error:#}"),
+            Err(_) => warn!("disconnect Atlas channel '{channel_id}' timed out"),
+        }
+        let response = response?.into_inner();
+        let user = response
+            .user
+            .ok_or_else(|| Status::internal("Keystone returned an empty user profile"))?;
+        let mut context = serde_json::from_str::<serde_json::Value>(&task.context_json)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let object = context
+            .as_object_mut()
+            .ok_or_else(|| Status::invalid_argument("Task.context_json must be a JSON object"))?;
+        object.insert("user_id".into(), serde_json::json!(user.user_id));
+        object.insert("username".into(), serde_json::json!(user.username));
+        object.insert("display_name".into(), serde_json::json!(user.display_name));
+        object.insert("roles".into(), serde_json::json!(user.roles));
+        task.context_json = context.to_string();
+        Ok(())
     }
 
     /// The history, task state, and transcript of a session, created on
@@ -365,6 +431,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         request: Request<Task>,
     ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let mut task = request.into_inner();
+        self.authenticate_task(&mut task).await?;
 
         if task.session_id.is_empty() {
             task.session_id = Uuid::new_v4().to_string();

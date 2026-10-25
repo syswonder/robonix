@@ -403,6 +403,25 @@ keystone_endpoint: 127.0.0.1:50095
     }
 
     #[test]
+    fn keystone_requirement_is_passed_independently_in_each_config_json() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("require_keystone: false").expect("component config");
+
+        for name in ["executor", "pilot", "liaison"] {
+            let args = system_cli_args(name, Some(&cfg), Some("127.0.0.1:50051"));
+            let json = args
+                .windows(2)
+                .find(|pair| pair[0] == "--config-json")
+                .map(|pair| pair[1].as_str())
+                .expect("config-json");
+            let config: serde_json::Value = serde_json::from_str(json).expect("JSON config");
+
+            assert_eq!(config["require_keystone"], false);
+            assert!(!args.iter().any(|arg| arg == "--require-keystone"));
+        }
+    }
+
+    #[test]
     fn keystone_inherits_the_atlas_endpoint_from_the_manifest() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
@@ -588,86 +607,6 @@ sentinel_listen: 127.0.0.1:50061
             error.to_string().contains("system/atlas.listen"),
             "{error:#}"
         );
-    }
-
-    #[test]
-    fn executor_keystone_requirement_follows_liaison() {
-        let liaison: serde_yaml::Value =
-            serde_yaml::from_str("keystone_endpoint: 127.0.0.1:50095").expect("liaison config");
-        let deploy = DeployManifest {
-            system: HashMap::from([("liaison".to_owned(), liaison)]),
-            ..Default::default()
-        };
-
-        assert!(
-            resolve_executor_keystone_requirement(&deploy, false, None)
-                .expect("derived requirement")
-        );
-    }
-
-    #[test]
-    fn executor_keystone_requirement_follows_liaison_environment() {
-        let deploy = DeployManifest {
-            system: HashMap::from([("liaison".to_owned(), serde_yaml::Value::Null)]),
-            ..Default::default()
-        };
-
-        assert!(
-            resolve_executor_keystone_requirement(&deploy, true, None)
-                .expect("environment-derived requirement")
-        );
-    }
-
-    #[test]
-    fn executor_keystone_requirement_accepts_matching_explicit_config() {
-        let liaison: serde_yaml::Value =
-            serde_yaml::from_str("keystone_endpoint: 127.0.0.1:50095").expect("liaison config");
-        let executor: serde_yaml::Value =
-            serde_yaml::from_str("require_keystone: true").expect("executor config");
-        let deploy = DeployManifest {
-            system: HashMap::from([
-                ("liaison".to_owned(), liaison),
-                ("executor".to_owned(), executor),
-            ]),
-            ..Default::default()
-        };
-
-        assert!(
-            resolve_executor_keystone_requirement(&deploy, false, None).expect("matching config")
-        );
-    }
-
-    #[test]
-    fn executor_keystone_requirement_rejects_mismatch() {
-        let liaison: serde_yaml::Value =
-            serde_yaml::from_str("keystone_endpoint: 127.0.0.1:50095").expect("liaison config");
-        let executor: serde_yaml::Value =
-            serde_yaml::from_str("require_keystone: false").expect("executor config");
-        let deploy = DeployManifest {
-            system: HashMap::from([
-                ("liaison".to_owned(), liaison),
-                ("executor".to_owned(), executor),
-            ]),
-            ..Default::default()
-        };
-
-        let error =
-            resolve_executor_keystone_requirement(&deploy, false, None).expect_err("mismatch");
-        assert!(error.to_string().contains("must agree"), "{error:#}");
-    }
-
-    #[test]
-    fn executor_keystone_environment_must_match_liaison() {
-        let liaison: serde_yaml::Value =
-            serde_yaml::from_str("keystone_endpoint: 127.0.0.1:50095").expect("liaison config");
-        let deploy = DeployManifest {
-            system: HashMap::from([("liaison".to_owned(), liaison)]),
-            ..Default::default()
-        };
-
-        let error = resolve_executor_keystone_requirement(&deploy, false, Some(false))
-            .expect_err("environment mismatch");
-        assert!(error.to_string().contains("must agree"), "{error:#}");
     }
 
     #[test]
@@ -1183,50 +1122,6 @@ fn resolve_executor_rule_paths(
                 serde_yaml::Value::String(manifest_dir.join(path).to_string_lossy().into_owned()),
             );
         }
-    }
-}
-
-fn resolve_executor_keystone_requirement(
-    deploy: &DeployManifest,
-    liaison_environment_enabled: bool,
-    executor_environment: Option<bool>,
-) -> Result<bool> {
-    let liaison_required = deploy.system.contains_key("liaison")
-        && (deploy
-            .system
-            .get("liaison")
-            .and_then(serde_yaml::Value::as_mapping)
-            .and_then(|map| map.get(serde_yaml::Value::String("keystone_endpoint".into())))
-            .and_then(serde_yaml::Value::as_str)
-            .is_some()
-            || liaison_environment_enabled);
-    let manifest_setting = deploy
-        .system
-        .get("executor")
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|map| map.get(serde_yaml::Value::String("require_keystone".into())))
-        .map(|value| {
-            value
-                .as_bool()
-                .with_context(|| "system.executor.require_keystone must be a boolean when present")
-        })
-        .transpose()?;
-    let configured = executor_environment.or(manifest_setting);
-    let Some(configured) = configured else {
-        return Ok(liaison_required);
-    };
-    if configured == liaison_required {
-        Ok(configured)
-    } else if liaison_required {
-        anyhow::bail!(
-            "Executor require_keystone is false, but Liaison Keystone is enabled; \
-             the two components must agree"
-        )
-    } else {
-        anyhow::bail!(
-            "Executor require_keystone is true, but Liaison Keystone is disabled; \
-             the two components must agree"
-        )
     }
 }
 
@@ -1770,30 +1665,10 @@ pub async fn execute(
     if (soma_declared || soma_implied) && !skip_system {
         ensure_soma_defaults(&mut deploy.system, &manifest_dir, &manifest_path);
     }
-    let executor_require_keystone = if !skip_system {
+    if !skip_system {
         resolve_executor_rule_paths(&mut deploy.system, &manifest_dir);
         validate_system_listen_plan(&deploy).context("invalid system listen plan")?;
-        let executor_environment = std::env::var_os("ROBONIX_EXECUTOR_REQUIRE_KEYSTONE")
-            .map(|value| {
-                value
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("ROBONIX_EXECUTOR_REQUIRE_KEYSTONE is not UTF-8"))
-            })
-            .transpose()?
-            .map(|value| {
-                value
-                    .parse::<bool>()
-                    .with_context(|| "ROBONIX_EXECUTOR_REQUIRE_KEYSTONE must be 'true' or 'false'")
-            })
-            .transpose()?;
-        Some(resolve_executor_keystone_requirement(
-            &deploy,
-            std::env::var_os("ROBONIX_KEYSTONE_ENDPOINT").is_some(),
-            executor_environment,
-        )?)
-    } else {
-        None
-    };
+    }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
     // Session state (Pilot transcripts) outlives the logs: boot clears old
@@ -1991,12 +1866,6 @@ pub async fn execute(
                 {
                     args.push("--capabilities".into());
                     args.push(p.clone());
-                }
-                if *name == "executor"
-                    && let Some(require_keystone) = executor_require_keystone
-                {
-                    args.push("--require-keystone".into());
-                    args.push(require_keystone.to_string());
                 }
                 // Refuse to spawn if the listen port is already taken — without
                 // this, the spawned binary silently dies on bind() failure but

@@ -30,12 +30,13 @@ Common configuration:
 - `--atlas` / `ROBONIX_ATLAS_ENDPOINT`: Atlas endpoint. Defaults to `127.0.0.1:50051`.
 - `--listen` / `ROBONIX_PILOT_LISTEN`: Pilot gRPC listen address. Defaults to `127.0.0.1:50071`.
 - `--id` / `ROBONIX_PILOT_PROVIDER_ID`: Pilot provider id registered with Atlas. Defaults to `pilot`.
+- `--require-keystone` / `ROBONIX_PILOT_REQUIRE_KEYSTONE`: validate every direct `SubmitTask` session through Keystone. Defaults to `false` and is independent of Liaison and Executor. CLI/environment overrides `system.pilot.require_keystone`.
 - `--vlm-upstream` / `ROBONIX_VLM_UPSTREAM`: OpenAI-compatible API base URL.
 - `--vlm-api-key` / `ROBONIX_VLM_API_KEY`: VLM API key.
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
-- `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
+- `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file; `require_keystone` uses the same field name.
 - `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.

@@ -357,10 +357,7 @@ async fn run_session(
     } else {
         None
     };
-    let auth_session_token = keystone_account
-        .as_ref()
-        .map(|_| req.session_token.clone())
-        .unwrap_or_default();
+    let auth_session_token = req.session_token.clone();
     // `record_seconds` is now a hard-stop ceiling on streaming capture
     // (FunASR's VAD ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
