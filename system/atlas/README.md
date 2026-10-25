@@ -32,6 +32,16 @@ calling remain available to other consumers. Omitted values default to `true`.
 
 The wire schema lives in [`proto/atlas.proto`](proto/atlas.proto).
 
+Sensor declarations may include `CapabilityTimeDescriptor` with their clock
+domain, acquisition semantics and pipeline uncertainty. Atlas validates and
+retains it with the declaration, returns it in Query and Connect, and preserves
+the absence of a known fixed delay. Rebuild protobuf bindings to use these fields.
+
+`AtlasRegistry::connect` returns `(channel_id, endpoint, params, time_descriptor)`;
+direct registry callers must handle the fourth value. The existing
+`AtlasClient::connect_capability` keeps its three-value return; callers that
+need metadata use `connect_capability_with_time`.
+
 ## Namespace diagnostics
 
 A provider's namespace is its primary grouping for discovery and operator
