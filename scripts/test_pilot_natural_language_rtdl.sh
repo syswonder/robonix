@@ -174,8 +174,8 @@ messages = {
         "请同时运行一个独立的长期 greet 问候任务，持续运行，不要停止或等待前面的 A 任务。"  # i18n-ok
         f"greet 命令是：{greet_cmd}。"  # i18n-ok
     ),
-    "stop_after_a1": (
-        "我改变主意了：请在 A1 任务完成之后停止整个 A 计划。"  # i18n-ok
+    "cancel_a": (
+        "我改变主意了：请立即取消整个 A 计划，停止 A1，不要执行 A2。"  # i18n-ok
         "持续 greet 任务必须继续运行，不要取消它。"  # i18n-ok
     ),
     "open_area": (
@@ -212,6 +212,22 @@ async def wait_final_after(after: float, timeout: float):
             return
         await asyncio.sleep(0.2)
     raise RuntimeError(f"timeout waiting for final reply after t={after:.2f}")
+
+
+async def wait_canceled_call(marker: str, timeout: float):
+    """Wait for the selected call's cancellation without waiting for independent work."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        targets = {
+            (plan["plan_id"], call["op_id"])
+            for plan in plans
+            for call in plan["calls"]
+            if marker in call["args_json"]
+        }
+        if any((plan_id, op_id) in targets and state == 4 for _, plan_id, op_id, state in node_events):
+            return
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"timeout waiting for cancellation of {marker}")
 
 
 async def collect_stream(stream):
@@ -299,10 +315,8 @@ async def main():
         await wait_label("B_GREET_START", 45)
 
         await asyncio.sleep(2)
-        collectors.append(await submit_steer(stub, "stop_after_a1"))
-        await wait_label("A_RESTAURANT_END", 65)
-        milestones["a_stopped"] = rel()
-        await wait_final_after(milestones["a_stopped"], 45)
+        collectors.append(await submit_steer(stub, "cancel_a"))
+        await wait_canceled_call("A_RESTAURANT_START", 45)
         await asyncio.sleep(1)
 
         collectors.append(await submit_steer(stub, "open_area"))
@@ -347,11 +361,11 @@ control_calls = [
     for plan in plans
     for call in plan["calls"]
     if call["contract_id"].rsplit("/", 1)[-1]
-    in {"cancel_plan", "cancel_all_plans", "stop_plan_at"}
+    in {"cancel_plan", "cancel_all_plans"}
 ]
 checks = {
     "Pilot planned A1": plan_a1 is not None,
-    "A1 completed": "A_RESTAURANT_END" in labels,
+    "A1 canceled before completion": "A_RESTAURANT_START" in labels and "A_RESTAURANT_END" not in labels,
     "A2 never started": "A_MEETING_START" not in labels,
     "Pilot planned independent greet": plan_b is not None,
     "greet produced all 60 heartbeats": len(ticks) == 60 and "B_GREET_END" in labels,
@@ -368,17 +382,11 @@ checks = {
         event_time >= milestones.get("d_completed", float("inf"))
         for event_time, _ in final_texts
     ),
-    "boundary-stop completion reply followed A1 completion": any(
-        event_time >= milestones.get("a_stopped", float("inf"))
-        for event_time, _ in final_texts
-    ),
 }
 
-# If A2 was already placed in the same in-flight tree as A1, the out-of-band
-# boundary stop must prevent it from starting. If A2 was not yet dispatched,
-# latest-steer suppression is the correct behavior.
+# Canceling an existing A sequence must skip A2; an undispatched A2 must be suppressed.
 if plan_a2 is not None and plan_a1 is not None and plan_a2["plan_id"] == plan_a1["plan_id"]:
-    checks["A sequence stopped at the explicit A1 boundary"] = (
+    checks["A cancellation skipped its pending successor"] = (
         "A_MEETING_START" not in labels and "Plan control accepted" in statuses
     )
 else:

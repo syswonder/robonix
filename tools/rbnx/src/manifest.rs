@@ -354,15 +354,52 @@ pub struct Package {
     pub license: String,
 }
 
+/// A contract and the transports served by this package.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CapabilityRef {
     /// Contract id (matches one of the TOMLs under `capabilities/`).
     pub name: String,
+    /// Declared transports; empty only for manifests that omit the field.
+    #[serde(default, deserialize_with = "deserialize_transports")]
+    pub transport: Vec<String>,
     /// Optional path to a package-local TOML that overrides / defines
     /// this capability (for experimental providers not yet in the official
     /// capabilities directory). Relative to the package root.
     #[serde(default, alias = "definition")]
     pub path: Option<String>,
+}
+
+fn deserialize_transports<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Transports {
+        One(String),
+        Many(Vec<String>),
+    }
+    let transports = match Transports::deserialize(deserializer)? {
+        Transports::One(value) => vec![value],
+        Transports::Many(values) => values,
+    };
+    if transports.is_empty() {
+        return Err(serde::de::Error::custom("transport list must not be empty"));
+    }
+    let mut seen = HashSet::new();
+    for transport in &transports {
+        if !matches!(transport.as_str(), "mcp" | "grpc" | "ros2") {
+            return Err(serde::de::Error::custom(format!(
+                "invalid transport '{transport}'; expected mcp, grpc or ros2"
+            )));
+        }
+        if !seen.insert(transport) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicate transport '{transport}'"
+            )));
+        }
+    }
+    Ok(transports)
 }
 
 /// One entry under a package's `depends:` list. Models a *source / lib*
@@ -485,7 +522,9 @@ pub fn load_from_path(manifest_path: &Path) -> Result<Manifest> {
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
     let raw: RawManifest = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
-    Ok(normalize(raw, manifest_path))
+    let manifest = normalize(raw, manifest_path);
+    manifest.validate_capabilities(manifest_path.parent().unwrap_or(Path::new(".")))?;
+    Ok(manifest)
 }
 
 fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
@@ -559,6 +598,99 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
 }
 
 impl Manifest {
+    fn validate_capabilities(&self, package_root: &Path) -> Result<()> {
+        let mut names = HashSet::new();
+        for capability in &self.capabilities {
+            if !names.insert(&capability.name) {
+                anyhow::bail!(
+                    "package '{}': repeated capability contract '{}'",
+                    self.package.name,
+                    capability.name
+                );
+            }
+            if capability.transport.is_empty() {
+                crate::output::warning(&format!(
+                    "package '{}': capability '{}' is missing `transport`; declare mcp, grpc or ros2 (or a non-empty list)",
+                    self.package.name, capability.name
+                ));
+            }
+        }
+
+        if self.capabilities.iter().all(|c| c.transport.is_empty()) {
+            return Ok(());
+        }
+        let mut roots = Vec::new();
+        let source = std::env::var_os("ROBONIX_SOURCE_PATH")
+            .map(PathBuf::from)
+            .or_else(|| {
+                package_root
+                    .ancestors()
+                    .find(|root| {
+                        root.join("Cargo.toml").is_file() && root.join("capabilities").is_dir()
+                    })
+                    .map(Path::to_path_buf)
+            })
+            .or_else(|| {
+                let path = crate::Config::config_file_path().ok()?;
+                let content = std::fs::read_to_string(path).ok()?;
+                serde_yaml::from_str::<crate::Config>(&content)
+                    .ok()?
+                    .robonix_source_path
+            });
+        if let Some(source) = source {
+            roots.push(source.join("capabilities"));
+        }
+        roots.push(package_root.join("capabilities"));
+        let roots: Vec<&Path> = roots
+            .iter()
+            .filter(|root| root.is_dir())
+            .map(PathBuf::as_path)
+            .collect();
+        let contracts =
+            robonix_atlas::contract_registry::ContractRegistry::load_from_capability_roots(&roots)?;
+        for capability in &self.capabilities {
+            let local = capability.path.as_ref().map(|path| package_root.join(path));
+            let explicit_mode = if let Some(path) = local.filter(|path| path.is_file()) {
+                let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)
+                    .with_context(|| format!("parse contract {}", path.display()))?;
+                value
+                    .get("mode")
+                    .and_then(|v| v.get("type"))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+            } else {
+                None
+            };
+            let Some(mode) = explicit_mode.as_deref().or_else(|| {
+                contracts
+                    .get(&capability.name)
+                    .map(|contract| contract.mode.as_str())
+            }) else {
+                continue;
+            };
+            for transport in &capability.transport {
+                let allowed = match mode {
+                    "rpc" => true,
+                    "rpc_server_stream" | "rpc_client_stream" | "rpc_bidirectional_stream" => {
+                        transport == "grpc"
+                    }
+                    "topic_out" | "topic_in" => transport == "grpc" || transport == "ros2",
+                    _ => false,
+                };
+                if !allowed {
+                    anyhow::bail!(
+                        "package '{}': capability '{}' transport '{}' is incompatible with contract mode '{}'",
+                        self.package.name,
+                        capability.name,
+                        transport,
+                        mode
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Return the Driver written in `capabilities:`, if any.
     pub fn explicit_lifecycle_driver_contract(&self) -> Result<Option<&str>> {
         let drivers = self
@@ -686,6 +818,109 @@ mod tests {
     }
 
     use super::*;
+
+    fn load_transport_manifest(capabilities: &str, mode: Option<&str>) -> Result<Manifest> {
+        let root = std::env::temp_dir().join(format!("rbnx-transport-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("capabilities")).unwrap();
+        if let Some(mode) = mode {
+            std::fs::write(
+                root.join("capabilities/example.v1.toml"),
+                format!("[contract]\nid = 'test/contract'\n[mode]\ntype = '{mode}'\n"),
+            )
+            .unwrap();
+        }
+        let path = root.join(MANIFEST_FILE);
+        std::fs::write(
+            &path,
+            format!(
+                "manifestVersion: 1\npackage:\n  name: test.package\n  version: 1.0.0\n  description: Test package\n  license: MIT\nstart: 'true'\ncapabilities:\n{capabilities}\n"
+            ),
+        )
+        .unwrap();
+        let result = load_from_path(&path);
+        std::fs::remove_dir_all(root).unwrap();
+        result
+    }
+
+    #[test]
+    fn capability_transports_accept_scalar_list_and_missing() {
+        for (field, expected) in [
+            ("transport: mcp", vec!["mcp"]),
+            ("transport: [grpc, ros2]", vec!["grpc", "ros2"]),
+            ("", vec![]),
+        ] {
+            let manifest = load_transport_manifest(
+                &format!("  - name: test/contract\n    {field}"),
+                Some("rpc"),
+            )
+            .unwrap();
+            assert_eq!(manifest.manifest_version, 1);
+            assert_eq!(manifest.capabilities[0].transport, expected);
+            manifest.validate_and_summarize().unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_or_duplicate_transports_are_rejected() {
+        for field in [
+            "transport: http",
+            "transport: [grpc, http]",
+            "transport: []",
+            "transport: [grpc, grpc]",
+            "transport: 42",
+            "transport: null",
+        ] {
+            assert!(
+                load_transport_manifest(&format!("  - name: test/contract\n    {field}"), None)
+                    .is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_contracts_are_rejected_even_with_different_transports() {
+        let error = load_transport_manifest(
+            "  - {name: test/contract, transport: grpc}\n  - {name: test/contract, transport: ros2}",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repeated capability contract 'test/contract'")
+        );
+    }
+
+    #[test]
+    fn transports_must_fit_contract_mode_when_known() {
+        for (mode, allowed) in [
+            ("rpc", vec!["mcp", "grpc", "ros2"]),
+            ("rpc_server_stream", vec!["grpc"]),
+            ("rpc_client_stream", vec!["grpc"]),
+            ("rpc_bidirectional_stream", vec!["grpc"]),
+            ("topic_out", vec!["grpc", "ros2"]),
+            ("topic_in", vec!["grpc", "ros2"]),
+        ] {
+            for transport in ["mcp", "grpc", "ros2"] {
+                let result = load_transport_manifest(
+                    &format!("  - {{name: test/contract, transport: {transport}}}"),
+                    Some(mode),
+                );
+                if allowed.contains(&transport) {
+                    result.unwrap();
+                } else {
+                    let message = result.unwrap_err().to_string();
+                    assert!(
+                        message.contains("incompatible with contract mode"),
+                        "{message}"
+                    );
+                    assert!(message.contains(mode) && message.contains(transport));
+                }
+            }
+        }
+        load_transport_manifest("  - {name: test/contract, transport: mcp}", None).unwrap();
+    }
 
     #[test]
     fn package_vendor_is_backward_compatible() {
@@ -872,6 +1107,7 @@ primitive:
                 .into_iter()
                 .map(|name| CapabilityRef {
                     name: name.to_string(),
+                    transport: Vec::new(),
                     path: None,
                 })
                 .collect(),

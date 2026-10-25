@@ -1,8 +1,6 @@
 string session_token
 string action
 string plan_id
-string op_id
-string when
 uint64 wait_ms
 ---
 bool success

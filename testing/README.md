@@ -44,6 +44,7 @@ planning boundary.
 | `build_report_from_artifacts.py` | canonical report builder used by both direct Webots workflow runs and ChatOps Pages publishing. |
 | `collect_diagnostic_context.py` | collects bounded PR metadata/diff plus relevant logs for failure/success analysis; it does not upload the whole repository. |
 | `llm_diagnose.py` | calls the configured DeepSeek-compatible chat endpoint and writes `llm-analysis.json`; failures are non-fatal. |
+| `model_bench/` | scores language models as Pilot's planner on a booted Robonix with a mocked world; see its README. |
 | `logs/` | per-run traces (git-ignored). |
 | `report/` | generated report files (git-ignored). |
 
@@ -93,16 +94,18 @@ sending diagnostic context to the LLM.
 
 Pilot does **not** drive the VLM in OpenAI `tool_calls` mode — it hard-errors on
 that (`planner.rs`: "VLM returned tool_calls in RTDL mode"). Instead the
-assistant returns exactly one JSON object in `content` with four keys:
+assistant returns exactly one JSON object in `content`:
 
 ```json
 {
   "content": "narration",
+  "message_updates": [],
+  "rtdl_parent_task_id": "T1",
   "rtdl_description": "label",
   "rtdl": {"op":"sequence","op_id":0,"description":"...","children":[
     {"op":"do","op_id":0,"description":"...","cap":"<provider>.<area>_<leaf>","args":{...}}
   ]},
-  "task_update": {"goal":"...","success_criterion":"...","status":"in_progress|done"}
+  "task_updates": [{"task_id":"T1","status":"in_progress|done|failed|superseded"}]
 }
 ```
 

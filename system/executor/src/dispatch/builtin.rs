@@ -88,9 +88,6 @@ pub async fn execute(
             .cancel_plan_builtin(call, self_provider_id, atlas)
             .await;
     }
-    if op == "stop_plan_at" {
-        return runtime.stop_plan_at_builtin(call).await;
-    }
     if op == "get_plan_status" {
         return runtime.get_plan_status_builtin(call).await;
     }
@@ -140,8 +137,11 @@ async fn run(
 /// Static metadata for the builtin ops. Used by main.rs to declare them
 /// against atlas at startup so pilot can discover them like any other provider.
 pub struct BuiltinSpec {
+    /// Operation name used as the builtin contract's final path segment.
     pub op: &'static str,
+    /// Human-readable capability description advertised through Atlas.
     pub description: &'static str,
+    /// JSON Schema describing the arguments accepted by this builtin.
     pub input_schema_json: &'static str,
 }
 
@@ -178,18 +178,13 @@ pub const BUILTINS: &[BuiltinSpec] = &[
     },
     BuiltinSpec {
         op: "get_all_plans",
-        description: "List every in-flight RTDL plan with its plan_id, a short description of the task, op_count, cancelled flag, and number of armed stop points. Call this to discover which plans are currently running, then inspect one with get_plan_status before stopping it. Takes no arguments.",
+        description: "List every in-flight RTDL plan with its plan_id, a short description of the task, op_count, and cancelled flag. Call this to discover which plans are currently running, then inspect one with get_plan_status before stopping it. Takes no arguments.",
         input_schema_json: r#"{"type":"object","properties":{}}"#,
     },
     BuiltinSpec {
         op: "get_plan_status",
-        description: "Inspect an in-flight RTDL plan: returns its ops, each with op_id, kind, description, current state (pending/running/verifying/succeeded/failed/canceled/timeout/paused) and any armed stop_point. Call this to find the op_id and live progress of a running plan before issuing stop_plan_at or cancel_plan. Errors if the plan is not active (stale/wrong id or already finished) — use get_all_plans to list running plans.",
+        description: "Inspect an in-flight RTDL plan: returns its ops, each with op_id, kind, description, current state (pending/running/verifying/succeeded/failed/canceled/timeout/paused). Call this to inspect live progress before issuing cancel_plan. Errors if the plan is not active (stale/wrong id or already finished) — use get_all_plans to list running plans.",
         input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to inspect"}},"required":["plan_id"]}"#,
-    },
-    BuiltinSpec {
-        op: "stop_plan_at",
-        description: "Set a stop point on an in-flight RTDL plan: when execution reaches the op with the given op_id, cancel the whole plan. Use 'on_complete' (default) to stop right after that op finishes, or 'on_enter' to stop the moment it is reached, before it runs. op_ids are the per-node identifiers shown in RTDL node_state events.",
-        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to set the stop point on"},"op_id":{"type":"string","description":"Node op_id at which to stop (cancel) the plan"},"when":{"type":"string","enum":["on_enter","on_complete"],"description":"on_enter = before the op runs; on_complete = after it finishes. Default on_complete."}},"required":["plan_id","op_id"]}"#,
     },
     BuiltinSpec {
         op: "read_capability_doc",
@@ -198,8 +193,10 @@ pub const BUILTINS: &[BuiltinSpec] = &[
     },
 ];
 
+/// JSON arguments selecting whose registered capability documentation to read.
 #[derive(Deserialize)]
 struct DocArgs {
+    /// Provider ID used to look up the registered CAPABILITY.md content in Atlas.
     provider_id: String,
 }
 
@@ -299,27 +296,40 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// JSON arguments for reading a text file within the workspace.
 #[derive(Deserialize)]
 struct ReadArgs {
+    /// File to read, resolved against and confined to the workspace root.
     path: String,
 }
+/// JSON arguments for creating or overwriting a text file within the workspace.
 #[derive(Deserialize)]
 struct WriteArgs {
+    /// Destination file, resolved against and confined to the workspace root.
     path: String,
+    /// Text written as the file's complete contents.
     content: String,
 }
+/// JSON arguments for replacing the first matching text in a workspace file.
 #[derive(Deserialize)]
 struct PatchArgs {
+    /// File to modify, resolved against and confined to the workspace root.
     path: String,
+    /// Literal text whose first occurrence is replaced.
     old: String,
+    /// Replacement text inserted in place of the matched occurrence.
     new: String,
 }
+/// JSON arguments for listing entries in a workspace directory.
 #[derive(Deserialize)]
 struct ListArgs {
+    /// Directory to list relative to the workspace root; omission selects the root.
     path: Option<String>,
 }
+/// JSON arguments for executing a shell command through the builtin.
 #[derive(Deserialize)]
 struct CmdArgs {
+    /// Shell source passed to `bash -c` for execution.
     command: String,
 }
 
@@ -489,6 +499,26 @@ fn format_command_output(out: std::process::Output) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
+    /// Run environment-mutating tests in a child process so concurrent execution tests
+    /// never inherit a workspace directory that another test removes.
+    fn isolated_workspace_test(name: &str) -> bool {
+        if std::env::var("RBNX_TEST_WORKSPACE_CASE").as_deref() == Ok(name) {
+            return false;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("dispatch::builtin::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("RBNX_TEST_WORKSPACE_CASE", name)
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated workspace test failed: {name}");
+        true
+    }
+
+    /// Check workspace path handling with an isolated process environment.
     #[test]
     fn a_provider_without_a_manual_still_documents_its_capabilities() {
         // Most providers never hand-write a CAPABILITY.md, but every provider
@@ -521,6 +551,9 @@ mod tests {
 
     #[test]
     fn path_traversal_dotdot_is_rejected() {
+        if isolated_workspace_test("path_traversal_dotdot_is_rejected") {
+            return;
+        }
         // Set workspace to a temp dir so we have a known root
         let tmp = std::env::temp_dir().join("rbnx_test_ws");
         std::fs::create_dir_all(&tmp).unwrap();
@@ -538,8 +571,12 @@ mod tests {
         );
     }
 
+    /// Check workspace path handling with an isolated process environment.
     #[test]
     fn path_traversal_absolute_outside_workspace_is_rejected() {
+        if isolated_workspace_test("path_traversal_absolute_outside_workspace_is_rejected") {
+            return;
+        }
         let tmp = std::env::temp_dir().join("rbnx_test_ws2");
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -556,8 +593,12 @@ mod tests {
         );
     }
 
+    /// Check workspace path handling with an isolated process environment.
     #[test]
     fn path_resolve_within_workspace_is_allowed() {
+        if isolated_workspace_test("path_resolve_within_workspace_is_allowed") {
+            return;
+        }
         let tmp = std::env::temp_dir().join("rbnx_test_ws3");
         std::fs::create_dir_all(&tmp).unwrap();
         // Create a test file inside workspace

@@ -151,6 +151,9 @@ class Handler(BaseHTTPRequestHandler):
                 reply = {
                     "content": "",
                     "rtdl_description": "list the test workspace",
+                    "message_updates": [],
+                    "rtdl_parent_task_id": "T1",
+                    "task_updates": [],
                     "rtdl": {
                         "op": "do",
                         "op_id": 0,
@@ -158,7 +161,6 @@ class Handler(BaseHTTPRequestHandler):
                         "cap": "executor.builtin_list_dir",
                         "args": {"path": "."},
                     },
-                    "task_update": None,
                 }
             else:
                 reply = {
@@ -166,9 +168,16 @@ class Handler(BaseHTTPRequestHandler):
                         "The test workspace was listed."
                         if scenario == "admin" else "The request was denied."
                     ),
-                    "rtdl_description": "",
-                    "rtdl": {"op": "sequence", "op_id": 0, "description": "", "children": []},
-                    "task_update": None,
+                    "rtdl_description": "finish the test",
+                    "message_updates": [],
+                    "rtdl_parent_task_id": "T1",
+                    "task_updates": [{
+                        "task_id": "T1",
+                        "goal": f"{scenario} test: list the test workspace",
+                        "success_criterion": "The workspace policy was checked",
+                        "status": "done",
+                    }],
+                    "rtdl": {"op": "sequence", "children": []},
                 }
             content = json.dumps(reply)
         else:
@@ -237,6 +246,7 @@ import secrets
 import sys
 
 import grpc
+import executor_pb2
 import keystone_pb2
 import liaison_pb2
 import pilot_pb2
@@ -403,6 +413,24 @@ def run_plan(execute, plan_id, session_token):
     return list(execute.Execute(plan(plan_id, session_token), timeout=10))
 
 
+def run_streamed_plan(execute_stream, plan_id, session_token):
+    requests = [
+        executor_pb2.ExecuteStreamInput(
+            message_kind=0,
+            plan_id=plan_id,
+            session_id="sentinel-keystone-smoke",
+            auth_session_token=session_token,
+        ),
+        executor_pb2.ExecuteStreamInput(
+            message_kind=1,
+            node_index=0,
+            node=plan(plan_id, session_token).nodes[0],
+        ),
+        executor_pb2.ExecuteStreamInput(message_kind=3),
+    ]
+    return list(execute_stream.ExecuteStream(iter(requests), timeout=10))
+
+
 def terminal_state(events, state):
     matches = [
         event.node_state
@@ -414,6 +442,9 @@ def terminal_state(events, state):
 
 with grpc.insecure_channel(executor_endpoint) as channel:
     execute = contracts.RobonixSystemExecutorExecuteStub(channel)
+    execute_stream = contracts.RobonixSystemExecutorExecuteStreamStub(channel)
+    control_plan = contracts.RobonixSystemExecutorControlPlanStub(channel)
+    cancel_all = contracts.RobonixSystemExecutorCancelAllPlansStub(channel)
     events = run_plan(execute, "empty-policy-admin", token)
     terminal = terminal_state(events, 2)
     assert terminal.leaf_result.success, terminal.leaf_result
@@ -432,8 +463,43 @@ with grpc.insecure_channel(executor_endpoint) as channel:
         lambda: run_plan(execute, "empty-policy-invalid-session", "invalid-session"),
         "Executor accepted an invalid Keystone session",
     )
+    for bad_token in ("", "invalid-session"):
+        expect_rpc_error(
+            grpc.StatusCode.UNAUTHENTICATED,
+            lambda bad_token=bad_token: run_streamed_plan(
+                execute_stream, "empty-policy-stream-unauthenticated", bad_token
+            ),
+            "Executor accepted a streamed plan without a valid Keystone session",
+        )
+    streamed_events = run_streamed_plan(execute_stream, "empty-policy-stream-admin", token)
+    assert terminal_state(streamed_events, 2).leaf_result.success, streamed_events
+    for bad_token in ("", "invalid-session"):
+        expect_rpc_error(
+            grpc.StatusCode.UNAUTHENTICATED,
+            lambda bad_token=bad_token: control_plan.ControlPlan(
+                executor_pb2.ControlPlan_Request(
+                    session_token=bad_token, action="cancel_all"
+                ),
+                timeout=5,
+            ),
+            "Executor accepted unauthenticated plan control",
+        )
+        expect_rpc_error(
+            grpc.StatusCode.UNAUTHENTICATED,
+            lambda bad_token=bad_token: cancel_all.CancelAll(
+                executor_pb2.CancelAll_Request(session_token=bad_token), timeout=5
+            ),
+            "Executor accepted unauthenticated cancel_all",
+        )
+    assert control_plan.ControlPlan(
+        executor_pb2.ControlPlan_Request(session_token=token, action="cancel_all"),
+        timeout=5,
+    ).success
+    assert cancel_all.CancelAll(
+        executor_pb2.CancelAll_Request(session_token=token), timeout=5
+    ).success
 
-print("PASS Executor authenticated the plan and Sentinel allowed the empty-policy call")
+print("PASS Executor authenticated complete, streamed, and control requests")
 
 policy = [
     {
@@ -517,6 +583,7 @@ print("PASS Sentinel kept the active rules after rejecting an invalid replacemen
 
 with grpc.insecure_channel(executor_endpoint) as channel:
     execute = contracts.RobonixSystemExecutorExecuteStub(channel)
+    execute_stream = contracts.RobonixSystemExecutorExecuteStreamStub(channel)
 
     admin_events = run_plan(execute, "role-policy-admin", token)
     admin_terminal = terminal_state(admin_events, 2)
@@ -532,8 +599,14 @@ with grpc.insecure_channel(executor_endpoint) as channel:
         event.HasField("plan_complete") and event.plan_complete.any_failed
         for event in user_events
     ), user_events
+    streamed_admin = run_streamed_plan(execute_stream, "role-policy-stream-admin", token)
+    assert terminal_state(streamed_admin, 2).leaf_result.success, streamed_admin
+    streamed_user = run_streamed_plan(execute_stream, "role-policy-stream-user", user_token)
+    streamed_terminal = terminal_state(streamed_user, 3)
+    assert not streamed_terminal.leaf_result.success, streamed_terminal
+    assert "deny-non-admin-list-dir" in streamed_terminal.leaf_result.error, streamed_terminal
 
-print("PASS Sentinel allowed the administrator and denied the normal user")
+print("PASS Sentinel allowed the administrator and denied the normal user on both execution paths")
 PY
 
 for database_file in "$WORK/keystone.db" "$WORK/keystone.db-wal" "$WORK/keystone.db-shm"; do

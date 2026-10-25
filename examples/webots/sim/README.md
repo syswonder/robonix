@@ -160,7 +160,12 @@ is pre-filled with the page's hostname so a third machine doesn't end
 up dialling its own `localhost`. The viewer uses the optimized W3D endpoint on
 port `1235`: it keeps the interactive WebGL scene and live robot transforms,
 but removes high-rate robot-window camera messages that the standard viewer
-does not consume. Viewer JavaScript, textures, meshes, and world assets are
+does not consume. This endpoint forces W3D broadcast mode and does not forward
+viewer controls such as pause, reset, or simulation timeouts. Connecting or
+reconnecting a viewer therefore cannot pause the simulator and interrupt ROS
+sensor samples. The raw Webots port `1234` does not have this protection; use
+the public `1235` endpoint for browser viewing.
+Viewer JavaScript, textures, meshes, and world assets are
 proxied and cached by the server, avoiding repeated cross-network downloads.
 
 For a remote machine, forward both endpoints over SSH:

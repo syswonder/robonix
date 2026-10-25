@@ -12,22 +12,31 @@
 //   4. Serves Execute on `listen`. Per-call dispatch resolves provider via
 //      `ConnectCapability(provider_id, contract_id, MCP)` on atlas.
 
+mod active_plans;
+mod capability_execution;
 mod config;
 mod dispatch;
+mod grpc_server;
 mod pb;
-mod plan_runtime;
-mod rtdl_wire;
+mod plan_input;
+mod plan_scheduler;
+mod rtdl_events;
 mod sentinel_runtime;
-mod service;
 mod verification;
+
+// Preserve the unchanged dispatch module's imports during this reorganization.
+use active_plans as plan_runtime;
+use rtdl_events as rtdl_wire;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
+use grpc_server::ExecutorServiceImpl;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
+use pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStreamServer;
 use pb::contracts::robonix_system_executor_get_health_server::RobonixSystemExecutorGetHealthServer;
 use pb::contracts::robonix_system_executor_list_active_plans_server::RobonixSystemExecutorListActivePlansServer;
 use pb::contracts::robonix_system_sentinel_list_rules_server::RobonixSystemSentinelListRulesServer;
@@ -38,7 +47,6 @@ use robonix_scribe::{info, warn};
 use sentinel_runtime::{
     SENTINEL_NAMESPACE, SENTINEL_PROVIDER_ID, SentinelRuntime, SentinelServiceImpl,
 };
-use service::ExecutorServiceImpl;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -92,6 +100,20 @@ async fn main() -> Result<()> {
                 "capabilities/system/executor/execute.v1.toml",
                 "robonix.contracts.RobonixSystemExecutorExecute",
                 "/robonix.contracts.RobonixSystemExecutorExecute/Execute",
+            ),
+        )
+        .await?;
+
+    atlas
+        .declare_capability(
+            &cfg.id,
+            "robonix/system/executor/execute_stream",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor/execute_stream.v1.toml",
+                "robonix.contracts.RobonixSystemExecutorExecuteStream",
+                "/robonix.contracts.RobonixSystemExecutorExecuteStream/ExecuteStream",
             ),
         )
         .await?;
@@ -257,6 +279,7 @@ async fn main() -> Result<()> {
 
     let executor_server = tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
+        .add_service(RobonixSystemExecutorExecuteStreamServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
         .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))

@@ -31,8 +31,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install streaming test dependency
-        run: python3 -m pip install "websockets>=14,<17"
+      - name: Install focused test dependencies
+        run: python3 -m pip install "websockets>=14,<17" "PyYAML>=6,<7"
       - name: Test custom ports and helper readiness
         run: python3 examples/webots/sim/tests/test_streaming.py
       - name: Test Webots report infrastructure failures

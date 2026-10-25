@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::active_plans::PlanRuntime;
 use crate::config::VerificationRule;
 use crate::dispatch;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
-use crate::plan_runtime::PlanRuntime;
-use crate::rtdl_wire::NodeEventContext;
+use crate::rtdl_events::NodeEventContext;
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
 
@@ -23,7 +23,9 @@ const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Immutable rule set shared by all concurrently executing plans.
 #[derive(Clone, Debug, Default)]
 pub struct VerificationPolicy {
+    /// Whether matched results may be verified while subsequent calls execute.
     overlap: bool,
+    /// Matching rules, with provider-specific matches preferred over contract fallbacks.
     rules: Vec<VerificationRule>,
 }
 
@@ -56,9 +58,12 @@ impl VerificationPolicy {
     }
 }
 
+/// Verifier's JSON verdict used to accept or fail the original capability result.
 #[derive(Debug, Deserialize)]
 struct VerifyResponse {
+    /// Whether the verifier accepted the capability result.
     passed: bool,
+    /// Explanation logged on success or included in the rejection error.
     detail: String,
 }
 

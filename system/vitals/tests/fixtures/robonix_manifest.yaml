@@ -14,7 +14,7 @@ system:
 primitive:
 # Example:
 #   - name: health_piper
-#     path: /home/xjy/roboarm/robonix/primitives/health_piper   # absolute path, no ~
+#     path: /path/to/deploy/primitives/health_piper   # absolute path, no ~
 #     config:
 #       can_port: can0
 service: []

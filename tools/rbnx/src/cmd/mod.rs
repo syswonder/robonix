@@ -436,6 +436,10 @@ pub enum Commands {
         /// Default is human-readable text with tool-call summaries.
         #[arg(long)]
         json: bool,
+        /// Continue this Pilot session instead of starting a new one. Sent
+        /// while an earlier task of the session runs, the prompt steers it.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Read Scribe JSON-lines log files and render them with optional
     /// tag / level filtering.  Point at a log directory or read the
@@ -568,7 +572,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             prompt,
             server,
             json,
-        } => ask::execute(&server, &prompt, json).await,
+            session,
+        } => ask::execute(&server, &prompt, json, session).await,
         Commands::Logs {
             log_dir,
             tag,

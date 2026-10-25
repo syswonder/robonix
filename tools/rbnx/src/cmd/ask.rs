@@ -35,7 +35,12 @@ const STATE_FAILED: u32 = 2;
 const CONSUMER_ID: &str = "rbnx-cli/ask";
 const LIAISON_CONTRACT: &str = "robonix/system/liaison/submit";
 
-pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
+pub async fn execute(
+    server: &str,
+    prompt: &str,
+    json: bool,
+    session: Option<String>,
+) -> Result<()> {
     let atlas_endpoint = super::canonical_endpoint(server);
     let login = super::auth::resolve(&atlas_endpoint, false).await?;
     let mut atlas = AtlasClient::connect(&atlas_endpoint)
@@ -50,7 +55,7 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
     }
     let mut client = RobonixSystemLiaisonSubmitClient::new(channel);
 
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = session.unwrap_or_else(|| Uuid::new_v4().to_string());
     let task =
         super::chat::build_text_task(&session_id, &login.user_id, &login.session_token, prompt);
     let mut stream = client

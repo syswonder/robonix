@@ -4,10 +4,12 @@
 manifestVersion: 1
 
 package:
-  name: com.robonix.example.memgraph_service
+  name: robonix.service.memgraph
   version: 0.1.0
   vendor: robonix
   description: Memgraph MCP server — structured CKG memory (Scribe Mem) for the agent.
+  tags: [service, memory, knowledge-graph, memgraph, mcp]
+  maintainers: [Hou Yunlong <1729508169@qq.com>]
   license: MulanPSL-2.0
 
 build: bash scripts/build.sh
@@ -28,5 +30,8 @@ start: |
 
 capabilities:
   - name: robonix/service/memory/remember
+    transport: mcp
   - name: robonix/service/memory/hybrid_search
+    transport: mcp
   - name: robonix/service/memory/promote
+    transport: mcp

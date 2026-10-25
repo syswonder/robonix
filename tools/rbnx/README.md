@@ -40,7 +40,7 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx login [USERNAME]`   | Log in to Keystone and save the session                 |
 | `rbnx logout`             | Revoke the current Keystone session                     |
 | `rbnx chat`               | Interactive TUI chat with the pilot                    |
-| `rbnx ask "..."`          | Single-turn task submission                            |
+| `rbnx ask "..."`          | Single-turn task submission; `--session ID` continues or steers a session |
 | `rbnx path KEY`           | Resolve a registered source path (root / capabilities / interfaces-lib / runtime-proto / robonix-api) |
 | `rbnx setup [PATH]`       | Register a robonix source tree at `PATH`               |
 | `rbnx clean`              | Remove per-package build artefacts                     |
@@ -56,6 +56,12 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx version [--json]`   | Version, git commit, build date, rustc, target; `--json` adds the source root |
 
 Run `rbnx <cmd> --help` for full flags.
+
+Each package manifest capability declares `transport: mcp`, `grpc`, or `ros2`,
+or a non-empty list such as `transport: [grpc, ros2]`. `rbnx validate` rejects
+invalid or duplicate transports, repeated contracts, and transports incompatible
+with an available contract TOML's mode. An omitted transport warns and remains
+accepted while existing packages migrate; `manifestVersion` stays `1`.
 
 `rbnx install [--github REPO \| --path DIR]`, `rbnx list`, and `rbnx info NAME`
 manage system-installed packages. They are legacy commands, hidden from
@@ -75,6 +81,12 @@ them `pilot-hidden`, because they remain registered and callable by system
 consumers.
 
 ### What a boot leaves behind
+
+During boot, `rbnx` compares package manifest transport declarations with Atlas
+registrations, including Soma-managed primitives and skills. It warns once per
+mismatch; missing registrations are reported only while the package is ACTIVE.
+A manifest without transport declarations gets one warning and skips comparison.
+These diagnostics do not fail startup.
 
 `rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
 anything. Each package records what the manifest asked for and what that
