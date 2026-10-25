@@ -30,7 +30,7 @@ async def ready(endpoint):
         await asyncio.wait_for(channel.channel_ready(), 10)
 
 
-async def check(entry, mcp_port, model, overlap=False):
+async def check(entry, mcp_port, model, overlap=False, cameras=("wrist",)):
     """Assert one terminal result per node, original output, and fail-closed errors."""
     root = Path(__file__).resolve().parents[4]
     atlas_bin = os.environ.get("VLM_TEST_ATLAS_BIN", str(Path.home()/".cargo/bin/robonix-atlas"))
@@ -47,19 +47,22 @@ async def check(entry, mcp_port, model, overlap=False):
                 await ready(atlas_endpoint)
                 async with grpc.aio.insecure_channel(atlas_endpoint) as atlas_channel:
                     atlas = atlas_pb2_grpc.AtlasStub(atlas_channel)
-                    await atlas.RegisterPrimitive(pb.RegisterRequest(
-                        id="wrist", namespace="robonix/primitive/camera"))
+                    for provider in cameras:
+                        await atlas.RegisterPrimitive(pb.RegisterRequest(
+                            id=provider, namespace="robonix/primitive/camera"))
                     await atlas.RegisterService(pb.RegisterRequest(
                         id="vlm_verifier", namespace="robonix/service/verifier"))
-                    await atlas.DeclareCapability(pb.DeclareCapabilityRequest(
-                        provider_id="wrist", contract_id="robonix/primitive/camera/rgb",
-                        transport=pb.TRANSPORT_ROS2, endpoint="/verifier_test/rgb",
-                        params=pb.TransportParams(ros2=pb.Ros2Params())))
+                    for provider in cameras:
+                        await atlas.DeclareCapability(pb.DeclareCapabilityRequest(
+                            provider_id=provider, contract_id="robonix/primitive/camera/rgb",
+                            transport=pb.TRANSPORT_ROS2,
+                            endpoint="/verifier_test/rgb" if provider == "wrist" else "/verifier_test/head_rgb",
+                            params=pb.TransportParams(ros2=pb.Ros2Params())))
                     await atlas.DeclareCapability(pb.DeclareCapabilityRequest(
                         provider_id="vlm_verifier", contract_id="robonix/service/verifier/verify",
                         transport=pb.TRANSPORT_MCP, endpoint=f"http://127.0.0.1:{mcp_port}/mcp",
                         params=pb.TransportParams(mcp=pb.McpParams())))
-                    for provider in ("wrist", "vlm_verifier"):
+                    for provider in (*cameras, "vlm_verifier"):
                         await atlas.DeclareCapability(pb.DeclareCapabilityRequest(
                             provider_id=provider, contract_id="robonix/lifecycle/driver",
                             transport=pb.TRANSPORT_GRPC, endpoint=f"127.0.0.1:{free_port()}",
@@ -74,7 +77,8 @@ async def check(entry, mcp_port, model, overlap=False):
                         "target_contract_id": "robonix/system/executor/builtin/run_command",
                         "target_provider_id": "executor",
                         "verifier_provider_id": "vlm_verifier",
-                        "verifier_args": {"camera_provider_id": "wrist"},
+                        "verifier_args": ({"camera_provider_id": cameras[0]} if len(cameras) == 1
+                                          else {"camera_provider_ids": list(cameras)}),
                     }]}}
                     processes.append(subprocess.Popen([
                         executor_bin, "--atlas", atlas_endpoint, "--listen", executor_endpoint,
@@ -84,13 +88,13 @@ async def check(entry, mcp_port, model, overlap=False):
                     with patch.dict(os.environ, {"ROBONIX_ATLAS": atlas_endpoint}), patch.object(entry, "ATLAS", CameraDirectory()):
                         async with grpc.aio.insecure_channel(executor_endpoint) as channel:
                             stub = contracts.RobonixSystemExecutorExecuteStub(channel)
-                            for mode in ("passed", "rejected", "malformed", "missing_camera"):
+                            for mode in ("passed", "rejected", "unobservable", "malformed", "missing_camera"):
                                 target_marker = Path(work)/f"{mode}-target"
                                 successor_marker = Path(work)/f"{mode}-successor"
                                 model.wait_for_marker = str(successor_marker) if overlap else None
                                 model.verdict = (
-                                    '{"passed":"true","detail":"invalid"}' if mode == "malformed"
-                                    else {"passed": mode == "passed", "detail": "visual evidence"})
+                                    '{"observable":true,"passed":"true","detail":"invalid"}' if mode == "malformed"
+                                    else {"observable": mode != "unobservable", "passed": mode == "passed", "detail": "visual evidence"})
                                 if mode == "missing_camera":
                                     entry.CAMERAS.close()
                                     entry.CAMERAS = CameraPool(lambda: entry.ATLAS, entry.service.id)
@@ -130,9 +134,11 @@ async def check(entry, mcp_port, model, overlap=False):
                                     assert "original-marker" in result.output, result
                                 if mode == "rejected":
                                     assert result.error.startswith("result verification failed:"), result
-                                if mode in ("malformed", "missing_camera"):
+                                if mode in ("unobservable", "malformed", "missing_camera"):
                                     assert result.error.startswith("result verification unavailable:"), result
-                                print(f"PASS: overlap={overlap} {mode}; target={target_marker.exists()} successor={successor_marker.exists()}")
+                                if mode == "unobservable":
+                                    assert "insufficient visual evidence" in result.error, result
+                                print(f"PASS: cameras={cameras} overlap={overlap} {mode}; target={target_marker.exists()} successor={successor_marker.exists()}")
                     model.wait_for_marker = None
             except BaseException:
                 log.flush()

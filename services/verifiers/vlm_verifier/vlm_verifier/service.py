@@ -44,7 +44,7 @@ async def verify(req: Verify_Request) -> Verify_Response:
     async def observe(provider_id):
         jpeg = await CAMERAS.capture(provider_id)
         try:
-            path = camera.save_verification_frame(f"{req.call_id}:{phase}", jpeg)
+            path = camera.save_verification_frame(f"{req.call_id}:{phase}:{provider_id}", jpeg)
         except OSError as exc:
             log.warning("call_id=%r could not save verification frame (%s)",
                         req.call_id, type(exc).__name__)
@@ -52,14 +52,16 @@ async def verify(req: Verify_Request) -> Verify_Response:
             log.info("call_id=%r verification frame saved: %s", req.call_id, path)
         return jpeg
 
-    async def evaluate(envelope, jpeg):
+    async def evaluate(envelope, images):
         now = time.monotonic()
         context = {k: v for k, v in envelope.items() if k not in ("phase", "target_output")}
         if phase == "before":
-            _before_images[req.call_id] = (now, context, jpeg)
+            _before_images[req.call_id] = (now, context, images)
             return {"passed": True, "detail": "Before image captured; result not yet verified."}
         _, before_context, before = _before_images.pop(req.call_id)
-        return await vlm.judge(config, envelope, before, jpeg)
+        if context != before_context:
+            raise ValueError("before image context mismatch")
+        return await vlm.judge(config, envelope, before, images)
 
     result = await core.verify(req.call_id, req.args_json, observe, evaluate)
     return Verify_Response(**result)

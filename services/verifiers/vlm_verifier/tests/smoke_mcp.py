@@ -33,8 +33,9 @@ from vlm_verifier import service as entry
 
 
 class ModelHandler(BaseHTTPRequestHandler):
-    verdict = {"passed": True, "detail": "target visibly held"}
+    verdict = {"observable": True, "passed": True, "detail": "target visibly held"}
     calls = 0
+    expected_cameras = ("wrist",)
     expected_colors = ("red", "blue")
     wait_for_marker = None
 
@@ -45,11 +46,17 @@ class ModelHandler(BaseHTTPRequestHandler):
         """Validate actual model wire payload and return the chosen verdict."""
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         assert self.path == "/v1/chat/completions"
+        assert data["temperature"] == 0
         content = data["messages"][1]["content"]
-        assert content[1]["text"] == "BEFORE capability execution"
-        assert content[3]["text"] == "AFTER capability execution"
+        target = json.loads(content[0]["text"])
+        assert target["target_contract_id"]
+        assert target["target_args"]
+        assert "target_output" in target
+        labels = [item["text"] for item in content[1:] if item["type"] == "text"]
+        assert labels == [f"{phase} capability execution; camera_provider_id={json.dumps(provider)}"
+                          for provider in self.expected_cameras for phase in ("BEFORE", "AFTER")]
         urls = [item["image_url"]["url"] for item in content if item["type"] == "image_url"]
-        assert len(urls) == 2
+        assert len(urls) == len(self.expected_colors) == 2 * len(self.expected_cameras)
         for url, color in zip(urls, self.expected_colors):
             image = PillowImage.open(io.BytesIO(base64.b64decode(url.split(",")[1])))
             red, green, blue = image.getpixel((0, 0))
@@ -80,16 +87,20 @@ async def main():
     rclpy.init(context=context)
     node = rclpy.create_node("verifier_test_camera", context=context)
     publisher = node.create_publisher(Image, "/verifier_test/rgb", 10)
+    head_publisher = node.create_publisher(Image, "/verifier_test/head_rgb", 10)
     stopped = threading.Event()
     executor = SingleThreadedExecutor(context=context)
     executor.add_node(node)
     color = [[255, 0, 0]]
+    head_color = [[0, 0, 255]]
 
     def publish():
         """Continuously publish the frame retained by the verifier's shared cache."""
         msg = Image(height=4, width=4, encoding="rgb8", step=12,
                     data=color[0] * 16)
         publisher.publish(msg)
+        head_publisher.publish(Image(height=4, width=4, encoding="rgb8", step=12,
+                                     data=head_color[0] * 16))
 
     node.create_timer(0.05, publish)
 
@@ -103,15 +114,15 @@ async def main():
     atlas = Mock()
 
     def find(**kwargs):
-        assert kwargs["provider_id"] in ("wrist", "missing")
+        assert kwargs["provider_id"] in ("wrist", "head", "missing")
         assert kwargs["contract_id"] == camera.RGB_CONTRACT
         if kwargs["provider_id"] == "missing":
             return []
-        return [SimpleNamespace(provider_id="wrist", contract_id=camera.RGB_CONTRACT)]
+        return [SimpleNamespace(provider_id=kwargs["provider_id"], contract_id=camera.RGB_CONTRACT)]
 
     def connect(**kwargs):
-        assert kwargs["provider_id"] == "wrist"
-        channel = Mock(endpoint="/verifier_test/rgb")
+        assert kwargs["provider_id"] in ("wrist", "head")
+        channel = Mock(endpoint="/verifier_test/rgb" if kwargs["provider_id"] == "wrist" else "/verifier_test/head_rgb")
         channels.append(channel)
         return channel
 
@@ -134,14 +145,22 @@ async def main():
                 async with ClientSession(read, write) as client:
                     await client.initialize()
 
-                    async def call(provider="wrist"):
+                    async def call(provider="wrist", cameras=None):
                         payload = dict(
                             target_provider_id="pick", target_contract_id="robonix/skill/pick/pick",
                             target_description="Pick the red object",
                             target_args={"object_name": "red object"}, target_output={"success": True},
                             verifier_args={"camera_provider_id": provider},
                         )
+                        if cameras is not None:
+                            payload["verifier_args"] = {"camera_provider_ids": cameras}
+                        ModelHandler.expected_cameras = tuple(cameras or [provider])
+                        colors = {"wrist": ("red", "blue"), "head": ("blue", "red")}
+                        if provider != "missing":
+                            ModelHandler.expected_colors = tuple(
+                                color for camera in ModelHandler.expected_cameras for color in colors[camera])
                         color[0] = [255, 0, 0]
+                        head_color[0] = [0, 0, 255]
                         await asyncio.sleep(0.1)
                         payload["phase"] = "before"
                         before = await client.call_tool("verify", {
@@ -151,6 +170,7 @@ async def main():
                             return before
                         assert json.loads(before.content[0].text)["passed"] is True
                         color[0] = [0, 0, 255]
+                        head_color[0] = [255, 0, 0]
                         await asyncio.sleep(0.1)
                         payload["phase"] = "after"
                         return await client.call_tool("verify", {
@@ -158,31 +178,43 @@ async def main():
                         })
 
                     for passed in (True, False):
-                        ModelHandler.verdict = {"passed": passed, "detail": "visual evidence"}
+                        ModelHandler.verdict = {"observable": True, "passed": passed, "detail": "visual evidence"}
                         response = await call()
                         assert not response.isError, response
                         body = json.loads(response.content[0].text)
                         assert body["passed"] is passed, body
-                    ModelHandler.verdict = '{"passed":"true","detail":"invalid"}'
+                        assert set(body) == {"passed", "detail"}, body
+                    ModelHandler.verdict = {"observable": False, "passed": False, "detail": "target occluded"}
+                    response = await call()
+                    assert response.isError, response
+                    assert "insufficient visual evidence" in response.content[0].text, response
+                    ModelHandler.verdict = {"observable": True, "passed": True, "detail": "wrist evidence resolves head occlusion"}
+                    response = await call(cameras=["wrist", "head"])
+                    assert not response.isError, response
+                    assert json.loads(response.content[0].text)["passed"] is True
+                    ModelHandler.verdict = '{"observable":true,"passed":"true","detail":"invalid"}'
                     assert (await call()).isError
                     before = ModelHandler.calls
                     assert (await call("missing")).isError
                     assert ModelHandler.calls == before
-                    assert len(channels) == 1
-                    assert channels[0].close.call_count == 0
-                    print("PASS: ordered before/after ROS images, MCP pass/reject/errors, one HTTP VLM call per pair")
+                    assert len(channels) == 2
+                    assert all(channel.close.call_count == 0 for channel in channels)
+                    print("PASS: labelled single/multiple ROS cameras, MCP pass/reject/abstain/errors, strict HTTP payload")
                     if os.environ.get("VLM_TEST_EXECUTOR_BIN"):
                         from executor_checks import check
-                        entry.CAMERAS.close()
-                        entry.CAMERAS = camera.CameraPool(lambda: entry.ATLAS, entry.service.id)
                         color[0] = [255, 0, 0]
-                        ModelHandler.expected_colors = ("red", "red")
-                        await check(entry, port, ModelHandler)
-                        entry.CAMERAS.close()
-                        entry.CAMERAS = camera.CameraPool(lambda: entry.ATLAS, entry.service.id)
-                        await check(entry, port, ModelHandler, overlap=True)
+                        head_color[0] = [0, 0, 255]
+                        for overlap in (False, True):
+                            for cameras in (("wrist",), ("wrist", "head")):
+                                entry.CAMERAS.close()
+                                entry.CAMERAS = camera.CameraPool(lambda: entry.ATLAS, entry.service.id)
+                                ModelHandler.expected_cameras = cameras
+                                ModelHandler.expected_colors = tuple(
+                                    color for provider in cameras
+                                    for color in (("red", "red") if provider == "wrist" else ("blue", "blue")))
+                                await check(entry, port, ModelHandler, overlap=overlap, cameras=cameras)
                     entry.shutdown()
-                    assert channels[0].close.call_count == 1
+                    assert all(channel.close.call_count == 1 for channel in channels)
     finally:
         entry.shutdown()
         server.should_exit = True
