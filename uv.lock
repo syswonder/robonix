@@ -28,6 +28,7 @@ resolution-markers = [
 members = [
     "robonix",
     "robonix-api",
+    "robonix-chronos-clock",
     "robonix-memgraph",
     "robonix-scene-verifier",
     "robonix-system-memory",
@@ -4205,6 +4206,11 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
 ]
 provides-extras = ["codegen"]
+
+[[package]]
+name = "robonix-chronos-clock"
+version = "1.1.0b1"
+source = { editable = "system/chronos/clock" }
 
 [[package]]
 name = "robonix-memgraph"
