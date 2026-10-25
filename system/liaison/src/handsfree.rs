@@ -9,7 +9,7 @@ use robonix_scribe::{info, warn};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -21,10 +21,7 @@ use crate::pb::contracts::{
     robonix_service_speech_wake_word_client::RobonixServiceSpeechWakeWordClient,
 };
 use crate::pb::liaison::{GetHandsfreeStatusResponse, StartVoiceSessionRequest, VoiceEvent};
-use crate::{
-    voice,
-    voice::{KIND_ASR_FINAL, KIND_ERROR},
-};
+use crate::{voice, voice::KIND_ASR_FINAL};
 
 const MIC_CONTRACT: &str = "robonix/primitive/audio/mic";
 const WAKE_WORD_CONTRACT: &str = "robonix/service/speech/wake_word";
@@ -75,7 +72,7 @@ pub struct HandsfreeController {
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
-    events: broadcast::Sender<VoiceEvent>,
+    events: broadcast::Sender<Result<VoiceEvent, tonic::Status>>,
     active_turns: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -200,7 +197,7 @@ impl HandsfreeController {
             loop {
                 match source.recv().await {
                     Ok(event) => {
-                        if tx.send(Ok(event)).await.is_err() {
+                        if tx.send(event).await.is_err() {
                             break;
                         }
                     }
@@ -216,7 +213,7 @@ impl HandsfreeController {
 
     fn publish(&self, event: VoiceEvent) {
         // A disconnected UI must never block the robot-local interaction.
-        let _ = self.events.send(event);
+        let _ = self.events.send(Ok(event));
     }
 
     async fn set_state(&self, value: &str, error: Option<String>) {
@@ -257,11 +254,20 @@ impl HandsfreeController {
 
             match wake_result {
                 Ok(Some(keyword)) => {
+                    let timestamp = match voice::now_ms() {
+                        Ok(timestamp) => timestamp,
+                        Err(error) => {
+                            let _ = self.events.send(Err(error.clone()));
+                            self.set_state("error", Some(error.to_string())).await;
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
                     {
                         let mut state = self.state.lock().await;
                         state.state = "triggered".to_string();
                         state.keyword = keyword.clone();
-                        state.last_wake_ms = now_ms();
+                        state.last_wake_ms = timestamp;
                         state.last_error.clear();
                     }
                     info!("[liaison/handsfree] wake phrase detected: {keyword}");
@@ -269,17 +275,7 @@ impl HandsfreeController {
                         let message = format!("{error:#}");
                         warn!("[liaison/handsfree] voice turn failed: {message}");
                         let session_id = self.config.lock().await.handsfree_session_id.clone();
-                        self.publish(VoiceEvent {
-                            event_kind: KIND_ERROR,
-                            session_id,
-                            text: String::new(),
-                            user_id: String::new(),
-                            confidence: 0.0,
-                            pilot: None,
-                            error: message.clone(),
-                            status_message: String::new(),
-                            timestamp_ms: now_ms(),
-                        });
+                        let _ = self.events.send(voice::event_error(&session_id, &message));
                         self.set_state("error", Some(message)).await;
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -423,6 +419,7 @@ impl HandsfreeController {
                                 }
                             }
                             Err(status) => {
+                                let _ = controller.events.send(Err(status.clone()));
                                 warn!(
                                     "[liaison/handsfree] background voice stream failed: {status}"
                                 );
@@ -446,11 +443,4 @@ impl HandsfreeController {
         turns.retain(|turn| !turn.is_finished());
         !turns.is_empty()
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

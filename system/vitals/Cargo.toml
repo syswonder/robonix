@@ -24,6 +24,10 @@ log = "0.4"
 env_logger = "0.11"
 uuid.workspace = true
 robonix-atlas = { path = "../atlas" }
+robonix-chronos-clock.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 robonix-codegen.workspace = true
