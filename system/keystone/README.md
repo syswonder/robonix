@@ -1,24 +1,13 @@
 # Keystone
 
-Keystone is Robonix's persistent user identity and account service. Liaison
+Keystone is Robonix's core system component for user identity. Liaison
 uses it to authenticate text, voice, and hands-free interactions before they
 reach Pilot.
 
-Keystone stores:
-
-- user accounts, profile fields, enabled state, and `user` / `admin` roles;
-- Argon2 password hashes;
-- opaque login sessions (only SHA-256 token hashes are persisted);
-- per-user voice-guard policy and Voiceprint bindings;
-- system account settings such as whether public signup is enabled.
-
-The SQLite database uses foreign keys and WAL mode. Its default path is
-`$ROBONIX_DATA_DIR/keystone.db`; `rbnx boot` sets `ROBONIX_DATA_DIR` to the
-deployment's `rbnx-boot/data` directory. A robot deployment that can move
-between source checkouts should set `system.keystone.database` and
-`bootstrap_credentials_file` to stable, robot-owned paths such as
-`${HOME}/.robonix/data/keystone.db` and
-`${HOME}/.robonix/data/keystone-bootstrap-admin.txt`.
+Keystone stores user accounts, roles, voice-guard settings, and login sessions
+in SQLite. Passwords are hashed with Argon2; only session token hashes are
+persisted. The database defaults to `$ROBONIX_DATA_DIR/keystone.db` (or
+`rbnx-boot/data/keystone.db` when unset) and is owner-only on Unix.
 
 ## First administrator
 
@@ -31,53 +20,33 @@ password and writes the one-time credentials to:
 rbnx-boot/data/keystone-bootstrap-admin.txt
 ```
 
-On Unix the file mode is `0600`. The startup log prints its path, never the
-password. The administrator must change the password after the first login.
+On Unix the file mode is `0600`. The administrator must change the password
+after the first login; Keystone then removes the credential file.
 
 ## Deployment configuration
 
-Keystone is a built-in system component:
+Configure Keystone under `system.keystone` in the deployment manifest. Set
+`system.liaison.keystone_endpoint` to its listen address to require client
+login. Keystone gRPC has no TLS; remote connections need a trusted network or
+encrypted tunnel.
 
-```yaml
-system:
-  keystone:
-    listen: 127.0.0.1:50095
-    log: info
-    database: ${HOME}/.robonix/data/keystone.db
-    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
-    voice_threshold: 0.25
-  liaison:
-    listen: 0.0.0.0:50081
-    keystone_endpoint: 127.0.0.1:50095
-```
-
-Clients may discover Keystone through Atlas. The default listener is
-robot-local; bind an unspecified address only when remote account clients must
-connect directly on a trusted network.
-
-Optional configuration can be passed in the `system.keystone` mapping:
+Configuration fields:
 
 | Field | Default | Purpose |
 |---|---|---|
 | `listen` | `127.0.0.1:50095` | Keystone gRPC listener |
-| `database` | `$ROBONIX_DATA_DIR/keystone.db` | SQLite database |
-| `bootstrap_credentials_file` | `$ROBONIX_DATA_DIR/keystone-bootstrap-admin.txt` | generated first-login credential file |
+| `database` | data directory `keystone.db` | SQLite database |
+| `bootstrap_credentials_file` | data directory `keystone-bootstrap-admin.txt` | generated first-login credential file |
 | `bootstrap_admin_username` | `admin` | first administrator username |
 | `bootstrap_admin_display_name` | `Administrator` | first administrator display name |
 | `bootstrap_admin_email` | empty | first administrator email |
 | `voice_threshold` | `0.25` | minimum Voiceprint confidence when voice guard is enabled |
 
-The threshold can also be set with `--voice-threshold` or
-`ROBONIX_KEYSTONE_VOICE_THRESHOLD`.
-
-The bootstrap password is intentionally environment-only and is not accepted
-from the deployment manifest.
-
 ## Access behavior
 
 When Liaison is configured with Keystone:
 
-- Text turns require a live session, but do not require a voiceprint.
+- Text turns require a live session.
 - When a user's voice guard is off, authenticated voice turns skip Voiceprint.
 - When the guard is on, every voice turn must identify as that same logged-in
   user above Keystone's configured confidence threshold.

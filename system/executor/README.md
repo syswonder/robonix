@@ -57,13 +57,9 @@ startup. `verifier_args` must be a JSON/YAML object and is forwarded unchanged
 inside the verifier request. `overlap` applies to the entire verification
 configuration and defaults to `false`, preserving synchronous verification.
 
-Sentinel rules are loaded when Executor starts. Authenticated administrators
-can list or atomically replace the active rules through
-`robonix/system/sentinel/list_rules` and
-`robonix/system/sentinel/replace_rules`. These services use a separate endpoint
-because Atlas requires endpoints to be unique across providers. Executor starts
-with an empty rule set when the configured rule file does not exist and no seed
-is configured. Later starts preserve rules replaced through the admin service.
+Executor loads Sentinel rules at startup. Administrators can list or replace
+them through `robonix/system/sentinel/list_rules` and
+`robonix/system/sentinel/replace_rules`. Rule changes persist across restarts.
 
 ## RTDL Execution
 
@@ -75,22 +71,16 @@ Executor interprets `Plan.nodes` from `Plan.root_index`:
   failed branch does not cancel sibling branches.
 - `do`: dispatches one `CapabilityCall`.
 
-Before dispatching a `do` node, Executor evaluates the active Sentinel rules
-against its arguments, the Keystone identity resolved for the Plan, the local
-time, and any required Soma, Vitals, or Scene state. A denied or indeterminate
-decision fails the node without invoking its provider.
+Before dispatching a `do` node, Executor evaluates the active Sentinel rules.
+A denied or indeterminate decision fails the node without invoking its provider.
 
 Every `Plan.nodes` entry must include non-empty `op_id` and `description`
 fields. Executor copies both fields into every `RtdlNodeState` so callers can
 match execution results back to the original RTDL node.
 
-When `Plan.auth_session_token` is non-empty, Executor resolves it through
-Keystone before reporting that the plan started. Executor rejects an invalid
-session and clears a valid credential before executing the tree. When
-`require_keystone` is enabled, an empty token is rejected with
-`UNAUTHENTICATED`; the same requirement applies to `control_plan` and
-`cancel_all_plans`. When disabled, empty credentials preserve local
-deployments without Keystone.
+When `require_keystone` is enabled, Executor requires a valid session for plan
+execution, `control_plan`, and `cancel_all_plans`. Without Keystone, these calls
+can use the local mode.
 
 Executor keeps an in-process table of active RTDL plans. The builtin
 `cancel_plan` capability can mark a plan as cancelled by `plan_id`; `sequence`

@@ -13,7 +13,7 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:50095";
 pub const DEFAULT_PROVIDER_ID: &str = "keystone";
 pub const KEYSTONE_NAMESPACE: &str = "robonix/system/keystone";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeystoneConfig {
     pub atlas_endpoint: String,
     pub listen: String,
@@ -27,7 +27,7 @@ pub struct KeystoneConfig {
     pub voice_threshold: f32,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "robonix-keystone", about = "Robonix user identity service")]
 pub struct Args {
     #[arg(long, env = "ROBONIX_ATLAS_ENDPOINT")]
@@ -53,9 +53,6 @@ pub struct Args {
 
     #[arg(long, env = "ROBONIX_KEYSTONE_BOOTSTRAP_ADMIN_EMAIL")]
     pub bootstrap_admin_email: Option<String>,
-
-    #[arg(long, env = "ROBONIX_KEYSTONE_BOOTSTRAP_ADMIN_PASSWORD")]
-    pub bootstrap_admin_password: Option<String>,
 
     #[arg(long, env = "ROBONIX_KEYSTONE_VOICE_THRESHOLD")]
     pub voice_threshold: Option<f32>,
@@ -147,7 +144,7 @@ impl KeystoneConfig {
                 .or(deployment.bootstrap_admin_email)
                 .or(file.bootstrap_admin_email)
                 .unwrap_or_default(),
-            bootstrap_admin_password: args.bootstrap_admin_password,
+            bootstrap_admin_password: nonempty_env("ROBONIX_KEYSTONE_BOOTSTRAP_ADMIN_PASSWORD"),
             voice_threshold: args
                 .voice_threshold
                 .or(deployment.voice_threshold)
@@ -159,4 +156,21 @@ impl KeystoneConfig {
 
 fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_password_is_not_a_cli_option() {
+        assert!(
+            Args::try_parse_from([
+                "robonix-keystone",
+                "--bootstrap-admin-password",
+                "not-on-the-command-line",
+            ])
+            .is_err()
+        );
+    }
 }

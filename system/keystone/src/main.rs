@@ -278,7 +278,11 @@ async fn main() -> Result<()> {
             .with_context(|| format!("declare '{}'", capability.contract_id))?;
     }
     let service_atlas = std::sync::Arc::new(tokio::sync::Mutex::new(atlas.clone()));
-    let service = std::sync::Arc::new(KeystoneService::new(store, service_atlas));
+    let service = std::sync::Arc::new(KeystoneService::new(
+        store,
+        service_atlas,
+        Some(config.bootstrap_credentials_file.clone()),
+    ));
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
     let mut server_task = tokio::spawn(async move {

@@ -51,8 +51,15 @@ User
   `VoiceEvent` state, ASR, voiceprint, Pilot, and TTS progress.
 - `robonix/system/liaison/voice/finish`: ends microphone capture for an
   in-flight voice session and submits the transcript recognized so far.
+- `robonix/system/liaison/handsfree/set_enabled`: enables or disables the
+  robot-local wake-word interaction mode.
+- `robonix/system/liaison/handsfree/status`: reads the wake-word interaction
+  state.
+- `robonix/system/liaison/handsfree/events`: streams events from hands-free
+  voice turns.
 
-All three contracts are registered by the `liaison` provider id.
+All six contracts are registered by the `liaison` provider id, which also
+declares the shared lifecycle Driver contract.
 
 A voice turn normally ends on the ASR backend's own end-of-utterance
 detection. Continuous background noise can keep that from ever firing, which
@@ -81,27 +88,16 @@ normalised identity in `Task.context_json.user_id`:
 - voice path: uses `voice:<speaker_id>` from voiceprint when available.
 
 When `ROBONIX_KEYSTONE_ENDPOINT` or `system.liaison.keystone_endpoint` is set,
-external text, control, push-to-talk voice, and hands-free enable requests must
-include a Keystone login token. Liaison retains the validated token while
-hands-free mode is enabled and resolves the session before every voice capture.
-`rbnx boot` turns this same setting into Executor's `require_keystone` mode so
-both boundaries reject a missing session rather than allowing direct Executor
-callers to bypass Liaison.
-If the account's voice guard is disabled, the voice turn skips Voiceprint; if it
-is enabled, Voiceprint must identify the logged-in account above Keystone's
-configured threshold.
-Liaison removes the token from `context_json`, replaces caller-supplied identity
-fields with the Keystone account, and forwards the validated credential in the
-internal `Task.auth_session_token` field. The local Liaison access policy is
-used only when Keystone is not configured.
-
-Manifest configuration cannot provide a login token. When Keystone is
-configured, hands-free mode therefore starts disabled until an authenticated
-client enables it.
+text/API tasks require `context_json.session_token`; voice and hands-free
+requests use their `session_token` field. Both hands-free enable and disable
+require a valid session. Hands-free starts disabled until a client enables it.
+Liaison forwards the authenticated account to Pilot. If the account enables
+voice guard, Voiceprint must identify that same account. `rbnx boot` also
+requires a session at Executor when Liaison uses Keystone.
 
 Keystone does not bind a Pilot `session_id` to one account. An authenticated
-user with an existing id may continue or control that session. Liaison's own
-headless-session cleanup is forwarded internally without a login session.
+user with an existing id may continue or control that session. The local
+Liaison access policy applies only when Keystone is not configured.
 
 When Keystone is not configured and `ROBONIX_LIAISON_ACCESS_ENABLED=1`:
 
@@ -135,7 +131,7 @@ robonix-liaison
 | `ROBONIX_ATLAS` | `127.0.0.1:50051` | Atlas address |
 | `ROBONIX_PILOT_ENDPOINT` | `127.0.0.1:50071` | Pilot address |
 | `ROBONIX_KEYSTONE_ENDPOINT` | (unset) | Keystone address; when set, external text, control, push-to-talk voice, and hands-free requests require a login session |
-| `ROBONIX_SESSION_TOKEN` | (unset) | Keystone login token attached to text, control, and push-to-talk voice requests by `rbnx chat` |
+| `ROBONIX_SESSION_TOKEN` | (unset) | Keystone login token attached to text, control, and push-to-talk voice requests by `rbnx chat` and `rbnx ask` |
 | `ROBONIX_LIAISON_PORT` | `50081` | Liaison listen port |
 | `ROBONIX_LIAISON_VOICE_MOCK` | (unset) | Set to `1` to skip real mic+ASR and use preset text |
 | `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `Hello, please introduce yourself.` | Text used in mock mode |

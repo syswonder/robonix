@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::warn;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
@@ -45,11 +48,34 @@ use robonix_keystone::{AuthSession, KeystoneError, KeystoneStore, User};
 pub struct KeystoneService {
     store: KeystoneStore,
     atlas: Arc<Mutex<AtlasClient>>,
+    bootstrap_credentials_file: Option<PathBuf>,
 }
 
 impl KeystoneService {
-    pub fn new(store: KeystoneStore, atlas: Arc<Mutex<AtlasClient>>) -> Self {
-        Self { store, atlas }
+    pub fn new(
+        store: KeystoneStore,
+        atlas: Arc<Mutex<AtlasClient>>,
+        bootstrap_credentials_file: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            atlas,
+            bootstrap_credentials_file,
+        }
+    }
+
+    fn remove_bootstrap_credentials(&self) {
+        let Some(path) = self.bootstrap_credentials_file.as_deref() else {
+            return;
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                "remove bootstrap credentials '{}' failed: {error}",
+                path.display()
+            ),
+        }
     }
 
     async fn resolve_endpoint(
@@ -200,14 +226,18 @@ impl RobonixSystemKeystoneChangePassword for KeystoneService {
         request: Request<ChangePasswordRequest>,
     ) -> Result<Response<ChangePasswordResponse>, Status> {
         let input = request.into_inner();
-        self.store
+        let password_change_required = self
+            .store
             .change_password(
                 &input.session_token,
                 &input.current_password,
                 &input.new_password,
             )
-            .map(|()| Response::new(ChangePasswordResponse {}))
-            .map_err(status)
+            .map_err(status)?;
+        if password_change_required {
+            self.remove_bootstrap_credentials();
+        }
+        Ok(Response::new(ChangePasswordResponse {}))
     }
 }
 
@@ -528,6 +558,7 @@ fn status(error: KeystoneError) -> Status {
         | KeystoneError::UserDisabled
         | KeystoneError::VoiceprintMismatch
         | KeystoneError::VoiceprintConfidenceLow => Status::unauthenticated(error.to_string()),
+        KeystoneError::PasswordChangeRequired => Status::failed_precondition(error.to_string()),
         KeystoneError::AdminRequired | KeystoneError::LastAdmin => {
             Status::permission_denied(error.to_string())
         }
@@ -545,6 +576,7 @@ fn status(error: KeystoneError) -> Status {
         | KeystoneError::InvalidVoiceThreshold => Status::invalid_argument(error.to_string()),
         KeystoneError::PasswordHash(_)
         | KeystoneError::LockPoisoned
+        | KeystoneError::Io(_)
         | KeystoneError::Database(_) => Status::internal(error.to_string()),
     }
 }

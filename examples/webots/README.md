@@ -15,7 +15,7 @@ examples/webots/
 ├── soma.yaml                  TIAGo Lite body description (default).
 ├── soma.full.yaml             Full single-arm TIAGo body description.
 ├── sentinel-rules.v1.json     First-boot Sentinel policy.
-├── SENTINEL_DEMO.md           Sentinel policy and Scene condition examples.
+├── SENTINEL_DEMO.md           Sentinel policy setup.
 ├── primitives/                One device = one package.
 │   ├── tiago_chassis/         /amcl_pose + /cmd_vel  → chassis/{state, move}
 │   ├── tiago_camera/          /head_front_camera/*   → camera/{snapshot, depth_snapshot}
@@ -196,25 +196,26 @@ The deploy manifest references these via `${VLM_*}`.
    - Spawns the package via `rbnx start -p <path>` (which runs that
      package's `scripts/start.sh` — for tiago drivers that's a
      `docker exec` into the sim container that runs the Python driver).
-   - Polls atlas until the package registers its first capability.
-   - If the new provider declared a `*/driver` gRPC capability, also calls
-     `LifecycleDriver.Driver(CMD_INIT, config_json)` to initialize it.
-     Providers without a `*/driver` capability are deployed as soon as they
-     register (no init dance) — tiago drivers fall in this bucket.
+   - Polls atlas until the package registers and declares its lifecycle
+     Driver. Every provider must expose exactly one Driver; a missing or
+     ambiguous one fails startup.
+   - Calls `Driver(CMD_INIT, config_json)`, then `CMD_ACTIVATE` for
+     primitives and services. Skills stop at `INACTIVE`; Executor activates
+     them on their first call.
 3. Sits on Ctrl-C / SIGTERM, then tears down all children.
 
 ## How the LLM picks tools
 
-After `rbnx boot` is up, pilot's system prompt lists each provider's
-`CAPABILITY.md` path; the LLM uses the executor's `read_file` builtin
-to lazy-load the docs it needs (e.g. `read_file("/path/to/tiago_chassis/CAPABILITY.md")`).
+After `rbnx boot` is up, Pilot's prompt lists each provider that
+registered a `CAPABILITY.md`, by provider id and one-line description; the
+LLM reads a manual on demand with the `read_capability_doc` builtin, passing
+the provider id. Atlas serves the content, so no file path is involved.
 
-Tools are exposed to the LLM as `<area>_<leaf>` to avoid leaf-name
-collisions (camera and lidar both have a `snapshot` leaf — the LLM
-sees `camera_snapshot` and `lidar_snapshot`). The MCP server inside
-each driver still registers tools by leaf name.
+Capabilities are exposed to the LLM as `<provider_id>.<area>_<leaf>`
+(camera and lidar both have a `snapshot` leaf — the LLM sees
+`tiago_camera.camera_snapshot` and `tiago_lidar.lidar_snapshot`). The MCP
+server inside each driver still registers tools by leaf name.
 
-The pilot's persistence prompt instructs the LLM to keep iterating
-tools-then-reason until the task is *verifiably* done — taking a
-fresh `camera/snapshot` after every physical action to confirm
-progress.
+Pilot replans after each tree's results arrive. The model reports progress
+in `task_update`: `in_progress` while steps remain, `done` once its
+`success_criterion` holds.

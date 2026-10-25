@@ -5,6 +5,7 @@
 pub mod pb;
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,7 +50,7 @@ impl User {
 }
 
 /// A newly issued, opaque server-side session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthSession {
     pub token: String,
     pub expires_at_ms: u64,
@@ -57,11 +58,22 @@ pub struct AuthSession {
 }
 
 /// A private, owner-readable voiceprint sample used for profile preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VoiceprintPreview {
     pub audio_data: Vec<u8>,
     pub sample_rate_hz: u32,
     pub updated_at_ms: u64,
+}
+
+impl fmt::Debug for VoiceprintPreview {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VoiceprintPreview")
+            .field("audio_data_len", &self.audio_data.len())
+            .field("sample_rate_hz", &self.sample_rate_hz)
+            .field("updated_at_ms", &self.updated_at_ms)
+            .finish()
+    }
 }
 
 /// Errors surfaced by Keystone's storage and authorization boundary.
@@ -69,6 +81,8 @@ pub struct VoiceprintPreview {
 pub enum KeystoneError {
     #[error("authentication failed")]
     AuthenticationFailed,
+    #[error("password change is required")]
+    PasswordChangeRequired,
     #[error("administrator role is required")]
     AdminRequired,
     #[error("user is disabled")]
@@ -106,6 +120,8 @@ pub enum KeystoneError {
     #[error("database lock is poisoned")]
     LockPoisoned,
     #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
     Database(#[from] rusqlite::Error),
 }
 
@@ -121,8 +137,13 @@ impl KeystoneStore {
     /// Open or create a persistent Keystone database and apply the current schema.
     pub fn open(path: impl AsRef<Path>, voice_threshold: f32) -> Result<Self, KeystoneError> {
         validate_voice_threshold(voice_threshold)?;
+        let path = path.as_ref();
+        prepare_database_file(path)?;
         let connection = Connection::open(path)?;
-        Self::from_connection(connection, voice_threshold)
+        secure_database_files(path)?;
+        let store = Self::from_connection(connection, voice_threshold)?;
+        secure_database_files(path)?;
+        Ok(store)
     }
 
     /// Create an isolated in-memory store for tests.
@@ -405,14 +426,17 @@ impl KeystoneStore {
         token: &str,
         current_password: &str,
         new_password: &str,
-    ) -> Result<(), KeystoneError> {
+    ) -> Result<bool, KeystoneError> {
         validate_password(new_password)?;
-        let user = self.authenticate(token)?;
-        let password_hash: String = self.connection()?.query_row(
+        let connection = self.connection()?;
+        let user = authenticate_session_on(&connection, token)?;
+        let password_change_required = user.password_change_required;
+        let password_hash: String = connection.query_row(
             "SELECT password_hash FROM users WHERE user_id = ?1",
             params![user.user_id],
             |row| row.get(0),
         )?;
+        drop(connection);
         if !verify_password(current_password, &password_hash)? {
             return Err(KeystoneError::AuthenticationFailed);
         }
@@ -432,7 +456,7 @@ impl KeystoneStore {
             params![user.user_id, current_token_hash],
         )?;
         transaction.commit()?;
-        Ok(())
+        Ok(password_change_required)
     }
 
     pub fn list_users(&self, admin_token: &str) -> Result<Vec<User>, KeystoneError> {
@@ -752,6 +776,14 @@ impl KeystoneStore {
 }
 
 fn authenticate_on(connection: &Connection, token: &str) -> Result<User, KeystoneError> {
+    let user = authenticate_session_on(connection, token)?;
+    if user.password_change_required {
+        return Err(KeystoneError::PasswordChangeRequired);
+    }
+    Ok(user)
+}
+
+fn authenticate_session_on(connection: &Connection, token: &str) -> Result<User, KeystoneError> {
     if token.is_empty() {
         return Err(KeystoneError::AuthenticationFailed);
     }
@@ -980,6 +1012,52 @@ fn is_unique_constraint(error: &rusqlite::Error) -> bool {
     )
 }
 
+fn prepare_database_file(path: &Path) -> Result<(), KeystoneError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    Ok(())
+}
+
+fn secure_database_files(path: &Path) -> Result<(), KeystoneError> {
+    secure_database_file(path)?;
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = std::path::PathBuf::from(sidecar);
+        if sidecar.exists() {
+            secure_database_file(&sidecar)?;
+        }
+    }
+    Ok(())
+}
+
+fn secure_database_file(path: &Path) -> Result<(), KeystoneError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +1078,9 @@ mod tests {
             .expect("bootstrap")
             .expect("created");
         let admin = store.login("admin", ADMIN_PASSWORD).expect("admin login");
+        store
+            .change_password(&admin.token, ADMIN_PASSWORD, ADMIN_PASSWORD)
+            .expect("clear bootstrap password requirement");
         (store, admin)
     }
 
@@ -1272,5 +1353,95 @@ mod tests {
             Err(KeystoneError::AuthenticationFailed)
         ));
         assert!(store.login("alice", "new-password").is_ok());
+    }
+
+    #[test]
+    fn pending_password_change_blocks_other_account_operations() {
+        let store = KeystoneStore::open_in_memory(DEFAULT_VOICE_THRESHOLD).expect("store");
+        store
+            .bootstrap_admin("admin", "Admin", "", ADMIN_PASSWORD, true)
+            .expect("bootstrap");
+        let admin = store.login("admin", ADMIN_PASSWORD).expect("admin login");
+
+        assert!(matches!(
+            store.authenticate(&admin.token),
+            Err(KeystoneError::PasswordChangeRequired)
+        ));
+        assert!(matches!(
+            store.update_profile(&admin.token, "Changed", ""),
+            Err(KeystoneError::PasswordChangeRequired)
+        ));
+
+        store
+            .change_password(&admin.token, ADMIN_PASSWORD, ADMIN_PASSWORD)
+            .expect("change password");
+        assert!(store.authenticate(&admin.token).is_ok());
+    }
+
+    #[test]
+    fn login_treats_sql_metacharacters_as_literal_input() {
+        let (store, _) = store_with_admin();
+        assert!(matches!(
+            store.login("admin' OR 1=1 --", ADMIN_PASSWORD),
+            Err(KeystoneError::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn passwords_and_session_tokens_are_not_stored_in_plaintext() {
+        let (store, admin) = store_with_admin();
+        let connection = store.connection().expect("connection");
+        let password_hash: String = connection
+            .query_row(
+                "SELECT password_hash FROM users WHERE user_id = ?1",
+                params![admin.user.user_id],
+                |row| row.get(0),
+            )
+            .expect("password hash");
+        let token_hash: String = connection
+            .query_row(
+                "SELECT token_hash FROM sessions
+                  WHERE user_id = ?1 AND revoked = 0
+                  ORDER BY created_at_ms DESC LIMIT 1",
+                params![admin.user.user_id],
+                |row| row.get(0),
+            )
+            .expect("token hash");
+
+        assert_ne!(password_hash, ADMIN_PASSWORD);
+        assert!(password_hash.starts_with("$argon2"));
+        assert_ne!(token_hash, admin.token);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_and_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("keystone.db");
+        std::fs::write(&database, []).expect("create database file");
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen database permissions");
+
+        let store = KeystoneStore::open(&database, DEFAULT_VOICE_THRESHOLD).expect("open");
+        store
+            .bootstrap_admin("admin", "Admin", "", ADMIN_PASSWORD, true)
+            .expect("bootstrap");
+
+        for path in [
+            database.clone(),
+            database.with_file_name("keystone.db-wal"),
+            database.with_file_name("keystone.db-shm"),
+        ] {
+            if path.exists() {
+                let mode = std::fs::metadata(path)
+                    .expect("database metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+        }
     }
 }

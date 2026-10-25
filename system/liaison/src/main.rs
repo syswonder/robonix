@@ -619,7 +619,7 @@ impl RobonixSystemLiaisonHandsfreeSetEnabled for LiaisonServiceImpl {
         request: Request<SetHandsfreeRequest>,
     ) -> Result<Response<SetHandsfreeResponse>, Status> {
         let request = request.into_inner();
-        if request.enabled && self.pipeline.enforce_keystone {
+        if self.pipeline.enforce_keystone {
             self.pipeline
                 .keystone
                 .resolve_session(&request.session_token)
@@ -1296,6 +1296,63 @@ mod tests {
             atlas_pb::LifecycleState::StateTerminated as i32
         );
 
+        atlas_server.abort();
+    }
+
+    #[tokio::test]
+    async fn handsfree_disable_requires_keystone_session() {
+        let atlas_addr = reserve_address();
+        let registry = Arc::new(AtlasRegistry::default());
+        let atlas_server = tokio::spawn(serve_atlas(registry, atlas_addr));
+        let atlas = AtlasClient::connect_with_retry(
+            format!("http://{atlas_addr}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("connect test Atlas");
+        let atlas = Arc::new(Mutex::new(atlas));
+        let access = Arc::new(AccessControlConfig::from_env());
+        let keystone = Arc::new(keystone_gateway::KeystoneGateway::new(
+            "127.0.0.1:0",
+            Arc::clone(&atlas),
+        ));
+        let handsfree = handsfree::HandsfreeController::new(
+            handsfree::HandsfreeConfig::default(),
+            Arc::clone(&atlas),
+            String::new(),
+            Arc::clone(&access),
+            Some(Arc::clone(&keystone)),
+        );
+        handsfree
+            .set_enabled(true, "mic".into(), "speaker".into(), "valid".into())
+            .await
+            .expect("prepare enabled hands-free mode");
+        let service = LiaisonServiceImpl {
+            pipeline: Arc::new(LiaisonPipeline::new(
+                String::new(),
+                Arc::clone(&atlas),
+                Arc::clone(&access),
+                keystone,
+                true,
+            )),
+            atlas,
+            pilot_endpoint_default: String::new(),
+            access,
+            handsfree,
+        };
+
+        assert!(
+            service
+                .set_handsfree(Request::new(SetHandsfreeRequest {
+                    enabled: false,
+                    session_token: String::new(),
+                    ..Default::default()
+                }))
+                .await
+                .is_err()
+        );
+        assert!(service.handsfree.snapshot().await.enabled);
         atlas_server.abort();
     }
 

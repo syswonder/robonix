@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use robonix_cli::Config;
 
 mod ask;
+mod auth;
 pub(crate) mod boot_watchdog;
 mod build;
 mod chat;
@@ -37,8 +38,40 @@ mod version;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
 
+// gRPC listeners bind IPv4, while localhost may resolve to ::1 first.
+fn canonical_endpoint(server: &str) -> String {
+    let endpoint = if server.starts_with("http://") || server.starts_with("https://") {
+        server.to_string()
+    } else {
+        format!("http://{server}")
+    };
+    for scheme in ["http://", "https://"] {
+        if let Some(authority) = endpoint.strip_prefix(scheme)
+            && let Some(rest) = authority.strip_prefix("localhost")
+            && (rest.is_empty() || rest.starts_with(':') || rest.starts_with('/'))
+        {
+            return format!("{scheme}127.0.0.1{rest}");
+        }
+    }
+    endpoint
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Log in to Keystone with a username and password
+    Login {
+        /// Account username. Prompts when omitted.
+        username: Option<String>,
+        /// robonix-atlas endpoint used to discover Keystone
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
+        server: String,
+    },
+    /// Revoke the current Keystone login session
+    Logout {
+        /// robonix-atlas endpoint used to discover Keystone
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
+        server: String,
+    },
     /// Build a package (local path or system-installed)
     Build {
         /// Deployment manifest to build (builds every declared package)
@@ -432,6 +465,8 @@ pub enum Commands {
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
+        Commands::Login { username, server } => auth::login(&server, username).await,
+        Commands::Logout { server } => auth::logout(&server).await,
         Commands::Build {
             file,
             path,
