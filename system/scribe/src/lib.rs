@@ -247,27 +247,28 @@ impl Serialize for LogRecord {
 }
 
 impl LogRecord {
-    /// Create a new record with the current wall-clock timestamp (u64 ns).
-    pub fn now(level: Level, tag: impl Into<String>, msg: impl Into<String>) -> Self {
-        let ts = system_time_ns();
-        Self {
+    /// Create a record from Chronos wall time, returning read/range errors.
+    /// Unverified readings are accepted; unavailable quality is noted in `msg`.
+    pub fn now(
+        level: Level,
+        tag: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        let wall = robonix_chronos_clock::wall_time()?;
+        let ts = u64::try_from(wall.timestamp_ns).map_err(std::io::Error::other)?;
+        let msg = msg.into();
+        let msg = if wall.available {
+            msg
+        } else {
+            format!("{msg} [Chronos wall clock unavailable: {}]", wall.reason)
+        };
+        Ok(Self {
             ts,
             level,
             tag: tag.into(),
-            msg: msg.into(),
-        }
+            msg,
+        })
     }
-}
-
-/// Best-effort nanosecond timestamp from `SystemTime`.
-///
-/// When chronos lands this will become `chronos::now()`.
-fn system_time_ns() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
 }
 
 // ── Global lazy state ──────────────────────────────────────────────
@@ -354,6 +355,8 @@ static FILE_MIN: LazyLock<Level> =
 /// | Error  |  ✓    |  ✓   |
 ///
 /// Override with `SCRIBE_CONSOLE_LEVEL` / `SCRIBE_FILE_LEVEL`.
+/// If time cannot be read or represented, write the original message and the
+/// error directly to stderr even for file-only levels, skipping the JSON sink.
 pub fn log(level: Level, tag: &str, msg: &str) {
     // Only construct the timestamped record when at least one sink
     // accepts this level — avoid wasted clock syscalls for Debug.
@@ -363,7 +366,17 @@ pub fn log(level: Level, tag: &str, msg: &str) {
     if !console_ok && !file_ok {
         return;
     }
-    let record = LogRecord::now(level, tag, msg);
+    let record = match LogRecord::now(level, tag, msg) {
+        Ok(record) => record,
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "{level} {tag} {msg} [Chronos time read failed: {error}]"
+            );
+            return;
+        }
+    };
     if console_ok {
         let _ = format::write_console(&record);
     }
@@ -514,7 +527,7 @@ mod tests {
             (Level::Error, "webui GET /api/map.png failed"),
             (Level::Debug, "x"),
         ] {
-            let rec = LogRecord::now(level, "nav2", msg);
+            let rec = LogRecord::now(level, "nav2", msg).unwrap();
             let line = format::format_console(&rec);
             let line = line.trim_end_matches('\n');
             assert_eq!(
@@ -616,7 +629,7 @@ mod tests {
 
     #[test]
     fn log_record_now_has_reasonable_ts() {
-        let rec = LogRecord::now(Level::Debug, "test", "hello");
+        let rec = LogRecord::now(Level::Debug, "test", "hello").unwrap();
         // After 2020-01-01 in nanos
         assert!(rec.ts > 1_577_836_800_000_000_000);
         // Not in the far future
@@ -642,10 +655,10 @@ mod tests {
     #[test]
     fn convenience_wrappers_use_correct_levels() {
         // Verify by inspecting a LogRecord produced by each wrapper.
-        let r_d = LogRecord::now(Level::Debug, "t", "d");
-        let r_i = LogRecord::now(Level::Info, "t", "i");
-        let r_w = LogRecord::now(Level::Warn, "t", "w");
-        let r_e = LogRecord::now(Level::Error, "t", "e");
+        let r_d = LogRecord::now(Level::Debug, "t", "d").unwrap();
+        let r_i = LogRecord::now(Level::Info, "t", "i").unwrap();
+        let r_w = LogRecord::now(Level::Warn, "t", "w").unwrap();
+        let r_e = LogRecord::now(Level::Error, "t", "e").unwrap();
         assert_eq!(r_d.level, Level::Debug);
         assert_eq!(r_i.level, Level::Info);
         assert_eq!(r_w.level, Level::Warn);
