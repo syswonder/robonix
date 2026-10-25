@@ -10,8 +10,8 @@ pub fn run_case(name: &str, exercise: fn()) -> Option<std::process::Output> {
     }
     let directory = tempfile::tempdir().unwrap();
     let library = directory.path().join("clock_failure.so");
-    let source =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/clock_failure.c");
+    let source = directory.path().join("clock_failure.c");
+    std::fs::write(&source, include_str!("clock_failure.c")).unwrap();
     let output = Command::new("cc")
         .args([
             "-shared", "-fPIC", "-std=c11", "-Wall", "-Wextra", "-Werror",

@@ -9,6 +9,12 @@ voiceprint itself. Those are separate providers discovered through Atlas.
 
 ## Architecture
 
+Local task, voice-event, wake and speaker-output timestamps use the in-process
+Chronos reference clock. Read and quality failures are returned through the
+existing RPC or event error path without substituting a timestamp. Source audio
+stamps and monotonic timeout handling are preserved. No running Chronos service
+is required.
+
 ```
 User
   │
