@@ -32,10 +32,22 @@ from pathlib import Path
 
 import yaml
 
+if __package__:
+    from .bundle import scrub, write_bundle
+    from .provenance import collect as collect_provenance, validate_serving
+    from .runlog import capture
+else:
+    from bundle import scrub, write_bundle
+    from provenance import collect as collect_provenance, validate_serving
+    from runlog import capture
+
 HERE = Path(__file__).resolve().parent
 
 STATE_FAILED = 2  # PilotEvent status.state
 SCORING_VERSION = 2
+MAX_REPLY_BYTES = 200 * 1024
+MAX_OUTPUT_BYTES = 16 * 1024
+TRUNCATED_REPLY = "[reply truncated]\n"
 OUT_OF_CREDIT = re.compile(r"credit balance|insufficient|余额不足", re.I)  # i18n-ok
 
 
@@ -123,15 +135,18 @@ def fetch_images(urls: dict[str, str], directory: Path) -> None:
 
 def ask(rbnx: str, server: str, task: str, session: str) -> subprocess.Popen:
     return subprocess.Popen([rbnx, "ask", task, "--json", "--server", server, "--session", session],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def events_of(proc: subprocess.Popen, timeout: float) -> list[dict]:
+def events_of(proc: subprocess.Popen, timeout: float, log: Path | None = None) -> list[dict]:
     try:
-        out, _ = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, _ = proc.communicate()
+        out, err = proc.communicate()
+    if log is not None:
+        log.with_suffix(".stdout.jsonl").write_text(out)
+        log.with_suffix(".stderr.log").write_text(err or "")
     events = []
     for line in out.splitlines():
         try:
@@ -155,20 +170,96 @@ def lines_of(path: Path, tag: str) -> list[dict]:
     return out
 
 
+def cap_rounds(rounds: list[dict]) -> None:
+    """Keep recent reply text within the per-case UTF-8 byte budget."""
+    excess = sum(len(r["reply"].encode()) for r in rounds) - MAX_REPLY_BYTES
+    for r in rounds:
+        if excess <= 0:
+            break
+        raw = r["reply"].encode()
+        if not raw or r["reply"] == TRUNCATED_REPLY:
+            continue
+        keep = max(0, len(raw) - excess - len(TRUNCATED_REPLY))
+        r["reply"] = TRUNCATED_REPLY + (raw[-keep:].decode(errors="ignore") if keep else "")
+        r["truncated"] = True
+        excess -= len(raw) - len(r["reply"].encode())
+
+
+def without_binary(value):
+    if isinstance(value, (bytes, bytearray)):
+        return {"binary_bytes": len(value)}
+    if isinstance(value, dict):
+        media_types = [str(value.get(k, "")).lower() for k in ("media_type", "mime_type", "content_type")]
+        image = (all(k in value for k in ("width", "height", "encoding", "data"))
+                 or any(t.startswith("image/") for t in media_types)
+                 or value.get("type") in ("image", "image_url", "input_image"))
+        binary = (image or "encoding" in value or value.get("type") == "base64"
+                  or any(t.startswith(("audio/", "video/", "application/octet-stream", "application/pdf"))
+                         for t in media_types))
+        return {k: ("[image omitted]" if image else "[binary omitted]")
+                if (re.fullmatch(r"(?:[\w-]+[_-])?image[_-]base64", k, re.I)
+                    or k.lower() in ("base64", "b64_json", "data_base64", "bytes", "blob")
+                    or image and k.lower() in ("source", "url", "image_url")
+                    or k == "data" and binary)
+                else without_binary(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [without_binary(v) for v in value]
+    if isinstance(value, str):
+        value = re.sub(r"data:([^\s,;]+)(?:;[^\s,]*)?,[^\s\"'<>]*",
+                       "[binary omitted]", value, flags=re.I)
+        # Some contracts return JSON text inside their response fields.
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(decoded, (dict, list, str)):
+            clean = without_binary(decoded)
+            if clean != decoded:
+                return json.dumps(clean, ensure_ascii=False)
+    return value
+
+
+def call_output(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass  # Executor builtins can return plain text.
+    value = without_binary(value)
+    raw = json.dumps(value, ensure_ascii=False).encode()
+    if len(raw) <= MAX_OUTPUT_BYTES:
+        return value
+    value = {"truncated": True, "json_bytes": len(raw),
+             "preview": raw[:MAX_OUTPUT_BYTES - 128].decode(errors="ignore")}
+    while (excess := len(json.dumps(value, ensure_ascii=False).encode()) - MAX_OUTPUT_BYTES) > 0:
+        value["preview"] = value["preview"].encode()[:-excess].decode(errors="ignore")
+    return value
+
+
 def run_case(a, world: Path, case: dict, tag: str) -> dict:
     w = case.get("world", {})
+    log_dir = getattr(a, "log_dir", None)
     (world / "state.json").write_text(json.dumps({
         "case": tag, "image": w.get("image"), "fail": w.get("fail", {}), "nav_s": w.get("nav_s", 2),
         "call_s": 0.8, "images_dir": str(Path(a.images).resolve()),
+        **({"request_log": str(log_dir / "requests.jsonl")} if log_dir else {}),
     }))
     session = str(uuid.uuid4())
     started = time.time()
+    event_logs = []
+    if log_dir:
+        directory = log_dir / "events" / hashlib.sha256(tag.encode()).hexdigest()[:16]
+        directory.mkdir(parents=True, exist_ok=True)
+        tasks = [case["task"]] + ([w["steer"]["task"]] if w.get("steer") else [])
+        (directory / "case.json").write_text(json.dumps({"case": tag, "session": session, "tasks": tasks}))
+        event_logs = [directory / str(i) for i in range(len(tasks))]
     first = ask(a.rbnx, a.server, case["task"], session)
     turns: list[list[dict]] = []
     if steer := w.get("steer"):
         time.sleep(steer["after_s"])
-        turns.append(events_of(ask(a.rbnx, a.server, steer["task"], session), a.timeout))
-    turns.insert(0, events_of(first, a.timeout))
+        turns.append(events_of(ask(a.rbnx, a.server, steer["task"], session), a.timeout,
+                               event_logs[1] if event_logs else None))
+    turns.insert(0, events_of(first, a.timeout, event_logs[0] if event_logs else None))
     events = [event for turn in turns for event in turn]
     elapsed = time.time() - started
 
@@ -202,8 +293,17 @@ def run_case(a, world: Path, case: dict, tag: str) -> dict:
             # Executor builtins have leaf results but no mock-provider timing log.
             if c["contract"].startswith("robonix/system/executor/builtin/"):
                 calls.append({**c, "ok": leaf["success"], "executed": True})
+    for c in calls:
+        leaf = completed[c["call_id"]]
+        c.update(output=call_output(leaf.get("output")), error=leaf.get("error") or None)
     calls.sort(key=lambda c: c.get("start", float("inf")))
-    vlm = [{k: v for k, v in r.items() if k != "case"} for r in lines_of(world / "vlm.jsonl", tag)]
+    records = lines_of(world / "vlm.jsonl", tag)
+    round_keys = ("start", "end", "reply", "usage", "error", "images")
+    rounds = [{k: r.get(k) for k in round_keys} for r in records if "reply" in r]
+    rounds.sort(key=lambda r: r["start"])
+    cap_rounds(rounds)
+    vlm = [{k: v for k, v in r.items() if k not in ("case", "start", "end", "reply")
+            and not (k == "error" and v is None)} for r in records]
     finals = [e["final_text"] for e in events if e.get("final_text")]
     return {
         "calls": calls,
@@ -212,6 +312,7 @@ def run_case(a, world: Path, case: dict, tag: str) -> dict:
         "final": finals[-1] if finals else "",
         "failed": any((e.get("status") or {}).get("state") == STATE_FAILED for e in events),
         "vlm": vlm,
+        "rounds": rounds,
         "elapsed_s": round(elapsed, 1),
     }
 
@@ -337,6 +438,23 @@ def check_deploy(a) -> None:
         sys.exit(f"Atlas at {a.server} is not a bench deployment (missing {sorted(missing)})")
 
 
+def logs_for_results(files: list[Path]) -> dict[str, Path]:
+    logs = {}
+    for path in files:
+        provenance = json.loads(path.read_text()).get("meta", {}).get("provenance") or {}
+        for run in [provenance, *provenance.get("previous_runs", [])]:
+            run_id = run.get("run_id", "")
+            if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+                continue
+            directory = path.parent / ".runs" / run_id / "logs"
+            if not directory.is_dir():
+                raise ValueError(f"missing run logs for {run_id}")
+            for entry in sorted(directory.rglob("*")):
+                if entry.is_file():
+                    logs[f"{run_id}/{entry.relative_to(directory).as_posix()}"] = entry
+    return logs
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--env-file", required=True, help="KEY=VALUE file with VLM_BASE_URL and VLM_API_KEY")
@@ -350,7 +468,50 @@ def main() -> None:
     ap.add_argument("--timeout", type=float, default=300, help="seconds per case")
     ap.add_argument("--only", help="regex over case ids")
     ap.add_argument("--out", default=str(HERE / "results"))
+    ap.add_argument("--bundle", type=Path, help="write a scrubbed submission ZIP after the run")
+    ap.add_argument("--board-id", help="the Hub board id (required with --bundle)")
+    ap.add_argument("--endpoint-kind", choices=("cloud", "local", "robot"), help="model serving location (required with --bundle)")
+    ap.add_argument("--judge-model", help="judge model id (required with --bundle; judge.py records the actual model)")
+    ap.add_argument("--serving-facts", type=Path, help="JSON with framework, version, hardware, precision, max_context and sampling")
+    ap.add_argument("--component-logs", action="append", type=Path, help="component log directory; repeat for custom log locations")
     a = ap.parse_args()
+    if a.bundle and not all((a.board_id, a.endpoint_kind, a.judge_model)):
+        ap.error("--bundle requires --board-id, --endpoint-kind and --judge-model")
+    a.serving = json.loads(a.serving_facts.read_text()) if a.serving_facts else None
+    if a.endpoint_kind:
+        validate_serving(a.endpoint_kind, a.serving)
+    elif a.serving is not None:
+        ap.error("--serving-facts requires --endpoint-kind")
+    a.run_id = uuid.uuid4().hex
+    a.started = time.time()
+    a.written = []
+    a.log_dir = (Path(a.out) / ".runs" / a.run_id / "logs").resolve()
+    sources = a.component_logs if a.component_logs is not None else [
+        Path(a.deploy) / "rbnx-boot/logs", Path(a.deploy) / "logs"]
+    if a.component_logs is not None and any(not path.is_dir() for path in sources):
+        ap.error("every --component-logs path must be an existing directory")
+    if a.bundle and not any(path.is_dir() for path in sources):
+        ap.error("no component logs found; specify --component-logs for the booted deployment")
+    env = read_env(a.env_file)
+    endpoint = urllib.parse.urlparse(env["VLM_BASE_URL"])
+    a.secrets = [value for key, value in env.items() if key.upper().endswith(("_KEY", "_TOKEN")) or "SECRET" in key.upper()]
+    a.secrets.extend(value for value in (env["VLM_BASE_URL"], endpoint.hostname) if value)
+    try:
+        with capture(a.log_dir, sources):
+            _run(a)
+            if a.bundle:
+                print("Writing submission bundle", flush=True)
+    finally:
+        for path in a.written:
+            data = json.loads(path.read_text())
+            data["meta"]["provenance"]["end"] = time.time()
+            data["meta"]["provenance"] = scrub(data["meta"]["provenance"], a.secrets)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+        if a.bundle and a.written:
+            write_bundle(a.bundle.resolve(), a.written, logs_for_results(a.written), a.secrets)
+
+
+def _run(a) -> None:
     git = lambda *args: subprocess.run(["git", *args], capture_output=True, text=True, cwd=HERE).stdout.strip()  # noqa: E731
 
     env = read_env(a.env_file)
@@ -367,7 +528,7 @@ def main() -> None:
     for model_spec in a.model:
         model, _, label = model_spec.partition("=")
         label = label or model
-        print(f"== {label} ({model} @ {host})", flush=True)
+        print(f"== {label} ({model})", flush=True)
         # Results are written after every case, and a rerun resumes: a run
         # stopped halfway is not paid for twice.
         path = out / (re.sub(r"[^A-Za-z0-9._-]", "_", f"{label}@{host}") + ".json")
@@ -375,12 +536,25 @@ def main() -> None:
         if previous is not None and previous.get("meta", {}).get("scoring_version") != SCORING_VERSION:
             sys.exit(f"{path}: results use an older scoring version; preserve them and choose a new --out directory")
         results = previous["results"] if previous is not None else []
+        old_provenance = previous.get("meta", {}).get("provenance") if previous else None
+        if a.bundle and results and (not old_provenance or any(not r.get("log_run") for r in results)):
+            sys.exit("existing results have no run logs; preserve the JSON and use a new --out for a complete bundle")
+        provenance = collect_provenance(HERE.parents[1], Path(a.cases), model,
+                                        a.endpoint_kind or "cloud", a.board_id, a.judge_model,
+                                        a.rbnx, a.started, list(sys.argv), a.serving)
+        if a.endpoint_kind is None:
+            provenance["planner"]["endpoint_kind"] = None
+        provenance["run_id"] = a.run_id
+        provenance["previous_runs"] = []
+        if old_provenance:
+            old = dict(old_provenance)
+            provenance["previous_runs"] = [*old.pop("previous_runs", []), old]
         done = {(r["id"], r["rep"]) for r in results}
         (world / "target.json").write_text(json.dumps({"env_file": str(Path(a.env_file).resolve()), "model": model}))
         vision = probe_vision(base, key, model, Path(a.images))
         if vision.startswith("error"):
             sys.exit(f"{model}: the endpoint did not answer the vision probe ({vision}); not running")
-        meta = {"model": label, "endpoint_model": model, "host": host, "scoring_version": SCORING_VERSION, "formats": probe_formats(base, key, model), "modalities": ["text", "image"] if vision == "image" else ["text"],
+        meta = {"model": label, "endpoint_model": model, "provenance": provenance, "scoring_version": SCORING_VERSION, "formats": probe_formats(base, key, model), "modalities": ["text", "image"] if vision == "image" else ["text"],
                 "robonix_commit": git("rev-parse", "HEAD") or None, "cases_sha256": cases_sha256(Path(a.cases)),
                 "date": time.strftime("%Y-%m-%d")}
         for case in cases:
@@ -389,8 +563,11 @@ def main() -> None:
                     continue
                 # A relay that hangs, rate-limits or errors says nothing
                 # about the model: run the case again, up to twice.
+                rounds = []
                 for attempt in range(3):
-                    run = run_case(a, world, case, f"{label}@{host}|{case['id']}|{rep}|{attempt}")
+                    run = run_case(a, world, case, f"{a.run_id}|{label}|{case['id']}|{rep}|{attempt}")
+                    rounds.extend(run["rounds"])
+                    cap_rounds(rounds)
                     route_failed = any(v["status"] in (0, 429, 500, 502, 503, 504) for v in run["vlm"]) or (not run["vlm"] and run["failed"])
                     if not route_failed and run["elapsed_s"] < a.timeout:
                         break
@@ -399,12 +576,20 @@ def main() -> None:
                 fails = check(case, run)
                 results.append({
                     "id": case["id"], "rep": rep, "fails": fails, "pilot_failed": run["failed"], "elapsed_s": run["elapsed_s"],
-                    "attempts": attempt + 1, "calls": [{k: c.get(k) for k in ("contract", "args", "start", "end", "ok", "executed")} for c in run["calls"]],
+                    "attempts": attempt + 1, "calls": [{k: c.get(k) for k in ("contract", "args", "start", "end", "ok", "executed", "output", "error")} for c in run["calls"]],
                     "planned_calls": run["planned_calls"], "finished": run["finished"],
-                    "final": run["final"], "vlm": run["vlm"],
+                    "final": run["final"], "vlm": run["vlm"], "rounds": rounds, "log_run": a.run_id,
                 })
                 print(f"   {'FAIL' if fails else 'JUDGE' if 'judge' in case else 'PASS'} {case['id']:<28} {run['elapsed_s']:>6.1f}s {'; '.join(fails)[:160]}", flush=True)
+                provenance["end"] = time.time()
+                meta["provenance"] = scrub(provenance, a.secrets)
                 path.write_text(json.dumps({"meta": meta, "results": results}, ensure_ascii=False, indent=1))
+                if path not in a.written:
+                    a.written.append(path)
+        if results and path not in a.written:
+            meta["provenance"] = scrub(provenance, a.secrets)
+            path.write_text(json.dumps({"meta": meta, "results": results}, ensure_ascii=False, indent=1))
+            a.written.append(path)
 
 
 if __name__ == "__main__":

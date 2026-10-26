@@ -22,12 +22,16 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import zipfile
 from pathlib import Path
 
 import yaml
 
-from bench import HERE, OUT_OF_CREDIT, read_env
+from bench import HERE, OUT_OF_CREDIT, logs_for_results, read_env
+
+if __package__:
+    from .bundle import scrub, write_bundle
+else:
+    from bundle import scrub, write_bundle
 
 
 def judge_key(spec: dict, model: str, case: dict) -> str:
@@ -77,6 +81,11 @@ def main() -> None:
     used = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
     for f in map(Path, a.files):
         data = json.loads(f.read_text())
+        provenance = data["meta"].get("provenance")
+        if provenance is not None:
+            provenance["judge_model"] = a.model
+            data["meta"]["provenance"] = scrub(provenance, [env["VLM_API_KEY"]])
+        data["meta"]["judge_model"] = a.model
         for r in data["results"]:
             case = cases[r["id"]]
             if "judge" not in case:
@@ -94,15 +103,16 @@ def main() -> None:
             r["judge_key"] = key
             data["meta"]["judge_model"] = a.model
             f.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+        f.write_text(json.dumps(data, ensure_ascii=False, indent=1))
         rs = data["results"]
         passed = sum(not r["fails"] and all(v["met"] for v in r.get("verdicts") or []) for r in rs)
         print(f"{f.name}: {passed}/{len(rs)} cases pass", flush=True)
     print(f"judge {a.model}: {used['calls']} calls, {used['prompt_tokens']} prompt + {used['completion_tokens']} completion tokens")
     # What is uploaded to Robonix Hub: the judged files, as one archive.
     archive = Path(a.files[0]).parent / f"model-bench-{time.strftime('%Y%m%d-%H%M%S')}.zip"
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in dict.fromkeys(map(Path, a.files)):
-            z.write(f, f.name)
+    files = list(dict.fromkeys(map(Path, a.files)))
+    secrets = [value for key, value in env.items() if key.upper().endswith(("_KEY", "_TOKEN")) or "SECRET" in key.upper()]
+    write_bundle(archive.resolve(), files, logs_for_results(files), secrets)
     print(f"submit {archive} on Robonix Hub")
 
 
