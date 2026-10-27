@@ -129,6 +129,18 @@ mkdir -p "$SCENE_HOST_DATA_DIR"
 # start.sh was dying there before it could launch the service container, which
 # is why the runtime-protobuf contract test only ever saw the codegen run.
 declare -a EXTRA_MOUNTS=()
+# The capability catalog is a deployment file outside the image. Mount it at
+# the same absolute path so ROBONIX_LLM_CATALOG means the same thing inside.
+declare -a CATALOG_ARGS=()
+if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
+    if [[ ! -f "${ROBONIX_LLM_CATALOG}" ]]; then
+        echo "[scene/start] ROBONIX_LLM_CATALOG=${ROBONIX_LLM_CATALOG} is not a file" >&2
+        exit 2
+    fi
+    ROBONIX_LLM_CATALOG="$(realpath "${ROBONIX_LLM_CATALOG}")"
+    export ROBONIX_LLM_CATALOG
+    CATALOG_ARGS=(-v "${ROBONIX_LLM_CATALOG}:${ROBONIX_LLM_CATALOG}:ro")
+fi
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
@@ -267,6 +279,13 @@ exec docker run --rm \
     -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
+    -e ROBONIX_LLM_CATALOG="${ROBONIX_LLM_CATALOG:-}" \
+    -e DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
+    -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    -e DASHSCOPE_API_KEY="${DASHSCOPE_API_KEY:-}" \
+    -e VLLM_API_KEY="${VLLM_API_KEY:-}" \
+    -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    -e GEMINI_API_KEY="${GEMINI_API_KEY:-}" \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
@@ -292,5 +311,7 @@ exec docker run --rm \
     -v "$PKG/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/proto_gen:ro" \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
+    -e PYTHONPATH=/robonix-api \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+    ${CATALOG_ARGS[@]+"${CATALOG_ARGS[@]}"} \
     "$IMG"
