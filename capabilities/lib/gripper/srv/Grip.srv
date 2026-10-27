@@ -1,8 +1,15 @@
-# Close adaptively to establish contact, without a target opening. Observe
-# state for contact; a holding observation is not proof of task-level success.
+# Establish a grip, optionally at a target opening width, not just a position.
+# Without a width target, close adaptively; do not invent a target width.
+# The provider applies its configured gripping tolerances. Observe state for
+# contact; a holding observation is not proof of task-level success.
+# Reject request forms not supported by info and nonfinite, negative or known-
+# unreachable width targets with ok=false before dispatch; never clamp.
+# Shared relative-setting rules: gripper/srv/GetGripperInfo.srv.
 float64 relative_effort # 0 = configured default; (0,1] = device-relative setting.
                         # Not measured force, newtons, or a safety force limit.
 float64 relative_speed  # 0 = configured default; (0,1] = relative speed setting.
+bool opening_width_valid # True: use a width target; false: ignore opening_width_m.
+float64 opening_width_m  # Target clear width between current gripping faces, m.
 ---
 bool ok                 # Accepted and dispatched, not proof of contact.
 string message          # Human-readable reason on rejection or dispatch failure.

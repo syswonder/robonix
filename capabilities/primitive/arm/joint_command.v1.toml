@@ -5,7 +5,7 @@ id = "robonix/primitive/arm/joint_command"
 version = "1"
 kind = "primitive"
 idl = "common_interfaces/sensor_msgs/msg/JointState.msg"
-description = "Named arm and gripper joint command input using standard JointState units."
+description = "Named arm joint command input using standard JointState units."
 
 [mode]
 type = "topic_in"

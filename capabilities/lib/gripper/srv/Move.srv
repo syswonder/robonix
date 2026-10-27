@@ -2,6 +2,7 @@
 # verified position control declare this capability. Observe state for arrival.
 # Reject nonfinite, negative or known-unreachable widths; do not silently clamp.
 # The primitive converts width to device coordinates; mapping need not be linear.
+# Shared relative-setting rules: gripper/srv/GetGripperInfo.srv.
 float64 opening_width_m # Target clear width between current gripping faces, m.
 float64 relative_speed  # 0 = configured default; (0,1] = relative speed setting.
 ---

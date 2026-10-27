@@ -3,7 +3,7 @@ id = "robonix/primitive/gripper/state"
 version = "1"
 kind = "primitive"
 idl = "gripper/msg/GripperState.msg"
-description = "Publish independent observations of opening width in metres and contact state."
+description = "Publish newly acquired opening width in metres and contact state with one Unix-epoch acquisition timestamp."
 
 [mode]
 type = "topic_out"

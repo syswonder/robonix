@@ -1,11 +1,22 @@
-# Metadata is static until restart. Discover supported operations through Atlas;
-# each configurable flag permits non-default settings in that operation's request
-# and is false when the operation is absent.
+# Metadata is static until restart. Discover supported operations through Atlas.
+# Shared relative-setting rules for move, grip and open:
+# Values must be finite in [0,1]. Zero selects that operation's configured
+# default, never a setting left by an earlier command.
+# Nonzero values require the corresponding configurable flag to be true.
+# Reject invalid or unsupported values with ok=false before dispatch; never
+# clamp, ignore them or substitute defaults. Flags are false for absent operations.
+# Nonzero values map to the provider's configured usable range, possibly
+# nonlinearly; equal values do not imply equal outputs across devices.
+# Grip width flags describe accepted request forms. At least one is true when
+# grip is declared; both are false when it is absent.
 # Width bounds apply to the current fingertips and configuration, not nominal
 # mechanical limits. A valid range is finite with 0 <= min <= max; zero width
 # need not be reachable. Restart after changing fingertips or configuration.
+# A valid max_opening_width_m is also the target of open, when supported.
+# Unknown width bounds do not prevent providing open.
 # Force bounds are the achievable normal grip force per gripping face, N: a
 # hardware capability, not the configured relative_effort or a measurement.
+# Leave force bounds invalid when this force convention or conversion is unknown.
 ---
 bool ok                  # Query succeeded; metadata valid, not motion readiness.
 string message           # Reason when ok = false; metadata then has no meaning.
@@ -19,3 +30,5 @@ float64 max_opening_width_m     # Maximum permitted clear width between gripping
 bool gripping_force_range_valid # False: range unknown; ignore both bounds.
 float64 min_gripping_force_n    # Minimum achievable grip force per gripping face, N.
 float64 max_gripping_force_n    # Maximum achievable grip force per gripping face, N.
+bool grip_with_opening_width_supported    # Grip accepts opening_width_valid=true.
+bool grip_without_opening_width_supported # Grip accepts opening_width_valid=false.

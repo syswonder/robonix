@@ -3,7 +3,7 @@ id = "robonix/primitive/gripper/grip"
 version = "1"
 kind = "primitive"
 idl = "gripper/srv/Grip.srv"
-description = "Dispatch adaptive closing; observe state for contact."
+description = "Dispatch gripping with an optional opening-width target; observe state for contact."
 
 [mode]
 type = "rpc"
