@@ -1554,11 +1554,25 @@ pub async fn run_turn(
             round,
         );
         let mut streamed_task: Option<(Option<String>, Option<String>)> = None;
-        let mut stream = tokio::time::timeout(
-            vlm_idle_timeout(),
-            vlm.chat_stream(&messages, &[], Some(vlm.prompt_cache_key()), reply_shape),
-        )
-        .await??;
+        // Opening cannot dispatch RTDL nodes, so one retry is safe here.
+        let mut open_retried = false;
+        let mut stream = loop {
+            match tokio::time::timeout(
+                vlm_idle_timeout(),
+                vlm.chat_stream(&messages, &[], Some(vlm.prompt_cache_key()), reply_shape),
+            )
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result)
+            {
+                Ok(stream) => break stream,
+                Err(error) if !open_retried => {
+                    warn!("[pilot/vlm] opening stream failed; retrying once: {error:#}");
+                    open_retried = true;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         // Retain the sent context even if generation is later interrupted.
         append_request_context(history, &runtime_context);
         catalog_view.commit();

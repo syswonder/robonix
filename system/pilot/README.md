@@ -136,6 +136,8 @@ When Pilot receives a task for a session it has no history for, such as after a 
 
 ## RTDL Planning Flow
 
+Pilot retries opening a VLM stream once if it fails or times out. `ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS` bounds each opening attempt and the gap between received stream events (default 30 seconds, clamped to 5–300). Once the stream opens, a timeout cancels the unfinished plan and retains its results without replaying the request.
+
 Pilot no longer sends OpenAI `tools` / function schemas as the primary planning path. Instead, it writes the RTDL grammar and available capability list into the prompt. The model must return a single JSON object: `content` (text shown to the user), `message_updates`, `rtdl_parent_task_id`, `rtdl_description` (a short label for the tree), `rtdl` (the tree) and `task_updates`; the task fields are described under Tasks above:
 
 ```json
