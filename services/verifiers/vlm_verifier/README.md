@@ -105,6 +105,14 @@ The existing `overlap` controls only the after request. When enabled, later
 actions may affect the cached image read by after and can execute before a
 rejection. Camera capture keeps its original latest-frame behavior.
 
+Pending before images are limited to 64 calls and 64 MiB of JPEG data. Each
+capture removes entries older than one hour. A duplicate pending `call_id` is
+rejected without replacing its images. When either capacity limit is reached,
+the oldest entries are evicted; a single camera set larger than 64 MiB is
+rejected. An after request whose before images expired or were evicted makes
+verification unavailable. These limits also bound images left by failed or
+cancelled calls that never issue after; they do not change camera sampling.
+
 A passing response looks like this:
 
 ```json
