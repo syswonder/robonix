@@ -7,7 +7,12 @@ description: >-
 properties:
   vlm:
     type: object
-    description: Model endpoint, credential and model ID. All three fields are required and must be non-empty strings.
+    description: >-
+      Model endpoint, credential and model ID. All three fields are required
+      and must be non-empty strings. When the deployment sets
+      ROBONIX_LLM_CATALOG, the catalog's vision target wins and this block is
+      ignored; it stays required because most deployments configure the
+      endpoint here.
     properties:
       base_url:
         type: string
