@@ -16,6 +16,9 @@ service = Service(id="vlm_verifier", namespace="robonix/service/verifier")
 CAMERAS = camera.CameraPool(lambda: ATLAS, service.id)
 _config = None
 _before_images = {}
+MAX_PENDING_CALLS = 64
+MAX_PENDING_BYTES = 64 * 1024 * 1024
+BEFORE_TTL = 3600
 
 
 @service.on_init
@@ -54,8 +57,20 @@ async def verify(req: Verify_Request) -> Verify_Response:
 
     async def evaluate(envelope, images):
         now = time.monotonic()
+        for call_id, (created, _, _) in list(_before_images.items()):
+            if now - created >= BEFORE_TTL:
+                del _before_images[call_id]
         context = {k: v for k, v in envelope.items() if k not in ("phase", "target_output")}
         if phase == "before":
+            if req.call_id in _before_images:
+                raise ValueError("duplicate before image call_id")
+            size = sum(len(frame) for frame in images.values())
+            if size > MAX_PENDING_BYTES:
+                raise ValueError("before images exceed cache byte limit")
+            pending_size = sum(len(frame) for _, _, frames in _before_images.values() for frame in frames.values())
+            while _before_images and (len(_before_images) >= MAX_PENDING_CALLS or pending_size + size > MAX_PENDING_BYTES):
+                _, _, oldest = _before_images.pop(next(iter(_before_images)))
+                pending_size -= sum(len(frame) for frame in oldest.values())
             _before_images[req.call_id] = (now, context, images)
             return {"passed": True, "detail": "Before image captured; result not yet verified."}
         _, before_context, before = _before_images.pop(req.call_id)

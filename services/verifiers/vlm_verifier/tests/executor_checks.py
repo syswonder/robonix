@@ -1,5 +1,6 @@
 """Real Atlas/Executor verification checks used by smoke_mcp."""
 import asyncio
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -85,7 +86,8 @@ async def check(entry, mcp_port, model, overlap=False, cameras=("wrist",)):
                         "--id", "executor", "--config-json", json.dumps(config),
                     ], stdout=log, stderr=log, env=dict(os.environ, ROBONIX_WORKSPACE=work)))
                     await ready(executor_endpoint)
-                    with patch.dict(os.environ, {"ROBONIX_ATLAS": atlas_endpoint}), patch.object(entry, "ATLAS", CameraDirectory()):
+                    with patch.dict(os.environ, {"ROBONIX_ATLAS": atlas_endpoint}), patch.object(entry, "ATLAS", CameraDirectory()), ExitStack() as cleanup:
+                        cleanup.callback(lambda: entry.CAMERAS.close())
                         async with grpc.aio.insecure_channel(executor_endpoint) as channel:
                             stub = contracts.RobonixSystemExecutorExecuteStub(channel)
                             for mode in ("passed", "rejected", "unobservable", "malformed", "missing_camera"):
@@ -98,6 +100,9 @@ async def check(entry, mcp_port, model, overlap=False, cameras=("wrist",)):
                                 if mode == "missing_camera":
                                     entry.CAMERAS.close()
                                     entry.CAMERAS = CameraPool(lambda: entry.ATLAS, entry.service.id)
+                                    # Keep a valid view open to exercise cleanup after partial capture failure.
+                                    for provider in cameras[1:]:
+                                        await entry.CAMERAS.capture(provider)
                                     await atlas.Unregister(pb.UnregisterRequest(id="wrist"))
                                 plan = pilot_pb2.Plan(
                                     plan_id=mode, session_id="vlm-smoke", root_index=0,

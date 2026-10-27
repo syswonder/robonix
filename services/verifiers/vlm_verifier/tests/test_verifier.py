@@ -125,15 +125,14 @@ class ParsingTests(unittest.TestCase):
         """Check color conversion."""
         import io
         from PIL import Image as PillowImage
-        from sensor_msgs.msg import Image
         for encoding, pixel in (("rgb8", [255, 0, 0]), ("bgr8", [0, 0, 255])):
-            msg = Image(height=4, width=4, encoding=encoding, step=12, data=pixel * 16)
+            msg = SimpleNamespace(height=4, width=4, encoding=encoding, step=12, data=pixel * 16)
             jpeg = camera.encode_jpeg(msg)
             decoded = PillowImage.open(io.BytesIO(jpeg)).getpixel((0, 0))
             self.assertGreater(decoded[0], 240)
             self.assertLess(decoded[2], 10)
         with self.assertRaises(ValueError):
-            camera.encode_jpeg(Image())
+            camera.encode_jpeg(SimpleNamespace(encoding=""))
 
     def test_verification_frame_is_private_and_call_id_is_sanitized(self):
         """Save the exact model JPEG without permitting call-id path traversal."""
@@ -150,14 +149,13 @@ class ParsingTests(unittest.TestCase):
 
     def test_padding_and_invalid_image_shapes(self):
         """Check padding and invalid image shapes."""
-        from sensor_msgs.msg import Image
-        padded = Image(height=2, width=2, encoding="rgb8", step=8,
-                       data=([255, 0, 0] * 2 + [0, 0]) * 2)
+        padded = SimpleNamespace(height=2, width=2, encoding="rgb8", step=8,
+                                 data=([255, 0, 0] * 2 + [0, 0]) * 2)
         self.assertTrue(camera.encode_jpeg(padded).startswith(bytes([255, 216])))
         for bad in (
-            Image(height=2, width=2, encoding="rgb8", step=5, data=[0] * 10),
-            Image(height=2, width=2, encoding="rgb8", step=6, data=[0] * 11),
-            Image(height=2, width=2, encoding="16UC1", step=4, data=[0] * 8),
+            SimpleNamespace(height=2, width=2, encoding="rgb8", step=5, data=[0] * 10),
+            SimpleNamespace(height=2, width=2, encoding="rgb8", step=6, data=[0] * 11),
+            SimpleNamespace(height=2, width=2, encoding="16UC1", step=4, data=[0] * 8),
         ):
             with self.assertRaises(ValueError):
                 camera.encode_jpeg(bad)
@@ -358,18 +356,52 @@ class ServicePhaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_cache_is_bounded_and_expired_images_are_removed(self):
         now = self.service.time.monotonic()
         self.cache.update({str(i): (now, {}, {"wrist": b"image"}) for i in range(64)})
+        await self.request("before")
+        self.assertEqual(len(self.cache), 64)
+        self.assertNotIn("0", self.cache)
+        self.assertIn("call", self.cache)
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
-            await self.request("before")
+            await self.request("after", call_id="0")
+        self.cache.clear()
         self.cache.update({str(i): (float("-inf"), {}, {"wrist": b"image"}) for i in range(64)})
         await self.request("before")
         self.assertEqual(list(self.cache), ["call"])
+        self.judge.assert_not_called()
 
     async def test_pending_camera_bytes_are_bounded(self):
         with patch.object(self.service, "MAX_PENDING_BYTES", 8):
             await self.request("before", call_id="first")
+            await self.request("before", call_id="second")
+        self.assertEqual(list(self.cache), ["second"])
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after", call_id="first")
+        self.judge.assert_not_called()
+
+    async def test_expired_before_makes_after_unavailable(self):
+        await self.request("before")
+        created, context, images = self.cache["call"]
+        self.cache["call"] = (created - self.service.BEFORE_TTL - 1, context, images)
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after")
+        self.assertFalse(self.cache)
+        self.judge.assert_not_called()
+
+    async def test_duplicate_before_preserves_original_images(self):
+        self.capture.side_effect = [b"original", b"replacement", b"after"]
+        await self.request("before")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("before")
+        await self.request("after")
+        self.assertEqual(self.judge.call_args.args[2:],
+                         ({"wrist": b"original"}, {"wrist": b"after"}))
+
+    async def test_oversized_camera_set_does_not_evict_pending_images(self):
+        with patch.object(self.service, "MAX_PENDING_BYTES", 8):
+            await self.request("before", call_id="first")
             with self.assertRaisesRegex(RuntimeError, "unavailable"):
-                await self.request("before", call_id="second")
+                await self.request("before", call_id="second", cameras=["head", "wrist"])
         self.assertEqual(list(self.cache), ["first"])
+        self.judge.assert_not_called()
 
 
 if __name__ == "__main__":
