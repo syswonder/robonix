@@ -1,0 +1,163 @@
+{
+  "catalog": {
+    "models": [
+      {
+        "id": "local/vllm",
+        "provider": "vllm",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "model": "Qwen2.5-VL-7B-Instruct-AWQ",
+        "api_key_env": "VLLM_API_KEY",
+        "capabilities": {
+          "vision": true,
+          "json_object": true,
+          "json_schema": true,
+          "tools": true,
+          "stream": true
+        },
+        "context": 16384,
+        "latency_p95_ms": 300,
+        "price_input_per_mtok": 0.0,
+        "price_output_per_mtok": 0.0
+      },
+      {
+        "id": "deepseek/flash",
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "capabilities": {
+          "vision": true,
+          "json_object": true,
+          "json_schema": false,
+          "tools": true,
+          "stream": true
+        },
+        "context": 131072,
+        "latency_p95_ms": 2000,
+        "price_input_per_mtok": 0.14,
+        "price_output_per_mtok": 0.28
+      },
+      {
+        "id": "cloud/gpt",
+        "provider": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-5.5",
+        "api_key_env": "OPENAI_API_KEY",
+        "capabilities": {
+          "vision": true,
+          "json_object": true,
+          "json_schema": true,
+          "tools": true,
+          "stream": true
+        },
+        "context": 400000,
+        "latency_p95_ms": 2500,
+        "price_input_per_mtok": 1.25,
+        "price_output_per_mtok": 10.0
+      },
+      {
+        "id": "text/small",
+        "provider": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4.1-mini",
+        "api_key_env": "OPENAI_API_KEY",
+        "capabilities": {
+          "vision": false,
+          "json_object": true,
+          "json_schema": true,
+          "tools": true,
+          "stream": true
+        },
+        "context": 131072,
+        "latency_p95_ms": 500,
+        "price_input_per_mtok": 0.4,
+        "price_output_per_mtok": 1.6
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "vision and tools prefer latency",
+      "requirements": {
+        "capabilities": ["vision", "tools"],
+        "input_tokens": 1000,
+        "max_output_tokens": 256
+      },
+      "expected_ids": ["local/vllm", "deepseek/flash", "cloud/gpt"]
+    },
+    {
+      "name": "context excludes the local model",
+      "requirements": {
+        "capabilities": ["vision"],
+        "input_tokens": 20000,
+        "max_output_tokens": 1000
+      },
+      "expected_ids": ["deepseek/flash", "cloud/gpt"]
+    },
+    {
+      "name": "latency budget keeps the local model only",
+      "requirements": {
+        "capabilities": ["vision"],
+        "max_latency_ms": 1000
+      },
+      "expected_ids": ["local/vllm"]
+    },
+    {
+      "name": "cost budget drops the expensive model",
+      "requirements": {
+        "capabilities": ["vision"],
+        "input_tokens": 10000,
+        "max_output_tokens": 1000,
+        "max_cost_usd_per_call": 0.02
+      },
+      "expected_ids": ["local/vllm", "deepseek/flash"]
+    },
+    {
+      "name": "json_schema downgrades when no strict model fits",
+      "requirements": {
+        "capabilities": ["vision", "json_schema"],
+        "input_tokens": 20000,
+        "max_output_tokens": 1000,
+        "max_latency_ms": 2000
+      },
+      "expected_ids": ["deepseek/flash"],
+      "expected_downgraded": true
+    },
+    {
+      "name": "no downgrade when the caller forbids it",
+      "requirements": {
+        "capabilities": ["vision", "json_schema"],
+        "input_tokens": 20000,
+        "max_output_tokens": 1000,
+        "max_latency_ms": 2000,
+        "allow_downgrade": false
+      },
+      "expected_ids": []
+    },
+    {
+      "name": "json_schema stays strict when a schema model fits",
+      "requirements": {
+        "capabilities": ["vision", "json_schema"],
+        "input_tokens": 1000,
+        "max_output_tokens": 256
+      },
+      "expected_ids": ["local/vllm", "cloud/gpt"]
+    },
+    {
+      "name": "text work can use every model",
+      "requirements": {
+        "input_tokens": 1000,
+        "max_output_tokens": 256
+      },
+      "expected_ids": ["local/vllm", "text/small", "deepseek/flash", "cloud/gpt"]
+    },
+    {
+      "name": "no match returns no targets",
+      "requirements": {
+        "capabilities": ["vision", "json_schema"],
+        "max_latency_ms": 100
+      },
+      "expected_ids": []
+    }
+  ]
+}
