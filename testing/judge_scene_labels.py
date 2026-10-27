@@ -9,6 +9,7 @@ a statement about vocabulary, not about recognition. `evaluate_webots_scene.py`
 accepts a judgments file instead (`--label-judgments-file`); this writes one.
 
     export VLM_API_KEY=... VLM_BASE_URL=https://host/v1
+    # or set ROBONIX_LLM_CATALOG and the selected target's key env
     python3 testing/judge_scene_labels.py --evaluation out/evaluation.json \
         --output out/label_judgments.json
 
@@ -30,6 +31,13 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+try:
+    from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+except ModuleNotFoundError:
+    # CI runs this script from a bare interpreter; the package lives in-tree.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pylib" / "robonix-api"))
+    from robonix_api.llm import Requirements, api_key_for, resolve_from_env
 
 DEFAULT_MODEL = "anthropic/claude-opus-5"
 
@@ -89,12 +97,30 @@ def _chat(base_url: str, api_key: str, model: str, system: str, user: str) -> st
         raise SystemExit(f"unexpected reply shape from the judge endpoint: {str(payload)[:300]}")
 
 
-def _judge(pairs: list[tuple[str, str]], model: str) -> list[dict]:
-    """Ask the model once for the whole list; parse one JSON object per line."""
+def _judge_config(model: str) -> tuple[str, str, str]:
+    """Resolve the judge endpoint, preferring the deployment catalog."""
+    try:
+        target = resolve_from_env(Requirements())
+    except RuntimeError as exc:
+        raise SystemExit(f"capability catalog: {exc}") from exc
+    if target is not None:
+        api_key = api_key_for(target)
+        if not api_key:
+            raise SystemExit(
+                f"{target.api_key_env} is required for catalog target {target.id}"
+            )
+        return target.base_url, api_key, target.model
     api_key = os.environ.get("VLM_API_KEY", "").strip()
     base_url = os.environ.get("VLM_BASE_URL", "").strip()
     if not api_key or not base_url:
         raise SystemExit("set VLM_API_KEY and VLM_BASE_URL (an OpenAI-compatible endpoint)")
+    return base_url, api_key, model
+
+
+def _judge(
+    pairs: list[tuple[str, str]], base_url: str, api_key: str, model: str
+) -> list[dict]:
+    """Ask the model once for the whole list; parse one JSON object per line."""
     listing = "\n".join(f"expected={a}  observed={b}" for a, b in pairs)
     text = _chat(base_url, api_key, model, SYSTEM, listing)
 
@@ -129,6 +155,7 @@ def main() -> int:
                     help="judge this pair too (repeatable)")
     args = ap.parse_args()
 
+    base_url, api_key, model = _judge_config(args.model)
     evaluation = json.loads(args.evaluation.read_text(encoding="utf-8"))
     pairs = _pairs_from_evaluation(evaluation)
     for spec in args.extra_pair:
@@ -140,10 +167,10 @@ def main() -> int:
         print("no label pairs to judge", file=sys.stderr)
         return 1
 
-    judgments = _judge(pairs, args.model)
+    judgments = _judge(pairs, base_url, api_key, model)
     payload = {
         "schema_version": 1,
-        "judge": {"provider": "openai-compatible", "model": args.model},
+        "judge": {"provider": "openai-compatible", "model": model},
         "judgments": judgments,
     }
     args.output.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
