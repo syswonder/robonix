@@ -1,0 +1,8 @@
+string username
+string display_name
+string email
+string password
+---
+string session_token
+uint64 expires_at_ms
+keystone/User user

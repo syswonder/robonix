@@ -7,6 +7,7 @@ use crate::pb::executor::RtdlEvent;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use crate::rtdl_events::{self, NodeEventContext};
+use crate::sentinel_runtime::{SENTINEL_PROVIDER_ID, SentinelIdentity, SentinelRuntime};
 use crate::verification::{self, VerificationPolicy};
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
@@ -78,6 +79,7 @@ fn leaf_terminal_state(success: bool, cancelled: bool) -> u32 {
 }
 
 /// Dispatch one RTDL `do` node and stream node_state events.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_call(
     call: &CapabilityCall,
     node: NodeEventContext,
@@ -85,8 +87,48 @@ pub(crate) async fn execute_call(
     mut atlas: AtlasClient,
     provider_id: String,
     runtime: PlanRuntime,
+    sentinel: SentinelRuntime,
+    identity: SentinelIdentity,
     verification: Arc<VerificationPolicy>,
 ) -> NodeExecution {
+    let decision = sentinel
+        .check(
+            &atlas,
+            SENTINEL_PROVIDER_ID,
+            &call.contract_id,
+            &call.args_json,
+            &identity,
+        )
+        .await;
+    if !decision.allow {
+        let result = CapabilityCallResult {
+            call_id: call.call_id.clone(),
+            provider_id: call.provider_id.clone(),
+            contract_id: call.contract_id.clone(),
+            success: false,
+            output: String::new(),
+            error: format!(
+                "Sentinel denied capability call by rule '{}': {}",
+                decision.rule_id, decision.reason
+            ),
+        };
+        warn!(
+            "[sentinel] denied call_id={} contract='{}' rule='{}': {}",
+            call.call_id, call.contract_id, decision.rule_id, decision.reason
+        );
+        runtime
+            .record_op_state(&node.plan_id, &node.op_id, RtdlNodeStateEnum::Failed as u32)
+            .await;
+        let _ = tx
+            .send(Ok(rtdl_events::node_state_from_result(
+                &node,
+                result,
+                RtdlNodeStateEnum::Failed as u32,
+            )))
+            .await;
+        return NodeExecution::finished(true);
+    }
+
     // Log the args too (bounded) so the log shows what each call requested —
     // useful for debugging capability calls. Truncated to keep large payloads
     // (images, file content) from bloating the log.
@@ -278,6 +320,7 @@ fn log_success(call: &CapabilityCall, result: &CapabilityCallResult) {
 mod tests {
     use super::*;
     use crate::config::VerificationRule;
+    use crate::sentinel_runtime::{SentinelIdentity, SentinelRuntime};
     use robonix_atlas::service::{AtlasRegistry, serve_atlas};
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -296,6 +339,14 @@ mod tests {
     fn reserve_address() -> SocketAddr {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
         listener.local_addr().expect("reserved address")
+    }
+
+    fn sentinel_runtime() -> SentinelRuntime {
+        SentinelRuntime::load(std::env::temp_dir().join(format!(
+            "executor-capability-sentinel-{}.json",
+            uuid::Uuid::new_v4()
+        )))
+        .expect("empty Sentinel policy")
     }
 
     /// Preserve verifier outcomes and fail closed if its background task cannot finish.
@@ -345,6 +396,8 @@ mod tests {
             atlas,
             "executor".into(),
             runtime,
+            sentinel_runtime(),
+            SentinelIdentity::default(),
             Arc::new(VerificationPolicy::new(
                 false,
                 vec![VerificationRule {

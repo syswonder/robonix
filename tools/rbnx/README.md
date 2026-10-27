@@ -37,6 +37,8 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx channels`           | List open consumer→provider channels                   |
 | `rbnx inspect`            | Dump atlas state for debugging                         |
 | `rbnx codegen [--mcp]`    | Generate proto + MCP type stubs for a package          |
+| `rbnx login [USERNAME]`   | Log in to Keystone and save the session                 |
+| `rbnx logout`             | Revoke the current Keystone session                     |
 | `rbnx chat`               | Interactive TUI chat with the pilot                    |
 | `rbnx ask "..."`          | Single-turn task submission; `--session ID` continues or steers a session |
 | `rbnx path KEY`           | Resolve a registered source path (root / capabilities / interfaces-lib / runtime-proto / robonix-api) |
@@ -65,6 +67,16 @@ accepted while existing packages migrate; `manifestVersion` stays `1`.
 manage system-installed packages. They are legacy commands, hidden from
 `rbnx --help`; deployment manifests with `rbnx build` and `rbnx boot` replace
 them.
+
+When Keystone is enabled, `rbnx login` reads a password without displaying it
+and saves the session in `~/.robonix/session.yaml` (mode `0600` on Unix).
+`rbnx chat` prompts for login; `rbnx ask` requires a saved session or
+`ROBONIX_SESSION_TOKEN`. `rbnx logout` revokes the session and removes the file.
+Without Keystone, both commands use the local OS user without login. Remote
+connections need a trusted network or encrypted tunnel because gRPC has no TLS.
+Liaison, Pilot, and Executor each control Keystone enforcement with their own
+`require_keystone` setting. `rbnx boot` passes these settings independently;
+CLI/environment overrides apply before manifest values.
 
 `rbnx tools` follows contract metadata and omits entries marked
 `llm_callable = false`; `rbnx contracts` still lists those contracts and marks
@@ -120,7 +132,7 @@ or `--sessions` to remove those too.
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
-Atlas, Executor, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
+Atlas, Executor, Keystone, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
 manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or
@@ -139,6 +151,11 @@ system:
 ## Environment
 
 - `ROBONIX_ATLAS` — atlas endpoint, default `localhost:50051`.
+- `ROBONIX_SESSION_TOKEN` — Keystone session token for automation; overrides `rbnx login` state.
+- `ROBONIX_LIAISON_REQUIRE_KEYSTONE`,
+  `ROBONIX_EXECUTOR_REQUIRE_KEYSTONE`, and
+  `ROBONIX_PILOT_REQUIRE_KEYSTONE` — override the corresponding component's
+  manifest `require_keystone` value.
 - `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
   to pilot at boot.
 - `ROBONIX_DRIVER_INIT_TIMEOUT_S` — seconds `rbnx boot` waits for a package's

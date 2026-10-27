@@ -1,0 +1,23 @@
+[
+  {
+    "id": "webots-demo-allow-admin-skills-v1",
+    "effect": "allow",
+    "priority": 100,
+    "conditions": {
+      "contract": "robonix/skill/*",
+      "roles": [
+        "admin"
+      ]
+    },
+    "reason": "Webots demo administrators may invoke registered skills"
+  },
+  {
+    "id": "webots-demo-deny-non-admin-skills-v1",
+    "effect": "deny",
+    "priority": 10,
+    "conditions": {
+      "contract": "robonix/skill/*"
+    },
+    "reason": "Webots demo skills require the Keystone admin role"
+  }
+]

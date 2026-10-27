@@ -45,14 +45,16 @@ pub fn deploy_repo_dir_name(url: &str) -> String {
 
 /// Single source of truth for which `system:` keys are shipped binaries
 /// rather than packages under `<robonix_source>/system/<key>/`.
-pub const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma", "vitals"];
+pub const SYSTEM_BUILTINS: &[&str] = &[
+    "atlas", "executor", "keystone", "pilot", "liaison", "soma", "vitals",
+];
 
 pub fn is_builtin_system(name: &str) -> bool {
     SYSTEM_BUILTINS.contains(&name)
 }
 
 /// The built-in components nothing runs without: the registry, the executor
-/// and the body. The others (pilot, liaison, vitals) may be disabled.
+/// and the body. The others (keystone, pilot, liaison, vitals) may be disabled.
 pub const SYSTEM_REQUIRED: &[&str] = &["atlas", "executor", "soma"];
 
 /// Whether a deployment entry says `status: disabled`. `enabled`, or no

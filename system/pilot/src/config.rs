@@ -31,6 +31,8 @@ pub struct PilotConfig {
     pub atlas_endpoint: String,
     pub listen: String,
     pub id: String,
+    /// Require a valid Keystone session before accepting a task.
+    pub require_keystone: bool,
     pub vlm: VlmConfig,
 }
 
@@ -86,6 +88,10 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_PILOT_PROVIDER_ID")]
     pub id: Option<String>,
 
+    /// Require a live Keystone session for every submitted task.
+    #[arg(long, env = "ROBONIX_PILOT_REQUIRE_KEYSTONE")]
+    pub require_keystone: Option<bool>,
+
     /// LLM API base URL (e.g. <https://api.openai.com/v1>).
     #[arg(long, env = "ROBONIX_VLM_UPSTREAM")]
     pub vlm_upstream: Option<String>,
@@ -136,7 +142,17 @@ struct FileConfig {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
+    require_keystone: Option<bool>,
+    #[serde(default)]
     vlm: Option<FileVlmConfig>,
+}
+
+/// Pilot settings decoded from the `system.pilot` manifest block.
+#[derive(Default, Deserialize)]
+struct ManifestConfig {
+    /// Whether Pilot requires Keystone for direct task submissions.
+    #[serde(default)]
+    require_keystone: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -160,6 +176,10 @@ impl PilotConfig {
         let file_cfg: FileConfig = match &args.config {
             Some(path) => load_yaml(path)?,
             None => FileConfig::default(),
+        };
+        let manifest_cfg: ManifestConfig = match args.config_json.as_deref() {
+            Some(raw) => serde_json::from_str(raw).context("parse Pilot --config-json")?,
+            None => ManifestConfig::default(),
         };
         let file_vlm = file_cfg.vlm.unwrap_or_default();
 
@@ -210,6 +230,11 @@ impl PilotConfig {
             atlas_endpoint,
             listen,
             id,
+            require_keystone: args
+                .require_keystone
+                .or(manifest_cfg.require_keystone)
+                .or(file_cfg.require_keystone)
+                .unwrap_or(false),
             vlm: VlmConfig {
                 upstream,
                 api_key,
@@ -248,4 +273,46 @@ fn missing_field(yaml_path: &str, env_var: &str, flag: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "missing required field '{yaml_path}': set it in --config YAML, env {env_var}, or pass {flag}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> Args {
+        Args {
+            atlas: None,
+            listen: None,
+            id: None,
+            require_keystone: None,
+            vlm_upstream: Some("https://example.invalid/v1".into()),
+            vlm_api_key: Some("test-key".into()),
+            vlm_model: Some("test-model".into()),
+            vlm_context_window_tokens: None,
+            vlm_format: None,
+            config: None,
+            log: None,
+            config_json: None,
+        }
+    }
+
+    #[test]
+    fn require_keystone_defaults_off_and_reads_manifest() {
+        let cfg = PilotConfig::resolve(args()).expect("default config");
+        assert!(!cfg.require_keystone);
+
+        let mut args = args();
+        args.config_json = Some(r#"{"require_keystone":true}"#.into());
+        let cfg = PilotConfig::resolve(args).expect("manifest config");
+        assert!(cfg.require_keystone);
+    }
+
+    #[test]
+    fn require_keystone_cli_wins_over_manifest() {
+        let mut args = args();
+        args.require_keystone = Some(false);
+        args.config_json = Some(r#"{"require_keystone":true}"#.into());
+        let cfg = PilotConfig::resolve(args).expect("overridden config");
+        assert!(!cfg.require_keystone);
+    }
 }

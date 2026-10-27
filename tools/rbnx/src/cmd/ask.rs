@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// `rbnx ask` — non-interactive sibling of `rbnx chat`. Same atlas
-// + SubmitTask gRPC path, but no ratatui shell: prints events to
-// stdout as they arrive and exits when the pilot stream closes.
+// `rbnx ask` — non-interactive sibling of `rbnx chat`. It discovers Liaison
+// through Atlas and submits the same Task, but has no ratatui shell. It prints
+// events to stdout and exits when the pilot stream closes.
 //
 // Use cases:
 //   * scripted regression / smoke tests that need pilot in the loop
@@ -16,14 +16,13 @@
 use anyhow::{Context, Result};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use std::io::{self, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_stream::StreamExt;
 use tonic::Request;
 use uuid::Uuid;
 
-use crate::pb::contracts::robonix_system_pilot_client::RobonixSystemPilotClient;
+use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
-use crate::pb::pilot::{CapabilityCall, Plan, Task};
+use crate::pb::pilot::{CapabilityCall, Plan};
 
 // PilotEvent.event_kind discriminants — must mirror service.rs / .msg.
 const EVT_TEXT_CHUNK: u32 = 0;
@@ -34,6 +33,7 @@ const EVT_FINAL_TEXT: u32 = 4;
 
 const STATE_FAILED: u32 = 2;
 const CONSUMER_ID: &str = "rbnx-cli/ask";
+const LIAISON_CONTRACT: &str = "robonix/system/liaison/submit";
 
 pub async fn execute(
     server: &str,
@@ -41,32 +41,27 @@ pub async fn execute(
     json: bool,
     session: Option<String>,
 ) -> Result<()> {
-    let mut atlas = AtlasClient::connect(server)
+    let atlas_endpoint = super::canonical_endpoint(server);
+    let login = super::auth::resolve(&atlas_endpoint, false).await?;
+    let mut atlas = AtlasClient::connect(&atlas_endpoint)
         .await
         .with_context(|| format!("connect to atlas at '{server}'"))?;
-    let (channel_id, pilot_cap_id, channel) =
-        atlas_client::connect_to_capability(&mut atlas, CONSUMER_ID, "robonix/system/pilot")
+    let (channel_id, liaison_cap_id, channel) =
+        atlas_client::connect_to_capability(&mut atlas, CONSUMER_ID, LIAISON_CONTRACT)
             .await
-            .context("locate pilot via atlas")?;
+            .context("locate Liaison via Atlas")?;
     if !json {
-        eprintln!("[ask] connected to pilot '{pilot_cap_id}' (channel {channel_id})");
+        eprintln!("[ask] connected to Liaison '{liaison_cap_id}' (channel {channel_id})");
     }
-    let mut client = RobonixSystemPilotClient::new(channel);
+    let mut client = RobonixSystemLiaisonSubmitClient::new(channel);
 
     let session_id = session.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let task = Task {
-        task_id: Uuid::new_v4().to_string(),
-        session_id: session_id.clone(),
-        source: 0, // INTENT_SOURCE_TEXT
-        text: prompt.to_string(),
-        audio_data: vec![],
-        context_json: String::new(),
-        timestamp_ms: now_ms(),
-    };
+    let task =
+        super::chat::build_text_task(&session_id, &login.user_id, &login.session_token, prompt);
     let mut stream = client
         .submit_task(Request::new(task))
         .await
-        .context("SubmitTask RPC failed")?
+        .context("Liaison SubmitTask RPC failed")?
         .into_inner();
 
     let stdout = io::stdout();
@@ -245,11 +240,4 @@ fn plan_calls(plan: &Plan) -> Vec<&CapabilityCall> {
         .iter()
         .filter_map(|node| node.call.as_ref())
         .collect()
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
