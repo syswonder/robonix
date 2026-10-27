@@ -1,10 +1,12 @@
 """Tests for LLM-based memory search — prompt formatting, config, fallback paths."""
 
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _HERE = Path(__file__).resolve().parent
 _SVC = _HERE.parent
@@ -70,7 +72,8 @@ class TestLLMConfig(unittest.TestCase):
         for k in ("MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY",
                   "MEMGRAPH_LLM_MODEL",
                   "VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL",
-                  "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"):
+                  "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+                  "ROBONIX_LLM_CATALOG"):
             os.environ.pop(k, None)
 
     def test_no_creds_returns_false(self):
@@ -120,6 +123,45 @@ class TestLLMConfig(unittest.TestCase):
         os.environ["VLM_API_KEY"] = "sk"
         cfg = llm_search._llm_config()
         assert cfg["model"] == "gpt-4.1"
+
+    def test_catalog_overrides_legacy_config(self):
+        self._clear_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = Path(tmp) / "catalog.json"
+            catalog.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "id": "test/llm",
+                                "provider": "vllm",
+                                "base_url": "http://127.0.0.1:9999/v1",
+                                "model": "test-llm",
+                                "api_key_env": "TEST_KEY",
+                                "capabilities": {"json_object": True},
+                                "latency_p95_ms": 100,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "ROBONIX_LLM_CATALOG": str(catalog),
+                    "TEST_KEY": "secret",
+                    "VLM_BASE_URL": "https://legacy.invalid/v1",
+                    "VLM_API_KEY": "legacy",
+                },
+                clear=False,
+            ):
+                cfg = llm_search._llm_config()
+        assert cfg == {
+            "base_url": "http://127.0.0.1:9999/v1",
+            "api_key": "secret",
+            "model": "test-llm",
+        }
 
 
 class TestLLMRankFallback(unittest.TestCase):

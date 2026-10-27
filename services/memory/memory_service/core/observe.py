@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+
 from ..storage.image_store import _DEFAULT_IMAGE_ROOT
 from .types import ObjectCoord
 
@@ -25,6 +27,19 @@ log = logging.getLogger("scribe_mem")
 # ── VLM config (reuses Pilot's env vars) ───────────────────────────────────
 
 def _vlm_config() -> dict:
+    try:
+        target = resolve_from_env(
+            Requirements(capabilities=("vision",), max_output_tokens=256)
+        )
+    except RuntimeError as exc:
+        log.warning("observe: capability catalog: %s", exc)
+        target = None
+    if target is not None:
+        return {
+            "base_url": target.base_url,
+            "api_key": api_key_for(target),
+            "model": target.model,
+        }
     return {
         "base_url": (os.environ.get("VLM_BASE_URL")
                      or os.environ.get("OPENAI_BASE_URL") or ""),
