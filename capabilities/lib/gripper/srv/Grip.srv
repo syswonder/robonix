@@ -1,15 +1,18 @@
-# Establish a grip, optionally at a target opening width, not just a position.
-# Without a width target, close adaptively; do not invent a target width.
-# The provider applies its configured gripping tolerances. Observe state for
-# contact; a holding observation is not proof of task-level success.
-# Reject request forms not supported by info and nonfinite, negative or known-
-# unreachable width targets with ok=false before dispatch; never clamp.
+# Attempt to establish a grip, optionally for an expected object width.
+# The expected width is a size criterion, not a jaw-position target.
+# The provider applies its configured tolerances to the achieved opening.
+# A width match alone does not prove contact or task success; observe state.
+# Without an expected width, close adaptively; do not invent one.
+# Reject unsupported request forms and nonfinite, negative or known-unsupported
+# expected widths with ok=false before dispatch; never clamp.
 # Shared relative-setting rules: gripper/srv/GetGripperInfo.srv.
 float64 relative_effort # 0 = configured default; (0,1] = device-relative setting.
                         # Not measured force, newtons, or a safety force limit.
 float64 relative_speed  # 0 = configured default; (0,1] = relative speed setting.
-bool opening_width_valid # True: use a width target; false: ignore opening_width_m.
-float64 opening_width_m  # Target clear width between current gripping faces, m.
+# True: expected_object_width_m is supplied as a grip-size criterion.
+# False: no expected width; ignore expected_object_width_m.
+bool expected_object_width_valid
+float64 expected_object_width_m # Expected object width between gripping faces, m.
 ---
 bool ok                 # Accepted and dispatched, not proof of contact.
 string message          # Human-readable reason on rejection or dispatch failure.

@@ -7,8 +7,8 @@
 # clamp, ignore them or substitute defaults. Flags are false for absent operations.
 # Nonzero values map to the provider's configured usable range, possibly
 # nonlinearly; equal values do not imply equal outputs across devices.
-# Grip width flags describe accepted request forms. At least one is true when
-# grip is declared; both are false when it is absent.
+# Grip width flags describe requests with or without an expected object width.
+# At least one is true when grip is declared; both are false when it is absent.
 # Width bounds apply to the current fingertips and configuration, not nominal
 # mechanical limits. A valid range is finite with 0 <= min <= max; zero width
 # need not be reachable. Restart after changing fingertips or configuration.
@@ -30,5 +30,7 @@ float64 max_opening_width_m     # Maximum permitted clear width between gripping
 bool gripping_force_range_valid # False: range unknown; ignore both bounds.
 float64 min_gripping_force_n    # Minimum achievable grip force per gripping face, N.
 float64 max_gripping_force_n    # Maximum achievable grip force per gripping face, N.
-bool grip_with_opening_width_supported    # Grip accepts opening_width_valid=true.
-bool grip_without_opening_width_supported # Grip accepts opening_width_valid=false.
+# Grip accepts requests with expected_object_width_valid=true.
+bool grip_with_expected_object_width_supported
+# Grip accepts requests with expected_object_width_valid=false.
+bool grip_without_expected_object_width_supported
