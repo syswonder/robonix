@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from robonix_api import scribe_logger
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
 import os
 import platform
 import sys
@@ -236,18 +237,43 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
+def _compact_config() -> dict[str, str | None]:
+    """Resolve the summarizer endpoint, preferring the deployment catalog.
+
+    Without ROBONIX_LLM_CATALOG this keeps the historical VLM_* / OPENAI_*
+    fallback so memory does not need a separate API key.
+    """
+    try:
+        target = resolve_from_env(Requirements(max_output_tokens=1024))
+    except RuntimeError as exc:
+        log.warning("compact: capability catalog: %s", exc)
+        target = None
+    if target is not None:
+        return {
+            "base_url": target.base_url,
+            "api_key": api_key_for(target),
+            "model": target.model,
+        }
+    return {
+        "base_url": os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
+        "api_key": os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+        "model": os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5",
+    }
+
+
 @memory.mcp("robonix/service/memory/compact")
 async def compact(msg: Empty) -> String:
     """Compact and summarize recent memories. Call this at the end of a session.
     Returns std_msgs/String JSON. Contract: robonix/service/memory/compact.
 
     Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
-    separate API key. Reads VLM_BASE_URL / VLM_API_KEY / VLM_MODEL (or the
-    OPENAI_* equivalents as fallback)."""
+    separate API key. Reads the deployment catalog when configured, then
+    VLM_BASE_URL / VLM_API_KEY / VLM_MODEL (or the OPENAI_* equivalents)."""
     _ = msg
-    base_url = os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
-    api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
+    config = _compact_config()
+    base_url = config["base_url"]
+    api_key = config["api_key"]
+    model = str(config["model"] or "gpt-5.5")
     log.info("compact (model=%s, base_url=%s)", model, _redact_url(base_url))
     if not api_key:
         log.warning("compact: no LLM key set (VLM_API_KEY / OPENAI_API_KEY)")
