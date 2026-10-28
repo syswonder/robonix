@@ -4209,7 +4209,6 @@ provides-extras = ["codegen"]
 
 [[package]]
 name = "robonix-chronos-clock"
-version = "1.1.0b1"
 source = { editable = "system/chronos/clock" }
 
 [[package]]
