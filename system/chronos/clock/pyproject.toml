@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "robonix-chronos-clock"
-version = "1.1.0b1"
+dynamic = ["version"]
 description = "Chronos reference and steady clock readings without system service dependencies"
 readme = "README.md"
 requires-python = ">=3.10"
