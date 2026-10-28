@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/gripper/stop"
+version = "1"
+kind = "primitive"
+idl = "gripper/srv/Stop.srv"
+description = "Dispatch a halt of jaw motion without opening or disabling the gripper."
+
+[mode]
+type = "rpc"

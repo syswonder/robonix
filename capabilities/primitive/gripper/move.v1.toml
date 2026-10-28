@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/gripper/move"
+version = "1"
+kind = "primitive"
+idl = "gripper/srv/Move.srv"
+description = "Dispatch an absolute opening-width target in metres; observe state for arrival."
+
+[mode]
+type = "rpc"

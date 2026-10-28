@@ -1,0 +1,9 @@
+# Drive to info.max_opening_width_m when info.opening_width_range_valid=true;
+# otherwise use the provider's configured, unreported open endpoint.
+# Arrival can be inferred from state only with a known target and valid width
+# feedback. This is not a stop, torque-off, sensor-zeroing or calibration command.
+# Shared relative-setting rules: gripper/srv/GetGripperInfo.srv.
+float64 relative_speed # 0 = configured default; (0,1] = relative speed setting.
+---
+bool ok                # Accepted and dispatched, not proof that the jaws opened.
+string message         # Human-readable reason on rejection or dispatch failure.
