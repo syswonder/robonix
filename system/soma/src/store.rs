@@ -11,8 +11,11 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -27,6 +30,7 @@ pub struct SomaBody {
     pub urdf_path: PathBuf,
     pub urdf_xml: String,
     urdf_asset_paths: Vec<UrdfAssetPath>,
+    urdf_asset_manifest: OnceLock<SomaUrdfAssetManifest>,
     pub footprint: Option<Footprint>,
     pub grippers: Vec<GripperConfig>,
 }
@@ -49,6 +53,21 @@ struct UrdfAssetPath {
 pub struct SomaUrdfAsset {
     pub path: String,
     pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SomaUrdfAssetMetadata {
+    pub path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SomaUrdfAssetManifest {
+    pub resource_set_id: String,
+    pub total_size_bytes: u64,
+    pub assets: Vec<SomaUrdfAssetMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,6 +191,7 @@ impl SomaBody {
             urdf_path,
             urdf_xml,
             urdf_asset_paths,
+            urdf_asset_manifest: OnceLock::new(),
             footprint,
             grippers,
         })
@@ -228,6 +248,111 @@ impl SomaBody {
                 })
             })
             .collect()
+    }
+
+    /// Return immutable metadata, hashing each resource only once per Soma process.
+    pub fn urdf_asset_manifest(&self) -> Result<SomaUrdfAssetManifest> {
+        if let Some(manifest) = self.urdf_asset_manifest.get() {
+            return Ok(manifest.clone());
+        }
+        let manifest = self.build_urdf_asset_manifest()?;
+        let _ = self.urdf_asset_manifest.set(manifest.clone());
+        Ok(manifest)
+    }
+
+    /// Hash all indexed resources without retaining their bytes in memory.
+    fn build_urdf_asset_manifest(&self) -> Result<SomaUrdfAssetManifest> {
+        let mut assets = Vec::with_capacity(self.urdf_asset_paths.len());
+        let mut resource_set_digest = Sha256::new();
+        let mut total_size_bytes = 0_u64;
+        for asset in &self.urdf_asset_paths {
+            let source_path = self.resolve_urdf_asset_path(&asset.wire_path)?;
+            let mut source = std::fs::File::open(&source_path)
+                .with_context(|| format!("open URDF asset '{}'", source_path.display()))?;
+            let size_bytes = source
+                .metadata()
+                .with_context(|| format!("stat URDF asset '{}'", source_path.display()))?
+                .len();
+            let mut asset_digest = Sha256::new();
+            let mut buffer = [0_u8; 1024 * 1024];
+            loop {
+                let read = source
+                    .read(&mut buffer)
+                    .with_context(|| format!("hash URDF asset '{}'", source_path.display()))?;
+                if read == 0 {
+                    break;
+                }
+                asset_digest.update(&buffer[..read]);
+            }
+            let sha256 = format!("{:x}", asset_digest.finalize());
+            let path_bytes = asset.wire_path.as_bytes();
+            resource_set_digest.update((path_bytes.len() as u64).to_be_bytes());
+            resource_set_digest.update(path_bytes);
+            resource_set_digest.update(size_bytes.to_be_bytes());
+            resource_set_digest.update(sha256.as_bytes());
+            total_size_bytes = total_size_bytes.saturating_add(size_bytes);
+            assets.push(SomaUrdfAssetMetadata {
+                path: asset.wire_path.clone(),
+                size_bytes,
+                sha256,
+                media_type: asset_media_type(&asset.wire_path).to_string(),
+            });
+        }
+        Ok(SomaUrdfAssetManifest {
+            resource_set_id: format!("{:x}", resource_set_digest.finalize()),
+            total_size_bytes,
+            assets,
+        })
+    }
+
+    /// Resolve an indexed wire path to a canonical file below the URDF directory.
+    pub fn resolve_urdf_asset_path(&self, wire_path: &str) -> Result<PathBuf> {
+        let asset = self
+            .urdf_asset_paths
+            .iter()
+            .find(|asset| asset.wire_path == wire_path)
+            .with_context(|| format!("URDF does not reference asset '{wire_path}'"))?;
+        let urdf_dir = self.urdf_path.parent().with_context(|| {
+            format!(
+                "URDF '{}' has no parent directory",
+                self.urdf_path.display()
+            )
+        })?;
+        let canonical_dir = urdf_dir
+            .canonicalize()
+            .with_context(|| format!("resolve URDF directory '{}'", urdf_dir.display()))?;
+        let canonical_path = asset
+            .source_path
+            .canonicalize()
+            .with_context(|| format!("resolve URDF asset '{}'", asset.source_path.display()))?;
+        if !canonical_path.starts_with(&canonical_dir) {
+            bail!(
+                "URDF asset '{}' resolves outside '{}'",
+                asset.wire_path,
+                urdf_dir.display()
+            );
+        }
+        Ok(canonical_path)
+    }
+}
+
+fn asset_media_type(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "stl" => "model/stl",
+        "dae" => "model/vnd.collada+xml",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ktx2" => "image/ktx2",
+        _ => "application/octet-stream",
     }
 }
 

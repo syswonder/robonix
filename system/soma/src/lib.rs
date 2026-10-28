@@ -13,6 +13,8 @@ pub mod store;
 
 pub const GET_YAML_CONTRACT: &str = "robonix/system/soma/get_yaml";
 pub const GET_URDF_CONTRACT: &str = "robonix/system/soma/get_urdf";
+pub const GET_URDF_ASSET_MANIFEST_CONTRACT: &str = "robonix/system/soma/get_urdf_asset_manifest";
+pub const STREAM_URDF_ASSET_CONTRACT: &str = "robonix/system/soma/stream_urdf_asset";
 pub const GET_FOOTPRINT_CONTRACT: &str = "robonix/system/soma/footprint";
 pub const GET_HEALTH_CONTRACT: &str = "robonix/system/soma/get_health";
 pub const HEALTH_CONTRACT: &str = "robonix/system/soma/health";
