@@ -1,5 +1,5 @@
 # RTDL execution tree node encoded as an arena entry in Plan.nodes.
-# node_kind: 0=sequence, 1=parallel, 2=do.
+# node_kind: 0=sequence, 1=parallel, 2=do, 3=if, 4=repeat, 5=while
 uint32 node_kind
 
 # Child node indices for sequence and parallel nodes. Empty for do nodes.
@@ -13,3 +13,16 @@ string op_id
 
 # Human-readable intent for this RTDL node.
 string description
+
+# JSON-encoded condition expression for if and while.
+# Empty for other node kinds.
+string condition_json
+
+# Result variable name for 'do'. Empty means no binding.
+string bind
+
+# Number of body executions for repeat.
+uint32 repeat_count
+
+# Maximum number of body executions for while.
+uint32 max_iterations
