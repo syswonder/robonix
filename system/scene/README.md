@@ -45,13 +45,61 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the live RGB frame. Class list is a 55-entry indoor-office vocabulary; override at runtime via `SCENE_OPEN_VOCAB_CLASSES=cup,chair,...`.
 2. **Segment.** MobileSAM, prompted with each YOLO bbox, produces a per-detection mask.
 3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract — the real per-deployment camera. There is no hardcoded-default fallback: guessing `K` scales every point by `fx/fy` and silently misplaces objects, so when no usable intrinsics are wired the detector *waits* (logs `waiting for camera intrinsics`) instead. The world transform comes from the robot's TF tree first: Scene asks for `T(world ← selected_camera_optical)` so the full URDF/static chain and SLAM's `map → odom` correction stay intact. Only when that TF lookup is unavailable does the compatibility path compose `T(world ← body)` from `service/map/pose` (or odom) with `T(body ← camera_optical)` from `primitive/camera/extrinsics`. The selected pose source determines `body`; the extrinsics parent must match that same frame. The world frame name is whatever `header.frame_id` the localizer publishes — never a hardcoded `"map"` once a sample exists.
-4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + 3D-AABB IoU drives the concept-graphs merge pipeline: `compute_spatial_similarities` + `compute_visual_similarities` + `aggregate_similarities` + `merge_detections_to_objects`. Three hard gates filter the agg_sim matrix:
+4. **Match + merge.** The default `association=voxel_vote` scores shared voxel observations and label text similarity. With `association=cg`, visual features and voxel overlap feed the aggregate score instead. The `cg` path applies these gates:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
-   * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
+   * **Class gate** — reject different class groups beyond `cross_class_centroid_max_m`; configured confusable classes share one group.
    * **Threshold** — agg_sim < 0.85 (`merge_threshold`) → spawn new object instead.
 5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
-Periodic cleanup (every 10 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
+The ConceptGraphs inference path uses FP32 TensorRT engines for YOLO, SAM
+encoder/decoder and CLIP visual, plus CPU ONNX Runtime for text. Native startup
+reads `SCENE_ONNX_DIR` (default `docker/_weights/onnx`); it does not require the
+source `.pt`/`.bin` weights or torch. `scripts/build_engines.py` builds and
+verifies temporary engines before publishing them to `SCENE_ENGINE_CACHE_DIR`.
+Cache names include the ONNX hash, TRT version, compute capability and build
+settings. The YOLO text session is released after computing the class table;
+TRT I/O buffers are reused, and YOLO score constants are prepared at load time.
+Representative-feature selection is skipped for unchanged tracks; new observations
+and merge counts invalidate it. Map objects retain one independently owned initial
+mask for export compatibility; historical masks are not accumulated.
+
+Periodic cleanup (every 10 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse. Each tick publishes at most one registry snapshot after its observations and cleanup. Overlap merging skips objects already consumed by another merge. `obj_pcd_max_points` remains an approximate per-detection sampling target; merged map clouds are reduced by voxel size, without a fixed point-count cap.
+
+## TensorRT native model setup
+
+The TRT deployment is validated for the lite model set on `jetson-native`.
+Docker packaging still stages the source Torch weights; it needs TRT runtime
+and ONNX/engine provisioning before using this ConceptGraphs implementation.
+The engine path does not fall back to Torch or CPU inference.
+
+On the export machine, install Torch, Ultralytics and open_clip, and stage the
+YOLO-World, MobileSAM and OpenCLIP source weights in `docker/_weights/`.
+From `system/scene`, generate six ONNX models and their parity references:
+
+```bash
+python3 -m pip install onnx onnxscript
+python3 scripts/export_models.py --out docker/_weights/onnx
+rsync -a docker/_weights/onnx/ user@board:/path/to/robonix/system/scene/docker/_weights/onnx/
+```
+
+On the board, provision TensorRT from JetPack and install the engine runtime
+requirements. Build the engines before managed startup:
+
+```bash
+cd /path/to/robonix/system/scene
+python3 -m pip install -r docker/requirements/scene-perception-engines.txt
+python3 scripts/build_engines.py --models-dir docker/_weights/onnx --verify
+python3 scripts/build_engines.py --models-dir docker/_weights/onnx --check
+```
+
+`SCENE_ONNX_DIR` selects a different model directory for native build/start;
+`SCENE_ENGINE_CACHE_DIR` selects the engine cache. Pass `--models-dir` when
+calling the builder directly. The native build script also compiles the
+staged exports. Startup uses `--check` and fails if an engine is missing;
+it never compiles under Atlas's registration deadline. Rebuild after a TRT,
+GPU architecture or ONNX change. `gpu_engine_mb` on the cost page reports
+TRT's declared execution-context memory, excluding weights, I/O buffers and
+driver overhead.
 
 ## Deployment targets (x86 / Jetson)
 

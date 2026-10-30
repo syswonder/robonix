@@ -49,14 +49,40 @@ class OfflineBuildContractTests(unittest.TestCase):
             )
             self.assertNotIn("pretrained='laion2b_s34b_b79k'", text)
 
-    def test_native_start_defaults_to_staged_clip_checkpoint(self):
-        start = (SCENE_ROOT / "scripts" / "start_native.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            'SCENE_CLIP_PRETRAINED:-$W/open_clip_pytorch_model.bin', start
-        )
-        self.assertIn('"$SCENE_CLIP_PRETRAINED"', start)
+    def test_native_start_accepts_onnx_without_torch_weights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            models = root / "onnx"
+            models.mkdir()
+            (models / "yolo-world-cut.onnx").write_bytes(b"onnx")
+            fake_python = root / "python"
+            fake_python.write_text(
+                '#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n'
+                'if [[ "$1" == */scripts/build_engines.py && "${NATIVE_PREFLIGHT_FAIL:-0}" == 1 ]]; then exit 1; fi\n',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            env = os.environ.copy()
+            env.update(RBNX_PACKAGE_ROOT=str(root), SCENE_ONNX_DIR=str(models),
+                       SCENE_NATIVE_PYTHON=str(fake_python), NATIVE_LOG=str(root / "calls"))
+            subprocess.run(
+                ["bash", "-c", 'source() { :; }; export -f source; exec bash "$1"',
+                 "native-test", str(SCENE_ROOT / "scripts" / "start_native.sh")],
+                env=env, check=True, capture_output=True, text=True,
+            )
+            calls = (root / "calls").read_text().splitlines()
+            self.assertTrue(any("--models-dir " + str(models) in call for call in calls))
+            self.assertIn("-m scene_service.service", calls)
+            self.assertTrue(any(call.endswith("--check") for call in calls))
+            (root / "calls").unlink()
+            env["NATIVE_PREFLIGHT_FAIL"] = "1"
+            failed = subprocess.run(
+                ["bash", "-c", 'source() { :; }; export -f source; exec bash "$1"',
+                 "native-test", str(SCENE_ROOT / "scripts" / "start_native.sh")],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertNotIn("-m scene_service.service", (root / "calls").read_text().splitlines())
 
     def _fixture(self, root: Path, *, include_clip: bool) -> tuple[Path, dict[str, str]]:
         scene = root / "system" / "scene"

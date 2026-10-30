@@ -1900,20 +1900,8 @@ def _cgroup_cpu_usec():
 
 
 def _gpu_sample():
-    """GPU memory this process reserved, and the card's utilisation.
-
-    Torch knows what this process holds, which is the honest number for "what
-    does this backend cost"; the card's total and utilisation come from NVML
-    when it is available and are shared with whatever else runs on the GPU.
-    """
+    """Card-wide memory and utilization from NVML."""
     out = {}
-    try:
-        import torch
-        if torch.cuda.is_available():
-            out["gpu_reserved_mb"] = torch.cuda.memory_reserved() / 1e6
-            out["gpu_allocated_mb"] = torch.cuda.memory_allocated() / 1e6
-    except Exception:  # noqa: BLE001
-        pass
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -1936,6 +1924,10 @@ def _cost_sample(detector):
     if backend is None and detector is not None:
         backend = type(detector).__name__
     sample["backend"] = backend or "none"
+
+    engines = getattr(detector, "_engines", None)
+    if engines is not None and hasattr(engines, "device_memory_bytes"):
+        sample["gpu_engine_mb"] = engines.device_memory_bytes / 1e6
 
     mem = _read_first("/sys/fs/cgroup/memory.current")
     if mem is None:

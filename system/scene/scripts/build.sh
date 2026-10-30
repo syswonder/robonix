@@ -227,6 +227,12 @@ fetch_hf_weight \
 # the host JetPack stack via --system-site-packages; we only pip-install the
 # light pure-python deps on top. Mirrors mapping_rbnx's native target.
 if [[ "$TARGET" == "jetson-native" ]]; then
+    ONNX_DIR="${SCENE_ONNX_DIR:-$PKG/docker/_weights/onnx}"
+    if [[ ! -s "$ONNX_DIR/yolo-world-cut.onnx" ]]; then
+        echo "[build] error: stage exported ONNX/NPZ models in $ONNX_DIR first" >&2
+        echo "        see the Scene README for export and target setup steps." >&2
+        exit 1
+    fi
     # No venv on purpose. A --system-site-packages venv can't see the host
     # JetPack torch (it's typically a `pip install --user` in ~/.local), and
     # forcing the user-site onto PYTHONPATH drags shadowing shims (e.g. enum34)
@@ -245,7 +251,7 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     "$PY" -m pip install --user --upgrade pip --index-url "$PIP_IDX" || true
     # torch & friends are already satisfied by the host stack, so pip skips
     # them; only the missing pure-python deps get installed.
-    for req in scene-base scene-perception-core scene-perception-heavy; do
+    for req in scene-base scene-perception-engines scene-perception-core scene-perception-heavy; do
         f="docker/requirements/${req}.txt"
         [[ -f "$f" ]] || continue
         echo "[build] pip install --user -r $f"
@@ -324,6 +330,8 @@ PY
         exit 1
     fi
     "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
+    # Compile before service startup: Atlas registration has a short deadline.
+    "$PY" "$PKG/scripts/build_engines.py" --models-dir "$ONNX_DIR"
     echo "[build] done (jetson-native)."
     exit 0
 fi

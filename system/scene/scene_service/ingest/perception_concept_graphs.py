@@ -115,8 +115,8 @@ _CFG_DEFAULTS = {
     "min_points_threshold": 50,
     # Height of the floor in the world frame.
     "floor_z_m": 0.0,
-    # Per-object pcd cap (downsample points if exceeded). Keeps
-    # memory bounded as the same object is observed many times.
+    # Approximate sampling target for each detection, before map merging.
+    # Merged objects are reduced by voxel size, not capped at this count.
     "obj_pcd_max_points": 5000,
     # Periodic cleanup interval (in ticks at ~1.6 Hz). 10 ticks = 6 s cadence.
     "denoise_interval_ticks": 10,
@@ -204,78 +204,34 @@ def _env_or(name: str, fallback: str) -> str:
     return (os.environ.get(name, "") or "").strip() or fallback
 
 
-def _try_load_models(yolo_path, sam_path, clip_model_name, clip_pretrained, profile="lite"):
-    """Load YOLO-World, a SAM variant, and open_clip in one shot."""
-    models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
-    yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", models["yolo"])
-    mp = sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", models["sam"])
-    cm = clip_model_name or _env_or("SCENE_CLIP_MODEL", models["clip_model"])
-    cp = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", models["clip_pretrained"])
-    log.info("[scene-cg] profile=%s yolo=%s sam=%s clip=%s/%s", profile, yw, mp, cm, cp)
-    if not os.path.isfile(yw):
-        log.warning("YOLO-World weights not found at %s — perception disabled", yw)
-        return (None,) * 6
-    if not os.path.isfile(mp):
-        log.warning(
-            "SAM weights not found at %s — perception disabled (profile=%s; the full "
-            "profile expects SCENE_MODELS_DIR mounted at /opt/models/full)", mp, profile,
-        )
-        return (None,) * 6
-    try:
-        import torch
-        from ultralytics import YOLO, SAM
-        import open_clip
-    except Exception as e:  # noqa: BLE001
-        log.warning("ultralytics / open_clip / torch not importable (%s) — perception disabled", e)
-        return (None,) * 6
-
-    # Default to CUDA when available, but allow forcing CPU via env.
+def _load_engine_bundle(profile="lite"):
+    """Load TRT/ORT sessions, or disable perception when they are unavailable."""
     if os.environ.get("SCENE_CG_FORCE_CPU", "").strip() in ("1", "true", "yes"):
-        device = "cpu"
-        log.warning("[scene-cg] SCENE_CG_FORCE_CPU set — running on CPU")
-    else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
         log.warning(
-            "[scene-cg] CUDA not available — concept-graphs runs on CPU; "
-            "expect ~5x slower ticks. Detector will still merge correctly."
+            "[scene-cg] SCENE_CG_FORCE_CPU set — the engine path is GPU-only; "
+            "perception disabled"
         )
+        return None, "cpu"
+
+    models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
+    yw = _env_or("SCENE_YOLO_WORLD_WEIGHTS", models["yolo"])
+    # The ONNX exports ship beside the weights (start_native.sh preflights
+    # `<weights dir>/onnx`); SCENE_ONNX_DIR overrides for split layouts.
+    models_dir = _env_or("SCENE_ONNX_DIR", os.path.join(os.path.dirname(yw), "onnx"))
+    classes = _resolved_classes()
+    log.info("[scene-cg] profile=%s onnx=%s classes=%d", profile, models_dir, len(classes))
 
     try:
-        yolo = YOLO(yw)
-        classes = _resolved_classes()
-        yolo.set_classes(classes)
-        log.info("[scene-cg] YOLO-World loaded: %d open-vocab classes", len(classes))
-    except Exception as e:  # noqa: BLE001
-        log.warning("YOLO-World load failed: %s", e)
-        return (None,) * 6
-    try:
-        sam = SAM(mp)
-        log.info("[scene-cg] MobileSAM loaded")
-    except Exception as e:  # noqa: BLE001
-        log.warning("MobileSAM load failed: %s", e)
-        return (None,) * 6
-    try:
-        from torchvision.transforms import ConvertImageDtype
+        from .perception_engines import load_engines
 
-        precision = "fp32"
-        if device == "cuda" and os.environ.get(
-            "SCENE_CLIP_FP32", ""
-        ).strip() not in ("1", "true", "yes"):
-            precision = "pure_fp16"
-        clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-            cm, pretrained=cp, device=device, precision=precision,
-        )
-        clip_model.eval()
-        if precision == "pure_fp16":
-            clip_preprocess.transforms.append(ConvertImageDtype(torch.float16))
-        log.info("[scene-cg] open_clip %s/%s loaded on %s (%s)", cm, cp, device, precision)
-        clip_tokenizer = open_clip.get_tokenizer(cm)
+        bundle = load_engines(classes, models_dir=models_dir)
+    except FileNotFoundError as e:
+        log.warning("%s — perception disabled", e)
+        return None, "cpu"
     except Exception as e:  # noqa: BLE001
-        log.warning("open_clip load failed: %s", e)
-        return (None,) * 6
-
-    return yolo, sam, clip_model, clip_preprocess, clip_tokenizer, device
+        log.warning("engine load failed (%s) — perception disabled", e)
+        return None, "cpu"
+    return bundle, "cuda"
 
 
 # ── Visible-absence detection ────────────────────────────────────────────
@@ -511,38 +467,6 @@ def _visible_missing_uuids(
 
 
 
-def _import_cg():
-    """Import concept-graphs's slam modules."""
-    from conceptgraph.slam.slam_classes import MapObjectList, DetectionList
-    from conceptgraph.slam.utils import detections_to_obj_pcd_and_bbox
-    from conceptgraph.slam.mapping import (
-        compute_spatial_similarities,
-        compute_visual_similarities,
-        aggregate_similarities,
-        merge_detections_to_objects,
-    )
-    from conceptgraph.utils.model_utils import compute_clip_features_batched
-    from conceptgraph.slam.utils import (
-        denoise_objects,
-        filter_objects,
-        merge_overlap_objects,
-        compute_overlap_matrix_general,
-    )
-    return {
-        "MapObjectList": MapObjectList,
-        "DetectionList": DetectionList,
-        "detections_to_obj_pcd_and_bbox": detections_to_obj_pcd_and_bbox,
-        "compute_spatial_similarities": compute_spatial_similarities,
-        "compute_visual_similarities": compute_visual_similarities,
-        "aggregate_similarities": aggregate_similarities,
-        "merge_detections_to_objects": merge_detections_to_objects,
-        "compute_clip_features_batched": compute_clip_features_batched,
-        "denoise_objects": denoise_objects,
-        "filter_objects": filter_objects,
-        "merge_overlap_objects": merge_overlap_objects,
-        "compute_overlap_matrix_general": compute_overlap_matrix_general,
-    }
-
 
 # ── Detector class ───────────────────────────────────────────────────────
 class ConceptGraphsDetector:
@@ -590,12 +514,7 @@ class ConceptGraphsDetector:
         self._period_s = period_s
         self._conf_thresh = confidence_threshold
         self._max_dets = max_detections
-        self._yolo_weights = yolo_weights_path
-        self._sam_weights = sam_weights_path
-        # Resolve the CLIP identity here, the same way _try_load_models does,
-        # so the export records the encoder that actually produced the features
-        # rather than the constructor argument (None whenever the default or
-        # env value is used).
+        # Exports need the resolved encoder identity, including env overrides.
         _models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
         self._clip_model_name = clip_model_name or _env_or("SCENE_CLIP_MODEL", _models["clip_model"])
         self._clip_pretrained = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _models["clip_pretrained"])
@@ -606,13 +525,9 @@ class ConceptGraphsDetector:
         self._robot_base_frame_fn = robot_base_frame_fn or (lambda: "")
         self._pose_max_age_s = max(0.0, float(pose_max_age_s))
 
-        self._yolo: Any = None
-        self._sam: Any = None
-        self._clip_model: Any = None
-        self._clip_preprocess: Any = None
-        self._clip_tokenizer: Any = None
+        self._engines: Any = None
         self._device: str = "cpu"
-        self._cg: Optional[dict] = None
+        self._cg: Any = None
         self._map_objects: Any = None
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
@@ -624,6 +539,12 @@ class ConceptGraphsDetector:
         # half of why one would be chosen over the other.
         self.backend_name = "concept_graphs"
         self.last_tick_s = 0.0
+        # Optional stage split (SCENE_TICK_PROFILE=1): the split, not the
+        # total, decides whether a CPU runtime swap pays off — it only does
+        # when the GPU stages dominate the tick.
+        self._tick_profile = os.environ.get("SCENE_TICK_PROFILE", "") == "1"
+        self._stage_s: dict = {}
+        self._stage_log_n = 0
         self._known_gate = KnownGround(hub) if hub is not None else None
         self._min_mapped_fraction = 0.5
         # Set in start() so worker-thread `_project_to_registry` can schedule
@@ -676,6 +597,7 @@ class ConceptGraphsDetector:
         self._label_hist: dict[Any, dict[str, float]] = {}
         self._vox: dict[Any, dict[tuple[int, int, int], int]] = {}
         self._label_text_cache: dict[str, Any] = {}
+        self._refreshed_counts: dict[Any, int] = {}
         # How long a soft-evicted (missing) registry record is kept so a re-
         # detection can re-bind it before it is hard-pruned.
         try:
@@ -697,23 +619,19 @@ class ConceptGraphsDetector:
             return
         loop = asyncio.get_running_loop()
         self._asyncio_loop = loop
-        (
-            self._yolo, self._sam,
-            self._clip_model, self._clip_preprocess, self._clip_tokenizer,
-            self._device,
-        ) = await loop.run_in_executor(
-            None, _try_load_models,
-            self._yolo_weights, self._sam_weights,
-            self._clip_model_name, self._clip_pretrained, self._profile,
+        self._engines, self._device = await loop.run_in_executor(
+            None, _load_engine_bundle, self._profile,
         )
-        if self._yolo is None:
-            log.warning("ConceptGraphsDetector skipped — models unavailable")
+        if self._engines is None:
+            log.warning("ConceptGraphsDetector skipped — engine set unavailable")
             return
         try:
-            self._cg = _import_cg()
-            self._map_objects = self._cg["MapObjectList"]()
+            from . import perception_cg_numpy
+
+            self._cg = perception_cg_numpy
+            self._map_objects = self._cg.MapObjectList()
         except Exception as e:  # noqa: BLE001
-            log.warning("concept-graphs slam modules unavailable (%s) — perception disabled", e)
+            log.warning("concept-graphs numpy modules unavailable (%s) — perception disabled", e)
             return
 
         self._stop.clear()
@@ -732,12 +650,15 @@ class ConceptGraphsDetector:
             self._task = None
         if self._map_objects is not None:
             export_from_env(self._map_objects, self._clip_model_name, self._clip_pretrained)
+        if self._engines is not None:
+            self._engines.close()
+            self._engines = None
 
     # ── Text embedding (shared CLIP) ─────────────────────────────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
-        """Encode `texts` with the already-loaded open_clip text encoder,
+        """Encode `texts` with the loaded CLIP text tower (ONNX/CPU ORT),
         L2-normalized to match the per-object image features."""
-        if self._clip_model is None or self._clip_tokenizer is None or not texts:
+        if self._engines is None or not texts:
             return None
         try:
             with self._inference_lock:
@@ -751,15 +672,9 @@ class ConceptGraphsDetector:
         Text encoding for callers that already hold `_inference_lock` (the tick
         thread).
         """
-        if self._clip_model is None or self._clip_tokenizer is None or not texts:
+        if self._engines is None or not texts:
             return None
-        import torch
-
-        with torch.no_grad():
-            tokens = self._clip_tokenizer(texts).to(self._device)
-            feats = self._clip_model.encode_text(tokens).float()
-            feats = feats / feats.norm(dim=-1, keepdim=True)
-            return feats.cpu().tolist()
+        return self._engines.embed_text(texts).tolist()
 
     # ── External viz access ──────────────────────────────────────────
     # Read by the rerun viewer tick and /api/objects3d.
@@ -939,8 +854,29 @@ class ConceptGraphsDetector:
                 # Timed here rather than inside, so the figure covers the whole
                 # pass and is recorded even when the pass raises.
                 self.last_tick_s = time.monotonic() - t0
+                if self._tick_profile and self._stage_s:
+                    self._stage_log_n += 1
+                    if self._stage_log_n % 25 == 1:
+                        # TRT has no allocator pool to track — the engine set's
+                        # static device footprint is the number that matters.
+                        eng_mb = (
+                            self._engines.device_memory_bytes / 2**20
+                            if self._engines is not None else 0.0
+                        )
+                        log.info(
+                            "[scene-cg] tick %.3fs: yolo %.3f sam %.3f clip %.3f "
+                            "pcd %.3f, engines %.0fMB device",
+                            self.last_tick_s,
+                            self._stage_s.get("yolo", 0.0),
+                            self._stage_s.get("sam", 0.0),
+                            self._stage_s.get("clip", 0.0),
+                            self._stage_s.get("pcd", 0.0),
+                            eng_mb,
+                        )
 
     def _tick_locked(self) -> None:
+        self._stage_s = {}
+        t_stage = time.monotonic()
         rgb_msg = self._rgb_msg()
         depth_msg = self._depth_msg()
         if rgb_msg is None or depth_msg is None:
@@ -958,48 +894,30 @@ class ConceptGraphsDetector:
             if self._tick_idx % 25 == 1:
                 log.info("[scene-cg] waiting for camera intrinsics")
             return
-        try:
-            import torch
-        except Exception:
-            return
         rgb = _image_msg_to_bgr(rgb_msg)
         depth = _depth_msg_to_metres(depth_msg)
         self._tick_boxes = {}
         if rgb is None or depth is None:
             return
-        # YOLO-World predict expects RGB in standard channel order.
+        # CLIP crops are taken from true RGB; the engines get BGR and flip
+        # channels internally, exactly like the ultralytics predictors did.
         rgb_for_clip = rgb[:, :, ::-1].copy()  # BGR → RGB
 
-        # ── YOLO-World detect ────────────────────────────────────────
+        # ── YOLO-World detect (engine: preprocess + score stage + NMS) ──
         try:
-            # device must be explicit: ultralytics auto-selects CUDA when torch
-            # sees a GPU, bypassing SCENE_CG_FORCE_CPU — and crashing on hosts
-            # where YOLO-under-CUDA is unstable (the reason that flag exists).
-            yolo_results = self._yolo.predict(
-                rgb, conf=self._conf_thresh, verbose=False,
-                device=self._device,
-            )
+            dets = self._engines.detect(rgb, self._conf_thresh)
         except Exception as e:  # noqa: BLE001
-            log.warning("yolo-world predict failed: %s", e)
+            log.warning("yolo-world engine failed: %s", e)
             return
-        if not yolo_results:
-            return
-        r0 = yolo_results[0]
-        boxes = getattr(r0, "boxes", None)
-        if boxes is None or len(boxes) == 0:
-            self._tick_idx += 1
-            self._maybe_periodic_cleanup()
+        self._stage_s["yolo"] = time.monotonic() - t_stage
+        t_stage = time.monotonic()
+        if dets.shape[0] == 0:
+            self._finish_tick()
             return
 
-        try:
-            xyxy = boxes.xyxy.detach().cpu().numpy()
-            confs = boxes.conf.detach().cpu().numpy()
-            cls_idx = boxes.cls.detach().cpu().numpy().astype(int)
-        except Exception as e:  # noqa: BLE001
-            log.warning("yolo-world boxes unreadable: %s — skipping tick", e)
-            return
-        if xyxy.shape[0] == 0:
-            return
+        xyxy = dets[:, :4].astype(np.float32)
+        confs = dets[:, 4].astype(np.float32)
+        cls_idx = dets[:, 5].astype(int)
 
         # Cap the count so SAM doesn't get a 200-bbox dump.
         if xyxy.shape[0] > self._max_dets:
@@ -1008,7 +926,7 @@ class ConceptGraphsDetector:
             confs = confs[top]
             cls_idx = cls_idx[top]
 
-        names = getattr(r0, "names", None) or {i: c for i, c in enumerate(self._classes)}
+        names = {i: c for i, c in enumerate(self._classes)}
         # Per-tick diagnostic: how many bboxes did YOLO-World return, what
         # classes?
         if self._tick_idx % 25 == 0:
@@ -1024,36 +942,20 @@ class ConceptGraphsDetector:
             for cidx in cls_idx
         ], dtype=bool)
         if not keep.any():
-            self._tick_idx += 1
-            self._maybe_periodic_cleanup()
+            self._finish_tick()
             return
         xyxy = xyxy[keep]
         confs = confs[keep]
         cls_idx = cls_idx[keep]
 
-        # ── MobileSAM mask each bbox ─────────────────────────────────
+        # ── MobileSAM mask each bbox (encoder + decoder engines) ──
         try:
-            sam_results = self._sam.predict(
-                rgb, bboxes=xyxy.tolist(), verbose=False,
-            )
+            masks = self._engines.segment(rgb, xyxy)
         except Exception as e:  # noqa: BLE001
-            log.warning("mobile-sam predict failed: %s — skipping tick", e)
+            log.warning("mobile-sam engine failed: %s — skipping tick", e)
             return
-        if not sam_results or getattr(sam_results[0], "masks", None) is None:
-            log.debug("mobile-sam returned no masks")
-            return
-        masks_t = sam_results[0].masks.data
-        masks = masks_t.detach().cpu().numpy().astype(bool)
-        if masks.shape[0] != xyxy.shape[0]:
-            # SAM dropped some boxes (e.g. degenerate). Realign.
-            n = min(masks.shape[0], xyxy.shape[0])
-            masks = masks[:n]
-            xyxy = xyxy[:n]
-            confs = confs[:n]
-            cls_idx = cls_idx[:n]
-        if masks.shape[0] == 0:
-            return
-
+        self._stage_s["sam"] = time.monotonic() - t_stage
+        t_stage = time.monotonic()
         # Resize masks to depth resolution if needed (MobileSAM masks come back
         # at the input resolution, which matches RGB; depth may differ; equal-
         # sized streams make this a no-op).
@@ -1073,29 +975,9 @@ class ConceptGraphsDetector:
                 log.warning("mask resize failed: %s — skipping tick", e)
                 return
 
-        # ── CLIP per-detection feature ──────────────────────────────
+        # ── CLIP per-detection feature (visual engine, b8) ──────────
         try:
-            import supervision as sv
-            sv_dets = sv.Detections(
-                xyxy=xyxy.astype(np.float32),
-                class_id=cls_idx.astype(int),
-                confidence=confs.astype(np.float32),
-            )
-            sv_dets.mask = masks
-            # concept-graphs does `classes[class_id]`, and class_id is the
-            # detector's own id -- not a position in Scene's vocabulary.
-            present = sorted({int(c) for c in cls_idx})
-            dense_id = {c: i for i, c in enumerate(present)}
-            clip_classes = [str(names.get(c, f"class_{c}")) for c in present]
-            sv_dets.class_id = np.array(
-                [dense_id[int(c)] for c in cls_idx], dtype=int
-            )
-            _, image_feats, _ = self._cg["compute_clip_features_batched"](
-                rgb_for_clip, sv_dets,
-                self._clip_model, self._clip_preprocess, self._clip_tokenizer,
-                clip_classes, self._device,
-            )
-            image_feats = image_feats.astype(np.float32, copy=False)
+            image_feats = self._engines.clip_feats(rgb_for_clip, xyxy)
         except Exception as e:  # noqa: BLE001
             # Log the full traceback once; later failures are counted.
             if not getattr(self, "_clip_fail_logged", False):
@@ -1112,6 +994,8 @@ class ConceptGraphsDetector:
             else:
                 log.warning("CLIP feature compute failed: %s — skipping tick", e)
             return
+        self._stage_s["clip"] = time.monotonic() - t_stage
+        t_stage = time.monotonic()
 
         # ── Per-detection PCD + bbox in map frame ────────────────────
         cam_K_mat = np.array([
@@ -1137,7 +1021,7 @@ class ConceptGraphsDetector:
             return
         self._spatial_not_ready_logged = False
         try:
-            obj_pcds_and_bboxes = self._cg["detections_to_obj_pcd_and_bbox"](
+            obj_pcds_and_bboxes = self._cg.detections_to_obj_pcd_and_bbox(
                 depth_array=depth.astype(np.float32),
                 masks=masks,
                 cam_K=cam_K_mat,
@@ -1156,10 +1040,10 @@ class ConceptGraphsDetector:
         except Exception as e:  # noqa: BLE001
             log.warning("detections_to_obj_pcd_and_bbox failed: %s — skipping tick", e)
             return
+        self._stage_s["pcd"] = time.monotonic() - t_stage
 
         # ── Build DetectionList ──────────────────────────────────────
-        DetectionList = self._cg["DetectionList"]
-        det_list = DetectionList()
+        det_list = self._cg.DetectionList()
         image_idx = self._tick_idx
         for i in range(xyxy.shape[0]):
             entry = obj_pcds_and_bboxes[i]
@@ -1211,7 +1095,7 @@ class ConceptGraphsDetector:
                 "class_id": [cls_id_i],
                 "captions": [""],
                 "num_detections": 1,
-                "mask": [masks[i]],
+                "mask": [masks[i].copy()],  # persistent objects must not retain the whole batch
                 "xyxy": [xyxy[i].tolist()],
                 "conf": [float(confs[i])],
                 "n_points": len(entry["pcd"].points),
@@ -1220,7 +1104,7 @@ class ConceptGraphsDetector:
                 "is_background": cls_name in _BG_CLASSES,
                 "pcd": entry["pcd"],
                 "bbox": entry["bbox"],
-                "clip_ft": torch.from_numpy(image_feats[i]).float(),
+                "clip_ft": image_feats[i],
                 "num_obj_in_class": 0,
                 "curr_obj_num": 0,
                 "new_counter": 0,
@@ -1228,96 +1112,86 @@ class ConceptGraphsDetector:
             det_list.append(d)
 
         if len(det_list) == 0:
-            self._tick_idx += 1
-            self._maybe_periodic_cleanup()
+            self._finish_tick()
             return
 
         # ── Concept-graphs merge ─────────────────────────────────────
         if len(self._map_objects) == 0:
-            for d in det_list:
-                self._map_objects.append(d)
+            self._map_objects.extend(det_list)
             for d in det_list:
                 self._record_observation(d["id"], d)
                 self._refresh_object(d)
             log.info("[scene-cg] init map with %d objects", len(self._map_objects))
         else:
             try:
-                # Own voxel overlap: concept-graphs' 'overlap' mode crashes on coplanar boxes (pytorch3d).
-                visual_sim = self._cg["compute_visual_similarities"](
-                    det_list, self._map_objects,
-                )
-                spatial_sim = self._voxel_pcd_overlap_torch(det_list, self._map_objects)
-                spatial_sim = spatial_sim.to(visual_sim.device)
-                agg_sim = self._cg["aggregate_similarities"](
-                    self.cfg["match_method"], self.cfg["phys_bias"],
-                    spatial_sim, visual_sim,
-                )
-
-                # ── Hard centroid-distance + same-class gates ───────
-                # Two reasons to short-circuit a "high agg_sim" pair: (1)
-                # **Distance gate.** With merge_threshold low, visual sim alone
-                # can carry a match — but two physically distant potted_plants
-                # ALSO have visual sim ≈ 0.6.
-                try:
-                    import torch
-                    det_centroids = []
-                    det_classes = []
-                    for d in det_list:
-                        pp = np.asarray(d["pcd"].points)
-                        det_centroids.append(pp.mean(axis=0) if pp.size else np.zeros(3))
-                        det_classes.append(str(d.get("class_name", "")).lower())
-                    obj_centroids = []
-                    obj_classes = []
-                    for o in self._map_objects:
-                        pp = np.asarray(o["pcd"].points)
-                        obj_centroids.append(pp.mean(axis=0) if pp.size else np.zeros(3))
-                        obj_classes.append(str(o.get("class_name", "")).lower())
-                    if det_centroids and obj_centroids:
-                        dC = np.asarray(det_centroids)             # (M, 3)
-                        oC = np.asarray(obj_centroids)             # (N, 3)
-                        diffs = dC[:, None, :] - oC[None, :, :]    # (M, N, 3)
-                        dist = np.linalg.norm(diffs, axis=2)       # (M, N)
-                        max_d = float(self.cfg["max_merge_dist_m"])
-                        dist_mask = torch.from_numpy(dist > max_d).to(agg_sim.device)
-                        agg_sim[dist_mask] = float("-inf")
-
-                        # Same-class gate.
-                        prox_m = float(self.cfg["cross_class_centroid_max_m"])
-                        proximate = dist <= prox_m                  # (M, N) bool
-                        # Confusable-class buckets
-                        # (SCENE_CG_MERGE_CLASS_GROUPS) collapse e.g.
-                        # chair/table/desk to one key so a desk's YOLO label
-                        # flicker is NOT treated as a class mismatch.
-                        grp = self._merge_class_group
-                        cls_mismatch = np.zeros((len(det_classes), len(obj_classes)), dtype=bool)
-                        for i, dc in enumerate(det_classes):
-                            dcg = grp.get(dc, dc)
-                            for j, oc in enumerate(obj_classes):
-                                ocg = grp.get(oc, oc)
-                                if dcg and ocg and dcg != ocg and not proximate[i, j]:
-                                    cls_mismatch[i, j] = True
-                        cls_mask = torch.from_numpy(cls_mismatch).to(agg_sim.device)
-                        agg_sim[cls_mask] = float("-inf")
-                except Exception as _e:  # noqa: BLE001
-                    log.debug("merge-gate skipped: %s", _e)
-
-                # Below threshold → unmatched → new object.
                 if str(self.cfg["association"]) == "voxel_vote":
-                    agg_sim = self._voxel_vote_similarity(det_list).to(agg_sim.device)
+                    agg_sim = self._voxel_vote_similarity(det_list)
                     agg_sim[agg_sim < float(self.cfg["assoc_threshold"])] = float("-inf")
                 else:
+                    # Own voxel overlap: concept-graphs' 'overlap' mode crashes on coplanar boxes (pytorch3d).
+                    visual_sim = self._cg.compute_visual_similarities(
+                        det_list, self._map_objects,
+                    )
+                    spatial_sim = self._voxel_pcd_overlap_matrix(
+                        det_list, self._map_objects,
+                        voxel_size=self.cfg["downsample_voxel_size"],
+                    )
+                    agg_sim = self._cg.aggregate_similarities(
+                        self.cfg["match_method"], self.cfg["phys_bias"],
+                        spatial_sim, visual_sim,
+                    )
+
+                    # Similar appearance alone cannot justify merging distant objects.
+                    try:
+                        det_centroids = []
+                        det_classes = []
+                        for d in det_list:
+                            pp = np.asarray(d["pcd"].points)
+                            det_centroids.append(pp.mean(axis=0) if pp.size else np.zeros(3))
+                            det_classes.append(str(d.get("class_name", "")).lower())
+                        obj_centroids = []
+                        obj_classes = []
+                        for o in self._map_objects:
+                            pp = np.asarray(o["pcd"].points)
+                            obj_centroids.append(pp.mean(axis=0) if pp.size else np.zeros(3))
+                            obj_classes.append(str(o.get("class_name", "")).lower())
+                        if det_centroids and obj_centroids:
+                            dC = np.asarray(det_centroids)             # (M, 3)
+                            oC = np.asarray(obj_centroids)             # (N, 3)
+                            diffs = dC[:, None, :] - oC[None, :, :]    # (M, N, 3)
+                            dist = np.linalg.norm(diffs, axis=2)       # (M, N)
+                            max_d = float(self.cfg["max_merge_dist_m"])
+                            agg_sim[dist > max_d] = float("-inf")
+
+                            # Same-class gate.
+                            prox_m = float(self.cfg["cross_class_centroid_max_m"])
+                            proximate = dist <= prox_m                  # (M, N) bool
+                            # Configured class groups tolerate label flicker.
+                            grp = self._merge_class_group
+                            cls_mismatch = np.zeros((len(det_classes), len(obj_classes)), dtype=bool)
+                            for i, dc in enumerate(det_classes):
+                                dcg = grp.get(dc, dc)
+                                for j, oc in enumerate(obj_classes):
+                                    ocg = grp.get(oc, oc)
+                                    if dcg and ocg and dcg != ocg and not proximate[i, j]:
+                                        cls_mismatch[i, j] = True
+                            agg_sim[cls_mismatch] = float("-inf")
+                    except Exception as _e:  # noqa: BLE001
+                        log.debug("merge-gate skipped: %s", _e)
+
                     agg_sim[agg_sim < self.cfg["merge_threshold"]] = float("-inf")
                 # Remember which track each detection will merge into: the
                 # merge routine only returns the list, and the side tables
                 # (feature bank, label votes, voxel counts) need the target.
-                _best = agg_sim.max(dim=1)
+                _best_vals = agg_sim.max(axis=1)
+                _best_idx = agg_sim.argmax(axis=1)
                 target_ids = [
-                    self._map_objects[int(_best.indices[i])]["id"]
-                    if float(_best.values[i]) > float("-inf") else None
+                    self._map_objects[int(_best_idx[i])]["id"]
+                    if float(_best_vals[i]) > float("-inf") else None
                     for i in range(len(det_list))
                 ]
                 pre_n = len(self._map_objects)
-                self._map_objects = self._cg["merge_detections_to_objects"](
+                self._map_objects = self._cg.merge_detections_to_objects(
                     downsample_voxel_size=self.cfg["downsample_voxel_size"],
                     dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
                     dbscan_eps=self.cfg["dbscan_eps"],
@@ -1331,19 +1205,8 @@ class ConceptGraphsDetector:
                     agg_sim=agg_sim,
                 )
                 added = len(self._map_objects) - pre_n
-                present = {o["id"] for o in self._map_objects}
-                fresh = iter(list(self._map_objects[pre_n:]))
                 for d, tid in zip(det_list, target_ids):
-                    if tid is None:
-                        # unmatched → upstream appended the detection itself
-                        # (same id) or a processed copy, in detection order
-                        if d["id"] in present:
-                            tid = d["id"]
-                        else:
-                            nobj = next(fresh, None)
-                            tid = nobj["id"] if nobj is not None else None
-                    if tid is not None:
-                        self._record_observation(tid, d)
+                    self._record_observation(tid if tid is not None else d["id"], d)
                 for obj in self._map_objects:
                     self._refresh_object(obj)
                 # Per-frame log is too noisy.
@@ -1373,9 +1236,7 @@ class ConceptGraphsDetector:
             self._seen = (rgb, dict(self._tick_boxes),
                           (float(trans_pose[0, 3]), float(trans_pose[1, 3])), time.time())
         self._update_visible_absence(depth=depth, K=K, trans_pose=trans_pose)
-        self._tick_idx += 1
-        self._maybe_periodic_cleanup()
-        self._project_to_registry()
+        self._finish_tick(observed=True)
 
     def _update_visible_absence(self, *, depth, K, trans_pose) -> None:
         """Remove map objects whose old location is verifiably empty."""
@@ -1423,7 +1284,7 @@ class ConceptGraphsDetector:
         if not doomed:
             return
         if self._cg is not None:
-            retained = self._cg["MapObjectList"]()
+            retained = self._cg.MapObjectList()
         else:  # pragma: no cover - loaders guarantee _cg by now
             retained = []
         removed = 0
@@ -1479,25 +1340,24 @@ class ConceptGraphsDetector:
                     out[j, i] = v
         return out
 
-    def _voxel_pcd_overlap_torch(self, det_list, map_objects):
-        """Wrap `_voxel_pcd_overlap_matrix` for the per-tick merge — returns an
-        (M, N) torch tensor on `self._device` so it can be passed directly to
-        `aggregate_similarities` alongside the CLIP visual similarity matrix."""
-        import torch
-        arr = self._voxel_pcd_overlap_matrix(
-            det_list, map_objects, voxel_size=self.cfg["downsample_voxel_size"],
-        )
-        return torch.from_numpy(arr).to(self._device)
-
     # ── Periodic cleanup ─────────────────────────────────────────────
-    def _maybe_periodic_cleanup(self) -> None:
+    def _finish_tick(self, *, observed: bool = False) -> None:
+        self._tick_idx += 1
+        had_objects = bool(self._map_objects)
+        cleaned = self._maybe_periodic_cleanup()
+        if observed or cleaned:
+            self._project_to_registry()
+        if had_objects:
+            export_from_env(self._map_objects, self._clip_model_name, self._clip_pretrained)
+
+    def _maybe_periodic_cleanup(self) -> bool:
         if self._map_objects is None or len(self._map_objects) == 0:
-            return
+            return False
         ran_any = False
         if self._tick_idx % self.cfg["denoise_interval_ticks"] == 0:
             try:
                 pre = len(self._map_objects)
-                self._map_objects = self._cg["denoise_objects"](
+                self._map_objects = self._cg.denoise_objects(
                     downsample_voxel_size=self.cfg["downsample_voxel_size"],
                     dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
                     dbscan_eps=self.cfg["dbscan_eps"],
@@ -1507,7 +1367,7 @@ class ConceptGraphsDetector:
                     objects=self._map_objects,
                 )
                 # filter_objects drops objects with too-few points / detections
-                self._map_objects = self._cg["filter_objects"](
+                self._map_objects = self._cg.filter_objects(
                     obj_min_points=self.cfg["obj_min_points"],
                     obj_min_detections=self.cfg["obj_min_detections"],
                     objects=self._map_objects,
@@ -1527,7 +1387,7 @@ class ConceptGraphsDetector:
                     voxel_size=self.cfg["downsample_voxel_size"],
                 )
                 # merge_overlap_objects returns (MapObjectList, index_updates).
-                merged_objs, _index_updates = self._cg["merge_overlap_objects"](
+                merged_objs, _index_updates = self._cg.merge_overlap_objects(
                     merge_overlap_thresh=self.cfg["merge_overlap_thresh"],
                     merge_visual_sim_thresh=self.cfg["merge_visual_sim_thresh"],
                     merge_text_sim_thresh=self.cfg["merge_text_sim_thresh"],
@@ -1564,11 +1424,7 @@ class ConceptGraphsDetector:
                     ran_any = True
             except Exception as e:  # noqa: BLE001
                 log.warning("same-class proximity collapse failed: %s", e)
-        if ran_any:
-            self._project_to_registry()
-        # Optional snapshot in the layout the upstream Replica scorer reads.
-        # Inert unless SCENE_EXPORT_CG_PICKLE names a directory.
-        export_from_env(self._map_objects, self._clip_model_name, self._clip_pretrained)
+        return ran_any
 
     def _cross_class_geometric_collapse(self, objects):
         """Class-and-visual-agnostic merge pass."""
@@ -1576,13 +1432,7 @@ class ConceptGraphsDetector:
         n = len(objects)
         if n < 2:
             return objects
-        merge_obj2_into_obj1 = self._cg.get("merge_obj2_into_obj1")
-        if merge_obj2_into_obj1 is None:
-            try:
-                from conceptgraph.slam.utils import merge_obj2_into_obj1 as _m
-                merge_obj2_into_obj1 = _m
-            except Exception:
-                return objects
+        merge_obj2_into_obj1 = self._cg.merge_obj2_into_obj1
 
         bboxes: list[tuple["np.ndarray", "np.ndarray"]] = []
         for o in objects:
@@ -1635,8 +1485,7 @@ class ConceptGraphsDetector:
                 if pts.size:
                     bboxes[i] = (pts.min(axis=0), pts.max(axis=0))
 
-        MapObjectList = self._cg["MapObjectList"]
-        out = MapObjectList()
+        out = self._cg.MapObjectList()
         for k, alive in enumerate(keep):
             if alive:
                 out.append(objects[k])
@@ -1652,13 +1501,7 @@ class ConceptGraphsDetector:
         n = len(objects)
         if n < 2:
             return objects
-        merge_obj2_into_obj1 = self._cg.get("merge_obj2_into_obj1")
-        if merge_obj2_into_obj1 is None:
-            try:
-                from conceptgraph.slam.utils import merge_obj2_into_obj1 as _m
-                merge_obj2_into_obj1 = _m
-            except Exception:
-                return objects
+        merge_obj2_into_obj1 = self._cg.merge_obj2_into_obj1
 
         def _centroid(o):
             pts = np.asarray(o["pcd"].points)
@@ -1699,8 +1542,7 @@ class ConceptGraphsDetector:
                 keep[j] = False
                 centroids[i] = _centroid(objects[i])
 
-        MapObjectList = self._cg["MapObjectList"]
-        out = MapObjectList()
+        out = self._cg.MapObjectList()
         for k, alive in enumerate(keep):
             if alive:
                 out.append(objects[k])
@@ -1896,7 +1738,8 @@ class ConceptGraphsDetector:
         if self._map_objects is None:
             return
         live = {o["id"] for o in self._map_objects}
-        for table in (self._bank, self._max_area, self._label_hist, self._vox):
+        for table in (self._bank, self._max_area, self._label_hist, self._vox,
+                      self._refreshed_counts):
             for k in [k for k in table if k not in live]:
                 del table[k]
 
@@ -1931,6 +1774,7 @@ class ConceptGraphsDetector:
 
     def _record_observation(self, track_id, det: dict) -> None:
         """Fold one detection into a track's side tables."""
+        self._refreshed_counts.pop(track_id, None)
         if det.get("xyxy"):
             self._tick_boxes[str(track_id)] = det["xyxy"][0]
         try:
@@ -1945,7 +1789,7 @@ class ConceptGraphsDetector:
             if area >= float(self.cfg["feature_area_ratio"]) * biggest:
                 ft = det.get("clip_ft")
                 if ft is not None:
-                    v = np.asarray(ft.detach().cpu().numpy() if hasattr(ft, "detach") else ft, dtype=np.float32).ravel()
+                    v = np.asarray(ft, dtype=np.float32).ravel()
                     n = float(np.linalg.norm(v))
                     if n > 0:
                         bank = self._bank.setdefault(track_id, [])
@@ -1968,9 +1812,14 @@ class ConceptGraphsDetector:
         return max(hist.items(), key=lambda kv: kv[1])[0]
 
     def _refresh_object(self, obj: dict) -> None:
-        """Apply label voting and text-guided feature selection to a track."""
+        """Apply label voting and text-guided feature selection when a track changes."""
+        track_id = obj["id"]
+        count = obj["num_detections"]
+        if self._refreshed_counts.get(track_id) == count:
+            return
+        # Cleanup merges change the count even without a new observation.
+        self._refreshed_counts[track_id] = count
         try:
-            import torch
             if self.cfg["label_vote"]:
                 label = self._consensus_label(obj)
                 if label:
@@ -1983,17 +1832,18 @@ class ConceptGraphsDetector:
             text = self._label_text_feat(str(obj.get("class_name") or ""))
             feats = np.stack([b[0] for b in bank], axis=0)
             if text is None:
-                # no text encoder: the largest view stands in
+                self._refreshed_counts.pop(track_id, None)
+                # Retry text selection on the next pass if encoding recovers.
                 best = int(np.argmax([b[1] for b in bank]))
             else:
                 best = int(np.argmax(feats @ text))
-            obj["clip_ft"] = torch.from_numpy(feats[best].copy()).float()
+            obj["clip_ft"] = feats[best].copy()
         except Exception as e:  # noqa: BLE001
+            self._refreshed_counts.pop(track_id, None)
             log.debug("[scene-cg] refresh_object skipped: %s", e)
 
     def _voxel_vote_similarity(self, det_list):
         """Detection × track score matrix for the voxel-vote association."""
-        import torch
         self._reconcile_side_tables()
         objs = self._map_objects
         n_obj = len(objs)
@@ -2019,7 +1869,7 @@ class ConceptGraphsDetector:
                 else:
                     feat = 0.5
                 S[i, j] = w_geo * geo + w_feat * feat
-        return torch.from_numpy(S)
+        return S
 
     def _project_to_registry(self) -> None:
         """Replace registry's perception-source objects with a snapshot of the
@@ -2263,7 +2113,7 @@ class ConceptGraphsDetector:
                     return
                 gone = set(uuids)
                 if self._cg is not None:
-                    retained = self._cg["MapObjectList"]()
+                    retained = self._cg.MapObjectList()
                 else:
                     retained = []
                 for obj in self._map_objects:
@@ -2288,7 +2138,7 @@ class ConceptGraphsDetector:
         if not previous or previous == world_frame or self._map_objects is None:
             return
         log.info("[scene-cg] world frame %s -> %s; starting the map again", previous, world_frame)
-        self._map_objects = self._cg["MapObjectList"]() if self._cg is not None else []
+        self._map_objects = self._cg.MapObjectList() if self._cg is not None else []
         self._vox.clear()
 
     async def reset_derived_state(self) -> None:
@@ -2301,7 +2151,7 @@ class ConceptGraphsDetector:
                 if self._map_objects is None:
                     return
                 if self._cg is not None:
-                    self._map_objects = self._cg["MapObjectList"]()
+                    self._map_objects = self._cg.MapObjectList()
                 else:
                     self._map_objects = []
 
