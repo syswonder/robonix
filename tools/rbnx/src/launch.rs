@@ -47,7 +47,7 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -600,6 +600,102 @@ pub fn contract_id_to_service_name(id: &str) -> String {
 /// on heartbeat/state/capability updates.
 pub type ProviderRegistrationSnapshot = HashMap<String, String>;
 
+/// Compares one package's declared transports with Atlas observations during bring-up.
+pub struct CapabilityTransportCheck {
+    /// Deployment instance used to identify the package in diagnostics.
+    package: String,
+    /// Expected contract and transport pairs from the selected package manifest.
+    declared: BTreeSet<(String, String)>,
+    /// Contracts whose omitted transport leaves their runtime transport unspecified.
+    unspecified: BTreeSet<String>,
+    /// Whether the framework supplies the shared lifecycle Driver implicitly.
+    implicit_driver: bool,
+    /// Diagnostics already returned, bounded by the package's observed capabilities.
+    warned: BTreeSet<String>,
+}
+
+impl CapabilityTransportCheck {
+    pub fn new(package: &str, manifest: &crate::manifest::Manifest) -> Self {
+        Self {
+            package: package.to_owned(),
+            declared: manifest
+                .capabilities
+                .iter()
+                .flat_map(|capability| {
+                    capability
+                        .transport
+                        .iter()
+                        .map(|transport| (capability.name.clone(), transport.clone()))
+                })
+                .collect(),
+            unspecified: manifest
+                .capabilities
+                .iter()
+                .filter(|capability| capability.transport.is_empty())
+                .map(|capability| capability.name.clone())
+                .collect(),
+            implicit_driver: manifest
+                .capabilities
+                .iter()
+                .all(|capability| !capability.name.ends_with("/driver")),
+            warned: BTreeSet::new(),
+        }
+    }
+
+    pub fn observe(&mut self, provider: &atlas_pb::CapabilityProvider) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.declared.is_empty() {
+            warnings.push(format!(
+                "package '{}': manifest declares no capability transports; runtime transport comparison skipped",
+                self.package
+            ));
+        } else {
+            let registered = provider
+                .capabilities
+                .iter()
+                .map(|capability| {
+                    let transport = match atlas_pb::Transport::try_from(capability.transport) {
+                        Ok(atlas_pb::Transport::Grpc) => "grpc".to_owned(),
+                        Ok(atlas_pb::Transport::Ros2) => "ros2".to_owned(),
+                        Ok(atlas_pb::Transport::Mcp) => "mcp".to_owned(),
+                        _ => format!("unknown({})", capability.transport),
+                    };
+                    (capability.contract_id.clone(), transport)
+                })
+                .collect::<BTreeSet<_>>();
+            for (contract, transport) in registered.difference(&self.declared) {
+                if self.implicit_driver
+                    && contract == crate::manifest::SHARED_LIFECYCLE_DRIVER_CONTRACT
+                    && transport == "grpc"
+                {
+                    continue;
+                }
+                warnings.push(if self.unspecified.contains(contract) {
+                    format!(
+                        "package '{}': registered capability contract '{contract}' over '{transport}', but the manifest gives it no `transport`",
+                        self.package
+                    )
+                } else {
+                    format!(
+                        "package '{}': registered capability contract '{contract}' transport '{transport}' is not declared in the manifest",
+                        self.package
+                    )
+                });
+            }
+            if provider.state == atlas_pb::LifecycleState::StateActive as i32 {
+                for (contract, transport) in self.declared.difference(&registered) {
+                    warnings.push(format!(
+                        "package '{}': declared capability contract '{contract}' transport '{transport}' is not registered while ACTIVE",
+                        self.package
+                    ));
+                }
+            }
+        }
+        warnings.retain(|warning| self.warned.insert(warning.clone()));
+        warnings
+    }
+}
+
 pub async fn snapshot_provider_ids(
     atlas: &mut AtlasClient,
 ) -> Result<ProviderRegistrationSnapshot> {
@@ -648,6 +744,8 @@ pub fn is_expected_provider_registration(
 ///     sending lifecycle commands.
 #[derive(Debug, Clone)]
 pub struct RegistrationOutcome {
+    /// Full Atlas snapshot after declarations settle, before lifecycle commands.
+    pub provider: atlas_pb::CapabilityProvider,
     pub provider_id: String,
     pub provider_kind: i32,
     pub provider_namespace: String,
@@ -832,6 +930,7 @@ pub async fn wait_for_registration_core(
             }
             let driver_contracts = runtime_driver_contracts(&current);
             return Ok(RegistrationOutcome {
+                provider: current.clone(),
                 provider_id,
                 provider_kind: current.kind,
                 provider_namespace: current.namespace,
@@ -939,16 +1038,193 @@ pub async fn call_driver_cmd(
 #[cfg(test)]
 mod tests {
     use super::{
-        PackageRuntimeRecord, atlas_pb, is_expected_provider_registration,
-        is_new_provider_registration, linux_proc_status_is_not_zombie,
-        macos_procargs_has_environment_entry, macos_ps_state_is_not_zombie, proc_start_time_ticks,
-        process_group_has_members, resolve_runtime_driver_contract,
-        shutdown_package_runtime_checked, terminate_process_group_guarded,
-        validate_runtime_driver_contracts,
+        CapabilityTransportCheck, PackageRuntimeRecord, atlas_pb,
+        is_expected_provider_registration, is_new_provider_registration,
+        linux_proc_status_is_not_zombie, macos_procargs_has_environment_entry,
+        macos_ps_state_is_not_zombie, proc_start_time_ticks, process_group_has_members,
+        resolve_runtime_driver_contract, shutdown_package_runtime_checked,
+        terminate_process_group_guarded, validate_runtime_driver_contracts,
     };
 
     const SHARED: &str = "robonix/lifecycle/driver";
     const LEGACY: &str = "robonix/primitive/camera/driver";
+
+    fn transport_check(capabilities: &[(&str, &[&str])]) -> CapabilityTransportCheck {
+        let manifest = crate::manifest::Manifest {
+            capabilities: capabilities
+                .iter()
+                .map(|(name, transport)| crate::manifest::CapabilityRef {
+                    name: (*name).to_owned(),
+                    transport: transport.iter().map(|value| (*value).to_owned()).collect(),
+                    path: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        CapabilityTransportCheck::new("camera", &manifest)
+    }
+
+    fn transport_provider(
+        state: atlas_pb::LifecycleState,
+        capabilities: &[(&str, atlas_pb::Transport)],
+    ) -> atlas_pb::CapabilityProvider {
+        atlas_pb::CapabilityProvider {
+            id: "camera".to_owned(),
+            state: state as i32,
+            capabilities: capabilities
+                .iter()
+                .map(|(contract, transport)| atlas_pb::Capability {
+                    contract_id: (*contract).to_owned(),
+                    transport: *transport as i32,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transport_comparison_warns_for_pairs_once_and_defers_missing_until_active() {
+        use atlas_pb::{LifecycleState as State, Transport};
+        let mut check = transport_check(&[("camera/rgb", &["grpc", "ros2"])]);
+        let mut provider = transport_provider(
+            State::StateRegistered,
+            &[
+                ("camera/rgb", Transport::Grpc),
+                ("camera/rgb", Transport::Mcp),
+            ],
+        );
+        let warnings = check.observe(&provider);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("package 'camera'"));
+        assert!(warnings[0].contains("contract 'camera/rgb' transport 'mcp'"));
+        assert!(warnings[0].contains("not declared"));
+        assert!(check.observe(&provider).is_empty());
+        provider.state = State::StateInactive as i32;
+        assert!(check.observe(&provider).is_empty());
+        provider.state = State::StateActive as i32;
+        let warnings = check.observe(&provider);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("contract 'camera/rgb' transport 'ros2'"));
+        assert!(warnings[0].contains("not registered while ACTIVE"));
+        assert!(check.observe(&provider).is_empty());
+    }
+
+    #[test]
+    fn exact_registered_transport_set_and_implicit_driver_need_no_warning() {
+        use atlas_pb::{LifecycleState as State, Transport};
+        let mut check = transport_check(&[("camera/rgb", &["grpc", "ros2"])]);
+        let provider = transport_provider(
+            State::StateActive,
+            &[
+                ("camera/rgb", Transport::Grpc),
+                ("camera/rgb", Transport::Ros2),
+                (SHARED, Transport::Grpc),
+            ],
+        );
+        assert!(check.observe(&provider).is_empty());
+        let mut explicit = transport_check(&[(SHARED, &["ros2"])]);
+        assert_eq!(explicit.observe(&provider).len(), 4);
+    }
+
+    #[test]
+    fn a_contract_without_transport_is_still_reported_when_it_registers() {
+        use atlas_pb::{LifecycleState as State, Transport};
+        let provider = transport_provider(State::StateActive, &[("camera/rgb", Transport::Ros2)]);
+        let mut legacy = transport_check(&[("camera/rgb", &[])]);
+        let warnings = legacy.observe(&provider);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("declares no capability transports"));
+        assert!(legacy.observe(&provider).is_empty());
+
+        let mut mixed = transport_check(&[("camera/rgb", &[]), ("camera/status", &["grpc"])]);
+        let warnings = mixed.observe(&provider);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| {
+            w.contains("'camera/rgb' over 'ros2', but the manifest gives it no `transport`")
+        }));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("contract 'camera/status' transport 'grpc'"))
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_comparison_uses_real_atlas_registration_and_lifecycle_snapshots() {
+        use atlas_pb::{LifecycleState as State, Transport};
+        use robonix_atlas::client::{AtlasClient, grpc_params};
+        use robonix_atlas::service::{AtlasRegistry, AtlasService};
+        use std::sync::Arc;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(atlas_pb::atlas_server::AtlasServer::new(AtlasService::new(
+                    Arc::new(AtlasRegistry::default()),
+                )))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        let mut atlas = AtlasClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        atlas
+            .register_service("camera", "camera", "")
+            .await
+            .unwrap();
+        atlas
+            .declare_capability(
+                "camera",
+                "camera/rgb",
+                Transport::Grpc,
+                "127.0.0.1:51000",
+                grpc_params("camera.proto", "Camera", "/Camera/Rgb"),
+            )
+            .await
+            .unwrap();
+        let mut check = transport_check(&[("camera/rgb", &["ros2"])]);
+        let registered = atlas
+            .query_capabilities("camera", "", Transport::Unspecified)
+            .await
+            .unwrap();
+        let warnings = check.observe(&registered[0]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("transport 'grpc' is not declared"));
+
+        atlas
+            .declare_capability(
+                "camera",
+                SHARED,
+                Transport::Grpc,
+                "127.0.0.1:51000",
+                grpc_params(
+                    "lifecycle.proto",
+                    "robonix.contracts.RobonixLifecycleDriver",
+                    "/robonix.contracts.RobonixLifecycleDriver/Driver",
+                ),
+            )
+            .await
+            .unwrap();
+        atlas
+            .set_lifecycle_state("camera", State::StateInactive, "")
+            .await
+            .unwrap();
+        atlas
+            .set_lifecycle_state("camera", State::StateActive, "")
+            .await
+            .unwrap();
+        let active = atlas
+            .query_capabilities("camera", "", Transport::Unspecified)
+            .await
+            .unwrap();
+        let warnings = check.observe(&active[0]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("transport 'ros2' is not registered while ACTIVE"));
+        assert!(check.observe(&active[0]).is_empty());
+        server.abort();
+        let _ = server.await;
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]

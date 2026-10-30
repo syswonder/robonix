@@ -216,8 +216,8 @@ pub(crate) fn close_trailing_assistant(messages: &mut Vec<Message>) {
 /// changed, or removed since, and nothing when the catalog is unchanged.
 ///
 /// A round's record counts as shown only once that round is written to
-/// history; a round dropped for a steer or a stale plan leaves the view as it
-/// was, so the next round repeats what the model has not yet seen.
+/// history; if opening the stream fails, the next round repeats what was not
+/// recorded.
 #[derive(Default)]
 pub(crate) struct CatalogView {
     shown: Option<BTreeMap<String, String>>,

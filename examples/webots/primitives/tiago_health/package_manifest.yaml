@@ -20,5 +20,8 @@ stop: |
 
 capabilities:
   - name: robonix/primitive/health/state
+    transport: grpc
   - name: robonix/primitive/health/stream
+    transport: grpc
   - name: robonix/lifecycle/driver
+    transport: grpc

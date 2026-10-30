@@ -39,5 +39,8 @@ stop: |
 
 capabilities:
   - name: robonix/primitive/chassis/move
+    transport: grpc
   - name: robonix/primitive/chassis/odom
+    transport: ros2
   - name: robonix/primitive/chassis/twist_in
+    transport: ros2

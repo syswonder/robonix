@@ -35,7 +35,12 @@ const EVT_FINAL_TEXT: u32 = 4;
 const STATE_FAILED: u32 = 2;
 const CONSUMER_ID: &str = "rbnx-cli/ask";
 
-pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
+pub async fn execute(
+    server: &str,
+    prompt: &str,
+    json: bool,
+    session: Option<String>,
+) -> Result<()> {
     let mut atlas = AtlasClient::connect(server)
         .await
         .with_context(|| format!("connect to atlas at '{server}'"))?;
@@ -48,7 +53,7 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
     }
     let mut client = RobonixSystemPilotClient::new(channel);
 
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = session.unwrap_or_else(|| Uuid::new_v4().to_string());
     let task = Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.clone(),

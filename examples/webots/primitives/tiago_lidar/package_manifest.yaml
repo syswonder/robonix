@@ -23,4 +23,6 @@ stop: |
 
 capabilities:
   - name: robonix/primitive/lidar/lidar
+    transport: ros2
   - name: robonix/primitive/lidar/snapshot
+    transport: mcp

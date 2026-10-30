@@ -90,6 +90,12 @@ files follow `<interface>.v1.toml` naming, grouped by domain, for example
 
 Comments and docstrings follow `comments-explain-why` in `.agents/guidelines/maintainability.md`: say why when the code cannot, in a line or two.
 
+Every struct must have a documentation comment explaining what it represents
+and its purpose. Every field, including tuple struct fields, must have its own
+documentation comment explaining its meaning and role. This applies regardless of visibility.
+In Rust, use `///` doc comments, and explain semantics rather than merely
+restating the struct or field name.
+
 ## Testing Guidelines
 
 Place Rust integration tests in each crate's `tests/` directory and keep unit

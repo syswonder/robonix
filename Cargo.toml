@@ -13,6 +13,7 @@
 # listed in the root pyproject.toml, not part of this Cargo workspace.
 members = [
     "system/atlas",
+    "system/chronos/clock",
     "system/executor",
     "system/liaison",
     "system/pilot",

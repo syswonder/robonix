@@ -123,11 +123,43 @@ class StreamingSmokeTest(unittest.IsolatedAsyncioTestCase):
             f"ws://127.0.0.1:{self.stream_port}"
         ) as websocket:
             await websocket.send("w3d")
-            self.assertEqual(await websocket.recv(), "echo:w3d")
+            self.assertEqual(await websocket.recv(), "echo:w3d;broadcast")
 
         self.proxy.terminate()
         self.proxy.wait(timeout=5)
         self.run_healthcheck(expected_success=False)
+
+    async def test_viewer_cannot_control_simulation(self) -> None:
+        """Normalize viewer handshakes and reject controls across reconnects."""
+        self.run_healthcheck(expected_success=True, timeout=5.0)
+        async with websockets.connect(
+            f"ws://127.0.0.1:{self.stream_port}"
+        ) as websocket:
+            await websocket.send("w3d")
+            self.assertEqual(await websocket.recv(), "echo:w3d;broadcast")
+            for command in (
+                "pause",
+                "real-time:-1",
+                "fast:-1",
+                "timeout:0",
+                "reset",
+                "reload",
+                "step",
+                "load:office.wbt",
+                "robot:my_robot:command",
+                b"pause",
+            ):
+                await websocket.send(command)
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(websocket.recv(), timeout=0.2)
+            await websocket.send("w3d;broadcast")
+            self.assertEqual(await websocket.recv(), "echo:w3d;broadcast")
+
+        async with websockets.connect(
+            f"ws://127.0.0.1:{self.stream_port}"
+        ) as websocket:
+            await websocket.send("w3d")
+            self.assertEqual(await websocket.recv(), "echo:w3d;broadcast")
 
 
 if __name__ == "__main__":
