@@ -26,6 +26,8 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+
 from .types import MemoryNode
 
 log = logging.getLogger("scribe_mem")
@@ -34,6 +36,20 @@ log = logging.getLogger("scribe_mem")
 
 def _llm_config() -> dict:
     """Resolve LLM endpoint from env vars with standard fallbacks."""
+    try:
+        target = resolve_from_env(
+            Requirements(capabilities=("json_object",), max_output_tokens=512)
+        )
+    except RuntimeError as exc:
+        log.warning("llm_search: capability catalog: %s", exc)
+        target = None
+    if target is not None:
+        return {
+            "base_url": target.base_url,
+            "api_key": api_key_for(target),
+            "model": target.model,
+        }
+
     base_url = (
         os.environ.get("MEMGRAPH_LLM_BASE_URL")
         or os.environ.get("VLM_BASE_URL")

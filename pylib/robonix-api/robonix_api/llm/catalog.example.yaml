@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Example capability catalog.  Copy it into a deployment and edit the model
+# list; never put a key here.  `api_key_env` names the environment variable a
+# consumer reads before connecting directly.
+
+models:
+  - id: deepseek/flash
+    provider: deepseek
+    base_url: https://api.deepseek.com
+    model: deepseek-flash
+    api_key_env: DEEPSEEK_API_KEY
+    protocol: openai-chat
+    capabilities:
+      vision: true
+      json_object: true
+      json_schema: false
+      tools: true
+      stream: true
+    context: 131072
+    latency_p95_ms: 2000
+    price_input_per_mtok: 0.14
+    price_output_per_mtok: 0.28
+
+  - id: cloud/gpt
+    provider: openai
+    base_url: https://api.openai.com/v1
+    model: gpt-5.5
+    api_key_env: OPENAI_API_KEY
+    protocol: openai-chat
+    capabilities:
+      vision: true
+      json_object: true
+      json_schema: true
+      tools: true
+      stream: true
+    context: 400000
+    latency_p95_ms: 2500
+    price_input_per_mtok: 1.25
+    price_output_per_mtok: 10.0
+
+  - id: text/small
+    provider: openai
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+    protocol: openai-chat
+    capabilities:
+      vision: false
+      json_object: true
+      json_schema: true
+      tools: true
+      stream: true
+    context: 131072
+    latency_p95_ms: 500
+    price_input_per_mtok: 0.4
+    price_output_per_mtok: 1.6

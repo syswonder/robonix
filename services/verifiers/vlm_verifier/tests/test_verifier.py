@@ -96,14 +96,46 @@ class ParsingTests(unittest.TestCase):
     def test_vlm_configuration(self):
         """Check vlm configuration."""
         valid = dict(base_url="http://localhost:123/v1/", api_key="secret", model="vision")
-        self.assertEqual(vlm.VlmConfig.parse(valid).base_url, "http://localhost:123/v1")
-        for key in valid:
-            invalid = dict(valid, **{key: ""})
-            with self.assertRaises(ValueError):
-                vlm.VlmConfig.parse(invalid)
-        for url in ("file:///x", "http://user:secret@host/v1", "https://host/v1?key=secret"):
-            with self.assertRaises(ValueError):
-                vlm.VlmConfig.parse(dict(valid, base_url=url))
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": ""}, clear=False):
+            self.assertEqual(vlm.VlmConfig.parse(valid).base_url, "http://localhost:123/v1")
+            for key in valid:
+                invalid = dict(valid, **{key: ""})
+                with self.assertRaises(ValueError):
+                    vlm.VlmConfig.parse(invalid)
+            for url in ("file:///x", "http://user:secret@host/v1", "https://host/v1?key=secret"):
+                with self.assertRaises(ValueError):
+                    vlm.VlmConfig.parse(dict(valid, base_url=url))
+
+    def test_vlm_configuration_from_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = Path(tmp) / "catalog.json"
+            catalog.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "id": "test/vision",
+                                "provider": "vllm",
+                                "base_url": "http://127.0.0.1:9999/v1/",
+                                "model": "test-vl",
+                                "api_key_env": "TEST_KEY",
+                                "capabilities": {"vision": True},
+                                "latency_p95_ms": 100,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"ROBONIX_LLM_CATALOG": str(catalog), "TEST_KEY": "secret"},
+                clear=False,
+            ):
+                config = vlm.VlmConfig.parse(None)
+        self.assertEqual(config.base_url, "http://127.0.0.1:9999/v1")
+        self.assertEqual(config.model, "test-vl")
+        self.assertEqual(config.api_key, "secret")
 
     def test_exact_camera_resolution(self):
         """Check exact camera resolution."""

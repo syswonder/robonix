@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use robonix_llm_catalog::{Requirements, api_key_for, resolve_from_env};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -184,6 +185,42 @@ impl PilotConfig {
             bail!("vlm api_format='{api_format}' not supported (only 'openai')");
         }
 
+        let requirements = env_llm_requirements();
+        if let Some(target) = resolve_from_env(&requirements)? {
+            if target.protocol != "openai-chat" {
+                bail!(
+                    "catalog target {} uses protocol {}; pilot only speaks openai-chat",
+                    target.id,
+                    target.protocol
+                );
+            }
+            let api_key = api_key_for(&target);
+            if api_key.is_empty() {
+                bail!(
+                    "read {} for catalog target {}",
+                    target.api_key_env,
+                    target.id
+                );
+            }
+            let context_window_tokens = args
+                .vlm_context_window_tokens
+                .or(file_vlm.context_window_tokens)
+                .filter(|tokens| *tokens > 0)
+                .or(target.context.map(|tokens| tokens as usize));
+            return Ok(Self {
+                atlas_endpoint,
+                listen,
+                id,
+                vlm: VlmConfig {
+                    upstream: target.base_url,
+                    api_key,
+                    model: target.model,
+                    context_window_tokens,
+                    api_format,
+                },
+            });
+        }
+
         let upstream = args
             .vlm_upstream
             .or(file_vlm.upstream)
@@ -236,6 +273,45 @@ fn env_atlas() -> Option<String> {
     std::env::var("ROBONIX_ATLAS")
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+/// Capabilities and budgets for the catalog lookup. The defaults describe what
+/// Pilot's planning requests need; every value can be overridden per
+/// deployment. `json_schema` is intentionally absent: Pilot already downgrades
+/// a rejected schema at request time, so requiring the capability here would
+/// exclude a capable json_object model such as DeepSeek Flash.
+fn env_llm_requirements() -> Requirements {
+    let capabilities = std::env::var("ROBONIX_LLM_CAPABILITIES")
+        .unwrap_or_else(|_| "vision,tools,stream".to_owned());
+    Requirements {
+        capabilities: capabilities
+            .split(',')
+            .map(str::trim)
+            .filter(|capability| !capability.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        input_tokens: env_u64("ROBONIX_LLM_INPUT_TOKENS").unwrap_or(0),
+        max_output_tokens: env_u64("ROBONIX_LLM_MAX_OUTPUT_TOKENS").unwrap_or(0),
+        max_latency_ms: env_f64("ROBONIX_LLM_MAX_LATENCY_MS"),
+        max_cost_usd_per_call: env_f64("ROBONIX_LLM_MAX_COST_USD_PER_CALL"),
+        allow_downgrade: env_bool("ROBONIX_LLM_ALLOW_DOWNGRADE").unwrap_or(true),
+    }
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+fn env_f64(name: &str) -> Option<f64> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn load_yaml(path: &Path) -> Result<FileConfig> {

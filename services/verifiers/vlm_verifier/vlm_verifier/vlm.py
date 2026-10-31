@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import httpx
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
 
 SYSTEM_PROMPT = """You verify completed robot actions using BEFORE and AFTER camera images.
 Each image is labelled with its camera provider and execution phase.
@@ -54,7 +55,29 @@ class VlmConfig:
 
     @classmethod
     def parse(cls, cfg):
-        """Validate independent model configuration without exposing secrets."""
+        """Validate independent model configuration without exposing secrets.
+
+        A deployment catalog wins over the manifest's ``vlm`` block; the block
+        stays required by the deployment schema because most deployments still
+        configure the endpoint there.
+        """
+        try:
+            target = resolve_from_env(Requirements(capabilities=("vision",)))
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        if target is not None:
+            if target.protocol != "openai-chat":
+                raise ValueError(
+                    f"catalog target {target.id!r} uses protocol {target.protocol!r}; "
+                    "the verifier only speaks openai-chat"
+                )
+            api_key = api_key_for(target)
+            if not api_key:
+                raise ValueError(
+                    f"{target.api_key_env} is required for catalog target {target.id!r}"
+                )
+            return cls(target.base_url.rstrip("/"), api_key, target.model)
+
         if not isinstance(cfg, dict):
             raise ValueError("vlm must be an object")
         for key in ("base_url", "api_key", "model"):

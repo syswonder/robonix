@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+[package]
+name = "robonix-llm-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Capability catalog and model resolver for Robonix consumers."
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

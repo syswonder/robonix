@@ -87,6 +87,16 @@ shared only; direct exact-legacy launches use legacy when that service exists.
 
 The Atlas wire protocol (atlas_pb2 / atlas_pb2_grpc) is pre-generated and bundled in the wheel. Per-contract stubs (`robonix_contracts_pb2`, MCP typed dataclasses) are generated **per deployment** by `rbnx codegen` against your contract TOMLs — `robonix-api` automatically picks them up from `<pkg>/rbnx-build/codegen/` at runtime.
 
+## LLM catalog
+
+`robonix_api.llm` is the shared capability catalog and model resolver used by
+Scene, Memory, Memsearch, the VLM Verifier, CI scripts and other consumers. It
+answers "which model endpoint should this request use?" from a declarative
+catalog and leaves the provider call to the consumer's own client. It does not
+proxy traffic, hold keys or track health. See
+[`robonix_api/llm/README.md`](robonix_api/llm/README.md) for the catalog format,
+the Python API and the deployment variables.
+
 ## Provider network binding
 
 Provider lifecycle gRPC, user gRPC, and MCP servers keep the compatible

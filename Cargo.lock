@@ -3235,6 +3235,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "robonix-llm-catalog"
+version = "1.1.0-beta.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "robonix-pilot"
 version = "1.1.0-beta.1"
 dependencies = [
@@ -3248,6 +3258,7 @@ dependencies = [
  "rmcp",
  "robonix-atlas",
  "robonix-codegen",
+ "robonix-llm-catalog",
  "robonix-scribe",
  "serde",
  "serde_json",

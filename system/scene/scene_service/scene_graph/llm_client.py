@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 import httpx
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
 
 log = logging.getLogger(__name__)
 
@@ -26,24 +27,42 @@ class SceneGraphLLMClient:
         timeout: float = 30.0,
         reasoning_effort: str | None = None,
     ) -> None:
-        self.base_url = (
-            base_url
-            or os.environ.get("VLM_BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL")
-            or ""
-        ).rstrip("/")
-        self.api_key = (
-            api_key
-            or os.environ.get("VLM_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or ""
-        )
-        self.model = (
-            model
-            or os.environ.get("VLM_MODEL")
-            or os.environ.get("OPENAI_MODEL")
-            or "gpt-4o-mini"
-        )
+        target = None
+        if base_url is None and api_key is None and model is None:
+            try:
+                # The graph client also serves the image-relation and caption
+                # paths, so vision is the hard requirement.
+                target = resolve_from_env(Requirements(capabilities=("vision",)))
+            except RuntimeError as exc:
+                log.warning("[scene-graph-llm] capability catalog: %s", exc)
+        if target is not None:
+            self.base_url = target.base_url
+            self.api_key = api_key_for(target)
+            self.model = target.model
+            log.info(
+                "[scene-graph-llm] catalog target %s model=%s",
+                target.id,
+                target.model,
+            )
+        else:
+            self.base_url = (
+                base_url
+                or os.environ.get("VLM_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL")
+                or ""
+            ).rstrip("/")
+            self.api_key = (
+                api_key
+                or os.environ.get("VLM_API_KEY")
+                or os.environ.get("OPENAI_API_KEY")
+                or ""
+            )
+            self.model = (
+                model
+                or os.environ.get("VLM_MODEL")
+                or os.environ.get("OPENAI_MODEL")
+                or "gpt-4o-mini"
+            )
         self.timeout = timeout
         # Sent only when set: providers without reasoning reject the field.
         if reasoning_effort is not None:
