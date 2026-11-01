@@ -11,6 +11,8 @@ grpcio==1.80.0
 grpcio-tools==1.76.0
 protobuf==6.33.6
 pymilvus[milvus_lite]!=2.6.10,>=2.5.0
+# Arrow 26 requires NumPy 2; Scene and ROS use NumPy 1.26.
+pyarrow==25.0.1
 uvicorn
 httpx
 Pillow

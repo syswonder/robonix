@@ -320,3 +320,16 @@ class ObjectStore:
             server_manager_instance.release_server(self._uri)
         except Exception:  # noqa: BLE001
             pass
+
+
+def verify_local_store() -> None:
+    """Verify embedded storage can create and query a temporary database."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="scene-storage-check-") as directory:
+        store = ObjectStore(str(Path(directory) / "objects.db"))
+        try:
+            if store.load_all(strict=True) != []:
+                raise RuntimeError("Temporary Scene database is not empty")
+        finally:
+            store.close()

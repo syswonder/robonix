@@ -58,20 +58,21 @@ class OfflineBuildContractTests(unittest.TestCase):
             fake_python = root / "python"
             fake_python.write_text(
                 '#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n'
-                'if [[ "$1" == */scripts/build_engines.py && "${NATIVE_PREFLIGHT_FAIL:-0}" == 1 ]]; then exit 1; fi\n',
+                'if [[ "$1" == */scripts/prepare_models.py && "${NATIVE_PREFLIGHT_FAIL:-0}" == 1 ]]; then exit 1; fi\n',
                 encoding="utf-8",
             )
             fake_python.chmod(0o755)
             env = os.environ.copy()
             env.update(RBNX_PACKAGE_ROOT=str(root), SCENE_ONNX_DIR=str(models),
-                       SCENE_NATIVE_PYTHON=str(fake_python), NATIVE_LOG=str(root / "calls"))
+                       SCENE_NATIVE_PYTHON=str(fake_python), NATIVE_LOG=str(root / "calls"),
+                       SCENE_CG_INFERENCE="tensorrt")
             subprocess.run(
                 ["bash", "-c", 'source() { :; }; export -f source; exec bash "$1"',
                  "native-test", str(SCENE_ROOT / "scripts" / "start_native.sh")],
                 env=env, check=True, capture_output=True, text=True,
             )
             calls = (root / "calls").read_text().splitlines()
-            self.assertTrue(any("--models-dir " + str(models) in call for call in calls))
+            self.assertTrue(any("prepare_models.py --check" in call for call in calls))
             self.assertIn("-m scene_service.service", calls)
             self.assertTrue(any(call.endswith("--check") for call in calls))
             (root / "calls").unlink()
@@ -217,6 +218,29 @@ printf 'downloaded-clip' > "$out"
                 expected,
             )
 
+    def test_native_build_only_prepares_models_when_tensorrt_is_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=True)
+            clip = scene / "rbnx-build/data/ultralytics/weights/clip/ViT-B-32.pt"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"text encoder")
+            fake_python = root / "python"
+            fake_python.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n')
+            fake_python.chmod(0o755)
+            (scene / "rbnx-build/native-candidate.sh").write_text(
+                f'export SCENE_NATIVE_PYTHON="{fake_python}"\nexport ROS_DISTRO=jazzy\n')
+            env.update(RBNX_BUILD_TARGET="jetson-native", SCENE_NATIVE_PYTHON=str(fake_python),
+                       NATIVE_LOG=str(root / "native.log"))
+            for backend in ("torch", "tensorrt"):
+                env["SCENE_CG_INFERENCE"] = backend
+                subprocess.run(["bash", "scripts/build.sh"], cwd=scene, env=env,
+                               check=True, capture_output=True, text=True)
+                calls = (root / "native.log").read_text()
+                self.assertEqual("prepare_models.py" in calls, backend == "tensorrt")
+                self.assertEqual("scene-perception-export.txt" in calls, backend == "tensorrt")
+                (root / "native.log").unlink()
+
     def test_empty_hf_mirror_uses_only_the_direct_file_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -231,3 +255,29 @@ printf 'downloaded-clip' > "$out"
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_native_start_selects_prepared_python_and_stops_on_stale_environment(tmp_path):
+    (tmp_path / 'rbnx-build').mkdir()
+    python = tmp_path / 'prepared-python'
+    python.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n'
+        'if [[ "$1" == */prepare_native.py && "${STALE_ENV:-0}" == 1 ]]; then exit 18; fi\n')
+    python.chmod(0o755)
+    (tmp_path / 'rbnx-build/native-env.sh').write_text(
+        f'export SCENE_NATIVE_PYTHON="{python}"\nexport ROS_DISTRO=jazzy\n')
+    env = os.environ.copy()
+    env.update(RBNX_PACKAGE_ROOT=str(tmp_path), NATIVE_LOG=str(tmp_path / 'calls'))
+    env.pop('SCENE_NATIVE_PYTHON', None)
+    command = ['bash', '-c', 'source() { if [[ "$1" == /opt/ros/* ]]; then return; fi; builtin source "$1"; }; '
+               'export -f source; exec bash "$1"', 'native-test', str(SCENE_ROOT / 'scripts/start_native.sh')]
+    subprocess.run(command, env=env, check=True, capture_output=True, text=True)
+    calls = (tmp_path / 'calls').read_text().splitlines()
+    assert calls[0].endswith('/prepare_native.py --check')
+    assert calls[1].endswith('/prepare_models.py --check')
+    assert calls[2] == '-m scene_service.service'
+    (tmp_path / 'calls').unlink()
+    env['STALE_ENV'] = '1'
+    result = subprocess.run(command, env=env, capture_output=True, text=True)
+    assert result.returncode == 18
+    assert len((tmp_path / 'calls').read_text().splitlines()) == 1

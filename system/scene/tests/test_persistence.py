@@ -476,3 +476,17 @@ def test_a_crop_of_the_wall_behind_is_not_a_view():
     assert not looks_like(depth, (20, 20, 60, 60), 1.5)  # the object "is" at 1.5 m
     depth[20:60, 20:60] = 1.5
     assert looks_like(depth, (20, 20, 60, 60), 1.5)
+
+
+def test_storage_verification_closes_store_on_query_failure(monkeypatch):
+    from unittest.mock import Mock
+    import pytest
+    from scene_service import persistence
+
+    store = Mock()
+    store.load_all.side_effect = RuntimeError('storage unavailable')
+    monkeypatch.setattr(persistence, 'ObjectStore', Mock(return_value=store))
+    with pytest.raises(RuntimeError, match='storage unavailable'):
+        persistence.verify_local_store()
+    store.load_all.assert_called_once_with(strict=True)
+    store.close.assert_called_once_with()

@@ -13,7 +13,12 @@ set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 
+if [[ -f "$PKG/rbnx-build/native-env.sh" ]]; then
+    source "$PKG/rbnx-build/native-env.sh"
+    "$SCENE_NATIVE_PYTHON" "$PKG/scripts/prepare_native.py" --check
+fi
 PY="${SCENE_NATIVE_PYTHON:-python3}"
+
 
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 # shellcheck disable=SC1091
@@ -25,25 +30,17 @@ if ROBONIX_API="$(rbnx path robonix-api 2>/dev/null)"; then
     export PYTHONPATH="$ROBONIX_API:$PYTHONPATH"
 fi
 
-# Keep legacy model identifiers for exported map metadata; runtime loads ONNX.
+export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
+
 W="$PKG/docker/_weights"
+export SCENE_YOLO_WORLD_WEIGHTS="${SCENE_YOLO_WORLD_WEIGHTS:-$W/yolov8l-world.pt}"
+export SCENE_MOBILE_SAM_WEIGHTS="${SCENE_MOBILE_SAM_WEIGHTS:-$W/mobile_sam.pt}"
 export SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}"
 export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-$W/open_clip_pytorch_model.bin}"
 export SCENE_ONNX_DIR="${SCENE_ONNX_DIR:-$W/onnx}"
-ONNX_DIR="$SCENE_ONNX_DIR"
 export SCENE_ENGINE_CACHE_DIR="${SCENE_ENGINE_CACHE_DIR:-$HOME/.cache/robonix/scene-engines}"
-if [[ ! -s "$ONNX_DIR/yolo-world-cut.onnx" ]]; then
-    echo "[scene/native] error: no ONNX exports under $ONNX_DIR — perception cannot start" >&2
-    echo "               run system/scene/scripts/export_models.py on the build machine." >&2
-    exit 1
-fi
-if ! "$PY" -c "import tensorrt, cuda.bindings.runtime" 2>/dev/null; then
-    echo "[scene/native] error: '$PY' lacks tensorrt/cuda-bindings — perception cannot start" >&2
-    echo "               install the engine runtime (docker/requirements/scene-perception-engines.txt)." >&2
-    exit 1
-fi
-echo "[scene/native] checking prebuilt engine cache ..."
-"$PY" "$PKG/scripts/build_engines.py" --models-dir "$ONNX_DIR" --check || exit 1
+# Startup checks only: export/compilation must precede Atlas registration.
+"$PY" "$PKG/scripts/prepare_models.py" --check
 
 # Host-persisted scene state (object-memory DB + scene-graph caches).
 mkdir -p "$PKG/rbnx-build/data/robonix"

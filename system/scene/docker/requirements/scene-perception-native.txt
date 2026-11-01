@@ -1,0 +1,8 @@
+# Native ConceptGraphs uses NumPy fusion and direct model adapters.
+numpy>=1.26,<2
+opencv-python-headless>=4.8
+ultralytics>=8.3
+clip-anytorch>=2.6
+open_clip_torch>=2.20
+open3d>=0.20,<0.21
+hydra-core==1.3.2

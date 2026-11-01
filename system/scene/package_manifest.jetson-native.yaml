@@ -1,17 +1,12 @@
 # Scene MCP server — Jetson + NATIVE host-ROS2 deployment target.
 #
-#   build → RBNX_BUILD_TARGET=jetson-native scripts/build.sh: no docker.
-#           Creates rbnx-build/venv (--system-site-packages) and pip-installs
-#           only the light pure-python deps; torch / torchvision / ultralytics /
-#           open3d come from the host JetPack stack (see the scene README
-#           "Jetson native prerequisites" for how to install them).
-#   start → ROBONIX_SCENE_FORCE=native scripts/start.sh → start_native.sh:
-#           runs scene_service on the host python, sharing the host RMW so it
-#           sees the live camera/pointcloud topics the other host nodes publish.
+#   build → detect the supported L4T/Ubuntu/Python combination, prepare a
+#           versioned environment, reuse or install GPU/ROS dependencies,
+#           and verify native inference before publishing the environment.
+#   start → start_native.sh loads that environment and shares host ROS 2 RMW.
 #
-# Use this on a Jetson whose host already has ROS 2 Humble + a CUDA-enabled
-# python (the common JetPack setup). For a self-contained image instead, use
-# package_manifest.jetson-docker.yaml.
+# The board must already boot a supported JetPack OS image. See README.md
+# for the supported profiles and automatic native preparation.
 manifestVersion: 1
 
 package:
