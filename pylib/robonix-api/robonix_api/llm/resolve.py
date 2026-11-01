@@ -46,16 +46,12 @@ def _resolve(catalog: ModelCatalog, requirements: Requirements) -> list[ModelSpe
     every returned model then carries ``downgraded=True``.
     """
     required = set(requirements.features)
-    downgraded = False
-
-    if "json_schema" in required and requirements.allow_downgrade:
-        if not _matching(catalog, required, requirements):
-            relaxed = (required - {"json_schema"}) | {"json_object"}
-            if _matching(catalog, relaxed, requirements):
-                required = relaxed
-                downgraded = True
-
     matches = _matching(catalog, required, requirements)
+    downgraded = False
+    if not matches and "json_schema" in required and requirements.allow_downgrade:
+        relaxed = (required - {"json_schema"}) | {"json_object"}
+        matches = _matching(catalog, relaxed, requirements)
+        downgraded = bool(matches)
     matches.sort(key=_preference)
     return [replace(model, downgraded=downgraded) for model in matches]
 

@@ -253,9 +253,14 @@ impl PilotConfig {
                         .with_context(|| format!("vlm.model {model_id:?} is not a catalog id"))?
                         .clone()
                 }
-                None => resolve_from_env(&env_llm_requirements())?.ok_or_else(|| {
-                    missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream")
-                })?,
+                None => {
+                    // Pilot handles schema refusal at request time, so it does
+                    // not require the json_schema feature here.
+                    let requirements = Requirements::from_env("vision,tools,stream");
+                    resolve_from_env(&requirements)?.ok_or_else(|| {
+                        missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream")
+                    })?
+                }
             };
             vlm_from_catalog(
                 &target,
@@ -264,6 +269,7 @@ impl PilotConfig {
                 reasoning_effort,
                 api_format,
             )?
+
         };
         Ok(Self {
             atlas_endpoint,
@@ -326,15 +332,6 @@ fn env_atlas() -> Option<String> {
     std::env::var("ROBONIX_ATLAS")
         .ok()
         .filter(|v| !v.is_empty())
-}
-
-/// Features and budgets for the catalog lookup. The defaults describe what
-/// Pilot's planning requests need; every value can be overridden per
-/// deployment. `json_schema` is intentionally absent: Pilot already downgrades
-/// a rejected schema at request time, so requiring the feature here would
-/// exclude a capable json_object model such as DeepSeek Flash.
-fn env_llm_requirements() -> Requirements {
-    Requirements::from_env("vision,tools,stream")
 }
 
 fn load_yaml(path: &Path) -> Result<FileConfig> {
