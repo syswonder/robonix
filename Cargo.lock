@@ -3215,6 +3215,7 @@ dependencies = [
  "robonix-atlas",
  "robonix-codegen",
  "robonix-llm-catalog",
+ "robonix-pilot",
  "robonix-scribe",
  "serde",
  "serde_json",

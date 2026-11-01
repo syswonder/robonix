@@ -151,6 +151,9 @@ explicit `vlm` block, and exports `ROBONIX_LLM_CATALOG` plus
 Package start scripts forward only those key variables, so a catalog can use
 any provider without editing a hard-coded allowlist.
 
+Pilot preflight uses the same configuration parser as the Pilot binary,
+including environment overrides, explicit keys and protocol validation.
+
 Explicit `system.pilot.vlm` config wins over the catalog. A `vlm` block with
 only `model` selects that catalog id; omit `vlm` to resolve by
 `ROBONIX_LLM_FEATURES` (default `vision,tools,stream`). A broken catalog fails

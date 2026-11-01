@@ -37,11 +37,14 @@ pub struct PilotConfig {
     pub vlm: VlmConfig,
 }
 
+/// Connection settings used by Pilot's model client.
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
+    /// Selected catalog id; `None` means an explicit endpoint was configured.
+    pub catalog_id: Option<String>,
     /// Context limit declared by the deployment. This wins over provider
     /// metadata and the built-in registry because a proxy may expose a logical
     /// model name while routing to a smaller physical context window.
@@ -220,6 +223,7 @@ impl PilotConfig {
                     upstream,
                     api_key,
                     model,
+                    catalog_id: None,
                     context_window_tokens: explicit_context,
                     api_format,
                 },
@@ -293,6 +297,7 @@ fn vlm_from_catalog(
         upstream: target.base_url.clone(),
         api_key,
         model: target.model.clone(),
+        catalog_id: Some(target.id.clone()),
         context_window_tokens,
         api_format,
     })
