@@ -309,6 +309,17 @@ pub fn resolve_from_env(requirements: &Requirements) -> Result<Option<ModelSpec>
         return Ok(None);
     }
     let catalog = ModelCatalog::load(Path::new(path))?;
+    let available = ModelCatalog {
+        models: catalog
+            .models
+            .iter()
+            .filter(|model| model.api_key_env.is_none() || !api_key_for(model).is_empty())
+            .cloned()
+            .collect(),
+    };
+    if let Some(target) = available.resolve(requirements).into_iter().next() {
+        return Ok(Some(target));
+    }
     let targets = catalog.resolve(requirements);
     if targets.is_empty() {
         bail!(
@@ -316,29 +327,17 @@ pub fn resolve_from_env(requirements: &Requirements) -> Result<Option<ModelSpec>
             requirements.features.join(",")
         );
     }
-    let usable: Vec<&ModelSpec> = targets
+    let mut missing: Vec<&str> = targets
         .iter()
-        .filter(|target| {
-            target
-                .api_key_env
-                .as_deref()
-                .is_none_or(|name| std::env::var(name).is_ok_and(|value| !value.is_empty()))
-        })
+        .filter_map(|target| target.api_key_env.as_deref())
         .collect();
-    let Some(target) = usable.first() else {
-        let mut missing: Vec<&str> = targets
-            .iter()
-            .filter_map(|target| target.api_key_env.as_deref())
-            .collect();
-        missing.sort_unstable();
-        missing.dedup();
-        bail!(
-            "no usable model in {path} for {}; set one of {}",
-            requirements.features.join(","),
-            missing.join(", ")
-        );
-    };
-    Ok(Some((*target).clone()))
+    missing.sort_unstable();
+    missing.dedup();
+    bail!(
+        "no usable model in {path} for {}; set one of {}",
+        requirements.features.join(","),
+        missing.join(", ")
+    )
 }
 
 /// The key the consumer must send, or an empty string when unset/keyless.

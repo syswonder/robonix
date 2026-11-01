@@ -93,6 +93,8 @@ unset key are skipped. If no target is usable, it raises an error naming the
 missing variables. When the catalog variable is unset it returns `None`, which
 keeps the legacy configuration. The catalog is read once per process; restart
 the consumer after editing it.
+Missing credentials are filtered before matching, so an unavailable schema
+model cannot block a usable JSON fallback.
 
 ### Deployment
 

@@ -130,23 +130,24 @@ def resolve_from_env(
     path = os.environ.get(env, "").strip()
     if not path:
         return None
-    targets = _catalog_for(path).resolve(requirements)
+    catalog = _catalog_for(path)
+    available = ModelCatalog(tuple(
+        model for model in catalog.models
+        if model.api_key_env is None or api_key_for(model)
+    ))
+    targets = available.resolve(requirements)
+    if targets:
+        return targets[0]
+    targets = catalog.resolve(requirements)
     if not targets:
         raise RuntimeError(
             f"no model in {path} satisfies {sorted(requirements.features)}"
         )
-    usable = [
-        target
-        for target in targets
-        if target.api_key_env is None or os.environ.get(target.api_key_env)
-    ]
-    if not usable:
-        missing = sorted({target.api_key_env for target in targets if target.api_key_env})
-        raise RuntimeError(
-            f"no usable model in {path} for {sorted(requirements.features)}; "
-            f"set one of {', '.join(missing)}"
-        )
-    return usable[0]
+    missing = sorted({target.api_key_env for target in targets if target.api_key_env})
+    raise RuntimeError(
+        f"no usable model in {path} for {sorted(requirements.features)}; "
+        f"set one of {', '.join(missing)}"
+    )
 
 
 def api_key_for(target: ModelSpec) -> str:
