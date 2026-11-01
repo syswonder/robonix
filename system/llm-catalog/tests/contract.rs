@@ -137,3 +137,46 @@ fn rejects_invalid_api_key_env_names() {
         assert!(result.is_err(), "accepted key variable {name:?}");
     }
 }
+
+#[test]
+fn shared_validation_cases() {
+    let cases_path = contract_path().with_file_name("validation_cases.json");
+    let text = std::fs::read_to_string(cases_path).expect("read validation cases");
+    let cases: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let path = std::env::temp_dir()
+        .join(format!("catalog-validation-{}.yaml", std::process::id()));
+    let write_model = |model| {
+        std::fs::write(&path, serde_json::json!({"models": [model]}).to_string()).unwrap();
+    };
+    write_model(cases["model"].clone());
+    let catalog = ModelCatalog::load(&path).expect("normalized catalog");
+    let model = serde_json::to_value(&catalog.models[0]).unwrap();
+    for (key, value) in cases["normalized"].as_object().unwrap() {
+        assert_eq!(&model[key], value, "normalized {key}");
+    }
+    for overrides in cases["invalid"].as_array().unwrap() {
+        let mut model = cases["model"].clone();
+        model
+            .as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().unwrap().clone());
+        write_model(model);
+        assert!(ModelCatalog::load(&path).is_err(), "accepted {overrides}");
+    }
+    for field in [
+        "latency_p95_ms",
+        "price_input_per_mtok",
+        "price_output_per_mtok",
+    ] {
+        for value in cases["non_finite"].as_array().unwrap() {
+            let mut model = cases["model"].clone();
+            model[field] = "NON_FINITE".into();
+            let text = serde_json::json!({"models": [model]})
+                .to_string()
+                .replace("\"NON_FINITE\"", value.as_str().unwrap());
+            std::fs::write(&path, text).unwrap();
+            assert!(ModelCatalog::load(&path).is_err(), "accepted {field}={value}");
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}

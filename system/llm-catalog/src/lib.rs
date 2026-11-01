@@ -147,11 +147,13 @@ impl ModelCatalog {
         let is_json = path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
-        let catalog: Self = if is_json {
+        let mut catalog: Self = if is_json {
             serde_json::from_str(&text)
                 .with_context(|| format!("parse JSON catalog {}", path.display()))?
         } else {
-            serde_yaml::from_str(&text)
+            // Typed YAML deserialization otherwise coerces booleans into strings.
+            serde_yaml::from_str::<serde_yaml::Value>(&text)
+                .and_then(serde_yaml::from_value::<Self>)
                 .with_context(|| format!("parse YAML catalog {}", path.display()))?
         };
         catalog.validate()?;
@@ -214,22 +216,27 @@ impl ModelCatalog {
             .collect()
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&mut self) -> Result<()> {
         if self.models.is_empty() {
             bail!("catalog.models must be a non-empty list");
         }
         let mut seen = HashSet::new();
-        for model in &self.models {
+        for model in &mut self.models {
             for (field, value) in [
-                ("id", &model.id),
-                ("provider", &model.provider),
-                ("base_url", &model.base_url),
-                ("model", &model.model),
-                ("protocol", &model.protocol),
+                ("id", &mut model.id),
+                ("provider", &mut model.provider),
+                ("base_url", &mut model.base_url),
+                ("model", &mut model.model),
+                ("protocol", &mut model.protocol),
             ] {
-                if value.trim().is_empty() {
+                *value = value.trim().to_owned();
+                if value.is_empty() {
                     bail!("model.{field} must not be empty");
                 }
+            }
+            model.base_url = model.base_url.trim_end_matches('/').to_owned();
+            if model.base_url.is_empty() {
+                bail!("model.base_url must not be empty");
             }
             if let Some(name) = &model.api_key_env {
                 let valid_start = name
@@ -242,17 +249,23 @@ impl ModelCatalog {
                     bail!("model.api_key_env must be a valid environment variable name");
                 }
             }
-            if !seen.insert(model.id.as_str()) {
+            if !seen.insert(model.id.clone()) {
                 bail!("duplicate model id {:?}", model.id);
             }
             if model.context == Some(0) {
                 bail!("model {:?}.context must be positive", model.id);
             }
-            if model.price_input_per_mtok < 0.0 || model.price_output_per_mtok < 0.0 {
-                bail!("model {:?} prices must not be negative", model.id);
+            if [model.price_input_per_mtok, model.price_output_per_mtok]
+                .iter()
+                .any(|price| !price.is_finite() || *price < 0.0)
+            {
+                bail!("model {:?} prices must be finite and non-negative", model.id);
             }
-            if model.latency_p95_ms.is_some_and(|latency| latency < 0.0) {
-                bail!("model {:?}.latency_p95_ms must not be negative", model.id);
+            if model
+                .latency_p95_ms
+                .is_some_and(|latency| !latency.is_finite() || latency < 0.0)
+            {
+                bail!("model {:?}.latency_p95_ms must be finite and non-negative", model.id);
             }
         }
         Ok(())

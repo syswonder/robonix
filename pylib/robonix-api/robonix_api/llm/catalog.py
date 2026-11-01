@@ -8,6 +8,7 @@ variable a consumer reads before connecting directly.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,26 +43,28 @@ class ModelSpec:
         if not isinstance(data, dict):
             raise ValueError("model must be an object")
         model_id = _required_str(data, "id")
+        latency = data.get("latency_p95_ms")
+        if latency is not None:
+            latency = _non_negative(latency, "latency_p95_ms")
         spec = cls(
             id=model_id,
             provider=_required_str(data, "provider"),
             base_url=_required_str(data, "base_url").rstrip("/"),
             model=_required_str(data, "model"),
             api_key_env=_api_key_env(data.get("api_key_env")),
-            features=_features(data.get("features")),
+            features=_features(data.get("features", {})),
             context=_optional_positive_int(data.get("context"), "context"),
-            latency_p95_ms=_optional_non_negative(data.get("latency_p95_ms"),
-                                                 "latency_p95_ms"),
-            price_input_per_mtok=_optional_non_negative(
-                data.get("price_input_per_mtok"), "price_input_per_mtok"
-            ) or 0.0,
-            price_output_per_mtok=_optional_non_negative(
-                data.get("price_output_per_mtok"), "price_output_per_mtok"
-            ) or 0.0,
-            protocol=str(data.get("protocol") or "openai-chat"),
+            latency_p95_ms=latency,
+            price_input_per_mtok=_non_negative(
+                data.get("price_input_per_mtok", 0.0), "price_input_per_mtok"
+            ),
+            price_output_per_mtok=_non_negative(
+                data.get("price_output_per_mtok", 0.0), "price_output_per_mtok"
+            ),
+            protocol=_required_str(data, "protocol") if "protocol" in data else "openai-chat",
         )
-        if not spec.protocol.strip():
-            raise ValueError(f"model {model_id!r}.protocol must not be empty")
+        if not spec.base_url:
+            raise ValueError("model.base_url is required")
         return spec
 
     def supports(self, feature: str) -> bool:
@@ -134,8 +137,6 @@ def _api_key_env(value: Any) -> str | None:
 
 
 def _features(value: Any) -> dict[str, bool]:
-    if value is None:
-        return {}
     if not isinstance(value, dict):
         raise ValueError("model.features must be an object")
     features: dict[str, bool] = {}
@@ -153,16 +154,18 @@ def _features(value: Any) -> dict[str, bool]:
 def _optional_positive_int(value: Any, key: str) -> int | None:
     if value is None:
         return None
-    number = int(value)
-    if number <= 0:
-        raise ValueError(f"model.{key} must be positive")
-    return number
+    if type(value) is not int or not 0 < value <= 2**64 - 1:
+        raise ValueError(f"model.{key} must be a positive 64-bit integer")
+    return value
 
 
-def _optional_non_negative(value: Any, key: str) -> float | None:
-    if value is None:
-        return None
-    number = float(value)
-    if number < 0:
-        raise ValueError(f"model.{key} must not be negative")
+def _non_negative(value: Any, key: str) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"model.{key} must be a number")
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ValueError(f"model.{key} must be finite") from None
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"model.{key} must be finite and non-negative")
     return number

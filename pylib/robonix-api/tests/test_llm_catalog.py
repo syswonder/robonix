@@ -11,6 +11,23 @@ LLM = ROOT / "robonix_api" / "llm"
 
 
 class ModelCatalogTests(unittest.TestCase):
+    def test_shared_validation_cases(self):
+        cases = json.loads((LLM / "contract" / "validation_cases.json").read_text())
+        model = ModelCatalog.from_dict({"models": [cases["model"]]}).models[0]
+        for key, value in cases["normalized"].items():
+            self.assertEqual(getattr(model, key), value)
+        for overrides in cases["invalid"]:
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                ModelCatalog.from_dict({"models": [{**cases["model"], **overrides}]})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.yaml"
+            for field in ("latency_p95_ms", "price_input_per_mtok", "price_output_per_mtok"):
+                for value in cases["non_finite"]:
+                    payload = json.dumps({"models": [{**cases["model"], field: "NON_FINITE"}]})
+                    path.write_text(payload.replace('"NON_FINITE"', value), encoding="utf-8")
+                    with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                        ModelCatalog.load(path)
+
     def test_load_example_yaml(self):
         catalog = ModelCatalog.load(LLM / "catalog.example.yaml")
         self.assertEqual(len(catalog.models), 3)
