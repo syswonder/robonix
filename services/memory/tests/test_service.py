@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory_service.core.types import (
     LogRecord, SpatialContext, ObjectCoord, TagFilter, NodeType,
 )
-from memory_service.service import MemoryService
+with patch("http.server.HTTPServer", side_effect=OSError("disabled in unit tests")):
+    from memory_service.service import MemoryService
 
 
 class TestMemoryService:
