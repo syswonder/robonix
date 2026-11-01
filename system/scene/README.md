@@ -51,55 +51,58 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
    * **Threshold** — agg_sim < 0.85 (`merge_threshold`) → spawn new object instead.
 5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
-The ConceptGraphs inference path uses FP32 TensorRT engines for YOLO, SAM
-encoder/decoder and CLIP visual, plus CPU ONNX Runtime for text. Native startup
-reads `SCENE_ONNX_DIR` (default `docker/_weights/onnx`); it does not require the
-source `.pt`/`.bin` weights or torch. `scripts/build_engines.py` builds and
-verifies temporary engines before publishing them to `SCENE_ENGINE_CACHE_DIR`.
-Cache names include the ONNX hash, TRT version, compute capability and build
-settings. The YOLO text session is released after computing the class table;
-TRT I/O buffers are reused, and YOLO score constants are prepared at load time.
-Representative-feature selection is skipped for unchanged tracks; new observations
-and merge counts invalidate it. Map objects retain one independently owned initial
-mask for export compatibility; historical masks are not accumulated.
+ConceptGraphs uses Torch by default. Set `SCENE_CG_INFERENCE=tensorrt` before
+building and starting to use FP32 TensorRT for YOLO, SAM and CLIP visual,
+with CPU ONNX Runtime for text. Both implementations share point-cloud fusion
+and object retention. TensorRT is supported for the `lite` profile only;
+`full` remains available through Torch. Selecting TensorRT also selects
+ConceptGraphs when no mapper is configured; an explicit DualMap setting is
+rejected.
 
-Periodic cleanup (every 10 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse. Each tick publishes at most one registry snapshot after its observations and cleanup. Overlap merging skips objects already consumed by another merge. `obj_pcd_max_points` remains an approximate per-detection sampling target; merged map clouds are reduced by voxel size, without a fixed point-count cap.
+## Switching inference implementations
 
-## TensorRT native model setup
-
-The TRT deployment is validated for the lite model set on `jetson-native`.
-Docker packaging still stages the source Torch weights; it needs TRT runtime
-and ONNX/engine provisioning before using this ConceptGraphs implementation.
-The engine path does not fall back to Torch or CPU inference.
-
-On the export machine, install Torch, Ultralytics and open_clip, and stage the
-YOLO-World, MobileSAM and OpenCLIP source weights in `docker/_weights/`.
-From `system/scene`, generate six ONNX models and their parity references:
+From `system/scene`, use the same environment for build and boot:
 
 ```bash
-python3 -m pip install onnx onnxscript
-python3 scripts/export_models.py --out docker/_weights/onnx
-rsync -a docker/_weights/onnx/ user@board:/path/to/robonix/system/scene/docker/_weights/onnx/
+export SCENE_CG_INFERENCE=tensorrt  # default: torch
+RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
+ROBONIX_SCENE_FORCE=native bash scripts/start.sh
 ```
 
-On the board, provision TensorRT from JetPack and install the engine runtime
-requirements. Build the engines before managed startup:
+The build downloads source weights using the normal model cache, installs
+export/runtime dependencies, exports ONNX locally using the installed Torch,
+and builds and numerically verifies engines on the GPU. No second machine is
+needed. Export runs in separate processes per model to release preparation
+memory. Torch remains installed; the TensorRT service process does not import
+it. Native deployment still requires the host JetPack Torch/CUDA stack below.
 
-```bash
-cd /path/to/robonix/system/scene
-python3 -m pip install -r docker/requirements/scene-perception-engines.txt
-python3 scripts/build_engines.py --models-dir docker/_weights/onnx --verify
-python3 scripts/build_engines.py --models-dir docker/_weights/onnx --check
-```
+The first TensorRT build can take several minutes and requires extra disk and
+memory for conversion. Later builds reuse exports fingerprinted by source
+weights, exporter and package versions. Engines are fingerprinted by ONNX,
+TensorRT version, GPU architecture and build settings. A failed preparation
+leaves the previously published export selection intact and does not stop a
+running service. Startup only checks caches; it never exports or compiles and
+never falls back silently to Torch. Rebuild after changing the selection or
+models. Live switching inside an already running service is not supported.
 
-`SCENE_ONNX_DIR` selects a different model directory for native build/start;
-`SCENE_ENGINE_CACHE_DIR` selects the engine cache. Pass `--models-dir` when
-calling the builder directly. The native build script also compiles the
-staged exports. Startup uses `--check` and fails if an engine is missing;
-it never compiles under Atlas's registration deadline. Rebuild after a TRT,
-GPU architecture or ONNX change. `gpu_engine_mb` on the cost page reports
-TRT's declared execution-context memory, excluding weights, I/O buffers and
-driver overhead.
+To return to Torch, set `SCENE_CG_INFERENCE=torch` and build/boot normally.
+TensorRT caches are retained. `SCENE_ONNX_DIR` and `SCENE_ENGINE_CACHE_DIR`
+can override the native export and engine locations; their defaults are
+`docker/_weights/onnx` and `~/.cache/robonix/scene-engines`. The export cache
+keeps the current and previous published model sets.
+
+For Docker targets, use the same option with the existing manifests. The
+image adds conversion and TensorRT dependencies only when selected. After
+image construction, a temporary GPU container prepares models in a host cache:
+`rbnx-build/docker-models` for packaged Jetson images, or `rbnx-build/tensorrt`
+for x86 images. The service mounts the selected cache read-only. This requires
+the NVIDIA container runtime on the target. Torch remains the default for
+both x86 and Jetson Docker images.
+
+Advanced/offline setups may still stage ONNX/NPZ files directly and use
+`scripts/build_engines.py --models-dir DIR --verify`. The cost page's
+`gpu_engine_mb` reports TensorRT execution-context memory, excluding weights,
+I/O buffers and driver overhead; Torch reports its allocator statistics.
 
 ## Deployment targets (x86 / Jetson)
 
@@ -113,52 +116,96 @@ One repo covers three targets, picked by the per-target package manifest
 |---|---|---|---|
 | **x86-docker** (default) | `package_manifest.yaml` | cu128 x86 wheels baked into `docker/Dockerfile` | `docker run --gpus all` |
 | **jetson-docker** | `package_manifest.jetson-docker.yaml` | NVIDIA jetson-ai-lab wheels in `docker/Dockerfile.jetson` | `docker run --runtime nvidia` |
-| **jetson-native** | `package_manifest.jetson-native.yaml` | **host JetPack torch** (no image) | host `python3 -m scene_service.service` |
+| **jetson-native** | `package_manifest.jetson-native.yaml` | validated host Torch or pinned ARM wheels (no image) | host `python3 -m scene_service.service` |
 
 `scripts/build.sh` branches on `RBNX_BUILD_TARGET`; `scripts/start.sh` branches
 on `ROBONIX_SCENE_FORCE` (`native`/`docker`, or auto from
-`ROBONIX_SCENE_PLATFORM=jetson_orin`). On most Jetsons **jetson-native is the
-recommended path** — it reuses the JetPack CUDA stack instead of building a
-multi-GB L4T image.
+`ROBONIX_SCENE_PLATFORM=jetson_orin`). Use jetson-docker for repeatable deployment with application code, ROS and
+GPU libraries in one image. Native deployment reuses the host environment
+and remains useful for development or systems without Docker GPU support.
 
-### Jetson native prerequisites (install the JetPack CUDA stack)
+### Automatic Jetson Docker preparation
 
-`jetson-native` does **not** install torch — it expects a CUDA-capable host
-python already has it, and only pip-installs scene's light pure-python deps
-(`pip install --user`) on top. On a fresh Jetson (JetPack 6 / L4T r36 /
-CUDA 12.6) install the GPU stack first:
-
-```bash
-# 1. ROS 2 Humble on the host (apt, from the ROS 2 repo) — scene needs it
-#    for tf2 + the message types. (Skip if already installed.)
-
-# 2. JetPack CUDA-enabled torch / torchvision from NVIDIA's Jetson index.
-#    The index tag matches your JetPack: jp6/cu126 here; use jp6/cu128 etc.
-#    if your JetPack ships a different CUDA. (apt install nvidia-jetpack
-#    provides the CUDA toolkit these wheels link against.)
-pip install --user --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 \
-    torch torchvision
-
-# 3. perception extras that have native aarch64 wheels
-pip install --user ultralytics open3d
-
-# verify CUDA is live before building scene
-python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-#   → e.g.  2.10.0 True
-```
-
-Then build + run scene native (what `rbnx build`/`rbnx boot` do via the
-jetson-native manifest):
+The Docker target selects a pinned base image, ROS distribution and ARM Torch
+wheels from `scripts/native_profiles.json`. Supported profiles cover Orin on
+L4T 36.4.x / Ubuntu 22.04 and L4T 39.2.x / Ubuntu 24.04. The host needs Docker,
+NVIDIA Container Toolkit and the Robonix build tools. Host Torch and ROS are
+not required. Unrecognized platform combinations stop before image construction.
 
 ```bash
-RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user the light deps
-ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
+python3 scripts/prepare_docker.py --plan
+RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+
+# Switch the same deployment to TensorRT.
+SCENE_CG_INFERENCE=tensorrt RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+SCENE_CG_INFERENCE=tensorrt ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
 ```
 
-> Native scene uses the same ROS 2 RMW configuration as the host process. Set
-> `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
-> the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set
-> `ROBONIX_FORCE_CPU=1` to skip CUDA.
+The build validates CUDA convolution, torchvision NMS and Scene perception in
+an isolated candidate container before publishing the image. TensorRT builds
+also export models and verify engines on the target GPU. Model caches are
+separated by GPU hardware and the image's frozen SDK dependencies. Code-only
+rebuilds can reuse compatible engines.
+
+The launcher uses the verified image ID and baked application code, API,
+protobuf stubs and ROS map messages. It mounts persistent Scene data and a
+read-only model cache. Source changes, backend changes and unsupported TensorRT launch options are
+rejected before replacing the service container. A failed build preserves
+the previous verified image and model cache. Model-cache cleanup retains the
+current and previous generations; superseded images use normal Docker cleanup.
+
+Jetson packaged images support the ConceptGraphs backend. The full Torch
+profile still needs external models through `SCENE_MODELS_DIR`. Build proxy
+arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
+
+### Automatic Jetson native preparation
+
+The native build detects L4T, board family, Ubuntu and Python, then selects
+`scripts/native_profiles.json`. The initial profiles cover Orin on L4T
+36.4.x / Ubuntu 22.04 / Python 3.10 and L4T 39.2.x / Ubuntu 24.04 /
+Python 3.12. Other combinations stop before installation.
+
+```bash
+# Inspect the selected profile without modifying the system.
+python3 scripts/prepare_native.py --plan
+
+# The same build/start commands work for both supported environments.
+RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
+ROBONIX_SCENE_FORCE=native bash scripts/start.sh
+```
+
+The build reuses Torch/torchvision only after CUDA convolution and CUDA NMS
+succeed. If needed, it installs pinned, hash-checked ARM wheels and matching
+CUDA runtime libraries. The Orin 39.2 profile uses a CUDA 12.9 Torch build
+alongside system CUDA 13. Existing working GPU dependencies are preserved.
+ROS defaults to Humble on Ubuntu 22.04 and Jazzy on Ubuntu 24.04; missing ROS
+components and their apt source are installed automatically. Existing apt
+sources are reused. System package installation needs root or existing noninteractive
+sudo authorization (`sudo -v` first in an interactive shell); native preparation does not flash JetPack or replace the kernel/BSP.
+
+Scene dependencies are installed into a versioned virtual environment under
+`rbnx-build/native`, with access to existing system/user packages. GPU package
+versions and NumPy constraints prevent generic pip installs from replacing
+the selected Torch stack. Code generation uses that environment too. After
+model preparation and GPU, ROS and embedded database checks succeed, the build publishes
+`rbnx-build/native-env.sh`; native startup reads it automatically and checks
+recorded versions without importing Torch. A failed build keeps the previous
+published environment. Current and previous environment generations are kept.
+`SCENE_NATIVE_PYTHON` can select the base interpreter for preparation.
+
+On Orin / L4T 39.2.1, complete native Torch and TensorRT builds, real-image
+inference and pinned Torch installation into a Python environment without
+Torch have passed. The 36.4 profile has automated tests and verified wheel
+URLs/checksums, but has not had a hardware run. Missing ROS/CUDA installation
+paths have automated tests; a fresh OS bootstrap has not been exercised.
+Wheel sources and supported combinations are recorded in `native_profiles.json`.
+Fresh systems need access to the apt/pip sources and compatible JetPack GPU
+drivers supplied by the board's OS image.
+
+Native Scene inherits the host ROS 2 transport configuration. Set
+`RMW_IMPLEMENTATION` explicitly when the rest of the deployment uses a
+non-default transport.
 
 ## Perception profiles and backends
 
@@ -569,6 +616,7 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_CG_FORCE_CPU` | `` | set to `1` to force CPU mode (~3× slower) |
 | `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera providers before falling back |
 | `SCENE_POSE_MAX_AGE_S` | `2.0` | maximum receipt age in seconds for pose/odometry used in camera-to-world projection; stale samples withhold detections |
+| `SCENE_CG_INFERENCE` | `torch` | ConceptGraphs inference: `torch` or `tensorrt`; use the same value for build and boot |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
 | `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |

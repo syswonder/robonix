@@ -328,6 +328,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
             package/index.js package/re_viewer.js package/re_viewer_bg.wasm \
     && rm /tmp/requirements/scene-viewer.txt
 
+ARG SCENE_CG_INFERENCE=torch
+COPY requirements/scene-perception-engines.txt /tmp/requirements/scene-perception-engines.txt
+COPY requirements/scene-perception-export.txt /tmp/requirements/scene-perception-export.txt
+RUN if [ "$SCENE_CG_INFERENCE" = tensorrt ]; then \
+        without-proxy python3 -m pip install \
+            -r /tmp/requirements/scene-perception-engines.txt \
+            -r /tmp/requirements/scene-perception-export.txt \
+            'tensorrt-cu12>=10,<11'; \
+    fi
+
 WORKDIR /scene
 
 COPY entrypoint.sh /entrypoint.sh

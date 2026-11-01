@@ -31,30 +31,75 @@ if [[ "$MODE" == "native" ]]; then
     exec bash "${PKG}/scripts/start_native.sh"
 fi
 
-CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
-# Named no image, prefer the DualMap one where this host has built it.
-#
-# This mirrors capabilities.default_backend() inside the container, which
-# prefers DualMap wherever the image carries a checkout. scripts/build.sh
-# builds that layer unless SCENE_PERCEPTION_BACKEND=concept_graphs.
-DEFAULT_IMG=robonix-scene
-if [[ "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]] \
-   && docker image inspect robonix-scene-dualmap >/dev/null 2>&1; then
-    DEFAULT_IMG=robonix-scene-dualmap
+INFERENCE="${SCENE_CG_INFERENCE:-torch}"
+INFERENCE="$(printf '%s' "$INFERENCE" | tr '[:upper:]' '[:lower:]' | xargs)"
+export SCENE_CG_INFERENCE="$INFERENCE"
+CG_FORCE_CPU="$(printf '%s' "${SCENE_CG_FORCE_CPU:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${ROBONIX_FORCE_CPU:-0}" == "1" || "$CG_FORCE_CPU" == "1" || "$CG_FORCE_CPU" == "true" || "$CG_FORCE_CPU" == "yes" ]]; then
+    export ROBONIX_FORCE_CPU=1
+    if [[ "$INFERENCE" == "tensorrt" ]]; then
+        echo "[scene/start] TensorRT requires GPU passthrough; unset ROBONIX_FORCE_CPU" >&2
+        exit 2
+    fi
+    export SCENE_CG_FORCE_CPU=1
 fi
-IMG="${ROBONIX_SCENE_IMAGE:-$DEFAULT_IMG}"
+
+
+PACKAGED=0
+if [[ -f "$PKG/rbnx-build/docker-env.json" ]]; then
+    python3 "$PKG/scripts/prepare_docker.py" --check
+    source "$PKG/rbnx-build/docker-runtime.sh"
+    PACKAGED=1
+else
+    DEFAULT_IMG=robonix-scene
+    if [[ "$INFERENCE" != "tensorrt" && "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]] \
+       && docker image inspect robonix-scene-dualmap >/dev/null 2>&1; then
+        DEFAULT_IMG=robonix-scene-dualmap
+    fi
+    IMG="${ROBONIX_SCENE_IMAGE:-$DEFAULT_IMG}"
+fi
+CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 RUNTIME_PROTO_TMP=""
 
+case "$INFERENCE" in
+    torch) ;;
+    tensorrt)
+        export SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-concept_graphs}"
+        TRT_GPU=(--gpus all)
+        if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}" || [[ -e /etc/nv_tegra_release ]]; then
+            TRT_GPU=(--runtime nvidia)
+        fi
+        if [[ "$PACKAGED" == "0" ]]; then
+        # Check before installing cleanup traps or touching an existing service.
+        docker run --rm "${TRT_GPU[@]}" -e NVIDIA_DRIVER_CAPABILITIES=all \
+            -e SCENE_CG_INFERENCE=tensorrt -e SCENE_ONNX_DIR=/scene-models/onnx \
+            -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
+            -e SCENE_PROFILE="${SCENE_PROFILE:-lite}" \
+            -e SCENE_PERCEPTION_BACKEND="$SCENE_PERCEPTION_BACKEND" \
+            -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}" \
+            -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
+            -v "$PKG:/scene:ro" -v "$PKG/rbnx-build/tensorrt:/scene-models:ro" \
+            --entrypoint python3 "$IMG" /scene/scripts/prepare_models.py --check
+        fi
+        ;;
+    *) echo "[scene/start] SCENE_CG_INFERENCE must be torch or tensorrt" >&2; exit 2 ;;
+esac
+
+
 cleanup() {
-    timeout 15s docker stop "$CT" >/dev/null 2>&1 || true
+    if [[ -n "${RUN_DIR:-}" ]]; then
+        if [[ -s "$RUN_DIR/cid" ]]; then
+            timeout 15s docker stop "$(cat "$RUN_DIR/cid")" >/dev/null 2>&1 || true
+        fi
+        rm -rf -- "$RUN_DIR"
+    fi
     if [[ -n "$RUNTIME_PROTO_TMP" ]]; then
         rm -rf -- "$RUNTIME_PROTO_TMP"
     fi
 }
-trap cleanup EXIT INT TERM
-
-# Drop a stopped container from a previous run.
-docker rm -f "$CT" >/dev/null 2>&1 || true
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Python protobuf generated code is only forward-compatible within protobuf's
 # documented runtime window.  `rbnx codegen` intentionally uses the host's
@@ -113,7 +158,9 @@ prepare_runtime_proto_gen() {
     echo "[scene/start] runtime-compatible protobuf stubs ready"
 }
 
-prepare_runtime_proto_gen
+if [[ "$PACKAGED" == "0" ]]; then
+    prepare_runtime_proto_gen
+fi
 
 mkdir -p rbnx-build/data
 # Host-persisted scene state. Mounted at /data/robonix in the container so the
@@ -129,6 +176,12 @@ mkdir -p "$SCENE_HOST_DATA_DIR"
 # start.sh was dying there before it could launch the service container, which
 # is why the runtime-protobuf contract test only ever saw the codegen run.
 declare -a EXTRA_MOUNTS=()
+if [[ "$PACKAGED" == "1" ]]; then
+    EXTRA_MOUNTS+=(-v "$SCENE_DOCKER_CACHE:/scene-models:ro")
+elif [[ "$INFERENCE" == "tensorrt" ]]; then
+    EXTRA_MOUNTS+=(-v "$PKG/rbnx-build/tensorrt:/scene-models:ro")
+fi
+
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
@@ -189,6 +242,9 @@ fi
 # ROBONIX_FORCE_CPU=1. Without this flag the container sees CPU only
 # and CLIP/YOLO run ~5x slower.
 declare -a GPU_ARGS=()
+if [[ "${ROBONIX_FORCE_CPU:-0}" == "1" ]]; then
+    GPU_ARGS=(-e NVIDIA_VISIBLE_DEVICES=void)
+fi
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
     # NVIDIA_DRIVER_CAPABILITIES=all is REQUIRED: with just `--gpus all` (or
     # `--runtime nvidia`) and the capability unset, the NVIDIA runtime injects
@@ -213,11 +269,21 @@ if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
     fi
 fi
 
+declare -a SOURCE_MOUNTS=()
+if [[ "$PACKAGED" == "0" ]]; then
+    SOURCE_MOUNTS=(-v "$PKG:/scene"
+        -v "$PKG/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/proto_gen:ro"
+        -v "$(rbnx path robonix-api):/robonix-api:ro")
+fi
+# All image/cache/protobuf checks have passed before replacing a container.
+docker rm -f "$CT" >/dev/null 2>&1 || true
+RUN_DIR="$(mktemp -d "$PKG/rbnx-build/.scene-run.XXXXXX")"
+
 # SCENE_WEB_HOST below defaults to loopback. The container runs with
 # --network host, so what the service binds is what the host exposes, and the
 # web UI has no authentication while its annotation endpoints write map data.
 # Set SCENE_WEB_HOST=0.0.0.0 to reach it from another machine.
-exec docker run --rm \
+docker run --rm --cidfile "$RUN_DIR/cid" \
     --name "$CT" \
     --entrypoint /scene/docker/entrypoint.sh \
     --network host \
@@ -236,6 +302,9 @@ exec docker run --rm \
     -e SCENE_OBJECT_VIEWS_MAX="${SCENE_OBJECT_VIEWS_MAX:-}" \
     -e SCENE_CAPTION_LANG="${SCENE_CAPTION_LANG:-zh}" \
     -e SCENE_PROFILE="${SCENE_PROFILE:-}" \
+    -e SCENE_CG_INFERENCE="$INFERENCE" \
+    -e SCENE_ONNX_DIR=/scene-models/onnx \
+    -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
     -e SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-}" \
     -e SCENE_DUALMAP_CLASSES="${SCENE_DUALMAP_CLASSES:-}" \
     -e SCENE_DUALMAP_ROOT="${SCENE_DUALMAP_ROOT:-}" \
@@ -288,9 +357,8 @@ exec docker run --rm \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
     -e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}" \
     ${ZENOH_ARGS[@]+"${ZENOH_ARGS[@]}"} \
-    -v "$(pwd)":/scene \
-    -v "$PKG/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/proto_gen:ro" \
+    ${SOURCE_MOUNTS[@]+"${SOURCE_MOUNTS[@]}"} \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
-    -v "$(rbnx path robonix-api)":/robonix-api:ro \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
-    "$IMG"
+    "$IMG" &
+wait "$!"

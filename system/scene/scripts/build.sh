@@ -253,6 +253,11 @@ fetch_hf_weight \
     "open_clip_pytorch_model.bin" \
     "$OPEN_CLIP_WEIGHTS"
 
+if [[ "$TARGET" == "jetson-docker" ]]; then
+    python3 "$PKG/scripts/prepare_docker.py" --build
+    exit 0
+fi
+
 # ── 2a. Native dependencies inside the selected Scene environment ────────
 if [[ "$TARGET" == "jetson-native" ]]; then
     PY="$SCENE_NATIVE_PYTHON"
@@ -328,12 +333,11 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "[build] error: target $TARGET needs docker on PATH" >&2
     exit 1
 fi
-# jetson-docker uses the L4T-based Dockerfile; x86-docker the default one.
 SCENE_DOCKERFILE="docker/Dockerfile"
-[[ "$TARGET" == "jetson-docker" ]] && SCENE_DOCKERFILE="docker/Dockerfile.jetson"
 
 DOCKER_BUILD_FLAGS=(
     --network=host
+    --build-arg "SCENE_CG_INFERENCE=$INFERENCE"
     --pull=false
     --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}"
     --build-arg "ROS_BASE_IMAGE=${ROS_BASE_IMAGE}"
@@ -417,6 +421,27 @@ esac
 
 echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
 docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
+
+if [[ "$INFERENCE" == "tensorrt" ]]; then
+    # GPU compilation runs after image construction, before service replacement.
+    TRT_GPU=(--gpus all)
+    mkdir -p "$BUILD/tensorrt"
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e USER=scene -e LOGNAME=scene "${TRT_GPU[@]}" -e NVIDIA_DRIVER_CAPABILITIES=all \
+        -e SCENE_CG_INFERENCE=tensorrt -e SCENE_ONNX_DIR=/scene-models/onnx \
+        -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
+        -e SCENE_PROFILE="${SCENE_PROFILE:-lite}" \
+        -e SCENE_PERCEPTION_BACKEND="$SCENE_PERCEPTION_BACKEND" \
+        -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}" \
+        -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
+        -v "$PKG:/scene:ro" -v "$PKG/$BUILD/tensorrt:/scene-models" \
+        --entrypoint bash "$IMG" -ec '
+            mkdir -p /tmp/Ultralytics
+            cp /opt/ultralytics/Ultralytics/settings.json /tmp/Ultralytics/
+            export YOLO_CONFIG_DIR=/tmp
+            exec "$@"
+        ' scene-prepare python3 /scene/scripts/prepare_models.py
+fi
+
 
 # DualMap, the default backend, is a layer over the image above (start.sh uses
 # it when present). SCENE_PERCEPTION_BACKEND=concept_graphs skips it.

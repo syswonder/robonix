@@ -29,7 +29,7 @@ class OfflineBuildContractTests(unittest.TestCase):
         self.assertNotIn('local tmp="$cached.tmp.$$"', build)
 
     def test_dockerfiles_default_to_bundled_frontend_and_local_clip(self):
-        for name in ("Dockerfile", "Dockerfile.jetson"):
+        for name in ("Dockerfile",):
             text = (SCENE_ROOT / "docker" / name).read_text(encoding="utf-8")
             self.assertFalse(
                 text.splitlines()[0].lstrip().startswith("# syntax="),
@@ -130,6 +130,10 @@ if [[ "${1:-}" == build ]]; then
     printf '%s\n' "$@" > "$FAKE_DOCKER_LOG"
     exit 0
 fi
+if [[ "${1:-}" == run ]]; then
+    printf '%s\n' "$@" > "$FAKE_PREP_LOG"
+    exit 0
+fi
 echo "unexpected fake docker invocation: $*" >&2
 exit 91
 """,
@@ -218,6 +222,20 @@ printf 'downloaded-clip' > "$out"
                 expected,
             )
 
+    def test_tensorrt_docker_build_prepares_models_with_selected_encoder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=True)
+            env.update(SCENE_CG_INFERENCE="tensorrt", SCENE_CLIP_MODEL="ViT-B-32",
+                       SCENE_PROFILE="lite", FAKE_PREP_LOG=str(root / "prepare.log"))
+            args = self._run_build(scene, env)
+            self.assertIn("SCENE_CG_INFERENCE=tensorrt", args)
+            prep = (root / "prepare.log").read_text().splitlines()
+            self.assertIn("SCENE_CLIP_MODEL=ViT-B-32", prep)
+            self.assertIn("SCENE_PROFILE=lite", prep)
+            self.assertIn("/scene/scripts/prepare_models.py", prep)
+            self.assertIn("--gpus", prep)
+
     def test_native_build_only_prepares_models_when_tensorrt_is_selected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -255,6 +273,26 @@ printf 'downloaded-clip' > "$out"
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_tensorrt_preflight_failure_does_not_stop_existing_container(tmp_path):
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    docker = fake_bin / 'docker'
+    docker.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\nexit 23\n')
+    docker.chmod(0o755)
+    env = os.environ.copy()
+    env.update(PATH=str(fake_bin) + os.pathsep + env['PATH'],
+               RBNX_PACKAGE_ROOT=str(tmp_path), ROBONIX_SCENE_FORCE='docker',
+               SCENE_CG_INFERENCE=' TensorRT ', SCENE_PERCEPTION_BACKEND='',
+               DOCKER_LOG=str(tmp_path / 'docker.log'))
+    result = subprocess.run(['bash', str(SCENE_ROOT / 'scripts/start.sh')],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 23
+    calls = (tmp_path / 'docker.log').read_text().splitlines()
+    assert len(calls) == 1
+    assert 'prepare_models.py --check' in calls[0]
+    assert calls[0].startswith('run --rm ')
 
 
 def test_native_start_selects_prepared_python_and_stops_on_stale_environment(tmp_path):

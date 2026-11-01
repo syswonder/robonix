@@ -1,197 +1,108 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-# system/scene container — Jetson (arm64 / L4T) variant.
-#
-# Same shape as docker/Dockerfile, with ONE deliberate difference: the
-# torch / torchvision wheels come from NVIDIA's Jetson index (jetson-ai-lab,
-# JetPack 6 / CUDA 12.6) instead of the cu128 x86_64 wheels. The base stays
-# the multi-arch `ros:${ROS_DISTRO}-ros-base` (its arm64 manifest is what
-# `docker build` picks on a Jetson), so ROS 2 + the scene Python stack are
-# identical to the x86 image — only the CUDA wheels differ.
-#
-# IMPORTANT — run with the NVIDIA container runtime so the container can use
-# the GPU: scripts/start.sh adds `--runtime nvidia` on the jetson-docker path.
-# The Jetson's CUDA/cuDNN userspace libraries are bind-mounted from the host by
-# that runtime; the image itself only carries the torch python wheels.
-#
-# For most Jetsons the lighter `package_manifest.jetson-native.yaml` (host
-# ROS + host JetPack torch, no image build) is the recommended path; this
-# image exists for hosts that want a self-contained scene container.
+# Complete Jetson Scene application; GPU userspace is supplied by the image.
+ARG ROS_BASE_IMAGE=nvcr.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04@sha256:e5ad51a95a1438e7dcba242b70dfd207684fa4c73b7618f865df27b9eb92f57d
+FROM ${ROS_BASE_IMAGE} AS dependencies
 
-ARG ROS_DISTRO=humble
-ARG ROS_BASE_IMAGE=robonix-ros:humble-ros-base
-FROM ${ROS_BASE_IMAGE}
+ARG ROS_DISTRO=jazzy
+ARG CUDA_APT_SUFFIX=12-9
+ENV ROS_DISTRO=${ROS_DISTRO} \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+# Bootstrap ROS's signed apt repository, independent of host ROS packages.
+COPY _build/ros-source.deb /tmp/ros-source.deb
+RUN dpkg -i /tmp/ros-source.deb && rm /tmp/ros-source.deb
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3-venv python3-pip python3-numpy libgl1 libglib2.0-0 libgomp1 libopenblas0 cuda-cupti-${CUDA_APT_SUFFIX} build-essential cmake \
+        ros-${ROS_DISTRO}-ros-base ros-${ROS_DISTRO}-tf2-ros \
+        ros-${ROS_DISTRO}-rmw-zenoh-cpp python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv --system-site-packages /opt/scene-venv
+ENV PATH=/opt/scene-venv/bin:${PATH} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-# ── Build-time proxy helpers (identical to the x86 Dockerfile) ────────
-RUN cat > /usr/local/bin/with-build-proxy <<'EOF' \
- && chmod +x /usr/local/bin/with-build-proxy \
- && cat > /usr/local/bin/without-proxy <<'EOF2' \
- && chmod +x /usr/local/bin/without-proxy
-#!/usr/bin/env sh
-set -eu
-export HTTP_PROXY="${HTTP_PROXY_HOST:-}"
-export HTTPS_PROXY="${HTTPS_PROXY_HOST:-}"
-export http_proxy="${HTTP_PROXY_HOST:-}"
-export https_proxy="${HTTPS_PROXY_HOST:-}"
-export NO_PROXY="${NO_PROXY_HOST:-}"
-export no_proxy="${NO_PROXY_HOST:-}"
-exec "$@"
-EOF
-#!/usr/bin/env sh
-set -eu
-unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
-unset ALL_PROXY all_proxy NO_PROXY no_proxy
-exec "$@"
-EOF2
-
-# ── TUNA mirrors ───────────────────────────────────────────────────
-RUN set -eux; \
-    find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
-      | xargs -0 -r sed -i --follow-symlinks \
-          -e 's|http://packages\.ros\.org/ros2/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu|g' \
-          -e 's|^Types: deb deb-src$|Types: deb|'; \
-    if [ -f /etc/apt/sources.list ]; then \
-        sed -i --follow-symlinks \
-            -e 's|http://ports\.ubuntu\.com/ubuntu-ports/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' \
-            /etc/apt/sources.list; \
+COPY requirements/scene-base.txt requirements/scene-perception-native.txt \
+     requirements/scene-perception-lock.txt requirements/scene-perception-export.txt \
+     requirements/scene-perception-engines.txt /tmp/requirements/
+COPY _build/gpu-wheels.txt /tmp/gpu-wheels.txt
+COPY _build/gpu-constraints.txt /tmp/gpu-constraints.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-deps -r /tmp/gpu-wheels.txt \
+    && pip install -c /tmp/gpu-constraints.txt -c /tmp/requirements/scene-perception-lock.txt \
+        -r /tmp/requirements/scene-base.txt -r /tmp/requirements/scene-perception-native.txt
+# Open3D loads EGL even when Scene only uses point-cloud operations.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY _build/tensorrt-packages.txt _build/tensorrt-key.asc _build/tensorrt-source.list /tmp/
+ARG SCENE_CG_INFERENCE=torch
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -e; \
+    if [ "$SCENE_CG_INFERENCE" = tensorrt ]; then \
+        pip install -c /tmp/gpu-constraints.txt -c /tmp/requirements/scene-perception-lock.txt \
+            -r /tmp/requirements/scene-perception-export.txt \
+            -r /tmp/requirements/scene-perception-engines.txt; \
+        if [ -s /tmp/tensorrt-packages.txt ]; then \
+            cp /tmp/tensorrt-key.asc /usr/share/keyrings/scene-jetson.asc; \
+            cp /tmp/tensorrt-source.list /etc/apt/sources.list.d/scene-jetson.list; \
+            apt-get update; \
+            xargs -r apt-get install -y --no-install-recommends < /tmp/tensorrt-packages.txt; \
+            rm -rf /var/lib/apt/lists/*; \
+        fi; \
     fi
 
-ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-    UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-    HF_ENDPOINT=https://hf-mirror.com
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# System packages we need at runtime (same set as the x86 image).
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    without-proxy sh -c ' \
-        apt-get update && \
-        apt-get install -y --no-install-recommends \
-            python3-pip \
-            python3-cv-bridge \
-            python3-numpy \
-            ros-$ROS_DISTRO-tf2-ros \
-            ros-$ROS_DISTRO-tf-transformations \
-            ros-$ROS_DISTRO-rmw-zenoh-cpp \
-            ros-$ROS_DISTRO-zenoh-bridge-dds && \
-        rm -rf /var/lib/apt/lists/* \
-    '
-
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy python3 -m pip install --progress-bar on --timeout 60 --retries 3 --upgrade pip
-
-# torch + torchvision — JETSON wheels (JetPack 6 / L4T r36 / CUDA 12.6).
-# NVIDIA's jetson-ai-lab index serves CUDA-enabled aarch64 wheels; pin the
-# index via JETSON_PIP_INDEX to match a different JetPack (e.g. jp6/cu128).
-ARG JETSON_PIP_INDEX=https://pypi.jetson-ai-lab.dev/jp6/cu126
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy python3 -m pip install --progress-bar on --timeout 120 --retries 3 \
-        --index-url "${JETSON_PIP_INDEX}" \
-        torch torchvision
-
-# Generic scene deps + concept-graphs perception stack (same requirements as
-# the x86 image — torch is already satisfied above, so pip skips it).
-COPY requirements/scene-base.txt /tmp/requirements/scene-base.txt
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install -r /tmp/requirements/scene-base.txt --progress-bar on --timeout 60 --retries 3 \
-    && rm /tmp/requirements/scene-base.txt
-
-COPY requirements/scene-perception-core.txt /tmp/requirements/scene-perception-core.txt
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install -r /tmp/requirements/scene-perception-core.txt --progress-bar on --timeout 60 --retries 3 \
-    && rm /tmp/requirements/scene-perception-core.txt
-
-COPY requirements/scene-perception-heavy.txt /tmp/requirements/scene-perception-heavy.txt
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install -r /tmp/requirements/scene-perception-heavy.txt --progress-bar on --timeout 60 --retries 3 \
-    && rm /tmp/requirements/scene-perception-heavy.txt
-
-# ── Proxy-needed network layers ────────────────────────────────────
-ARG HTTP_PROXY_HOST
-ARG HTTPS_PROXY_HOST
-ARG NO_PROXY_HOST
-# GitHub mirror prefix (RBNX_GH_MIRROR in scripts/build.sh); empty clones
-# from github.com directly.
-ARG GITHUB_PREFIX=https://ghfast.top/
-
-RUN set -eux; \
-    rm -rf /opt/concept-graphs; \
-    with-build-proxy git clone --depth 1 --branch ali-dev \
-        ${GITHUB_PREFIX}https://github.com/concept-graphs/concept-graphs.git \
-        /opt/concept-graphs \
-    || ( rm -rf /opt/concept-graphs && \
-         with-build-proxy git clone --depth 1 --branch ali-dev \
-            https://github.com/concept-graphs/concept-graphs.git /opt/concept-graphs )
-
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy pip install --no-deps -e /opt/concept-graphs
-
-# Bake CV model weights into the image.
-ENV HF_HOME=/opt/models/hf \
-    YOLO_CONFIG_DIR=/opt/ultralytics
-RUN mkdir -p /opt/models /opt/models/hf /opt/models/ultralytics /opt/ultralytics
-COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
-COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
-COPY _weights/open_clip_pytorch_model.bin /opt/models/open_clip_pytorch_model.bin
-RUN with-build-proxy sh <<'EOF'
-set -eux
-export YOLO_CONFIG_DIR=/opt/ultralytics
-python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='/opt/models/open_clip_pytorch_model.bin')"
-
-python3 - <<'PY'
-from ultralytics.utils import SETTINGS
-
-SETTINGS.update({
-    "weights_dir": "/opt/models/ultralytics",
-    "datasets_dir": "/tmp/ultralytics/datasets",
-    "runs_dir": "/tmp/ultralytics/runs",
-    "sync": False,
-})
-PY
-
-python3 - <<'PY'
-from pathlib import Path
-from ultralytics.utils import WEIGHTS_DIR
-
-expected = Path("/opt/models/ultralytics")
-if Path(WEIGHTS_DIR) != expected:
-    raise RuntimeError(f"Ultralytics WEIGHTS_DIR={WEIGHTS_DIR!s}, expected {expected!s}")
-
-from ultralytics import YOLO
-
-classes = [
-    "chair", "table", "desk", "couch", "sofa", "bookshelf", "shelf",
-    "cabinet", "drawer", "whiteboard",
-    "monitor", "laptop", "keyboard", "mouse", "computer tower",
-    "monitor stand", "headphones", "webcam", "router", "power strip",
-    "cup", "mug", "water bottle", "thermos", "paper cup",
-    "backpack", "handbag", "book", "notebook", "pen", "pencil",
-    "phone", "tablet",
-    "box", "cardboard box", "tray", "basket", "trash bin",
-    "tool", "screwdriver", "wrench", "tape",
-    "plant", "potted plant", "lamp", "clock", "picture frame",
-    "snack", "fruit", "apple", "banana",
-    "door", "doorway", "fire extinguisher", "person",
-]
-
-model = YOLO("/opt/models/yolov8l-world.pt")
-model.set_classes(classes)
-PY
-
-test -s /opt/models/ultralytics/clip/ViT-B-32.pt
-chmod -R a+rX,u+rwX /opt/ultralytics /opt/models/ultralytics
-EOF
-
-ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
+ENV SCENE_CG_INFERENCE=${SCENE_CG_INFERENCE} \
+    SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
     SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
-    YOLO_CONFIG_DIR=/opt/ultralytics \
     SCENE_CLIP_MODEL=ViT-B-32 \
-    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin
-
+    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin \
+    YOLO_CONFIG_DIR=/opt/ultralytics \
+    PYTHONPATH=/scene:/robonix-api:/scene/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/robonix_mcp_types
+# Keep the viewer's NumPy-compatible Arrow pin after the GPU dependency layers.
+COPY requirements/scene-viewer.txt /tmp/requirements/scene-viewer.txt
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-deps -r /tmp/requirements/scene-viewer.txt \
+    && v="$(sed -n 's/^rerun-sdk==//p' /tmp/requirements/scene-viewer.txt)" \
+    && mkdir -p /opt/rerun-web-viewer \
+    && curl -fSL --retry 3 --connect-timeout 20 \
+        "${NPM_REGISTRY}/@rerun-io/web-viewer/-/web-viewer-${v}.tgz" -o /tmp/scene-viewer.tgz \
+    && tar xzf /tmp/scene-viewer.tgz -C /opt/rerun-web-viewer --strip-components=1 \
+        package/index.js package/re_viewer.js package/re_viewer_bg.wasm \
+    && rm /tmp/scene-viewer.tgz
+FROM dependencies AS application
+COPY _build/models/yolov8l-world.pt _build/models/mobile_sam.pt _build/models/open_clip_pytorch_model.bin /opt/models/
+COPY _build/models/ViT-B-32.pt /opt/models/ultralytics/clip/ViT-B-32.pt
+COPY _build/api /robonix-api
+COPY _build/scene /scene
+COPY entrypoint.sh /scene/docker/entrypoint.sh
+COPY _build/container-policy.json /scene/container-policy.json
 WORKDIR /scene
-COPY entrypoint.sh /entrypoint.sh
-COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
-RUN chmod +x /entrypoint.sh
-ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml
-ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
-ENTRYPOINT ["/entrypoint.sh"]
+RUN python -m grpc_tools.protoc \
+        -I/scene/rbnx-build/runtime-proto -I/scene/rbnx-build/proto-staging \
+        --python_out=/scene/rbnx-build/codegen/scene_proto_gen \
+        --grpc_python_out=/scene/rbnx-build/codegen/scene_proto_gen \
+        /scene/rbnx-build/runtime-proto/*.proto /scene/rbnx-build/proto-staging/*.proto \
+    && ln -s scene_proto_gen /scene/rbnx-build/codegen/proto_gen \
+    && python -c 'import importlib,pathlib; p=pathlib.Path("rbnx-build/codegen/scene_proto_gen"); [importlib.import_module(f.stem) for f in p.glob("*_pb2*.py")]'
+RUN mkdir -p /opt/ultralytics
+RUN python - <<'PY'
+from ultralytics.utils import SETTINGS
+SETTINGS.update({'weights_dir': '/opt/models/ultralytics', 'sync': False})
+PY
+RUN bash -c 'source /opt/ros/${ROS_DISTRO}/setup.bash && python scripts/check_docker.py --inference "$SCENE_CG_INFERENCE" --imports-only'
+RUN bash -c 'source /opt/ros/${ROS_DISTRO}/setup.bash && cd /scene/rbnx-build/codegen/ros2_idl && colcon build --packages-up-to map' \
+    && pip freeze > /scene/container-requirements.txt \
+    && dpkg-query -W -f='${Package}=${Version}\n' >> /scene/container-requirements.txt
+ENTRYPOINT ["/bin/bash", "/scene/docker/entrypoint.sh"]
+
+ARG SCENE_SOURCE_SHA
+ARG SCENE_BASE_PIN
+ARG SCENE_L4T_PREFIX
+LABEL io.robonix.scene.packaged="1" \
+      io.robonix.scene.base=${SCENE_BASE_PIN} \
+      io.robonix.scene.source=${SCENE_SOURCE_SHA} \
+      io.robonix.scene.l4t=${SCENE_L4T_PREFIX} \
+      io.robonix.scene.inference=${SCENE_CG_INFERENCE}

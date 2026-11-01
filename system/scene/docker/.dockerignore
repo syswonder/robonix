@@ -1,0 +1,3 @@
+_weights/onnx
+**/__pycache__
+**/*.pyc
