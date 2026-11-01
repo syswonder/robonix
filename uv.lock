@@ -720,16 +720,22 @@ dependencies = [
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/1a/fe/7351d7e586a8b4c9f89731bfe4cf0148223e8f9903ff09571f78b3fb0682/cuda_bindings-13.2.0-cp310-cp310-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:08b395f79cb89ce0cd8effff07c4a1e20101b873c256a1aeb286e8fd7bd0f556", size = 5744254, upload-time = "2026-03-11T00:12:29.798Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/aa/ef/184aa775e970fc089942cd9ec6302e6e44679d4c14549c6a7ea45bf7f798/cuda_bindings-13.2.0-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d6f3682ec3c4769326aafc67c2ba669d97d688d0b7e63e659d36d2f8b72f32d6", size = 6329075, upload-time = "2026-03-11T00:12:32.319Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ec/ea/81999d01375645f34596c76eb046b4b36d58cc6fe2bddb2410f8a7b7a827/cuda_bindings-13.2.0-cp310-cp310-win_amd64.whl", hash = "sha256:845025438a1b9e20718b9fb42add3e0eb72e85458bcab3eeb80bfd8f0a9dab33", size = 5600047, upload-time = "2026-03-11T00:12:34.848Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e0/a9/3a8241c6e19483ac1f1dcf5c10238205dcb8a6e9d0d4d4709240dff28ff4/cuda_bindings-13.2.0-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:721104c603f059780d287969be3d194a18d0cc3b713ed9049065a1107706759d", size = 5730273, upload-time = "2026-03-11T00:12:37.18Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e9/94/2748597f47bb1600cd466b20cab4159f1530a3a33fe7f70fee199b3abb9e/cuda_bindings-13.2.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1eba9504ac70667dd48313395fe05157518fd6371b532790e96fbb31bbb5a5e1", size = 6313924, upload-time = "2026-03-11T00:12:39.462Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/29/5a/0ce1731c48bcd9f40996a4ef1abbf634f1a7fe4a15c5050b1e75ce3a7acf/cuda_bindings-13.2.0-cp311-cp311-win_amd64.whl", hash = "sha256:debb51b211d246f8326f6b6e982506a5d0d9906672c91bc478b66addc7ecc60a", size = 5631363, upload-time = "2026-03-11T00:12:41.58Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/52/c8/b2589d68acf7e3d63e2be330b84bc25712e97ed799affbca7edd7eae25d6/cuda_bindings-13.2.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e865447abfb83d6a98ad5130ed3c70b1fc295ae3eeee39fd07b4ddb0671b6788", size = 5722404, upload-time = "2026-03-11T00:12:44.041Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/1f/92/f899f7bbb5617bb65ec52a6eac1e9a1447a86b916c4194f8a5001b8cde0c/cuda_bindings-13.2.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:46d8776a55d6d5da9dd6e9858fba2efcda2abe6743871dee47dd06eb8cb6d955", size = 6320619, upload-time = "2026-03-11T00:12:45.939Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/bb/a5/d7f01a415e134546248cef612adad8153c9f1eb10ec79505a7cd8294370b/cuda_bindings-13.2.0-cp312-cp312-win_amd64.whl", hash = "sha256:45815daeb595bf3b405c52671a2542b1f8e9329f3b029494acbfcc74aeaa1f2d", size = 5840830, upload-time = "2026-03-11T00:12:48.43Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/df/93/eef988860a3ca985f82c4f3174fc0cdd94e07331ba9a92e8e064c260337f/cuda_bindings-13.2.0-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6629ca2df6f795b784752409bcaedbd22a7a651b74b56a165ebc0c9dcbd504d0", size = 5614610, upload-time = "2026-03-11T00:12:50.337Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/18/23/6db3aba46864aee357ab2415135b3fe3da7e9f1fa0221fa2a86a5968099c/cuda_bindings-13.2.0-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7dca0da053d3b4cc4869eff49c61c03f3c5dbaa0bcd712317a358d5b8f3f385d", size = 6149914, upload-time = "2026-03-11T00:12:52.374Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c4/84/d3b6220b51cbc02ca14db7387e97445126b4ff5125aaa6c5dd7dcb75e679/cuda_bindings-13.2.0-cp313-cp313-win_amd64.whl", hash = "sha256:8cebe3ce4aeeca5af9c490e175f76c4b569bbf4a35a62294b777bc77bf7ac4d8", size = 5796512, upload-time = "2026-03-11T00:12:54.483Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c0/87/87a014f045b77c6de5c8527b0757fe644417b184e5367db977236a141602/cuda_bindings-13.2.0-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a6464b30f46692d6c7f65d4a0e0450d81dd29de3afc1bb515653973d01c2cd6e", size = 5685673, upload-time = "2026-03-11T00:12:56.371Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ee/5e/c0fe77a73aaefd3fff25ffaccaac69c5a63eafdf8b9a4c476626ef0ac703/cuda_bindings-13.2.0-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f4af9f3e1be603fa12d5ad6cfca7844c9d230befa9792b5abdf7dd79979c3626", size = 6191386, upload-time = "2026-03-11T00:12:58.965Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e3/73/98bcb069778fe420226db75aff54b5dd6c3ecfd0912edabab723326e80b7/cuda_bindings-13.2.0-cp314-cp314-win_amd64.whl", hash = "sha256:bd658bb5c0e55b7b3e5dd0ed509c6addb298c665db26a9bfba35e1e626000ba2", size = 5938605, upload-time = "2026-03-11T00:13:01.639Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/5f/58/ed2c3b39c8dd5f96aa7a4abef0d47a73932c7a988e30f5fa428f00ed0da1/cuda_bindings-13.2.0-cp314-cp314t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:df850a1ff8ce1b3385257b08e47b70e959932f5f432d0a4e46a355962b4e4771", size = 5507469, upload-time = "2026-03-11T00:13:04.063Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/1f/01/0c941b112ceeb21439b05895eace78ca1aa2eaaf695c8521a068fd9b4c00/cuda_bindings-13.2.0-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e8a16384c6494e5485f39314b0b4afb04bee48d49edb16d5d8593fd35bbd231b", size = 6059693, upload-time = "2026-03-11T00:13:06.003Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/52/49/4e01cc06447d39476e138d1b1adec8d35c0d04eccd2c8d69befc08cd66e8/cuda_bindings-13.2.0-cp314-cp314t-win_amd64.whl", hash = "sha256:6ccf14e0c1def3b7200100aafff3a9f7e210ecb6e409329e92dcf6cd2c00d5c7", size = 6662637, upload-time = "2026-03-11T00:13:07.881Z" },
 ]
 
 [[package]]
@@ -3758,51 +3764,56 @@ name = "robonix-system-scene"
 version = "1.1.0b1"
 source = { virtual = "system/scene" }
 dependencies = [
-    { name = "cuda-bindings", marker = "platform_machine == 'aarch64'" },
-    { name = "cuda-pathfinder", marker = "platform_machine == 'aarch64'" },
     { name = "fastmcp" },
-    { name = "ftfy" },
     { name = "grpcio" },
     { name = "grpcio-tools" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "numpy" },
-    { name = "onnxruntime", version = "1.18.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "platform_machine == 'aarch64'" },
-    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "platform_machine != 'aarch64'" },
     { name = "open3d", marker = "python_full_version < '3.13' and platform_machine == 'x86_64'" },
     { name = "pillow" },
     { name = "protobuf" },
     { name = "pymilvus" },
     { name = "pyyaml" },
-    { name = "regex" },
     { name = "robonix-api" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+tensorrt = [
+    { name = "cuda-bindings" },
+    { name = "cuda-pathfinder" },
+    { name = "ftfy" },
+    { name = "onnxruntime", version = "1.18.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "platform_machine == 'aarch64'" },
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "platform_machine != 'aarch64'" },
+    { name = "regex" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "cuda-bindings", marker = "platform_machine == 'aarch64'", specifier = ">=12" },
-    { name = "cuda-pathfinder", marker = "platform_machine == 'aarch64'" },
+    { name = "cuda-bindings", marker = "extra == 'tensorrt'", specifier = ">=12" },
+    { name = "cuda-pathfinder", marker = "extra == 'tensorrt'", specifier = ">=0.3" },
     { name = "fastmcp", specifier = ">=3,<5" },
-    { name = "ftfy", specifier = ">=6" },
+    { name = "ftfy", marker = "extra == 'tensorrt'", specifier = ">=6" },
     { name = "grpcio", specifier = "==1.80.0" },
     { name = "grpcio-tools", specifier = "==1.76.0" },
     { name = "httpx" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "numpy", specifier = ">=1.26,<2" },
-    { name = "onnxruntime", specifier = ">=1.17" },
+    { name = "onnxruntime", marker = "extra == 'tensorrt'", specifier = ">=1.17" },
     { name = "open3d", marker = "python_full_version < '3.13' and platform_machine == 'x86_64'", specifier = ">=0.18" },
     { name = "pillow" },
     { name = "protobuf", specifier = "==6.33.6" },
     { name = "pymilvus", specifier = ">=2.5.0,!=2.6.10" },
     { name = "pyyaml" },
-    { name = "regex" },
+    { name = "regex", marker = "extra == 'tensorrt'" },
     { name = "robonix-api", editable = "pylib/robonix-api" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "uvicorn" },
 ]
+provides-extras = ["tensorrt"]
 
 [[package]]
 name = "robonix-system-speech"

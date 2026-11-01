@@ -204,34 +204,39 @@ def _env_or(name: str, fallback: str) -> str:
     return (os.environ.get(name, "") or "").strip() or fallback
 
 
-def _load_engine_bundle(profile="lite"):
-    """Load TRT/ORT sessions, or disable perception when they are unavailable."""
-    if os.environ.get("SCENE_CG_FORCE_CPU", "").strip() in ("1", "true", "yes"):
-        log.warning(
-            "[scene-cg] SCENE_CG_FORCE_CPU set — the engine path is GPU-only; "
-            "perception disabled"
-        )
-        return None, "cpu"
+def _load_engine_bundle(profile="lite", yolo_path=None, sam_path=None,
+                        clip_model_name=None, clip_pretrained=None):
+    from ..inference_config import (
+        inference_backend, prepared_models_dir, engine_cache_dir, validate_tensorrt_config,
+    )
 
+    backend = inference_backend()
     models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
-    yw = _env_or("SCENE_YOLO_WORLD_WEIGHTS", models["yolo"])
-    # The ONNX exports ship beside the weights (start_native.sh preflights
-    # `<weights dir>/onnx`); SCENE_ONNX_DIR overrides for split layouts.
-    models_dir = _env_or("SCENE_ONNX_DIR", os.path.join(os.path.dirname(yw), "onnx"))
+    yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", models["yolo"])
     classes = _resolved_classes()
-    log.info("[scene-cg] profile=%s onnx=%s classes=%d", profile, models_dir, len(classes))
+    log.info("[scene-cg] inference=%s profile=%s", backend, profile)
+    if backend == "torch":
+        try:
+            from .perception_torch import TorchPerception
 
-    try:
-        from .perception_engines import load_engines
+            bundle = TorchPerception(
+                classes, yw,
+                sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", models["sam"]),
+                clip_model_name or _env_or("SCENE_CLIP_MODEL", models["clip_model"]),
+                clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", models["clip_pretrained"]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Torch models unavailable (%s) — perception disabled", exc)
+            return None, "cpu"
+        return bundle, bundle.device
 
-        bundle = load_engines(classes, models_dir=models_dir)
-    except FileNotFoundError as e:
-        log.warning("%s — perception disabled", e)
-        return None, "cpu"
-    except Exception as e:  # noqa: BLE001
-        log.warning("engine load failed (%s) — perception disabled", e)
-        return None, "cpu"
-    return bundle, "cuda"
+    validate_tensorrt_config(profile=profile, clip_model=clip_model_name)
+    from .perception_engines import load_engines
+
+    models_dir = _env_or("SCENE_ONNX_DIR", os.path.join(os.path.dirname(yw), "onnx"))
+    models_dir = prepared_models_dir(models_dir)
+    return load_engines(classes, models_dir=models_dir,
+                        cache_dir=str(engine_cache_dir(models_dir))), "cuda"
 
 
 # ── Visible-absence detection ────────────────────────────────────────────
@@ -506,6 +511,8 @@ class ConceptGraphsDetector:
         profile: str = "lite",
     ) -> None:
         self._profile = profile
+        self._yolo_weights_path = yolo_weights_path
+        self._sam_weights_path = sam_weights_path
         self._rgb_msg = rgb_fetcher_msg
         self._depth_msg = depth_fetcher_msg
         self._cam_info = camera_info_fetcher
@@ -621,6 +628,8 @@ class ConceptGraphsDetector:
         self._asyncio_loop = loop
         self._engines, self._device = await loop.run_in_executor(
             None, _load_engine_bundle, self._profile,
+            self._yolo_weights_path, self._sam_weights_path,
+            self._clip_model_name, self._clip_pretrained,
         )
         if self._engines is None:
             log.warning("ConceptGraphsDetector skipped — engine set unavailable")
@@ -656,8 +665,7 @@ class ConceptGraphsDetector:
 
     # ── Text embedding (shared CLIP) ─────────────────────────────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
-        """Encode `texts` with the loaded CLIP text tower (ONNX/CPU ORT),
-        L2-normalized to match the per-object image features."""
+        """Encode texts with CLIP, normalized to match object image features."""
         if self._engines is None or not texts:
             return None
         try:
@@ -857,21 +865,14 @@ class ConceptGraphsDetector:
                 if self._tick_profile and self._stage_s:
                     self._stage_log_n += 1
                     if self._stage_log_n % 25 == 1:
-                        # TRT has no allocator pool to track — the engine set's
-                        # static device footprint is the number that matters.
-                        eng_mb = (
-                            self._engines.device_memory_bytes / 2**20
-                            if self._engines is not None else 0.0
-                        )
                         log.info(
                             "[scene-cg] tick %.3fs: yolo %.3f sam %.3f clip %.3f "
-                            "pcd %.3f, engines %.0fMB device",
+                            "pcd %.3f",
                             self.last_tick_s,
                             self._stage_s.get("yolo", 0.0),
                             self._stage_s.get("sam", 0.0),
                             self._stage_s.get("clip", 0.0),
                             self._stage_s.get("pcd", 0.0),
-                            eng_mb,
                         )
 
     def _tick_locked(self) -> None:
@@ -907,7 +908,7 @@ class ConceptGraphsDetector:
         try:
             dets = self._engines.detect(rgb, self._conf_thresh)
         except Exception as e:  # noqa: BLE001
-            log.warning("yolo-world engine failed: %s", e)
+            log.warning("yolo-world inference failed: %s", e)
             return
         self._stage_s["yolo"] = time.monotonic() - t_stage
         t_stage = time.monotonic()
@@ -952,10 +953,16 @@ class ConceptGraphsDetector:
         try:
             masks = self._engines.segment(rgb, xyxy)
         except Exception as e:  # noqa: BLE001
-            log.warning("mobile-sam engine failed: %s — skipping tick", e)
+            log.warning("mobile-sam inference failed: %s — skipping tick", e)
             return
         self._stage_s["sam"] = time.monotonic() - t_stage
         t_stage = time.monotonic()
+        # SAM may omit degenerate boxes on the Torch path.
+        n = min(len(masks), len(xyxy))
+        if n == 0:
+            self._finish_tick()
+            return
+        masks, xyxy, confs, cls_idx = masks[:n], xyxy[:n], confs[:n], cls_idx[:n]
         # Resize masks to depth resolution if needed (MobileSAM masks come back
         # at the input resolution, which matches RGB; depth may differ; equal-
         # sized streams make this a no-op).

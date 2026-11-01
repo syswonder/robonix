@@ -105,3 +105,28 @@ def test_yolo_scores_preserve_features_and_reuse_class_constants(monkeypatch):
         np.testing.assert_allclose(nms.call_args.args[1], expected)
     np.testing.assert_array_equal(features, original)
     np.testing.assert_array_equal(bundle.e, embeddings)
+
+
+@pytest.mark.parametrize('count', [0, 33, 64])
+def test_segment_preserves_all_boxes_with_single_box_decoder(count):
+    engines = object.__new__(pe.PerceptionEngines)
+    embedding = np.zeros((1, 256, 64, 64), np.float32)
+    engines.sam_enc = SimpleNamespace(run=Mock(return_value={'image_embed': embedding}))
+    calls = []
+
+    def decode(inputs):
+        assert inputs['image_embeddings'] is embedding
+        assert inputs['boxes'].shape == (1, 4)
+        index = len(calls)
+        calls.append(inputs['boxes'].copy())
+        return {'masks': np.full((1, 1, 256, 256), 1 if index % 2 else -1, np.float32)}
+
+    engines.sam_dec = SimpleNamespace(run=Mock(side_effect=decode))
+    image = np.zeros((12, 16, 3), np.uint8)
+    boxes = np.tile(np.array([[1, 2, 8, 10]], np.float32), (count, 1))
+    masks = engines.segment(image, boxes)
+    assert masks.shape == (count, 12, 16)
+    assert masks.dtype == np.bool_
+    assert np.array_equal(masks[:, 0, 0], np.arange(count) % 2 == 1)
+    assert len(calls) == count
+    assert engines.sam_enc.run.call_count == bool(count)

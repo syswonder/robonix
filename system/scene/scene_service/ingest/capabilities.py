@@ -41,6 +41,8 @@ def dualmap_available() -> bool:
 
 def default_backend() -> Backend:
     """The backend to use when config and environment both stay silent."""
+    if os.environ.get("SCENE_CG_INFERENCE", "").strip().lower() == "tensorrt":
+        return FALLBACK_BACKEND
     return PREFERRED_BACKEND if dualmap_available() else FALLBACK_BACKEND
 
 

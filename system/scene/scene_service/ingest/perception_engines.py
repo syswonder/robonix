@@ -50,7 +50,6 @@ NMS_MAX_DET = 300    # predict default max_det, before Scene's own top-k cap
 NMS_MAX_NMS = 30000  # candidate cap before the greedy pass
 NMS_MAX_WH = 7680    # per-class box offset for batched NMS
 
-SAM_DEC_MAX_BOXES = 32  # bound the number of sequential decoder calls
 YOLO_NC_MAX = 256
 WORKSPACE = 1 << 30
 # Increment when builder semantics change beyond the settings fingerprinted below.
@@ -424,18 +423,10 @@ def clip_crop_crops(rgb: np.ndarray, xyxy: np.ndarray, padding: int = 20) -> np.
     path bitwise: torchvision Resize on PIL uses PIL's own BICUBIC resize,
     ToTensor is uint8/255, Normalize is the OpenAI CLIP mean/std."""
     from PIL import Image
-    image = Image.fromarray(np.ascontiguousarray(rgb))
-    width, height = image.size
-    crops = []
-    for x_min, y_min, x_max, y_max in np.asarray(xyxy, dtype=np.float64):
-        # PIL's crop rounds the box coordinates.
-        x0, y0, x1, y1 = round(x_min), round(y_min), round(x_max), round(y_max)
-        x0 -= min(padding, max(x0, 0))
-        y0 -= min(padding, max(y0, 0))
-        x1 += min(padding, width - x1)
-        y1 += min(padding, height - y1)
-        crop = image.crop((x0, y0, x1, y1))
+    from .perception_images import clip_crops
 
+    crops = []
+    for crop in clip_crops(rgb, xyxy, padding):
         cw, ch = crop.size
         if (cw <= ch and cw != CLIP_CROP) or (ch <= cw and ch != CLIP_CROP):
             if cw < ch:
@@ -589,18 +580,16 @@ class PerceptionEngines:
         """Box-prompted masks (K,H,W) bool at the input resolution."""
         if xyxy.shape[0] == 0:
             return np.zeros((0, bgr.shape[0], bgr.shape[1]), dtype=bool)
-        assert xyxy.shape[0] <= SAM_DEC_MAX_BOXES, \
-            f"segment() caps at {SAM_DEC_MAX_BOXES} boxes"
         enc = self.sam_enc.run({"image": sam_preprocess(bgr)[None]})["image_embed"]
         boxes = sam_scale_boxes(xyxy, bgr.shape[:2])  # (K,4) in 1024-space
         # The decoder runs one box at a time (static K=1 profile): batched-K
         # tactics cost ~38MB device scratch per profiled box, which is a bad
         # trade on the 8GB board; a K=1 call is ~10ms.
-        logits = np.stack([
-            self.sam_dec.run({"image_embeddings": enc, "boxes": boxes[i:i + 1]})["masks"][0]
-            for i in range(boxes.shape[0])
-        ])
-        return sam_postprocess_masks(logits, bgr.shape[:2])
+        masks = np.empty((len(boxes), *bgr.shape[:2]), dtype=bool)
+        for i in range(len(boxes)):
+            logits = self.sam_dec.run({"image_embeddings": enc, "boxes": boxes[i:i + 1]})["masks"]
+            masks[i] = sam_postprocess_masks(logits, bgr.shape[:2])[0]
+        return masks
 
     def clip_feats(self, rgb: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
         """(K,512) L2-normalized CLIP features, b8 batches."""

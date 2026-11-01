@@ -179,3 +179,40 @@ def test_observations_use_the_matched_or_new_track_identity(detector, matched):
     else:
         assert track_id == detection["id"]
         assert d._map_objects[-1] is detection
+
+
+def test_selected_tensorrt_loader_does_not_import_torch(monkeypatch, tmp_path):
+    import builtins
+    from scene_service.ingest import perception_concept_graphs as cg
+    from scene_service.ingest import perception_engines
+
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setenv('SCENE_ONNX_DIR', str(tmp_path))
+    monkeypatch.delenv('SCENE_CG_FORCE_CPU', raising=False)
+    monkeypatch.delenv('SCENE_CLIP_MODEL', raising=False)
+    monkeypatch.setenv('SCENE_PERCEPTION_BACKEND', 'concept_graphs')
+    sentinel = object()
+    monkeypatch.setattr(perception_engines, 'load_engines', lambda *a, **k: sentinel)
+    original = builtins.__import__
+
+    def without_torch(name, *args, **kwargs):
+        if name.split('.')[0] in ('torch', 'ultralytics', 'open_clip'):
+            raise AssertionError(f'Unexpected runtime import: {name}')
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', without_torch)
+    assert cg._load_engine_bundle() == (sentinel, 'cuda')
+
+
+def test_missing_torch_models_preserve_geometric_service(monkeypatch, caplog):
+    from scene_service.ingest import perception_concept_graphs as cg
+    from scene_service.ingest import perception_torch
+
+    monkeypatch.delenv('SCENE_CG_INFERENCE', raising=False)
+
+    def missing(*args):
+        raise FileNotFoundError('missing source weights')
+
+    monkeypatch.setattr(perception_torch, 'TorchPerception', missing)
+    assert cg._load_engine_bundle() == (None, 'cpu')
+    assert 'perception disabled' in caplog.text

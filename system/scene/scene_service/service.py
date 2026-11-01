@@ -771,6 +771,10 @@ async def _start_ros_ingest(
             "recognised keys are %s",
             ", ".join(perception_cfg.ignored_keys), ", ".join(sorted(PERCEPTION_KEYS)),
         )
+    from .inference_config import inference_backend, validate_tensorrt_config
+
+    if inference_backend() == "tensorrt":
+        validate_tensorrt_config(profile=perception_cfg.profile, backend=perception_cfg.backend)
     profile = perception_cfg.profile
     plan = plan_perception(hub, profile, perception_cfg.backend)
     log.info("[scene] perception plan: %s", plan.summary())

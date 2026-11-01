@@ -51,16 +51,13 @@ dependencies = [
     # transitively (via memsearch), without an explicit pin.
     "pymilvus!=2.6.10,>=2.5.0",
     "robonix-api",
-    # Perception engine runtime (TRT engines + CPU onnxruntime text towers).
-    # tensorrt itself is a board-side system/wheel install (NVIDIA index,
-    # ~1GB) and stays out of this file; cuda-bindings drives the engine
-    # buffers, so it is only resolved where scene actually runs (aarch64).
+]
+
+[project.optional-dependencies]
+tensorrt = [
     "onnxruntime>=1.17",
-    "cuda-bindings>=12; platform_machine == 'aarch64'",
-    "cuda-pathfinder; platform_machine == 'aarch64'",
-    # Vendored CLIP tokenizer (ingest/perception_engines.py): regex compiles
-    # the \p{L}/\p{N} pattern stdlib re cannot; ftfy fixes mojibake and is
-    # optional at runtime (skipped when absent).
+    "cuda-bindings>=12",
+    "cuda-pathfinder>=0.3",
     "regex",
     "ftfy>=6",
 ]

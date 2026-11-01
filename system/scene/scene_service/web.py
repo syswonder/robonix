@@ -1929,6 +1929,12 @@ def _cost_sample(detector):
     if engines is not None and hasattr(engines, "device_memory_bytes"):
         sample["gpu_engine_mb"] = engines.device_memory_bytes / 1e6
 
+    elif engines is not None and getattr(engines, "device", "cpu") == "cuda":
+        import torch
+
+        sample["gpu_allocated_mb"] = torch.cuda.memory_allocated() / 1e6
+        sample["gpu_reserved_mb"] = torch.cuda.memory_reserved() / 1e6
+
     mem = _read_first("/sys/fs/cgroup/memory.current")
     if mem is None:
         mem = _read_first("/sys/fs/cgroup/memory/memory.usage_in_bytes")
