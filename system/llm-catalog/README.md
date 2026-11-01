@@ -35,6 +35,9 @@ matching, so an unavailable schema model cannot block a usable JSON fallback.
 
 Omit `api_key_env` for keyless endpoints. When set, it must match
 `[A-Za-z_][A-Za-z0-9_]*` so launchers can forward it as an environment variable.
+Both loaders trim endpoint identifiers and reject non-finite prices/latency
+and non-integer or out-of-range context sizes. Shared validation cases cover
+these rules alongside the resolver cases.
 
 The shared cases in `pylib/robonix-api/robonix_api/llm/contract/resolve_cases.json` are run by
 both this crate and the Python package:
