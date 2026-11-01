@@ -141,32 +141,31 @@ if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
     export ROBONIX_LLM_CATALOG
     CATALOG_ARGS=(-v "${ROBONIX_LLM_CATALOG}:${ROBONIX_LLM_CATALOG}:ro")
 fi
-# rbnx exports ROBONIX_LLM_KEY_ENVS with exactly the api_key_env names the
-# catalog uses. Forward only those; the legacy six-key list remains for
-# manual launches that predate the catalog.
 declare -a KEY_ARGS=()
-if [[ -n "${ROBONIX_LLM_CATALOG:-}" && -n "${ROBONIX_LLM_KEY_ENVS+x}" ]]; then
+if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
+    if [[ -z "${ROBONIX_LLM_KEY_ENVS+x}" ]]; then
+        # Standalone launches have no key list from rbnx boot.
+        ROBONIX_LLM_KEY_ENVS="$(
+            PYTHONPATH="$(rbnx path robonix-api)${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+from robonix_api.llm import catalog_from_env
+print(",".join(sorted({m.api_key_env for m in catalog_from_env().models if m.api_key_env})))
+'
+        )"
+    fi
     IFS=',' read -r -a ROBONIX_LLM_KEY_NAMES <<< "${ROBONIX_LLM_KEY_ENVS}"
-    for key_name in ${ROBONIX_LLM_KEY_NAMES[@]+"${ROBONIX_LLM_KEY_NAMES[@]}"}; do
-        [[ -z "$key_name" ]] && continue
-        if [[ ! "$key_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-            echo "[scene/start] invalid catalog key environment variable name" >&2
-            exit 2
-        fi
-        if [[ -n "${!key_name:-}" ]]; then
-            KEY_ARGS+=(-e "$key_name")
-        fi
-    done
 else
-    KEY_ARGS=(
-        -e DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
-        -e OPENAI_API_KEY="${OPENAI_API_KEY:-}"
-        -e DASHSCOPE_API_KEY="${DASHSCOPE_API_KEY:-}"
-        -e VLLM_API_KEY="${VLLM_API_KEY:-}"
-        -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
-        -e GEMINI_API_KEY="${GEMINI_API_KEY:-}"
-    )
+    ROBONIX_LLM_KEY_NAMES=(VLM_API_KEY OPENAI_API_KEY)
 fi
+for key_name in ${ROBONIX_LLM_KEY_NAMES[@]+"${ROBONIX_LLM_KEY_NAMES[@]}"}; do
+    [[ -z "$key_name" ]] && continue
+    if [[ ! "$key_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        echo "[scene/start] invalid catalog key environment variable name" >&2
+        exit 2
+    fi
+    if [[ -n "${!key_name:-}" ]]; then
+        KEY_ARGS+=(-e "$key_name")
+    fi
+done
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
@@ -302,7 +301,6 @@ exec docker run --rm \
     -e SCENE_PERCEPTION_WAIT_S="${SCENE_PERCEPTION_WAIT_S:-30}" \
     -e SCENE_OPEN_VOCAB_CLASSES="${SCENE_OPEN_VOCAB_CLASSES:-}" \
     -e VLM_BASE_URL="${VLM_BASE_URL:-}" \
-    -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
     -e SCENE_VLM_MAX_TOKENS="${SCENE_VLM_MAX_TOKENS:-}" \

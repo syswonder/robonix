@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -15,7 +17,7 @@ SCENE_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeProtobufContractTests(unittest.TestCase):
-    def test_launcher_generates_with_runtime_image_without_network(self):
+    def _run_launcher(self, env_overrides=None, catalog=None, check=True):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene = root / "scene"
@@ -47,8 +49,11 @@ class RuntimeProtobufContractTests(unittest.TestCase):
             (fake_bin / "rbnx").write_text(
                 "#!/usr/bin/env bash\n"
                 "set -eu\n"
-                "[[ \"${1:-}\" == path && \"${2:-}\" == runtime-proto ]]\n"
-                "printf '%s\\n' \"$FAKE_RUNTIME_PROTO\"\n",
+                "[[ \"${1:-}\" == path ]]\n"
+                "case \"${2:-}\" in\n"
+                "runtime-proto) printf '%s\\n' \"$FAKE_RUNTIME_PROTO\" ;;\n"
+                "robonix-api) printf '%s\\n' \"$FAKE_ROBONIX_API\" ;;\n"
+                "*) exit 2 ;;\nesac\n",
                 encoding="utf-8",
             )
             (fake_bin / "docker").write_text(
@@ -74,25 +79,38 @@ exit 0
                 executable.chmod(0o755)
 
             env = os.environ.copy()
+            for name in list(env):
+                if name.startswith(("ROBONIX_LLM_", "VLM_")) or name.endswith("_API_KEY"):
+                    env.pop(name)
             env.update(
                 {
                     "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
                     "RBNX_PACKAGE_ROOT": str(scene),
                     "ROBONIX_SCENE_IMAGE": "scene-runtime:test",
+                    "ROBONIX_SCENE_FORCE": "docker",
+                    "ROBONIX_FORCE_CPU": "1",
                     "SCENE_DATA_DIR": str(root / "scene-data"),
                     "FAKE_RUNTIME_PROTO": str(runtime_proto),
                     "FAKE_DOCKER_LOG": str(docker_log),
+                    "FAKE_ROBONIX_API": str(SCENE_ROOT.parents[1] / "pylib" / "robonix-api"),
                 }
             )
-            subprocess.run(
+            if catalog is not None:
+                path = root / "models.json"
+                path.write_text(json.dumps(catalog), encoding="utf-8")
+                env["ROBONIX_LLM_CATALOG"] = str(path)
+            env.update(env_overrides or {})
+            result = subprocess.run(
                 ["bash", "scripts/start.sh"],
                 cwd=scene,
                 env=env,
-                check=True,
+                check=check,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+            if result.returncode:
+                return result, []
 
             lines = docker_log.read_text(encoding="utf-8").splitlines()
             codegen = next(line for line in lines if "--network none" in line)
@@ -109,6 +127,48 @@ exit 0
             self.assertTrue(
                 (scene / "rbnx-build" / "codegen" / "scene_proto_gen" / "atlas_pb2.py").is_file()
             )
+            return result, shlex.split(service)
+
+    def test_launcher_generates_with_runtime_image_without_network(self):
+        self._run_launcher()
+
+    def test_catalog_keys_are_forwarded_by_name_in_both_launch_modes(self):
+        catalog = {"models": [{
+            "id": "test", "provider": "test", "model": "test",
+            "base_url": "http://127.0.0.1:8000/v1", "api_key_env": "MOONSHOT_API_KEY",
+        }]}
+        for managed in (False, True):
+            env = {"MOONSHOT_API_KEY": "dummy-used", "DEEPSEEK_API_KEY": "dummy-unused"}
+            if managed:
+                env["ROBONIX_LLM_KEY_ENVS"] = "MOONSHOT_API_KEY"
+            with self.subTest(managed=managed):
+                _, args = self._run_launcher(env, catalog)
+                self.assertIn("MOONSHOT_API_KEY", args)
+                self.assertNotIn("DEEPSEEK_API_KEY", args)
+                self.assertNotIn("dummy-used", " ".join(args))
+                self.assertNotIn("dummy-unused", " ".join(args))
+
+    def test_keyless_catalog_and_unsafe_precomputed_names(self):
+        catalog = {"models": [{
+            "id": "local", "provider": "test", "model": "local",
+            "base_url": "http://127.0.0.1:8000/v1",
+        }]}
+        self._run_launcher({"ROBONIX_LLM_KEY_ENVS": ""}, catalog)
+        result, _ = self._run_launcher({
+            "ROBONIX_LLM_KEY_ENVS": "BASH_VERSINFO[$(printf${IFS}UNSAFE>&2)0]",
+        }, catalog, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("UNSAFE", result.stderr)
+
+    def test_legacy_launch_forwards_only_legacy_keys_without_values(self):
+        _, args = self._run_launcher({
+            "VLM_API_KEY": "dummy-vlm", "OPENAI_API_KEY": "dummy-openai",
+            "DEEPSEEK_API_KEY": "dummy-unused",
+        })
+        self.assertIn("VLM_API_KEY", args)
+        self.assertIn("OPENAI_API_KEY", args)
+        self.assertNotIn("DEEPSEEK_API_KEY", args)
+        self.assertNotIn("dummy-", " ".join(args))
 
     def test_entrypoint_has_no_ambient_codegen_fallback(self):
         entrypoint = (SCENE_ROOT / "docker" / "entrypoint.sh").read_text(
