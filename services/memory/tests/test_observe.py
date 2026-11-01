@@ -42,6 +42,18 @@ class TestTemplateSummary(unittest.TestCase):
 
 
 class TestVLMConfig(unittest.TestCase):
+
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/vision", "provider": "vllm", "model": "test-vl",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"vision": True},
+            "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return path
     def _clear_env(self):
         for k in ("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL",
                   "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
@@ -73,31 +85,10 @@ class TestVLMConfig(unittest.TestCase):
 
     def test_keyless_catalog_is_available(self):
         self._clear_env()
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "local/keyless",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "local",
-                                "features": {"vision": True},
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog)},
-                clear=False,
-            ):
-                assert _vlm_available() is True
-                cfg = _vlm_config()
+        path = self._catalog(id="local/keyless", model="local")
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path)}):
+            assert _vlm_available() is True
+            cfg = _vlm_config()
         assert cfg["requires_key"] is False
         assert cfg["api_key"] == ""
 
@@ -113,42 +104,15 @@ class TestVLMConfig(unittest.TestCase):
 
     def test_catalog_overrides_legacy_config(self):
         self._clear_env()
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "test/vision",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "test-vl",
-                                "api_key_env": "TEST_KEY",
-                                "features": {"vision": True},
-                                "latency_p95_ms": 100,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "ROBONIX_LLM_CATALOG": str(catalog),
-                    "TEST_KEY": "secret",
-                    "VLM_BASE_URL": "https://legacy.invalid/v1",
-                    "VLM_API_KEY": "legacy",
-                },
-                clear=False,
-            ):
-                cfg = _vlm_config()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
+            "VLM_API_KEY": "legacy",
+        }):
+            cfg = _vlm_config()
         assert cfg == {
-            "base_url": "http://127.0.0.1:9999/v1",
-            "api_key": "secret",
-            "model": "test-vl",
-            "requires_key": True,
+            "base_url": "http://127.0.0.1:9999/v1", "api_key": "secret",
+            "model": "test-vl", "requires_key": True,
         }
 
 
