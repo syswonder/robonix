@@ -485,7 +485,7 @@ soma_endpoint: 127.0.0.1:50091
             .expect("valid catalog");
         assert!(
             system_boot_detail("pilot", &empty, Some(&catalog))
-                .contains("vlm=catalog:catalog/model source=manifest")
+                .contains("catalog=catalog/model source=manifest")
         );
     }
 
@@ -679,6 +679,21 @@ soma_endpoint: 127.0.0.1:50091
         let error = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
             .expect_err("unsupported protocol");
         assert!(format!("{error:#}").contains("only speaks openai-chat"));
+    }
+
+    #[test]
+    fn catalog_boot_detail_shows_the_actual_model_and_redacts_the_endpoint() {
+        let mut data: serde_json::Value = serde_json::from_str(PILOT_CATALOG).unwrap();
+        data["models"][0]["base_url"] = "https://user:password@provider.example/v1?token=private".into();
+        let env = catalog_env("boot-detail", &data.to_string());
+        let info = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true).unwrap();
+        let detail = system_boot_detail("pilot", &[], Some(&info));
+        assert!(detail.contains("vlm=catalog-model"));
+        assert!(detail.contains("endpoint=https://provider.example/v1"));
+        assert!(detail.contains("catalog=catalog/model source=manifest"));
+        for value in ["password", "private", "secret"] {
+            assert!(!detail.contains(value));
+        }
     }
 }
 
@@ -2407,86 +2422,44 @@ fn validate_model_catalog(
 }
 
 fn system_boot_detail(name: &str, args: &[String], catalog: Option<&CatalogInfo>) -> String {
-    let mut listen: Option<&str> = None;
-    let mut vlm_upstream: Option<&str> = None;
-    let mut vlm_model: Option<&str> = None;
-    let mut context_window_tokens: Option<&str> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        let next = args.get(i + 1).map(|s| s.as_str());
-        match (a, next) {
-            ("--listen", Some(v)) => {
-                listen = Some(v);
-                i += 2;
-            }
-            ("--vlm-upstream", Some(v)) => {
-                vlm_upstream = Some(v);
-                i += 2;
-            }
-            ("--vlm-model", Some(v)) => {
-                vlm_model = Some(v);
-                i += 2;
-            }
-            ("--vlm-context-window-tokens", Some(v)) => {
-                context_window_tokens = Some(v);
-                i += 2;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    let port = listen
-        .and_then(|s| s.rsplit(':').next())
-        .map(|p| format!(":{p}"))
+    let port = args
+        .windows(2)
+        .find(|pair| pair[0] == "--listen")
+        .and_then(|pair| pair[1].rsplit(':').next())
+        .map(|port| format!(":{port}"))
         .unwrap_or_default();
-    if name == "pilot" {
-        let capacity = if let Some(tokens) = context_window_tokens {
-            format!("context={tokens} (manual)")
-        } else {
-            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
-                .to_string()
-        };
-        if let Some(catalog) = catalog {
-            if let Some(upstream) = vlm_upstream.filter(|value| !value.trim().is_empty()) {
-                let host = upstream
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split('/')
-                    .next()
-                    .unwrap_or("?");
-                let model = vlm_model
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or("?");
-                return format!("{port}  vlm={model}@{host} source=explicit  {capacity}");
-            }
-            if let Some(model) = vlm_model.filter(|value| !value.trim().is_empty()) {
-                return format!("{port}  vlm=catalog:{model} source=catalog-id  {capacity}");
-            }
-            let target = catalog
-                .pilot
-                .as_ref()
-                .and_then(|vlm| vlm.catalog_id.as_deref())
-                .unwrap_or("?");
-            return format!(
-                "{port}  vlm=catalog:{target} source={}  {capacity}",
-                catalog.source
-            );
-        }
-        let host = vlm_upstream
-            .and_then(|u| {
-                u.trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split('/')
-                    .next()
-            })
-            .unwrap_or("?");
-        let model = vlm_model.unwrap_or("?");
-        format!("{port}  vlm={model}@{host}  {capacity}")
-    } else {
-        port
+    if name != "pilot" {
+        return port;
     }
+    let resolved = catalog
+        .and_then(|info| info.pilot.clone())
+        .map(Ok)
+        .unwrap_or_else(|| resolve_pilot_config(args));
+    let vlm = match resolved {
+        Ok(vlm) => vlm,
+        Err(error) => return format!("{port}  invalid VLM configuration: {error:#}"),
+    };
+    let id = vlm
+        .catalog_id
+        .as_ref()
+        .map(|id| format!(" catalog={id}"))
+        .unwrap_or_default();
+    let source = if vlm.catalog_id.is_some() {
+        catalog.map_or("env", |info| info.source)
+    } else {
+        "explicit"
+    };
+    let capacity = vlm
+        .context_window_tokens
+        .map(|tokens| format!("context={tokens} (manual)"))
+        .unwrap_or_else(|| "context=auto".into());
+    format!(
+        "{port}  vlm={} endpoint={}{} source={}  {capacity}",
+        vlm.model,
+        vlm.endpoint_for_log(),
+        id,
+        source
+    )
 }
 
 /// Translate a `system.<name>:` block into CLI args for the corresponding

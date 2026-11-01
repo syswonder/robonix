@@ -158,6 +158,8 @@ Explicit `system.pilot.vlm` config wins over the catalog. A `vlm` block with
 only `model` selects that catalog id; omit `vlm` to resolve by
 `ROBONIX_LLM_FEATURES` (default `vision,tools,stream`). A broken catalog fails
 boot before any component prints `[ OK ]`.
+Pilot's boot line includes the request model, redacted endpoint, catalog id
+when selected, and the configuration source.
 
 ## Environment
 
