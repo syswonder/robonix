@@ -68,6 +68,18 @@ class TestFormatNode(unittest.TestCase):
 class TestLLMConfig(unittest.TestCase):
     """Env-var config resolution — no LLM needed."""
 
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/llm", "provider": "vllm", "model": "test-llm",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"json_object": True},
+            "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return path
+
     def _clear_env(self):
         for k in ("MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY",
                   "MEMGRAPH_LLM_MODEL",
@@ -136,72 +148,24 @@ class TestLLMConfig(unittest.TestCase):
 
     def test_catalog_overrides_legacy_config(self):
         self._clear_env()
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "test/llm",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "test-llm",
-                                "api_key_env": "TEST_KEY",
-                                "features": {"json_object": True},
-                                "latency_p95_ms": 100,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "ROBONIX_LLM_CATALOG": str(catalog),
-                    "TEST_KEY": "secret",
-                    "VLM_BASE_URL": "https://legacy.invalid/v1",
-                    "VLM_API_KEY": "legacy",
-                },
-                clear=False,
-            ):
-                cfg = llm_search._llm_config()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
+            "VLM_API_KEY": "legacy",
+        }):
+            cfg = llm_search._llm_config()
         assert cfg == {
-            "base_url": "http://127.0.0.1:9999/v1",
-            "api_key": "secret",
-            "model": "test-llm",
-            "requires_key": True,
+            "base_url": "http://127.0.0.1:9999/v1", "api_key": "secret",
+            "model": "test-llm", "requires_key": True,
         }
 
 
     def test_keyless_catalog_is_available(self):
         self._clear_env()
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "local/keyless",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "local",
-                                "features": {"json_object": True},
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog)},
-                clear=False,
-            ):
-                assert llm_search.llm_search_available() is True
-                cfg = llm_search._llm_config()
+        path = self._catalog(id="local/keyless", model="local")
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path)}):
+            assert llm_search.llm_search_available() is True
+            cfg = llm_search._llm_config()
         assert cfg["requires_key"] is False
         assert cfg["api_key"] == ""
 

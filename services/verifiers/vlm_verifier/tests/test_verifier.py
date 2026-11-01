@@ -26,6 +26,18 @@ def envelope(provider="wrist"):
 
 
 class ParsingTests(unittest.TestCase):
+
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/vision", "provider": "vllm", "model": "test-vl",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"vision": True},
+            "api_key_env": "TEST_KEY", "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path), "TEST_KEY": "secret"})
     def test_wrist_camera_prompt_recognizes_partial_opposing_jaws(self):
         """Accept valid wrist-camera evidence without requiring the full gripper."""
         prompt = vlm.SYSTEM_PROMPT
@@ -112,123 +124,28 @@ class ParsingTests(unittest.TestCase):
                     vlm.VlmConfig.parse(dict(valid, base_url=url))
 
     def test_vlm_configuration_from_catalog(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "test/vision",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1/",
-                                "model": "test-vl",
-                                "api_key_env": "TEST_KEY",
-                                "features": {"vision": True},
-                                "latency_p95_ms": 100,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog), "TEST_KEY": "secret"},
-                clear=False,
-            ):
-                config = vlm.VlmConfig.parse(None)
+        with self._catalog(base_url="http://127.0.0.1:9999/v1/"):
+            config = vlm.VlmConfig.parse(None)
         self.assertEqual(config.base_url, "http://127.0.0.1:9999/v1")
         self.assertEqual(config.model, "test-vl")
         self.assertEqual(config.api_key, "secret")
 
     def test_keyless_catalog_target_is_allowed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "local/keyless",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "local",
-                                "features": {"vision": True},
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog)},
-                clear=False,
-            ):
-                config = vlm.VlmConfig.parse(None)
+        with self._catalog(id="local/keyless", model="local", api_key_env=None):
+            config = vlm.VlmConfig.parse(None)
         self.assertEqual(config.api_key, "")
         self.assertFalse(config.requires_key)
 
     def test_catalog_url_is_validated(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "test/vision",
-                                "provider": "vllm",
-                                "base_url": "https://user:pw@host/v1?key=secret",
-                                "model": "test-vl",
-                                "api_key_env": "TEST_KEY",
-                                "features": {"vision": True},
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog), "TEST_KEY": "secret"},
-                clear=False,
-            ), self.assertRaises(ValueError):
-                vlm.VlmConfig.parse(None)
+        with self._catalog(base_url="https://user:pw@host/v1?key=secret"), self.assertRaises(ValueError):
+            vlm.VlmConfig.parse(None)
 
     def test_explicit_vlm_wins_over_catalog(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "test/vision",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "test-vl",
-                                "api_key_env": "TEST_KEY",
-                                "features": {"vision": True},
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog), "TEST_KEY": "secret"},
-                clear=False,
-            ):
-                config = vlm.VlmConfig.parse(
-                    {
-                        "base_url": "http://explicit.example/v1",
-                        "api_key": "explicit-key",
-                        "model": "explicit-model",
-                    }
-                )
+        with self._catalog():
+            config = vlm.VlmConfig.parse({
+                "base_url": "http://explicit.example/v1", "api_key": "explicit-key",
+                "model": "explicit-model",
+            })
         self.assertEqual(config.base_url, "http://explicit.example/v1")
         self.assertEqual(config.model, "explicit-model")
         self.assertEqual(config.api_key, "explicit-key")
@@ -250,31 +167,8 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(config.model, "explicit-model")
 
     def test_vlm_model_can_select_a_catalog_id(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            catalog = Path(tmp) / "catalog.json"
-            catalog.write_text(
-                json.dumps(
-                    {
-                        "models": [
-                            {
-                                "id": "test/vision",
-                                "provider": "vllm",
-                                "base_url": "http://127.0.0.1:9999/v1",
-                                "model": "test-vl",
-                                "api_key_env": "TEST_KEY",
-                                "features": {"vision": True},
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {"ROBONIX_LLM_CATALOG": str(catalog), "TEST_KEY": "secret"},
-                clear=False,
-            ):
-                config = vlm.VlmConfig.parse({"model": "test/vision"})
+        with self._catalog():
+            config = vlm.VlmConfig.parse({"model": "test/vision"})
         self.assertEqual(config.base_url, "http://127.0.0.1:9999/v1")
         self.assertEqual(config.model, "test-vl")
 

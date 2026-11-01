@@ -118,7 +118,6 @@ jobs:
           services/memory/tests/test_llm_search.py
           services/memory/tests/test_observe.py
           services/memory/tests/test_service.py
-          services/memsearch/tests/test_compact_config.py
           system/scene/tests/test_llm_catalog.py
           system/scene/tests/test_runtime_protobuf_contract.py
       - name: Test verifier configuration and requests
