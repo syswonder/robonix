@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 import httpx
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
 
 from ..state.data_assoc import Detection
 from ..state.object_registry import BBox3D, Pose3D
@@ -120,9 +121,32 @@ class VLMObjectDetector:
         self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
         self.api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         self.model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
+        self.requires_key = True
+        try:
+            self.max_tokens = max(1, int(os.environ.get("SCENE_VLM_MAX_TOKENS", "1024")))
+        except ValueError:
+            self.max_tokens = 1024
+
+        target = resolve_from_env(
+            Requirements(
+                features=("vision",),
+                max_output_tokens=self.max_tokens,
+            )
+        )
+        if target is not None:
+            self.base_url = target.base_url
+            self.api_key = api_key_for(target)
+            self.model = target.model
+            self.requires_key = target.api_key_env is not None
+            log.info(
+                "[scene-vlm] catalog target %s model=%s",
+                target.id,
+                target.model,
+            )
+
         # Sent only when set; strict endpoints reject the unknown field.
         self.reasoning_effort = os.environ.get("VLM_REASONING_EFFORT", "").strip()
-        if not self.api_key:
+        if self.requires_key and not self.api_key:
             log.warning("[scene-vlm] VLM_API_KEY not set; perception will be inert")
 
     @staticmethod
@@ -161,7 +185,7 @@ class VLMObjectDetector:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                if self.api_key:
+                if self.api_key or not self.requires_key:
                     await self._tick()
             except Exception as e:  # noqa: BLE001
                 log.warning("[scene-vlm] tick failed: %s", e)
@@ -283,13 +307,12 @@ class VLMObjectDetector:
 
     async def _call_vlm(self, jpeg_b64: str) -> Optional[list[dict]]:
         """One chat-completions call; the parsed ``detections`` list, or None."""
-        if not self.base_url or not self.api_key:
+        if not self.base_url or (self.requires_key and not self.api_key):
             return None
         url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         body = {
             "model": self.model,
             "messages": [
@@ -303,6 +326,9 @@ class VLMObjectDetector:
                 },
             ],
             "temperature": 0.0,
+            # A detection reply is small; without a cap a reasoning model can
+            # spend thousands of tokens on one frame (observed: 17k / 105 s).
+            "max_tokens": self.max_tokens,
         }
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort

@@ -136,11 +136,33 @@ system:
     log: info
 ```
 
+## Model catalog
+
+`rbnx boot` resolves the model catalog before spawning anything:
+
+1. `ROBONIX_LLM_CATALOG` when set (absolute path);
+2. the deployment manifest's optional `model_catalog:` path, relative to the
+   manifest;
+3. `~/.robonix/models.yaml` when that file exists.
+
+It loads and validates the catalog, resolves Pilot's target when Pilot has no
+explicit `vlm` block, and exports `ROBONIX_LLM_CATALOG` plus
+`ROBONIX_LLM_KEY_ENVS` (the exact `api_key_env` names the catalog uses).
+Package start scripts forward only those key variables, so a catalog can use
+any provider without editing a hard-coded allowlist.
+
+Explicit `system.pilot.vlm` config wins over the catalog. A `vlm` block with
+only `model` selects that catalog id; omit `vlm` to resolve by
+`ROBONIX_LLM_FEATURES` (default `vision,tools,stream`). A broken catalog fails
+boot before any component prints `[ OK ]`.
+
 ## Environment
 
 - `ROBONIX_ATLAS` — atlas endpoint, default `localhost:50051`.
-- `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
-  to pilot at boot.
+- `ROBONIX_LLM_CATALOG` — model catalog path; overrides the manifest path and
+  the user-level default.
+- `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — legacy VLM credentials used
+  when Pilot has an explicit `vlm` block and no catalog.
 - `ROBONIX_DRIVER_INIT_TIMEOUT_S` — seconds `rbnx boot` waits for a package's
   `Driver(CMD_INIT)` reply. Default 90.
 - `RBNX_GH_MIRROR` — prefix tried before `https://github.com/` URLs when

@@ -27,6 +27,7 @@ async-openai = { workspace = true, features = ["chat-completion"] }
 reqwest.workspace = true
 futures-util = "0.3"
 robonix-atlas = { path = "../atlas" }
+robonix-llm-catalog = { path = "../llm-catalog" }
 
 [build-dependencies]
 robonix-codegen.workspace = true

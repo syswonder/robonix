@@ -177,6 +177,7 @@ def test_inferer_no_creds():
 _LLM_ENV = (
     "VLM_API_KEY", "VLM_BASE_URL", "VLM_MODEL", "VLM_REASONING_EFFORT",
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
+    "ROBONIX_LLM_CATALOG",
 )
 
 

@@ -38,6 +38,7 @@ use robonix_cli::launch::{
     snapshot_provider_ids, terminate_process_group,
 };
 use robonix_cli::output;
+use robonix_llm_catalog::{ModelCatalog, Requirements, api_key_for, resolve_from_env};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -91,6 +92,11 @@ fn driver_init_timeout() -> Duration {
 struct DeployManifest {
     #[serde(default)]
     name: String,
+    /// Optional path to the model catalog for this deployment. Overrides the
+    /// user-level `~/.robonix/models.yaml`; `ROBONIX_LLM_CATALOG` overrides
+    /// both.
+    #[serde(default)]
+    model_catalog: Option<String>,
     #[serde(default)]
     system: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
@@ -178,6 +184,7 @@ fn resolve_entry_path(
 mod tests {
 
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")
@@ -455,14 +462,160 @@ soma_endpoint: 127.0.0.1:50091
             "--vlm-model".into(),
             "gpt-4o".into(),
         ];
-        assert!(require_system_args("pilot", &known).is_ok());
+        assert!(require_system_args("pilot", &known, false).is_ok());
 
         let mut unknown = known.clone();
         unknown[5] = "private-local-planner".into();
-        assert!(require_system_args("pilot", &unknown).is_ok());
+        assert!(require_system_args("pilot", &unknown, false).is_ok());
         unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
-        assert!(require_system_args("pilot", &unknown).is_ok());
-        assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
+        assert!(require_system_args("pilot", &unknown, false).is_ok());
+        assert!(system_boot_detail("pilot", &unknown, None).contains("context=32768 (manual)"));
+    }
+
+    #[test]
+    fn pilot_preflight_allows_missing_vlm_args_when_catalog_is_enabled() {
+        let empty: Vec<String> = Vec::new();
+        assert!(require_system_args("pilot", &empty, true).is_ok());
+        assert!(require_system_args("pilot", &empty, false).is_err());
+        let catalog = CatalogInfo {
+            source: "manifest",
+            pilot_target: Some("catalog/model".into()),
+            pilot_explicit: false,
+        };
+        assert!(
+            system_boot_detail("pilot", &empty, Some(&catalog))
+                .contains("vlm=catalog:catalog/model source=manifest")
+        );
+    }
+
+    static CATALOG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CatalogEnv {
+        _lock: MutexGuard<'static, ()>,
+        path: PathBuf,
+    }
+
+    impl Drop for CatalogEnv {
+        fn drop(&mut self) {
+            unsafe {
+                for name in [
+                    "ROBONIX_LLM_CATALOG",
+                    "ROBONIX_LLM_KEY_ENVS",
+                    "CAT_KEY",
+                    "ROBONIX_LLM_FEATURES",
+                    "ROBONIX_LLM_INPUT_TOKENS",
+                    "ROBONIX_LLM_MAX_OUTPUT_TOKENS",
+                    "ROBONIX_LLM_MAX_LATENCY_MS",
+                    "ROBONIX_LLM_MAX_COST_USD_PER_CALL",
+                    "ROBONIX_LLM_ALLOW_DOWNGRADE",
+                ] {
+                    std::env::remove_var(name);
+                }
+            }
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn catalog_env(name: &str, body: &str) -> CatalogEnv {
+        let lock = CATALOG_ENV_LOCK.lock().expect("catalog env lock");
+        let path =
+            std::env::temp_dir().join(format!("rbnx-catalog-{}-{name}.json", std::process::id()));
+        std::fs::write(&path, body).expect("write catalog");
+        unsafe {
+            std::env::set_var("CAT_KEY", "secret");
+            std::env::remove_var("ROBONIX_LLM_FEATURES");
+            std::env::remove_var("ROBONIX_LLM_INPUT_TOKENS");
+            std::env::remove_var("ROBONIX_LLM_MAX_OUTPUT_TOKENS");
+            std::env::remove_var("ROBONIX_LLM_MAX_LATENCY_MS");
+            std::env::remove_var("ROBONIX_LLM_MAX_COST_USD_PER_CALL");
+            std::env::remove_var("ROBONIX_LLM_ALLOW_DOWNGRADE");
+        }
+        CatalogEnv { _lock: lock, path }
+    }
+
+    fn pilot_system(vlm: &str) -> HashMap<String, serde_yaml::Value> {
+        let mut system = HashMap::new();
+        system.insert(
+            "pilot".into(),
+            serde_yaml::from_str(vlm).expect("pilot block"),
+        );
+        system
+    }
+
+    #[test]
+    fn model_catalog_path_prefers_env_then_manifest() {
+        let _env = catalog_env("path", r#"{"models":[]}"#);
+        unsafe { std::env::set_var("ROBONIX_LLM_CATALOG", "/tmp/env-catalog.json") };
+        let (_, source) = resolve_model_catalog(Some("models.yaml"), Path::new("/tmp/deploy"))
+            .expect("env catalog");
+        assert_eq!(source, "env");
+
+        unsafe { std::env::remove_var("ROBONIX_LLM_CATALOG") };
+        let (path, source) = resolve_model_catalog(Some("models.yaml"), Path::new("/tmp/deploy"))
+            .expect("manifest catalog");
+        assert_eq!(path, PathBuf::from("/tmp/deploy/models.yaml"));
+        assert_eq!(source, "manifest");
+    }
+
+    #[test]
+    fn catalog_validation_resolves_the_pilot_target() {
+        let env = catalog_env(
+            "valid",
+            r#"{"models":[{"id":"catalog/model","provider":"test",
+            "base_url":"http://catalog.example/v1","model":"catalog-model",
+            "api_key_env":"CAT_KEY","features":{"vision":true,"tools":true,"stream":true}}]}"#,
+        );
+        let catalog = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("valid catalog");
+        assert_eq!(catalog.pilot_target.as_deref(), Some("catalog/model"));
+        assert!(!catalog.pilot_explicit);
+        assert_eq!(
+            std::env::var("ROBONIX_LLM_KEY_ENVS").as_deref(),
+            Ok("CAT_KEY")
+        );
+    }
+
+    #[test]
+    fn catalog_validation_rejects_an_unresolvable_pilot_catalog() {
+        let env = catalog_env(
+            "no-match",
+            r#"{"models":[{"id":"text/model","provider":"test",
+            "base_url":"http://text.example/v1","model":"text",
+            "features":{"tools":true}}]}"#,
+        );
+        let error = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect_err("no pilot target");
+        assert!(format!("{error:#}").contains("satisfies"), "{error:#}");
+    }
+
+    #[test]
+    fn catalog_validation_accepts_keyless_local_targets() {
+        let env = catalog_env(
+            "keyless",
+            r#"{"models":[{"id":"local/keyless","provider":"vllm",
+            "base_url":"http://127.0.0.1:8000/v1","model":"local",
+            "features":{"vision":true,"tools":true,"stream":true}}]}"#,
+        );
+        let catalog = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("keyless catalog");
+        assert_eq!(catalog.pilot_target.as_deref(), Some("local/keyless"));
+        assert_eq!(std::env::var("ROBONIX_LLM_KEY_ENVS").as_deref(), Ok(""));
+    }
+
+    #[test]
+    fn catalog_validation_leaves_explicit_pilot_config_alone() {
+        let env = catalog_env(
+            "explicit",
+            r#"{"models":[{"id":"text/model","provider":"test",
+            "base_url":"http://text.example/v1","model":"text",
+            "features":{"tools":true}}]}"#,
+        );
+        let system =
+            pilot_system("vlm: {upstream: http://explicit.example/v1, model: explicit-model}");
+        let catalog =
+            validate_model_catalog(&env.path, "manifest", &system, true).expect("explicit pilot");
+        assert!(catalog.pilot_explicit);
+        assert!(catalog.pilot_target.is_none());
     }
 }
 
@@ -904,6 +1057,7 @@ async fn spawn_system_binary(
     name: &str,
     bin: &str,
     args: &[String],
+    catalog: Option<&CatalogInfo>,
 ) -> Result<Spawned> {
     // Run the installed binary directly.  Stdout / stderr are piped
     // through Scribe (tag = binary name, e.g. "executor") so nothing
@@ -955,7 +1109,7 @@ async fn spawn_system_binary(
     // (--capabilities path lists, --vlm-api-key, …). Full args are
     // available in the log file; the boot line stays terse so users
     // can scan the bring-up sequence at a glance.
-    let detail = system_boot_detail(name, args);
+    let detail = system_boot_detail(name, args, catalog);
     output::boot_ok(name, &detail);
     Ok(Spawned {
         name: name.to_string(),
@@ -1001,6 +1155,7 @@ async fn spawn_soma_binary(
     name: &str,
     bin: &str,
     args: &[String],
+    catalog: Option<&CatalogInfo>,
 ) -> Result<(Spawned, std::fs::File)> {
     use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 
@@ -1103,7 +1258,7 @@ async fn spawn_soma_binary(
         }
     });
 
-    let detail = system_boot_detail(name, args);
+    let detail = system_boot_detail(name, args, catalog);
     output::boot_ok(name, &detail);
     Ok((
         Spawned {
@@ -1372,6 +1527,29 @@ pub async fn execute(
         super::check_remotes::report_outdated(&manifest_path);
     }
 
+    // Resolve and validate the model catalog before any component is spawned.
+    // A broken catalog must fail here, not print `[ OK ]` and then take Pilot
+    // down during config load.
+    let catalog = if let Some((path, source)) =
+        resolve_model_catalog(deploy.model_catalog.as_deref(), &manifest_dir)
+    {
+        Some(
+            validate_model_catalog(
+                &path,
+                source,
+                &deploy.system,
+                !skip_system && deploy.system.contains_key("pilot"),
+            )
+            .map_err(|error| {
+                output::boot_fail("pilot", &format!("{error:#}"));
+                error
+            })?,
+        )
+    } else {
+        None
+    };
+    let catalog_resolves_pilot = catalog.as_ref().is_some_and(|info| !info.pilot_explicit);
+
     // soma owns primitive + skill bring-up (see
     // docs/docs/architecture/deployment-and-startup.md). If the manifest
     // declares ANY primitive or skill, we MUST start a soma — otherwise those
@@ -1633,7 +1811,7 @@ pub async fn execute(
                 // required field 'vlm.upstream'`. Boot still printed `[ OK ]`
                 // because we never re-checked. Fail fast at spawn time and tell
                 // the user exactly what's missing.
-                if let Err(e) = require_system_args(name, &args) {
+                if let Err(e) = require_system_args(name, &args, catalog_resolves_pilot) {
                     output::boot_fail(name, &e);
                     anyhow::bail!("system/{name}: {e}");
                 }
@@ -1641,11 +1819,13 @@ pub async fn execute(
                 let sp = if *name == "soma" {
                     // soma needs an inherited pipe fd for the stage-2
                     // trigger. Everything else uses the plain spawn path.
-                    let (sp, writer) = spawn_soma_binary(&log_dir, name, bin, &args).await?;
+                    let (sp, writer) =
+                        spawn_soma_binary(&log_dir, name, bin, &args, catalog.as_ref()).await?;
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args).await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args, catalog.as_ref())
+                        .await?
                 };
                 children.push(sp);
                 persist_state(
@@ -2080,9 +2260,15 @@ fn persist_state(
 /// produces `--vlm-upstream ""` — pilot then registers briefly, dies
 /// with `missing required field 'vlm.upstream'`, and boot reports
 /// `[ OK ]` because the failure happens after spawn-and-register. Catch
-/// it here so the user sees a `[FAIL]` line naming the bad keys.
-fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), String> {
-    if name != "pilot" {
+/// it here so the user sees a `[FAIL]` line naming the bad keys. A deployment
+/// that selects `ROBONIX_LLM_CATALOG` does not need the legacy VLM fields:
+/// Pilot resolves them from the catalog instead.
+fn require_system_args(
+    name: &str,
+    args: &[String],
+    llm_catalog: bool,
+) -> std::result::Result<(), String> {
+    if name != "pilot" || llm_catalog {
         return Ok(());
     }
     let need = [
@@ -2113,7 +2299,132 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
     Ok(())
 }
 
-fn system_boot_detail(name: &str, args: &[String]) -> String {
+/// Model catalog selected for this deployment.
+#[derive(Debug, Clone)]
+struct CatalogInfo {
+    /// Where the path came from: `env`, `manifest`, or `user`.
+    source: &'static str,
+    /// Pilot's catalog target when Pilot resolves from the catalog.
+    pilot_target: Option<String>,
+    /// True when `system.pilot.vlm` has an explicit upstream, so Pilot does
+    /// not consult the catalog and the legacy preflight still applies.
+    pilot_explicit: bool,
+}
+
+/// Resolve the catalog path: `ROBONIX_LLM_CATALOG`, then manifest
+/// `model_catalog:`, then `~/.robonix/models.yaml`.
+fn resolve_model_catalog(
+    manifest_catalog: Option<&str>,
+    manifest_dir: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    if let Ok(value) = std::env::var("ROBONIX_LLM_CATALOG") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some((PathBuf::from(value), "env"));
+        }
+    }
+    if let Some(value) = manifest_catalog {
+        let value = value.trim();
+        if !value.is_empty() {
+            let path = Path::new(value);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                manifest_dir.join(path)
+            };
+            return Some((path, "manifest"));
+        }
+    }
+    let user = dirs::home_dir()?.join(".robonix").join("models.yaml");
+    user.is_file().then_some((user, "user"))
+}
+
+/// Read `system.pilot.vlm.upstream` and `.model` after manifest expansion.
+fn pilot_vlm_fields(
+    system: &HashMap<String, serde_yaml::Value>,
+) -> (Option<String>, Option<String>) {
+    let field = |key: &str| {
+        system
+            .get("pilot")
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|pilot| pilot.get(serde_yaml::Value::String("vlm".into())))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|vlm| vlm.get(serde_yaml::Value::String(key.into())))
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    (field("upstream"), field("model"))
+}
+
+fn ensure_catalog_key(target: &robonix_llm_catalog::ModelSpec) -> Result<()> {
+    if target.api_key_env.is_some() && api_key_for(target).is_empty() {
+        anyhow::bail!(
+            "missing {} for catalog target {}",
+            target.api_key_env.as_deref().unwrap_or(""),
+            target.id
+        );
+    }
+    Ok(())
+}
+
+/// Load and validate a catalog before any system component is spawned, and
+/// export the path plus the exact `api_key_env` names for consumers.
+fn validate_model_catalog(
+    path: &Path,
+    source: &'static str,
+    system: &HashMap<String, serde_yaml::Value>,
+    validate_pilot: bool,
+) -> Result<CatalogInfo> {
+    let catalog = ModelCatalog::load(path)
+        .with_context(|| format!("load model catalog {}", path.display()))?;
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut key_envs: Vec<String> = catalog
+        .models
+        .iter()
+        .filter_map(|model| model.api_key_env.clone())
+        .collect();
+    key_envs.sort();
+    key_envs.dedup();
+    unsafe {
+        std::env::set_var("ROBONIX_LLM_CATALOG", &absolute);
+        std::env::set_var("ROBONIX_LLM_KEY_ENVS", key_envs.join(","));
+    }
+
+    let (pilot_upstream, pilot_model) = pilot_vlm_fields(system);
+    let pilot_explicit = pilot_upstream.is_some();
+    let pilot_target = if validate_pilot && !pilot_explicit {
+        let target = if let Some(model_id) = pilot_model {
+            catalog
+                .model(&model_id)
+                .with_context(|| format!("vlm.model {model_id:?} is not a catalog id"))?
+                .clone()
+        } else {
+            let requirements = Requirements::from_env("vision,tools,stream");
+            resolve_from_env(&requirements)
+                .with_context(|| format!("resolve Pilot target from {}", absolute.display()))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model catalog {} produced no Pilot target",
+                        absolute.display()
+                    )
+                })?
+        };
+        ensure_catalog_key(&target)?;
+        Some(target.id)
+    } else {
+        None
+    };
+
+    Ok(CatalogInfo {
+        source,
+        pilot_target,
+        pilot_explicit,
+    })
+}
+
+fn system_boot_detail(name: &str, args: &[String], catalog: Option<&CatalogInfo>) -> String {
     let mut listen: Option<&str> = None;
     let mut vlm_upstream: Option<&str> = None;
     let mut vlm_model: Option<&str> = None;
@@ -2149,6 +2460,34 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
         .map(|p| format!(":{p}"))
         .unwrap_or_default();
     if name == "pilot" {
+        let capacity = if let Some(tokens) = context_window_tokens {
+            format!("context={tokens} (manual)")
+        } else {
+            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
+                .to_string()
+        };
+        if let Some(catalog) = catalog {
+            if let Some(upstream) = vlm_upstream.filter(|value| !value.trim().is_empty()) {
+                let host = upstream
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("?");
+                let model = vlm_model
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("?");
+                return format!("{port}  vlm={model}@{host} source=explicit  {capacity}");
+            }
+            if let Some(model) = vlm_model.filter(|value| !value.trim().is_empty()) {
+                return format!("{port}  vlm=catalog:{model} source=catalog-id  {capacity}");
+            }
+            let target = catalog.pilot_target.as_deref().unwrap_or("?");
+            return format!(
+                "{port}  vlm=catalog:{target} source={}  {capacity}",
+                catalog.source
+            );
+        }
         let host = vlm_upstream
             .and_then(|u| {
                 u.trim_start_matches("https://")
@@ -2158,12 +2497,6 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
             })
             .unwrap_or("?");
         let model = vlm_model.unwrap_or("?");
-        let capacity = if let Some(tokens) = context_window_tokens {
-            format!("context={tokens} (manual)")
-        } else {
-            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
-                .to_string()
-        };
         format!("{port}  vlm={model}@{host}  {capacity}")
     } else {
         port

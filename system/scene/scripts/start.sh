@@ -129,6 +129,41 @@ mkdir -p "$SCENE_HOST_DATA_DIR"
 # start.sh was dying there before it could launch the service container, which
 # is why the runtime-protobuf contract test only ever saw the codegen run.
 declare -a EXTRA_MOUNTS=()
+# The model catalog is a deployment file outside the image. Mount it at
+# the same absolute path so ROBONIX_LLM_CATALOG means the same thing inside.
+declare -a CATALOG_ARGS=()
+if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
+    if [[ ! -f "${ROBONIX_LLM_CATALOG}" ]]; then
+        echo "[scene/start] ROBONIX_LLM_CATALOG=${ROBONIX_LLM_CATALOG} is not a file" >&2
+        exit 2
+    fi
+    ROBONIX_LLM_CATALOG="$(realpath "${ROBONIX_LLM_CATALOG}")"
+    export ROBONIX_LLM_CATALOG
+    CATALOG_ARGS=(-v "${ROBONIX_LLM_CATALOG}:${ROBONIX_LLM_CATALOG}:ro")
+fi
+# rbnx exports ROBONIX_LLM_KEY_ENVS with exactly the api_key_env names the
+# catalog uses. Forward only those; the legacy six-key list remains for
+# manual launches that predate the catalog.
+declare -a KEY_ARGS=()
+if [[ -n "${ROBONIX_LLM_CATALOG:-}" && -n "${ROBONIX_LLM_KEY_ENVS+x}" ]]; then
+    IFS=',' read -r -a ROBONIX_LLM_KEY_NAMES <<< "${ROBONIX_LLM_KEY_ENVS}"
+    for key_name in "${ROBONIX_LLM_KEY_NAMES[@]}"; do
+        key_name="${key_name//[[:space:]]/}"
+        [[ -z "$key_name" ]] && continue
+        if [[ -n "${!key_name:-}" ]]; then
+            KEY_ARGS+=(-e "$key_name")
+        fi
+    done
+else
+    KEY_ARGS=(
+        -e DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+        -e OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+        -e DASHSCOPE_API_KEY="${DASHSCOPE_API_KEY:-}"
+        -e VLLM_API_KEY="${VLLM_API_KEY:-}"
+        -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+        -e GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+    )
+fi
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
@@ -267,6 +302,9 @@ exec docker run --rm \
     -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
+    -e SCENE_VLM_MAX_TOKENS="${SCENE_VLM_MAX_TOKENS:-}" \
+    -e ROBONIX_LLM_CATALOG="${ROBONIX_LLM_CATALOG:-}" \
+    ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
@@ -293,4 +331,5 @@ exec docker run --rm \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+    ${CATALOG_ARGS[@]+"${CATALOG_ARGS[@]}"} \
     "$IMG"
