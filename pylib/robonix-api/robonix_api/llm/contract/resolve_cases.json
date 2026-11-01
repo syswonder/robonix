@@ -79,83 +79,26 @@
     {
       "name": "vision and tools prefer latency",
       "requirements": {
-        "features": ["vision", "tools"],
-        "input_tokens": 1000,
-        "max_output_tokens": 256
+        "features": ["vision", "tools"]
       },
       "expected_ids": ["local/vllm", "deepseek/flash", "cloud/gpt"]
     },
     {
-      "name": "context excludes the local model",
+      "name": "json_schema requires schema support",
       "requirements": {
-        "features": ["vision"],
-        "input_tokens": 20000,
-        "max_output_tokens": 1000
-      },
-      "expected_ids": ["deepseek/flash", "cloud/gpt"]
-    },
-    {
-      "name": "latency budget keeps the local model only",
-      "requirements": {
-        "features": ["vision"],
-        "max_latency_ms": 1000
-      },
-      "expected_ids": ["local/vllm"]
-    },
-    {
-      "name": "cost budget drops the expensive model",
-      "requirements": {
-        "features": ["vision"],
-        "input_tokens": 10000,
-        "max_output_tokens": 1000,
-        "max_cost_usd_per_call": 0.02
-      },
-      "expected_ids": ["local/vllm", "deepseek/flash"]
-    },
-    {
-      "name": "json_schema downgrades when no strict model fits",
-      "requirements": {
-        "features": ["vision", "json_schema"],
-        "input_tokens": 20000,
-        "max_output_tokens": 1000,
-        "max_latency_ms": 2000
-      },
-      "expected_ids": ["deepseek/flash"],
-      "expected_downgraded": true
-    },
-    {
-      "name": "no downgrade when the caller forbids it",
-      "requirements": {
-        "features": ["vision", "json_schema"],
-        "input_tokens": 20000,
-        "max_output_tokens": 1000,
-        "max_latency_ms": 2000,
-        "allow_downgrade": false
-      },
-      "expected_ids": []
-    },
-    {
-      "name": "json_schema stays strict when a schema model fits",
-      "requirements": {
-        "features": ["vision", "json_schema"],
-        "input_tokens": 1000,
-        "max_output_tokens": 256
+        "features": ["vision", "json_schema"]
       },
       "expected_ids": ["local/vllm", "cloud/gpt"]
     },
     {
       "name": "text work can use every model",
-      "requirements": {
-        "input_tokens": 1000,
-        "max_output_tokens": 256
-      },
+      "requirements": {},
       "expected_ids": ["local/vllm", "text/small", "deepseek/flash", "cloud/gpt"]
     },
     {
       "name": "no match returns no targets",
       "requirements": {
-        "features": ["vision", "json_schema"],
-        "max_latency_ms": 100
+        "features": ["audio"]
       },
       "expected_ids": []
     }

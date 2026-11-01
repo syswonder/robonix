@@ -127,12 +127,7 @@ class VLMObjectDetector:
         except ValueError:
             self.max_tokens = 1024
 
-        target = resolve_from_env(
-            Requirements(
-                features=("vision",),
-                max_output_tokens=self.max_tokens,
-            )
-        )
+        target = resolve_from_env(Requirements(features=("vision",)))
         if target is not None:
             self.base_url = target.base_url
             self.api_key = api_key_for(target)

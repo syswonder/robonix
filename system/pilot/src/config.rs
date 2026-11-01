@@ -332,11 +332,6 @@ mod tests {
                     "ROBONIX_LLM_CATALOG",
                     "CAT_KEY",
                     "ROBONIX_LLM_FEATURES",
-                    "ROBONIX_LLM_INPUT_TOKENS",
-                    "ROBONIX_LLM_MAX_OUTPUT_TOKENS",
-                    "ROBONIX_LLM_MAX_LATENCY_MS",
-                    "ROBONIX_LLM_MAX_COST_USD_PER_CALL",
-                    "ROBONIX_LLM_ALLOW_DOWNGRADE",
                 ] {
                     std::env::remove_var(name);
                 }
@@ -358,11 +353,6 @@ mod tests {
             std::env::set_var("ROBONIX_LLM_CATALOG", &path);
             std::env::set_var("CAT_KEY", "secret");
             std::env::remove_var("ROBONIX_LLM_FEATURES");
-            std::env::remove_var("ROBONIX_LLM_INPUT_TOKENS");
-            std::env::remove_var("ROBONIX_LLM_MAX_OUTPUT_TOKENS");
-            std::env::remove_var("ROBONIX_LLM_MAX_LATENCY_MS");
-            std::env::remove_var("ROBONIX_LLM_MAX_COST_USD_PER_CALL");
-            std::env::remove_var("ROBONIX_LLM_ALLOW_DOWNGRADE");
         }
         EnvGuard {
             _lock: lock,

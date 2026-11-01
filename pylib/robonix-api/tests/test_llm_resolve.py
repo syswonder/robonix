@@ -13,7 +13,7 @@ def _catalog(*models):
     return ModelCatalog.from_dict({"models": list(models)})
 
 
-def _model(model_id, *, latency=None, vision=True, json_schema=True, context=8192):
+def _model(model_id, *, latency=None, vision=True, json_schema=True):
     return {
         "id": model_id,
         "provider": "vllm",
@@ -27,55 +27,34 @@ def _model(model_id, *, latency=None, vision=True, json_schema=True, context=819
             "tools": True,
             "stream": True,
         },
-        "context": context,
         "latency_p95_ms": latency,
     }
 
 
 class ResolveTests(unittest.TestCase):
-    def test_capability_is_a_hard_filter(self):
+    def test_feature_is_a_hard_filter(self):
         catalog = _catalog(_model("vision", vision=True), _model("text", vision=False))
         targets = catalog.resolve(Requirements(features=("vision",)))
         self.assertEqual([target.id for target in targets], ["vision"])
-
-    def test_context_budget_filters_models(self):
-        catalog = _catalog(
-            _model("small", context=1000),
-            _model("large", context=100000),
-        )
-        targets = catalog.resolve(
-            Requirements(input_tokens=5000, max_output_tokens=1000),
-        )
-        self.assertEqual([target.id for target in targets], ["large"])
-
-    def test_latency_budget_rejects_unknown_latency(self):
-        catalog = _catalog(_model("known", latency=500), _model("unknown", latency=None))
-        targets = catalog.resolve(Requirements(max_latency_ms=1000))
-        self.assertEqual([target.id for target in targets], ["known"])
 
     def test_preference_is_latency_then_price_then_id(self):
         catalog = _catalog(
             _model("slow", latency=2000),
             _model("fast", latency=100),
             _model("also-fast", latency=100),
+            {**_model("expensive", latency=100), "price_input_per_mtok": 1},
+            _model("unknown"),
         )
         targets = catalog.resolve(Requirements())
         self.assertEqual(
-            [target.id for target in targets], ["also-fast", "fast", "slow"]
+            [target.id for target in targets],
+            ["also-fast", "fast", "expensive", "slow", "unknown"],
         )
 
-    def test_downgrade_marks_every_target(self):
+    def test_json_schema_requires_a_schema_model(self):
         catalog = _catalog(_model("object-only", json_schema=False, latency=100))
         targets = catalog.resolve(
-            Requirements(features=("json_schema",), allow_downgrade=True),
-        )
-        self.assertEqual([target.id for target in targets], ["object-only"])
-        self.assertTrue(targets[0].downgraded)
-
-    def test_no_downgrade_keeps_the_strict_request(self):
-        catalog = _catalog(_model("object-only", json_schema=False, latency=100))
-        targets = catalog.resolve(
-            Requirements(features=("json_schema",), allow_downgrade=False),
+            Requirements(features=("json_schema",)),
         )
         self.assertEqual(targets, [])
 
@@ -113,8 +92,6 @@ class ContractTests(unittest.TestCase):
                 raw["features"] = tuple(raw.get("features", ()))
                 targets = catalog.resolve(Requirements(**raw))
                 self.assertEqual([t.id for t in targets], case["expected_ids"])
-                if targets:
-                    self.assertEqual(targets[0].downgraded, case.get("expected_downgraded", False))
 
 
 @contextmanager
@@ -166,18 +143,14 @@ class ResolveFromEnvTests(unittest.TestCase):
         with _env_catalog(MODELS), self.assertRaises(RuntimeError):
             resolve_from_env(Requirements(features=("audio",)))
 
-    def test_missing_schema_key_allows_a_usable_json_fallback(self):
+    def test_missing_schema_key_does_not_relax_features(self):
         schema = {**MODELS[0], "features": {"json_schema": True}}
         fallback = {**MODELS[1], "features": {"json_object": True}}
         del fallback["api_key_env"]
         with _env_catalog([schema, fallback]):
             req = Requirements(features=("json_schema",))
-            target = resolve_from_env(req)
-            self.assertEqual(target.id, "slow/model")
-            self.assertTrue(target.downgraded)
-            with self.assertRaises(RuntimeError):
-                resolve_from_env(Requirements(features=("json_schema",), allow_downgrade=False))
+            with self.assertRaisesRegex(RuntimeError, "FAST_KEY"):
+                resolve_from_env(req)
             os.environ["FAST_KEY"] = "dummy"
             target = resolve_from_env(req)
             self.assertEqual(target.id, "fast/model")
-            self.assertFalse(target.downgraded)

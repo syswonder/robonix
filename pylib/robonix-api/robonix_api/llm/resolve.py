@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Feature and budget matching, plus deployment environment lookup."""
+"""Feature matching and deployment environment lookup."""
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import lru_cache
 
 from .catalog import ModelCatalog, ModelSpec
@@ -11,19 +11,9 @@ from .catalog import ModelCatalog, ModelSpec
 
 @dataclass(frozen=True)
 class Requirements:
-    """What the caller needs for this request.
-
-    Features are hard requirements.  Budgets are optional; an unknown
-    latency is rejected when a latency budget is set because it cannot be
-    proven to fit.
-    """
+    """Features the caller requires from a model."""
 
     features: tuple[str, ...] = ()
-    input_tokens: int = 0
-    max_output_tokens: int = 0
-    max_latency_ms: float | None = None
-    max_cost_usd_per_call: float | None = None
-    allow_downgrade: bool = True
 
     @classmethod
     def default(cls) -> "Requirements":
@@ -32,49 +22,12 @@ class Requirements:
 
 
 def _resolve(catalog: ModelCatalog, requirements: Requirements) -> list[ModelSpec]:
-    required = set(requirements.features)
-    matches = _matching(catalog, required, requirements)
-    downgraded = False
-    if not matches and "json_schema" in required and requirements.allow_downgrade:
-        relaxed = (required - {"json_schema"}) | {"json_object"}
-        matches = _matching(catalog, relaxed, requirements)
-        downgraded = bool(matches)
-    matches.sort(key=_preference)
-    return [replace(model, downgraded=downgraded) for model in matches]
-
-
-def _matching(
-    catalog: ModelCatalog, required: set[str], requirements: Requirements
-) -> list[ModelSpec]:
-    return [
+    matches = [
         model
         for model in catalog.models
-        if _fits(model, required, requirements)
+        if all(model.supports(feature) for feature in requirements.features)
     ]
-
-
-def _fits(model: ModelSpec, required: set[str], requirements: Requirements) -> bool:
-    if any(not model.supports(feature) for feature in required):
-        return False
-    wanted_tokens = requirements.input_tokens + requirements.max_output_tokens
-    if model.context is not None and wanted_tokens > model.context:
-        return False
-    if requirements.max_latency_ms is not None:
-        if model.latency_p95_ms is None:
-            return False
-        if model.latency_p95_ms > requirements.max_latency_ms:
-            return False
-    if requirements.max_cost_usd_per_call is not None:
-        if _estimated_cost(model, requirements) > requirements.max_cost_usd_per_call:
-            return False
-    return True
-
-
-def _estimated_cost(model: ModelSpec, requirements: Requirements) -> float:
-    return (
-        requirements.input_tokens / 1_000_000 * model.price_input_per_mtok
-        + requirements.max_output_tokens / 1_000_000 * model.price_output_per_mtok
-    )
+    return sorted(matches, key=_preference)
 
 
 def _preference(model: ModelSpec) -> tuple[float, float, str]:
@@ -114,18 +67,14 @@ def resolve_from_env(
     if not path:
         return None
     catalog = _catalog_for(path)
-    available = ModelCatalog(tuple(
-        model for model in catalog.models
-        if model.api_key_env is None or api_key_for(model)
-    ))
-    targets = available.resolve(requirements)
-    if targets:
-        return targets[0]
     targets = catalog.resolve(requirements)
     if not targets:
         raise RuntimeError(
             f"no model in {path} satisfies {sorted(requirements.features)}"
         )
+    for target in targets:
+        if target.api_key_env is None or api_key_for(target):
+            return target
     missing = sorted({target.api_key_env for target in targets if target.api_key_env})
     raise RuntimeError(
         f"no usable model in {path} for {sorted(requirements.features)}; "

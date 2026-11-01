@@ -2,7 +2,7 @@
 //! Print the models that satisfy a feature request.
 //!
 //! cargo run -p robonix-llm-catalog --example resolve -- \
-//!   pylib/robonix-api/robonix_api/llm/catalog.example.yaml vision,tools 1000 256
+//!   pylib/robonix-api/robonix_api/llm/catalog.example.yaml vision,tools
 
 use std::path::PathBuf;
 
@@ -14,15 +14,6 @@ fn main() -> anyhow::Result<()> {
         .next()
         .unwrap_or_else(|| "pylib/robonix-api/robonix_api/llm/catalog.example.yaml".to_owned());
     let features = args.next().unwrap_or_default();
-    let input_tokens = args
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let max_output_tokens = args
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-
     let catalog = ModelCatalog::load(&PathBuf::from(catalog_path))?;
     let requirements = Requirements {
         features: features
@@ -31,19 +22,15 @@ fn main() -> anyhow::Result<()> {
             .filter(|feature| !feature.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        input_tokens,
-        max_output_tokens,
-        ..Requirements::default()
     };
 
     for target in catalog.resolve(&requirements) {
         println!(
-            "{}  {}  {}  env={}  downgraded={}",
+            "{}  {}  {}  env={}",
             target.id,
             target.base_url,
             target.model,
-            target.api_key_env.as_deref().unwrap_or("<none>"),
-            target.downgraded
+            target.api_key_env.as_deref().unwrap_or("<none>")
         );
     }
     Ok(())

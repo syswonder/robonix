@@ -37,7 +37,7 @@ Common configuration:
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
 - `ROBONIX_LLM_CATALOG`: optional model-catalog path. A complete `vlm` block always wins; if `vlm.model` names a catalog id, the endpoint and key come from that entry; with no `vlm` block Pilot resolves by `ROBONIX_LLM_FEATURES`.
-- `ROBONIX_LLM_FEATURES`: required model features when Pilot resolves from the catalog; defaults to `vision,tools,stream`.
+- `ROBONIX_LLM_FEATURES`: required model features when Pilot resolves from the catalog; defaults to `vision,tools,stream`. All listed features must be supported; schema refusal is handled by the request client.
 
 The crate exposes `config` so `rbnx` preflight uses Pilot's own CLI, environment
 and file precedence, including explicit key overrides and protocol validation.

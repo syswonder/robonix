@@ -2,11 +2,11 @@
 //! Feature catalog and model resolver for Robonix consumers.
 //!
 //! The catalog is the single source of truth for what a model can do and how
-//! to connect to it.  `ModelCatalog::resolve` filters by feature and request
-//! budgets and returns every matching model in preference order; the consumer
+//! to connect to it.  `ModelCatalog::resolve` filters by feature and
+//! returns every matching model in preference order; the consumer
 //! connects to the first one directly.  This crate does not proxy traffic,
 //! track health or manage keys.
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -33,7 +33,7 @@ pub struct ModelSpec {
     /// Context window in tokens; `None` means the catalog sets no limit.
     #[serde(default)]
     pub context: Option<u64>,
-    /// Estimated p95 latency in milliseconds, used for ranking and budgets.
+    /// Estimated p95 latency in milliseconds, used for ranking.
     #[serde(default)]
     pub latency_p95_ms: Option<f64>,
     /// Input price in USD per million tokens.
@@ -45,10 +45,6 @@ pub struct ModelSpec {
     /// Wire protocol the consumer must speak; currently `openai-chat`.
     #[serde(default = "default_protocol")]
     pub protocol: String,
-    /// Set by [`ModelCatalog::resolve`] when the request asked for `json_schema`
-    /// but only a `json_object` model fit.  Never read from the catalog file.
-    #[serde(skip)]
-    pub downgraded: bool,
 }
 
 fn default_protocol() -> String {
@@ -69,39 +65,15 @@ pub struct ModelCatalog {
     pub models: Vec<ModelSpec>,
 }
 
-/// What a request needs.  Features are hard requirements; budgets are
-/// optional.  An unknown latency is rejected when a latency budget is set.
-#[derive(Debug, Clone)]
+/// Features the caller requires from a model.
+#[derive(Debug, Clone, Default)]
 pub struct Requirements {
     /// Features the model must support; all of them are required.
     pub features: Vec<String>,
-    /// Estimated input tokens for the request.
-    pub input_tokens: u64,
-    /// Maximum tokens the model may generate.
-    pub max_output_tokens: u64,
-    /// Optional p95 latency budget; unknown latency is rejected.
-    pub max_latency_ms: Option<f64>,
-    /// Optional per-call cost budget in USD.
-    pub max_cost_usd_per_call: Option<f64>,
-    /// Whether a `json_schema` request may fall back to `json_object`.
-    pub allow_downgrade: bool,
-}
-
-impl Default for Requirements {
-    fn default() -> Self {
-        Self {
-            features: Vec::new(),
-            input_tokens: 0,
-            max_output_tokens: 0,
-            max_latency_ms: None,
-            max_cost_usd_per_call: None,
-            allow_downgrade: true,
-        }
-    }
 }
 
 impl Requirements {
-    /// Build request requirements from the `ROBONIX_LLM_*` environment.
+    /// Read comma-separated features from `ROBONIX_LLM_FEATURES`.
     /// `default_features` is used when `ROBONIX_LLM_FEATURES` is absent.
     #[must_use]
     pub fn from_env(default_features: &str) -> Self {
@@ -114,28 +86,7 @@ impl Requirements {
                 .filter(|feature| !feature.is_empty())
                 .map(ToOwned::to_owned)
                 .collect(),
-            input_tokens: env_u64("ROBONIX_LLM_INPUT_TOKENS").unwrap_or(0),
-            max_output_tokens: env_u64("ROBONIX_LLM_MAX_OUTPUT_TOKENS").unwrap_or(0),
-            max_latency_ms: env_f64("ROBONIX_LLM_MAX_LATENCY_MS"),
-            max_cost_usd_per_call: env_f64("ROBONIX_LLM_MAX_COST_USD_PER_CALL"),
-            allow_downgrade: env_bool("ROBONIX_LLM_ALLOW_DOWNGRADE").unwrap_or(true),
         }
-    }
-}
-
-fn env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok()?.parse().ok()
-}
-
-fn env_f64(name: &str) -> Option<f64> {
-    std::env::var(name).ok()?.parse().ok()
-}
-
-fn env_bool(name: &str) -> Option<bool> {
-    match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
     }
 }
 
@@ -169,25 +120,14 @@ impl ModelCatalog {
     }
 
     /// Return matching models, best first: latency, then token price, then id.
-    ///
-    /// When `json_schema` is required but no schema-capable model fits the
-    /// request budgets, `allow_downgrade` lets a `json_object` model stand in;
-    /// every returned model then carries `downgraded = true`.
     #[must_use]
     pub fn resolve(&self, requirements: &Requirements) -> Vec<ModelSpec> {
-        let mut required: BTreeSet<String> = requirements.features.iter().cloned().collect();
-        let mut matches = self.matching(&required, requirements);
-        let mut downgraded = false;
-
-        if matches.is_empty()
-            && required.contains("json_schema")
-            && requirements.allow_downgrade
-        {
-            required.remove("json_schema");
-            required.insert("json_object".to_owned());
-            matches = self.matching(&required, requirements);
-            downgraded = !matches.is_empty();
-        }
+        let mut matches: Vec<ModelSpec> = self
+            .models
+            .iter()
+            .filter(|model| requirements.features.iter().all(|feature| model.supports(feature)))
+            .cloned()
+            .collect();
 
         matches.sort_by(|left, right| {
             let left_latency = left.latency_p95_ms.unwrap_or(f64::INFINITY);
@@ -199,18 +139,7 @@ impl ModelCatalog {
                 .then(left_price.total_cmp(&right_price))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        for model in &mut matches {
-            model.downgraded = downgraded;
-        }
         matches
-    }
-
-    fn matching(&self, required: &BTreeSet<String>, req: &Requirements) -> Vec<ModelSpec> {
-        self.models
-            .iter()
-            .filter(|model| fits(model, required, req))
-            .cloned()
-            .collect()
     }
 
     fn validate(&mut self) -> Result<()> {
@@ -269,35 +198,6 @@ impl ModelCatalog {
     }
 }
 
-fn fits(model: &ModelSpec, required: &BTreeSet<String>, req: &Requirements) -> bool {
-    if !required.iter().all(|feature| model.supports(feature)) {
-        return false;
-    }
-    let wanted_tokens = req.input_tokens.saturating_add(req.max_output_tokens);
-    if model.context.is_some_and(|context| wanted_tokens > context) {
-        return false;
-    }
-    if let Some(budget) = req.max_latency_ms {
-        match model.latency_p95_ms {
-            Some(latency) if latency <= budget => {}
-            _ => return false,
-        }
-    }
-    if let Some(budget) = req.max_cost_usd_per_call
-        && estimated_cost(model, req) > budget
-    {
-        return false;
-    }
-    true
-}
-
-fn estimated_cost(model: &ModelSpec, req: &Requirements) -> f64 {
-    req.input_tokens as f64 / 1_000_000.0 * model.price_input_per_mtok
-        + req.max_output_tokens as f64 / 1_000_000.0 * model.price_output_per_mtok
-}
-
-/// Resolve one target from `ROBONIX_LLM_CATALOG`, or `None` when unset.
-///
 /// Load the catalog named by `ROBONIX_LLM_CATALOG`, or `None` when unset.
 pub fn catalog_from_env() -> Result<Option<ModelCatalog>> {
     let path = std::env::var("ROBONIX_LLM_CATALOG").unwrap_or_default();
@@ -319,23 +219,17 @@ pub fn resolve_from_env(requirements: &Requirements) -> Result<Option<ModelSpec>
         return Ok(None);
     }
     let catalog = ModelCatalog::load(Path::new(path))?;
-    let available = ModelCatalog {
-        models: catalog
-            .models
-            .iter()
-            .filter(|model| model.api_key_env.is_none() || !api_key_for(model).is_empty())
-            .cloned()
-            .collect(),
-    };
-    if let Some(target) = available.resolve(requirements).into_iter().next() {
-        return Ok(Some(target));
-    }
     let targets = catalog.resolve(requirements);
     if targets.is_empty() {
         bail!(
             "no model in {path} satisfies {}",
             requirements.features.join(",")
         );
+    }
+    for target in &targets {
+        if target.api_key_env.is_none() || !api_key_for(target).is_empty() {
+            return Ok(Some(target.clone()));
+        }
     }
     let mut missing: Vec<&str> = targets
         .iter()

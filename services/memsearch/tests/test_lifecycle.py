@@ -256,16 +256,17 @@ class MemoryLifecycleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             catalog = root / "models.json"
-            small_context = json.dumps({"models": [{
-                "id": "too-small", "provider": "test", "model": "local",
-                "base_url": "http://127.0.0.1:8000/v1", "context": 1,
+            missing_key = json.dumps({"models": [{
+                "id": "keyed", "provider": "test", "model": "local",
+                "base_url": "http://127.0.0.1:8000/v1", "api_key_env": "COMPACT_TEST_KEY",
             }]})
             for body, expected in ((None, "FileNotFoundError"),
-                                   ("{", "JSONDecodeError"), (small_context, "satisfies")):
+                                   ("{", "JSONDecodeError"), (missing_key, "COMPACT_TEST_KEY")):
                 if body is not None:
                     catalog.write_text(body, encoding="utf-8")
                 with self.subTest(body=body), patch.dict(os.environ, {
                     "ROBONIX_LLM_CATALOG": str(catalog),
+                    "COMPACT_TEST_KEY": "",
                 }):
                     module, _ = _load_service()
                     result = _run_init(module, _WorkingMemSearch, {
