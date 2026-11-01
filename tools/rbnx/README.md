@@ -148,8 +148,12 @@ system:
 It loads and validates the catalog, resolves Pilot's target when Pilot has no
 explicit `vlm` block, and exports `ROBONIX_LLM_CATALOG` plus
 `ROBONIX_LLM_KEY_ENVS` (the exact `api_key_env` names the catalog uses).
-Package start scripts forward only those key variables, so a catalog can use
-any provider without editing a hard-coded allowlist.
+Pilot and the Python catalog consumers receive only the
+[runtime settings](../../pylib/robonix-api/robonix_api/llm/runtime_env.txt) and
+those key variables. A selected explicit Pilot key is also retained.
+Python package hooks apply this through the
+[catalog launcher](../../pylib/robonix-api/robonix_api/llm/README.md#deployment).
+Other services keep their existing environment, as do launches without a catalog.
 
 Pilot preflight uses the same configuration parser as the Pilot binary,
 including environment overrides, explicit keys and protocol validation.

@@ -47,6 +47,11 @@ and file precedence, including explicit key overrides and protocol validation.
 - `ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS`: maximum time without a VLM stream event before ending the turn and canceling its submitted plan. Defaults to `30` seconds and is clamped to `5..=300`. Non-empty `reasoning_content` deltas refresh this timer but are not appended to the assistant JSON.
 - `ROBONIX_SESSION_DIR`: where session transcripts are kept (see Session transcripts). `rbnx boot` sets it; defaults to `./sessions`.
 
+With a model catalog configured, `rbnx boot` restricts Pilot's inherited
+environment to the shared [runtime settings](../../pylib/robonix-api/robonix_api/llm/runtime_env.txt)
+and catalog key names. An explicit `ROBONIX_VLM_API_KEY` is retained when
+Pilot selects it. CLI and file configuration keep their precedence.
+
 ## Context capacity: automatic, visible, and overrideable
 
 Pilot compacts history before the next request would exceed the model's total context capacity. This is not the same thing as `max_tokens`: it is the full input + output budget.

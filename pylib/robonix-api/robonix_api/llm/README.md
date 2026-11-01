@@ -85,7 +85,16 @@ the `api_key_env` of every target they may use (keyless local targets need no
 variable). Consumers without the variable keep their legacy configuration, so
 the migration can be rolled out one service at a time.
 
-Scene mounts the catalog at the same absolute path and forwards only its
+Native Python package hooks launch through
+`python -m robonix_api.llm MODULE [ARGS...]`. With a catalog configured, this
+keeps only the variables in [runtime_env.txt](runtime_env.txt) and the catalog's
+`api_key_env` names before executing the consumer. The list includes Python,
+ROS, logging, cache paths and consumer settings. Additional runtime variables
+must be added explicitly; arbitrary inherited variables are dropped.
+`rbnx` uses the same list for Pilot, also preserving an explicit
+`ROBONIX_VLM_API_KEY` when that is the credential Pilot selected.
+
+Containerized Scene mounts the catalog at the same absolute path and forwards only its
 `api_key_env` variables, by name. Under `rbnx boot`, `ROBONIX_LLM_KEY_ENVS`
 supplies that list; standalone launches derive it with the host's Python and
 `robonix_api.llm` (PyYAML is needed for YAML catalogs). Without a catalog,

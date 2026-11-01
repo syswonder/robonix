@@ -504,6 +504,9 @@ soma_endpoint: 127.0.0.1:50091
         "ROBONIX_VLM_FORMAT",
         "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS",
         "ROBONIX_CONFIG_PATH",
+        "RBNX_BOOT_ID",
+        "UNUSED_PROVIDER_API_KEY",
+        "UNRELATED_CREDENTIAL",
     ];
 
     /// Restores process settings after a serialized preflight test.
@@ -550,6 +553,41 @@ soma_endpoint: 127.0.0.1:50091
             _lock: lock,
             path,
             saved,
+        }
+    }
+
+    #[test]
+    fn pilot_child_receives_only_catalog_keys_and_selected_overrides() {
+        let env = catalog_env("child-env", PILOT_CATALOG);
+        unsafe {
+            std::env::set_var("UNUSED_PROVIDER_API_KEY", "unused");
+            std::env::set_var("UNRELATED_CREDENTIAL", "unused");
+            std::env::set_var("RBNX_BOOT_ID", "test-boot");
+        }
+        for (explicit_key, config, expected_key) in [
+            (None, "{}", ""),
+            (Some("override"), "{}", "override"),
+            (Some("unused"), "{vlm: {model: catalog/model, api_key: selected}}", ""),
+        ] {
+            if let Some(key) = explicit_key {
+                unsafe { std::env::set_var("ROBONIX_VLM_API_KEY", key) };
+            }
+            let catalog = validate_model_catalog(&env.path, "manifest", &pilot_system(config), true)
+                .expect("valid catalog");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(concat!(
+                "test \"$CAT_KEY\" = secret && ",
+                "test \"$RBNX_BOOT_ID\" = test-boot && ",
+                "test \"$ROBONIX_LLM_KEY_ENVS\" = CAT_KEY && ",
+                "test -n \"$ROBONIX_LLM_CATALOG\" && test -n \"$PATH\" && ",
+                "test \"${UNUSED_PROVIDER_API_KEY+x}\" != x && ",
+                "test \"${UNRELATED_CREDENTIAL+x}\" != x && ",
+                "test \"${ROBONIX_VLM_API_KEY-}\" = \"$1\""
+            ));
+            cmd.arg("probe").arg(expected_key);
+            apply_pilot_catalog_env(&mut cmd, &catalog);
+            let output = cmd.as_std_mut().output().expect("run environment probe");
+            assert!(output.status.success(), "explicit key: {explicit_key:?}");
         }
     }
 
@@ -1124,6 +1162,25 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
     log_dir.join(format!("{name}.log"))
 }
 
+fn apply_pilot_catalog_env(cmd: &mut Command, catalog: &CatalogInfo) {
+    let key_envs = std::env::var("ROBONIX_LLM_KEY_ENVS").unwrap_or_default();
+    let mut allowed: HashSet<&str> = include_str!(
+        "../../../../pylib/robonix-api/robonix_api/llm/runtime_env.txt"
+    )
+    .split_whitespace()
+    .chain(key_envs.split(',').filter(|name| !name.is_empty()))
+    .collect();
+    // An explicit Pilot key can override a catalog entry's credential.
+    if std::env::var("ROBONIX_VLM_API_KEY").ok().is_some_and(|key| {
+        !key.is_empty() && catalog.pilot.as_ref().is_some_and(|pilot| pilot.api_key == key)
+    }) {
+        allowed.insert("ROBONIX_VLM_API_KEY");
+    }
+    cmd.env_clear().envs(std::env::vars_os().filter(|(name, _)| {
+        name.to_str().is_some_and(|name| allowed.contains(name))
+    }));
+}
+
 async fn spawn_system_binary(
     log_dir: &Path,
     session_dir: &Path,
@@ -1139,6 +1196,11 @@ async fn spawn_system_binary(
     let mut cmd = Command::new(bin);
     for a in args {
         cmd.arg(a);
+    }
+    if name == "pilot"
+        && let Some(catalog) = catalog
+    {
+        apply_pilot_catalog_env(&mut cmd, catalog);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
