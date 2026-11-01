@@ -13,7 +13,7 @@ def _catalog(*models):
     return ModelCatalog.from_dict({"models": list(models)})
 
 
-def _model(model_id, *, latency=None, vision=True, json_schema=True):
+def _model(model_id, *, latency=None, vision=True, json_schema=True, context=None):
     return {
         "id": model_id,
         "provider": "vllm",
@@ -28,6 +28,7 @@ def _model(model_id, *, latency=None, vision=True, json_schema=True):
             "stream": True,
         },
         "latency_p95_ms": latency,
+        "context": context,
     }
 
 
@@ -50,6 +51,20 @@ class ResolveTests(unittest.TestCase):
             [target.id for target in targets],
             ["also-fast", "fast", "expensive", "slow", "unknown"],
         )
+
+    def test_context_budget_filters_models(self):
+        catalog = _catalog(
+            _model("small", context=4096),
+            _model("large", context=131072),
+        )
+        targets = catalog.resolve(
+            Requirements(
+                features=("vision",),
+                input_tokens=4000,
+                max_output_tokens=512,
+            )
+        )
+        self.assertEqual([target.id for target in targets], ["large"])
 
     def test_json_schema_requires_a_schema_model(self):
         catalog = _catalog(_model("object-only", json_schema=False, latency=100))

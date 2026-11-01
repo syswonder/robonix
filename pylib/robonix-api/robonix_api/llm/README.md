@@ -46,8 +46,9 @@ client = OpenAI(
 client.chat.completions.create(model=target.model, messages=...)
 ```
 
-All requested features must be supported. Matching models are ordered by
-latency, then combined token price, then id.
+All requested features must be supported, and the model's `context` must fit
+`input_tokens + max_output_tokens` when both are set. Matching models are
+ordered by latency, then combined token price, then id.
 The caller tries the first and may try the next on failure.
 
 ## Consumer integration

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 /// One concrete model endpoint a consumer can connect to.
@@ -28,7 +29,7 @@ pub struct ModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
     /// Feature flags such as `vision`, `tools` or `json_schema`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_features")]
     pub features: BTreeMap<String, bool>,
     /// Context window in tokens; `None` means the catalog sets no limit.
     #[serde(default)]
@@ -43,12 +44,33 @@ pub struct ModelSpec {
     #[serde(default)]
     pub price_output_per_mtok: f64,
     /// Wire protocol the consumer must speak; currently `openai-chat`.
-    #[serde(default = "default_protocol")]
+    #[serde(
+        default = "default_protocol",
+        deserialize_with = "deserialize_protocol"
+    )]
     pub protocol: String,
 }
 
 fn default_protocol() -> String {
     "openai-chat".to_owned()
+}
+
+/// Treat a missing `features` field as empty, but reject an explicit `null`.
+fn deserialize_features<'de, D>(deserializer: D) -> std::result::Result<BTreeMap<String, bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<BTreeMap<String, bool>>::deserialize(deserializer)?
+        .ok_or_else(|| de::Error::custom("model.features must be an object"))
+}
+
+/// Treat a missing `protocol` as the default, but reject an explicit `null`.
+fn deserialize_protocol<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .ok_or_else(|| de::Error::custom("model.protocol must not be null"))
 }
 
 impl ModelSpec {
@@ -65,11 +87,15 @@ pub struct ModelCatalog {
     pub models: Vec<ModelSpec>,
 }
 
-/// Features the caller requires from a model.
+/// Features and request size the caller requires from a model.
 #[derive(Debug, Clone, Default)]
 pub struct Requirements {
     /// Features the model must support; all of them are required.
     pub features: Vec<String>,
+    /// Estimated input tokens for the request.
+    pub input_tokens: u64,
+    /// Maximum tokens the model may generate.
+    pub max_output_tokens: u64,
 }
 
 impl Requirements {
@@ -86,6 +112,14 @@ impl Requirements {
                 .filter(|feature| !feature.is_empty())
                 .map(ToOwned::to_owned)
                 .collect(),
+            input_tokens: std::env::var("ROBONIX_LLM_INPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            max_output_tokens: std::env::var("ROBONIX_LLM_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
         }
     }
 }
@@ -122,10 +156,19 @@ impl ModelCatalog {
     /// Return matching models, best first: latency, then token price, then id.
     #[must_use]
     pub fn resolve(&self, requirements: &Requirements) -> Vec<ModelSpec> {
+        let wanted_tokens = requirements
+            .input_tokens
+            .saturating_add(requirements.max_output_tokens);
         let mut matches: Vec<ModelSpec> = self
             .models
             .iter()
-            .filter(|model| requirements.features.iter().all(|feature| model.supports(feature)))
+            .filter(|model| {
+                requirements
+                    .features
+                    .iter()
+                    .all(|feature| model.supports(feature))
+                    && model.context.is_none_or(|context| wanted_tokens <= context)
+            })
             .cloned()
             .collect();
 

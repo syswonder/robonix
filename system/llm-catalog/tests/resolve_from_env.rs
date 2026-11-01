@@ -48,6 +48,7 @@ fn keyless_target_wins_on_latency() {
         unsafe { std::env::set_var("SLOW_KEY", "secret") };
         let target = resolve_from_env(&Requirements {
             features: vec!["vision".into()],
+            ..Requirements::default()
         })
         .expect("resolve")
         .expect("catalog enabled");
@@ -71,6 +72,7 @@ fn missing_keys_are_an_error() {
     with_catalog("missing-keys", body, || {
         let error = resolve_from_env(&Requirements {
             features: vec!["vision".into()],
+            ..Requirements::default()
         })
         .expect_err("missing keys must fail");
         let message = format!("{error:#}");
@@ -104,6 +106,7 @@ fn missing_schema_key_does_not_relax_features() {
     with_catalog("strict-schema", body, || {
         let requirements = Requirements {
             features: vec!["json_schema".into()],
+            ..Requirements::default()
         };
         let error = resolve_from_env(&requirements).expect_err("missing schema key");
         assert!(format!("{error:#}").contains("FAST_KEY"), "{error:#}");

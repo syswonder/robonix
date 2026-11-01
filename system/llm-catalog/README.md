@@ -13,6 +13,7 @@ let catalog = ModelCatalog::load("catalog.example.yaml".as_ref())?;
 catalog.model("deepseek/flash")?; // lookup by id
 let targets = catalog.resolve(&Requirements {
     features: vec!["vision".into(), "tools".into()],
+    ..Requirements::default()
 });
 let target = &targets[0];
 
@@ -24,8 +25,9 @@ if let Some(target) = resolve_from_env(&Requirements::default())? {
 
 The API mirrors `robonix_api.llm`: load, model lookup, resolve, env helper
 and key helper. Matching models are ordered by latency, then combined token
-price, then id. All requested features must be supported. The environment
-helper skips matching targets whose credentials are missing.
+price, then id. All requested features must be supported, and a model's
+`context` must fit `input_tokens + max_output_tokens`. The environment helper
+skips matching targets whose credentials are missing.
 `Requirements::from_env` reads comma-separated `ROBONIX_LLM_FEATURES`.
 
 Omit `api_key_env` for keyless endpoints. When set, it must match

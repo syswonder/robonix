@@ -22,6 +22,7 @@ fn main() -> anyhow::Result<()> {
             .filter(|feature| !feature.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
+        ..Requirements::default()
     };
 
     for target in catalog.resolve(&requirements) {

@@ -32,6 +32,12 @@ struct CaseRequirements {
     /// Features the model must support.
     #[serde(default)]
     features: Vec<String>,
+    /// Estimated input tokens.
+    #[serde(default)]
+    input_tokens: u64,
+    /// Maximum tokens the model may generate.
+    #[serde(default)]
+    max_output_tokens: u64,
 }
 
 fn contract_path() -> std::path::PathBuf {
@@ -46,6 +52,8 @@ fn shared_resolve_cases() {
     for case in &fixture.cases {
         let requirements = Requirements {
             features: case.requirements.features.clone(),
+            input_tokens: case.requirements.input_tokens,
+            max_output_tokens: case.requirements.max_output_tokens,
         };
         let targets = fixture.catalog.resolve(&requirements);
         let ids: Vec<String> = targets.iter().map(|model| model.id.clone()).collect();
