@@ -8,6 +8,7 @@ variable a consumer reads before connecting directly.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -46,7 +47,7 @@ class ModelSpec:
             provider=_required_str(data, "provider"),
             base_url=_required_str(data, "base_url").rstrip("/"),
             model=_required_str(data, "model"),
-            api_key_env=_optional_str(data, "api_key_env"),
+            api_key_env=_api_key_env(data.get("api_key_env")),
             features=_features(data.get("features")),
             context=_optional_positive_int(data.get("context"), "context"),
             latency_p95_ms=_optional_non_negative(data.get("latency_p95_ms"),
@@ -124,13 +125,12 @@ def _required_str(data: dict[str, Any], key: str) -> str:
     return value.strip()
 
 
-def _optional_str(data: dict[str, Any], key: str) -> str | None:
-    value = data.get(key)
+def _api_key_env(value: Any) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"model.{key} must be a non-empty string when set")
-    return value.strip()
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError("model.api_key_env must be a valid environment variable name")
+    return value
 
 
 def _features(value: Any) -> dict[str, bool]:

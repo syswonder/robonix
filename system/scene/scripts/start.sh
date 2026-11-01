@@ -147,9 +147,12 @@ fi
 declare -a KEY_ARGS=()
 if [[ -n "${ROBONIX_LLM_CATALOG:-}" && -n "${ROBONIX_LLM_KEY_ENVS+x}" ]]; then
     IFS=',' read -r -a ROBONIX_LLM_KEY_NAMES <<< "${ROBONIX_LLM_KEY_ENVS}"
-    for key_name in "${ROBONIX_LLM_KEY_NAMES[@]}"; do
-        key_name="${key_name//[[:space:]]/}"
+    for key_name in ${ROBONIX_LLM_KEY_NAMES[@]+"${ROBONIX_LLM_KEY_NAMES[@]}"}; do
         [[ -z "$key_name" ]] && continue
+        if [[ ! "$key_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "[scene/start] invalid catalog key environment variable name" >&2
+            exit 2
+        fi
         if [[ -n "${!key_name:-}" ]]; then
             KEY_ARGS+=(-e "$key_name")
         fi
