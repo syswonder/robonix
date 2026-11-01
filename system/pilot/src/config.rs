@@ -207,65 +207,46 @@ impl PilotConfig {
             .or(file_vlm.context_window_tokens)
             .filter(|tokens| *tokens > 0);
 
-        // A complete vlm block is explicit deployment config: use it as-is
-        // and never let a user-level catalog override it.
-        if let Some(upstream) = explicit_upstream {
+        let vlm = if let Some(upstream) = explicit_upstream {
             let model = explicit_model
                 .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
             let api_key = explicit_key.ok_or_else(|| {
                 missing_field("vlm.api_key", "ROBONIX_VLM_API_KEY", "--vlm-api-key")
             })?;
-            return Ok(Self {
-                atlas_endpoint,
-                listen,
-                id,
-                vlm: VlmConfig {
-                    upstream,
-                    api_key,
-                    model,
-                    catalog_id: None,
-                    context_window_tokens: explicit_context,
-                    api_format,
-                },
-            });
-        }
-
-        // A model name without an upstream selects a catalog entry. The
-        // caller picks the model; the catalog supplies the endpoint and,
-        // unless an explicit key is set, the key.
-        if let Some(model_id) = explicit_model {
-            let catalog = catalog_from_env()?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vlm.model {model_id:?} names a catalog id, but ROBONIX_LLM_CATALOG is unset"
-                )
-            })?;
-            let target = catalog
-                .model(&model_id)
-                .with_context(|| format!("vlm.model {model_id:?} is not a catalog id"))?;
-            return Ok(Self {
-                atlas_endpoint,
-                listen,
-                id,
-                vlm: vlm_from_catalog(target, explicit_key, explicit_context, api_format)?,
-            });
-        }
-
-        // No explicit VLM block: resolve from the catalog by requirements.
-        let requirements = env_llm_requirements();
-        if let Some(target) = resolve_from_env(&requirements)? {
-            return Ok(Self {
-                atlas_endpoint,
-                listen,
-                id,
-                vlm: vlm_from_catalog(&target, explicit_key, explicit_context, api_format)?,
-            });
-        }
-
-        Err(missing_field(
-            "vlm.upstream",
-            "ROBONIX_VLM_UPSTREAM",
-            "--vlm-upstream",
-        ))
+            VlmConfig {
+                upstream,
+                api_key,
+                model,
+                catalog_id: None,
+                context_window_tokens: explicit_context,
+                api_format,
+            }
+        } else {
+            let target = if let Some(model_id) = explicit_model {
+                let catalog = catalog_from_env()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "vlm.model {model_id:?} names a catalog id, but ROBONIX_LLM_CATALOG is unset"
+                    )
+                })?;
+                catalog
+                    .model(&model_id)
+                    .with_context(|| format!("vlm.model {model_id:?} is not a catalog id"))?
+                    .clone()
+            } else {
+                // Pilot handles schema refusal at request time.
+                let requirements = Requirements::from_env("vision,tools,stream");
+                resolve_from_env(&requirements)?.ok_or_else(|| {
+                    missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream")
+                })?
+            };
+            vlm_from_catalog(&target, explicit_key, explicit_context, api_format)?
+        };
+        Ok(Self {
+            atlas_endpoint,
+            listen,
+            id,
+            vlm,
+        })
     }
 }
 
@@ -318,15 +299,6 @@ fn env_atlas() -> Option<String> {
     std::env::var("ROBONIX_ATLAS")
         .ok()
         .filter(|v| !v.is_empty())
-}
-
-/// Features and budgets for the catalog lookup. The defaults describe what
-/// Pilot's planning requests need; every value can be overridden per
-/// deployment. `json_schema` is intentionally absent: Pilot already downgrades
-/// a rejected schema at request time, so requiring the feature here would
-/// exclude a capable json_object model such as DeepSeek Flash.
-fn env_llm_requirements() -> Requirements {
-    Requirements::from_env("vision,tools,stream")
 }
 
 fn load_yaml(path: &Path) -> Result<FileConfig> {

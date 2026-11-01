@@ -176,22 +176,19 @@ impl ModelCatalog {
     #[must_use]
     pub fn resolve(&self, requirements: &Requirements) -> Vec<ModelSpec> {
         let mut required: BTreeSet<String> = requirements.features.iter().cloned().collect();
+        let mut matches = self.matching(&required, requirements);
         let mut downgraded = false;
 
-        if required.contains("json_schema")
+        if matches.is_empty()
+            && required.contains("json_schema")
             && requirements.allow_downgrade
-            && self.matching(&required, requirements).is_empty()
         {
-            let mut relaxed = required.clone();
-            relaxed.remove("json_schema");
-            relaxed.insert("json_object".to_owned());
-            if !self.matching(&relaxed, requirements).is_empty() {
-                required = relaxed;
-                downgraded = true;
-            }
+            required.remove("json_schema");
+            required.insert("json_object".to_owned());
+            matches = self.matching(&required, requirements);
+            downgraded = !matches.is_empty();
         }
 
-        let mut matches = self.matching(&required, requirements);
         matches.sort_by(|left, right| {
             let left_latency = left.latency_p95_ms.unwrap_or(f64::INFINITY);
             let right_latency = right.latency_p95_ms.unwrap_or(f64::INFINITY);

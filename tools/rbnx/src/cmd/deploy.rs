@@ -1233,7 +1233,6 @@ async fn spawn_soma_binary(
     name: &str,
     bin: &str,
     args: &[String],
-    catalog: Option<&CatalogInfo>,
 ) -> Result<(Spawned, std::fs::File)> {
     use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 
@@ -1336,7 +1335,7 @@ async fn spawn_soma_binary(
         }
     });
 
-    let detail = system_boot_detail(name, args, catalog);
+    let detail = system_boot_detail(name, args, None);
     output::boot_ok(name, &detail);
     Ok((
         Spawned {
@@ -1898,7 +1897,7 @@ pub async fn execute(
                     // soma needs an inherited pipe fd for the stage-2
                     // trigger. Everything else uses the plain spawn path.
                     let (sp, writer) =
-                        spawn_soma_binary(&log_dir, name, bin, &args, catalog.as_ref()).await?;
+                        spawn_soma_binary(&log_dir, name, bin, &args).await?;
                     soma_stage_writer = Some(writer);
                     sp
                 } else {

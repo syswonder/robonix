@@ -131,7 +131,6 @@ mkdir -p "$SCENE_HOST_DATA_DIR"
 declare -a EXTRA_MOUNTS=()
 # The model catalog is a deployment file outside the image. Mount it at
 # the same absolute path so ROBONIX_LLM_CATALOG means the same thing inside.
-declare -a CATALOG_ARGS=()
 if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
     if [[ ! -f "${ROBONIX_LLM_CATALOG}" ]]; then
         echo "[scene/start] ROBONIX_LLM_CATALOG=${ROBONIX_LLM_CATALOG} is not a file" >&2
@@ -139,7 +138,7 @@ if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
     fi
     ROBONIX_LLM_CATALOG="$(realpath "${ROBONIX_LLM_CATALOG}")"
     export ROBONIX_LLM_CATALOG
-    CATALOG_ARGS=(-v "${ROBONIX_LLM_CATALOG}:${ROBONIX_LLM_CATALOG}:ro")
+    EXTRA_MOUNTS+=(-v "${ROBONIX_LLM_CATALOG}:${ROBONIX_LLM_CATALOG}:ro")
 fi
 declare -a KEY_ARGS=()
 if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
@@ -332,5 +331,4 @@ exec docker run --rm \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
-    ${CATALOG_ARGS[@]+"${CATALOG_ARGS[@]}"} \
     "$IMG"
