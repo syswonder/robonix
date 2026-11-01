@@ -328,11 +328,7 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             unsafe {
-                for name in [
-                    "ROBONIX_LLM_CATALOG",
-                    "CAT_KEY",
-                    "ROBONIX_LLM_FEATURES",
-                ] {
+                for name in ["ROBONIX_LLM_CATALOG", "CAT_KEY", "ROBONIX_LLM_FEATURES"] {
                     std::env::remove_var(name);
                 }
             }

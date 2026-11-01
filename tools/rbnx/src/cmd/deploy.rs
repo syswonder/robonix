@@ -567,13 +567,18 @@ soma_endpoint: 127.0.0.1:50091
         for (explicit_key, config, expected_key) in [
             (None, "{}", ""),
             (Some("override"), "{}", "override"),
-            (Some("unused"), "{vlm: {model: catalog/model, api_key: selected}}", ""),
+            (
+                Some("unused"),
+                "{vlm: {model: catalog/model, api_key: selected}}",
+                "",
+            ),
         ] {
             if let Some(key) = explicit_key {
                 unsafe { std::env::set_var("ROBONIX_VLM_API_KEY", key) };
             }
-            let catalog = validate_model_catalog(&env.path, "manifest", &pilot_system(config), true)
-                .expect("valid catalog");
+            let catalog =
+                validate_model_catalog(&env.path, "manifest", &pilot_system(config), true)
+                    .expect("valid catalog");
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(concat!(
                 "test \"$CAT_KEY\" = secret && ",
@@ -717,7 +722,8 @@ soma_endpoint: 127.0.0.1:50091
     #[test]
     fn catalog_boot_detail_shows_the_actual_model_and_redacts_the_endpoint() {
         let mut data: serde_json::Value = serde_json::from_str(PILOT_CATALOG).unwrap();
-        data["models"][0]["base_url"] = "https://user:password@provider.example/v1?token=private".into();
+        data["models"][0]["base_url"] =
+            "https://user:password@provider.example/v1?token=private".into();
         let env = catalog_env("boot-detail", &data.to_string());
         let info = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true).unwrap();
         let detail = system_boot_detail("pilot", &[], Some(&info));
@@ -1164,21 +1170,28 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
 
 fn apply_pilot_catalog_env(cmd: &mut Command, catalog: &CatalogInfo) {
     let key_envs = std::env::var("ROBONIX_LLM_KEY_ENVS").unwrap_or_default();
-    let mut allowed: HashSet<&str> = include_str!(
-        "../../../../pylib/robonix-api/robonix_api/llm/runtime_env.txt"
-    )
-    .split_whitespace()
-    .chain(key_envs.split(',').filter(|name| !name.is_empty()))
-    .collect();
+    let mut allowed: HashSet<&str> =
+        include_str!("../../../../pylib/robonix-api/robonix_api/llm/runtime_env.txt")
+            .split_whitespace()
+            .chain(key_envs.split(',').filter(|name| !name.is_empty()))
+            .collect();
     // An explicit Pilot key can override a catalog entry's credential.
-    if std::env::var("ROBONIX_VLM_API_KEY").ok().is_some_and(|key| {
-        !key.is_empty() && catalog.pilot.as_ref().is_some_and(|pilot| pilot.api_key == key)
-    }) {
+    if std::env::var("ROBONIX_VLM_API_KEY")
+        .ok()
+        .is_some_and(|key| {
+            !key.is_empty()
+                && catalog
+                    .pilot
+                    .as_ref()
+                    .is_some_and(|pilot| pilot.api_key == key)
+        })
+    {
         allowed.insert("ROBONIX_VLM_API_KEY");
     }
-    cmd.env_clear().envs(std::env::vars_os().filter(|(name, _)| {
-        name.to_str().is_some_and(|name| allowed.contains(name))
-    }));
+    cmd.env_clear().envs(
+        std::env::vars_os()
+            .filter(|(name, _)| name.to_str().is_some_and(|name| allowed.contains(name))),
+    );
 }
 
 async fn spawn_system_binary(
@@ -1953,8 +1966,7 @@ pub async fn execute(
                 let sp = if *name == "soma" {
                     // soma needs an inherited pipe fd for the stage-2
                     // trigger. Everything else uses the plain spawn path.
-                    let (sp, writer) =
-                        spawn_soma_binary(&log_dir, name, bin, &args).await?;
+                    let (sp, writer) = spawn_soma_binary(&log_dir, name, bin, &args).await?;
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
@@ -2471,10 +2483,7 @@ fn validate_model_catalog(
         None
     };
 
-    Ok(CatalogInfo {
-        source,
-        pilot,
-    })
+    Ok(CatalogInfo { source, pilot })
 }
 
 fn system_boot_detail(name: &str, args: &[String], catalog: Option<&CatalogInfo>) -> String {

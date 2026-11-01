@@ -89,8 +89,7 @@ fn looks_up_a_model_by_id() {
 
 #[test]
 fn rejects_invalid_api_key_env_names() {
-    let path = std::env::temp_dir()
-        .join(format!("catalog-key-names-{}.json", std::process::id()));
+    let path = std::env::temp_dir().join(format!("catalog-key-names-{}.json", std::process::id()));
     for name in [
         "",
         " KEY ",
@@ -117,8 +116,7 @@ fn shared_validation_cases() {
     let cases_path = contract_path().with_file_name("validation_cases.json");
     let text = std::fs::read_to_string(cases_path).expect("read validation cases");
     let cases: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let path = std::env::temp_dir()
-        .join(format!("catalog-validation-{}.yaml", std::process::id()));
+    let path = std::env::temp_dir().join(format!("catalog-validation-{}.yaml", std::process::id()));
     let write_model = |model| {
         std::fs::write(&path, serde_json::json!({"models": [model]}).to_string()).unwrap();
     };
@@ -149,7 +147,10 @@ fn shared_validation_cases() {
                 .to_string()
                 .replace("\"NON_FINITE\"", value.as_str().unwrap());
             std::fs::write(&path, text).unwrap();
-            assert!(ModelCatalog::load(&path).is_err(), "accepted {field}={value}");
+            assert!(
+                ModelCatalog::load(&path).is_err(),
+                "accepted {field}={value}"
+            );
         }
     }
     std::fs::remove_file(path).unwrap();
