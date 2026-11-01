@@ -231,12 +231,16 @@ impl ModelCatalog {
                     bail!("model.{field} must not be empty");
                 }
             }
-            if model
-                .api_key_env
-                .as_deref()
-                .is_some_and(|name| name.trim().is_empty())
-            {
-                bail!("model {:?}.api_key_env must not be empty", model.id);
+            if let Some(name) = &model.api_key_env {
+                let valid_start = name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_');
+                if !valid_start
+                    || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                {
+                    bail!("model.api_key_env must be a valid environment variable name");
+                }
             }
             if !seen.insert(model.id.as_str()) {
                 bail!("duplicate model id {:?}", model.id);

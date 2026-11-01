@@ -112,3 +112,28 @@ fn looks_up_a_model_by_id() {
     assert_eq!(deepseek.provider, "deepseek");
     assert!(catalog.model("absent").is_err());
 }
+
+#[test]
+fn rejects_invalid_api_key_env_names() {
+    let path = std::env::temp_dir()
+        .join(format!("catalog-key-names-{}.json", std::process::id()));
+    for name in [
+        "",
+        " KEY ",
+        "1KEY",
+        "KEY,OTHER",
+        "KEY=value",
+        "KEY[0]",
+        "BASH_VERSINFO[$(printf${IFS}UNSAFE>&2)0]",
+    ] {
+        let data = serde_json::json!({"models": [{
+            "id": "local/test", "provider": "vllm",
+            "base_url": "http://127.0.0.1:8000/v1", "model": "local",
+            "api_key_env": name,
+        }]});
+        std::fs::write(&path, data.to_string()).expect("write catalog");
+        let result = ModelCatalog::load(&path);
+        std::fs::remove_file(&path).expect("remove catalog");
+        assert!(result.is_err(), "accepted key variable {name:?}");
+    }
+}

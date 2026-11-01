@@ -55,21 +55,15 @@ class ModelCatalogTests(unittest.TestCase):
         )
         self.assertIsNone(catalog.models[0].api_key_env)
 
-    def test_rejects_empty_api_key_env(self):
-        with self.assertRaises(ValueError):
-            ModelCatalog.from_dict(
-                {
-                    "models": [
-                        {
-                            "id": "local/keyless",
-                            "provider": "vllm",
-                            "base_url": "http://127.0.0.1:8000/v1",
-                            "model": "local",
-                            "api_key_env": "",
-                        }
-                    ]
-                }
-            )
+    def test_rejects_invalid_api_key_env(self):
+        for name in ("", " KEY ", "1KEY", "KEY,OTHER", "KEY=value", "KEY[0]",
+                     "BASH_VERSINFO[$(printf${IFS}UNSAFE>&2)0]"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                ModelCatalog.from_dict({"models": [{
+                    "id": "local/test", "provider": "vllm",
+                    "base_url": "http://127.0.0.1:8000/v1", "model": "local",
+                    "api_key_env": name,
+                }]})
 
     def test_rejects_duplicate_ids(self):
         data = {
