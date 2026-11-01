@@ -37,6 +37,7 @@ pub struct PilotConfig {
     pub vlm: VlmConfig,
 }
 
+/// Connection settings used by Pilot's model client.
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
     pub upstream: String,
@@ -44,6 +45,8 @@ pub struct VlmConfig {
     pub model: String,
     /// Optional OpenAI-compatible reasoning effort sent with each request.
     pub reasoning_effort: Option<String>,
+    /// Selected catalog id; `None` means an explicit endpoint was configured.
+    pub catalog_id: Option<String>,
     /// Context limit declared by the deployment. This wins over provider
     /// metadata and the built-in registry because a proxy may expose a logical
     /// model name while routing to a smaller physical context window.
@@ -230,6 +233,7 @@ impl PilotConfig {
                 api_key,
                 model,
                 reasoning_effort,
+                catalog_id: None,
                 context_window_tokens: explicit_context,
                 api_format,
             }
@@ -267,6 +271,7 @@ impl PilotConfig {
             id,
             vlm,
         })
+
     }
 }
 
@@ -300,6 +305,7 @@ fn vlm_from_catalog(
         api_key,
         model: target.model.clone(),
         reasoning_effort,
+        catalog_id: Some(target.id.clone()),
         context_window_tokens,
         api_format,
     })

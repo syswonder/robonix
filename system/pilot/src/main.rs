@@ -19,7 +19,6 @@
 //   3. Serves RobonixSystemPilot on `listen`. Executor address is discovered
 //      through atlas at every Stream RPC, not configured statically.
 
-mod config;
 mod discovery;
 // Pilot shares Executor's expression grammar for admission.
 #[allow(dead_code)]
@@ -41,7 +40,6 @@ mod vlm;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use config::{Args, PILOT_NAMESPACE, PilotConfig};
 use pb::contracts::robonix_lifecycle_driver_client::RobonixLifecycleDriverClient;
 use pb::contracts::robonix_lifecycle_driver_server::{
     RobonixLifecycleDriver, RobonixLifecycleDriverServer,
@@ -51,6 +49,7 @@ use pb::contracts::robonix_system_pilot_server::RobonixSystemPilotServer;
 use pb::lifecycle::{DriverRequest, DriverResponse};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_pilot::config::{self, Args, PILOT_NAMESPACE, PilotConfig};
 use robonix_scribe::{info, warn};
 use service::PilotServiceImpl;
 use std::time::Duration;

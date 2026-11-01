@@ -33,6 +33,7 @@ git2 = "0.20.4"
 resvg = "0.47.0"
 robonix-atlas = { path = "../../system/atlas" }
 robonix-llm-catalog = { path = "../../system/llm-catalog" }
+robonix-pilot = { path = "../../system/pilot" }
 robonix-scribe.workspace = true
 
 [build-dependencies]
