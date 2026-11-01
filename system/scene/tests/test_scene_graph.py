@@ -27,6 +27,7 @@ _LLM_ENV_VARS = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
+    "ROBONIX_LLM_CATALOG",
 )
 
 

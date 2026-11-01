@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 import httpx
+from robonix_api.llm import Requirements, api_key_for, resolve_from_env
 
 log = logging.getLogger(__name__)
 
@@ -26,24 +27,41 @@ class SceneGraphLLMClient:
         timeout: float = 30.0,
         reasoning_effort: str | None = None,
     ) -> None:
-        self.base_url = (
-            base_url
-            or os.environ.get("VLM_BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL")
-            or ""
-        ).rstrip("/")
-        self.api_key = (
-            api_key
-            or os.environ.get("VLM_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or ""
-        )
-        self.model = (
-            model
-            or os.environ.get("VLM_MODEL")
-            or os.environ.get("OPENAI_MODEL")
-            or "gpt-4o-mini"
-        )
+        target = None
+        if base_url is None and api_key is None and model is None:
+            # The graph client also serves the image-relation and caption
+            # paths, so vision is the hard requirement.
+            target = resolve_from_env(Requirements(features=("vision",)))
+        self.requires_key = True
+        if target is not None:
+            self.base_url = target.base_url
+            self.api_key = api_key_for(target)
+            self.model = target.model
+            self.requires_key = target.api_key_env is not None
+            log.info(
+                "[scene-graph-llm] catalog target %s model=%s",
+                target.id,
+                target.model,
+            )
+        else:
+            self.base_url = (
+                base_url
+                or os.environ.get("VLM_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL")
+                or ""
+            ).rstrip("/")
+            self.api_key = (
+                api_key
+                or os.environ.get("VLM_API_KEY")
+                or os.environ.get("OPENAI_API_KEY")
+                or ""
+            )
+            self.model = (
+                model
+                or os.environ.get("VLM_MODEL")
+                or os.environ.get("OPENAI_MODEL")
+                or "gpt-4o-mini"
+            )
         self.timeout = timeout
         # Sent only when set: providers without reasoning reject the field.
         if reasoning_effort is not None:
@@ -51,7 +69,7 @@ class SceneGraphLLMClient:
         else:
             self.reasoning_effort = os.environ.get("VLM_REASONING_EFFORT", "").strip()
 
-        if not self.api_key:
+        if self.requires_key and not self.api_key:
             log.warning(
                 "[scene-graph-llm] VLM_API_KEY not set; "
                 "relation inference will return 'unknown'"
@@ -59,7 +77,9 @@ class SceneGraphLLMClient:
 
     @property
     def available(self) -> bool:
-        return bool(self.base_url and self.api_key)
+        return bool(self.base_url) and (
+            bool(self.api_key) or not self.requires_key
+        )
 
     async def chat_json(
         self,
@@ -76,10 +96,9 @@ class SceneGraphLLMClient:
             return {}
 
         url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         if images:
             user_content: Any = [{"type": "text", "text": user_message}]
             for img in images:

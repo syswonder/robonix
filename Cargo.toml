@@ -17,6 +17,8 @@ members = [
     "system/chronos",
     "system/executor",
     "system/liaison",
+    # Shared model catalog for LLM consumers (Pilot and future users).
+    "system/llm-catalog",
     "system/pilot",
     "system/scribe",
     "system/soma",

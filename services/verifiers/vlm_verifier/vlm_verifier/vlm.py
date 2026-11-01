@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import httpx
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    catalog_from_env,
+    resolve_from_env,
+)
 
 SYSTEM_PROMPT = """You verify completed robot actions using BEFORE and AFTER camera images.
 Each image is labelled with its camera provider and execution phase.
@@ -51,19 +57,91 @@ class VlmConfig:
     base_url: str
     api_key: str = field(repr=False)
     model: str
+    requires_key: bool = True
 
     @classmethod
     def parse(cls, cfg):
-        """Validate independent model configuration without exposing secrets."""
+        """Validate independent model configuration without exposing secrets.
+
+        A complete ``vlm`` block is explicit and wins over the catalog. A block
+        with only ``model`` selects a catalog id; no ``vlm`` block resolves by
+        the verifier's feature requirements.
+        """
+        if isinstance(cfg, dict):
+            base_url = cfg.get("base_url")
+            api_key = cfg.get("api_key")
+            model = cfg.get("model")
+            has_base = isinstance(base_url, str) and bool(base_url.strip())
+            has_key = isinstance(api_key, str) and bool(api_key.strip())
+            has_model = isinstance(model, str) and bool(model.strip())
+            if has_base and has_key and has_model:
+                return cls(_validated_base_url(base_url), api_key, model)
+            if has_model and not has_base and not has_key:
+                catalog = catalog_from_env()
+                if catalog is None:
+                    raise ValueError(
+                        f"vlm.model {model!r} names a catalog id, "
+                        "but ROBONIX_LLM_CATALOG is unset"
+                    )
+                return cls._from_target(catalog.model(model))
+            if has_base or has_key or has_model:
+                missing = next(
+                    key
+                    for key, present in (
+                        ("base_url", has_base),
+                        ("api_key", has_key),
+                        ("model", has_model),
+                    )
+                    if not present
+                )
+                raise ValueError(f"vlm.{missing} is required")
+
+        try:
+            target = resolve_from_env(Requirements(features=("vision",)))
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        if target is not None:
+            return cls._from_target(target)
         if not isinstance(cfg, dict):
             raise ValueError("vlm must be an object")
-        for key in ("base_url", "api_key", "model"):
-            if not isinstance(cfg.get(key), str) or not cfg[key].strip():
-                raise ValueError(f"vlm.{key} is required")
-        url = urlsplit(cfg["base_url"])
-        if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment:
-            raise ValueError("vlm.base_url must be an HTTP(S) base URL without credentials or query")
-        return cls(cfg["base_url"].rstrip("/"), cfg["api_key"], cfg["model"])
+        raise ValueError("vlm.base_url is required")
+
+    @classmethod
+    def _from_target(cls, target):
+        if target.protocol != "openai-chat":
+            raise ValueError(
+                f"catalog target {target.id!r} uses protocol {target.protocol!r}; "
+                "the verifier only speaks openai-chat"
+            )
+        api_key = api_key_for(target)
+        if target.api_key_env is not None and not api_key:
+            raise ValueError(
+                f"{target.api_key_env} is required for catalog target {target.id!r}"
+            )
+        return cls(
+            _validated_base_url(target.base_url),
+            api_key,
+            target.model,
+            requires_key=target.api_key_env is not None,
+        )
+
+
+def _validated_base_url(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("vlm.base_url is required")
+    url = urlsplit(value)
+    if (
+        url.scheme not in ("http", "https")
+        or not url.hostname
+        or url.username
+        or url.password
+        or url.query
+        or url.fragment
+    ):
+        raise ValueError(
+            "vlm.base_url must be an HTTP(S) base URL without credentials or query"
+        )
+    return value.rstrip("/")
 
 
 def strict_object(pairs):
@@ -122,9 +200,12 @@ async def judge(config, envelope, before, after):
     }
     try:
         async with httpx.AsyncClient(timeout=40, follow_redirects=False) as client:
+            headers = {"Content-Type": "application/json"}
+            if config.api_key:
+                headers["Authorization"] = "Bearer " + config.api_key
             response = await client.post(
                 config.base_url + "/chat/completions",
-                headers={"Authorization": "Bearer " + config.api_key},
+                headers=headers,
                 json=payload,
             )
             response.raise_for_status()

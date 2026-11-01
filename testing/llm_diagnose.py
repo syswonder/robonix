@@ -14,6 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+except ModuleNotFoundError:
+    # CI runs this script from a bare interpreter; the package lives in-tree.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pylib" / "robonix-api"))
+    from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -44,15 +51,17 @@ def _post_chat(base_url: str, api_key: str, model: str, messages: list[dict[str,
         "response_format": {"type": "json_object"},
     }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "robonix-ci-diagnostics",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "robonix-ci-diagnostics",
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -87,7 +96,9 @@ def _build_messages(context: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Call DeepSeek for Robonix CI diagnostic analysis")
+    ap = argparse.ArgumentParser(
+        description="Call the configured LLM endpoint for Robonix CI diagnostic analysis"
+    )
     ap.add_argument("--context-json", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--base-url", default=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
@@ -96,16 +107,31 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=90)
     args = ap.parse_args()
 
-    api_key = os.environ.get(args.api_key_env, "")
+    provider = "deepseek"
+    base_url = args.base_url
+    model = args.model
+    api_key_env: str | None = args.api_key_env
+    try:
+        target = resolve_from_env(Requirements(features=("json_object",)))
+    except Exception as exc:
+        print(f"error: model catalog: {exc}", file=sys.stderr)
+        return 2
+    if target is not None:
+        provider = target.provider
+        base_url = target.base_url
+        model = target.model
+        api_key_env = target.api_key_env
+
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    if not api_key:
+    if api_key_env is not None and not api_key:
         args.out.write_text(
             json.dumps(
                 {
                     "generated_on": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     "available": False,
                     "title": "LLM analysis unavailable",
-                    "summary": f"{args.api_key_env} was not configured for this run.",
+                    "summary": f"{api_key_env} was not configured for this run.",
                     "confidence": "low",
                 },
                 indent=2,
@@ -118,12 +144,12 @@ def main() -> int:
 
     context = _load_json(args.context_json)
     try:
-        response = _post_chat(args.base_url, api_key, args.model, _build_messages(context), args.timeout)
+        response = _post_chat(base_url, api_key, model, _build_messages(context), args.timeout)
         content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         analysis = _extract_json_object(str(content))
         analysis["available"] = True
-        analysis["provider"] = "deepseek"
-        analysis["model"] = args.model
+        analysis["provider"] = provider
+        analysis["model"] = model
         analysis["generated_on"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     except (OSError, urllib.error.HTTPError, json.JSONDecodeError, KeyError, IndexError) as exc:
         analysis = {
@@ -132,8 +158,8 @@ def main() -> int:
             "summary": str(exc),
             "confidence": "low",
             "generated_on": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "provider": "deepseek",
-            "model": args.model,
+            "provider": provider,
+            "model": model,
         }
         print(f"warning: LLM analysis failed: {exc}", file=sys.stderr)
 
