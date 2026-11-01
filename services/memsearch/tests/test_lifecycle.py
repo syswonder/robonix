@@ -67,6 +67,9 @@ def _load_service():
         observed_threads.append(os.environ.get("MEMSEARCH_ONNX_THREADS"))
 
     robonix_api = types.ModuleType("robonix_api")
+    robonix_api.__path__ = [
+        str(PACKAGE_ROOT.parents[1] / "pylib" / "robonix-api" / "robonix_api")
+    ]
     robonix_api.Service = _Service
     robonix_api.Ok = _Ok
     robonix_api.Err = _Err
