@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -13,6 +14,8 @@ from unittest.mock import patch
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_PATH = PACKAGE_ROOT / "memsearch_service" / "service.py"
+sys.path.insert(0, str(PACKAGE_ROOT.parents[1] / "pylib" / "robonix-api"))
+import robonix_api.llm
 
 
 class _Ok:
@@ -248,6 +251,31 @@ class MemoryLifecycleTest(unittest.TestCase):
             self.assertIsInstance(result, _Err)
             self.assertIn("database is not writable", result.message)
             self.assertIsNone(module.mem)
+
+    def test_catalog_errors_fail_before_backend_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = root / "models.json"
+            small_context = json.dumps({"models": [{
+                "id": "too-small", "provider": "test", "model": "local",
+                "base_url": "http://127.0.0.1:8000/v1", "context": 1,
+            }]})
+            for body, expected in ((None, "FileNotFoundError"),
+                                   ("{", "JSONDecodeError"), (small_context, "satisfies")):
+                if body is not None:
+                    catalog.write_text(body, encoding="utf-8")
+                with self.subTest(body=body), patch.dict(os.environ, {
+                    "ROBONIX_LLM_CATALOG": str(catalog),
+                }):
+                    module, _ = _load_service()
+                    result = _run_init(module, _WorkingMemSearch, {
+                        "memory_dir": str(root / "memory"),
+                        "milvus_uri": str(root / "memory.db"),
+                    })
+                    self.assertIsInstance(result, _Err)
+                    self.assertIn(expected, result.message)
+                    self.assertIsNone(module.mem)
+                    self.assertEqual(_WorkingMemSearch.instances, [])
 
     def test_start_hook_does_not_kill_database_holders(self) -> None:
         manifest = (PACKAGE_ROOT / "package_manifest.yaml").read_text(encoding="utf-8")

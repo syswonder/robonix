@@ -67,7 +67,9 @@ needed before lifecycle initialization or contain secrets:
 | `OPENAI_MODEL` | unset | Fallback model when `VLM_MODEL` is unset. If both are unset, `compact` uses `gpt-5.5`. |
 | `ROBONIX_ATLAS` | supplied by `rbnx` | Atlas endpoint used by `robonix-api`. |
 
-`search` and `save` do not require model API credentials. When neither
+With `ROBONIX_LLM_CATALOG` set, initialization validates the compaction model
+before constructing the backend. A keyless catalog entry needs no credential.
+Without a catalog, `search` and `save` do not require model API credentials. When neither
 `VLM_API_KEY` nor `OPENAI_API_KEY` is set, `compact` returns a clear
 no-credentials result without calling an external endpoint.
 

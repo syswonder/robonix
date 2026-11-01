@@ -299,6 +299,7 @@ def init(cfg: dict):
     global mem, MEMORY_DIR, MILVUS_URI, _APPLIED_CONFIG, _reopen
     try:
         resolved = _resolve_config(cfg)
+        _compact_config()
         if mem is not None:
             if resolved == _APPLIED_CONFIG:
                 log.info("on_init: already initialized with the same configuration")

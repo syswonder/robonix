@@ -39,6 +39,9 @@ print(f'Nodes: {svc.graph.count()}')
 
 ## Configuration
 
+- `ROBONIX_LLM_CATALOG` — optional model catalog. Search requires
+  `json_object`; image observation requires `vision`. Invalid configuration
+  fails startup before the HTTP hook opens and is checked during initialization.
 - `EMBEDDING_MODEL_PATH` — path to all-MiniLM-L6-v2 model directory
   (optional; otherwise sentence-transformers uses its standard model cache)
 - Spatial records containing objects must provide their actual coordinate
