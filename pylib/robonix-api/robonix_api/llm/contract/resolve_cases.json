@@ -96,6 +96,15 @@
       "expected_ids": ["local/vllm", "text/small", "deepseek/flash", "cloud/gpt"]
     },
     {
+      "name": "context budget rejects smaller models",
+      "requirements": {
+        "features": ["vision"],
+        "input_tokens": 200000,
+        "max_output_tokens": 1000
+      },
+      "expected_ids": ["cloud/gpt"]
+    },
+    {
       "name": "no match returns no targets",
       "requirements": {
         "features": ["audio"]

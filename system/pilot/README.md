@@ -38,6 +38,7 @@ Common configuration:
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
 - `ROBONIX_LLM_CATALOG`: optional model-catalog path. A complete `vlm` block always wins; if `vlm.model` names a catalog id, the endpoint and key come from that entry; with no `vlm` block Pilot resolves by `ROBONIX_LLM_FEATURES`.
 - `ROBONIX_LLM_FEATURES`: required model features when Pilot resolves from the catalog; defaults to `vision,tools,stream`. All listed features must be supported; schema refusal is handled by the request client.
+- `ROBONIX_LLM_INPUT_TOKENS` / `ROBONIX_LLM_MAX_OUTPUT_TOKENS`: optional token estimate used to reject catalog entries whose `context` is too small; default `0`.
 
 The crate exposes `config` so `rbnx` preflight uses Pilot's own CLI, environment
 and file precedence, including explicit key overrides and protocol validation.

@@ -11,9 +11,11 @@ from .catalog import ModelCatalog, ModelSpec
 
 @dataclass(frozen=True)
 class Requirements:
-    """Features the caller requires from a model."""
+    """Features and request size the caller requires from a model."""
 
     features: tuple[str, ...] = ()
+    input_tokens: int = 0
+    max_output_tokens: int = 0
 
     @classmethod
     def default(cls) -> "Requirements":
@@ -22,10 +24,12 @@ class Requirements:
 
 
 def _resolve(catalog: ModelCatalog, requirements: Requirements) -> list[ModelSpec]:
+    wanted_tokens = requirements.input_tokens + requirements.max_output_tokens
     matches = [
         model
         for model in catalog.models
         if all(model.supports(feature) for feature in requirements.features)
+        and (model.context is None or wanted_tokens <= model.context)
     ]
     return sorted(matches, key=_preference)
 
