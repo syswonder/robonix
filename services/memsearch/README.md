@@ -69,6 +69,8 @@ needed before lifecycle initialization or contain secrets:
 
 With `ROBONIX_LLM_CATALOG` set, initialization validates the compaction model
 before constructing the backend. A keyless catalog entry needs no credential.
+The package hook uses the [catalog launcher](../../pylib/robonix-api/robonix_api/llm/README.md#deployment)
+to restrict inherited environment variables.
 Without a catalog, `search` and `save` do not require model API credentials. When neither
 `VLM_API_KEY` nor `OPENAI_API_KEY` is set, `compact` returns a clear
 no-credentials result without calling an external endpoint.

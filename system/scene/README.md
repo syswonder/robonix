@@ -250,6 +250,10 @@ Fixed SDK combinations belong to Docker profiles. `scripts/native_profiles.json`
 is retained as a deprecated alias for `docker_profiles.json`; Native does not
 use it to select packages or reject hosts.
 
+With `ROBONIX_LLM_CATALOG` configured, native startup uses the
+[catalog launcher](../../pylib/robonix-api/robonix_api/llm/README.md#deployment)
+to pass only declared model keys and supported runtime settings to Scene.
+
 Native Scene inherits the host ROS 2 transport configuration. Set
 `RMW_IMPLEMENTATION` explicitly when the rest of the deployment uses a
 non-default transport.
