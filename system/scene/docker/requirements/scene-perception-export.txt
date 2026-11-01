@@ -1,0 +1,3 @@
+# Model preparation only; TensorRT runtime never imports these packages.
+onnx>=1.16
+onnxscript>=0.3

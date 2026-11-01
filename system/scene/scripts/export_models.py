@@ -385,6 +385,7 @@ def main() -> None:
     ap.add_argument("--yolo-weights", default=os.path.join(PKG, "docker", "_weights", "yolov8l-world.pt"))
     ap.add_argument("--sam-weights", default=os.path.join(PKG, "docker", "_weights", "mobile_sam.pt"))
     ap.add_argument("--clip-bin", default=os.path.join(PKG, "docker", "_weights", "open_clip_pytorch_model.bin"))
+    ap.add_argument("--only", choices=("yolo", "sam", "clip"))
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()
     OUT = args.out
@@ -397,19 +398,19 @@ def main() -> None:
     # eval+no_grad triggers torch's fused MHA fastpath, which has no opset-17
     # mapping; the plain attention decomposition exports fine.
     torch.backends.mha.set_fastpath_enabled(False)
-    if not (done("yolo-world-cut") and done("yolo-world-text")):
+    if args.only in (None, "yolo") and not (done("yolo-world-cut") and done("yolo-world-text")):
         export_yolo(args.yolo_weights)
     else:
         log("yolo exports present, skip")
-    if not done("sam-encoder"):
+    if args.only in (None, "sam") and not done("sam-encoder"):
         export_sam(args.sam_weights)
     else:
         log("sam export present, skip")
-    if not done("sam-decoder"):
+    if args.only in (None, "sam") and not done("sam-decoder"):
         export_sam_decoder(args.sam_weights)
     else:
         log("sam-decoder export present, skip")
-    if not (done("clip-visual") and done("clip-text")):
+    if args.only in (None, "clip") and not (done("clip-visual") and done("clip-text")):
         export_clip(args.clip_bin)
     else:
         log("clip exports present, skip")
