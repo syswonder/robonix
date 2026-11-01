@@ -56,7 +56,9 @@ fn default_protocol() -> String {
 }
 
 /// Treat a missing `features` field as empty, but reject an explicit `null`.
-fn deserialize_features<'de, D>(deserializer: D) -> std::result::Result<BTreeMap<String, bool>, D::Error>
+fn deserialize_features<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, bool>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -213,7 +215,9 @@ impl ModelCatalog {
                     .first()
                     .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_');
                 if !valid_start
-                    || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    || !name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
                 {
                     bail!("model.api_key_env must be a valid environment variable name");
                 }
@@ -228,13 +232,19 @@ impl ModelCatalog {
                 .iter()
                 .any(|price| !price.is_finite() || *price < 0.0)
             {
-                bail!("model {:?} prices must be finite and non-negative", model.id);
+                bail!(
+                    "model {:?} prices must be finite and non-negative",
+                    model.id
+                );
             }
             if model
                 .latency_p95_ms
                 .is_some_and(|latency| !latency.is_finite() || latency < 0.0)
             {
-                bail!("model {:?}.latency_p95_ms must be finite and non-negative", model.id);
+                bail!(
+                    "model {:?}.latency_p95_ms must be finite and non-negative",
+                    model.id
+                );
             }
         }
         Ok(())
