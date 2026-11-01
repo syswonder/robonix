@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Pure feature-to-model resolution.
-
-`ModelCatalog.resolve` filters the catalog by required features and request budgets and
-returns every matching model in preference order.  The caller connects to the
-first one directly; trying the next on failure is ordinary fallback and needs no
-extra state.  There is deliberately no health tracking, proxy or telemetry here.
-"""
+"""Feature and budget matching, plus deployment environment lookup."""
 from __future__ import annotations
 
 import os
@@ -38,13 +32,6 @@ class Requirements:
 
 
 def _resolve(catalog: ModelCatalog, requirements: Requirements) -> list[ModelSpec]:
-    """Return matching models, best first.
-
-    Preference order is latency, then combined token price, then model id.
-    When ``json_schema`` is required but no schema-capable model fits the
-    request budgets, ``allow_downgrade`` lets a ``json_object`` model stand in;
-    every returned model then carries ``downgraded=True``.
-    """
     required = set(requirements.features)
     matches = _matching(catalog, required, requirements)
     downgraded = False

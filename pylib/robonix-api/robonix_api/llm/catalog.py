@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Declarative model catalog for feature-based routing.
-
-The catalog is the single source of truth for what a model can do and how to
-connect to it.  It carries no secrets: `api_key_env` names the environment
-variable a consumer reads before connecting directly.
-"""
+"""Model endpoints and features; credentials are named by environment variable."""
 from __future__ import annotations
 
 import json
@@ -111,11 +106,8 @@ class ModelCatalog:
         raise ValueError(f"unknown model {model_id!r}")
 
     def resolve(self, requirements: "Requirements") -> list[ModelSpec]:
-        """Return matching models, best first.
-
-        Delegates to the pure resolver so catalog data and ranking rules stay in
-        separate modules; the local import avoids a module cycle.
-        """
+        """Return matching models, best first."""
+        # Import locally to avoid a cycle with the resolver's model types.
         from .resolve import _resolve
 
         return _resolve(self, requirements)
