@@ -12,7 +12,10 @@ _SVC = _HERE.parent
 if str(_SVC) not in sys.path:
     sys.path.insert(0, str(_SVC))
 
-from memsearch_service.service import _compact_config
+from test_lifecycle import _load_service
+
+_service, _ = _load_service()
+_compact_config = _service._compact_config
 
 _ENV_KEYS = (
     "ROBONIX_LLM_CATALOG",
