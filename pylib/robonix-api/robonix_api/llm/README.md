@@ -105,9 +105,11 @@ the `api_key_env` of every target they may use (keyless local targets need no
 variable). Consumers without the variable keep their legacy configuration, so
 the migration can be rolled out one service at a time.
 
-Scene runs in a container: its start script mounts the catalog at the same
-absolute path and forwards `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`,
-`DASHSCOPE_API_KEY`, `VLLM_API_KEY`, `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`.
+Scene mounts the catalog at the same absolute path and forwards only its
+`api_key_env` variables, by name. Under `rbnx boot`, `ROBONIX_LLM_KEY_ENVS`
+supplies that list; standalone launches derive it with the host's Python and
+`robonix_api.llm` (PyYAML is needed for YAML catalogs). Without a catalog,
+Scene forwards only the legacy `VLM_API_KEY` and `OPENAI_API_KEY` variables.
 The catalog is read once per process; restart a consumer after editing it.
 
 The requirements used by the in-tree consumers:
