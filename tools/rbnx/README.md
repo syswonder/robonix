@@ -161,8 +161,8 @@ boot before any component prints `[ OK ]`.
 - `ROBONIX_ATLAS` — atlas endpoint, default `localhost:50051`.
 - `ROBONIX_LLM_CATALOG` — model catalog path; overrides the manifest path and
   the user-level default.
-- `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — legacy VLM credentials used
-  when Pilot has an explicit `vlm` block and no catalog.
+- `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — legacy values referenced by
+  explicit manifest `vlm` blocks, which take precedence even with a catalog.
 - `ROBONIX_DRIVER_INIT_TIMEOUT_S` — seconds `rbnx boot` waits for a package's
   `Driver(CMD_INIT)` reply. Default 90.
 - `RBNX_GH_MIRROR` — prefix tried before `https://github.com/` URLs when
