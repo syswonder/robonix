@@ -46,11 +46,7 @@ def _png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
 def main() -> int:
     catalog = ModelCatalog.load(ROOT / "robonix_api" / "llm" / "catalog.example.yaml")
     targets = catalog.resolve(
-        Requirements(
-            features=("vision", "tools"),
-            input_tokens=1000,
-            max_output_tokens=256,
-        ),
+        Requirements(features=("vision", "tools")),
     )
     if not targets:
         print("no catalog model satisfies vision+tools", file=sys.stderr)

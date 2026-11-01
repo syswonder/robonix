@@ -27,9 +27,7 @@ log = logging.getLogger("scribe_mem")
 # ── VLM config (reuses Pilot's env vars) ───────────────────────────────────
 
 def _vlm_config() -> dict:
-    target = resolve_from_env(
-        Requirements(features=("vision",), max_output_tokens=256)
-    )
+    target = resolve_from_env(Requirements(features=("vision",)))
     if target is not None:
         return {
             "base_url": target.base_url,

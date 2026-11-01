@@ -29,9 +29,6 @@ class ModelSpec:
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0
     protocol: str = "openai-chat"
-    # Set by resolve() when the request asked for json_schema but the catalog
-    # only had a json_object model.  Not part of the catalog file.
-    downgraded: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ModelSpec":

@@ -48,7 +48,6 @@ fn keyless_target_wins_on_latency() {
         unsafe { std::env::set_var("SLOW_KEY", "secret") };
         let target = resolve_from_env(&Requirements {
             features: vec!["vision".into()],
-            ..Requirements::default()
         })
         .expect("resolve")
         .expect("catalog enabled");
@@ -72,7 +71,6 @@ fn missing_keys_are_an_error() {
     with_catalog("missing-keys", body, || {
         let error = resolve_from_env(&Requirements {
             features: vec!["vision".into()],
-            ..Requirements::default()
         })
         .expect_err("missing keys must fail");
         let message = format!("{error:#}");
@@ -96,27 +94,21 @@ fn empty_api_key_env_is_rejected() {
 }
 
 #[test]
-fn missing_schema_key_allows_a_usable_json_fallback() {
+fn missing_schema_key_does_not_relax_features() {
     let body = r#"{"models":[
         {"id":"schema","provider":"test","base_url":"http://cloud.example/v1",
          "model":"schema","api_key_env":"FAST_KEY","features":{"json_schema":true}},
         {"id":"json","provider":"test","base_url":"http://127.0.0.1:8000/v1",
          "model":"json","features":{"json_object":true}}
     ]}"#;
-    with_catalog("schema-fallback", body, || {
-        let mut requirements = Requirements {
+    with_catalog("strict-schema", body, || {
+        let requirements = Requirements {
             features: vec!["json_schema".into()],
-            ..Requirements::default()
         };
-        let target = resolve_from_env(&requirements).unwrap().unwrap();
-        assert_eq!(target.id, "json");
-        assert!(target.downgraded);
-        requirements.allow_downgrade = false;
-        assert!(resolve_from_env(&requirements).is_err());
-        requirements.allow_downgrade = true;
+        let error = resolve_from_env(&requirements).expect_err("missing schema key");
+        assert!(format!("{error:#}").contains("FAST_KEY"), "{error:#}");
         unsafe { std::env::set_var("FAST_KEY", "dummy") };
         let target = resolve_from_env(&requirements).unwrap().unwrap();
         assert_eq!(target.id, "schema");
-        assert!(!target.downgraded);
     });
 }

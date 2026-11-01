@@ -34,11 +34,7 @@ from robonix_api.llm import ModelCatalog, Requirements, api_key_for
 
 catalog = ModelCatalog.load("catalog.example.yaml")
 targets = catalog.resolve(
-    Requirements(
-        features=("vision", "tools"),
-        input_tokens=12000,
-        max_output_tokens=512,
-    ),
+    Requirements(features=("vision", "tools")),
 )
 target = targets[0]
 
@@ -50,13 +46,9 @@ client = OpenAI(
 client.chat.completions.create(model=target.model, messages=...)
 ```
 
-Matching models are ordered by latency, then combined token price, then id.
+All requested features must be supported. Matching models are ordered by
+latency, then combined token price, then id.
 The caller tries the first and may try the next on failure.
-
-When the request needs `json_schema` and no schema-capable model fits, the
-default `allow_downgrade=True` lets a `json_object` model stand in and marks
-the returned targets `downgraded=True`. Pass `allow_downgrade=False` to require
-a schema-capable model or get an empty list.
 
 ## Consumer integration
 
@@ -81,8 +73,6 @@ unset key are skipped. If no target is usable, it raises an error naming the
 missing variables. When the catalog variable is unset it returns `None`, which
 keeps the legacy configuration. The catalog is read once per process; restart
 the consumer after editing it.
-Missing credentials are filtered before matching, so an unavailable schema
-model cannot block a usable JSON fallback.
 
 ### Deployment
 

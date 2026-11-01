@@ -13,9 +13,6 @@ let catalog = ModelCatalog::load("catalog.example.yaml".as_ref())?;
 catalog.model("deepseek/flash")?; // lookup by id
 let targets = catalog.resolve(&Requirements {
     features: vec!["vision".into(), "tools".into()],
-    input_tokens: 12_000,
-    max_output_tokens: 512,
-    ..Requirements::default()
 });
 let target = &targets[0];
 
@@ -27,11 +24,9 @@ if let Some(target) = resolve_from_env(&Requirements::default())? {
 
 The API mirrors `robonix_api.llm`: load, model lookup, resolve, env helper
 and key helper. Matching models are ordered by latency, then combined token
-price, then id. When `json_schema` is required and no schema-capable model
-fits, the default `allow_downgrade` lets a `json_object` model stand in and
-marks every target `downgraded = true`.
-The environment helper excludes targets with missing credentials before
-matching, so an unavailable schema model cannot block a usable JSON fallback.
+price, then id. All requested features must be supported. The environment
+helper skips matching targets whose credentials are missing.
+`Requirements::from_env` reads comma-separated `ROBONIX_LLM_FEATURES`.
 
 Omit `api_key_env` for keyless endpoints. When set, it must match
 `[A-Za-z_][A-Za-z0-9_]*` so launchers can forward it as an environment variable.
@@ -45,5 +40,5 @@ both this crate and the Python package:
 ```bash
 cargo test -p robonix-llm-catalog
 cargo run -p robonix-llm-catalog --example resolve -- \
-  pylib/robonix-api/robonix_api/llm/catalog.example.yaml vision,tools 1000 256
+  pylib/robonix-api/robonix_api/llm/catalog.example.yaml vision,tools
 ```

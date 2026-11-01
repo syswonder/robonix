@@ -20,13 +20,10 @@ struct Fixture {
 struct Case {
     /// Human-readable name used in assertion messages.
     name: String,
-    /// Feature and budget inputs for this case.
+    /// Required features for this case.
     requirements: CaseRequirements,
     /// Expected model ids in preference order.
     expected_ids: Vec<String>,
-    /// Whether the first result must carry the downgrade flag.
-    #[serde(default)]
-    expected_downgraded: bool,
 }
 
 /// Request requirements as they appear in the JSON contract file.
@@ -35,25 +32,6 @@ struct CaseRequirements {
     /// Features the model must support.
     #[serde(default)]
     features: Vec<String>,
-    /// Estimated input tokens.
-    #[serde(default)]
-    input_tokens: u64,
-    /// Maximum tokens the model may generate.
-    #[serde(default)]
-    max_output_tokens: u64,
-    /// Optional p95 latency budget.
-    #[serde(default)]
-    max_latency_ms: Option<f64>,
-    /// Optional per-call cost budget.
-    #[serde(default)]
-    max_cost_usd_per_call: Option<f64>,
-    /// Whether schema downgrade is allowed.
-    #[serde(default = "default_true")]
-    allow_downgrade: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn contract_path() -> std::path::PathBuf {
@@ -68,22 +46,10 @@ fn shared_resolve_cases() {
     for case in &fixture.cases {
         let requirements = Requirements {
             features: case.requirements.features.clone(),
-            input_tokens: case.requirements.input_tokens,
-            max_output_tokens: case.requirements.max_output_tokens,
-            max_latency_ms: case.requirements.max_latency_ms,
-            max_cost_usd_per_call: case.requirements.max_cost_usd_per_call,
-            allow_downgrade: case.requirements.allow_downgrade,
         };
         let targets = fixture.catalog.resolve(&requirements);
         let ids: Vec<String> = targets.iter().map(|model| model.id.clone()).collect();
         assert_eq!(ids, case.expected_ids, "case {:?}", case.name);
-        if let Some(first) = targets.first() {
-            assert_eq!(
-                first.downgraded, case.expected_downgraded,
-                "case {:?} downgraded flag",
-                case.name
-            );
-        }
     }
 }
 
