@@ -30,6 +30,8 @@ and key helper. Matching models are ordered by latency, then combined token
 price, then id. When `json_schema` is required and no schema-capable model
 fits, the default `allow_downgrade` lets a `json_object` model stand in and
 marks every target `downgraded = true`.
+The environment helper excludes targets with missing credentials before
+matching, so an unavailable schema model cannot block a usable JSON fallback.
 
 Omit `api_key_env` for keyless endpoints. When set, it must match
 `[A-Za-z_][A-Za-z0-9_]*` so launchers can forward it as an environment variable.

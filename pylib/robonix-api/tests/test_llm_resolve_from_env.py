@@ -135,3 +135,21 @@ class ResolveFromEnvTests(unittest.TestCase):
                     resolve_from_env(Requirements(features=("audio",)))
         finally:
             directory.cleanup()
+
+    def test_missing_schema_key_allows_a_usable_json_fallback(self):
+        schema = {**MODELS[0], "features": {"json_schema": True}}
+        fallback = {**MODELS[1], "features": {"json_object": True}}
+        del fallback["api_key_env"]
+        directory, path = _catalog([schema, fallback])
+        self.addCleanup(directory.cleanup)
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path)}, clear=True):
+            req = Requirements(features=("json_schema",))
+            target = resolve_from_env(req)
+            self.assertEqual(target.id, "slow/model")
+            self.assertTrue(target.downgraded)
+            with self.assertRaises(RuntimeError):
+                resolve_from_env(Requirements(features=("json_schema",), allow_downgrade=False))
+            os.environ["FAST_KEY"] = "dummy"
+            target = resolve_from_env(req)
+            self.assertEqual(target.id, "fast/model")
+            self.assertFalse(target.downgraded)
