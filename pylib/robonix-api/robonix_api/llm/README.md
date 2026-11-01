@@ -3,10 +3,8 @@
 Model catalog and model resolver for Robonix consumers, shipped as the
 `robonix_api.llm` submodule of `robonix-api`.
 
-The submodule answers one question: **given what this request needs, which
-model should the consumer connect to?** It returns a model endpoint descriptor;
-the consumer opens that connection itself. There is no proxy, no model traffic
-and no health service here.
+Consumers resolve an endpoint from their requirements and connect directly;
+the catalog adds no proxy or service.
 
 ## ModelCatalog
 
@@ -14,29 +12,19 @@ A catalog is a YAML or JSON file with a `models` list:
 
 ```yaml
 models:
-  - id: deepseek/flash
-    provider: deepseek
-    base_url: https://api.deepseek.com
-    model: deepseek-flash
-    api_key_env: DEEPSEEK_API_KEY
-    protocol: openai-chat
-    features:
-      vision: true
-      json_object: true
-      json_schema: false
-      tools: true
-      stream: true
-    context: 131072
-    latency_p95_ms: 2000
-    price_input_per_mtok: 0.14
-    price_output_per_mtok: 0.28
+  - id: local/vision
+    provider: vllm
+    base_url: http://127.0.0.1:8000/v1
+    model: vision
+    features: {vision: true, tools: true, stream: true}
 ```
 
 `api_key_env` is the name of an environment variable, never the key. The
 resolver returns it so the consumer can read the key locally and connect
 directly. Omit it for a keyless endpoint such as a local vLLM/Ollama server.
 
-`catalog.example.yaml` is a complete example.
+[catalog.example.yaml](catalog.example.yaml) also shows protocol, context,
+latency and price fields.
 
 ## Python
 
@@ -151,10 +139,3 @@ calls it directly with a generated image:
 export DEEPSEEK_API_KEY=...
 PYTHONPATH=pylib/robonix-api python3 pylib/robonix-api/examples/llm_deepseek_smoke.py
 ```
-
-## Deliberately not included
-
-Health tracking, circuit breakers, usage reports, decision caching, image
-budget enforcement and an HTTP service. Those belong to a consumer or to an
-optional gateway and should be added only when a concrete requirement needs
-them.

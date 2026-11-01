@@ -8,6 +8,10 @@ from robonix_api.llm import ModelCatalog
 
 ROOT = Path(__file__).resolve().parent.parent
 LLM = ROOT / "robonix_api" / "llm"
+MODEL = {
+    "id": "local/test", "provider": "vllm",
+    "base_url": "http://127.0.0.1:8000/v1", "model": "test",
+}
 
 
 class ModelCatalogTests(unittest.TestCase):
@@ -37,19 +41,8 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertFalse(deepseek.supports("json_schema"))
 
     def test_load_json(self):
-        data = {
-            "models": [
-                {
-                    "id": "local/test",
-                    "provider": "vllm",
-                    "base_url": "http://127.0.0.1:8000/v1",
-                    "model": "test",
-                    "api_key_env": "VLLM_API_KEY",
-                    "features": {"vision": True},
-                    "context": 8192,
-                }
-            ]
-        }
+        data = {"models": [{**MODEL, "api_key_env": "VLLM_API_KEY",
+                            "features": {"vision": True}, "context": 8192}]}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "catalog.json"
             path.write_text(json.dumps(data), encoding="utf-8")
@@ -58,51 +51,19 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(catalog.models[0].protocol, "openai-chat")
 
     def test_api_key_env_is_optional(self):
-        catalog = ModelCatalog.from_dict(
-            {
-                "models": [
-                    {
-                        "id": "local/keyless",
-                        "provider": "vllm",
-                        "base_url": "http://127.0.0.1:8000/v1",
-                        "model": "local",
-                    }
-                ]
-            }
-        )
+        catalog = ModelCatalog.from_dict({"models": [{**MODEL, "id": "local/keyless", "model": "local"}]})
         self.assertIsNone(catalog.models[0].api_key_env)
 
     def test_rejects_invalid_api_key_env(self):
         for name in ("", " KEY ", "1KEY", "KEY,OTHER", "KEY=value", "KEY[0]",
                      "BASH_VERSINFO[$(printf${IFS}UNSAFE>&2)0]"):
             with self.subTest(name=name), self.assertRaises(ValueError):
-                ModelCatalog.from_dict({"models": [{
-                    "id": "local/test", "provider": "vllm",
-                    "base_url": "http://127.0.0.1:8000/v1", "model": "local",
-                    "api_key_env": name,
-                }]})
+                ModelCatalog.from_dict({"models": [{**MODEL, "api_key_env": name}]})
 
     def test_rejects_duplicate_ids(self):
-        data = {
-            "models": [
-                {
-                    "id": "same",
-                    "provider": "vllm",
-                    "base_url": "http://127.0.0.1:8000/v1",
-                    "model": "same",
-                    "api_key_env": "VLLM_API_KEY",
-                },
-                {
-                    "id": "same",
-                    "provider": "vllm",
-                    "base_url": "http://127.0.0.1:8000/v1",
-                    "model": "same",
-                    "api_key_env": "VLLM_API_KEY",
-                },
-            ]
-        }
+        model = {**MODEL, "id": "same", "model": "same", "api_key_env": "VLLM_API_KEY"}
         with self.assertRaises(ValueError):
-            ModelCatalog.from_dict(data)
+            ModelCatalog.from_dict({"models": [model, model]})
 
     def test_rejects_missing_field(self):
         with self.assertRaises(ValueError):
@@ -112,20 +73,7 @@ class ModelCatalogTests(unittest.TestCase):
 
     def test_rejects_non_boolean_features(self):
         with self.assertRaises(ValueError):
-            ModelCatalog.from_dict(
-                {
-                    "models": [
-                        {
-                            "id": "x",
-                            "provider": "vllm",
-                            "base_url": "http://x",
-                            "model": "x",
-                            "api_key_env": "VLLM_API_KEY",
-                            "features": {"vision": "false"},
-                        }
-                    ]
-                }
-            )
+            ModelCatalog.from_dict({"models": [{**MODEL, "features": {"vision": "false"}}]})
 
     def test_unknown_model_is_an_error(self):
         catalog = ModelCatalog.load(LLM / "catalog.example.yaml")
