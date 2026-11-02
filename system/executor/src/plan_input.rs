@@ -4,6 +4,11 @@ use crate::pb::executor::ExecuteStreamInput;
 use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
 use std::collections::HashSet;
 
+const RTDL_IF: u32 = 3;
+const RTDL_REPEAT: u32 = 4;
+const RTDL_WHILE: u32 = 5;
+const MAX_ITERATIONS: u32 = 10_000;
+
 // Match capabilities/lib/executor/msg/ExecuteStreamInput.msg.
 pub(crate) const EXECUTE_STREAM_START: u32 = 0;
 pub(crate) const EXECUTE_STREAM_NODE: u32 = 1;
@@ -100,6 +105,10 @@ impl PlanInput {
         if input.order.len() != count {
             return Err("Plan contains nodes unreachable from root_index".into());
         }
+        for (index, node) in plan.nodes.iter().enumerate() {
+            validate_completed_operator(index, node)?;
+        }
+        validate_parallel_bindings(&plan.nodes)?;
         input.plan = plan;
         Ok(input)
     }
@@ -115,8 +124,29 @@ impl PlanInput {
         if self.op_ids.contains(op_id) {
             return Err(format!("node {index} has duplicate op_id '{op_id}'"));
         }
+        if !node.bind.is_empty() && (node.node_kind != 2 || node.bind.trim() != node.bind) {
+            return Err(format!("node {index} has invalid bind"));
+        }
+        if matches!(node.node_kind, RTDL_IF | RTDL_WHILE) {
+            let condition: serde_json::Value = serde_json::from_str(&node.condition_json)
+                .map_err(|error| format!("node {index} has invalid condition: {error}"))?;
+            crate::expression::validate_expr(&condition)?;
+        } else if !node.condition_json.is_empty() {
+            return Err(format!("node {index} must not contain a condition"));
+        }
+        if node.node_kind != RTDL_REPEAT && node.repeat_count != 0
+            || node.node_kind != RTDL_WHILE && node.max_iterations != 0
+        {
+            return Err(format!("node {index} has unexpected loop limit"));
+        }
+        if node.repeat_count > MAX_ITERATIONS
+            || node.max_iterations > MAX_ITERATIONS
+            || node.node_kind == RTDL_WHILE && node.max_iterations == 0
+        {
+            return Err(format!("node {index} has invalid loop limit"));
+        }
         match node.node_kind {
-            0 | 1 if node.call.is_none() => {}
+            0 | 1 | RTDL_IF | RTDL_REPEAT | RTDL_WHILE if node.call.is_none() => {}
             2 => {
                 if !node.children.is_empty() {
                     return Err(format!("do node {index} must not have children"));
@@ -133,6 +163,7 @@ impl PlanInput {
                         "do node {index} requires object args and unique call_id"
                     ));
                 }
+                crate::expression::validate_expr(&args)?;
             }
             _ => {
                 return Err(format!(
@@ -179,6 +210,10 @@ impl PlanInput {
                             parent = self.parents[p];
                         }
                     }
+                }
+                validate_completed_operator(index, &self.plan.nodes[index])?;
+                if self.plan.nodes[index].node_kind == 1 {
+                    validate_parallel_bindings(&self.plan.nodes)?;
                 }
                 self.closed[index] = true;
                 Ok(())
@@ -249,6 +284,91 @@ impl PlanInput {
         self.plan.nodes.push(node);
         Ok(())
     }
+}
+
+fn validate_completed_operator(index: usize, node: &RtdlNode) -> Result<(), String> {
+    match node.node_kind {
+        RTDL_IF if !(1..=2).contains(&node.children.len()) => {
+            Err(format!("if node {index} requires one or two children"))
+        }
+        RTDL_REPEAT | RTDL_WHILE if node.children.len() != 1 => {
+            Err(format!("loop node {index} requires one body"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn expression_reads(value: &serde_json::Value, reads: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if crate::expression::is_reference(fields)
+                && let Some(name) = fields.get("var").and_then(serde_json::Value::as_str)
+            {
+                reads.insert(name.into());
+            }
+            for value in fields.values() {
+                expression_reads(value, reads);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                expression_reads(value, reads);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_parallel_bindings(nodes: &[RtdlNode]) -> Result<(), String> {
+    fn dependencies(
+        index: usize,
+        nodes: &[RtdlNode],
+    ) -> Result<(HashSet<String>, HashSet<String>), String> {
+        let node = &nodes[index];
+        let mut reads = HashSet::new();
+        let mut writes = HashSet::new();
+        if !node.bind.is_empty() {
+            writes.insert(node.bind.clone());
+        }
+        if !node.condition_json.is_empty() {
+            expression_reads(
+                &serde_json::from_str(&node.condition_json).expect("validated condition"),
+                &mut reads,
+            );
+        }
+        if let Some(call) = &node.call {
+            expression_reads(
+                &serde_json::from_str(&call.args_json).expect("validated args"),
+                &mut reads,
+            );
+        }
+        let mut branches: Vec<(HashSet<String>, HashSet<String>)> = Vec::new();
+        for &child in &node.children {
+            let branch = dependencies(child as usize, nodes)?;
+            if node.node_kind == 1 {
+                for (other_reads, other_writes) in &branches {
+                    if !branch.1.is_disjoint(other_writes)
+                        || !branch.0.is_disjoint(other_writes)
+                        || !branch.1.is_disjoint(other_reads)
+                    {
+                        return Err(format!(
+                            "parallel node {index} has conflicting variable dependencies"
+                        ));
+                    }
+                }
+            }
+            reads.extend(branch.0.iter().cloned());
+            writes.extend(branch.1.iter().cloned());
+            branches.push(branch);
+        }
+        Ok((reads, writes))
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if node.node_kind == 1 {
+            dependencies(index, nodes)?;
+        }
+    }
+    Ok(())
 }
 
 /// Require complete capability identity before dispatch or incremental admission.
@@ -528,6 +648,7 @@ mod complete_plan_tests {
             call,
             op_id: op_id.to_string(),
             description: description.to_string(),
+            ..Default::default()
         }
     }
 

@@ -1,7 +1,7 @@
 # robonix-executor
 
 Executes Pilot's RTDL plans: validates input, schedules `sequence` / `parallel`
-nodes, and runs each `do` capability call. External calls resolve through Atlas
+nodes, evaluates `if` / `repeat` / `while`, and runs each `do` capability call. External calls resolve through Atlas
 and use MCP; builtin capabilities run in-process.
 
 ## Build and run
@@ -46,6 +46,9 @@ Both execution RPCs share one scheduler:
 
 - `sequence` runs children in order and skips later children after a failure;
   `parallel` runs branches concurrently without canceling siblings on failure.
+- A completed `if` / `repeat` / `while` subtree executes under one control task.
+  Its body may run more than once; the next outer sequence child waits for the
+  control task and its descendant verification to finish.
 - Input requires a nonempty plan ID, unique op/call IDs, nonempty node
   descriptions, object-valued call arguments, at most 256 nodes and 32 levels.
   Complete plans must form one tree; active plan IDs cannot be reused.
@@ -60,6 +63,9 @@ Incremental input follows `START → NODE / CLOSE → END`. Execution can begin
 before `END`; operators close innermost first. Invalid input returns
 `invalid_argument`; capability failures use node events. Input loss before
 `END` or response disconnection triggers cancellation and cleanup.
+Control subtrees begin after their `CLOSE`, so a condition, branch, or loop body
+cannot execute from an incomplete model response. Earlier complete siblings
+can run while the rest of the response arrives.
 See the [stream protocol](../../capabilities/lib/executor/msg/ExecuteStreamInput.msg),
 [event IDL](../../capabilities/lib/executor/msg/RtdlEvent.msg), and
 [contracts](../../capabilities/system/executor/) for field definitions.
@@ -120,25 +126,14 @@ Under `robonix/system/executor/builtin/`:
   calls already in progress are allowed to return naturally.
 - `get_all_plans`: list every in-flight RTDL plan (no args). Returns each
   `plan_id` with a short `description` of the task (the root node's description,
-  which carries the model's `rtdl_description`), `op_count`, `cancelled`, and the
-  number of armed `stop_points`. The plan-list level of inspect-then-act:
-  discover running plans, then drill in with `get_plan_status`.
+  which carries the model's `rtdl_description`), `op_count`, and `cancelled`.
+  Discover running plans here, then drill in with `get_plan_status`.
 - `get_plan_status`: inspect an in-flight RTDL plan. Args: `plan_id` (required).
   Returns each op as JSON with `op_id`, `kind`, `description`, current `state`
-  (`pending`/`running`/`verifying`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`) and
-  any armed `stop_point`. Lets the LLM read a running plan's structure + live
-  progress before issuing a `stop_plan_at` / `cancel_plan` (inspect first, then
-  act). Errors if the plan is not active (stale/wrong id or already finished) —
+  (`pending`/`running`/`verifying`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`).
+  Use it to inspect progress before issuing `cancel_plan`. Errors if the plan is not active (stale/wrong id or already finished) —
   it is a query, so "not found" is an error; use `get_all_plans` to check which
   plans are still running.
-- `stop_plan_at`: arm a stop point on an in-flight RTDL plan — when execution
-  reaches the node with the given `op_id`, the **whole plan is cancelled** (same
-  teardown as `cancel_plan`). Args: `plan_id` (required), `op_id` (required), and
-  `when` (optional, `on_complete` default): `on_enter` cancels the moment the op
-  is reached, before its call runs (the op never executes); `on_complete` cancels
-  right after the op's call finishes. `op_id`s are the per-node identifiers
-  surfaced in `RtdlNodeState` events. Setting a stop point on a plan that is no
-  longer active is a success no-op; an `op_id` that never executes never fires.
 
 
 ## RTDL conditions and loops
@@ -147,7 +142,7 @@ RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `b
 
 Variables are isolated per plan; loops update the same binding each iteration. Bound calls wait for verification even under overlap mode, and loop iterations wait for all descendant verification. Parallel siblings must be independent; their results may be consumed after the join. Repeat counts are 0–10000 and while requires a 1–10000 iteration limit. A while condition still true at the limit fails. See [the protocol](../pilot/rtdl_protocol.md) for the complete grammar.
 
-Control execution writes `[executor/rtdl]` info records for the complete execution path. Plan records include session, round, tree and call counts, final state and elapsed time. Node records include the node kind and description; `do` records include the resolved arguments, provider, contract, binding name, final state and elapsed time. Binding records report the stored name, JSON value type and byte size. Control nodes also report their configured limit, condition result, selected branch, iteration start and completion, and exit reason. Condition evaluation errors and exhausted while limits produce warning records. Read these with `rbnx logs -t executor`; previews are bounded and execution-context values are not dumped.
+Control execution writes `[executor/rtdl]` info records for its limit, condition result, selected branch, and iteration start/completion. Binding records report the stored name and output byte size. Condition evaluation errors and exhausted while limits produce warning records. Read these with `rbnx logs -t executor`; execution-context values are not dumped.
 
 ## Source map
 

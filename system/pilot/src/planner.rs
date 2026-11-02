@@ -56,12 +56,12 @@ pub struct ExecutorConn {
 pub(crate) type CapabilityTarget = (String, String);
 pub(crate) type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
 
-const RTDL_SEQUENCE: u32 = 0;
-const RTDL_PARALLEL: u32 = 1;
-const RTDL_DO: u32 = 2;
-const RTDL_IF: u32 = 3;
-const RTDL_REPEAT: u32 = 4;
-const RTDL_WHILE: u32 = 5;
+pub(crate) const RTDL_SEQUENCE: u32 = 0;
+pub(crate) const RTDL_PARALLEL: u32 = 1;
+pub(crate) const RTDL_DO: u32 = 2;
+pub(crate) const RTDL_IF: u32 = 3;
+pub(crate) const RTDL_REPEAT: u32 = 4;
+pub(crate) const RTDL_WHILE: u32 = 5;
 
 pub(crate) struct DisplayCapability<'a> {
     pub(crate) display_name: String,
@@ -2034,9 +2034,7 @@ pub(crate) struct RtdlEnvelope {
     pub(crate) task_fields: TaskFields,
 }
 
-/// Distinguish plan and node ids from those retained across Pilot restarts.
-pub(crate) static RUN_TAG: LazyLock<String> =
-    LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
+#[cfg(test)]
 fn extract_json_object(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let start = bytes.iter().position(|&b| b == b'{')?;
@@ -2070,6 +2068,7 @@ fn extract_json_object(raw: &str) -> Option<&str> {
 }
 
 /// The reply fields besides the task fields of `tasks::REPLY_FIELDS`.
+#[cfg(test)]
 const REPLY_CORE_FIELDS: [&str; 3] = ["content", "rtdl_description", "rtdl"];
 
 /// Tolerates a prose preamble or trailing commentary around the JSON object
@@ -2082,6 +2081,7 @@ const REPLY_CORE_FIELDS: [&str; 3] = ["content", "rtdl_description", "rtdl"];
 /// unknown or one of `content`, `rtdl_description`, `rtdl` is missing,
 /// `content` / `rtdl_description` are not strings, `rtdl` is not an object, or
 /// a task field is malformed (`tasks::parse_task_fields`).
+#[cfg(test)]
 fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
     let candidate = extract_json_object(raw).unwrap_or(raw);
     let v: serde_json::Value = serde_json::from_str(candidate)?;
@@ -2124,459 +2124,10 @@ fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
     })
 }
 
-fn raw_preview(raw: &str) -> String {
-    if raw.is_empty() {
-        return "assistant content was empty".to_string();
-    }
-    let preview: String = raw.chars().take(240).collect();
-    let ellipsis = if raw.chars().count() > 240 { "..." } else { "" };
-    format!("assistant content preview: {preview:?}{ellipsis}")
-}
-
-// ── RTDL recovery (merged from dev #88) ────────────────────────────────────────
-// When the VLM emits an RTDL that fails to parse or expand, feed the error back
-// once and let it self-correct; a second failure ends the turn gracefully.
-
-/// Corrective prompt appended to the next VLM round after a rejected reply — a
-/// parse or expand failure, plan control that cannot apply, or an empty dispatch
-/// that contradicts the task state.
-fn build_rtdl_retry_prompt(
-    err: &anyhow::Error,
-    raw_content: &str,
-    display_caps: &[DisplayCapability<'_>],
-) -> String {
-    let mut p = format!(
-        "Your previous RTDL response was rejected by Pilot.\n\
-         Error: {err:#}\n\
-         Previous response preview: {}\n\n\
-         Fix the RTDL error and retry the same user request exactly once. If the error \
-         mentions an unknown capability, do not repeat that capability. Return ONLY a JSON object \
-         with `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl` and `task_updates`. The reply MUST begin \
-         with `{{` and end with `}}`: no prose, narration, or markdown fences before or after it (put \
-         any user-facing text inside `content`). Use only \
-         capability_name values from this list; do not invent provider names, method names, or \
-         aliases:\n",
-        raw_preview(raw_content)
-    );
-    for cap in display_caps {
-        p.push_str("- ");
-        p.push_str(&cap.display_name);
-        p.push('\n');
-    }
-    // A truncated reply and a malformed one read the same to a parser, but the
-    // model can only act on the first if it is told which it was. deepseek-v3.2
-    // copied the task text back into its reply every round, hit the
-    // output ceiling and had its JSON cut mid-string; "fix the RTDL error" gave
-    // it nothing to change, and it repeated the same reply.
-    let truncated = format!("{err:#}").contains("EOF while parsing");
-    if truncated {
-        p.push_str(
-            "\nYour reply was cut off because it ran past the output limit. Do not \
-             restate the user's messages, the action catalogue, or any other prompt \
-             text; refer to messages and tasks by id. Keep the whole reply short.\n",
-        );
-    }
-    p.push_str(
-        "\nIf no further capability call is needed, use \
-         {\"op\":\"sequence\",\"children\":[]} as `rtdl` with `rtdl_parent_task_id: null`, and close a \
-         finished task in `task_updates`. If the user's requested action cannot be performed \
-         using the listed capabilities, explain the missing capability in `content`, return an \
-         empty RTDL sequence and close that task as `failed`, instead of inventing a capability.\n",
-    );
-    p
-}
-
-/// A reply that calls no capability while declaring the task in progress and
-/// leaving nothing running: nothing will advance the task, so the turn cannot
-/// either.
-///
-/// Idleness needs both signals. `forest` covers this turn's dispatches,
-/// including one Executor has not registered yet; `executor_active_plans` is the
-/// count from the snapshot fetched before this round's request — the plan table
-/// as the model was shown it, covering earlier turns and other sessions — so a
-/// plan registered while the model was thinking is not in it, and a listed plan
-/// may be cancelled or verifying rather than running. A failed query reports
-/// `None`, which is not proof of idleness.
-fn empty_dispatch_problem(
-    plan: &Plan,
-    fields: &TaskFields,
-    in_flight: bool,
-    executor_active_plans: Option<usize>,
-) -> Option<String> {
-    let keeps_open = fields
-        .updates
-        .iter()
-        .any(|update| update.status.as_deref() == Some(tasks::IN_PROGRESS));
-    if !keeps_open || plan_call_count(plan) > 0 || in_flight {
-        return None;
-    }
-    if executor_active_plans != Some(0) {
-        return None;
-    }
-    Some(
-        "`rtdl` calls no capability while a task update keeps a task `in_progress` and nothing \
-         is in flight: dispatch its next step, ask in `content` for what you need (and leave \
-         `task_updates` empty), or close the task when its success criterion holds."
-            .to_string(),
-    )
-}
-
-/// End a turn whose reply was rejected: an empty no-op plan, no meta op, and
-/// what the model said as the answer to show — the recovery text when it said
-/// nothing.
-fn end_turn_after_rejection(
-    assistant_content: String,
-    session_id: &str,
-    round: u32,
-) -> (
-    String,
-    String,
-    Option<Plan>,
-    Option<MetaPlanOp>,
-    String,
-    TaskFields,
-    bool,
-) {
-    let plan_id = String::new();
-    let graph = empty_sequence_plan(plan_id.clone(), session_id.to_string(), round);
-    let reply = if assistant_content.trim().is_empty() {
-        rtdl_recovery_final_text()
-    } else {
-        assistant_content
-    };
-    (
-        reply,
-        String::new(),
-        Some(graph),
-        None,
-        plan_id,
-        TaskFields::default(),
-        true,
-    )
-}
-
-/// A single empty-sequence root plan, used as the no-op plan when a turn ends in
-/// RTDL recovery. Carries non-empty `op_id`/`description` so executor's
-/// `validate_plan` accepts it.
-fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan {
-    Plan {
-        plan_id,
-        session_id,
-        round,
-        nodes: vec![RtdlNode {
-            node_kind: RTDL_SEQUENCE,
-            children: Vec::new(),
-            call: None,
-            op_id: "recovery".to_string(),
-            description: "recovery: no valid plan produced".to_string(),
-            condition_json: "".to_string(),
-            bind: "".to_string(),
-            repeat_count: 0,
-            max_iterations: 0,
-        }],
-        root_index: 0,
-    }
-}
-
-/// User-facing message when RTDL recovery gives up — never leaks the internal error.
-fn rtdl_recovery_final_text() -> String {
-    "I couldn't produce a valid robot plan after retrying once. Please try again or rephrase the request."
-        .to_string()
-}
-
-/// Process-wide monotonic source of node `op_id`s. The LLM-emitted RTDL does
-/// not carry a usable op_id (it defaults to 0), so pilot assigns one itself
-/// while parsing: a globally-unique, auto-incrementing id starting at 1.
-/// "Global" = across every plan/round in this pilot process, so each node in
-/// the live task-graph forest is uniquely addressable for steering and result
-/// correlation — not merely unique within one plan.
-static OP_ID_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Four hex characters naming this Pilot process. Both counters restart at 0
-/// on every start, while a session restored from its transcript still refers
-/// to the ids of the run that wrote it, and a surviving Executor still holds
-/// the plans that run dispatched. The tag keeps them apart with nothing to
-/// seed or persist. Four characters because components restart on their own
-/// after a failure, so two adjacent runs must not draw the same tag; short
-/// because the model copies these ids by hand out of the In-flight trees block.
-pub static RUN_TAG: LazyLock<String> =
+/// Distinguish plan and node ids from those retained across Pilot restarts.
+pub(crate) static RUN_TAG: LazyLock<String> =
     LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
 
-/// Allocate the next global op_id (`a7c3-1`, `a7c3-2`, …).
-fn next_op_id() -> String {
-    format!(
-        "{}-{}",
-        *RUN_TAG,
-        OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1
-    )
-}
-
-fn expand_rtdl_to_plan(
-    rtdl: &serde_json::Value,
-    target_map: &CapabilityTargetMap,
-    plan_id: String,
-    session_id: String,
-    round: u32,
-    root_description: &str,
-) -> Result<Plan> {
-    let mut nodes = Vec::new();
-    let mut next_call = 0usize;
-    let root_index = expand_rtdl_node(
-        rtdl,
-        "$",
-        target_map,
-        plan_id.as_str(),
-        root_description,
-        &mut next_call,
-        &mut nodes,
-    )?;
-    Ok(Plan {
-        plan_id,
-        session_id,
-        round,
-        nodes,
-        root_index,
-    })
-}
-
-/// Pick a node's `description`, in priority order:
-/// 1. the LLM's own per-node `description` field when present and non-empty;
-/// 2. the LLM's tree label (`rtdl_description`) for an otherwise-unlabelled root;
-/// 3. a synthesized fallback (e.g. `call camera_snapshot`).
-///
-/// The model is asked to author a node-level `description` for every node (see
-/// `RTDL_PROTOCOL_REMINDER`); the fallbacks keep a sloppy or older reply from failing
-/// the turn, since executor's `validate_plan` requires a non-empty description.
-fn pick_description(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    path: &str,
-    root_description: &str,
-    synthesized: String,
-) -> String {
-    if let Some(d) = obj.get("description").and_then(|x| x.as_str()) {
-        let d = d.trim();
-        if !d.is_empty() {
-            return d.to_string();
-        }
-    }
-    if path == "$" && !root_description.is_empty() {
-        return root_description.to_string();
-    }
-    synthesized
-}
-
-/// Reject node fields outside the allowed set and require the structural ones.
-///
-/// `required` lists the keys an operator must carry beyond `op` (e.g.
-/// `children` for sequence/parallel; `cap` + `args` for do). `op_id` and
-/// `description` are always optional — the model emits them (op_id defaults to
-/// 0, which pilot ignores and reassigns), but a reply that omits them still
-/// parses. Any other key (`out`, `id`, `plan_id`, …) is an error.
-fn reject_unknown_node_keys(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    path: &str,
-    op: &str,
-    required: &[&str],
-) -> Result<()> {
-    const OPTIONAL: [&str; 2] = ["op_id", "description"];
-    for key in obj.keys() {
-        let known = key == "op"
-            || required.contains(&key.as_str())
-            || OPTIONAL.contains(&key.as_str())
-            || op == "do" && key == "bind"
-            || op == "if" && key == "else";
-        if !known {
-            anyhow::bail!("{path}: {op} node has unexpected field `{key}`");
-        }
-    }
-    for req in required {
-        if !obj.contains_key(*req) {
-            anyhow::bail!("{path}: {op} node must contain `{req}`");
-        }
-    }
-    Ok(())
-}
-
-fn expand_rtdl_node(
-    node: &serde_json::Value,
-    path: &str,
-    target_map: &CapabilityTargetMap,
-    plan_id: &str,
-    root_description: &str,
-    next_call: &mut usize,
-    nodes: &mut Vec<RtdlNode>,
-) -> Result<u32> {
-    let obj = node
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("{path}: RTDL node must be an object"))?;
-    let op = obj
-        .get("op")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!("{path}.op must be a string"))?;
-
-    match op {
-        "if" | "repeat" | "while" => {
-            let required: &[&str] = match op {
-                "if" => &["condition", "then"],
-                "repeat" => &["count", "body"],
-                _ => &["condition", "body", "max_iterations"],
-            };
-            reject_unknown_node_keys(obj, path, op, required)?;
-            let condition_json = if let Some(condition) = obj.get("condition") {
-                crate::expression::validate_expr(condition).map_err(anyhow::Error::msg)?;
-                serde_json::to_string(condition)?
-            } else {
-                String::new()
-            };
-            let limit_key = if op == "repeat" {
-                "count"
-            } else {
-                "max_iterations"
-            };
-            let limit = if op == "if" {
-                0
-            } else {
-                obj[limit_key]
-                    .as_u64()
-                    .filter(|count| *count <= 10_000 && (op != "while" || *count > 0))
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "{path}.{limit_key} must be an integer in {}..=10000",
-                            if op == "while" { 1 } else { 0 }
-                        )
-                    })? as u32
-            };
-            let node_index = nodes.len() as u32;
-            nodes.push(RtdlNode {
-                node_kind: match op {
-                    "if" => RTDL_IF,
-                    "repeat" => RTDL_REPEAT,
-                    _ => RTDL_WHILE,
-                },
-                op_id: next_op_id(),
-                description: pick_description(obj, path, root_description, op.to_string()),
-                condition_json,
-                repeat_count: if op == "repeat" { limit } else { 0 },
-                max_iterations: if op == "while" { limit } else { 0 },
-                ..Default::default()
-            });
-            let body_key = if op == "if" { "then" } else { "body" };
-            let mut children = vec![expand_rtdl_node(
-                &obj[body_key],
-                &format!("{path}.{body_key}"),
-                target_map,
-                plan_id,
-                root_description,
-                next_call,
-                nodes,
-            )?];
-            if let Some(otherwise) = obj.get("else") {
-                children.push(expand_rtdl_node(
-                    otherwise,
-                    &format!("{path}.else"),
-                    target_map,
-                    plan_id,
-                    root_description,
-                    next_call,
-                    nodes,
-                )?);
-            }
-            nodes[node_index as usize].children = children;
-            Ok(node_index)
-        }
-        "sequence" | "parallel" => {
-            reject_unknown_node_keys(obj, path, op, &["children"])?;
-            let children = obj
-                .get("children")
-                .and_then(|x| x.as_array())
-                .ok_or_else(|| anyhow::anyhow!("{path}.children must be an array"))?;
-            let node_index = nodes.len() as u32;
-            let node_kind = if op == "sequence" {
-                RTDL_SEQUENCE
-            } else {
-                RTDL_PARALLEL
-            };
-            let description = pick_description(
-                obj,
-                path,
-                root_description,
-                format!("{op} of {} step(s)", children.len()),
-            );
-            nodes.push(RtdlNode {
-                node_kind,
-                children: Vec::new(),
-                call: None,
-                op_id: next_op_id(),
-                description,
-                condition_json: "".to_string(),
-                bind: "".to_string(),
-                repeat_count: 0,
-                max_iterations: 0,
-            });
-            let mut child_indices = Vec::with_capacity(children.len());
-            for (idx, child) in children.iter().enumerate() {
-                let child_index = expand_rtdl_node(
-                    child,
-                    &format!("{path}.children[{idx}]"),
-                    target_map,
-                    plan_id,
-                    root_description,
-                    next_call,
-                    nodes,
-                )?;
-                child_indices.push(child_index);
-            }
-            nodes[node_index as usize].children = child_indices;
-            Ok(node_index)
-        }
-        "do" => {
-            reject_unknown_node_keys(obj, path, op, &["cap", "args"])?;
-            let cap = obj
-                .get("cap")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| anyhow::anyhow!("{path}.cap must be a string"))?;
-            let args = obj
-                .get("args")
-                .filter(|x| x.is_object())
-                .ok_or_else(|| anyhow::anyhow!("{path}.args must be an object"))?;
-            crate::expression::validate_expr(args).map_err(anyhow::Error::msg)?;
-            let bind = match obj.get("bind") {
-                None => String::new(),
-                Some(value) => value
-                    .as_str()
-                    .filter(|name| !name.is_empty() && name.trim() == *name)
-                    .ok_or_else(|| anyhow!("{path}.bind must be a non-empty string"))?
-                    .to_string(),
-            };
-            let (provider_id, contract_id) = target_map
-                .get(cap)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("{path}.cap unknown capability `{cap}`"))?;
-            let call_index = *next_call;
-            *next_call += 1;
-            let node_index = nodes.len() as u32;
-            let description = pick_description(obj, path, root_description, format!("call {cap}"));
-            nodes.push(RtdlNode {
-                node_kind: RTDL_DO,
-                children: Vec::new(),
-                call: Some(CapabilityCall {
-                    call_id: format!("{plan_id}:{call_index}"),
-                    provider_id,
-                    contract_id,
-                    args_json: serde_json::to_string(args)?,
-                }),
-                op_id: next_op_id(),
-                description,
-                condition_json: "".to_string(),
-                bind,
-                repeat_count: 0,
-                max_iterations: 0,
-            });
-            Ok(node_index)
-        }
-        other => anyhow::bail!("{path}.op unknown operator `{other}`"),
-    }
-}
 fn plan_call_count(plan: &Plan) -> usize {
     plan.nodes
         .iter()
@@ -3104,11 +2655,11 @@ mod tests {
         append_request_context, append_steer, assemble_planning_messages,
         build_capability_target_map, build_display_capabilities, build_forest_block,
         compact_tool_result, configured_vlm_idle_timeout, executor_active_snapshot,
-        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
-        is_legacy_plan_control_contract, is_terminal_executor_state, parse_meta_plan_op,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_state_name,
-        should_replan_after_plan_done, skip_memory_prefetch, task_is_session_end,
-        upsert_terminal_result,
+        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
+        is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
+        parse_meta_plan_op, parse_rtdl_assistant_response, record_dispatched_plan,
+        rtdl_node_kind_name, rtdl_state_name, should_replan_after_plan_done, skip_memory_prefetch,
+        task_is_session_end, upsert_terminal_result,
     };
     use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
     use crate::pb::pilot::{
@@ -3116,6 +2667,7 @@ mod tests {
     };
     use crate::prompt::{MAX_INLINE_DESCRIPTION_CHARS, summarize_description};
     use crate::rtdl_stream::{RtdlIncrementalParser, next_op_id};
+    use crate::tasks::{TaskFields, TaskRef};
     use crate::vlm::{Message, VlmUsage};
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;

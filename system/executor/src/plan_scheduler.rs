@@ -8,6 +8,9 @@ use crate::plan_input::{EXECUTE_STREAM_NODE, PlanInput};
 use crate::rtdl_events;
 use crate::verification::VerificationPolicy;
 use robonix_atlas::client::AtlasClient;
+use robonix_scribe::{info, warn};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -33,6 +36,256 @@ struct Execution {
 enum Completion {
     Call(usize, capability_execution::NodeExecution),
     Verified(usize, bool),
+    Controlled(usize, bool),
+}
+
+/// Execute a completed control subtree, including repeated visits to its body.
+#[derive(Clone)]
+struct ControlExecution {
+    /// Immutable arena after the control subtree has closed.
+    plan: Arc<crate::pb::pilot::Plan>,
+    /// Channel shared with the surrounding streamed plan.
+    tx: mpsc::Sender<Result<RtdlEvent, Status>>,
+    /// Atlas connection for capability calls.
+    atlas: AtlasClient,
+    /// Consumer identity for capability calls.
+    provider_id: String,
+    /// Plan context and cancellation state.
+    runtime: PlanRuntime,
+    /// Verification policy for descendants.
+    verification: Arc<VerificationPolicy>,
+}
+
+impl ControlExecution {
+    fn run(self, index: usize) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+        Box::pin(async move {
+            let node = &self.plan.nodes[index];
+            let ctx = rtdl_events::node_event_context(&self.plan, index);
+            if self.runtime.is_cancelled(&ctx.plan_id).await {
+                self.runtime
+                    .record_op_state(&ctx.plan_id, &ctx.op_id, State::Canceled as u32)
+                    .await;
+                let _ = self
+                    .tx
+                    .send(Ok(rtdl_events::node_state(
+                        &ctx,
+                        State::Canceled as u32,
+                        "canceled before execution".into(),
+                        None,
+                    )))
+                    .await;
+                return true;
+            }
+            if node.node_kind == 2 {
+                let mut call = node.call.clone().expect("validated do call");
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.args_json).expect("validated args");
+                let vars = self.runtime.context(&ctx.plan_id).await.snapshot().await;
+                match crate::expression::eval_value(&args, &vars) {
+                    Ok(value) => call.args_json = value.to_string(),
+                    Err(error) => {
+                        self.fail(&ctx, &format!("argument evaluation: {error}"))
+                            .await;
+                        return true;
+                    }
+                }
+                let outcome = capability_execution::execute_call(
+                    &call,
+                    &node.bind,
+                    ctx,
+                    self.tx.clone(),
+                    self.atlas.clone(),
+                    self.provider_id.clone(),
+                    self.runtime.clone(),
+                    self.verification.clone(),
+                )
+                .await;
+                return outcome.failed
+                    || match outcome.verifier {
+                        Some(verifier) => capability_execution::wait_for_verifier(verifier).await,
+                        None => false,
+                    };
+            }
+            rtdl_events::send_operator_state(
+                &self.tx,
+                &ctx,
+                State::Running as u32,
+                "running",
+                &self.runtime,
+            )
+            .await;
+            let (failed, reported) = match node.node_kind {
+                0 => {
+                    let mut failed = false;
+                    for &child in &node.children {
+                        if self.clone().run(child as usize).await {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    (failed, false)
+                }
+                1 => {
+                    let mut tasks = JoinSet::new();
+                    for &child in &node.children {
+                        tasks.spawn(self.clone().run(child as usize));
+                    }
+                    let mut failed = false;
+                    while let Some(result) = tasks.join_next().await {
+                        failed |= result.unwrap_or(true);
+                    }
+                    (failed, false)
+                }
+                3..=5 => self.clone().run_condition_or_loop(index, &ctx).await,
+                _ => (true, false),
+            };
+            let cancelled = self.runtime.is_cancelled(&ctx.plan_id).await;
+            if !reported {
+                rtdl_events::send_operator_final(
+                    &self.tx,
+                    &ctx,
+                    failed || cancelled,
+                    cancelled,
+                    &self.runtime,
+                )
+                .await;
+            }
+            failed || cancelled
+        })
+    }
+
+    async fn fail(&self, ctx: &rtdl_events::NodeEventContext, detail: &str) {
+        warn!(
+            "[executor/rtdl] plan_id={} node={} op_id={} failed: {}",
+            ctx.plan_id, ctx.node_index, ctx.op_id, detail
+        );
+        self.runtime
+            .record_op_state(&ctx.plan_id, &ctx.op_id, State::Failed as u32)
+            .await;
+        let _ = self
+            .tx
+            .send(Ok(rtdl_events::node_state(
+                ctx,
+                State::Failed as u32,
+                detail.into(),
+                None,
+            )))
+            .await;
+    }
+
+    async fn run_condition_or_loop(
+        &self,
+        index: usize,
+        ctx: &rtdl_events::NodeEventContext,
+    ) -> (bool, bool) {
+        let node = &self.plan.nodes[index];
+        let kind = match node.node_kind {
+            3 => "if",
+            4 => "repeat",
+            _ => "while",
+        };
+        let limit = match node.node_kind {
+            3 => 1,
+            4 => node.repeat_count,
+            _ => node.max_iterations,
+        };
+        let condition: serde_json::Value = if node.node_kind == 4 {
+            serde_json::Value::Bool(true)
+        } else {
+            serde_json::from_str(&node.condition_json).expect("validated condition")
+        };
+        info!(
+            "[executor/rtdl] plan_id={} node={} op_id={} {kind} start limit={limit}",
+            ctx.plan_id, index, ctx.op_id
+        );
+        let mut iterations = 0;
+        loop {
+            if self.runtime.is_cancelled(&ctx.plan_id).await {
+                return (true, false);
+            }
+            let selected = if node.node_kind == 4 {
+                if iterations < limit { Some(0) } else { None }
+            } else {
+                let vars = self.runtime.context(&ctx.plan_id).await.snapshot().await;
+                match crate::expression::eval_condi(&condition, &vars) {
+                    Ok(value) => {
+                        let branch = if value {
+                            Some(0)
+                        } else if node.node_kind == 3 && node.children.len() == 2 {
+                            Some(1)
+                        } else {
+                            None
+                        };
+                        info!(
+                            "[executor/rtdl] plan_id={} node={} op_id={} {kind} condition={value} completed_iterations={iterations} selected={}",
+                            ctx.plan_id,
+                            index,
+                            ctx.op_id,
+                            match branch {
+                                Some(0) if node.node_kind == 3 => "then",
+                                Some(1) => "else",
+                                Some(_) => "body",
+                                None => "none",
+                            }
+                        );
+                        branch
+                    }
+                    Err(error) => {
+                        self.fail(ctx, &format!("condition evaluation: {error}"))
+                            .await;
+                        return (true, true);
+                    }
+                }
+            };
+            let Some(selected) = selected else {
+                info!(
+                    "[executor/rtdl] plan_id={} node={} op_id={} {kind} exit completed_iterations={iterations} reason={}",
+                    ctx.plan_id,
+                    index,
+                    ctx.op_id,
+                    if node.node_kind == 4 {
+                        "count completed"
+                    } else {
+                        "condition false"
+                    }
+                );
+                return (false, false);
+            };
+            if iterations >= limit {
+                self.fail(ctx, "while condition remains true at max_iterations")
+                    .await;
+                return (true, true);
+            }
+            info!(
+                "[executor/rtdl] plan_id={} node={} op_id={} {kind} iteration={} limit={limit} child={} start",
+                ctx.plan_id,
+                index,
+                ctx.op_id,
+                iterations + 1,
+                node.children[selected]
+            );
+            let failed = self.clone().run(node.children[selected] as usize).await;
+            iterations += 1;
+            info!(
+                "[executor/rtdl] plan_id={} node={} op_id={} {kind} iteration={iterations} child={} complete failed={failed}",
+                ctx.plan_id, index, ctx.op_id, node.children[selected]
+            );
+            if failed || node.node_kind == 3 {
+                info!(
+                    "[executor/rtdl] plan_id={} node={} op_id={} {kind} exit completed_iterations={iterations} reason={}",
+                    ctx.plan_id,
+                    index,
+                    ctx.op_id,
+                    if failed {
+                        "child failed"
+                    } else {
+                        "branch completed"
+                    }
+                );
+                return (failed, false);
+            }
+        }
+    }
 }
 
 /// Own one plan's scheduling state and tasks until all work has been drained.
@@ -137,12 +390,40 @@ impl PlanScheduler {
         (true, false)
     }
 
+    /// Descendants of a control node are owned by its recursive execution task.
+    fn inside_control(&self, index: usize) -> bool {
+        let mut parent = self.input.parent(index);
+        while let Some(p) = parent {
+            if matches!(self.input.plan().nodes[p].node_kind, 3..=5) {
+                return true;
+            }
+            parent = self.input.parent(p);
+        }
+        false
+    }
+
+    fn is_descendant_of(&self, index: usize, ancestor: usize) -> bool {
+        let mut parent = self.input.parent(index);
+        while let Some(p) = parent {
+            if p == ancestor {
+                return true;
+            }
+            parent = self.input.parent(p);
+        }
+        false
+    }
+
     /// Advance runnable nodes and closed operators; report transitions that may unlock more work.
     async fn schedule(&mut self) -> bool {
         let mut progressed = false;
         for position in 0..self.input.order().len() {
             let index = self.input.order()[position];
-            if self.execution[index].started {
+            if self.execution[index].started || self.inside_control(index) {
+                continue;
+            }
+            if matches!(self.input.plan().nodes[index].node_kind, 3..=5)
+                && !self.input.is_closed(index)
+            {
                 continue;
             }
             let (ready, blocked) = self.permitted(index);
@@ -153,14 +434,23 @@ impl PlanScheduler {
             let ctx = rtdl_events::node_event_context(self.input.plan(), index);
             if self.cancelled || blocked {
                 let leaf = ctx.node_kind == 2;
+                let controlled = matches!(ctx.node_kind, 3..=5);
                 self.execution[index] = Execution {
                     started: true,
-                    immediate: leaf.then_some(true),
-                    final_failed: leaf.then_some(true),
+                    immediate: (leaf || controlled).then_some(true),
+                    final_failed: (leaf || controlled).then_some(true),
                     canceled: true,
                     verifying: false,
                 };
-                if !leaf {
+                if controlled {
+                    for descendant in 0..self.execution.len() {
+                        if self.is_descendant_of(descendant, index) {
+                            self.execution[descendant].immediate = Some(true);
+                            self.execution[descendant].final_failed = Some(true);
+                        }
+                    }
+                }
+                if !leaf && !controlled {
                     continue;
                 }
                 self.runtime
@@ -179,7 +469,19 @@ impl PlanScheduler {
             }
             self.execution[index].started = true;
             let node = &self.input.plan().nodes[index];
-            if let Some(call) = node.call.clone() {
+            if matches!(node.node_kind, 3..=5) {
+                let control = ControlExecution {
+                    plan: Arc::new(self.input.plan().clone()),
+                    tx: self.tx.clone(),
+                    atlas: self.atlas.clone(),
+                    provider_id: self.provider_id.clone(),
+                    runtime: self.runtime.clone(),
+                    verification: self.verification.clone(),
+                };
+                self.tasks
+                    .spawn(async move { Completion::Controlled(index, control.run(index).await) });
+            } else if let Some(call) = node.call.clone() {
+                let bind = node.bind.clone();
                 let atlas = self.atlas.clone();
                 let provider_id = self.provider_id.clone();
                 let runtime = self.runtime.clone();
@@ -207,8 +509,36 @@ impl PlanScheduler {
                             },
                         );
                     }
+                    let mut call = call;
+                    let args: serde_json::Value =
+                        serde_json::from_str(&call.args_json).expect("validated args");
+                    let vars = runtime.context(&ctx.plan_id).await.snapshot().await;
+                    match crate::expression::eval_value(&args, &vars) {
+                        Ok(value) => call.args_json = value.to_string(),
+                        Err(error) => {
+                            runtime
+                                .record_op_state(&ctx.plan_id, &ctx.op_id, State::Failed as u32)
+                                .await;
+                            let _ = tx
+                                .send(Ok(rtdl_events::node_state(
+                                    &ctx,
+                                    State::Failed as u32,
+                                    format!("argument evaluation: {error}"),
+                                    None,
+                                )))
+                                .await;
+                            return Completion::Call(
+                                index,
+                                capability_execution::NodeExecution {
+                                    failed: true,
+                                    verifier: None,
+                                },
+                            );
+                        }
+                    }
                     let result = capability_execution::execute_call(
                         &call,
+                        &bind,
                         ctx,
                         tx,
                         atlas,
@@ -234,6 +564,7 @@ impl PlanScheduler {
             let index = self.input.order()[position];
             let node = &self.input.plan().nodes[index];
             if node.node_kind == 2
+                || self.inside_control(index)
                 || !self.execution[index].started
                 || self.execution[index].final_failed.is_some()
                 || !self.input.is_closed(index)
@@ -298,6 +629,13 @@ impl PlanScheduler {
         mut self,
         mut stream: impl Stream<Item = Result<ExecuteStreamInput, Status>> + Unpin,
     ) {
+        let started_at = std::time::Instant::now();
+        info!(
+            "[executor/rtdl] plan_id={} session_id={} round={} plan start",
+            self.input.plan().plan_id,
+            self.input.plan().session_id,
+            self.input.plan().round
+        );
         self.runtime.record_plan_ops(self.input.plan()).await;
         let _ = self
             .tx
@@ -340,6 +678,16 @@ impl PlanScheduler {
                             }
                         }
                         Some(Ok(Completion::Verified(index, failed))) => { self.execution[index].final_failed = Some(failed || self.execution[index].immediate == Some(true)); }
+                        Some(Ok(Completion::Controlled(index, failed))) => {
+                            self.execution[index].immediate = Some(failed);
+                            self.execution[index].final_failed = Some(failed);
+                            for descendant in 0..self.execution.len() {
+                                if self.inside_control(descendant) && self.is_descendant_of(descendant, index) {
+                                    self.execution[descendant].immediate = Some(false);
+                                    self.execution[descendant].final_failed = Some(false);
+                                }
+                            }
+                        }
                         Some(Err(error)) => {
                             self.error = Some(Status::internal(format!("execution task failed: {error}")));
                             self.cancel().await;
@@ -378,22 +726,39 @@ impl PlanScheduler {
             }
             if self.error.is_some() && self.tasks.is_empty() {
                 for e in &mut self.execution {
-                    if e.started && e.immediate.is_none() {
-                        e.immediate = Some(true);
-                        e.final_failed = Some(true);
-                    }
+                    e.immediate.get_or_insert(true);
+                    e.final_failed.get_or_insert(true);
                 }
             }
         }
         self.cancelled |= self.runtime.complete_plan(&self.input.plan().plan_id).await;
+        let failed = self.cancelled
+            || self
+                .execution
+                .get(self.input.plan().root_index as usize)
+                .is_some_and(|e| e.final_failed == Some(true));
+        info!(
+            "[executor/rtdl] plan_id={} plan end state={} nodes={} calls={} duration_ms={}",
+            self.input.plan().plan_id,
+            if self.cancelled {
+                "Canceled"
+            } else if failed || self.error.is_some() {
+                "Failed"
+            } else {
+                "Succeeded"
+            },
+            self.input.plan().nodes.len(),
+            self.input
+                .plan()
+                .nodes
+                .iter()
+                .filter(|node| node.call.is_some())
+                .count(),
+            started_at.elapsed().as_millis()
+        );
         if let Some(error) = self.error {
             let _ = self.tx.send(Err(error)).await;
         } else {
-            let failed = self.cancelled
-                || self
-                    .execution
-                    .get(self.input.plan().root_index as usize)
-                    .is_some_and(|e| e.final_failed == Some(true));
             let _ = self
                 .tx
                 .send(Ok(rtdl_events::plan_complete(
@@ -650,6 +1015,7 @@ mod scheduling_tests {
                     call: None,
                     op_id: "sequence".into(),
                     description: "run the verified sequence".into(),
+                    ..Default::default()
                 },
                 RtdlNode {
                     node_kind: RTDL_DO,
@@ -662,6 +1028,7 @@ mod scheduling_tests {
                     }),
                     op_id: "op_1".into(),
                     description: "list active plans".into(),
+                    ..Default::default()
                 },
                 RtdlNode {
                     node_kind: RTDL_DO,
@@ -674,6 +1041,7 @@ mod scheduling_tests {
                     }),
                     op_id: "op_2".into(),
                     description: "continue with the next node".into(),
+                    ..Default::default()
                 },
             ],
             root_index: 0,

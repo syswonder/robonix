@@ -201,7 +201,7 @@ Pilot accepts it only when it does not contradict the task state. When a task
 update keeps a task `in_progress` and nothing runs — neither this session's trees
 nor any plan in Executor's active-plan snapshot — the model claims the task is
 advancing while nothing will run, so the reply is rejected
-(`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
+and the model gets a corrective round; if it repeats,
 the turn ends with what the model said. The per-round reminder states the
 pairing rule: an empty sequence goes with `task_update: null` or
 `status: "done"`, or stands while a running tree is waited on.
@@ -211,4 +211,5 @@ pairing rule: an empty sequence goes with `task_update: null` or
 RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `body`), and bounded `while` (`condition`, `max_iterations`, `body`). A `do.bind` stores successful, verified output in the plan's execution context. Reference it with `{"var":"name","path":["field",0]}` in arguments or conditions. Conditions accept booleans and `{"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}` expressions. Missing values and non-boolean conditions fail explicitly.
 
 Variables are isolated per plan; loops update the same binding each iteration. Bound calls wait for verification even under overlap mode, and loop iterations wait for all descendant verification. Parallel siblings must be independent; their results may be consumed after the join. Repeat counts are 0–10000 and while requires a 1–10000 iteration limit. A while condition still true at the limit fails. See [the protocol](../pilot/rtdl_protocol.md) for the complete grammar.
+During streamed generation, Pilot submits completed ordinary nodes as soon as they are safe to dispatch. It submits an `if`, `repeat`, or `while` subtree after its full JSON object closes; Executor can then evaluate its condition or repeat its body without relying on later model output.
 The `[pilot/rtdl]` plan tree logs include repeat counts, while limits, condition expressions and do binding names. Expressions and binding names use bounded previews. `[pilot/forest]` logs every Executor node-state event at info level and summarizes the completed plan. Compare the planned fields and forest events with Executor's `[executor/rtdl]` records to check what actually ran.
