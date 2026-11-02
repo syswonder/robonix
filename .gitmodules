@@ -4,9 +4,6 @@
 [submodule "common_interfaces"]
 	path = capabilities/lib/common_interfaces
 	url = https://github.com/enkerewpo/common_interfaces
-[submodule "docs"]
-	path = docs
-	url = https://github.com/syswonder/robonix-book
 [submodule "capabilities/lib/unique_identifier_msgs"]
 	path = capabilities/lib/unique_identifier_msgs
 	url = https://github.com/ros2/unique_identifier_msgs.git
