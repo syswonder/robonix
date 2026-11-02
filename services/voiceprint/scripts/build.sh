@@ -160,7 +160,10 @@ if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
 import numpy as np
 from voiceprint_service.engine import EcapaTdnnEngine
 
-source = EcapaTdnnEngine._resolve_source()
+try:
+    source = EcapaTdnnEngine._resolve_source()
+except ValueError:
+    source = EcapaTdnnEngine._resolve_source(local_files_only=False)
 engine = EcapaTdnnEngine()
 embedding = engine.extract_from_file(f"{source}/example1.wav")
 if embedding.shape != (192,) or not np.isfinite(embedding).all():

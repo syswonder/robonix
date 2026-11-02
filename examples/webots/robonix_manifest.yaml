@@ -147,7 +147,7 @@ service:
       # tencent before build+boot for the lightweight cloud path.
       speech_backend: ${SPEECH_BACKEND}
       disable_whisper: true
-      funasr_device: cuda
+      funasr_device: auto
       tts_voice: zh-CN-XiaoxiaoNeural
       default_speaker_provider_id: audio_driver
       tencent_asr_appid: ${TENCENT_ASR_APPID}

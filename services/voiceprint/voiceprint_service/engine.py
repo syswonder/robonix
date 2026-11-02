@@ -74,13 +74,13 @@ class EcapaTdnnEngine:
         log.info("ECAPA-TDNN loaded (embedding_dim=192)")
 
     @staticmethod
-    def _resolve_source() -> str:
+    def _resolve_source(local_files_only: bool = True) -> str:
         # Returns a local directory holding the ECAPA-TDNN repo, fetched from
         # ModelScope (cached under ~/.cache/modelscope). speechbrain's
         # from_hparams reads weights directly from this dir, so no HF fetch.
         from modelscope.hub.snapshot_download import snapshot_download
 
-        return snapshot_download(_MODELSCOPE_ID)
+        return snapshot_download(_MODELSCOPE_ID, local_files_only=local_files_only)
 
     # -- public extraction -------------------------------------------------
 

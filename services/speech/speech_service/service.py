@@ -320,8 +320,15 @@ class FunASRStreamingBackend:
 
     def __init__(self):
         from funasr import AutoModel
+        from funasr.download.name_maps_from_hub import name_maps_ms
+        from modelscope.hub.snapshot_download import snapshot_download
 
         model_name = os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
+        model_path = (
+            model_name
+            if os.path.isdir(model_name)
+            else snapshot_download(name_maps_ms.get(model_name, model_name), local_files_only=True)
+        )
         chunk_size_str = os.environ.get("FUNASR_CHUNK_SIZE", "[0,10,5]")
         # Try GPU first, fall back to CPU on init failure (typically
         # `CUDA error: out of memory` because scene's YOLO+SAM+CLIP
@@ -353,9 +360,8 @@ class FunASRStreamingBackend:
             )
             try:
                 self.model = AutoModel(
-                    model=model_name,
+                    model=model_path,
                     device=device,
-                    hub_kwargs={"local_files_only": True},
                 )
                 self.device = device
                 log.info("FunASR model loaded on %s.", device)
