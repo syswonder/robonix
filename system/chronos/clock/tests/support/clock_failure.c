@@ -20,8 +20,9 @@ int clock_gettime(clockid_t clock, struct timespec *value) {
         return -1;
     }
     int result = ((int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime"))(clock, value);
-    if (result == 0 && clock == CLOCK_REALTIME && selected == 2) {
-        value->tv_sec = -1;
+    if (result == 0 && clock == CLOCK_REALTIME) {
+        if (selected == 2) value->tv_sec = -1;
+        if (selected == 8) value->tv_sec += 86400;
     }
     return result;
 }
