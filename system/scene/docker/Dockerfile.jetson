@@ -59,12 +59,12 @@ ENV SCENE_CG_INFERENCE=${SCENE_CG_INFERENCE} \
     SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin \
     YOLO_CONFIG_DIR=/opt/ultralytics \
     PYTHONPATH=/scene:/robonix-api:/scene/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/robonix_mcp_types
-# Keep the viewer's NumPy-compatible Arrow pin after the GPU dependency layers.
+# Viewer dependencies reuse the Arrow constraint from scene-base.
 COPY requirements/scene-viewer.txt /tmp/requirements/scene-viewer.txt
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-deps -r /tmp/requirements/scene-viewer.txt \
+    && pip install --index-url https://pypi.org/simple --no-deps -r /tmp/requirements/scene-viewer.txt \
     && v="$(sed -n 's/^rerun-sdk==//p' /tmp/requirements/scene-viewer.txt)" \
     && mkdir -p /opt/rerun-web-viewer \
     && curl -fSL --retry 3 --connect-timeout 20 \
@@ -92,6 +92,14 @@ RUN python - <<'PY'
 from ultralytics.utils import SETTINGS
 SETTINGS.update({'weights_dir': '/opt/models/ultralytics', 'sync': False})
 PY
+# Ship portable exports and references; engines are compiled on the target GPU.
+RUN if [ "$SCENE_CG_INFERENCE" = tensorrt ]; then \
+        for model in yolo sam clip; do \
+            python scripts/export_models.py --only "$model" --out /opt/models/onnx \
+                --yolo-weights "$SCENE_YOLO_WORLD_WEIGHTS" --sam-weights "$SCENE_MOBILE_SAM_WEIGHTS" \
+                --clip-bin "$SCENE_CLIP_PRETRAINED" || exit 1; \
+        done; \
+    fi
 RUN bash -c 'source /opt/ros/${ROS_DISTRO}/setup.bash && python scripts/check_docker.py --inference "$SCENE_CG_INFERENCE" --imports-only'
 RUN bash -c 'source /opt/ros/${ROS_DISTRO}/setup.bash && cd /scene/rbnx-build/codegen/ros2_idl && colcon build --packages-up-to map' \
     && pip freeze > /scene/container-requirements.txt \

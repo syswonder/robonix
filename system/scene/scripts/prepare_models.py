@@ -49,6 +49,9 @@ def prepare(models_dir: Path) -> None:
         ("SCENE_MOBILE_SAM_WEIGHTS", "mobile_sam.pt"),
         ("SCENE_CLIP_PRETRAINED", "open_clip_pytorch_model.bin"),
     )]
+    baked = Path('/opt/models/onnx')
+    if baked.is_dir():
+        weights.extend(sorted(p for p in baked.iterdir() if p.suffix in ('.onnx', '.npz')))
     key = source_fingerprint(weights)
     destination = models_dir / key
     if destination.is_dir():
@@ -57,14 +60,19 @@ def prepare(models_dir: Path) -> None:
     else:
         pending = Path(tempfile.mkdtemp(prefix=".export-", dir=models_dir))
         try:
-            # Separate processes release Torch and exporter memory between models.
-            for model in ("yolo", "sam", "clip"):
-                subprocess.run([
-                    sys.executable, str(PKG / "scripts/export_models.py"),
-                    "--only", model, "--yolo-weights", str(weights[0]),
-                    "--sam-weights", str(weights[1]), "--clip-bin", str(weights[2]),
-                    "--out", str(pending),
-                ], check=True)
+            if baked.is_dir():
+                for path in baked.iterdir():
+                    if path.suffix in ('.onnx', '.npz'):
+                        shutil.copy2(path, pending / path.name)
+            else:
+                # Separate processes release Torch and exporter memory between models.
+                for model in ("yolo", "sam", "clip"):
+                    subprocess.run([
+                        sys.executable, str(PKG / "scripts/export_models.py"),
+                        "--only", model, "--yolo-weights", str(weights[0]),
+                        "--sam-weights", str(weights[1]), "--clip-bin", str(weights[2]),
+                        "--out", str(pending),
+                    ], check=True)
             build_engines(pending, cache_dir=engine_cache_dir(str(destination)))
             pending.rename(destination)
         finally:

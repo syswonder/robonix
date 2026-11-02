@@ -160,6 +160,26 @@ Jetson packaged images support the ConceptGraphs backend. The full Torch
 profile still needs external models through `SCENE_MODELS_DIR`. Build proxy
 arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
 
+### Local Dockerfile deployment
+
+Scene maintains Dockerfiles and build profiles. Each deployment builds its own
+local image; there is no Scene prebuilt-image distribution or registry release
+workflow. The build may pull the upstream NVIDIA/ROS base image and download
+package dependencies.
+
+```bash
+# Torch is the default; set this only for TensorRT.
+export SCENE_CG_INFERENCE=tensorrt
+RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+```
+
+The TensorRT Dockerfile exports ONNX models and numerical references while
+building the local image. After construction, the target GPU compiles and
+validates engines under `rbnx-build/docker-models`. Later starts check and reuse
+the cache without compiling. Models, SDK and hardware fingerprints separate
+incompatible caches. Source changes require a local rebuild before startup.
+
 ### Automatic Jetson native preparation
 
 Native preparation checks the actual host environment without a board-profile

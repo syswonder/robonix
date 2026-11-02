@@ -127,3 +127,26 @@ def test_unsupported_tensorrt_config_fails_before_preparation(monkeypatch, setti
     monkeypatch.setattr(sys, 'argv', ['prepare'])
     with pytest.raises(ValueError, match='TensorRT'):
         prepare.main()
+
+
+def test_packaged_onnx_compiles_on_target_without_reexporting(tmp_path, monkeypatch):
+    prepare = load_prepare()
+    baked = tmp_path / 'baked'
+    baked.mkdir()
+    (baked / 'sam.onnx').write_bytes(b'portable model')
+    (baked / 'sam.npz').write_bytes(b'numerical references')
+    monkeypatch.setattr(prepare, 'Path', lambda p: baked if str(p) == '/opt/models/onnx' else Path(p))
+    monkeypatch.setattr(prepare, 'source_fingerprint', lambda _: 'a' * 64)
+    monkeypatch.setattr(prepare.subprocess, 'run', Mock(side_effect=AssertionError('must not export')))
+    builds = []
+    def build(directory, **kwargs):
+        assert (directory / 'sam.onnx').read_bytes() == b'portable model'
+        assert (directory / 'sam.npz').read_bytes() == b'numerical references'
+        builds.append(directory)
+    monkeypatch.setattr(prepare, 'build_engines', build)
+    models = tmp_path / 'models'
+    models.mkdir()
+    prepare.prepare(models)
+    prepare.prepare(models)
+    assert len(builds) == 2
+    assert json.loads((models / 'prepared.json').read_text())['export'] == 'a' * 64
