@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Build and validate a complete Jetson Scene image before publishing it."""
+"""Build and validate a local Jetson Scene image before selecting it."""
 from __future__ import annotations
 
 import argparse
@@ -16,12 +16,22 @@ import subprocess
 import sys
 import uuid
 
-from prepare_native import detect, select_profile, download_verified, PROFILES
-
 PKG = Path(__file__).resolve().parents[1]
 BUILD = PKG / 'rbnx-build'
+PROFILES = Path(__file__).with_name('docker_profiles.json')
 sys.path.insert(0, str(PKG))
 from scene_service.inference_config import inference_backend, validate_tensorrt_config  # noqa: E402
+from scripts.prepare_native import detect, download_verified  # noqa: E402
+
+
+def select_profile(host: dict, *, check_python: bool = False) -> dict:
+    for profile in json.loads(PROFILES.read_text())['profiles']:
+        if (host['distro'] == 'ubuntu' and host['arch'] == 'aarch64' and 'orin' in host['model'].lower()
+                and host['l4t'].startswith(profile['l4t_prefix'])
+                and host['ubuntu'] == profile['ubuntu']
+                and (not check_python or host['python'] == profile['python'])):
+            return profile
+    raise RuntimeError(f'Unsupported Docker build environment: {host}; see scripts/docker_profiles.json')
 
 
 def format_command(command):
@@ -232,7 +242,7 @@ def build_image(profile, inference, fingerprint, candidate):
     run(args)
 
 
-def build(host: dict, profile: dict):
+def build(profile: dict):
     inference = inference_backend()
     validate_config()
     gpu_args()  # Fail before expensive build work or touching the active image.
@@ -270,7 +280,7 @@ def build(host: dict, profile: dict):
         for path in (BUILD / 'docker-models').iterdir():
             if path.is_dir() and re.fullmatch('[0-9a-f]{32}', path.name) and path.name not in keep:
                 shutil.rmtree(path)
-        print(f'[scene/docker] verified image published: {image}', flush=True)
+        print(f'[scene/docker] verified local image selected: {image}', flush=True)
     finally:
         subprocess.run(['docker', 'image', 'rm', candidate], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if cache is not None and cache.name not in {p.get('cache') for p in (previous or {}, (previous or {}).get('previous') or {})}:
@@ -284,7 +294,8 @@ def check(host: dict):
         raise RuntimeError('No verified Docker image; run the Scene jetson-docker build first')
     selected = json.loads((BUILD / 'docker-env.json').read_text())
     if (not host['l4t'].startswith(selected['l4t_prefix'])
-            or selected['inference'] != inference_backend() or selected['source'] != source_hash()):
+            or selected['inference'] != inference_backend()
+            or selected['source'] != source_hash()):
         raise RuntimeError('Docker environment changed; rerun the Scene Docker build')
     image = os.environ.get('ROBONIX_SCENE_IMAGE') or selected['image']
     details = inspect(image)
@@ -312,19 +323,19 @@ def main():
     modes.add_argument('--check', action='store_true')
     args = parser.parse_args()
     host = detect()
-    profile = select_profile(host, check_python=False)
-    if os.environ.get('ROBONIX_SCENE_ROS_DISTRO', profile['ros']) != profile['ros']:
-        raise RuntimeError(f"The detected Jetson profile requires ROS {profile['ros']}")
     if args.plan:
-        print(json.dumps(profile, indent=2))
+        print(json.dumps(select_profile(host), indent=2))
         return
-    BUILD.mkdir(parents=True, exist_ok=True)
     if args.check:
         check(host)
         return
+    BUILD.mkdir(parents=True, exist_ok=True)
     with (BUILD / '.docker-build.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        build(host, profile)
+        profile = select_profile(host)
+        if os.environ.get('ROBONIX_SCENE_ROS_DISTRO', profile['ros']) != profile['ros']:
+            raise RuntimeError(f"The detected Jetson profile requires ROS {profile['ros']}")
+        build(profile)
 
 
 if __name__ == '__main__':

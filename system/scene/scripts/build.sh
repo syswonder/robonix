@@ -27,9 +27,9 @@
 #
 #     RBNX_BUILD_PROXY=0 ./this-script.sh
 #
-#   To use proxy automatically when env vars exist:
+#   Proxy forwarding is opt-in; use existing proxy variables with:
 #
-#     ./this-script.sh
+#     RBNX_BUILD_PROXY=auto ./this-script.sh
 
 set -euo pipefail
 
@@ -46,8 +46,7 @@ IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 # package manifest's `build:` line:
 #   x86-docker     x86_64 + docker, ROS2 + cu128 torch in image  [default]
 #   jetson-docker  arm64 Jetson + docker, L4T base (docker/Dockerfile.jetson)
-#   jetson-native  arm64 Jetson, versioned host environment; detects the
-#                  supported JetPack profile and prepares GPU/ROS dependencies.
+#   jetson-native  host ROS 2, isolated application environment and GPU checks.
 TARGET="${RBNX_BUILD_TARGET:-x86-docker}"
 INFERENCE="${SCENE_CG_INFERENCE:-torch}"
 INFERENCE="$(printf '%s' "$INFERENCE" | tr '[:upper:]' '[:lower:]' | xargs)"
@@ -122,10 +121,8 @@ echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
-# Pulled out of the docker build because direct CDN connections from some
-# drop mid-stream on multi-hundred-MB transfers; an out-of-band download
-# with curl --retry-all-errors is much more robust, and the resulting
-# files become a cache-key-stable COPY into the image.
+# Download large weights on the host with curl retries and resume support.
+# COPY the cached files into the image.
 #
 # RBNX_GH_MIRROR:
 #   Prefix prepended to github.com URLs.

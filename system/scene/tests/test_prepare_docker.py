@@ -34,7 +34,7 @@ def test_docker_profile_does_not_require_host_python_to_match(docker):
                 l4t='39.2.1', ubuntu='24.04', python='3.13')
     assert docker.select_profile(host, check_python=False)['ros'] == 'jazzy'
     with pytest.raises(RuntimeError, match='Unsupported'):
-        docker.select_profile(host)
+        docker.select_profile(host, check_python=True)
 
 
 @pytest.mark.parametrize('key,value', [
@@ -127,7 +127,7 @@ def test_failed_candidate_preserves_previous_image_and_model_cache(docker, monke
     (cache / 'model.trt').write_bytes(b'working engine')
     monkeypatch.setattr(docker, 'check_gpu', Mock(side_effect=[HARDWARE, RuntimeError('inference failed')]))
     with pytest.raises(RuntimeError, match='inference failed'):
-        docker.build({'l4t': '39.2.1'}, PROFILE)
+        docker.build(PROFILE)
     assert marker.read_bytes() == original
     assert (cache / 'model.trt').read_bytes() == b'working engine'
     assert list((tmp_path / 'docker-models').iterdir()) == [cache]
@@ -137,14 +137,14 @@ def test_failed_candidate_preserves_previous_image_and_model_cache(docker, monke
 def test_source_update_keeps_sdk_model_cache_and_pins_previous_image(docker, monkeypatch, tmp_path):
     execute = build_fixture(docker, monkeypatch, tmp_path)
     monkeypatch.setattr(docker, 'check_gpu', lambda *a, **k: HARDWARE)
-    docker.build({'l4t': '39.2.1'}, PROFILE)
+    docker.build(PROFILE)
     marker = tmp_path / 'docker-env.json'
     first = json.loads(marker.read_text())
     model = tmp_path / 'docker-models' / first['cache'] / 'model.trt'
     model.write_bytes(b'verified engine')
     monkeypatch.setattr(docker, 'inspect', lambda _: {'Id': 'sha256:' + 'd' * 64})
     monkeypatch.setattr(docker, 'source_hash', lambda: 'updated-source')
-    docker.build({'l4t': '39.2.1'}, PROFILE)
+    docker.build(PROFILE)
     second = json.loads(marker.read_text())
     assert second['image'] != first['image'] and second['cache'] == first['cache']
     assert second['previous']['image'] == first['image']
@@ -184,3 +184,14 @@ def test_verified_bootstrap_artifacts_rebuild_without_network(docker, monkeypatc
     next((tmp_path / 'downloads').iterdir()).write_bytes(b'corrupted cache')
     docker.stage_download(source, destination)
     assert download.call_count == 2 and destination.read_bytes() == content
+
+
+def test_source_changes_require_local_rebuild_before_gpu_checks(docker, monkeypatch, tmp_path):
+    monkeypatch.setattr(docker, 'BUILD', tmp_path)
+    selected = dict(image='sha256:verified', inference='torch', source='old-source',
+                    l4t_prefix='39.2.', cache='c' * 32)
+    (tmp_path / 'docker-env.json').write_text(json.dumps(selected))
+    monkeypatch.setattr(docker, 'source_hash', lambda: 'changed-source')
+    monkeypatch.setattr(docker, 'inspect', Mock(side_effect=AssertionError('must reject before image access')))
+    with pytest.raises(RuntimeError, match='rerun'):
+        docker.check({'l4t': '39.2.1'})

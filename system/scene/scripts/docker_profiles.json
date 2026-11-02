@@ -1,0 +1,70 @@
+{
+  "profiles": [
+    {
+      "name": "jetpack-6-orin",
+      "l4t_prefix": "36.4.",
+      "ubuntu": "22.04",
+      "python": "3.10",
+      "ros": "humble",
+      "cuda": "12.6",
+      "torch": "2.8.0",
+      "torchvision": "0.23.0",
+      "wheels": [
+        "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/62a/1beee9f2f1470/torch-2.8.0-cp310-cp310-linux_aarch64.whl#sha256=62a1beee9f2f147076a974d2942c90060c12771c94740830327cae705b2595fc",
+        "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/907/c4c1933789645/torchvision-0.23.0-cp310-cp310-linux_aarch64.whl#sha256=907c4c1933789645ebb20dd9181d40f8647978e6bd30086ae7b01febb937d2d1"
+      ],
+      "ros_source": {
+        "url": "https://github.com/ros-infrastructure/ros-apt-source/releases/download/1.3.0/ros2-apt-source_1.3.0.jammy_all.deb",
+        "sha256": "110b9a462d55252decb8b7c816f61c2ba0d9890ce5fb93ac504e97cae5860d76"
+      },
+      "docker": {
+        "base": "nvcr.io/nvidia/l4t-jetpack:r36.4.0@sha256:34ccf0f3b63c6da9eee45f2e79de9bf7fdf3beda9abfd72bbf285ae9d40bb673",
+        "tensorrt_prefix": "10.3.",
+        "tensorrt_suite": "",
+        "tensorrt_packages": []
+      }
+    },
+    {
+      "name": "jetpack-7-orin",
+      "l4t_prefix": "39.2.",
+      "ubuntu": "24.04",
+      "python": "3.12",
+      "ros": "jazzy",
+      "cuda": "12.9",
+      "torch": "2.8.0",
+      "torchvision": "0.23.0",
+      "wheels": [
+        "https://pypi.jetson-ai-lab.io/jp6/cu129/+f/f36/0db283b1249b3/torch-2.8.0-cp312-cp312-linux_aarch64.whl#sha256=f360db283b1249b36a97b332bf8688917d9c7dbde4bc5120a03ae7a7e5a5d32c",
+        "https://pypi.jetson-ai-lab.io/jp6/cu129/+f/255/341cb5beb4673/torchvision-0.23.0-cp312-cp312-linux_aarch64.whl#sha256=255341cb5beb4673f0f1a26061105623f17a2b32188478c68b3f2e1a897d49a2"
+      ],
+      "ros_source": {
+        "url": "https://github.com/ros-infrastructure/ros-apt-source/releases/download/1.3.0/ros2-apt-source_1.3.0.noble_all.deb",
+        "sha256": "f31d84adf5054c7d60ded0e82c0f776a77ea33af53d08f40b9ad7c94cca55296"
+      },
+      "docker": {
+        "base": "nvcr.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04@sha256:e5ad51a95a1438e7dcba242b70dfd207684fa4c73b7618f865df27b9eb92f57d",
+        "tensorrt_prefix": "10.16.",
+        "tensorrt_suite": "r39.2",
+        "tensorrt_packages": [
+          "python3-libnvinfer=10.16.2.10-1+cuda13.2"
+        ]
+      }
+    }
+  ],
+  "sources": [
+    "https://developer.nvidia.com/embedded/jetpack/downloads",
+    "https://developer.nvidia.com/embedded/jetpack-archive",
+    "https://pypi.jetson-ai-lab.io/jp6/cu126/torch/",
+    "https://pypi.jetson-ai-lab.io/jp6/cu126/torchvision/",
+    "https://pypi.jetson-ai-lab.io/jp6/cu129/torch/",
+    "https://pypi.jetson-ai-lab.io/jp6/cu129/torchvision/"
+  ],
+  "clip_source": {
+    "url": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+    "sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
+  },
+  "jetson_key": {
+    "url": "https://repo.download.nvidia.com/jetson/jetson-ota-public.asc",
+    "sha256": "576f852981855e5c6cfb9b625ffb51b984ca451f1181b2e70435b005034fad55"
+  }
+}

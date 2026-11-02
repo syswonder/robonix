@@ -2,7 +2,7 @@
 
 Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes MCP tools that Pilot calls during RTDL planning/execution: queries (objects, regions, relations, robot context, navigation goals) and object edits (relabel, adjust geometry, delete, flush), and a self-contained 2D + 3D web viewer.
 
-This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
+Scene maintains current environment state from observations. Memory services handle long-term recall; hardware services control the robot. Scene does not send robot commands.
 
 ## What's inside
 
@@ -127,7 +127,7 @@ and remains useful for development or systems without Docker GPU support.
 ### Automatic Jetson Docker preparation
 
 The Docker target selects a pinned base image, ROS distribution and ARM Torch
-wheels from `scripts/native_profiles.json`. Supported profiles cover Orin on
+wheels from `scripts/docker_profiles.json`. Supported profiles cover Orin on
 L4T 36.4.x / Ubuntu 22.04 and L4T 39.2.x / Ubuntu 24.04. The host needs Docker,
 NVIDIA Container Toolkit and the Robonix build tools. Host Torch and ROS are
 not required. Unrecognized platform combinations stop before image construction.
@@ -143,7 +143,8 @@ SCENE_CG_INFERENCE=tensorrt ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
 ```
 
 The build validates CUDA convolution, torchvision NMS and Scene perception in
-an isolated candidate container before publishing the image. TensorRT builds
+an isolated candidate container before selecting the local image for startup.
+TensorRT builds
 also export models and verify engines on the target GPU. Model caches are
 separated by GPU hardware and the image's frozen SDK dependencies. Code-only
 rebuilds can reuse compatible engines.
@@ -161,47 +162,42 @@ arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
 
 ### Automatic Jetson native preparation
 
-The native build detects L4T, board family, Ubuntu and Python, then selects
-`scripts/native_profiles.json`. The initial profiles cover Orin on L4T
-36.4.x / Ubuntu 22.04 / Python 3.10 and L4T 39.2.x / Ubuntu 24.04 /
-Python 3.12. Other combinations stop before installation.
+Native preparation checks the actual host environment without a board-profile
+allowlist. It reuses working Torch/torchvision after convolution and NMS tests.
+When needed, it tries binary packages from the official PyTorch index in an
+isolated candidate environment. CUDA candidates come from the published indexes,
+filtered by the driver-reported CUDA API version; GPU tests decide whether the
+wheel actually supports this device. At most two CUDA indexes are tried, each
+in a fresh candidate environment. Failures report the installation or GPU-test
+error and leave the published environment unchanged.
 
 ```bash
-# Inspect the selected profile without modifying the system.
+# Inspect the host without installing anything.
 python3 scripts/prepare_native.py --plan
-
-# The same build/start commands work for both supported environments.
 RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
 ROBONIX_SCENE_FORCE=native bash scripts/start.sh
 ```
 
-The build reuses Torch/torchvision only after CUDA convolution and CUDA NMS
-succeed. If needed, it installs pinned, hash-checked ARM wheels and matching
-CUDA runtime libraries. The Orin 39.2 profile uses a CUDA 12.9 Torch build
-alongside system CUDA 13. Existing working GPU dependencies are preserved.
-ROS defaults to Humble on Ubuntu 22.04 and Jazzy on Ubuntu 24.04; missing ROS
-components and their apt source are installed automatically. Existing apt
-sources are reused. System package installation needs root or existing noninteractive
-sudo authorization (`sudo -v` first in an interactive shell); native preparation does not flash JetPack or replace the kernel/BSP.
+Native preparation does not install another CUDA/cuDNN stack, change GPU drivers
+or add NVIDIA repositories. Pip may install private GPU runtime dependencies
+inside the candidate venv. Existing ROS installations are preferred. Missing
+ROS components and TensorRT Python bindings are attempted through the configured
+OS repositories; configure those repositories first if packages are unavailable.
+Unknown OS versions need an existing ROS installation or an explicit ROS_DISTRO.
+System package installation requires root or existing noninteractive sudo.
 
-Scene dependencies are installed into a versioned virtual environment under
-`rbnx-build/native`, with access to existing system/user packages. GPU package
-versions and NumPy constraints prevent generic pip installs from replacing
-the selected Torch stack. Code generation uses that environment too. After
-model preparation and GPU, ROS and embedded database checks succeed, the build publishes
-`rbnx-build/native-env.sh`; native startup reads it automatically and checks
-recorded versions without importing Torch. A failed build keeps the previous
-published environment. Current and previous environment generations are kept.
-`SCENE_NATIVE_PYTHON` can select the base interpreter for preparation.
+Scene dependencies live under `rbnx-build/native`, with access to host packages.
+GPU version constraints protect the selected stack during application installs.
+After preparation and GPU, ROS and database checks pass, one atomic pointer
+publishes the environment. Startup checks recorded versions without importing
+Torch. Current and previous generations are retained, including a
+`requirements.lock` package-version record. `SCENE_NATIVE_PYTHON` selects the
+base interpreter. A new device passing these checks is not automatically a
+fully tested hardware support claim.
 
-On Orin / L4T 39.2.1, complete native Torch and TensorRT builds, real-image
-inference and pinned Torch installation into a Python environment without
-Torch have passed. The 36.4 profile has automated tests and verified wheel
-URLs/checksums, but has not had a hardware run. Missing ROS/CUDA installation
-paths have automated tests; a fresh OS bootstrap has not been exercised.
-Wheel sources and supported combinations are recorded in `native_profiles.json`.
-Fresh systems need access to the apt/pip sources and compatible JetPack GPU
-drivers supplied by the board's OS image.
+Fixed SDK combinations belong to Docker profiles. `scripts/native_profiles.json`
+is retained as a deprecated alias for `docker_profiles.json`; Native does not
+use it to select packages or reject hosts.
 
 Native Scene inherits the host ROS 2 transport configuration. Set
 `RMW_IMPLEMENTATION` explicitly when the rest of the deployment uses a

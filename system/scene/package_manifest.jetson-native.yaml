@@ -1,12 +1,11 @@
 # Scene MCP server — Jetson + NATIVE host-ROS2 deployment target.
 #
-#   build → detect the supported L4T/Ubuntu/Python combination, prepare a
-#           versioned environment, reuse or install GPU/ROS dependencies,
+#   build → detect the host, prepare a versioned application environment,
+#           reuse or try installing dependencies without replacing host CUDA,
 #           and verify native inference before publishing the environment.
 #   start → start_native.sh loads that environment and shares host ROS 2 RMW.
 #
-# The board must already boot a supported JetPack OS image. See README.md
-# for the supported profiles and automatic native preparation.
+# Use an existing JetPack/ROS installation. See README.md for native checks.
 manifestVersion: 1
 
 package:
