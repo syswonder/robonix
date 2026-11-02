@@ -342,6 +342,8 @@ struct TreeMeta {
     /// visible lets the model target any semantic boundary in one control call
     /// instead of querying live state first or guessing what "current" means.
     steps: Vec<TreeStep>,
+    /// Declared repeat limits, keyed by op id, for interpreting terminal states.
+    repeat_counts: HashMap<String, u32>,
 }
 
 struct TreeStep {
@@ -459,6 +461,11 @@ async fn handle_interrupt(
                     .map(|meta| meta.description.as_str())
                     .unwrap_or("unknown tree");
                 feed_results_into_history(history, &plan_id, description, std::slice::from_ref(r));
+            }
+            if let Some(meta) = forest.trees.get(&plan_id)
+                && let Some(feedback) = repeat_result_message(&ns, &meta.repeat_counts)
+            {
+                history.push(Message::user(&feedback));
             }
             // Any non-success terminal outcome escalates to the VLM at once
             // rather than waiting for the whole tree to finish: the result is
@@ -1114,6 +1121,18 @@ fn feed_results_into_history(
     history.extend(deferred_followups);
 }
 
+fn repeat_result_message(ns: &RtdlNodeState, counts: &HashMap<String, u32>) -> Option<String> {
+    if ns.node_kind != RTDL_REPEAT || ns.state != RtdlNodeStateEnum::Succeeded as u32 {
+        return None;
+    }
+    let count = counts.get(&ns.op_id)?;
+    Some(format!(
+        "Executor repeat result: plan_id={}, op_id={}, requested_count={count}, completed_iterations={count}. \
+         The repeat body ran exactly {count} times; a zero count did not invoke its body.",
+        ns.plan_id, ns.op_id
+    ))
+}
+
 /// Persist the exact capability calls handed to Executor so a later planning
 /// round can correlate terminal results with work it already dispatched.
 ///
@@ -1123,6 +1142,18 @@ fn feed_results_into_history(
 /// mandatory post-Completion round and allowed the same user step to be planned a
 /// second time from the robot's new state.
 fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: &str) {
+    let repeats: Vec<serde_json::Value> = plan
+        .nodes
+        .iter()
+        .filter(|node| node.node_kind == RTDL_REPEAT)
+        .map(|node| {
+            serde_json::json!({
+                "op_id": node.op_id,
+                "count": node.repeat_count,
+                "body_node_index": node.children.first(),
+            })
+        })
+        .collect();
     let calls: Vec<serde_json::Value> = plan
         .nodes
         .iter()
@@ -1146,10 +1177,11 @@ fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: 
     let record = serde_json::json!({
         "plan_id": plan.plan_id,
         "description": description,
+        "repeats": repeats,
         "calls": calls,
     });
     history.push(Message::user(&format!(
-        "Pilot harness dispatch record (already sent to Executor; not a new user request): {record}"
+        "Pilot harness dispatch record (plan node definitions sent to Executor; listed calls may not have run): {record}"
     )));
 }
 
@@ -1181,6 +1213,12 @@ async fn publish_stream(
             control_only: is_control_only(plan),
             call_signatures: plan_call_signatures(plan),
             steps: plan_steps(plan),
+            repeat_counts: plan
+                .nodes
+                .iter()
+                .filter(|node| node.node_kind == RTDL_REPEAT)
+                .map(|node| (node.op_id.clone(), node.repeat_count))
+                .collect(),
         },
     );
     let ended = live.complete || live.output.is_none();
@@ -2018,7 +2056,7 @@ Tasks (ids from the status board):
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
-Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call.
+Copy each cap exactly from the current catalog. A dispatch record describes submitted RTDL nodes, not actual capability invocations. Use Executor leaf feedback to confirm calls that ran. A successful repeat result reports how many times its body ran, including zero. Do not repeat successful work.
 "#;
 
 /// One parsed RTDL envelope from the VLM.
@@ -2584,12 +2622,12 @@ by planning capability calls available to you.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - Messages labelled `Executor feedback` are results of capability calls you
   already planned, not new user requests.
-- `Pilot harness dispatch record` messages are the authoritative record of RTDL
-  calls already sent to Executor. Correlate each result by `plan_id` and
-  `call_id`. When a recorded step succeeds, do not plan that same user-requested
-  step again from newly observed state; use the recorded args and result to
-  decide whether the success criterion is met. A genuinely different dependent
-  step may still use the same capability.
+- `Pilot harness dispatch record` messages describe the RTDL nodes submitted
+  to Executor, including repeat bodies that might run zero times. They do not
+  prove a capability was invoked. Correlate actual leaf results by `plan_id`
+  and `call_id`; a successful `Executor repeat result` gives the completed body
+  count. Do not plan a completed user-requested step again from newly observed
+  state. A genuinely different dependent step may still use the same capability.
 - If executor feedback already contains enough information to answer a task,
   answer in `content`, close the task as `done` in `task_updates`, and output an
   empty RTDL sequence. Do not repeat the same observation capability just to
@@ -2651,15 +2689,15 @@ for a running plan. Concretely:
 mod tests {
     use super::{
         CapabilityTargetMap, CatalogView, HistoryBudget, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
-        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskTable, TreeMeta, TreeStep, UsageTotals,
-        append_request_context, append_steer, assemble_planning_messages,
+        RTDL_PROTOCOL_REMINDER, RTDL_REPEAT, RTDL_SEQUENCE, RUN_TAG, TaskTable, TreeMeta, TreeStep,
+        UsageTotals, append_request_context, append_steer, assemble_planning_messages,
         build_capability_target_map, build_display_capabilities, build_forest_block,
         compact_tool_result, configured_vlm_idle_timeout, executor_active_snapshot,
         extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
         is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
         parse_meta_plan_op, parse_rtdl_assistant_response, record_dispatched_plan,
-        rtdl_node_kind_name, rtdl_state_name, should_replan_after_plan_done, skip_memory_prefetch,
-        task_is_session_end, upsert_terminal_result,
+        repeat_result_message, rtdl_node_kind_name, rtdl_state_name, should_replan_after_plan_done,
+        skip_memory_prefetch, task_is_session_end, upsert_terminal_result,
     };
     use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
     use crate::pb::pilot::{
@@ -3188,6 +3226,7 @@ mod tests {
                         description: description.into(),
                         capability: capability.into(),
                     }],
+                    repeat_counts: HashMap::new(),
                 },
             );
         }
@@ -3250,6 +3289,7 @@ mod tests {
                         capability: "navigate".into(),
                     },
                 ],
+                repeat_counts: HashMap::new(),
             },
         );
         let prompt = build_forest_block(&forest, &HashSet::new(), &TaskTable::default());
@@ -3333,6 +3373,54 @@ mod tests {
     }
 
     #[test]
+    fn repeat_feedback_distinguishes_planned_body_from_completed_iterations() {
+        for count in [0, 3] {
+            let plan = Plan {
+                plan_id: format!("repeat-{count}"),
+                nodes: vec![
+                    RtdlNode {
+                        node_kind: RTDL_REPEAT,
+                        op_id: "repeat-op".into(),
+                        repeat_count: count,
+                        children: vec![1],
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: RTDL_DO,
+                        op_id: "snapshot-op".into(),
+                        call: Some(CapabilityCall {
+                            call_id: format!("repeat-{count}:0"),
+                            provider_id: "tiago_camera".into(),
+                            contract_id: "robonix/primitive/camera/snapshot".into(),
+                            args_json: "{}".into(),
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut history = Vec::new();
+            record_dispatched_plan(&mut history, &plan, "camera boundary test");
+            let record = history[0].content.as_deref().unwrap();
+            assert!(record.contains("listed calls may not have run"));
+            assert!(record.contains(&format!("\"count\":{count}")));
+            let result = RtdlNodeState {
+                plan_id: plan.plan_id.clone(),
+                node_kind: RTDL_REPEAT,
+                op_id: "repeat-op".into(),
+                state: RtdlNodeStateEnum::Succeeded as u32,
+                ..Default::default()
+            };
+            let counts = HashMap::from([("repeat-op".to_string(), count)]);
+            let feedback = repeat_result_message(&result, &counts).unwrap();
+            assert!(feedback.contains(&format!("completed_iterations={count}")));
+            if count == 0 {
+                assert!(feedback.contains("did not invoke its body"));
+            }
+        }
+    }
+
+    #[test]
     fn cancel_target_must_be_live_and_not_already_requested() {
         let mut forest = HashMap::new();
         forest.insert(
@@ -3342,6 +3430,7 @@ mod tests {
                 control_only: false,
                 call_signatures: HashSet::new(),
                 steps: Vec::new(),
+                repeat_counts: HashMap::new(),
             },
         );
         let targets = vec!["7".to_string()];

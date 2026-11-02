@@ -172,6 +172,11 @@ Pilot parses RTDL incrementally and submits complete nodes to Executor through `
 
 Pilot forwards `VERIFYING` node states for live visibility but does not put them in LLM history or `BatchResult`. Once verification finishes, the final leaf result is written to history exactly once; a final failure triggers replanning immediately. `BatchResult` contains only the latest final state for each node.
 
+The dispatch record in planning history lists RTDL node definitions, including
+`do` nodes under a `repeat` whose count is zero. It is not evidence that those
+capabilities ran. Pilot records each successful `repeat` operator's completed
+iteration count separately; use leaf feedback to identify calls that ran.
+
 Parallel example:
 
 ```json
