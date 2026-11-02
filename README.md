@@ -56,7 +56,30 @@ The [System Architecture](#system-architecture) section lists every component.
 
 ## Quick Start
 
-### Prerequisites
+Robonix can be used in two ways:
+
+- **Robonix Console**: a web console installed on the robot. Install packages from the catalog, edit the configuration, start and stop Robonix, and read its logs from the browser.
+- **Command line**: build Robonix from source and run it with the `rbnx` command-line interface (CLI).
+
+### Robonix Console
+
+On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), as the user who runs Robonix:
+
+```bash
+curl -fsSL https://hub.robonix.ai/install | bash
+```
+
+The script installs Robonix if it is not there yet, asks for the OpenAI-compatible model endpoint that Pilot uses, and starts Robonix Console as a systemd user service. Open `http://127.0.0.1:4880` on the robot, or through an SSH tunnel (`ssh -L 4880:127.0.0.1:4880 user@robot`), and sign in with a [Robonix Hub](https://hub.robonix.ai/) account. To look around first, try the [online demo](https://hub.robonix.ai/demo/).
+
+To run the Webots simulation from the Console (the simulator needs Docker, and on a machine with an NVIDIA GPU also the NVIDIA Container Toolkit):
+
+1. On the overview page, click **Choose a robot configuration**, click **Install** on `pal_robotics.tiago_webots`, then **Create deployment**.
+2. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and save. The simulator then comes up before `rbnx boot` and goes down after Robonix exits.
+3. Click **Start**. The first start builds the simulator and package images, which takes a while; **View run logs** shows the progress.
+
+### Command line
+
+#### Prerequisites
 
 Install these from their own documentation first — Robonix does not provide or install them for you.
 
@@ -74,7 +97,7 @@ Rust and uv install into your home directory, so put them on `PATH` before conti
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 ```
 
-### Install Robonix
+#### Install Robonix
 
 ```bash
 git clone --recursive https://github.com/syswonder/robonix.git
