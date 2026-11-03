@@ -282,6 +282,8 @@ class _Atlas:
             return resp.endpoint or endpoint
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.ALREADY_EXISTS:
+                if time_descriptor is not None:
+                    raise
                 log.debug("declare %s/%s/%s already exists; ok",
                           provider_id, contract_id, _resolve_transport(transport).name)
                 return endpoint
