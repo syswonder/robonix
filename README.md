@@ -60,7 +60,7 @@ Robonix runs on the robot. It can be installed and managed through Robonix Conso
 
 ### Robonix Console
 
-The steps below run the TIAGo robot in the Webots simulator and give it a first task from your own computer or phone. The simulator runs on a Linux computer that plays the role of the robot: Ubuntu 22.04 or later (x86_64 or aarch64), with Docker usable without `sudo`. Below, `ROBOT_IP` stands for an address at which your computer or phone can reach the robot computer, such as a LAN or VPN address; once Robonix Console is installed, its **Overview** page lists the robot's addresses under **Robot Host**.
+The steps below run the TIAGo robot in the Webots simulator and give it a first task from your own computer or phone. The simulator runs on a Linux computer that plays the role of the robot: Ubuntu 22.04 or later (x86_64 or aarch64), with Docker installed. The user who runs the installer must be able to run `docker` without `sudo` (for example, as a member of the `docker` group), because the simulator is started as that user. Below, `ROBOT_IP` stands for an address at which your computer or phone can reach the robot computer, such as a LAN or VPN address; once Robonix Console is installed, its **Overview** page lists the robot's addresses under **Robot Host**.
 
 #### Set up the robot
 
@@ -70,7 +70,7 @@ On the robot computer, in a terminal, as a regular user:
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-The installer installs Robonix and Robonix Console. It asks for the vision-language model (VLM) that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name. The model must accept images and tool calls.
+The installer installs Robonix and Robonix Console. It asks for the vision-language model (VLM) that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name. Pilot sends the model camera images and offers the robot's capabilities as tool calls, so the model must support both.
 
 #### Use Robonix Console
 
@@ -88,9 +88,21 @@ The installer installs Robonix and Robonix Console. It asks for the vision-langu
 
 #### Use Robonix Client
 
-Robonix Client is the app for giving the robot tasks. It runs on a computer or a phone that can reach the robot at `ROBOT_IP`.
+Robonix Client is the operator's app: it gives the robot tasks by text or voice, shows the plan and each capability call as the robot carries it out, and displays the robot's camera view, health, and logs. It runs on a computer or a phone that can reach the robot at `ROBOT_IP`.
 
-To give tasks from a computer (Linux, macOS, or Windows), install [uv](https://docs.astral.sh/uv/getting-started/installation/), which also provides the Python that Robonix Client needs (on Linux or macOS: `curl -LsSf https://astral.sh/uv/install.sh | sh`). Then install Robonix Client and start it with the robot's address:
+To give tasks from a computer, first install [uv](https://docs.astral.sh/uv/getting-started/installation/), which also provides the Python that Robonix Client needs:
+
+```bash
+# Linux or macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Open a new terminal, then install Robonix Client and start it with the robot's address:
 
 ```bash
 uv tool install --python 3.11 git+https://github.com/syswonder/robonix-client.git
