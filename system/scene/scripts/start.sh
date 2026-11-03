@@ -76,7 +76,7 @@ case "$INFERENCE" in
             -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
             -e SCENE_PROFILE="${SCENE_PROFILE:-lite}" \
             -e SCENE_PERCEPTION_BACKEND="$SCENE_PERCEPTION_BACKEND" \
-            -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}" \
+            -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
             -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
             -v "$PKG:/scene:ro" -v "$PKG/rbnx-build/tensorrt:/scene-models:ro" \
             --entrypoint python3 "$IMG" /scene/scripts/prepare_models.py --check
@@ -192,9 +192,17 @@ if [[ -n "${SCENE_EXPORT_CG_PICKLE:-}" ]]; then
   mkdir -p "${SCENE_EXPORT_CG_PICKLE}"
   EXTRA_MOUNTS+=(-v "${SCENE_EXPORT_CG_PICKLE}:${SCENE_EXPORT_CG_PICKLE}")
 fi
-# The `full` perception profile needs weights the image does not bake in
-# (SAM-L, CLIP ViT-H-14). Point SCENE_MODELS_DIR at a host directory holding
-# them; it appears in the container as /opt/models/full.
+# Packaged images use their staged checkpoints; legacy images can bind local overrides.
+for variable in SCENE_YOLO_WORLD_WEIGHTS SCENE_MOBILE_SAM_WEIGHTS SCENE_CLIP_PRETRAINED; do
+  if [[ "$PACKAGED" == 0 && -n "${!variable:-}" ]]; then
+    if [[ -f "${!variable}" ]]; then
+      checkpoint="$(realpath "${!variable}")"
+      EXTRA_MOUNTS+=(-v "$checkpoint:$checkpoint:ro" -e "$variable=$checkpoint")
+    else
+      EXTRA_MOUNTS+=(-e "$variable=${!variable}")
+    fi
+  fi
+done
 # DualMap backend: a host vocabulary file is mounted read-only at the same path so
 # SCENE_DUALMAP_CLASSES means the same thing inside the container.
 if [[ -n "${SCENE_DUALMAP_CLASSES:-}" ]]; then
@@ -208,7 +216,9 @@ if [[ -n "${SCENE_DUALMAP_ROOT:-}" ]]; then
   [[ -d "${SCENE_DUALMAP_ROOT}/utils" ]] || { echo "[scene/start] SCENE_DUALMAP_ROOT=${SCENE_DUALMAP_ROOT} is not a DualMap checkout" >&2; exit 2; }
   EXTRA_MOUNTS+=(-v "${SCENE_DUALMAP_ROOT}:${SCENE_DUALMAP_ROOT}:ro")
 fi
-if [[ -n "${SCENE_MODELS_DIR:-}" ]]; then
+# Legacy and x86 images can mount Full weights; packaged Jetson images use
+# the checkpoints staged during their build.
+if [[ "$PACKAGED" == 0 && -n "${SCENE_MODELS_DIR:-}" ]]; then
   [[ -d "${SCENE_MODELS_DIR}" ]] || { echo "[scene/start] SCENE_MODELS_DIR=${SCENE_MODELS_DIR} is not a directory" >&2; exit 2; }
   EXTRA_MOUNTS+=(-v "${SCENE_MODELS_DIR}:/opt/models/full:ro")
 fi
@@ -318,7 +328,6 @@ docker run --rm --cidfile "$RUN_DIR/cid" \
     -e SCENE_CG_MERGE_THRESHOLD="${SCENE_CG_MERGE_THRESHOLD:-}" \
     -e SCENE_CG_VOXEL_SIZE="${SCENE_CG_VOXEL_SIZE:-}" \
     -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
-    -e SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-}" \
     -e SCENE_DETECT_PERIOD_S="${SCENE_DETECT_PERIOD_S:-}" \
     -e SCENE_DETECT_CONFIDENCE="${SCENE_DETECT_CONFIDENCE:-}" \
     -e SCENE_CG_MAX_MERGE_DIST_M="${SCENE_CG_MAX_MERGE_DIST_M:-}" \

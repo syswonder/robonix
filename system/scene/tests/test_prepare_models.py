@@ -114,8 +114,8 @@ def test_prepare_keeps_previous_generation_across_repeated_builds(tmp_path, monk
 
 
 @pytest.mark.parametrize('setting,value', [
-    ('SCENE_PROFILE', 'full'), ('SCENE_PERCEPTION_BACKEND', 'dualmap'),
-    ('SCENE_CG_FORCE_CPU', '1'), ('SCENE_CLIP_MODEL', 'ViT-H-14'),
+    ('SCENE_PROFILE', 'annotate'), ('SCENE_PERCEPTION_BACKEND', 'dualmap'),
+    ('SCENE_CG_FORCE_CPU', '1'),
 ])
 def test_unsupported_tensorrt_config_fails_before_preparation(monkeypatch, setting, value):
     prepare = load_prepare()
@@ -135,6 +135,7 @@ def test_packaged_onnx_compiles_on_target_without_reexporting(tmp_path, monkeypa
     baked.mkdir()
     (baked / 'sam.onnx').write_bytes(b'portable model')
     (baked / 'sam.npz').write_bytes(b'numerical references')
+    (baked / 'sam.onnx.data').write_bytes(b'external tensors')
     monkeypatch.setattr(prepare, 'Path', lambda p: baked if str(p) == '/opt/models/onnx' else Path(p))
     monkeypatch.setattr(prepare, 'source_fingerprint', lambda _: 'a' * 64)
     monkeypatch.setattr(prepare.subprocess, 'run', Mock(side_effect=AssertionError('must not export')))
@@ -142,6 +143,7 @@ def test_packaged_onnx_compiles_on_target_without_reexporting(tmp_path, monkeypa
     def build(directory, **kwargs):
         assert (directory / 'sam.onnx').read_bytes() == b'portable model'
         assert (directory / 'sam.npz').read_bytes() == b'numerical references'
+        assert (directory / 'sam.onnx.data').read_bytes() == b'external tensors'
         builds.append(directory)
     monkeypatch.setattr(prepare, 'build_engines', build)
     models = tmp_path / 'models'
@@ -150,3 +152,54 @@ def test_packaged_onnx_compiles_on_target_without_reexporting(tmp_path, monkeypa
     prepare.prepare(models)
     assert len(builds) == 2
     assert json.loads((models / 'prepared.json').read_text())['export'] == 'a' * 64
+
+
+@pytest.mark.parametrize("profile,model", [("lite", "ViT-B-32"), ("full", "ViT-H-14")])
+def test_selected_models_reach_all_export_processes(tmp_path, monkeypatch, profile, model):
+    prepare = load_prepare()
+    monkeypatch.setenv("SCENE_PROFILE", profile)
+    monkeypatch.setattr(prepare, "source_fingerprint", lambda _: "a" * 64)
+    monkeypatch.setattr(prepare, "build_engines", Mock())
+    calls = []
+    monkeypatch.setattr(prepare.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    prepare.prepare(tmp_path)
+    assert len(calls) == 3
+    for command in calls:
+        assert command[command.index("--profile") + 1] == profile
+        assert command[command.index("--clip-model") + 1] == model
+        sam = command[command.index("--sam-weights") + 1]
+        assert sam.endswith("sam_l.pt" if profile == "full" else "mobile_sam.pt")
+
+
+def test_export_fingerprint_includes_selected_model_identity(tmp_path, monkeypatch):
+    prepare = load_prepare()
+    monkeypatch.setattr(prepare.importlib.metadata, "version", lambda _: "test")
+    weights = tmp_path / "weights"
+    weights.write_bytes(b"same weight bytes")
+    monkeypatch.setenv("SCENE_PROFILE", "lite")
+    first = prepare.source_fingerprint([weights])
+    monkeypatch.setenv("SCENE_PROFILE", "full")
+    assert prepare.source_fingerprint([weights]) != first
+    monkeypatch.setenv("SCENE_PROFILE", "lite")
+    monkeypatch.setenv("SCENE_CLIP_MODEL", "ViT-H-14")
+    assert prepare.source_fingerprint([weights]) != first
+
+
+def test_full_never_reuses_baked_lite_exports(tmp_path, monkeypatch):
+    prepare = load_prepare()
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "model-config.json").write_text(json.dumps({"profile": "lite", "clip_model": "ViT-B-32"}))
+    monkeypatch.setenv("SCENE_PROFILE", "full")
+    monkeypatch.setattr(prepare, "Path", lambda p: baked if str(p) == "/opt/models/onnx" else Path(p))
+    monkeypatch.setattr(prepare, "source_fingerprint", lambda _: "a" * 64)
+    monkeypatch.setattr(prepare, "build_engines", Mock())
+    execute = Mock()
+    monkeypatch.setattr(prepare.subprocess, "run", execute)
+    models = tmp_path / "models"
+    models.mkdir()
+    prepare.prepare(models)
+    assert execute.call_count == 3
+    for call in execute.call_args_list:
+        command = call.args[0]
+        assert command[command.index("--profile") + 1] == "full"

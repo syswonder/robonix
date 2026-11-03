@@ -43,10 +43,6 @@ class OfflineBuildContractTests(unittest.TestCase):
             self.assertIn(
                 "pretrained='/opt/models/open_clip_pytorch_model.bin'", text
             )
-            self.assertIn(
-                "SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin",
-                text,
-            )
             self.assertNotIn("pretrained='laion2b_s34b_b79k'", text)
 
     def test_native_start_accepts_onnx_without_torch_weights(self):
@@ -91,6 +87,8 @@ class OfflineBuildContractTests(unittest.TestCase):
         (scene / "docker" / "_weights").mkdir(parents=True)
         (root / "scripts").mkdir(parents=True)
         shutil.copy2(SCENE_ROOT / "scripts" / "build.sh", scene / "scripts")
+        (scene / "scene_service").mkdir()
+        shutil.copy2(SCENE_ROOT / "scene_service/inference_config.py", scene / "scene_service")
         # The production build delegates exact-version Python generation to
         # this helper. These tests mock rbnx itself, so use a lightweight
         # fixture helper that preserves the delegation boundary without
@@ -240,12 +238,10 @@ printf 'downloaded-clip' > "$out"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene, env = self._fixture(root, include_clip=True)
-            clip = scene / "rbnx-build/data/ultralytics/weights/clip/ViT-B-32.pt"
-            clip.parent.mkdir(parents=True)
-            clip.write_bytes(b"text encoder")
             fake_python = root / "python"
             fake_python.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n')
             fake_python.chmod(0o755)
+            (scene / "rbnx-build").mkdir()
             (scene / "rbnx-build/native-candidate.sh").write_text(
                 f'export SCENE_NATIVE_PYTHON="{fake_python}"\nexport ROS_DISTRO=jazzy\n')
             env.update(RBNX_BUILD_TARGET="jetson-native", SCENE_NATIVE_PYTHON=str(fake_python),
@@ -258,6 +254,68 @@ printf 'downloaded-clip' > "$out"
                 self.assertEqual("prepare_models.py" in calls, backend == "tensorrt")
                 self.assertEqual("scene-perception-export.txt" in calls, backend == "tensorrt")
                 (root / "native.log").unlink()
+
+    def test_full_downloads_selected_weights_and_reuses_the_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=True)
+            env.update(SCENE_PROFILE="full", RBNX_GH_MIRROR="", SCENE_MODELS_DIR=str(root / "full"))
+            self._run_build(scene, env)
+            urls = (root / "curl.log").read_text().splitlines()
+            self.assertIn("https://github.com/ultralytics/assets/releases/download/v8.3.0/sam_l.pt", urls)
+            clip = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/main/open_clip_pytorch_model.bin"
+            self.assertIn(f"https://hf.invalid/{clip}", urls)
+            self.assertIn(f"https://huggingface.co/{clip}", urls)
+            self.assertEqual((root / "full/sam_l.pt").read_bytes(), b"downloaded-clip")
+            name = "open_clip_vit_h14_laion2b_s32b_b79k.bin"
+            self.assertEqual((root / "full" / name).read_bytes(), b"downloaded-clip")
+            self.assertEqual((scene / "docker/_build/full-models" / name).read_bytes(), b"downloaded-clip")
+            shutil.rmtree(root / "full")
+            (root / "curl.log").unlink()
+            self._run_build(scene, env)
+            self.assertFalse((root / "curl.log").exists())
+            self.assertEqual((root / "full" / name).read_bytes(), b"downloaded-clip")
+
+    def test_full_explicit_checkpoints_are_reused_without_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=True)
+            sam, clip = root / "sam_l.pt", root / "clip.bin"
+            sam.write_bytes(b"local sam")
+            clip.write_bytes(b"local clip")
+            env.update(SCENE_PROFILE="full", SCENE_MOBILE_SAM_WEIGHTS=str(sam),
+                       SCENE_CLIP_PRETRAINED=str(clip))
+            self._run_build(scene, env)
+            self.assertFalse((root / "curl.log").exists())
+            sam.unlink()
+            result = subprocess.run(["bash", "scripts/build.sh"], cwd=scene, env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("existing local checkpoint", result.stderr)
+            self.assertFalse((root / "curl.log").exists())
+
+    def test_x86_stages_external_lite_checkpoints_in_the_build_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=False)
+            for path in (scene / "docker/_weights").iterdir():
+                path.unlink()
+            overrides = {"SCENE_YOLO_WORLD_WEIGHTS": "yolov8l-world.pt",
+                         "SCENE_MOBILE_SAM_WEIGHTS": "mobile_sam.pt",
+                         "SCENE_CLIP_PRETRAINED": OPEN_CLIP_FILE}
+            for variable, name in overrides.items():
+                checkpoint = root / name
+                checkpoint.write_bytes(name.encode())
+                env[variable] = str(checkpoint)
+            self._run_build(scene, env)
+            self.assertFalse((root / "curl.log").exists())
+            for name in overrides.values():
+                self.assertEqual((scene / "docker/_weights" / name).read_bytes(), name.encode())
+            self.assertTrue((scene / "docker/_build/full-models").is_dir())
+            for variable, name in overrides.items():
+                env[variable] = f"docker/_weights/{name}"
+            self._run_build(scene, env)
+            self.assertFalse((root / "curl.log").exists())
 
     def test_empty_hf_mirror_uses_only_the_direct_file_url(self):
         with tempfile.TemporaryDirectory() as tmp:

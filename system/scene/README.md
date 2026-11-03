@@ -54,10 +54,33 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 ConceptGraphs uses Torch by default. Set `SCENE_CG_INFERENCE=tensorrt` before
 building and starting to use FP32 TensorRT for YOLO, SAM and CLIP visual,
 with CPU ONNX Runtime for text. Both implementations share point-cloud fusion
-and object retention. TensorRT is supported for the `lite` profile only;
-`full` remains available through Torch. Selecting TensorRT also selects
+and object retention. Lite and Full use the same TensorRT export, build and
+runtime path. The selected SAM and CLIP models supply preprocessing, feature
+dimensions and tokenizer context length through export metadata. Selecting TensorRT also selects
 ConceptGraphs when no mapper is configured; an explicit DualMap setting is
 rejected.
+
+Full selects SAM-L and CLIP ViT-H-14. Build and start with `SCENE_PROFILE=full`.
+The build downloads missing Full weights into `docker/_weights/full`, or into
+`SCENE_MODELS_DIR` when set, using the same mirror fallback, cache and resumable
+downloads as Lite. Existing checkpoints are reused. Explicit weight paths must
+name existing local files; they are never replaced with a different checkpoint.
+Containers use `/opt/models/full`. The Jetson Dockerfile build stages the selected
+weights and exports them inside the image. Full needs more memory than Lite;
+support in the code does not establish that it fits every Jetson.
+
+Exports include `model-config.json` and ONNX external weight files (`.onnx.data`).
+Copy them together with the graphs and numerical references. Preparation and
+engine caches distinguish model selections and external weights. Startup rejects
+exports for a different profile or CLIP model; rebuild before switching. Legacy
+exports without metadata remain usable only as Lite/ViT-B-32. The shared pipeline
+has real-weight export and ONNX Runtime parity checks for SAM-L and ViT-H-14.
+On Orin Nano Super 8 GB / L4T 39.2.1, Full preparation failed GPU allocations
+while compiling the SAM-L encoder and CLIP visual tower, including isolated
+build attempts. Full TensorRT has not passed deployment acceptance on that
+board. Lite remains the accepted TensorRT model set there. Full passed native
+preparation, real-image inference and service lifecycle tests on Orin NX 16 GB /
+L4T 36.4.3 / CUDA 12.6 / TensorRT 10.7. Live-camera mapping was not tested.
 
 ## Switching inference implementations
 
@@ -156,9 +179,10 @@ rejected before replacing the service container. A failed build preserves
 the previous verified image and model cache. Model-cache cleanup retains the
 current and previous generations; superseded images use normal Docker cleanup.
 
-Jetson packaged images support the ConceptGraphs backend. The full Torch
-profile still needs external models through `SCENE_MODELS_DIR`. Build proxy
-arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
+Jetson packaged images support the ConceptGraphs backend. The build stages the
+selected Lite or Full weights into the image. `SCENE_MODELS_DIR` can select a
+local Full model directory; missing default files are downloaded there. Build
+proxy arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
 
 ### Local Dockerfile deployment
 
@@ -208,6 +232,8 @@ System package installation requires root or existing noninteractive sudo.
 
 Scene dependencies live under `rbnx-build/native`, with access to host packages.
 GPU version constraints protect the selected stack during application installs.
+TensorRT preparation selects CUDA Python bindings for a working host CUDA
+runtime and verifies GPU allocation and release before publishing the environment.
 After preparation and GPU, ROS and database checks pass, one atomic pointer
 publishes the environment. Startup checks recorded versions without importing
 Torch. Current and previous generations are retained, including a
@@ -230,7 +256,7 @@ Scene spends and which mapper does the work:
 
 | key | values | meaning |
 |---|---|---|
-| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the small set (~4 GB of video memory), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, mounted from `SCENE_MODELS_DIR`), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
+| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the small set (~4 GB of video memory), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, downloaded during build; `SCENE_MODELS_DIR` overrides the directory), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
 | `backend` | `concept_graphs` (default), `dualmap` | which open-vocabulary mapper runs on the RGB-D stream. Env fallback `SCENE_PERCEPTION_BACKEND`. |
 
 Both backends take the same inputs (RGB, depth, intrinsics, camera→map transform)
@@ -634,8 +660,8 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_POSE_MAX_AGE_S` | `2.0` | maximum receipt age in seconds for pose/odometry used in camera-to-world projection; stale samples withhold detections |
 | `SCENE_CG_INFERENCE` | `torch` | ConceptGraphs inference: `torch` or `tensorrt`; use the same value for build and boot |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
-| `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
-| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
+| `SCENE_MOBILE_SAM_WEIGHTS` | Lite: `mobile_sam.pt`; Full: `full/sam_l.pt` | Relative defaults are under `/opt/models` in containers or `docker/_weights` on Native. Explicit paths override the profile. |
+| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | Lite: `ViT-B-32` / `open_clip_pytorch_model.bin`; Full: `ViT-H-14` / `full/open_clip_vit_h14_laion2b_s32b_b79k.bin` | Lite and Full weights are downloaded during build; `SCENE_MODELS_DIR` overrides the Full checkpoint directory. |
 | `SCENE_CG_MERGE_THRESHOLD` | `0.85` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
@@ -679,7 +705,7 @@ when the operator **saves a map** in the map UI, which snapshots the live
 registry together with the spatial artifact, and come back only when that map
 is **loaded** (see "Map library" below for the epoch rules). Each row carries
 a caption vector embedded with the open_clip text encoder already loaded for
-perception (512-d, shared with the per-object image features), so a future
+perception (shared with the per-object image feature dimensions), so a future
 object-search layer can reuse the table. The DB is scene-owned — a separate
 file/process from `services/memsearch`'s DB — and lives under the
 host-mounted `/data/robonix`, which also makes the scene-graph JSON caches

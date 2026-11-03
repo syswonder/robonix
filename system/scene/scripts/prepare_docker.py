@@ -20,7 +20,7 @@ PKG = Path(__file__).resolve().parents[1]
 BUILD = PKG / 'rbnx-build'
 PROFILES = Path(__file__).with_name('docker_profiles.json')
 sys.path.insert(0, str(PKG))
-from scene_service.inference_config import inference_backend, validate_tensorrt_config  # noqa: E402
+from scene_service.inference_config import inference_backend, validate_tensorrt_config, model_config, model_defaults  # noqa: E402
 from scripts.prepare_native import detect, download_verified  # noqa: E402
 
 
@@ -86,6 +86,9 @@ def file_hash(path: Path) -> str:
 
 def source_hash() -> str:
     digest = hashlib.sha256()
+    models = model_config(weights_dir=PKG / 'docker/_weights')
+    digest.update(json.dumps(models, sort_keys=True).encode())
+    digest.update((os.environ.get('SCENE_PROFILE') or 'lite').strip().lower().encode())
     paths = [PKG / 'scene_service', PKG / 'scripts', PKG / 'docker/requirements']
     files = [PKG / 'docker/Dockerfile.jetson', PKG / 'docker/entrypoint.sh',
              PKG / 'package_manifest.jetson-docker.yaml']
@@ -105,12 +108,15 @@ def image_run(image: str, command: list[str], *, inference: str, cache=None, cap
             '-e', f"SCENE_CG_FORCE_CPU={'1' if force_cpu() else ''}",
             '-e', 'SCENE_ONNX_DIR=/scene-models/onnx', '-e', 'SCENE_ENGINE_CACHE_DIR=/scene-models/engines',
             '-e', 'OPENBLAS_NUM_THREADS=1', '-e', 'OMP_NUM_THREADS=2']
-    for key in ('SCENE_PROFILE', 'SCENE_CLIP_MODEL', 'SCENE_CLIP_PRETRAINED', 'SCENE_OPEN_VOCAB_CLASSES'):
+    for key in ('SCENE_PROFILE', 'SCENE_CLIP_MODEL', 'SCENE_OPEN_VOCAB_CLASSES'):
         if os.environ.get(key):
             args += ['-e', f'{key}={os.environ[key]}']
-    if os.environ.get('SCENE_MODELS_DIR'):
-        full_models = Path(os.environ['SCENE_MODELS_DIR']).resolve(strict=True)
-        args += ['-v', f'{full_models}:/opt/models/full:ro']
+    canonical = model_defaults(weights_dir=Path('/opt/models'))
+    for variable, key in (('SCENE_YOLO_WORLD_WEIGHTS', 'yolo'),
+                          ('SCENE_MOBILE_SAM_WEIGHTS', 'sam'),
+                          ('SCENE_CLIP_PRETRAINED', 'clip_pretrained')):
+        if os.environ.get(variable):
+            args += ['-e', f'{variable}={canonical[key]}']
     if cache is not None:
         args += ['-v', f'{cache}:/scene-models']
     if 'CUDA_VISIBLE_DEVICES' in os.environ:
@@ -183,8 +189,12 @@ def stage(profile: dict, inference: str, fingerprint: str) -> Path:
         os.replace(partial, clip)
     models = context / 'models'
     models.mkdir()
-    for name in ('yolov8l-world.pt', 'mobile_sam.pt', 'open_clip_pytorch_model.bin'):
-        shutil.copy2(PKG / 'docker/_weights' / name, models / name)
+    selected = model_config(weights_dir=PKG / 'docker/_weights')
+    targets = model_defaults(weights_dir=Path("."))
+    for key in ("yolo", "sam", "clip_pretrained"):
+        target = models / targets[key]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(selected[key], target)
     shutil.copy2(clip, models / 'ViT-B-32.pt')
     sdk = profile['docker']
     (context / 'tensorrt-packages.txt').write_text('\n'.join(sdk['tensorrt_packages']))
@@ -226,7 +236,10 @@ def build_image(profile, inference, fingerprint, candidate):
     args = ['docker', 'build', '--network=host', '--pull=false',
             '--build-arg', f'ROS_BASE_IMAGE={base}', '--build-arg', f"ROS_DISTRO={profile['ros']}",
             '--build-arg', f"CUDA_APT_SUFFIX={profile['cuda'].replace('.', '-')}",
-            '--build-arg', f'SCENE_CG_INFERENCE={inference}', '--build-arg', f'SCENE_SOURCE_SHA={fingerprint}',
+            '--build-arg', f'SCENE_CG_INFERENCE={inference}',
+            '--build-arg', f"SCENE_PROFILE={(os.environ.get('SCENE_PROFILE') or 'lite').strip().lower()}",
+            '--build-arg', f"SCENE_CLIP_MODEL={model_config()['clip_model']}",
+            '--build-arg', f'SCENE_SOURCE_SHA={fingerprint}',
             '--build-arg', f"SCENE_L4T_PREFIX={profile['l4t_prefix']}",
             '--build-arg', f'SCENE_BASE_PIN={base_id}', '--build-arg', 'BUILDKIT_INLINE_CACHE=1', '-f', str(PKG / 'docker/Dockerfile.jetson'),
             '-t', candidate]

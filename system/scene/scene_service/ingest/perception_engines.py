@@ -21,6 +21,8 @@ import regex as re
 
 import numpy as np
 
+from ..inference_config import LEGACY_MODEL_METADATA
+
 try:  # scene dependency; only the letterbox paths need it
     import cv2
 except Exception:  # pragma: no cover - cv2 is part of every scene deploy
@@ -37,10 +39,10 @@ TRT_MODELS = ("yolo-world-cut", "sam-encoder", "sam-decoder", "clip-visual")
 ORT_MODELS = ("yolo-world-text", "clip-text")
 
 YOLO_IMGSZ = 672
-SAM_IMGSZ = 1024
-CLIP_CROP = 224
-CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
-CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+SAM_IMGSZ = LEGACY_MODEL_METADATA["sam_image_size"]
+CLIP_CROP = LEGACY_MODEL_METADATA["clip_image_size"]
+CLIP_MEAN = np.array(LEGACY_MODEL_METADATA["clip_mean"], dtype=np.float32)
+CLIP_STD = np.array(LEGACY_MODEL_METADATA["clip_std"], dtype=np.float32)
 SAM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32).reshape(3, 1, 1)
 SAM_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32).reshape(3, 1, 1)
 
@@ -65,11 +67,14 @@ def compute_cap() -> str:
 
 
 def onnx_hash12(onnx_path: str) -> str:
-    with open(onnx_path, "rb") as source:
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: source.read(1 << 20), b""):
-            digest.update(chunk)
-        return digest.hexdigest()[:12]
+    digest = hashlib.sha256()
+    for path in (onnx_path, onnx_path + ".data"):
+        if path.endswith(".data") and not os.path.exists(path):
+            continue
+        with open(path, "rb") as source:
+            for chunk in iter(lambda: source.read(1 << 20), b""):
+                digest.update(chunk)
+    return digest.hexdigest()[:12]
 
 
 def engine_file(name: str, models_dir: str, cache_dir: str) -> str:
@@ -315,10 +320,10 @@ class SimpleTokenizer:
             bpe_tokens.extend(self.encoder[t] for t in self.bpe(token).split(" "))
         return bpe_tokens
 
-    def __call__(self, texts) -> np.ndarray:
+    def __call__(self, texts, context_length=None) -> np.ndarray:
         if isinstance(texts, str):
             texts = [texts]
-        n_ctx = self.context_length
+        n_ctx = self.context_length if context_length is None else context_length
         rows = np.zeros((len(texts), n_ctx), dtype=np.int64)
         for i, text in enumerate(texts):
             tokens = [self.sot_token_id] + self.encode(text) + [self.eot_token_id]
@@ -358,20 +363,17 @@ def yolo_preprocess(bgr: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(im, dtype=np.float32) / 255.0
 
 
-def sam_preprocess(bgr: np.ndarray) -> np.ndarray:
-    """(3, 1024, 1024) float32 (call sites add the batch dim): letterbox
-    top-left (center=False, pad 114, matching the ultralytics SAM predictor),
-    BGR->RGB, CHW, SAM mean/std."""
-    im = _letterbox(bgr, SAM_IMGSZ, center=False)
+def sam_preprocess(bgr: np.ndarray, image_size: int = SAM_IMGSZ) -> np.ndarray:
+    """Top-left letterbox and normalize at the exported SAM input size."""
+    im = _letterbox(bgr, image_size, center=False)
     im = im[:, :, ::-1].transpose(2, 0, 1).astype(np.float32)
     im = (im - SAM_MEAN) / SAM_STD
     return np.ascontiguousarray(im)
 
 
-def sam_scale_boxes(xyxy: np.ndarray, src_hw: tuple[int, int]) -> np.ndarray:
-    """Boxes (K,4) in original pixels -> SAM 1024-space, float (no rounding,
-    matching _prepare_prompts' `bboxes *= r`)."""
-    r = min(SAM_IMGSZ / src_hw[0], SAM_IMGSZ / src_hw[1])
+def sam_scale_boxes(xyxy: np.ndarray, src_hw: tuple[int, int], image_size: int = SAM_IMGSZ) -> np.ndarray:
+    """Scale boxes into the encoder input without rounding prompt coordinates."""
+    r = min(image_size / src_hw[0], image_size / src_hw[1])
     return np.asarray(xyxy, dtype=np.float32) * r
 
 
@@ -416,45 +418,41 @@ def sam_postprocess_masks(logits: np.ndarray, src_hw: tuple[int, int]) -> np.nda
     return m > 0.0  # model.mask_threshold
 
 
-def clip_crop_crops(rgb: np.ndarray, xyxy: np.ndarray, padding: int = 20) -> np.ndarray:
-    """PIL crops for each detection box: pad 20 clamped to the borders, then
-    the open_clip preprocess chain (Resize 224 BICUBIC on the short side,
-    CenterCrop 224) as a (n, 3, 224, 224) float32 stack.  Matches the torch
-    path bitwise: torchvision Resize on PIL uses PIL's own BICUBIC resize,
-    ToTensor is uint8/255, Normalize is the OpenAI CLIP mean/std."""
+def clip_crop_crops(rgb: np.ndarray, xyxy: np.ndarray, padding: int = 20,
+                    image_size: int = CLIP_CROP, mean=CLIP_MEAN, std=CLIP_STD) -> np.ndarray:
+    """Apply the exported CLIP resize, center crop and normalization."""
     from PIL import Image
     from .perception_images import clip_crops
 
     crops = []
     for crop in clip_crops(rgb, xyxy, padding):
         cw, ch = crop.size
-        if (cw <= ch and cw != CLIP_CROP) or (ch <= cw and ch != CLIP_CROP):
+        if (cw <= ch and cw != image_size) or (ch <= cw and ch != image_size):
             if cw < ch:
-                ow, oh = CLIP_CROP, int(CLIP_CROP * ch / cw)
+                ow, oh = image_size, int(image_size * ch / cw)
             else:
-                ow, oh = int(CLIP_CROP * cw / ch), CLIP_CROP
+                ow, oh = int(image_size * cw / ch), image_size
             crop = crop.resize((ow, oh), Image.BICUBIC)
         cw, ch = crop.size
-        top = int(round((ch - CLIP_CROP) / 2.0))
-        left = int(round((cw - CLIP_CROP) / 2.0))
-        crop = crop.crop((left, top, left + CLIP_CROP, top + CLIP_CROP))
+        top = int(round((ch - image_size) / 2.0))
+        left = int(round((cw - image_size) / 2.0))
+        crop = crop.crop((left, top, left + image_size, top + image_size))
 
         arr = np.asarray(crop, dtype=np.float32) / 255.0  # ToTensor
-        arr = (arr - CLIP_MEAN) / CLIP_STD                # Normalize
+        arr = (arr - np.asarray(mean, np.float32)) / np.asarray(std, np.float32)                # Normalize
         crops.append(arr.transpose(2, 0, 1))              # HWC -> CHW
-    return np.ascontiguousarray(np.stack(crops), dtype=np.float32) if crops else np.zeros((0, 3, CLIP_CROP, CLIP_CROP), np.float32)
+    return np.ascontiguousarray(np.stack(crops), dtype=np.float32) if crops else np.zeros((0, 3, image_size, image_size), np.float32)
 
 
-def clip_batch8(crops: np.ndarray) -> list[np.ndarray]:
-    """Split (n,3,224,224) into (8,3,224,224) chunks; the last partial chunk is
-    zero-padded (the engine input shape is pinned to the b8 profile)."""
+def clip_batches(crops: np.ndarray, batch_size: int = 8) -> list[np.ndarray]:
+    """Pad the final batch to the exported engine's fixed batch size."""
     n = crops.shape[0]
     out = []
-    for i in range(0, n, 8):
-        chunk = crops[i:i + 8]
-        if chunk.shape[0] < 8:
+    for i in range(0, n, batch_size):
+        chunk = crops[i:i + batch_size]
+        if chunk.shape[0] < batch_size:
             chunk = np.concatenate(
-                [chunk, np.zeros((8 - chunk.shape[0], 3, CLIP_CROP, CLIP_CROP), np.float32)])
+                [chunk, np.zeros((batch_size - chunk.shape[0], *crops.shape[1:]), np.float32)])
         out.append(np.ascontiguousarray(chunk))
     return out
 
@@ -537,7 +535,9 @@ class PerceptionEngines:
 
     def __init__(self, classes: list[str], yolo: TrtRunner, sam_enc: TrtRunner,
                  clip_vis: TrtRunner, e: np.ndarray, clip_text: OrtSess,
-                 sam_dec: TrtRunner, scales, biases, ns):
+                 sam_dec: TrtRunner, scales, biases, ns, metadata):
+        self.metadata = metadata
+        self.tokenizer = _TOKENIZER or SimpleTokenizer()
         self.classes = list(classes)
         self.yolo = yolo
         self.sam_enc = sam_enc
@@ -580,8 +580,8 @@ class PerceptionEngines:
         """Box-prompted masks (K,H,W) bool at the input resolution."""
         if xyxy.shape[0] == 0:
             return np.zeros((0, bgr.shape[0], bgr.shape[1]), dtype=bool)
-        enc = self.sam_enc.run({"image": sam_preprocess(bgr)[None]})["image_embed"]
-        boxes = sam_scale_boxes(xyxy, bgr.shape[:2])  # (K,4) in 1024-space
+        enc = self.sam_enc.run({"image": sam_preprocess(bgr, self.metadata["sam_image_size"])[None]})["image_embed"]
+        boxes = sam_scale_boxes(xyxy, bgr.shape[:2], self.metadata["sam_image_size"])  # (K,4) in 1024-space
         # The decoder runs one box at a time (static K=1 profile): batched-K
         # tactics cost ~38MB device scratch per profiled box, which is a bad
         # trade on the 8GB board; a K=1 call is ~10ms.
@@ -592,22 +592,23 @@ class PerceptionEngines:
         return masks
 
     def clip_feats(self, rgb: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
-        """(K,512) L2-normalized CLIP features, b8 batches."""
-        crops = clip_crop_crops(rgb, xyxy)
+        """L2-normalized image features using the exported preprocessing."""
+        crops = clip_crop_crops(rgb, xyxy, image_size=self.metadata["clip_image_size"],
+                                mean=self.metadata["clip_mean"], std=self.metadata["clip_std"])
         n = crops.shape[0]
         feats = []
-        for chunk in clip_batch8(crops):  # (8,3,224,224), last chunk zero-padded
+        for chunk in clip_batches(crops, self.metadata["clip_batch_size"]):
             outs = self.clip_vis.run({"images": chunk})
             feats.append(outs["image_feats"])
         if not feats:
-            return np.zeros((0, 512), np.float32)
+            return np.zeros((0, self.metadata["clip_feature_dim"]), np.float32)
         # drop the zero-padded tail rows: the engine sees the padded batch,
         # the caller only wants n real crops back
         return normalize_rows(np.concatenate(feats, axis=0)[:n])
 
     def embed_text(self, texts: list[str]) -> np.ndarray:
-        """(n,512) normalized CLIP text features (arbitrary runtime text)."""
-        tokens = _TOKENIZER(texts)
+        """Normalized CLIP text features in the image feature space."""
+        tokens = self.tokenizer(texts, context_length=self.metadata["clip_context_length"])
         feats = self.clip_text.run({"tokens": tokens})["text_feats"]
         return normalize_rows(feats)
 
@@ -616,7 +617,7 @@ _TOKENIZER: SimpleTokenizer = None
 
 
 def load_engines(classes: list[str], models_dir: str = None,
-                 cache_dir: str = None) -> PerceptionEngines:
+                 cache_dir: str = None, *, profile=None, clip_model=None) -> PerceptionEngines:
     """Load every session or raise with the reason.  Engine fingerprints are
     resolved the same way build_engines.py names them; a missing or stale
     engine raises FileNotFoundError (the preflight hook builds them)."""
@@ -624,6 +625,9 @@ def load_engines(classes: list[str], models_dir: str = None,
     models_dir = models_dir or DEFAULT_MODELS_DIR
     cache_dir = cache_dir or DEFAULT_CACHE_DIR
 
+    from ..inference_config import model_metadata
+
+    metadata = model_metadata(models_dir, profile=profile, clip_model=clip_model)
     missing = [m for m in TRT_MODELS + ORT_MODELS
                if not os.path.isfile(os.path.join(models_dir, f"{m}.onnx"))]
     if missing:
@@ -655,7 +659,7 @@ def load_engines(classes: list[str], models_dir: str = None,
     del yolo_text
     clip_text = OrtSess(os.path.join(models_dir, "clip-text.onnx"))
     bundle = PerceptionEngines(classes, yolo, sam_enc, clip_vis,
-                               e, clip_text, sam_dec, scales, biases, ns)
+                               e, clip_text, sam_dec, scales, biases, ns, metadata=metadata)
     log.info("[scene-engines] loaded: E(%d,512), yolo/sam/clip TRT %.0fMB device mem",
              bundle.e.shape[0], bundle.device_memory_bytes / 2**20)
     return bundle

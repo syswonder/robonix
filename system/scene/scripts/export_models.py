@@ -8,9 +8,10 @@ board never needs torch at *runtime*, only here, once per model-set change).
 Outputs land in docker/_weights/onnx/ next to the weights so they ship through
 the same distribution channel, and start_native.sh picks them up.
 
-Artifacts per model: one .onnx plus a .npz holding seeded reference inputs and
-the torch fp32 reference outputs.  build_engines.py replays those on-target to
-check numerical parity with Torch before accepting the engine; no tokenizer
+Each model has an ONNX graph, external tensor data (.onnx.data), and a .npz
+with seeded inputs and Torch FP32 references. Shared model-config.json records
+model identity and preprocessing. Keep these files together.
+build_engines.py replays the references on-target to check numerical parity with Torch before accepting the engine; no tokenizer
 or preprocessing library is needed at gate time because
 token ids / preprocessed tensors are stored directly.
 
@@ -25,21 +26,20 @@ Models:
   yolo-world-text   YOLO-World's own CLIP ViT-B/32 text encoder (the model
                     set_classes uses); computes E for arbitrary class names.
                     First use downloads ~354MB of CLIP weights via ultralytics.
-  sam-encoder       MobileSAM image encoder (dynamo export keeps LayerNorm as
-                    a single node).
-  sam-decoder       MobileSAM box-prompt decoder (prompt encoder + mask
-                    decoder, dynamic box count); built as a K=1 TRT engine.
-  clip-visual       open_clip ViT-B-32 image tower, fixed batch 8 (the tick
-                    pads to the detection cap; 23ms per batch).
-  clip-text         open_clip ViT-B-32 text tower, dynamic batch (arbitrary
-                    runtime text queries).
+  sam-encoder       Selected SAM image encoder (MobileSAM or SAM-L).
+  sam-decoder       Shared SAM box-prompt decoder, built as a K=1 TRT engine.
+  clip-visual       Selected open_clip image tower, fixed batch of 8.
+  clip-text         Matching open_clip text tower, dynamic text batch.
 
-Only the "lite" perception profile is exported; the ViT-H-14 profile would
-need its own export run.
+Lite and full share the exporter; model identity and preprocessing are
+recorded beside the graphs for Torch-free runtime validation.
 """
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
+import tempfile
 import os
 import sys
 import time
@@ -57,6 +57,33 @@ import torch  # noqa: E402
 OUT = os.path.join(PKG, "docker", "_weights", "onnx")
 
 
+def export_graph(model, inputs, path, **kwargs):
+    """Keep large models outside protobuf's 2 GiB limit with named sidecars."""
+    import onnx
+
+    destination = Path(path)
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+        graph = Path(temporary) / destination.name
+        torch.onnx.export(model, inputs, str(graph), **kwargs)
+        loaded = onnx.load(str(graph), load_external_data=True)
+        sidecar = destination.with_suffix(destination.suffix + ".data")
+        sidecar.unlink(missing_ok=True)
+        onnx.save_model(loaded, str(destination), save_as_external_data=True,
+                        all_tensors_to_one_file=True, location=sidecar.name,
+                        size_threshold=1024)
+        # ONNX creates sidecars as 0600; packaged runtimes use a different UID.
+        destination.chmod(0o644)
+        if sidecar.exists():
+            sidecar.chmod(0o644)
+
+
+def update_metadata(**values):
+    path = Path(OUT) / "model-config.json"
+    config = json.loads(path.read_text()) if path.exists() else {}
+    config.update(values)
+    path.write_text(json.dumps(config, sort_keys=True) + "\n")
+
+
 def log(*a):
     print(*a, flush=True)
 
@@ -69,6 +96,8 @@ def cmp_log(name: str, a: np.ndarray, b: np.ndarray) -> None:
     a, b = a.astype(np.float64), b.astype(np.float64)
     cos = float((a * b).sum() / (np.linalg.norm(a) * np.linalg.norm(b)))
     log(f"  {name}: cos={cos:.6f} maxabs={np.abs(a - b).max():.3e}")
+    if not np.isfinite(cos) or cos < 0.999:
+        raise ValueError(f"{name}: export wrapper differs from the source model")
 
 
 # ── YOLO-World dual-tower ────────────────────────────────────────────────────
@@ -156,7 +185,7 @@ def export_yolo(weights: str) -> None:
 
     onnx_path = f"{OUT}/yolo-world-cut.onnx"
     with torch.no_grad():
-        torch.onnx.export(
+        export_graph(
             wrapper, (im, e55), onnx_path, opset_version=17, dynamo=False,
             input_names=["images", "txt_feats"], output_names=["boxes", "feats"],
             dynamic_axes={"txt_feats": {1: "nc"}},
@@ -190,7 +219,7 @@ def export_yolo(weights: str) -> None:
     tw = TextWrap(tm.model).eval()
     path = f"{OUT}/yolo-world-text.onnx"
     with torch.no_grad():
-        torch.onnx.export(
+        export_graph(
             tw, (tok,), path, opset_version=17, dynamo=False,
             input_names=["tokens"], output_names=["txt_feats"],
             dynamic_axes={"tokens": {0: "nc"}, "txt_feats": {0: "nc"}},
@@ -200,40 +229,31 @@ def export_yolo(weights: str) -> None:
     log(f"yolo-world-text {os.path.getsize(path) / 2**20:.0f}MB")
 
 
-# ── MobileSAM image encoder (dynamo, merged single file) ────────────────────
+# ── SAM image encoder ────────────────────
 def export_sam(weights: str) -> None:
-    import onnx
     from ultralytics import SAM
 
     m = SAM(weights)
     enc = m.model.image_encoder.eval()
     torch.manual_seed(0)
-    im = torch.randn(1, 3, 1024, 1024)
+    size = m.model.prompt_encoder.input_image_size
+    im = torch.randn(1, 3, *size)
     with torch.no_grad():
         ref = enc(im).numpy()
-    # dynamo exporter keeps LayerNorm as one node (fp32 internal reductions);
-    # external weights data merged back into a single file for distribution.
-    tmp = f"{OUT}/.sam-encoder-tmp.onnx"
     with torch.no_grad():
-        torch.onnx.export(
-            enc, (im,), tmp, opset_version=18, dynamo=True,
-            input_names=["image"], output_names=["image_embed"],
-        )
-    merged = onnx.load(tmp, load_external_data=True)
-    onnx.save(merged, f"{OUT}/sam-encoder.onnx")
-    os.remove(tmp)
-    if os.path.exists(tmp + ".data"):
-        os.remove(tmp + ".data")
+        export_graph(enc, (im,), f"{OUT}/sam-encoder.onnx", opset_version=18, dynamo=True,
+                     input_names=["image"], output_names=["image_embed"])
+    update_metadata(sam_image_size=int(m.model.prompt_encoder.input_image_size[0]))
     save_npz(f"{OUT}/sam-encoder.npz", image=im.numpy(), ref=ref)
     log(f"sam-encoder {os.path.getsize(f'{OUT}/sam-encoder.onnx') / 2**20:.0f}MB")
 
 
-# ── MobileSAM prompt encoder (box path) + mask decoder ──────────────────────
+# ── SAM prompt encoder (box path) + mask decoder ──────────────────────
 def export_sam_decoder(weights: str) -> None:
     """Export the box-prompt decoder; the target builds a static K=1 TRT engine.
 
     Takes the image embedding from the sam-encoder engine plus K boxes in
-    1024-space pixels, returns (K,1,256,256) mask logits.  The upstream
+    encoder-input pixels, returns the model's single-mask logits.  The upstream
     predict_masks broadcasts the image embedding with torch.repeat_interleave
     on a dynamic repeat, which exports as a data-dependent op — the batching
     here is plain expand (ONNX Expand, K-dynamic) and the per-token
@@ -284,7 +304,7 @@ def export_sam_decoder(weights: str) -> None:
             return masks[:, 0:1], iou_pred[:, 0:1]
 
     torch.manual_seed(0)
-    im = torch.randn(1, 3, 1024, 1024)
+    im = torch.randn(1, 3, *pe.input_image_size)
     with torch.no_grad():
         enc_ref = m.model.image_encoder(im).numpy()
 
@@ -311,7 +331,7 @@ def export_sam_decoder(weights: str) -> None:
     wrap = DecWrapper(pe, dec).eval()
     path = f"{OUT}/sam-decoder.onnx"
     with torch.no_grad():
-        torch.onnx.export(
+        export_graph(
             wrap, (torch.from_numpy(enc_ref), box_sets[0]), path,
             opset_version=17, dynamo=False,
             input_names=["image_embeddings", "boxes"],
@@ -327,28 +347,37 @@ def export_sam_decoder(weights: str) -> None:
     log(f"sam-decoder {os.path.getsize(path) / 2**20:.0f}MB")
 
 
-# ── open_clip ViT-B-32 (visual b8 + text, dynamic batch) ────────────────────
-def export_clip(openclip_bin: str) -> None:
+# ── open_clip visual and text towers ────────────────────
+def export_clip(openclip_bin: str, model_name: str) -> None:
     import open_clip
 
     model, _, _ = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained=openclip_bin)
+        model_name, pretrained=openclip_bin)
     model.eval()
 
+    preprocess = open_clip.get_model_preprocess_cfg(model)
+    size = preprocess["size"]
+    size = (size, size) if isinstance(size, int) else tuple(size)
+    if len(size) != 2 or size[0] != size[1]:
+        raise ValueError("TensorRT CLIP requires a square image input")
+    if preprocess.get("resize_mode", "shortest") != "shortest" or preprocess.get("interpolation", "bicubic") != "bicubic":
+        raise ValueError("TensorRT CLIP requires shortest-side bicubic preprocessing")
+    tokenizer = open_clip.get_tokenizer(model_name)
+    if type(tokenizer).__name__ != "SimpleTokenizer" or tokenizer.vocab_size != 49408:
+        raise ValueError("TensorRT CLIP requires the OpenAI BPE tokenizer")
     torch.manual_seed(0)
-    im = torch.randn(8, 3, 224, 224)
+    im = torch.randn(8, 3, *size)
     with torch.no_grad():
         ref = model.visual(im).numpy()
     path = f"{OUT}/clip-visual.onnx"
     with torch.no_grad():
-        torch.onnx.export(
+        export_graph(
             model.visual, (im,), path, opset_version=17, dynamo=False,
             input_names=["images"], output_names=["image_feats"],
         )
     save_npz(f"{OUT}/clip-visual.npz", images=im.numpy(), ref=ref)
     log(f"clip-visual {os.path.getsize(path) / 2**20:.0f}MB")
 
-    tokenizer = open_clip.get_tokenizer("ViT-B-32")
     texts = ["a photo of a chair", "a white table", "a laptop on a desk",
              "a green plant", "a red mug", "a door", "a trash bin", "a monitor"]
     tok = tokenizer(texts).int()
@@ -369,7 +398,7 @@ def export_clip(openclip_bin: str) -> None:
     tw = TextWrap(model).eval()
     path = f"{OUT}/clip-text.onnx"
     with torch.no_grad():
-        torch.onnx.export(
+        export_graph(
             tw, (tok,), path, opset_version=17, dynamo=False,
             input_names=["tokens"], output_names=["text_feats"],
             dynamic_axes={"tokens": {0: "n"}, "text_feats": {0: "n"}},
@@ -377,19 +406,43 @@ def export_clip(openclip_bin: str) -> None:
     save_npz(f"{OUT}/clip-text.npz", tokens=tok.numpy(), ref=ref,
              tokens1=tok1.numpy(), ref1=ref1)
     log(f"clip-text {os.path.getsize(path) / 2**20:.0f}MB")
+    update_metadata(clip_model=model_name, clip_image_size=size[0],
+                    clip_mean=list(preprocess["mean"]), clip_std=list(preprocess["std"]),
+                    clip_feature_dim=int(ref.shape[-1]),
+                    clip_context_length=int(tok.shape[1]), clip_batch_size=int(im.shape[0]))
 
 
 def main() -> None:
     global OUT
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--yolo-weights", default=os.path.join(PKG, "docker", "_weights", "yolov8l-world.pt"))
-    ap.add_argument("--sam-weights", default=os.path.join(PKG, "docker", "_weights", "mobile_sam.pt"))
-    ap.add_argument("--clip-bin", default=os.path.join(PKG, "docker", "_weights", "open_clip_pytorch_model.bin"))
+    ap.add_argument("--profile", default=os.environ.get("SCENE_PROFILE") or "lite", choices=("lite", "full"))
+    ap.add_argument("--yolo-weights")
+    ap.add_argument("--sam-weights")
+    ap.add_argument("--clip-bin")
+    ap.add_argument("--clip-model")
     ap.add_argument("--only", choices=("yolo", "sam", "clip"))
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()
     OUT = args.out
     os.makedirs(OUT, exist_ok=True)
+    from scene_service.inference_config import model_config
+
+    models = model_config(args.profile)
+    args.yolo_weights = args.yolo_weights or models["yolo"]
+    args.sam_weights = args.sam_weights or models["sam"]
+    args.clip_bin = args.clip_bin or models["clip_pretrained"]
+    args.clip_model = args.clip_model or models["clip_model"]
+    identity = {"profile": args.profile, "clip_model": args.clip_model,
+                "weights": [str(Path(p).resolve()) for p in
+                            (args.yolo_weights, args.sam_weights, args.clip_bin)]}
+    metadata = Path(OUT) / "model-config.json"
+    if metadata.exists():
+        previous = json.loads(metadata.read_text())
+        if any(previous.get(k) != v for k, v in identity.items()):
+            raise ValueError("Export selection changed; use a separate output directory")
+    elif any(Path(OUT).glob("*.onnx")):
+        raise ValueError("Unidentified exports exist; use a separate output directory")
+    update_metadata(**identity)
 
     def done(name: str) -> bool:
         return (os.path.isfile(f"{OUT}/{name}.onnx") and os.path.isfile(f"{OUT}/{name}.npz"))
@@ -411,7 +464,7 @@ def main() -> None:
     else:
         log("sam-decoder export present, skip")
     if args.only in (None, "clip") and not (done("clip-visual") and done("clip-text")):
-        export_clip(args.clip_bin)
+        export_clip(args.clip_bin, args.clip_model)
     else:
         log("clip exports present, skip")
     log(f"all exports done in {time.time() - t0:.0f}s -> {OUT}")

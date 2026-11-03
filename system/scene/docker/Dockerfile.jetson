@@ -52,11 +52,11 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         fi; \
     fi
 
+ARG SCENE_PROFILE=lite
+ARG SCENE_CLIP_MODEL
 ENV SCENE_CG_INFERENCE=${SCENE_CG_INFERENCE} \
-    SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
-    SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
-    SCENE_CLIP_MODEL=ViT-B-32 \
-    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin \
+    SCENE_PROFILE=${SCENE_PROFILE} \
+    SCENE_CLIP_MODEL=${SCENE_CLIP_MODEL} \
     YOLO_CONFIG_DIR=/opt/ultralytics \
     PYTHONPATH=/scene:/robonix-api:/scene/rbnx-build/codegen/scene_proto_gen:/scene/rbnx-build/codegen/robonix_mcp_types
 # Viewer dependencies reuse the Arrow constraint from scene-base.
@@ -73,8 +73,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
         package/index.js package/re_viewer.js package/re_viewer_bg.wasm \
     && rm /tmp/scene-viewer.tgz
 FROM dependencies AS application
-COPY _build/models/yolov8l-world.pt _build/models/mobile_sam.pt _build/models/open_clip_pytorch_model.bin /opt/models/
-COPY _build/models/ViT-B-32.pt /opt/models/ultralytics/clip/ViT-B-32.pt
+COPY _build/models/ /opt/models/
+RUN mkdir -p /opt/models/ultralytics/clip \
+    && mv /opt/models/ViT-B-32.pt /opt/models/ultralytics/clip/ViT-B-32.pt
 COPY _build/api /robonix-api
 COPY _build/scene /scene
 COPY entrypoint.sh /scene/docker/entrypoint.sh
@@ -95,9 +96,8 @@ PY
 # Ship portable exports and references; engines are compiled on the target GPU.
 RUN if [ "$SCENE_CG_INFERENCE" = tensorrt ]; then \
         for model in yolo sam clip; do \
-            python scripts/export_models.py --only "$model" --out /opt/models/onnx \
-                --yolo-weights "$SCENE_YOLO_WORLD_WEIGHTS" --sam-weights "$SCENE_MOBILE_SAM_WEIGHTS" \
-                --clip-bin "$SCENE_CLIP_PRETRAINED" || exit 1; \
+            python scripts/export_models.py --profile "$SCENE_PROFILE" --only "$model" \
+                --out /opt/models/onnx || exit 1; \
         done; \
     fi
 RUN bash -c 'source /opt/ros/${ROS_DISTRO}/setup.bash && python scripts/check_docker.py --inference "$SCENE_CG_INFERENCE" --imports-only'

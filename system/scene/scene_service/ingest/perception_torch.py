@@ -50,7 +50,7 @@ class TorchPerception:
 
         crops = [self.preprocess(crop) for crop in clip_crops(rgb, xyxy)]
         if not crops:
-            return np.empty((0, 512), dtype=np.float32)
+            return np.empty((0, self.clip.visual.output_dim), dtype=np.float32)
         feats = []
         with torch.inference_mode():
             for start in range(0, len(crops), 8):

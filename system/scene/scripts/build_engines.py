@@ -151,9 +151,9 @@ def build_trt_engine(onnx_path: str, eng_path: str, cache_dir: str, d) -> float:
         inp = network.get_input(i)
         name = inp.name
         if name == "txt_feats":
-            nc = int(d["txt_feats"].shape[1])
-            profile.set_shape(name, trt.Dims((1, 1, 512)), trt.Dims((1, nc, 512)),
-                              trt.Dims((1, YOLO_NC_MAX, 512)))
+            nc, width = map(int, d["txt_feats"].shape[1:])
+            profile.set_shape(name, trt.Dims((1, 1, width)), trt.Dims((1, nc, width)),
+                              trt.Dims((1, YOLO_NC_MAX, width)))
         elif name == "boxes":
             dims = trt.Dims((1, 4))  # static K=1: see the sam-decoder spec
             profile.set_shape(name, dims, dims, dims)

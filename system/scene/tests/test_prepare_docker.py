@@ -38,8 +38,8 @@ def test_docker_profile_does_not_require_host_python_to_match(docker):
 
 
 @pytest.mark.parametrize('key,value', [
-    ('SCENE_PROFILE', 'full'), ('SCENE_CG_FORCE_CPU', '1'),
-    ('ROBONIX_FORCE_CPU', '1'), ('SCENE_CLIP_MODEL', 'ViT-H-14'),
+    ('SCENE_PROFILE', 'annotate'), ('SCENE_CG_FORCE_CPU', '1'),
+    ('ROBONIX_FORCE_CPU', '1'),
     ('SCENE_PERCEPTION_BACKEND', 'dualmap'),
 ])
 def test_invalid_trt_configuration_stops_before_touching_images(docker, monkeypatch, key, value):
@@ -69,9 +69,9 @@ def test_candidate_checks_receive_the_actual_runtime_configuration(docker, monke
     assert 'USER=scene' in args
     assert 'SCENE_PROFILE=full' in args
     assert 'SCENE_CLIP_MODEL=ViT-H-14' in args
-    assert 'SCENE_CLIP_PRETRAINED=/opt/models/full/clip.bin' in args
+    assert 'SCENE_CLIP_PRETRAINED=/opt/models/full/open_clip_vit_h14_laion2b_s32b_b79k.bin' in args
     assert 'SCENE_OPEN_VOCAB_CLASSES=chair,table' in args
-    assert f'{tmp_path}:/opt/models/full:ro' in args
+    assert f'{tmp_path}:/opt/models/full:ro' not in args
 
 
 def test_unset_model_options_preserve_baked_image_defaults(docker, monkeypatch):
@@ -195,3 +195,15 @@ def test_source_changes_require_local_rebuild_before_gpu_checks(docker, monkeypa
     monkeypatch.setattr(docker, 'inspect', Mock(side_effect=AssertionError('must reject before image access')))
     with pytest.raises(RuntimeError, match='rerun'):
         docker.check({'l4t': '39.2.1'})
+
+
+def test_full_model_choice_reaches_docker_build(docker, monkeypatch):
+    monkeypatch.setenv("SCENE_PROFILE", "full")
+    monkeypatch.setattr(docker, "inspect", lambda _: {"Id": "sha256:base"})
+    execute = Mock()
+    monkeypatch.setattr(docker, "run", execute)
+    profile = json.loads(docker.PROFILES.read_text())["profiles"][0]
+    docker.build_image(profile, "tensorrt", "source", "candidate")
+    command = execute.call_args.args[0]
+    assert "SCENE_PROFILE=full" in command
+    assert "SCENE_CLIP_MODEL=ViT-H-14" in command

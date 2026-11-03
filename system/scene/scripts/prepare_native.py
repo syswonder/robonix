@@ -48,6 +48,33 @@ assert lib.cuDeviceGet(c.byref(device), 0) == 0, 'No CUDA device'
 assert lib.cuDeviceComputeCapability(c.byref(major), c.byref(minor), device) == 0
 print(json.dumps({'driver_cuda': version.value, 'sm': f'{major.value}{minor.value}'}))
 """
+CUDART_CHECK = """
+import ctypes as c, json
+for major in dict.fromkeys((PREFERRED_MAJOR, 13, 12)):
+    if major < 12:
+        continue
+    try:
+        lib = c.CDLL(f'libcudart.so.{major}')
+        version, count = c.c_int(), c.c_int()
+        if lib.cudaRuntimeGetVersion(c.byref(version)) == 0 and lib.cudaGetDeviceCount(c.byref(count)) == 0 and count.value:
+            print(json.dumps({'cuda_runtime': version.value}))
+            break
+    except OSError:
+        pass
+else:
+    raise RuntimeError('No working CUDA runtime for TensorRT Python bindings')
+"""
+CUDA_BINDINGS_CHECK = """
+import json
+from cuda.bindings import runtime as rt
+error, count = rt.cudaGetDeviceCount()
+assert int(error) == 0 and count, f'CUDA bindings cannot use the driver: {error}'
+error, pointer = rt.cudaMalloc(16)
+assert int(error) == 0, f'CUDA bindings allocation failed: {error}'
+error, = rt.cudaFree(pointer)
+assert int(error) == 0, f'CUDA bindings release failed: {error}'
+print(json.dumps({'cuda_bindings': 'ok'}))
+"""
 TRT_CHECK = '''
 import json, tensorrt as trt
 assert trt.__version__.split('.')[0] == '10', 'Scene requires TensorRT 10'
@@ -148,6 +175,8 @@ def install_ros() -> str:
     return ros
 
 
+
+
 def environment_key(host: dict, base_python: str = None) -> str:
     digest = hashlib.sha256(json.dumps([host, inference_backend()], sort_keys=True).encode())
     for path in [Path(__file__), *sorted((PKG / 'docker/requirements').glob('scene-*.txt'))]:
@@ -228,7 +257,7 @@ def package_versions(python: str) -> dict:
     code = '''
 import importlib.metadata as m, json
 result = {}
-for name in ('torch', 'torchvision', 'tensorrt', 'tensorrt-cu12', 'tensorrt-cu13', 'numpy'):
+for name in ('torch', 'torchvision', 'tensorrt', 'tensorrt-cu12', 'tensorrt-cu13', 'numpy', 'cuda-bindings', 'cuda-pathfinder'):
     try: result[name] = m.version(name)
     except m.PackageNotFoundError: pass
 print(json.dumps(result))
@@ -261,7 +290,19 @@ def setup(host: dict) -> None:
         require_probe(python, TRT_CHECK)
     constraints = directory / 'gpu-constraints.txt'
     versions = package_versions(python)
-    constraints.write_text('numpy<2\n' + ''.join(
+    binding_constraint = ''
+    if inference_backend() == 'tensorrt':
+        preferred = int((torch['cuda'] or '0').split('.')[0])
+        runtime = require_probe(python, CUDART_CHECK.replace('PREFERRED_MAJOR', str(preferred)))
+        major = runtime['cuda_runtime'] // 1000
+        minimum = '12.8' if major == 12 else str(major)
+        binding = versions.get('cuda-bindings')
+        if binding:
+            installed = tuple(map(int, binding.split('.')[:2]))
+            if installed[0] != major or installed < (major, 8 if major == 12 else 0):
+                versions.pop('cuda-bindings')
+        binding_constraint = f'cuda-bindings>={minimum},<{major + 1}\n'
+    constraints.write_text('numpy<2\n' + binding_constraint + ''.join(
         f'{name}=={version}\n' for name, version in versions.items() if name != 'numpy'))
     env = dict(host=host, python=python, ros=ros,
                inference=inference_backend(), key=key, generation=directory.name,
@@ -292,6 +333,7 @@ def verify(host: dict) -> None:
     require_probe(python, ROS_CHECK, ros)
     if inference_backend() == 'tensorrt':
         candidate.update(require_probe(python, TRT_CHECK))
+        candidate.update(require_probe(python, CUDA_BINDINGS_CHECK))
     require_probe(python, STORAGE_CHECK)
     candidate['versions'] = package_versions(python)
     packages = run([python, '-m', 'pip', 'list', '--format=freeze'], capture_output=True, text=True).stdout

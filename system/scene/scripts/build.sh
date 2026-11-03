@@ -147,7 +147,7 @@ copy_cached_weight() {
     local src="$1"
     local dest="$2"
     mkdir -p "$(dirname "$dest")"
-    if [[ "$src" == "$dest" ]]; then
+    if [[ "$src" == "$dest" || "$src" -ef "$dest" ]]; then
         return 0
     fi
     cp -f "$src" "$dest"
@@ -231,24 +231,67 @@ fetch_hf_weight() {
     fetch_weight_candidates "$dest" "${candidates[@]}"
 }
 
+SCENE_PROFILE="$(printf '%s' "${SCENE_PROFILE:-lite}" | tr '[:upper:]' '[:lower:]' | xargs)"
+export SCENE_PROFILE
+MODEL_PATHS_TEXT="$(PYTHONPATH="$PKG:${PYTHONPATH:-}" python3 - "$WEIGHTS_DIR" <<'PYMODELS'
+import sys
+from scene_service.inference_config import model_config, model_defaults
+for models in (model_config(weights_dir=sys.argv[1]), model_defaults(weights_dir=sys.argv[1])):
+    for key in ("yolo", "sam", "clip_pretrained"):
+        print(models[key])
+PYMODELS
+)"
+mapfile -t MODEL_PATHS <<< "$MODEL_PATHS_TEXT"
+for variable in SCENE_YOLO_WORLD_WEIGHTS SCENE_MOBILE_SAM_WEIGHTS SCENE_CLIP_PRETRAINED; do
+    if [[ -n "${!variable:-}" && ! -s "${!variable}" ]]; then
+        echo "[build] error: $variable must name an existing local checkpoint: ${!variable}" >&2
+        exit 1
+    fi
+done
+
 fetch_weight \
     "https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8l-world.pt" \
-    "$WEIGHTS_DIR/yolov8l-world.pt"
+    "${MODEL_PATHS[0]}"
 
-fetch_weight \
-    "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
-    "$WEIGHTS_DIR/mobile_sam.pt"
+# The x86 image also carries Lite weights for its default runtime configuration.
+if [[ "$SCENE_PROFILE" != full || "$TARGET" == x86-docker ]]; then
+    SAM_DEST="${MODEL_PATHS[1]}"
+    CLIP_DEST="${MODEL_PATHS[2]}"
+    if [[ "$SCENE_PROFILE" == full ]]; then
+        SAM_DEST="$WEIGHTS_DIR/mobile_sam.pt"
+        CLIP_DEST="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
+    fi
+    fetch_weight \
+        "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
+        "$SAM_DEST"
+    fetch_hf_weight \
+        "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" \
+        "open_clip_pytorch_model.bin" \
+        "$CLIP_DEST"
+fi
+if [[ "$SCENE_PROFILE" == full ]]; then
+    fetch_weight \
+        "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam_l.pt" \
+        "${MODEL_PATHS[1]}"
+    fetch_hf_weight \
+        "laion/CLIP-ViT-H-14-laion2B-s32B-b79K" \
+        "open_clip_pytorch_model.bin" \
+        "${MODEL_PATHS[2]}"
+fi
 
-# open_clip normally resolves this symbolic pretrained name through the
-# Hugging Face metadata API during the Docker build. Fetch the model file on
-# the host instead, using the same retry/cache path as the other scene weights,
-# then COPY it into both Docker variants. RBNX_HF_MIRROR controls the mirror;
-# the canonical huggingface.co URL is always the fallback.
-OPEN_CLIP_WEIGHTS="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
-fetch_hf_weight \
-    "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" \
-    "open_clip_pytorch_model.bin" \
-    "$OPEN_CLIP_WEIGHTS"
+if [[ "$TARGET" == x86-docker ]]; then
+    FULL_CONTEXT="$PKG/docker/_build/full-models"
+    rm -rf "$FULL_CONTEXT"
+    mkdir -p "$FULL_CONTEXT"
+    copy_cached_weight "${MODEL_PATHS[0]}" "$WEIGHTS_DIR/yolov8l-world.pt"
+    if [[ "$SCENE_PROFILE" == full ]]; then
+        copy_cached_weight "${MODEL_PATHS[1]}" "$FULL_CONTEXT/$(basename "${MODEL_PATHS[4]}")"
+        copy_cached_weight "${MODEL_PATHS[2]}" "$FULL_CONTEXT/$(basename "${MODEL_PATHS[5]}")"
+    else
+        copy_cached_weight "${MODEL_PATHS[1]}" "${MODEL_PATHS[4]}"
+        copy_cached_weight "${MODEL_PATHS[2]}" "${MODEL_PATHS[5]}"
+    fi
+fi
 
 if [[ "$TARGET" == "jetson-docker" ]]; then
     python3 "$PKG/scripts/prepare_docker.py" --build
@@ -261,16 +304,15 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     # Validate the host-staged open_clip checkpoint without contacting the
     # Hugging Face metadata API. Also pre-warm Ultralytics YOLO-World's text
     # encoder path:
-    # YOLOWorld.set_classes() uses openai/clip via Ultralytics' weights_dir,
-    # not open_clip's HF cache. If this is left to start_native, first boot can
+    # YOLOWorld.set_classes() uses openai/clip, not open_clip's HF cache.
+    # If this is left to start_native, first boot can
     # spend minutes downloading ViT-B-32.pt and miss the scene/object test flow.
     YCD="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
     UWD="$YCD/weights"
     mkdir -p "$YCD" "$UWD"
-    SCENE_CLIP_PRETRAINED="$OPEN_CLIP_WEIGHTS" \
-        "$PY" -c "import os, open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained=os.environ['SCENE_CLIP_PRETRAINED'])" \
+    "$PY" -c "import open_clip; from scene_service.inference_config import model_config; m=model_config(); open_clip.create_model_and_transforms(m['clip_model'], pretrained=m['clip_pretrained'])" \
         || {
-            echo "[build] error: open_clip could not load $OPEN_CLIP_WEIGHTS" >&2
+            echo "[build] error: open_clip could not load the selected model; check SCENE_PROFILE and model paths" >&2
             exit 1
         }
     YOLO_CONFIG_DIR="$YCD" "$PY" <<PY
@@ -283,7 +325,8 @@ SETTINGS.update({
     "sync": False,
 })
 PY
-    YOLO_CONFIG_DIR="$YCD" HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" "$PY" <<PY
+    YOLO_CONFIG_DIR="$YCD" SCENE_YOLO_WORLD_WEIGHTS="${MODEL_PATHS[0]}" HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" "$PY" <<PY
+import os
 from pathlib import Path
 from ultralytics.utils import WEIGHTS_DIR
 
@@ -308,14 +351,9 @@ classes = [
     "door", "doorway", "fire extinguisher", "person",
 ]
 
-model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
+model = YOLO(os.environ["SCENE_YOLO_WORLD_WEIGHTS"])
 model.set_classes(classes)
 PY
-    ULTRALYTICS_CLIP="$UWD/clip/ViT-B-32.pt"
-    if [[ ! -s "$ULTRALYTICS_CLIP" ]]; then
-        echo "[build] error: missing $ULTRALYTICS_CLIP after prefetch" >&2
-        exit 1
-    fi
     # Compile before service startup: Atlas registration has a short deadline.
     if [[ "$INFERENCE" == "tensorrt" ]]; then
         YOLO_CONFIG_DIR="$YCD" "$PY" "$PKG/scripts/prepare_models.py"
@@ -428,7 +466,7 @@ if [[ "$INFERENCE" == "tensorrt" ]]; then
         -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
         -e SCENE_PROFILE="${SCENE_PROFILE:-lite}" \
         -e SCENE_PERCEPTION_BACKEND="$SCENE_PERCEPTION_BACKEND" \
-        -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}" \
+        -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
         -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
         -v "$PKG:/scene:ro" -v "$PKG/$BUILD/tensorrt:/scene-models" \
         --entrypoint bash "$IMG" -ec '

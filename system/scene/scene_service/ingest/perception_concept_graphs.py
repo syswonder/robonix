@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Optional
 # Imported at module level: the tick loop uses numpy on every frame.
 import numpy as np
 from .cg_export import export_from_env
+from ..inference_config import model_config
 
 log = logging.getLogger("scene.ingest.cg")
 
@@ -54,30 +55,6 @@ def _resolved_classes() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-_DEFAULT_YOLO_WORLD_WEIGHTS = "/opt/models/yolov8l-world.pt"
-_DEFAULT_MOBILE_SAM_WEIGHTS = "/opt/models/mobile_sam.pt"
-_DEFAULT_CLIP_MODEL = "ViT-B-32"
-_DEFAULT_CLIP_PRETRAINED = "/opt/models/open_clip_pytorch_model.bin"
-
-# Model set per perception profile.
-_PROFILE_MODELS: dict[str, dict[str, str]] = {
-    "lite": {
-        "yolo": _DEFAULT_YOLO_WORLD_WEIGHTS,
-        "sam": _DEFAULT_MOBILE_SAM_WEIGHTS,
-        "clip_model": _DEFAULT_CLIP_MODEL,
-        "clip_pretrained": _DEFAULT_CLIP_PRETRAINED,
-    },
-    "full": {
-        "yolo": _DEFAULT_YOLO_WORLD_WEIGHTS,
-        "sam": "/opt/models/full/sam_l.pt",
-        "clip_model": "ViT-H-14",
-        "clip_pretrained": "/opt/models/full/open_clip_vit_h14_laion2b_s32b_b79k.bin",
-    },
-}
-
-
-# ── Concept-graphs config knobs ──────────────────────────────────────────
-# These are the v0 defaults.
 _CFG_DEFAULTS = {
     # 3D pcd downsampling (Open3D voxel size, metres). 0.025 = 2.5cm
     # voxels — concept-graphs default for indoor tabletop.
@@ -211,8 +188,8 @@ def _load_engine_bundle(profile="lite", yolo_path=None, sam_path=None,
     )
 
     backend = inference_backend()
-    models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
-    yw = yolo_path or _env_or("SCENE_YOLO_WORLD_WEIGHTS", models["yolo"])
+    models = model_config(profile)
+    yw = yolo_path or models["yolo"]
     classes = _resolved_classes()
     log.info("[scene-cg] inference=%s profile=%s", backend, profile)
     if backend == "torch":
@@ -221,22 +198,23 @@ def _load_engine_bundle(profile="lite", yolo_path=None, sam_path=None,
 
             bundle = TorchPerception(
                 classes, yw,
-                sam_path or _env_or("SCENE_MOBILE_SAM_WEIGHTS", models["sam"]),
-                clip_model_name or _env_or("SCENE_CLIP_MODEL", models["clip_model"]),
-                clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", models["clip_pretrained"]),
+                sam_path or models["sam"],
+                clip_model_name or models["clip_model"],
+                clip_pretrained or models["clip_pretrained"],
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("Torch models unavailable (%s) — perception disabled", exc)
             return None, "cpu"
         return bundle, bundle.device
 
-    validate_tensorrt_config(profile=profile, clip_model=clip_model_name)
+    validate_tensorrt_config(profile=profile)
     from .perception_engines import load_engines
 
     models_dir = _env_or("SCENE_ONNX_DIR", os.path.join(os.path.dirname(yw), "onnx"))
     models_dir = prepared_models_dir(models_dir)
     return load_engines(classes, models_dir=models_dir,
-                        cache_dir=str(engine_cache_dir(models_dir))), "cuda"
+                        cache_dir=str(engine_cache_dir(models_dir)),
+                        profile=profile, clip_model=clip_model_name or models["clip_model"]), "cuda"
 
 
 # ── Visible-absence detection ────────────────────────────────────────────
@@ -522,9 +500,9 @@ class ConceptGraphsDetector:
         self._conf_thresh = confidence_threshold
         self._max_dets = max_detections
         # Exports need the resolved encoder identity, including env overrides.
-        _models = _PROFILE_MODELS.get(profile, _PROFILE_MODELS["lite"])
-        self._clip_model_name = clip_model_name or _env_or("SCENE_CLIP_MODEL", _models["clip_model"])
-        self._clip_pretrained = clip_pretrained or _env_or("SCENE_CLIP_PRETRAINED", _models["clip_pretrained"])
+        _models = model_config(profile)
+        self._clip_model_name = clip_model_name or _models["clip_model"]
+        self._clip_pretrained = clip_pretrained or _models["clip_pretrained"]
         self._hub = hub
         self._camera_frame = camera_frame
         self._base_frame = (base_frame or "").strip().lstrip("/")

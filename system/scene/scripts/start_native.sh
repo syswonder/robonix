@@ -33,10 +33,6 @@ fi
 export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
 
 W="$PKG/docker/_weights"
-export SCENE_YOLO_WORLD_WEIGHTS="${SCENE_YOLO_WORLD_WEIGHTS:-$W/yolov8l-world.pt}"
-export SCENE_MOBILE_SAM_WEIGHTS="${SCENE_MOBILE_SAM_WEIGHTS:-$W/mobile_sam.pt}"
-export SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-ViT-B-32}"
-export SCENE_CLIP_PRETRAINED="${SCENE_CLIP_PRETRAINED:-$W/open_clip_pytorch_model.bin}"
 export SCENE_ONNX_DIR="${SCENE_ONNX_DIR:-$W/onnx}"
 export SCENE_ENGINE_CACHE_DIR="${SCENE_ENGINE_CACHE_DIR:-$HOME/.cache/robonix/scene-engines}"
 # Startup checks only: export/compilation must precede Atlas registration.

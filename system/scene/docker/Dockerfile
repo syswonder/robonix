@@ -237,6 +237,7 @@ RUN mkdir -p /opt/models /opt/models/hf /opt/models/ultralytics /opt/ultralytics
 COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
 COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
 COPY _weights/open_clip_pytorch_model.bin /opt/models/open_clip_pytorch_model.bin
+COPY _build/full-models/ /opt/models/full/
 
 # Two CLIP-flavored downloads bake in here:
 #   1. open_clip's ViT-B-32 LAION-2B — copied above from the host model cache.
@@ -301,13 +302,7 @@ EOF
 
 # No global proxy ENV was set, so there is no build-time proxy to clear here.
 
-# Fixed env so perception_concept_graphs.py knows where the weights
-# live without each deployment having to override.
-ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
-    SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
-    YOLO_CONFIG_DIR=/opt/ultralytics \
-    SCENE_CLIP_MODEL=ViT-B-32 \
-    SCENE_CLIP_PRETRAINED=/opt/models/open_clip_pytorch_model.bin
+ENV YOLO_CONFIG_DIR=/opt/ultralytics
 
 # viewer (see the file for why this one is --no-deps). Last, so bumping it
 # reuses every heavy layer above.

@@ -43,7 +43,7 @@ def test_setup_reuses_working_torch_without_installing_packages(tmp_path, monkey
         assert command[1:4] == ['-m', 'venv', '--system-site-packages']
         python.parent.mkdir(parents=True)
         python.touch()
-        (python.parents[1] / 'lib/python3.12/site-packages').mkdir(parents=True)
+        (python.parents[1] / f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages').mkdir(parents=True)
 
     monkeypatch.setattr(prepare, 'run', create_venv)
     monkeypatch.setenv('SCENE_CG_INFERENCE', 'torch')
@@ -144,7 +144,7 @@ def test_rebuild_stages_dependencies_without_changing_published_venv(tmp_path, m
         directory = Path(command[-1])
         (directory / 'bin').mkdir(parents=True)
         (directory / 'bin/python').touch()
-        (directory / 'lib/python3.12/site-packages').mkdir(parents=True)
+        (directory / f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages').mkdir(parents=True)
 
     monkeypatch.setattr(prepare, 'run', create)
     prepare.setup(host())
@@ -310,3 +310,47 @@ def test_legacy_profile_entry_points_still_resolve_docker_profiles():
     assert prepare.select_profile(host())['name'] == 'jetpack-7-orin'
     alias = Path(prepare.__file__).with_name('native_profiles.json')
     assert json.loads(alias.read_text()) == json.loads(alias.with_name('docker_profiles.json').read_text())
+
+
+@pytest.mark.parametrize('runtime,binding,keep_pin', [
+    (12060, '13.4.4', False), (13020, '13.4.4', True),
+    (12060, '12.7.1', False), (12060, '12.9.10', True),
+])
+def test_bindings_constraint_follows_working_cuda_runtime(tmp_path, monkeypatch, runtime, binding, keep_pin):
+    prepare = module()
+    monkeypatch.setattr(prepare, 'BUILD', tmp_path)
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setattr(prepare, 'install_ros', lambda: 'humble')
+    monkeypatch.setattr(prepare, 'environment_key', lambda *_: 'a' * 64)
+    monkeypatch.setattr(prepare, 'ensure_torch', lambda _: dict(cuda='12.6', torch='2.10.0'))
+    monkeypatch.setattr(prepare, 'probe', lambda *a: subprocess.CompletedProcess([], 0, '', ''))
+    monkeypatch.setattr(prepare, 'require_probe', lambda *a: {'cuda_runtime': runtime})
+    monkeypatch.setattr(prepare, 'package_versions', lambda _: {'torch': '2.10.0', 'cuda-bindings': binding})
+    def create(directory):
+        (directory / 'bin').mkdir(parents=True)
+        (directory / 'bin/python').touch()
+    monkeypatch.setattr(prepare, 'create_environment', create)
+    prepare.setup(host())
+    candidate = json.loads((tmp_path / 'native-candidate.json').read_text())
+    constraints = (Path(candidate['python']).parents[1] / 'gpu-constraints.txt').read_text()
+    expected = 'cuda-bindings>=12.8,<13' if runtime // 1000 == 12 else 'cuda-bindings>=13,<14'
+    assert expected in constraints
+    assert (f'cuda-bindings=={binding}' in constraints) == keep_pin
+
+
+def test_failed_cuda_bindings_probe_preserves_published_selection(tmp_path, monkeypatch):
+    prepare = module()
+    monkeypatch.setattr(prepare, 'BUILD', tmp_path)
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setattr(prepare, 'environment_key', lambda *_: 'b' * 64)
+    (tmp_path / 'native-candidate.json').write_text(json.dumps(dict(
+        host=host(), key='b' * 64, python=sys.executable, ros='jazzy', base_python=sys.executable)))
+    (tmp_path / 'native-env.json').write_text('{"key":"old"}')
+    def check(python, code, *args):
+        if code == prepare.CUDA_BINDINGS_CHECK:
+            raise RuntimeError('CUDA bindings cannot use the driver')
+        return {}
+    monkeypatch.setattr(prepare, 'require_probe', check)
+    with pytest.raises(RuntimeError, match='bindings'):
+        prepare.verify(host())
+    assert json.loads((tmp_path / 'native-env.json').read_text()) == {'key': 'old'}
