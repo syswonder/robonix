@@ -71,6 +71,8 @@ impl ChronosCore {
     /// Equal generations are idempotent. Older or zero generations are
     /// rejected. The last estimate remains available with its old reference
     /// identity while the reset is committed atomically across all domains.
+    /// A newer generation clears Fault to Reset; the retained model becomes
+    /// Unsynced. Availability recovery alone preserves Fault.
     pub fn update_reference_generation(&mut self, generation: u64) -> Result<(), ChronosError> {
         if generation == 0 || generation < self.reference_generation {
             return Err(ChronosError::ReferenceGenerationOutOfOrder {
@@ -717,7 +719,7 @@ fn finish_fit(samples: &VecDeque<Sample>, first: &Sample, slope: f64) -> Result<
         return Err(ChronosError::Overflow);
     }
     let rate = ((slope - 1.0) * PARTS_PER_BILLION as f64).round();
-    if !(i64::MIN as f64..=i64::MAX as f64).contains(&rate) {
+    if !(i64::MIN as f64..i64::MAX as f64).contains(&rate) {
         return Err(ChronosError::Overflow);
     }
     let rate_adjust_ppb = rate as i64;

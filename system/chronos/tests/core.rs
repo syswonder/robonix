@@ -668,6 +668,25 @@ fn fitting_failure_is_atomic_and_visible_as_fault() {
     let recovered = core.status("camera_clock", 3).unwrap();
     assert_eq!(recovered.state, DomainState::Fault);
     assert_eq!(recovered.reason, "clock model processing failed");
+
+    core.update_reference_generation(1).unwrap();
+    let unchanged = core.status("camera_clock", 3).unwrap();
+    assert_eq!(unchanged.state, DomainState::Fault);
+    assert_eq!(unchanged.reason, recovered.reason);
+
+    core.update_reference_generation(2).unwrap();
+    let reset = core.status("camera_clock", 3).unwrap();
+    assert_eq!(reset.state, DomainState::Reset);
+    assert_eq!(reset.generation, 2);
+    assert_eq!(reset.reference_generation, 2);
+    assert_eq!(
+        reset.reason,
+        "reference generation changed; retaining previous model"
+    );
+    let retained = core.convert("camera_clock", 0).unwrap();
+    assert_eq!(retained.state, DomainState::Unsynced);
+    assert_eq!(retained.generation, 1);
+    assert_eq!(retained.reference_generation, 1);
 }
 
 #[test]
@@ -940,4 +959,25 @@ fn wrapping_observation_gap_requires_reset() {
     core.reset("camera_clock").unwrap();
     core.observe("camera_clock", observation(3, 850, 1850, 1002))
         .unwrap();
+}
+
+#[test]
+fn fitting_rejects_a_rate_rounded_to_the_signed_upper_boundary() {
+    let mut core = ChronosCore::new();
+    let mut limits = policy();
+    limits.minimum_observations = 2;
+    core.register(descriptor(None), limits).unwrap();
+    core.observe("camera_clock", observation(1, 0, 0, 1))
+        .unwrap();
+    assert_eq!(
+        core.observe(
+            "camera_clock",
+            observation(2, 1_000_000, 9_223_372_037_854_777, 2),
+        ),
+        Err(ChronosError::Overflow)
+    );
+    assert_eq!(
+        core.status("camera_clock", 2).unwrap().state,
+        DomainState::Fault
+    );
 }
