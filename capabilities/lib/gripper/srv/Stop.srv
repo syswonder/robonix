@@ -1,0 +1,6 @@
+# Halt jaw motion without opening or disabling the gripper.
+# No holding-force or safety-rated emergency-stop guarantee.
+# Must remain dispatchable while move, grip or open is active.
+---
+bool ok        # Accepted and dispatched, not proof that motion has stopped.
+string message # Human-readable reason on rejection or dispatch failure.
