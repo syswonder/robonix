@@ -84,7 +84,7 @@ The installer installs Robonix and Robonix Console. It asks for the model that P
    | After exit | `bash sim/stop.sh` |
 
 4. On the same page, click **Allow other machines** and confirm, so that Robonix Client can connect from your computer or phone. Use this only on a trusted network.
-5. Click **Start**. The first start builds the simulator and takes several minutes. The robot is ready when **View run logs** shows Pilot and Liaison running.
+5. Click **Start**. The first start builds the simulator and takes several minutes; **View run logs** shows the progress.
 
 #### Use Robonix Client
 
