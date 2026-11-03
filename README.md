@@ -56,24 +56,57 @@ The [System Architecture](#system-architecture) section lists every component.
 
 ## Quick Start
 
-Robonix runs on the robot. It can be installed and managed through Robonix Console, a web console on the robot, or built from source and run with the `rbnx` command-line interface (CLI). Tasks are given through [Robonix Client](https://github.com/syswonder/robonix-client), which runs on the robot or on any computer or [Android device](https://github.com/syswonder/robonix-client-android/releases/latest) that can reach it, or with `rbnx chat` on the robot.
+Robonix runs on the robot. It can be installed and managed through Robonix Console, a web console on the robot, or built from source and run with the `rbnx` command-line interface (CLI). Tasks are given through [Robonix Client](https://github.com/syswonder/robonix-client) on your computer or Android phone.
 
 ### Robonix Console
 
-The following steps run the TIAGo robot in the Webots simulator through Robonix Console and send it a first task. On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), as a regular user:
+The steps below run the TIAGo robot in the Webots simulator and give it a first task from your own computer or phone. The simulator runs on a Linux computer that plays the role of the robot: Ubuntu 22.04 or later (x86_64 or aarch64), with Docker usable without `sudo`. Below, `ROBOT_IP` stands for an address at which your computer or phone can reach the robot computer, such as a LAN or VPN address; once Robonix Console is installed, its **Overview** page lists the robot's addresses under **Robot Host**.
+
+#### Set up the robot
+
+On the robot computer, in a terminal, as a regular user:
 
 ```bash
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-1. Open `http://127.0.0.1:4880` on the robot, or through `ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP`, and sign in with a [Robonix Hub](https://hub.robonix.ai/) account.
-2. In **Settings > Robot variables**, set the VLM endpoint URL, key, and model, and save. The model must be OpenAI-compatible and accept images and tool calls. The installer asks for the same values.
-3. On **Overview**, click **Choose a robot configuration**, select **PAL Robotics TIAGo**, and create the deployment. The Webots simulator needs Docker usable without `sudo`.
-4. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and save. Click **Start**; the first start builds the simulator and takes a while.
-5. Connect Robonix Client. On the robot, connect to `127.0.0.1`. From another device, first click **Allow other machines** on **Overview** and restart Robonix, then connect to `ROBOT_IP`. On a computer, run `pip install -e .` in a clone of [robonix-client](https://github.com/syswonder/robonix-client), start `robonix-client --robot-host ROBOT_IP`, and open `http://127.0.0.1:7860`. On Android, install the [APK](https://github.com/syswonder/robonix-client-android/releases/latest) and set **Robot Host** in **Settings**.
-6. Send the task `Turn left 90 degrees, take a photo, and describe what you see`. TIAGo turns in the simulator, the reply describes the photo, and the RTDL view shows the `navigate` and `snapshot` calls.
+The installer installs Robonix and Robonix Console. It asks for the vision-language model (VLM) that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name. The model must accept images and tool calls.
 
-The [Robonix Console guide](https://book.robonix.ai/getting-started/hub-console) covers each step in detail.
+#### Use Robonix Console
+
+1. In a browser on the robot computer, open `http://127.0.0.1:4880` and sign in with a [Robonix Hub](https://hub.robonix.ai/) account. From another computer, first run `ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP` there.
+2. On the **Overview** page of Robonix Console, click **Choose a robot configuration**, select **PAL Robotics TIAGo**, and click **Create deployment**.
+3. On the same page, click **Boot hooks**, enter the two commands below, and click **Save**:
+
+   | Field | Command |
+   |---|---|
+   | Before boot | `bash sim/start.sh --detach` |
+   | After exit | `bash sim/stop.sh` |
+
+4. On the same page, click **Allow other machines** and confirm, so that Robonix Client can connect from your computer or phone. Use this only on a trusted network.
+5. Click **Start**. The first start builds the simulator and takes several minutes. The robot is ready when **View run logs** shows Pilot and Liaison running.
+
+#### Use Robonix Client
+
+Robonix Client is the app for giving the robot tasks. It runs on a computer or a phone that can reach the robot at `ROBOT_IP`.
+
+To give tasks from a computer (Linux, macOS, or Windows), install [uv](https://docs.astral.sh/uv/getting-started/installation/), which also provides the Python that Robonix Client needs (on Linux or macOS: `curl -LsSf https://astral.sh/uv/install.sh | sh`). Then install Robonix Client and start it with the robot's address:
+
+```bash
+uv tool install --python 3.11 git+https://github.com/syswonder/robonix-client.git
+robonix-client --robot-host ROBOT_IP
+```
+
+Open `http://127.0.0.1:7860` on that computer.
+
+To give tasks from a phone, Robonix Client is currently available for Android 8.0 or later. Install the APK from the [latest release](https://github.com/syswonder/robonix-client-android/releases/latest), enter `ROBOT_IP` as **Robot Host** in **Settings**, and tap **Save** and connect.
+
+Once the client reaches the robot, it shows **Connected**. Send `Turn left 90 degrees, take a photo, and describe what you see`. TIAGo turns in the simulator, the reply describes what the camera sees, and the RTDL tree shows the `navigate` and `snapshot` calls.
+
+#### Other setups
+
+- **A real robot**: run the installer on the robot and install its robot configuration from the catalog instead of TIAGo.
+- **Change the planning model**: the VLM entered during installation is kept on the **Settings** page of Robonix Console under **Robot variables**. Change it there and restart Robonix.
 
 ### Command line
 
