@@ -60,7 +60,7 @@ Robonix runs on the robot. It can be installed and managed through Robonix Conso
 
 ### Robonix Console
 
-The steps below run the TIAGo robot in the Webots simulator and give it a first task from your own computer or phone. The simulator runs on a Linux computer that plays the role of the robot: Ubuntu 22.04 or later (x86_64 or aarch64), with Docker installed. The user who runs the installer must be able to run `docker` without `sudo` (for example, as a member of the `docker` group), because the simulator is started as that user. Below, `ROBOT_IP` stands for an address at which your computer or phone can reach the robot computer, such as a LAN or VPN address; once Robonix Console is installed, its **Overview** page lists the robot's addresses under **Robot Host**.
+The steps below run the TIAGo robot in the Webots simulator and give it a first task from your own computer or phone. The simulator runs on a Linux computer that plays the role of the robot: Ubuntu 22.04 (x86_64 or aarch64), with Docker installed. The user who runs the installer must be able to run `docker` without `sudo` (for example, as a member of the `docker` group), because the simulator is started as that user. Below, `ROBOT_IP` stands for an address at which your computer or phone can reach the robot computer, such as a LAN or VPN address; once Robonix Console is installed, its **Overview** page lists the robot's addresses under **Robot Host**.
 
 #### Set up the robot
 
