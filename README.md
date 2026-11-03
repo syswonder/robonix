@@ -70,7 +70,7 @@ On the robot computer, in a terminal, as a regular user:
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-The installer installs Robonix and Robonix Console. It asks for the vision-language model (VLM) that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name.
+The installer installs Robonix and Robonix Console. It asks for the model that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name.
 
 #### Use Robonix Console
 
@@ -118,7 +118,7 @@ Once the client reaches the robot, it shows **Connected**. Send `Turn left 90 de
 #### Other setups
 
 - **A real robot**: run the installer on the robot and install its robot configuration from the catalog instead of TIAGo.
-- **Change the planning model**: the VLM entered during installation is kept on the **Settings** page of Robonix Console under **Robot variables**. Change it there and restart Robonix.
+- **Change the planning model**: the model entered during installation is kept on the **Settings** page of Robonix Console under **Robot variables**, as **VLM endpoint URL**, **VLM key**, and **VLM model**. Change it there and restart Robonix.
 
 ### Command line
 
