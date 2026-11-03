@@ -56,63 +56,17 @@ The [System Architecture](#system-architecture) section lists every component.
 
 ## Quick Start
 
-A Robonix installation has three parts:
-
-- **Robonix**: the system that runs on the robot and executes tasks.
-- **[Robonix Console](https://hub.robonix.ai/)**: a web console on the robot for installing packages from the catalog, editing the configuration, starting and stopping Robonix, and reading its logs.
-- **[Robonix Client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It has a desktop version and an Android version, and runs on the robot or on another machine.
-
-Robonix can be installed and run through Robonix Console or from the command line.
+Robonix runs on the robot. It can be installed and managed through Robonix Console, a web console on the robot, or built from source and run with the `rbnx` command-line interface (CLI). Tasks are given through [Robonix Client](https://github.com/syswonder/robonix-client), which runs on the robot or on any computer or [Android device](https://github.com/syswonder/robonix-client-android/releases/latest) that can reach it, or with `rbnx chat` on the robot.
 
 ### Robonix Console
 
-This procedure runs the Webots TIAGo simulation and submits a first task.
-
-#### 1. Install Robonix Console
-
-On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), run as the regular user that will run Robonix:
+On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), as a regular user:
 
 ```bash
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-The installer builds Robonix if it is absent, starts Robonix Console as a systemd user service, and prompts for the model used by Pilot: an OpenAI-compatible endpoint URL, an API key, and a model that supports images and tool calls. These values may be left empty and set later.
-
-#### 2. Sign in and configure the model
-
-Open `http://127.0.0.1:4880` on the robot, or forward it from another machine with `ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP`. Sign in with a [Robonix Hub](https://hub.robonix.ai/) account.
-
-In **Settings > Robot variables**, set **VLM endpoint URL**, **VLM key**, and **VLM model**, then click **Save settings**. All deployments on the robot use these values; a change takes effect when Robonix restarts.
-
-#### 3. Create the TIAGo deployment
-
-The simulator requires Docker usable without `sudo`, and the NVIDIA Container Toolkit on machines with an NVIDIA GPU.
-
-1. On **Overview**, click **Choose a robot configuration**, select **PAL Robotics TIAGo**, and click **Create deployment**.
-2. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and click **Save**. These commands start the simulator before Robonix and stop it afterwards.
-3. Click **Start**. The first start builds the simulator and package images. **View run logs** shows progress; the deployment is ready when the camera, lidar, and chassis primitives, Pilot, and Liaison are running.
-
-#### 4. Install Robonix Client
-
-Robonix Client has a desktop version and an Android version. When the client runs on a machine other than the robot, including a phone, click **Allow other machines** on **Overview**, confirm, and restart Robonix. Use this setting only on a trusted network. Below, `ROBOT_IP` is one of the robot addresses shown on **Overview**, or `127.0.0.1` when the client runs on the robot.
-
-Desktop version, on Linux or macOS with Python 3.11 or later:
-
-```bash
-git clone https://github.com/syswonder/robonix-client.git
-cd robonix-client
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-robonix-client --robot-host ROBOT_IP
-```
-
-Windows installation and voice input are described in the [Robonix Client README](https://github.com/syswonder/robonix-client#install-guide).
-
-Android version, on Android 8.0 or later on the same network as the robot: install the APK from the [latest release](https://github.com/syswonder/robonix-client-android/releases/latest), allowing installation from unknown sources when prompted. In **Settings > Connection**, set **Robot Host** to `ROBOT_IP`, tap **Save**, and connect.
-
-#### 5. Submit a task
-
-On the desktop version, open `http://127.0.0.1:7860`; on Android, open the **Chat** tab. The client shows that it is connected once it reaches the robot. Enter a task such as "Turn left 90 degrees, take a photo, and describe what you see" and send it. The reply appears in the chat, and the RTDL view lists the capability calls that carry out the task.
+Open `http://127.0.0.1:4880` on the robot or through an SSH tunnel, and sign in with a [Robonix Hub](https://hub.robonix.ai/) account. Set the VLM endpoint, key, and model under **Settings**, install a robot configuration such as PAL Robotics TIAGo from the catalog, and click **Start**. Then connect Robonix Client to the robot and send a task. See the [Robonix Console guide](https://book.robonix.ai/getting-started/hub-console) for the complete walkthrough, including the Webots simulation and connecting from other devices.
 
 ### Command line
 
