@@ -575,7 +575,7 @@ impl RobonixSystemLiaisonHandsfreeEvents for LiaisonServiceImpl {
 
 // ── Stdin text loop (headless fallback) ─────────────────────────────────────
 
-async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
+async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) -> Result<()> {
     let task = Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
@@ -583,7 +583,7 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
         text: String::new(),
         audio_data: vec![],
         context_json: r#"{"session_end":true}"#.to_string(),
-        timestamp_ms: now_ms(),
+        timestamp_ms: voice::now_ms()?,
     };
     match pipeline.handle_intent(task).await {
         Ok(rx) => {
@@ -592,6 +592,7 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
         }
         Err(e) => debug!("[liaison/text] session_end: {e:#}"),
     }
+    Ok(())
 }
 
 async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
@@ -608,7 +609,7 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
 
         let mut line = String::new();
         if stdin.read_line(&mut line)? == 0 {
-            drain_session_end(&pipeline, &session_id).await;
+            drain_session_end(&pipeline, &session_id).await?;
             break;
         }
         let text = line.trim().to_string();
@@ -623,7 +624,7 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
             text,
             audio_data: vec![],
             context_json: String::new(),
-            timestamp_ms: now_ms(),
+            timestamp_ms: voice::now_ms()?,
         };
 
         match pipeline.handle_intent(task).await {
@@ -1027,13 +1028,6 @@ fn env_first(vars: &[&str], default: &str) -> String {
         }
     }
     default.to_string()
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn plan_calls(plan: &Plan) -> Vec<&CapabilityCall> {
