@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/gripper/grip"
+version = "1"
+kind = "primitive"
+idl = "gripper/srv/Grip.srv"
+description = "Dispatch gripping with an optional expected object width; observe state for contact and measured opening."
+
+[mode]
+type = "rpc"
