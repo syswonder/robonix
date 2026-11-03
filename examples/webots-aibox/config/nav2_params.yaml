@@ -1,0 +1,464 @@
+amcl:
+  ros__parameters:
+    use_sim_time: True
+    transform_tolerance: 0.3
+    tf_broadcast: true
+    scan_topic: /scanner_normalized
+    min_particles: 300
+    max_particles: 2000
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"  # match costmap robot_base_frame
+    global_frame_id: "map"
+    laser_max_range: -1.0
+    laser_min_range: -1.0
+    update_min_d: 0.05
+    update_min_a: 0.05
+    resample_interval: 1
+    set_initial_pose: true
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+map_server:
+  ros__parameters:
+    use_sim_time: True
+    # Overridden in launch by the "map" launch configuration or provided default value.
+    # To use in yaml, remove the default "map" value in the tb3_simulation_launch.py file & provide full path to map below.
+    yaml_filename: ""
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    # map frame: rtabmap provides the map->odom TF (online SLAM), so the BT
+    # navigator plans in the same map frame as the costmaps.
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: "__ROBONIX_ODOM_TOPIC__"
+    bt_loop_duration: 50
+    # BT goal acks cross the board↔sim-host rmw_zenoh link (RTT mean 5-9 ms,
+    # spikes ~37 ms); the 20 ms same-host default sits on the mean and
+    # intermittently aborts goals. 200 ms bounds only the worst-case wait.
+    default_server_timeout: 200
+    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
+    # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
+    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
+    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_smooth_path_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_assisted_teleop_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_drive_on_heading_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_globally_updated_goal_condition_bt_node
+    - nav2_is_path_valid_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_truncate_path_local_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_path_expiring_timer_condition
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_goal_updated_controller_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+    - nav2_controller_cancel_bt_node
+    - nav2_path_longer_on_approach_bt_node
+    - nav2_wait_cancel_bt_node
+    - nav2_spin_cancel_bt_node
+    - nav2_back_up_cancel_bt_node
+    - nav2_assisted_teleop_cancel_bt_node
+    - nav2_drive_on_heading_cancel_bt_node
+
+bt_navigator_navigate_through_poses_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+bt_navigator_navigate_to_pose_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
+    controller_plugins: ["FollowPath"]
+
+    # Progress checker parameters
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+    # Goal checker parameters
+    #precise_goal_checker:
+    #  plugin: "nav2_controller::SimpleGoalChecker"
+    #  xy_goal_tolerance: 0.25
+    #  yaw_goal_tolerance: 0.25
+    #  stateful: True
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+    # DWB parameters
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: True
+      min_vel_x: 0.0
+      min_vel_y: 0.0
+      max_vel_x: 0.26
+      max_vel_y: 0.0
+      max_vel_theta: 1.0
+      min_speed_xy: 0.0
+      max_speed_xy: 0.26
+      min_speed_theta: 0.0
+      # Add high threshold velocity for turtlebot 3 issue.
+      # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
+      acc_lim_x: 2.5
+      acc_lim_y: 0.0
+      acc_lim_theta: 3.2
+      decel_lim_x: -2.5
+      decel_lim_y: 0.0
+      decel_lim_theta: -3.2
+      vx_samples: 20
+      vy_samples: 5
+      vtheta_samples: 20
+      sim_time: 1.7
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+      xy_goal_tolerance: 0.25
+      trans_stopped_velocity: 0.25
+      short_circuit_trajectory_evaluation: True
+      stateful: True
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      transform_tolerance: 0.3
+      # map frame: rtabmap publishes both /map and a map->odom TF, so the
+      # costmap is anchored in the SLAM map (same as the proven tiago_demo
+      # config). The rolling window crops the map around the robot.
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: true
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.05
+      # TIAGo's base is 0.54 m across; 3 cm of margin on its radius. No
+      # footprint padding: the controller keeps the centre this far from an
+      # obstacle, and spin and backup must accept every pose it can reach.
+      robot_radius: 0.30
+      footprint_padding: 0.0
+      # static_layer first: the rolling local window is cropped from the live
+      # rtabmap /map, so the local controller (DWB) sees mapped walls and
+      # avoids them reactively. obstacle_layer adds anything not yet mapped.
+      plugins: ["static_layer", "obstacle_layer", "depth_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        map_topic: "__ROBONIX_MAP_TOPIC__"
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: "__ROBONIX_SCAN_TOPIC__"
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      depth_layer:
+        # The head camera's depth, for what the lidar's plane misses: table tops,
+        # shelves, anything overhanging the floor. Heights are in the map frame,
+        # where the floor is at -0.0985 (base_link's height); the band spans from
+        # 5 cm above the floor to the top of TIAGo Lite.
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 15.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        update_footprint_enabled: true
+        combination_method: 1
+        origin_z: -0.1
+        publish_voxel_map: false
+        transform_tolerance: 0.3
+        mapping_mode: false
+        observation_sources: depth_mark depth_clear
+        depth_mark:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: true
+          clearing: false
+          obstacle_range: 3.5
+          min_obstacle_height: -0.05
+          max_obstacle_height: 1.30
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: "voxel"
+          voxel_min_points: 0
+          clear_after_reading: true
+        depth_clear:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: false
+          clearing: true
+          max_z: 4.0
+          min_z: 0.1
+          vertical_fov_angle: 0.85
+          horizontal_fov_angle: 1.04
+          decay_acceleration: 5.0
+          model_type: 0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 1.0
+        inflation_radius: 1.50
+      always_send_full_costmap: True
+      
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      # map frame, online SLAM: rtabmap publishes a live /map (growing as the
+      # robot explores) plus a map->odom TF. The static_layer tracks /map
+      # updates (map_subscribe_transient_local) so the costmap follows the
+      # map as it grows — mapping and navigating at the same time. The
+      # obstacle_layer adds anything not yet in the map; allow_unknown lets
+      # the planner route through not-yet-mapped space.
+      global_frame: map
+      robot_base_frame: base_link
+      rolling_window: false
+      width: 12
+      height: 12
+      use_sim_time: True
+      robot_radius: 0.30
+      footprint_padding: 0.0
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "depth_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: "__ROBONIX_SCAN_TOPIC__"
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      depth_layer:
+        # The head camera's depth, for what the lidar's plane misses: table tops,
+        # shelves, anything overhanging the floor. Heights are in the map frame,
+        # where the floor is at -0.0985 (base_link's height); the band spans from
+        # 5 cm above the floor to the top of TIAGo Lite.
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 120.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        update_footprint_enabled: true
+        combination_method: 1
+        origin_z: -0.1
+        publish_voxel_map: false
+        transform_tolerance: 0.3
+        mapping_mode: false
+        observation_sources: depth_mark depth_clear
+        depth_mark:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: true
+          clearing: false
+          obstacle_range: 3.5
+          min_obstacle_height: -0.05
+          max_obstacle_height: 1.30
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: "voxel"
+          voxel_min_points: 0
+          clear_after_reading: true
+        depth_clear:
+          data_type: PointCloud2
+          topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+          marking: false
+          clearing: true
+          max_z: 4.0
+          min_z: 0.1
+          vertical_fov_angle: 0.85
+          horizontal_fov_angle: 1.04
+          decay_acceleration: 5.0
+          model_type: 0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+      always_send_full_costmap: True
+      
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: True
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: True
+
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors/AssistedTeleop"
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    use_sim_time: true
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: True
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: True
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: True
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.26, 0.0, 1.0]
+    min_velocity: [-0.26, 0.0, -1.0]
+    max_accel: [2.5, 0.0, 3.2]
+    max_decel: [-2.5, 0.0, -3.2]
+    odom_topic: "__ROBONIX_ODOM_TOPIC__"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+# Last line of defence between the velocity smoother and the velocity guard:
+# whatever the controller planned, the robot stops before anything the lidar
+# or the depth camera sees within 6 cm of its 0.27 m radius, and slows inside
+# 0.55 m. Heights are in base_link, 0.0985 m above the floor.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: True
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    transform_tolerance: 0.3
+    source_timeout: 1.0
+    stop_pub_timeout: 2.0
+    # The base itself, not the costmap's margin: slow the robot so that it
+    # would not touch anything within the next 1.2 s at its current
+    # velocity. Moving away or turning in place is never limited, so a robot
+    # next to furniture can always leave.
+    polygons: ["Base"]
+    Base:
+      type: "circle"
+      radius: 0.27
+      action_type: "approach"
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      max_points: 3
+      visualize: False
+    observation_sources: ["scan", "depth"]
+    scan:
+      type: "scan"
+      topic: "__ROBONIX_SCAN_TOPIC__"
+    depth:
+      type: "pointcloud"
+      topic: "__ROBONIX_DEPTH_CLOUD_TOPIC__"
+      min_height: -0.05
+      max_height: 1.2
