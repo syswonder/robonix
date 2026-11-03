@@ -70,7 +70,7 @@ On the robot computer, in a terminal, as a regular user:
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-The installer installs Robonix and Robonix Console. It asks for the vision-language model (VLM) that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name. Pilot sends the model camera images and offers the robot's capabilities as tool calls, so the model must support both.
+The installer installs Robonix and Robonix Console. It asks for the vision-language model (VLM) that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name. Pilot sends the model the robot's camera images, so the model must accept image input.
 
 #### Use Robonix Console
 
