@@ -72,7 +72,7 @@ pub struct HandsfreeController {
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
-    events: broadcast::Sender<Result<VoiceEvent, tonic::Status>>,
+    events: broadcast::Sender<VoiceEvent>,
     active_turns: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -197,7 +197,7 @@ impl HandsfreeController {
             loop {
                 match source.recv().await {
                     Ok(event) => {
-                        if tx.send(event).await.is_err() {
+                        if tx.send(Ok(event)).await.is_err() {
                             break;
                         }
                     }
@@ -213,7 +213,15 @@ impl HandsfreeController {
 
     fn publish(&self, event: VoiceEvent) {
         // A disconnected UI must never block the robot-local interaction.
-        let _ = self.events.send(Ok(event));
+        let _ = self.events.send(event);
+    }
+
+    async fn publish_error(&self, session_id: &str, message: &str) {
+        self.state.lock().await.last_error = message.to_string();
+        match voice::event_error(session_id, message) {
+            Ok(event) => self.publish(event),
+            Err(status) => warn!("[liaison/handsfree] cannot timestamp error event: {status}"),
+        }
     }
 
     async fn set_state(&self, value: &str, error: Option<String>) {
@@ -221,10 +229,6 @@ impl HandsfreeController {
         state.state = value.to_string();
         if let Some(error) = error {
             state.last_error = error;
-        } else if value == "listening" {
-            // A connected microphone and a fresh wake listener mean an older
-            // reconnect failure is no longer actionable in the client UI.
-            state.last_error.clear();
         }
     }
 
@@ -257,7 +261,7 @@ impl HandsfreeController {
                     let timestamp = match voice::now_ms() {
                         Ok(timestamp) => timestamp,
                         Err(error) => {
-                            let _ = self.events.send(Err(error.clone()));
+                            warn!("[liaison/handsfree] wake timestamp failed: {error}");
                             self.set_state("error", Some(error.to_string())).await;
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             continue;
@@ -275,7 +279,7 @@ impl HandsfreeController {
                         let message = format!("{error:#}");
                         warn!("[liaison/handsfree] voice turn failed: {message}");
                         let session_id = self.config.lock().await.handsfree_session_id.clone();
-                        let _ = self.events.send(voice::event_error(&session_id, &message));
+                        self.publish_error(&session_id, &message).await;
                         self.set_state("error", Some(message)).await;
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -404,6 +408,7 @@ impl HandsfreeController {
                 // background and immediately restore wake-word listening so
                 // the user can steer a long-running action.
                 let controller = Arc::clone(self);
+                let session_id = config.handsfree_session_id.clone();
                 let handle = tokio::spawn(async move {
                     while let Some(item) = stream.next().await {
                         match item {
@@ -419,7 +424,9 @@ impl HandsfreeController {
                                 }
                             }
                             Err(status) => {
-                                let _ = controller.events.send(Err(status.clone()));
+                                controller
+                                    .publish_error(&session_id, &status.to_string())
+                                    .await;
                                 warn!(
                                     "[liaison/handsfree] background voice stream failed: {status}"
                                 );
@@ -442,5 +449,90 @@ impl HandsfreeController {
         let mut turns = self.active_turns.lock().await;
         turns.retain(|turn| !turn.is_finished());
         !turns.is_empty()
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../chronos/clock/tests/support/mod.rs"
+    ));
+
+    #[test]
+    fn observers_survive_turn_errors_and_clock_outages() {
+        run_case(
+            "handsfree::tests::observers_survive_turn_errors_and_clock_outages",
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                        let address = reserved.local_addr().unwrap();
+                        drop(reserved);
+                        let server = tokio::spawn(robonix_atlas::service::serve_atlas(
+                            Arc::new(robonix_atlas::service::AtlasRegistry::default()),
+                            address,
+                        ));
+                        let atlas = AtlasClient::connect_with_retry(
+                            address.to_string(),
+                            50,
+                            Duration::from_millis(10),
+                        )
+                        .await
+                        .unwrap();
+                        let controller = HandsfreeController::new(
+                            HandsfreeConfig::default(),
+                            Arc::new(Mutex::new(atlas)),
+                            String::new(),
+                            Arc::new(AccessControlConfig::from_env()),
+                        );
+                        let mut first = controller.subscribe_events();
+                        let mut second = controller.subscribe_events();
+                        controller
+                            .publish_error("failed-turn", "upstream unavailable")
+                            .await;
+                        for observer in [&mut first, &mut second] {
+                            let event =
+                                tokio::time::timeout(Duration::from_secs(2), observer.next())
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .unwrap();
+                            assert_eq!(event.session_id, "failed-turn");
+                            assert_eq!(event.error, "upstream unavailable");
+                            assert!(event.timestamp_ms > 0);
+                        }
+                        mode(1);
+                        controller
+                            .publish_error("clock-failed-turn", "original failure")
+                            .await;
+                        controller.set_state("listening", None).await;
+                        assert_eq!(controller.snapshot().await.last_error, "original failure");
+                        mode(0);
+                        let recovered = VoiceEvent {
+                            session_id: "next-turn".into(),
+                            timestamp_ms: voice::now_ms().unwrap(),
+                            ..Default::default()
+                        };
+                        controller.publish(recovered.clone());
+                        for observer in [&mut first, &mut second] {
+                            let event =
+                                tokio::time::timeout(Duration::from_secs(2), observer.next())
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .unwrap();
+                            assert_eq!(event, recovered);
+                        }
+                        server.abort();
+                        let _ = server.await;
+                    });
+            },
+        );
     }
 }

@@ -318,6 +318,7 @@ pub async fn start_voice_session(
                     .await;
             }
             Err(e) => {
+                warn!("[liaison/voice] session '{session_id_for_task}' failed: {e:#}");
                 let _ = tx
                     .send(event_error(&session_id_for_task, &format!("{e:#}")))
                     .await;
@@ -903,7 +904,7 @@ async fn stream_capture_and_recognize(
     } else {
         DEFAULT_AUDIO_SAMPLE_RATE
     };
-    if let Some(path) = save_voice_recording(session_id, &pcm, sample_rate)? {
+    if let Some(path) = save_voice_recording(session_id, &pcm, sample_rate) {
         let _ = tx
             .send(Ok(event_status(
                 KIND_RECORDING_DONE,
@@ -1285,8 +1286,10 @@ fn event_user(
     })
 }
 
-/// Report a voice failure, or a clock Status if the error event cannot be timestamped.
+/// Preserve the original failure when its event cannot be timestamped.
 pub(crate) fn event_error(session_id: &str, error: &str) -> Result<VoiceEvent, Status> {
+    let timestamp_ms = now_ms()
+        .map_err(|clock| Status::new(clock.code(), format!("{error}; {}", clock.message())))?;
     Ok(VoiceEvent {
         event_kind: KIND_ERROR,
         session_id: session_id.to_string(),
@@ -1296,7 +1299,7 @@ pub(crate) fn event_error(session_id: &str, error: &str) -> Result<VoiceEvent, S
         pilot: None,
         error: error.to_string(),
         status_message: String::new(),
-        timestamp_ms: now_ms()?,
+        timestamp_ms,
     })
 }
 
@@ -1321,27 +1324,44 @@ fn now_ns() -> Result<u64, Status> {
         .map_err(|error| Status::unavailable(format!("Chronos time read failed: {error}")))
 }
 
-/// Save captured PCM; clock failures propagate before naming the file.
-fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Result<Option<PathBuf>> {
+// Diagnostic recording must not fail a voice turn when its clock is unavailable.
+fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Option<PathBuf> {
     let dump_dir = std::env::var("ROBONIX_LIAISON_VOICE_SAVE_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "/tmp".to_string());
     let dir = Path::new(&dump_dir);
     if fs::create_dir_all(dir).is_err() {
-        return Ok(None);
+        return None;
     }
-    let ts = now_ms()?;
+    let ts = match now_ms() {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            warn!("[liaison/voice] skipping recording: {error}");
+            return None;
+        }
+    };
+    let session_id: String = session_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
     let file_name = format!("voice_{}_{}.wav", session_id, ts);
     let path = dir.join(file_name);
     if write_wav(&path, pcm, sample_rate).is_ok() {
-        Ok(Some(path))
+        Some(path)
     } else {
-        Ok(None)
+        None
     }
 }
 
 fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::Error> {
+    use std::io::Write;
     const CHANNELS: u16 = 1;
     const BITS_PER_SAMPLE: u16 = 16;
     let data_size = pcm.len() as u32;
@@ -1365,7 +1385,11 @@ fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::E
     buf.extend_from_slice(&data_size.to_le_bytes());
     buf.extend_from_slice(pcm);
 
-    fs::write(path, buf)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(&buf)
 }
 
 /// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
@@ -1409,10 +1433,11 @@ mod tests {
                             .code(),
                         tonic::Code::Unavailable
                     );
-                    assert_eq!(
-                        event_error("s", "voice error").unwrap_err().code(),
-                        tonic::Code::Unavailable
-                    );
+                    let error = event_error("s", "voice error").unwrap_err();
+                    assert_eq!(error.code(), tonic::Code::Unavailable);
+                    assert!(error.message().contains("voice error"));
+                    assert!(error.message().contains("Chronos time read failed"));
+                    assert!(save_voice_recording("s", &[], 16_000).is_none());
                     assert!(now_ns().is_err());
                     clock_faults::mode(0);
                     assert!(
@@ -1427,6 +1452,55 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn recording_ids_remain_in_save_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let dump = directory.path().join("dump");
+        clock_faults::run_case_with_env(
+            "voice::tests::recording_ids_remain_in_save_directory",
+            &[("ROBONIX_LIAISON_VOICE_SAVE_DIR", dump.as_os_str())],
+            || {
+                let dump =
+                    PathBuf::from(std::env::var_os("ROBONIX_LIAISON_VOICE_SAVE_DIR").unwrap());
+                fs::create_dir_all(dump.join("voice_probe")).unwrap();
+                for session in [
+                    "probe/../../escaped",
+                    "/tmp/escaped",
+                    "a\\b",
+                    "a%2Fb",
+                    "plain-id",
+                ] {
+                    let path = save_voice_recording(session, &[0, 0], 16_000).unwrap();
+                    assert_eq!(path.parent(), Some(dump.as_path()));
+                    assert!(
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with("voice_")
+                    );
+                    let bytes = fs::read(&path).unwrap();
+                    assert!(bytes.starts_with(b"RIFF"));
+                    assert!(write_wav(&path, &[1, 2], 16_000).is_err());
+                    assert_eq!(fs::read(&path).unwrap(), bytes);
+                }
+                assert!(!fs::read_dir(dump.parent().unwrap()).unwrap().any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("escaped_")
+                }));
+                let outside = dump.parent().unwrap().join("outside.wav");
+                fs::write(&outside, b"keep").unwrap();
+                let link = dump.join("linked.wav");
+                std::os::unix::fs::symlink(&outside, &link).unwrap();
+                assert!(write_wav(&link, &[0, 0], 16_000).is_err());
+                assert_eq!(fs::read(&outside).unwrap(), b"keep");
+            },
+        );
+    }
 
     #[test]
     fn fallback_user_id_normalises_hint() {

@@ -4,6 +4,15 @@ use std::process::Command;
 
 /// Run clock fault injection in an isolated test process without changing host time.
 pub fn run_case(name: &str, exercise: fn()) -> Option<std::process::Output> {
+    run_case_with_env(name, &[], exercise)
+}
+
+/// Configure each child before its process-local logging or clock state initializes.
+pub fn run_case_with_env(
+    name: &str,
+    environment: &[(&str, &std::ffi::OsStr)],
+    exercise: fn(),
+) -> Option<std::process::Output> {
     if std::env::var("ROBONIX_CLOCK_TEST_CHILD").as_deref() == Ok(name) {
         exercise();
         return None;
@@ -31,6 +40,7 @@ pub fn run_case(name: &str, exercise: fn()) -> Option<std::process::Output> {
         .args(["--exact", name, "--nocapture"])
         .env("LD_PRELOAD", library)
         .env("ROBONIX_CLOCK_TEST_CHILD", name)
+        .envs(environment.iter().copied())
         .output()
         .unwrap();
     assert!(
