@@ -1,0 +1,24 @@
+# TIAGo lidar primitive, AIBOX deployment copy.
+#
+# This is examples/webots/primitives/tiago_lidar forwarded over SSH: the
+# driver still runs on the sim host (docker-exec'd into the sim container),
+# but boot/Soma on the board spawn and supervise it through the wrapper
+# scripts in ../scripts, so `rbnx boot` brings up the full split stack.
+# Keep the provider identity (`name` here equals the driver's hard-coded
+# Primitive id) and the capability list in sync with the upstream package.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_lidar
+  version: 0.1.0
+  vendor: robonix
+  description: Tiago lidar driver — 2D scan snapshot over Webots ROS2.
+  license: MulanPSL-2.0
+
+build: bash ../../scripts/remote_build.sh tiago_lidar
+start: bash ../../scripts/start.sh tiago_lidar
+stop: bash ../../scripts/stop.sh tiago_lidar
+
+capabilities:
+  - name: robonix/primitive/lidar/lidar
+  - name: robonix/primitive/lidar/snapshot

@@ -1,0 +1,13 @@
+// rmw_zenoh session config for the board: a pure Zenoh client of the router
+// inside the sim container (see webots-ubuntu.env's ZENOH_SESSION_CONFIG_URI).
+// Absent fields fall back to zenoh defaults — the shipped
+// DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5 only documents them.
+//
+// Copy to /root/robonix/run/zenoh-aibox.json5 and set the Ubuntu sim host's
+// IP (192.0.2.10 here, matching webots-ubuntu.env.example).
+{
+  mode: "client",
+  connect: {
+    endpoints: ["tcp/192.0.2.10:7447"],
+  },
+}

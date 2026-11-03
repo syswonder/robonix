@@ -1,0 +1,25 @@
+# TIAGo health primitive, AIBOX deployment copy.
+#
+# This is examples/webots/primitives/tiago_health forwarded over SSH: the
+# driver still runs on the sim host (docker-exec'd into the sim container),
+# but boot/Soma on the board spawn and supervise it through the wrapper
+# scripts in ../scripts, so `rbnx boot` brings up the full split stack.
+# Keep the provider identity (`name` here equals the driver's hard-coded
+# Primitive id) and the capability list in sync with the upstream package.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_health
+  version: 0.1.0
+  vendor: robonix
+  description: Nominal simulated hardware health for the Webots TIAGo deployment.
+  license: MulanPSL-2.0
+
+build: bash ../../scripts/remote_build.sh tiago_health
+start: bash ../../scripts/start.sh tiago_health
+stop: bash ../../scripts/stop.sh tiago_health
+
+capabilities:
+  - name: robonix/primitive/health/state
+  - name: robonix/primitive/health/stream
+  - name: robonix/lifecycle/driver
