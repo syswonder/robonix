@@ -23,6 +23,8 @@ use std::sync::OnceLock;
 pub mod format;
 pub mod sink;
 
+const CLOCK_ERROR_NOTE: &str = " [Chronos time read failed: ";
+
 /// Process-wide default tag, set once by [`init`].
 static DEFAULT_TAG: OnceLock<String> = OnceLock::new();
 
@@ -255,7 +257,12 @@ impl LogRecord {
         msg: impl Into<String>,
     ) -> std::io::Result<Self> {
         let wall = robonix_chronos_clock::wall_time()?;
-        let ts = u64::try_from(wall.timestamp_ns).map_err(std::io::Error::other)?;
+        let ts = u64::try_from(wall.timestamp_ns).map_err(|_| {
+            std::io::Error::other(format!(
+                "Chronos wall timestamp {}ns does not fit u64",
+                wall.timestamp_ns
+            ))
+        })?;
         let msg = msg.into();
         let msg = if wall.available {
             msg
@@ -369,11 +376,7 @@ pub fn log(level: Level, tag: &str, msg: &str) {
     let record = match LogRecord::now(level, tag, msg) {
         Ok(record) => record,
         Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "{level} {tag} {msg} [Chronos time read failed: {error}]"
-            );
+            let _ = format::write_clock_error(level, tag, msg, &error);
             return;
         }
     };
@@ -414,7 +417,8 @@ pub fn error(tag: &str, msg: &str) {
 /// appears once in the JSON fields and again embedded in `msg`). When the line
 /// is recognised as Scribe console output, strip the prefix and re-emit just
 /// the inner message at its original level under `tag`; otherwise treat the
-/// line as opaque output and log it verbatim at Info.
+/// line as opaque output and log it verbatim at Info. Unstamped clock-failure
+/// records retain their original level and diagnostic text.
 pub fn ingest(tag: &str, line: &str) {
     match parse_console_line(line) {
         Some((level, msg)) => log(level, tag, msg),
@@ -430,37 +434,41 @@ pub fn ingest(tag: &str, line: &str) {
 /// positions so a non-Scribe line (e.g. raw ROS2 output) falls through to None.
 fn parse_console_line(line: &str) -> Option<(Level, &str)> {
     let b = line.as_bytes();
-    // Shortest possible: 47-char prefix + at least one msg byte.
-    if b.len() < 48 {
-        return None;
-    }
-    if b[2] != b'-'
-        || b[5] != b' '
-        || b[8] != b':'
-        || b[11] != b':'
-        || b[14] != b'.'
-        || b[18] != b' '
-        || b[19] != b' '
-        || b[21] != b' '
-        || b[46] != b' '
-    {
-        return None;
-    }
-    for &i in &[0usize, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 17] {
-        if !b[i].is_ascii_digit() {
-            return None;
-        }
-    }
-    let level = match b[20] {
+    let (code, message) =
+        if b.get(1) == Some(&b' ') && line.contains(CLOCK_ERROR_NOTE) && line.ends_with(']') {
+            (b[0], line)
+        } else {
+            // Shortest possible: 47-char prefix + at least one msg byte.
+            if b.len() < 48 {
+                return None;
+            }
+            if b[2] != b'-'
+                || b[5] != b' '
+                || b[8] != b':'
+                || b[11] != b':'
+                || b[14] != b'.'
+                || b[18] != b' '
+                || b[19] != b' '
+                || b[21] != b' '
+                || b[46] != b' '
+            {
+                return None;
+            }
+            for &i in &[0usize, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 17] {
+                if !b[i].is_ascii_digit() {
+                    return None;
+                }
+            }
+            (b[20], line.get(47..)?)
+        };
+    let level = match code {
         b'D' => Level::Debug,
         b'I' => Level::Info,
         b'W' => Level::Warn,
         b'E' => Level::Error,
         _ => return None,
     };
-    // Byte 47 is the first message byte; it is a char boundary because bytes
-    // 0..=46 are all ASCII when every check above passed.
-    line.get(47..).map(|msg| (level, msg))
+    Some((level, message))
 }
 
 // ── Macros — process-wide default tag ───────────────────────────────

@@ -25,6 +25,11 @@ message, and error directly to stderr, even for a file-only level, and skips
 the structured file record. It neither fills in zero nor retries through a
 different clock. Fully filtered messages still produce no output.
 
+Clock-failure stderr records escape control characters and retain their level
+when forwarded through `ingest`, including when the receiving process only
+accepts Error records. The forwarded message keeps the original tag and clock
+error; its structured timestamp belongs to the receiving process.
+
 `LogRecord::now(...)` now returns `std::io::Result<LogRecord>`; callers that
 construct records directly must handle errors. The logging functions and
 macros retain their existing signatures. Clock reads currently require Linux;
