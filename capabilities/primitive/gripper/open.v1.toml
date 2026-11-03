@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/gripper/open"
+version = "1"
+kind = "primitive"
+idl = "gripper/srv/Open.srv"
+description = "Dispatch opening to the configured endpoint; observe state for arrival."
+
+[mode]
+type = "rpc"
