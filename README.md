@@ -60,13 +60,20 @@ Robonix runs on the robot. It can be installed and managed through Robonix Conso
 
 ### Robonix Console
 
-On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), as a regular user:
+The following steps run the TIAGo robot in the Webots simulator through Robonix Console and send it a first task. On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), as a regular user:
 
 ```bash
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-Open `http://127.0.0.1:4880` on the robot or through an SSH tunnel, and sign in with a [Robonix Hub](https://hub.robonix.ai/) account. Set the VLM endpoint, key, and model under **Settings**, install a robot configuration such as PAL Robotics TIAGo from the catalog, and click **Start**. Then connect Robonix Client to the robot and send a task. See the [Robonix Console guide](https://book.robonix.ai/getting-started/hub-console) for the complete walkthrough, including the Webots simulation and connecting from other devices.
+1. Open `http://127.0.0.1:4880` on the robot, or through `ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP`, and sign in with a [Robonix Hub](https://hub.robonix.ai/) account.
+2. In **Settings > Robot variables**, set the VLM endpoint URL, key, and model, and save. The model must be OpenAI-compatible and accept images and tool calls. The installer asks for the same values.
+3. On **Overview**, click **Choose a robot configuration**, select **PAL Robotics TIAGo**, and create the deployment. The Webots simulator needs Docker usable without `sudo`.
+4. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and save. Click **Start**; the first start builds the simulator and takes a while.
+5. Connect Robonix Client. On the robot, connect to `127.0.0.1`. From another device, first click **Allow other machines** on **Overview** and restart Robonix, then connect to `ROBOT_IP`. On a computer, run `pip install -e .` in a clone of [robonix-client](https://github.com/syswonder/robonix-client), start `robonix-client --robot-host ROBOT_IP`, and open `http://127.0.0.1:7860`. On Android, install the [APK](https://github.com/syswonder/robonix-client-android/releases/latest) and set **Robot Host** in **Settings**.
+6. Send the task `Turn left 90 degrees, take a photo, and describe what you see`. TIAGo turns in the simulator, the reply describes the photo, and the RTDL view shows the `navigate` and `snapshot` calls.
+
+The [Robonix Console guide](https://book.robonix.ai/getting-started/hub-console) covers each step in detail.
 
 ### Command line
 
