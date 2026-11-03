@@ -90,6 +90,13 @@ print(json.dumps({{"storage": "ok"}}))
 '''
 ROS_CHECK = ('import rclpy, tf2_ros; from sensor_msgs.msg import Image; '
              'from nav_msgs.msg import OccupancyGrid; print("ROS Python imports OK")')
+ROS_BUILD_CHECK = '''
+import colcon_core, colcon_cmake, colcon_ros, colcon_parallel_executor
+import rosidl_adapter, json
+from ament_index_python.packages import get_package_share_directory
+get_package_share_directory('rosidl_default_generators')
+print(json.dumps({'ros_build_tools': 'ok'}))
+'''
 
 
 def detect() -> dict:
@@ -175,6 +182,25 @@ def install_ros() -> str:
     return ros
 
 
+def prepare_ros_overlay(ros: str) -> None:
+    workspace = BUILD / 'codegen/ros2_idl'
+    if not (workspace / 'src/map').is_dir():
+        print('[scene/native] WARNING: map interface sources missing; skipping ROS overlay build', flush=True)
+        return
+    if probe(sys.executable, ROS_BUILD_CHECK, ros).returncode:
+        apt_install(['python3-colcon-common-extensions', f'ros-{ros}-rosidl-default-generators'])
+        require_probe(sys.executable, ROS_BUILD_CHECK, ros)
+    command = [sys.executable, '-c', 'from colcon_core.command import main; raise SystemExit(main())',
+               'build', '--packages-up-to', 'map', '--parallel-workers', '2', '--cmake-args',
+               f'-DPython3_EXECUTABLE={sys.executable}', f'-DPYTHON_EXECUTABLE={sys.executable}']
+    run(['bash', '-c', 'set -e; source "$1"; shift; exec "$@"',
+         'scene-native-overlay', f'/opt/ros/{ros}/setup.bash', *command], cwd=workspace)
+    check = ('from map.msg import MapLifecycle; '
+             'MapLifecycle.__class__.__import_type_support__(); '
+             'assert MapLifecycle.__class__._TYPE_SUPPORT is not None')
+    run(['bash', '-c', 'set -e; source "$1"; source "$2"; exec "$3" -c "$4"',
+         'scene-native-overlay-check', f'/opt/ros/{ros}/setup.bash',
+         str(workspace / 'install/setup.bash'), sys.executable, check])
 
 
 def environment_key(host: dict, base_python: str = None) -> str:

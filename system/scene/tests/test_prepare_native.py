@@ -354,3 +354,42 @@ def test_failed_cuda_bindings_probe_preserves_published_selection(tmp_path, monk
     with pytest.raises(RuntimeError, match='bindings'):
         prepare.verify(host())
     assert json.loads((tmp_path / 'native-env.json').read_text()) == {'key': 'old'}
+
+
+@pytest.mark.parametrize('tools_ready', [True, False])
+def test_ros_overlay_builds_and_checks_type_support(tmp_path, monkeypatch, tools_ready):
+    prepare = module()
+    monkeypatch.setattr(prepare, 'BUILD', tmp_path)
+    workspace = tmp_path / 'codegen/ros2_idl'
+    (workspace / 'src/map').mkdir(parents=True)
+    monkeypatch.setattr(prepare, 'probe', lambda *args: subprocess.CompletedProcess(
+        [], 0 if tools_ready else 1, '', ''))
+    monkeypatch.setattr(prepare, 'require_probe', Mock(return_value={}))
+    install = Mock()
+    execute = Mock()
+    monkeypatch.setattr(prepare, 'apt_install', install)
+    monkeypatch.setattr(prepare, 'run', execute)
+    prepare.prepare_ros_overlay('humble')
+    if tools_ready:
+        install.assert_not_called()
+    else:
+        install.assert_called_once_with([
+            'python3-colcon-common-extensions', 'ros-humble-rosidl-default-generators'])
+    build, check = execute.call_args_list
+    assert build.kwargs['cwd'] == workspace
+    assert build.args[0][-2:] == [f'-DPython3_EXECUTABLE={sys.executable}',
+                                 f'-DPYTHON_EXECUTABLE={sys.executable}']
+    assert str(workspace / 'install/setup.bash') in check.args[0]
+    assert check.args[0][-2] == sys.executable
+
+
+def test_failed_ros_overlay_build_stops_before_type_check(tmp_path, monkeypatch):
+    prepare = module()
+    monkeypatch.setattr(prepare, 'BUILD', tmp_path)
+    (tmp_path / 'codegen/ros2_idl/src/map').mkdir(parents=True)
+    monkeypatch.setattr(prepare, 'probe', lambda *args: subprocess.CompletedProcess([], 0, '', ''))
+    execute = Mock(side_effect=subprocess.CalledProcessError(1, ['colcon']))
+    monkeypatch.setattr(prepare, 'run', execute)
+    with pytest.raises(subprocess.CalledProcessError):
+        prepare.prepare_ros_overlay('humble')
+    assert execute.call_count == 1

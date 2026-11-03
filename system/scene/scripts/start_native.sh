@@ -23,6 +23,10 @@ PY="${SCENE_NATIVE_PYTHON:-python3}"
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 # shellcheck disable=SC1091
 set +u; source "/opt/ros/${ROS_DISTRO}/setup.bash"; set -u
+ROS2_IDL_SETUP="$PKG/rbnx-build/codegen/ros2_idl/install/setup.bash"
+if [[ -f "$ROS2_IDL_SETUP" ]]; then
+    set +u; source "$ROS2_IDL_SETUP"; set -u
+fi
 
 # Codegen stubs (proto_gen + robonix_mcp_types) + robonix-api + the package.
 export PYTHONPATH="$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:$PKG:${PYTHONPATH:-}"

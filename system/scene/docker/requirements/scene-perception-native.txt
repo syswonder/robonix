@@ -1,6 +1,8 @@
 # Native ConceptGraphs uses NumPy fusion and direct model adapters.
 numpy>=1.26,<2
-opencv-python-headless>=4.8
+# OpenCV 4.12+ requires NumPy 2; keep both wheels compatible with host ROS.
+opencv-python-headless>=4.8,<4.12
+opencv-python>=4.8,<4.12
 ultralytics>=8.3
 clip-anytorch>=2.6
 open_clip_torch>=2.20

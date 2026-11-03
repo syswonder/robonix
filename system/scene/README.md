@@ -722,7 +722,9 @@ this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
 `SCENE_MAP_BINDING_WAIT_S`) → manifest `config.map_id` → `SCENE_MAP_ID` env →
 `"default"`. The broadcast needs the generated `map` interface package
 (`rbnx codegen --ros2` → colcon overlay, built by `scripts/build.sh`, sourced
-by the container entrypoint); without it scene falls back to static binding
+by the container entrypoint or Native start script); Native builds the overlay
+with its selected Python interpreter and checks ROS message type support.
+Without the overlay, Scene falls back to static binding
 with a warning. At runtime scene only WATCHES the broadcast: if mapping's
 identity or `generation` (bumped when the map origin may have changed: reset /
 mapping-mode session start) drifts from the startup binding, scene logs a

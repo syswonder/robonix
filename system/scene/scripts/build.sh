@@ -105,12 +105,8 @@ fi
 
 
 # ── 1. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
-# --ros2 also emits rbnx-build/codegen/ros2_idl: the generated ROS 2
-# interface overlay carrying map/msg/MapLifecycle (mapping's latched map
-# identity broadcast, which scene's map binding subscribes to). It is
-# colcon-built inside the scene image after the docker build below and
-# sourced by docker/entrypoint.sh; without it scene falls back to static
-# map binding (SCENE_MAP_ID / config) with a warning.
+# MapLifecycle needs a generated ROS message overlay so Scene can follow
+# Mapping's map identity broadcasts on both Native and Docker deployments.
 FLAGS=(--mcp --ros2)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
@@ -119,6 +115,13 @@ echo "[build] rbnx codegen ${FLAGS[*]}"
 # Docker runtime Python stubs are regenerated and import-validated offline by
 # scripts/start.sh with the exact interpreter and libraries baked into $IMG.
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
+if [[ "$TARGET" == "jetson-native" ]]; then
+    "$SCENE_NATIVE_PYTHON" - "$ROS_DISTRO" <<'PY'
+import sys
+from scripts.prepare_native import prepare_ros_overlay
+prepare_ros_overlay(sys.argv[1])
+PY
+fi
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
 # Download large weights on the host with curl retries and resume support.
