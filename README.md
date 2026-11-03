@@ -60,7 +60,7 @@ A Robonix installation has three parts:
 
 - **Robonix**: the system that runs on the robot and executes tasks.
 - **[Robonix Console](https://hub.robonix.ai/)**: a web console on the robot for installing packages from the catalog, editing the configuration, starting and stopping Robonix, and reading its logs.
-- **[Robonix Client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It runs on the robot or on another machine.
+- **[Robonix Client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It runs on the robot or on another machine, and is also available for Android.
 
 Robonix can be installed and run through Robonix Console or from the command line.
 
@@ -107,6 +107,8 @@ robonix-client --robot-host ROBOT_IP
 ```
 
 `ROBOT_IP` is one of the robot addresses shown on **Overview**, or `127.0.0.1` on the robot itself. Windows installation and voice input are described in the [Robonix Client README](https://github.com/syswonder/robonix-client#install-guide).
+
+On Android 8.0 or later, install the APK from the [Robonix Client for Android releases](https://github.com/syswonder/robonix-client-android/releases/latest), allowing installation from unknown sources when prompted. In **Settings > Connection**, set **Robot Host** to `ROBOT_IP`, tap **Save**, and connect. The phone must be on the same network as the robot.
 
 #### 5. Submit a task
 
