@@ -56,50 +56,47 @@ The [System Architecture](#system-architecture) section lists every component.
 
 ## Quick Start
 
-Robonix can be used in two ways:
+A Robonix installation has three parts:
 
-- **Robonix Console**: a web console installed on the robot. Install packages from the catalog, edit the configuration, start and stop Robonix, and read its logs from the browser.
-- **Command line**: build Robonix from source and run it with the `rbnx` command-line interface (CLI).
+- **Robonix**: the system that runs on the robot and executes tasks.
+- **Robonix Console**: a web console on the robot for installing packages from the catalog, editing the configuration, starting and stopping Robonix, and reading its logs.
+- **[robonix-client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It runs on the robot or on another machine.
+
+Robonix can be installed and run through Robonix Console or from the command line.
 
 ### Robonix Console
 
-Robonix Console runs on the robot and manages it from the browser. You talk to the robot with [robonix-client](https://github.com/syswonder/robonix-client), on the robot or on another machine. The steps below run the Webots TIAGo simulation end to end.
+This procedure runs the Webots TIAGo simulation and submits a first task.
 
 #### 1. Install Robonix Console
 
-On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), as the user who runs Robonix, not as root:
+On the robot (Debian or Ubuntu, x86\_64 or aarch64, with systemd), run as the regular user that will run Robonix:
 
 ```bash
 curl -fsSL https://hub.robonix.ai/install | bash
 ```
 
-The script installs Robonix if it is not there yet (the first build takes a while) and starts Robonix Console as a systemd user service. It asks for the model Pilot plans with: an OpenAI-compatible endpoint URL, its API key, and a model name that accepts images and tool calls. You can leave them empty here and fill them in later.
+The installer builds Robonix if it is absent, starts Robonix Console as a systemd user service, and prompts for the model used by Pilot: an OpenAI-compatible endpoint URL, an API key, and a model that supports images and tool calls. These values may be left empty and set later.
 
-#### 2. Sign in and set the model
+#### 2. Sign in and configure the model
 
-Open `http://127.0.0.1:4880` on the robot, or from your computer through an SSH tunnel:
+Open `http://127.0.0.1:4880` on the robot, or forward it from another machine with `ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP`. Sign in with a [Robonix Hub](https://hub.robonix.ai/) account.
 
-```bash
-ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP
-```
+In **Settings > Robot variables**, set **VLM endpoint URL**, **VLM key**, and **VLM model**, then click **Save settings**. All deployments on the robot use these values; a change takes effect when Robonix restarts.
 
-Sign in with a [Robonix Hub](https://hub.robonix.ai/) account. Then open **Settings**, check **VLM endpoint URL**, **VLM key** and **VLM model** under **Robot variables**, and click **Save settings**. Every deployment on this robot uses them; a running Robonix picks up a change after it restarts.
+#### 3. Create the TIAGo deployment
 
-To look around without installing, try the [online demo](https://hub.robonix.ai/demo/).
+The simulator requires Docker usable without `sudo`, and the NVIDIA Container Toolkit on machines with an NVIDIA GPU.
 
-#### 3. Install the TIAGo simulation
+1. On **Overview**, click **Choose a robot configuration**, select **PAL Robotics TIAGo**, and click **Create deployment**.
+2. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and click **Save**. These commands start the simulator before Robonix and stop it afterwards.
+3. Click **Start**. The first start builds the simulator and package images. **View run logs** shows progress; the deployment is ready when the camera, lidar, and chassis primitives, Pilot, and Liaison are running.
 
-The simulator runs in Docker; on a machine with an NVIDIA GPU it also needs the NVIDIA Container Toolkit. The user must be able to run `docker` without `sudo`.
+#### 4. Install robonix-client
 
-1. On the **Overview** page, click **Choose a robot configuration**, choose **PAL Robotics TIAGo**, and click **Create deployment**.
-2. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and click **Save**. Robonix does not start the simulator itself; these commands bring it up before `rbnx boot` and take it down after Robonix exits.
-3. Click **Start**. The first start builds the simulator and package images and takes a while. **View run logs** shows the progress; the run is ready when the camera, lidar and chassis primitives, Pilot and Liaison are all up.
+When robonix-client runs on another machine, click **Allow other machines** on **Overview**, confirm, and restart Robonix. Use this setting only on a trusted network.
 
-#### 4. Connect robonix-client and send a task
-
-If robonix-client runs on another machine, click **Allow other machines** on the **Overview** page, confirm, then stop and start Robonix. Use this only on a network you trust.
-
-On the machine that runs the client (Python 3.11 or later):
+On the client machine, with Python 3.11 or later:
 
 ```bash
 git clone https://github.com/syswonder/robonix-client.git
@@ -109,7 +106,11 @@ pip install -e .
 robonix-client --robot-host ROBOT_IP
 ```
 
-`ROBOT_IP` is the robot's address as shown under **Connect robonix-client** on the **Overview** page, or `127.0.0.1` when the client runs on the robot. Open `http://127.0.0.1:7860`; the top bar shows **Connected** once it reaches Atlas. Type a task in the chat, for example "Turn left 90 degrees, take a photo and tell me what you see", and press Enter. The reply streams into the chat, and the **RTDL tree** on the right shows each capability call the robot makes. See the [client README](https://github.com/syswonder/robonix-client#install-guide) for Windows and voice.
+`ROBOT_IP` is an address listed under **Connect robonix-client** on **Overview**, or `127.0.0.1` on the robot itself. Windows installation and voice input are described in the [robonix-client README](https://github.com/syswonder/robonix-client#install-guide).
+
+#### 5. Submit a task
+
+Open `http://127.0.0.1:7860` on the client machine. The top bar shows **Connected** after the client reaches the robot. Enter a task such as "Turn left 90 degrees, take a photo, and describe what you see" and press Enter. The reply appears in the chat, and the **RTDL tree** panel lists the capability calls that carry out the task.
 
 ### Command line
 
