@@ -59,8 +59,8 @@ The [System Architecture](#system-architecture) section lists every component.
 A Robonix installation has three parts:
 
 - **Robonix**: the system that runs on the robot and executes tasks.
-- **Robonix Console**: a web console on the robot for installing packages from the catalog, editing the configuration, starting and stopping Robonix, and reading its logs.
-- **[robonix-client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It runs on the robot or on another machine.
+- **[Robonix Console](https://hub.robonix.ai/)**: a web console on the robot for installing packages from the catalog, editing the configuration, starting and stopping Robonix, and reading its logs.
+- **[Robonix Client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It runs on the robot or on another machine.
 
 Robonix can be installed and run through Robonix Console or from the command line.
 
@@ -92,9 +92,9 @@ The simulator requires Docker usable without `sudo`, and the NVIDIA Container To
 2. Click **Boot hooks**, set **Before boot** to `bash sim/start.sh --detach` and **After exit** to `bash sim/stop.sh`, and click **Save**. These commands start the simulator before Robonix and stop it afterwards.
 3. Click **Start**. The first start builds the simulator and package images. **View run logs** shows progress; the deployment is ready when the camera, lidar, and chassis primitives, Pilot, and Liaison are running.
 
-#### 4. Install robonix-client
+#### 4. Install Robonix Client
 
-When robonix-client runs on another machine, click **Allow other machines** on **Overview**, confirm, and restart Robonix. Use this setting only on a trusted network.
+When Robonix Client runs on another machine, click **Allow other machines** on **Overview**, confirm, and restart Robonix. Use this setting only on a trusted network.
 
 On the client machine, with Python 3.11 or later:
 
@@ -106,7 +106,7 @@ pip install -e .
 robonix-client --robot-host ROBOT_IP
 ```
 
-`ROBOT_IP` is an address listed under **Connect robonix-client** on **Overview**, or `127.0.0.1` on the robot itself. Windows installation and voice input are described in the [robonix-client README](https://github.com/syswonder/robonix-client#install-guide).
+`ROBOT_IP` is one of the robot addresses shown on **Overview**, or `127.0.0.1` on the robot itself. Windows installation and voice input are described in the [Robonix Client README](https://github.com/syswonder/robonix-client#install-guide).
 
 #### 5. Submit a task
 
