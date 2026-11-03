@@ -60,7 +60,7 @@ A Robonix installation has three parts:
 
 - **Robonix**: the system that runs on the robot and executes tasks.
 - **[Robonix Console](https://hub.robonix.ai/)**: a web console on the robot for installing packages from the catalog, editing the configuration, starting and stopping Robonix, and reading its logs.
-- **[Robonix Client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It runs on the robot or on another machine, and is also available for Android.
+- **[Robonix Client](https://github.com/syswonder/robonix-client)**: the operator's application for submitting tasks in text or voice and following the plan and each capability call. It has a desktop version and an Android version, and runs on the robot or on another machine.
 
 Robonix can be installed and run through Robonix Console or from the command line.
 
@@ -94,9 +94,9 @@ The simulator requires Docker usable without `sudo`, and the NVIDIA Container To
 
 #### 4. Install Robonix Client
 
-When Robonix Client runs on another machine, click **Allow other machines** on **Overview**, confirm, and restart Robonix. Use this setting only on a trusted network.
+Robonix Client has a desktop version and an Android version. When the client runs on a machine other than the robot, including a phone, click **Allow other machines** on **Overview**, confirm, and restart Robonix. Use this setting only on a trusted network. Below, `ROBOT_IP` is one of the robot addresses shown on **Overview**, or `127.0.0.1` when the client runs on the robot.
 
-On the client machine, with Python 3.11 or later:
+Desktop version, on Linux or macOS with Python 3.11 or later:
 
 ```bash
 git clone https://github.com/syswonder/robonix-client.git
@@ -106,13 +106,13 @@ pip install -e .
 robonix-client --robot-host ROBOT_IP
 ```
 
-`ROBOT_IP` is one of the robot addresses shown on **Overview**, or `127.0.0.1` on the robot itself. Windows installation and voice input are described in the [Robonix Client README](https://github.com/syswonder/robonix-client#install-guide).
+Windows installation and voice input are described in the [Robonix Client README](https://github.com/syswonder/robonix-client#install-guide).
 
-On Android 8.0 or later, install the APK from the [Robonix Client for Android releases](https://github.com/syswonder/robonix-client-android/releases/latest), allowing installation from unknown sources when prompted. In **Settings > Connection**, set **Robot Host** to `ROBOT_IP`, tap **Save**, and connect. The phone must be on the same network as the robot.
+Android version, on Android 8.0 or later on the same network as the robot: install the APK from the [latest release](https://github.com/syswonder/robonix-client-android/releases/latest), allowing installation from unknown sources when prompted. In **Settings > Connection**, set **Robot Host** to `ROBOT_IP`, tap **Save**, and connect.
 
 #### 5. Submit a task
 
-Open `http://127.0.0.1:7860` on the client machine. The top bar shows **Connected** after the client reaches the robot. Enter a task such as "Turn left 90 degrees, take a photo, and describe what you see" and press Enter. The reply appears in the chat, and the **RTDL tree** panel lists the capability calls that carry out the task.
+On the desktop version, open `http://127.0.0.1:7860`; on Android, open the **Chat** tab. The client shows that it is connected once it reaches the robot. Enter a task such as "Turn left 90 degrees, take a photo, and describe what you see" and send it. The reply appears in the chat, and the RTDL view lists the capability calls that carry out the task.
 
 ### Command line
 
