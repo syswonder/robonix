@@ -122,7 +122,8 @@ uv pip install --python "$VENV/bin/python" \
 # regardless of where JetPack / editable installs place them.
 # Disable with SPEECH_SKIP_JETSON_TORCH=1.
 if [[ "$USE_JETSON_TORCH" == "1" && "${SPEECH_SKIP_JETSON_TORCH:-}" != "1" ]]; then
-    SP="$SITEPKG"
+    # uv sync may recreate the environment with a different Python minor.
+    SP="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
     if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
         HOSTPY="${SPEECH_HOST_PYTHON:-python3}"
         if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
