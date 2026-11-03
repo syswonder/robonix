@@ -7,6 +7,8 @@
 Transcript timestamps use the in-process Chronos wall clock and keep real dates
 during simulation pauses and resets. Clock errors
 propagate to the turn caller; queued records remain available for retry.
+Cancellation uses the session forest's normal bookkeeping, and a final archive
+failure is logged even when the turn already failed for another reason.
 File write failures keep their existing retry behavior. No running Chronos
 service is required.
 
@@ -19,6 +21,10 @@ cargo build -p robonix-pilot
 The crate is part of the top-level Cargo workspace and is built / installed by `make build` and `make install` respectively.
 
 Run Pilot's tests with `cargo test -p robonix-pilot`. RTDL parser tests exercise the incremental parser used at runtime.
+
+On Linux with `cc`, `cargo test -p robonix-pilot archival_clock_failure` injects
+a transcript clock failure in an isolated child process and checks that the
+Executor control endpoint receives cancellation before the turn returns an error.
 
 ## Run
 
