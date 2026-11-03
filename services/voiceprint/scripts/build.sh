@@ -87,19 +87,9 @@ print("[build] generated Voiceprint gRPC and MCP imports OK")
 PY
 
 # ── 4. Pre-download the CAM++ speaker-embedding model (skip with SKIP_MODEL_DOWNLOAD=1) ─
-# k2-fsa hosts the 3D-Speaker CAM++ zh-cn 16k ONNX weights on the
-# sherpa-onnx "speaker-recongition-models" release tag (sic). ghfast.top
-# mirrors GitHub for CN runners; fall back to the official URL.
 SPEAKER_MODEL="$MODELS/campplus_zh.onnx"
-SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
-    if [[ ! -f "$SPEAKER_MODEL" ]]; then
-        echo "[build] downloading CAM++ speaker-embedding model"
-        if ! curl -fL --retry 3 --connect-timeout 15 -o "$SPEAKER_MODEL" "https://ghfast.top/$SPEAKER_URL"; then
-            rm -f "$SPEAKER_MODEL"
-            curl -fL --retry 3 --connect-timeout 15 -o "$SPEAKER_MODEL" "$SPEAKER_URL"
-        fi
-    fi
+    "$VENV/bin/python" "$PKG/scripts/download_model.py" "$SPEAKER_MODEL"
     "$VENV/bin/python" - <<'PY'
 import numpy as np
 from voiceprint_service.engine import SpeakerEmbeddingEngine

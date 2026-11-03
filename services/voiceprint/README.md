@@ -32,6 +32,9 @@ The build phase:
 2. Runs `rbnx codegen --mcp` with the venv interpreter and import-tests the
    generated contract modules under `rbnx-build/codegen/`.
 3. Downloads the CAM++ ONNX model into `rbnx-build/models/campplus_zh.onnx`.
+   Downloads use the author's Hugging Face repository and GitHub release,
+   verify SHA256, and publish the file only after verification. `HF_ENDPOINT`
+   and `RBNX_GH_MIRROR` select mirrors; stalled transfers time out.
    Set `SKIP_MODEL_DOWNLOAD=1` to skip the model download and verification.
 
 ## Run
