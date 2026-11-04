@@ -6,11 +6,38 @@
 //! left-aligned.  Timestamp is local time derived from the nanosecond
 //! UNIX-epoch `ts` field.
 
-use crate::{Level, LogRecord};
+use crate::{CLOCK_ERROR_NOTE, Level, LogRecord};
 use std::io::{self, IsTerminal, Write};
 
 /// Tag display width in console output (left-aligned, space-padded).
 const TAG_WIDTH: usize = 24;
+
+pub(crate) fn write_clock_error(
+    level: Level,
+    tag: &str,
+    msg: &str,
+    error: &io::Error,
+) -> io::Result<()> {
+    let line = format!(
+        "{level} {} {}{CLOCK_ERROR_NOTE}{}]\n",
+        escape_controls(tag),
+        escape_controls(msg),
+        escape_controls(&error.to_string()),
+    );
+    io::stderr().lock().write_all(line.as_bytes())
+}
+
+fn escape_controls(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
 
 /// Format a [`LogRecord`] as a logcat-style console line.
 ///

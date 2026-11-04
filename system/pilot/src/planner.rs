@@ -980,12 +980,12 @@ async fn compact_history(
     cache_epoch: u64,
     transcript: &mut Transcript,
     tasks: &TaskTable,
-) -> bool {
+) -> Result<bool> {
     let Some(room) = budget.room(non_history_tokens) else {
-        return false;
+        return Ok(false);
     };
     if !budget.must_compact(history, non_history_tokens) {
-        return false;
+        return Ok(false);
     }
     let before_messages = history.len();
     let before_tokens: usize = history.iter().map(history::tokens).sum();
@@ -1037,12 +1037,12 @@ async fn compact_history(
     let evicted = plan.evicted.len();
     let pinned = plan.pinned.len();
     // The evicted messages leave history here; make sure they are archived.
-    transcript.record(history, tasks);
+    transcript.record(history, tasks)?;
     *history = std::iter::once(summary)
         .chain(plan.pinned)
         .chain(plan.tail)
         .collect();
-    transcript.record_compaction(history, evicted, pinned, summarized);
+    transcript.record_compaction(history, evicted, pinned, summarized)?;
     let after_tokens: usize = history.iter().map(history::tokens).sum();
     info!(
         "[pilot/compaction] {}",
@@ -1066,7 +1066,7 @@ async fn compact_history(
             "summary_output_tokens": completion.as_ref().and_then(|c| c.usage.as_ref()).map(|u| u.completion_tokens),
         })
     );
-    true
+    Ok(true)
 }
 
 struct VlmTextCompletion {
@@ -1241,6 +1241,19 @@ pub async fn run_turn(
         }};
     }
 
+    // A strict archival failure must cancel execution before abandoning supervision.
+    macro_rules! clock_result {
+        ($result:expr) => {
+            match $result {
+                Ok(value) => value,
+                Err(error) => {
+                    forest.cancel_running(executor).await;
+                    return Err(error.into());
+                }
+            }
+        };
+    }
+
     if task_is_session_end(task) {
         info!("[pilot] session_end: invoking compact_memory if available");
         memory::try_compact(executor, atlas, consumer_id).await;
@@ -1350,7 +1363,7 @@ pub async fn run_turn(
                 handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await;
         }
         // Archive what the last iteration added, before anything can compact it.
-        transcript.record(history, tasks);
+        clock_result!(transcript.record(history, tasks));
         // Check for hard interrupt at the top of every iteration.
         if *term_signal.borrow() {
             return_interrupted!(&forest.trees);
@@ -1426,7 +1439,7 @@ pub async fn run_turn(
         // Pull any steers that landed while we were busy (e.g. during the
         // previous VLM stream) so this round plans with the latest user input.
         drain_steers(&mut steer_rx, history, tasks);
-        transcript.record(history, tasks);
+        clock_result!(transcript.record(history, tasks));
 
         // Re-discover capabilities from atlas every round so providers that
         // registered mid-turn are visible in the next call.
@@ -1482,17 +1495,18 @@ pub async fn run_turn(
         .iter()
         .map(|content| content.len().div_ceil(4))
         .sum();
-        if compact_history(
-            history,
-            vlm,
-            history_budget,
-            compaction_non_history_tokens,
-            cache_epoch,
-            transcript,
-            tasks,
-        )
-        .await
-        {
+        if clock_result!(
+            compact_history(
+                history,
+                vlm,
+                history_budget,
+                compaction_non_history_tokens,
+                cache_epoch,
+                transcript,
+                tasks,
+            )
+            .await
+        ) {
             cache_epoch = cache_epoch.saturating_add(1);
             // The summary may have absorbed the last full snapshots; show
             // them again rather than send changes against a missing baseline.
@@ -2543,6 +2557,159 @@ for a running plan. Concretely:
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    mod clock_faults {
+        use super::super::*;
+        use crate::pb::contracts::robonix_system_executor_control_plan_server::{
+            RobonixSystemExecutorControlPlan, RobonixSystemExecutorControlPlanServer,
+        };
+        use crate::pb::executor::ControlPlanResponse;
+
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../chronos/clock/tests/support/mod.rs"
+        ));
+
+        struct Control(mpsc::Sender<ControlPlanRequest>);
+
+        #[tonic::async_trait]
+        impl RobonixSystemExecutorControlPlan for Control {
+            async fn control_plan(
+                &self,
+                request: Request<ControlPlanRequest>,
+            ) -> Result<tonic::Response<ControlPlanResponse>, tonic::Status> {
+                self.0.send(request.into_inner()).await.unwrap();
+                Ok(tonic::Response::new(ControlPlanResponse {
+                    success: true,
+                    completed: true,
+                    ..Default::default()
+                }))
+            }
+        }
+
+        #[test]
+        fn archival_clock_failure_cancels_running_executor_plan() {
+            run_case(
+                "planner::tests::clock_faults::archival_clock_failure_cancels_running_executor_plan",
+                || {
+                    let directory = tempfile::tempdir().unwrap();
+                    std::env::set_current_dir(directory.path()).unwrap();
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(async {
+                            let listener =
+                                tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                            let address = listener.local_addr().unwrap();
+                            let incoming =
+                                futures_util::stream::unfold(listener, |listener| async {
+                                    let stream = listener.accept().await.map(|(stream, _)| stream);
+                                    Some((stream, listener))
+                                });
+                            let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+                            let server = tokio::spawn(
+                                tonic::transport::Server::builder()
+                                    .add_service(atlas_pb::atlas_server::AtlasServer::new(
+                                        robonix_atlas::service::AtlasService::new(Arc::new(
+                                            robonix_atlas::service::AtlasRegistry::default(),
+                                        )),
+                                    ))
+                                    .add_service(RobonixSystemExecutorControlPlanServer::new(
+                                        Control(cancel_tx),
+                                    ))
+                                    .serve_with_incoming(incoming),
+                            );
+                            let channel = Channel::from_shared(format!("http://{address}"))
+                                .unwrap()
+                                .connect()
+                                .await
+                                .unwrap();
+                            let mut executor = ExecutorConn {
+                                streaming: RobonixSystemExecutorExecuteStreamClient::new(
+                                    channel.clone(),
+                                ),
+                                graph: RobonixSystemExecutorExecuteClient::new(channel.clone()),
+                                active: RobonixSystemExecutorListActivePlansClient::new(
+                                    channel.clone(),
+                                ),
+                                control: RobonixSystemExecutorControlPlanClient::new(channel),
+                            };
+                            let mut atlas =
+                                AtlasClient::connect(address.to_string()).await.unwrap();
+                            let vlm = VlmClient::new(&crate::config::VlmConfig {
+                                upstream: "http://127.0.0.1:1/v1".into(),
+                                api_key: String::new(),
+                                model: "unused".into(),
+                                context_window_tokens: None,
+                                api_format: "openai".into(),
+                            });
+                            let mut forest = SessionForest::default();
+                            forest.trees.insert(
+                                "running-plan".into(),
+                                TreeMeta {
+                                    description: "active work".into(),
+                                    control_only: false,
+                                    call_signatures: HashSet::new(),
+                                    steps: Vec::new(),
+                                },
+                            );
+                            let task = Task {
+                                session_id: "clock-error".into(),
+                                text: "continue working".into(),
+                                ..Default::default()
+                            };
+                            let mut history = Vec::new();
+                            let mut tasks = TaskTable::default();
+                            let mut transcript =
+                                Transcript::new(&task.session_id, &history, &tasks);
+                            let (events, _events_rx) = mpsc::channel(8);
+                            let (_stop, stop_rx) = watch::channel(false);
+                            let (_steers, steer_rx) = mpsc::channel(1);
+                            mode(1);
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                run_turn(
+                                    &task,
+                                    &mut history,
+                                    &mut tasks,
+                                    &mut forest,
+                                    &vlm,
+                                    &mut executor,
+                                    &mut atlas,
+                                    "clock-error-consumer",
+                                    &events,
+                                    stop_rx,
+                                    steer_rx,
+                                    Arc::new(AtomicU64::new(0)),
+                                    &HistoryBudget::new(None, "unavailable"),
+                                    &mut transcript,
+                                ),
+                            )
+                            .await
+                            .unwrap();
+                            mode(0);
+                            assert!(
+                                result
+                                    .unwrap_err()
+                                    .downcast_ref::<std::io::Error>()
+                                    .is_some()
+                            );
+                            let cancel = cancel_rx
+                                .try_recv()
+                                .expect("cancel must precede the turn error");
+                            assert_eq!(cancel.action, "cancel");
+                            assert_eq!(cancel.plan_id, "running-plan");
+                            assert_eq!(cancel.wait_ms, 5_000);
+                            assert!(forest.kill_pending.contains("running-plan"));
+                            server.abort();
+                            let _ = server.await;
+                        });
+                },
+            );
+        }
+    }
+
     use super::{
         CapabilityTargetMap, CatalogView, HistoryBudget, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
         RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskTable, TreeMeta, TreeStep, UsageTotals,

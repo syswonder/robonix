@@ -1,0 +1,10 @@
+[package]
+name = "robonix-chronos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Chronos clock-domain models"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
