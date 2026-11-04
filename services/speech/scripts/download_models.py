@@ -2,6 +2,7 @@
 """Download verified Speech models and publish only complete runtime files."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import json
@@ -56,24 +57,50 @@ def prepare(root: Path, kind: str) -> None:
         primary = f'{mirror.rstrip("/")}/{official}' if mirror else official
         if kind == 'kws':
             primary = os.environ.get('SHERPA_KWS_MODEL_URL') or primary
-        with tempfile.TemporaryDirectory(prefix=f'.{name}-', dir=root) as tmp:
+        cache_root = os.environ.get('ROBONIX_MODEL_CACHE_DIR')
+        cache = Path(cache_root) / 'speech' / f'{digest}.tar.bz2' if cache_root else None
+        with ExitStack() as locks, tempfile.TemporaryDirectory(prefix=f'.{name}-', dir=root) as tmp:
+            if cache is not None:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache_lock = locks.enter_context((cache.parent / f'.{digest}.lock').open('a'))
+                fcntl.flock(cache_lock, fcntl.LOCK_EX)
             pending = Path(tmp)
             archive = pending / 'model.tar.bz2'
-            for url in dict.fromkeys((primary, official)):
-                try:
-                    subprocess.run([
-                        'curl', '-fL', '--retry', '1', '--connect-timeout', '15',
-                        '--max-time', '600', '--speed-limit', '4096', '--speed-time', '30',
-                        '-o', str(archive), url,
-                    ], check=True, timeout=1250)
-                    if checksum(archive) != digest:
-                        raise ValueError(f'{kind} archive checksum mismatch')
-                    break
-                except (OSError, ValueError, subprocess.SubprocessError) as error:
-                    print(f'[speech/build] {kind}: {type(error).__name__}; trying next source',
+            if cache is not None and cache.is_file():
+                actual = checksum(cache)
+                if actual == digest:
+                    shutil.copyfile(cache, archive)
+                else:
+                    print(f'[speech/build] {kind} cache checksum mismatch: expected={digest} actual={actual}',
                           file=sys.stderr, flush=True)
-            else:
-                raise RuntimeError(f'Could not download the verified {kind} model')
+            if not archive.exists():
+                fresh = primary + ('&' if '?' in primary else '?') + f'robonix_sha256={digest}'
+                api = ('https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/331699066'
+                       if kind == 'kws' else official)
+                alternate = f'https://gh-proxy.org/{official}' if kind == 'kws' else official
+                for url in dict.fromkeys((primary, fresh, api, official, alternate)):
+                    try:
+                        subprocess.run([
+                            'curl', '-fL', '--retry', '1', '--connect-timeout', '15',
+                            '--max-time', '600', '--speed-limit', '4096', '--speed-time', '30',
+                            *(['-H', 'Accept: application/octet-stream'] if url == api and kind == 'kws' else []),
+                            '-o', str(archive), url,
+                        ], check=True, timeout=1250)
+                        actual = checksum(archive)
+                        if actual != digest:
+                            raise ValueError(f'{kind} archive checksum mismatch: expected={digest} actual={actual}')
+                        break
+                    except (OSError, ValueError, subprocess.SubprocessError) as error:
+                        detail = str(error) if isinstance(error, ValueError) else type(error).__name__
+                        print(f'[speech/build] {kind}: {detail}; trying next source',
+                              file=sys.stderr, flush=True)
+                else:
+                    raise RuntimeError(f'Could not download the verified {kind} model')
+                if cache is not None:
+                    with tempfile.TemporaryDirectory(prefix='.download-', dir=cache.parent) as cached_tmp:
+                        staged_archive = Path(cached_tmp) / cache.name
+                        shutil.copyfile(archive, staged_archive)
+                        staged_archive.replace(cache)
             staged = pending / name
             staged.mkdir()
             with tarfile.open(archive, 'r|bz2') as bundle:

@@ -190,8 +190,13 @@ Model downloads honor RBNX_GH_MIRROR (empty selects GitHub directly).
 KWS and ASR release archives have pinned SHA256 checksums; only required
 runtime files are extracted into a staging directory. A failed transfer,
 checksum or extraction leaves the previous model directory intact. Verified
-cache files are checked again before reuse. ASR retains the int8 encoder and
-decoder; unused FP32 graphs are not extracted.
+runtime files are checked again before reuse. With ROBONIX_MODEL_CACHE_DIR set,
+verified archives are cached under its `speech/` directory by SHA256, checked
+again on each cache hit, and published atomically under a per-digest lock.
+A digest-keyed mirror request and KWS's official GitHub release asset API
+provide alternate downloads. KWS also tries gh-proxy.org after the official
+endpoints fail; every response must match the pinned archive checksum. Checksum failures report both expected and actual SHA256 values.
+ASR retains the int8 encoder and decoder; unused FP32 graphs are not extracted.
 
 At end of input, Paraformer receives lookahead padding before final decoding,
 following the [upstream streaming example](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.4/python-api-examples/online-decode-files.py).
