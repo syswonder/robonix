@@ -67,6 +67,19 @@ pub const CMD_SHUTDOWN: u32 = 3;
 /// driver capability with atlas before giving up.
 pub const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Effective registration timeout: `DRIVER_REGISTER_TIMEOUT` unless
+/// `ROBONIX_DRIVER_REGISTER_TIMEOUT_S` overrides it. Same override pattern as
+/// the CLI's `ROBONIX_DRIVER_INIT_TIMEOUT_S`, for deployments whose
+/// providers register slowly (e.g. wrappers reaching the driver over SSH).
+pub fn driver_register_timeout() -> Duration {
+    std::env::var("ROBONIX_DRIVER_REGISTER_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DRIVER_REGISTER_TIMEOUT)
+}
+
 /// Max time we'll wait for one `Driver(CMD_*)` RPC to return. 90s gives
 /// generous slack for slow-warming sensors (Webots's camera can take
 /// 30–50s on cold boot). Primitive driver-side waits should stay
@@ -849,7 +862,7 @@ fn runtime_driver_contracts(provider: &atlas_pb::CapabilityProvider) -> Vec<Stri
 /// Soma calls it directly and logs through scribe.
 ///
 /// Errors:
-///   * timeout (no new provider before `DRIVER_REGISTER_TIMEOUT`),
+///   * timeout (no new provider before `driver_register_timeout()`),
 ///   * the expected provider vanished between matching and settling (crashed
 ///     or was evicted by heartbeat lapse).
 ///
@@ -872,7 +885,8 @@ pub async fn wait_for_registration_core(
     // (one query per 2 spinner ticks at 100ms/tick).
     const POLL_INTERVAL: Duration = Duration::from_millis(200);
     let started = Instant::now();
-    let deadline = started + DRIVER_REGISTER_TIMEOUT;
+    let register_timeout = driver_register_timeout();
+    let deadline = started + register_timeout;
     loop {
         let providers = atlas
             .query_capabilities("", "", atlas_pb::Transport::Unspecified)
@@ -940,7 +954,7 @@ pub async fn wait_for_registration_core(
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "[{who}] timed out after {DRIVER_REGISTER_TIMEOUT:?} — package never \
+                "[{who}] timed out after {register_timeout:?} — package never \
                  registered expected deployment instance '{expected_provider_id}' with atlas",
             );
         }

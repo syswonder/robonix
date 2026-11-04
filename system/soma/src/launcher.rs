@@ -231,8 +231,10 @@ impl PackageLauncher {
         // Race the registration poll against child exit: if the
         // package crashes before it registers with atlas, surface
         // that immediately instead of sitting on the full
-        // DRIVER_REGISTER_TIMEOUT (60s). Mirrors the try_wait
-        // early-exit detection rbnx uses for soma itself (deploy.rs).
+        // registration timeout (DRIVER_REGISTER_TIMEOUT, 60 s by
+        // default; ROBONIX_DRIVER_REGISTER_TIMEOUT_S overrides it).
+        // Mirrors the try_wait early-exit detection rbnx uses for
+        // soma itself (deploy.rs).
         let who = format!("{}/{}", target.kind, target.name);
         let outcome = tokio::select! {
             result = wait_for_registration_core(atlas, &before, &target.name, &who) => match result {
@@ -445,7 +447,9 @@ impl PackageLauncher {
         // Return the child handle alongside the pid so the caller
         // can detect early exit — a package that crashes before it
         // registers with atlas would otherwise cause soma to wait
-        // the full DRIVER_REGISTER_TIMEOUT (60s) before moving on.
+        // the full registration timeout (DRIVER_REGISTER_TIMEOUT,
+        // 60 s by default; ROBONIX_DRIVER_REGISTER_TIMEOUT_S
+        // overrides it) before moving on.
         // process_group(0) made the child its own PGID leader;
         // SIGKILL on `pid` (and `-pid` for the group) still works
         // whether or not the handle is alive. The caller drops the

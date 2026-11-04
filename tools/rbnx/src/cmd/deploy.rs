@@ -35,8 +35,8 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
     CapabilityTransportCheck, PackageRuntimeRecord, ProviderRegistrationSnapshot,
-    RegistrationOutcome, contract_id_to_service_name, resolve_runtime_driver_contract,
-    snapshot_provider_ids, terminate_process_group,
+    RegistrationOutcome, contract_id_to_service_name, driver_register_timeout,
+    resolve_runtime_driver_contract, snapshot_provider_ids, terminate_process_group,
 };
 use robonix_cli::output;
 use robonix_llm_catalog::ModelCatalog;
@@ -68,9 +68,6 @@ const CMD_ACTIVATE: u32 = 1;
 const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 const CMD_SHUTDOWN: u32 = 3;
-// How long to wait for a freshly spawned package to register its driver
-// capability with atlas before giving up.
-const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 // Default Driver(CMD_INIT) deadline. Webots CI can override this with
 // ROBONIX_DRIVER_INIT_TIMEOUT_S for real stacks whose lifecycle bringup may
 // exceed 90s on a cold self-hosted runner.
@@ -3602,7 +3599,8 @@ async fn wait_for_registration(
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
-    let deadline = started + DRIVER_REGISTER_TIMEOUT;
+    let register_timeout = driver_register_timeout();
+    let deadline = started + register_timeout;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
     if output::boot_verbose() {
@@ -3750,14 +3748,14 @@ async fn wait_for_registration(
                 display_label,
                 &format!(
                     "registration timeout after {:?}; expected instance '{}' — see {}",
-                    DRIVER_REGISTER_TIMEOUT,
+                    register_timeout,
                     expected_provider_id,
                     log_file.display()
                 ),
             );
             anyhow::bail!(
                 "[{component}/{pkg_label}] timed out after {:?} — package never registered expected deployment instance '{}' with atlas. Log: {}",
-                DRIVER_REGISTER_TIMEOUT,
+                register_timeout,
                 expected_provider_id,
                 log_file.display()
             );
