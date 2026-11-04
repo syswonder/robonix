@@ -2021,6 +2021,7 @@ class ConceptGraphsDetector:
         if not hasattr(self, "_uuid_to_oid"):
             self._uuid_to_oid = {}
         self._reconcile_side_tables()
+        snapshot_frame = getattr(self, "_map_frame", "") or self._world_frame_fn()
         snapshots = []
         for obj in self._map_objects:
             try:
@@ -2078,13 +2079,19 @@ class ConceptGraphsDetector:
         # serializes with the snapshot reader (same asyncio.Lock).
         try:
             asyncio.run_coroutine_threadsafe(
-                self._apply_snapshot(snapshots, frozenset(getattr(self, "_held_uuids", ()))),
+                self._apply_snapshot(
+                    snapshots, frozenset(getattr(self, "_held_uuids", ())),
+                    expected_world_frame=snapshot_frame,
+                ),
                 self._asyncio_loop,
             )
         except Exception as e:  # noqa: BLE001
             log.debug("schedule registry update failed: %s", e)
 
-    async def _apply_snapshot(self, snapshots: list[dict], held: frozenset = frozenset()) -> None:
+    async def _apply_snapshot(
+        self, snapshots: list[dict], held: frozenset = frozenset(), *,
+        expected_world_frame: Optional[str] = None,
+    ) -> None:
         """Reconcile concept-graphs MapObjectList state into the registry
         **incrementally**. ``held`` are uuids the backend gated out before the
         snapshot; like a rejected snapshot they stay live."""
@@ -2115,6 +2122,9 @@ class ConceptGraphsDetector:
                     "withholding ConceptGraphs snapshot because the world frame "
                     "is unknown"
                 )
+                return
+            # Localization can change frames while this worker snapshot is queued.
+            if expected_world_frame is not None and wf != expected_world_frame:
                 return
             # oids touched this tick (bound / adopted / inserted).
             adopted_oids: set[str] = set()

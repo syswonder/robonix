@@ -449,6 +449,12 @@ rejects missing or mismatched frame ids instead of composing incompatible
 frames. Deployments with a complete URDF and TF tree should not publish a
 second transform with the opposite direction.
 
+When localization replaces an odometry frame, DualMap discards its old-frame
+tracks, clears its local/global maps and keyframe cache, and withholds those
+registry objects until they are seen again in the new frame. It does not
+relabel old coordinates or bypass the goal frame check. Both metric backends
+reject a queued registry snapshot if localization has changed its frame.
+
 For robots whose body frame is not `base_link`, set `base_frame` under
 `system.scene.config` (or `SCENE_BASE_FRAME`). This is an assertion about the
 body represented by the fallback pose and the required parent of camera

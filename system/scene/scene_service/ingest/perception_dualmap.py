@@ -279,6 +279,8 @@ class DualMapDetector(ConceptGraphsDetector):
     def _tick_locked(self) -> None:
         """Feed one keyframe through DualMap, then mirror its maps into
         ``self._map_objects`` and the registry."""
+        world_frame = str(self._world_frame_fn() or "").strip()
+        self._follow_world_frame(world_frame)
         rgb_msg = self._rgb_msg()
         depth_msg = self._depth_msg()
         if rgb_msg is None or depth_msg is None:
@@ -306,7 +308,9 @@ class DualMapDetector(ConceptGraphsDetector):
                             getattr(rgb_msg, "encoding", "?"), getattr(depth_msg, "encoding", "?"), self._undecodable)
             return
         try:
-            pose = self._build_camera_to_map_transform(stamp=_header_stamp(depth_msg))
+            pose = self._build_camera_to_map_transform(
+                expected_world_frame=world_frame, stamp=_header_stamp(depth_msg),
+            )
         except Exception as e:  # noqa: BLE001
             log.debug("[scene-dualmap] transform unavailable: %s", e)
             pose = None
@@ -456,6 +460,23 @@ class DualMapDetector(ConceptGraphsDetector):
                 self._map_objects = []
 
         await asyncio.get_running_loop().run_in_executor(None, _reset)
+
+    def _follow_world_frame(self, world_frame: str) -> None:
+        """Discard DualMap geometry when the localizer changes its world frame."""
+        previous = getattr(self, "_map_frame", "")
+        super()._follow_world_frame(world_frame)
+        if not previous or not world_frame or previous == world_frame:
+            return
+        if self._lm is not None:
+            self._lm.local_map = []
+        if self._gm is not None:
+            self._gm.global_map = []
+        self._all_objects = []
+        self._held_uuids = set()
+        self._last_kf_pose = None
+        self._last_frame_key = None
+        # Old-frame objects must stop being offered even while TF is catching up.
+        self._project_to_registry()
 
     def _is_keyframe(self, rgb_msg: Any, pose: Any) -> bool:
         """True for a new frame after enough translation, rotation or time; records it."""
