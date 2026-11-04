@@ -19,7 +19,13 @@ use uuid::Uuid;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_DO: u32 = 2;
 
-fn single_call_plan(plan_id: String, session_id: String, round: u32, call: CapabilityCall) -> Plan {
+fn single_call_plan(
+    plan_id: String,
+    session_id: String,
+    round: u32,
+    call: CapabilityCall,
+    auth_session_token: &str,
+) -> Plan {
     Plan {
         plan_id,
         session_id,
@@ -41,6 +47,7 @@ fn single_call_plan(plan_id: String, session_id: String, round: u32, call: Capab
             },
         ],
         root_index: 0,
+        auth_session_token: auth_session_token.to_owned(),
     }
 }
 
@@ -63,9 +70,11 @@ pub async fn prefetch(
             contract_id,
             args_json: serde_json::json!({ "data": query }).to_string(),
         },
+        &executor.auth_session_token,
     );
 
-    let submitted_plan = plan.clone();
+    let mut submitted_plan = plan.clone();
+    submitted_plan.auth_session_token.clear();
     let mut stream = executor
         .graph
         .execute(Request::new(plan))
@@ -116,9 +125,11 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             contract_id: cap.contract_id.clone(),
             args_json: "{}".to_string(),
         },
+        &executor.auth_session_token,
     );
 
-    let submitted_plan = plan.clone();
+    let mut submitted_plan = plan.clone();
+    submitted_plan.auth_session_token.clear();
     let Ok(mut stream) = executor
         .graph
         .execute(Request::new(plan))

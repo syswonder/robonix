@@ -212,6 +212,7 @@ impl StreamExecution {
     pub(crate) async fn cancel(
         &mut self,
         control: &mut RobonixSystemExecutorControlPlanClient<Channel>,
+        auth_session_token: &str,
     ) -> Result<()> {
         if self.plan.plan_id.is_empty() {
             return Ok(());
@@ -219,6 +220,7 @@ impl StreamExecution {
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(6),
             control.control_plan(ControlPlanRequest {
+                session_token: auth_session_token.to_owned(),
                 action: "cancel".into(),
                 plan_id: self.plan.plan_id.clone(),
                 wait_ms: 5000,
@@ -339,7 +341,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let result = live.cancel(&mut control).await;
+            let result = live.cancel(&mut control, "").await;
 
             assert_eq!(result.is_err(), reject);
             assert!(live.input.is_none());
@@ -430,9 +432,12 @@ mod tests {
             ..Default::default()
         };
 
-        live.cancel(&mut RobonixSystemExecutorControlPlanClient::new(channel))
-            .await
-            .unwrap();
+        live.cancel(
+            &mut RobonixSystemExecutorControlPlanClient::new(channel),
+            "",
+        )
+        .await
+        .unwrap();
 
         assert!(!live.complete);
         assert!(!live.transport_failed);

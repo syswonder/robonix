@@ -59,7 +59,9 @@ impl PlanInput {
     }
 
     /// Load a complete tree with all operators closed, preserving its original arena indices.
-    pub(crate) fn from_plan(plan: Plan) -> Result<Self, String> {
+    pub(crate) fn from_plan(mut plan: Plan) -> Result<Self, String> {
+        // The RPC layer authenticates this one-shot credential before validation.
+        plan.auth_session_token.clear();
         let count = plan.nodes.len();
         if plan.plan_id.trim().is_empty() || count == 0 || count > 256 {
             return Err("Plan requires a nonempty plan_id and 1 to 256 nodes".into());
@@ -539,6 +541,7 @@ mod complete_plan_tests {
             round: 0,
             nodes,
             root_index,
+            auth_session_token: String::new(),
         }
     }
 

@@ -22,6 +22,7 @@ use crate::pb::contracts::{
 };
 use crate::pb::liaison::{GetHandsfreeStatusResponse, StartVoiceSessionRequest, VoiceEvent};
 use crate::{
+    keystone_gateway::KeystoneGateway,
     voice,
     voice::{KIND_ASR_FINAL, KIND_ERROR},
 };
@@ -40,6 +41,8 @@ pub struct HandsfreeConfig {
     pub handsfree_speaker_provider_id: String,
     pub handsfree_session_id: String,
     pub handsfree_record_seconds: u32,
+    #[serde(skip)]
+    pub session_token: String,
 }
 
 impl Default for HandsfreeConfig {
@@ -53,6 +56,7 @@ impl Default for HandsfreeConfig {
             handsfree_speaker_provider_id: String::new(),
             handsfree_session_id: "handsfree".to_string(),
             handsfree_record_seconds: 20,
+            session_token: String::new(),
         }
     }
 }
@@ -75,6 +79,7 @@ pub struct HandsfreeController {
     atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     access: Arc<AccessControlConfig>,
+    keystone: Option<Arc<KeystoneGateway>>,
     events: broadcast::Sender<VoiceEvent>,
     active_turns: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -85,10 +90,12 @@ impl HandsfreeController {
         atlas: Arc<Mutex<AtlasClient>>,
         pilot_endpoint_default: String,
         access: Arc<AccessControlConfig>,
+        keystone: Option<Arc<KeystoneGateway>>,
     ) -> Arc<Self> {
         let enabled = config.handsfree_enabled
             && !config.handsfree_mic_provider_id.is_empty()
-            && !config.handsfree_speaker_provider_id.is_empty();
+            && !config.handsfree_speaker_provider_id.is_empty()
+            && keystone.is_none();
         let (events, _) = broadcast::channel(256);
         Arc::new(Self {
             enabled: AtomicBool::new(enabled),
@@ -102,6 +109,7 @@ impl HandsfreeController {
             atlas,
             pilot_endpoint_default,
             access,
+            keystone,
             events,
             active_turns: Mutex::new(Vec::new()),
         })
@@ -117,6 +125,7 @@ impl HandsfreeController {
         enabled: bool,
         mic_provider_id: String,
         speaker_provider_id: String,
+        session_token: String,
     ) -> Result<GetHandsfreeStatusResponse> {
         {
             let mut config = self.config.lock().await;
@@ -125,6 +134,11 @@ impl HandsfreeController {
             }
             if !speaker_provider_id.trim().is_empty() {
                 config.handsfree_speaker_provider_id = speaker_provider_id;
+            }
+            if enabled {
+                config.session_token = session_token;
+            } else {
+                config.session_token.clear();
             }
             if enabled
                 && (config.handsfree_mic_provider_id.trim().is_empty()
@@ -384,12 +398,14 @@ impl HandsfreeController {
             } else {
                 r#"{"client":"robot-handsfree","interaction_mode":"auto","barge_in":false,"handsfree":true}"#.to_string()
             },
+            session_token: config.session_token.clone(),
         };
         let mut stream = voice::start_voice_session(
             request,
             Arc::clone(&self.atlas),
             self.pilot_endpoint_default.clone(),
             Arc::clone(&self.access),
+            self.keystone.clone(),
         )
         .await
         .map_err(|status| anyhow!(status.to_string()))?;

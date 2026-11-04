@@ -1,0 +1,10 @@
+[contract]
+id = "robonix/system/keystone/admin_delete_user"
+version = "1"
+kind = "service"
+llm_callable = false
+idl = "keystone/srv/AdminDeleteUser.srv"
+description = "Delete a user account as an administrator."
+
+[mode]
+type = "rpc"

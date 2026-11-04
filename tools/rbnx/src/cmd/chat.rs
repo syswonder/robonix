@@ -393,11 +393,8 @@ fn save_chat_config(cfg: &ChatConfig) -> Result<()> {
 }
 
 pub async fn execute(server: &str) -> Result<()> {
-    let atlas_endpoint = if server.starts_with("http") {
-        server.to_string()
-    } else {
-        format!("http://{server}")
-    };
+    let atlas_endpoint = super::canonical_endpoint(server);
+    let login = super::auth::resolve(&atlas_endpoint, true).await?;
 
     let liaison_endpoint = if let Ok(ep) = std::env::var("ROBONIX_LIAISON_ENDPOINT") {
         info!("using ROBONIX_LIAISON_ENDPOINT={ep}");
@@ -414,7 +411,7 @@ pub async fn execute(server: &str) -> Result<()> {
             DEFAULT_LIAISON_FALLBACK.to_string()
         })
     };
-    let liaison_endpoint = localhost_to_ipv4_loopback(&liaison_endpoint);
+    let liaison_endpoint = super::canonical_endpoint(&liaison_endpoint);
 
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -442,6 +439,7 @@ pub async fn execute(server: &str) -> Result<()> {
         &mut terminal,
         &atlas_endpoint,
         &liaison_endpoint,
+        login,
         chat_cfg,
         &audio_warnings,
     )
@@ -501,7 +499,7 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
         } else {
             format!("http://{endpoint}")
         };
-        return Ok(localhost_to_ipv4_loopback(&uri));
+        return Ok(super::canonical_endpoint(&uri));
     }
     anyhow::bail!("no {contract_id} capability found in Atlas registry")
 }
@@ -1558,16 +1556,22 @@ async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     atlas_endpoint: &str,
     liaison_endpoint: &str,
+    login: super::auth::Session,
     mut chat_cfg: ChatConfig,
     audio_warnings: &[String],
 ) -> Result<()> {
-    let local_user = format!("local:{}", whoami_username());
+    let super::auth::Session {
+        user_id,
+        username,
+        session_token,
+    } = login;
     let mut initial: Vec<ChatMessage> = Vec::with_capacity(1 + audio_warnings.len());
     initial.push(ChatMessage {
         role: Role::Status,
         text: format!(
-            "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · F2 = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
+            "Connected to Liaison at {liaison_endpoint} as {}. \
+             Enter = send · F2 = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit.",
+            username
         ),
     });
     for w in audio_warnings {
@@ -1597,7 +1601,8 @@ async fn run_tui(
             && let Event::Key(key) = event::read()?
         {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                let _ = notify_session_end(liaison_endpoint, &session_id, &local_user).await;
+                let _ = notify_session_end(liaison_endpoint, &session_id, &user_id, &session_token)
+                    .await;
                 break;
             }
 
@@ -1649,7 +1654,8 @@ async fn run_tui(
                 if let Err(e) = run_voice_session_with_esc_abort(
                     liaison_endpoint,
                     &session_id,
-                    &local_user,
+                    &user_id,
+                    &session_token,
                     Rc::clone(&messages),
                     &forest,
                     terminal,
@@ -1685,8 +1691,13 @@ async fn run_tui(
                         continue;
                     }
                     if msg == "quit" || msg == "exit" {
-                        let _ =
-                            notify_session_end(liaison_endpoint, &session_id, &local_user).await;
+                        let _ = notify_session_end(
+                            liaison_endpoint,
+                            &session_id,
+                            &user_id,
+                            &session_token,
+                        )
+                        .await;
                         break;
                     }
                     messages.borrow_mut().push(ChatMessage {
@@ -1708,7 +1719,8 @@ async fn run_tui(
                     match run_text_intent_with_esc_abort(
                         liaison_endpoint,
                         &session_id,
-                        &local_user,
+                        &user_id,
+                        &session_token,
                         &msg,
                         Rc::clone(&messages),
                         &forest,
@@ -1751,7 +1763,12 @@ async fn run_tui(
 
 // ── Liaison gRPC helpers ─────────────────────────────────────────────────────
 
-fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pilot::Task {
+pub(super) fn build_text_task(
+    session_id: &str,
+    user_id: &str,
+    session_token: &str,
+    text: &str,
+) -> crate::pb::pilot::Task {
     use crate::pb::pilot::Task;
     const INTENT_SOURCE_TEXT: u32 = 0;
     Task {
@@ -1760,14 +1777,21 @@ fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pi
         source: INTENT_SOURCE_TEXT,
         text: text.to_string(),
         audio_data: vec![],
-        context_json: serde_json::json!({"user_id": user_id, "modality": "text"}).to_string(),
+        context_json: serde_json::json!({
+            "user_id": user_id,
+            "modality": "text",
+            "session_token": session_token,
+        })
+        .to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     }
 }
 
 fn build_control_task(
     session_id: &str,
     user_id: &str,
+    session_token: &str,
     extra_context_json: &str,
 ) -> crate::pb::pilot::Task {
     use crate::pb::pilot::Task;
@@ -1775,7 +1799,11 @@ fn build_control_task(
     let mut ctx: serde_json::Value =
         serde_json::from_str(extra_context_json.trim()).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = ctx.as_object_mut() {
-        obj.entry("user_id").or_insert(serde_json::json!(user_id));
+        obj.insert("user_id".to_string(), serde_json::json!(user_id));
+        obj.insert(
+            "session_token".to_string(),
+            serde_json::json!(session_token),
+        );
     }
     Task {
         task_id: Uuid::new_v4().to_string(),
@@ -1785,17 +1813,28 @@ fn build_control_task(
         audio_data: vec![],
         context_json: ctx.to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     }
 }
 
-async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
+async fn notify_session_end(
+    liaison_endpoint: &str,
+    session_id: &str,
+    user_id: &str,
+    session_token: &str,
+) -> Result<()> {
     use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
 
     let mut client = RobonixSystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for session_end")?;
 
-    let task = build_control_task(session_id, user_id, r#"{"session_end":true}"#);
+    let task = build_control_task(
+        session_id,
+        user_id,
+        session_token,
+        r#"{"session_end":true}"#,
+    );
     let mut stream = client
         .submit_task(tonic::Request::new(task))
         .await
@@ -1805,14 +1844,19 @@ async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &
     Ok(())
 }
 
-async fn abort_session(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
+async fn abort_session(
+    liaison_endpoint: &str,
+    session_id: &str,
+    user_id: &str,
+    session_token: &str,
+) -> Result<()> {
     use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
 
     let mut client = RobonixSystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for abort_turn")?;
 
-    let task = build_control_task(session_id, user_id, r#"{"abort_turn":true}"#);
+    let task = build_control_task(session_id, user_id, session_token, r#"{"abort_turn":true}"#);
     let _ = client
         .submit_task(tonic::Request::new(task))
         .await
@@ -1829,6 +1873,7 @@ fn spawn_voice_steer(
     liaison_endpoint: &str,
     session_id: &str,
     user_id: &str,
+    session_token: &str,
     chat_cfg: &ChatConfig,
 ) {
     use crate::pb::contracts::robonix_system_liaison_voice_client::RobonixSystemLiaisonVoiceClient;
@@ -1849,6 +1894,7 @@ fn spawn_voice_steer(
             chat_cfg.speaker_cap_id.as_deref(),
         ),
         context_json: String::new(),
+        session_token: session_token.to_string(),
     };
     tokio::spawn(async move {
         if let Ok(mut client) = RobonixSystemLiaisonVoiceClient::connect(ep).await
@@ -1867,6 +1913,7 @@ async fn run_text_intent_with_esc_abort(
     liaison_endpoint: &str,
     session_id: &str,
     user_id: &str,
+    session_token: &str,
     user_msg: &str,
     messages: Rc<RefCell<Vec<ChatMessage>>>,
     forest: &Rc<RefCell<ForestView>>,
@@ -1879,7 +1926,7 @@ async fn run_text_intent_with_esc_abort(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
     let liaison_ep = liaison_endpoint.to_string();
-    let task = build_text_task(session_id, user_id, user_msg);
+    let task = build_text_task(session_id, user_id, session_token, user_msg);
 
     // Steers forward into the same channel; the turn ends when the first
     // message's stream and every steer's stream have closed.
@@ -1918,7 +1965,13 @@ async fn run_text_intent_with_esc_abort(
                     && let Event::Key(key) = event::read()? {
                         match key.code {
                             KeyCode::Esc => {
-                                let _ = abort_session(liaison_endpoint, session_id, user_id).await;
+                                let _ = abort_session(
+                                    liaison_endpoint,
+                                    session_id,
+                                    user_id,
+                                    session_token,
+                                )
+                                .await;
                                 messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
                                     text: "Esc — abort_turn sent (in-flight turn should stop)."
@@ -1937,7 +1990,12 @@ async fn run_text_intent_with_esc_abort(
                                     // The steer's own stream carries what Pilot
                                     // does for it: read it here, never block on it.
                                     if let Some(tx) = steers.upgrade() {
-                                        let task = build_text_task(session_id, user_id, &steer);
+                                        let task = build_text_task(
+                                            session_id,
+                                            user_id,
+                                            session_token,
+                                            &steer,
+                                        );
                                         tokio::spawn(forward_submit(liaison_ep.clone(), task, tx));
                                     }
                                     *scroll = 0;
@@ -2005,6 +2063,7 @@ async fn send_steer(
     liaison_endpoint: &str,
     session_id: &str,
     user_id: &str,
+    session_token: &str,
     text: &str,
 ) -> Result<()> {
     use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
@@ -2012,7 +2071,7 @@ async fn send_steer(
     let mut client = RobonixSystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for steer")?;
-    let task = build_text_task(session_id, user_id, text);
+    let task = build_text_task(session_id, user_id, session_token, text);
     let mut stream = client
         .submit_task(tonic::Request::new(task))
         .await
@@ -2029,6 +2088,7 @@ async fn run_voice_session_with_esc_abort(
     liaison_endpoint: &str,
     session_id: &str,
     user_id: &str,
+    session_token: &str,
     messages: Rc<RefCell<Vec<ChatMessage>>>,
     forest: &Rc<RefCell<ForestView>>,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -2055,6 +2115,7 @@ async fn run_voice_session_with_esc_abort(
             chat_cfg.speaker_cap_id.as_deref(),
         ),
         context_json: String::new(),
+        session_token: session_token.to_string(),
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<VoiceEvent, Status>>(64);
@@ -2119,12 +2180,24 @@ async fn run_voice_session_with_esc_abort(
                                 role: Role::Voice,
                                 text: "Ctrl+V — voice steer: speak your addition…".to_string(),
                             });
-                            spawn_voice_steer(liaison_endpoint, session_id, user_id, chat_cfg);
+                            spawn_voice_steer(
+                                liaison_endpoint,
+                                session_id,
+                                user_id,
+                                session_token,
+                                chat_cfg,
+                            );
                             draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
                         } else {
                             match key.code {
                                 KeyCode::Esc => {
-                                    let _ = abort_session(liaison_endpoint, session_id, user_id).await;
+                                    let _ = abort_session(
+                                        liaison_endpoint,
+                                        session_id,
+                                        user_id,
+                                        session_token,
+                                    )
+                                    .await;
                                     messages.borrow_mut().push(ChatMessage {
                                         role: Role::Status,
                                         text: "Esc — abort_turn sent (Pilot stops; voice playback may still finish).".to_string(),
@@ -2140,7 +2213,14 @@ async fn run_voice_session_with_esc_abort(
                                             text: format!("(steer) {steer}"),
                                         });
                                         if let Err(e) =
-                                            send_steer(liaison_endpoint, session_id, user_id, &steer).await
+                                            send_steer(
+                                                liaison_endpoint,
+                                                session_id,
+                                                user_id,
+                                                session_token,
+                                                &steer,
+                                            )
+                                            .await
                                         {
                                             messages.borrow_mut().push(ChatMessage {
                                                 role: Role::Status,
@@ -2563,17 +2643,23 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Pilot/Liaison bind IPv4 (`0.0.0.0`). Resolving `localhost` often prefers
-/// `::1`, so the gRPC client hits IPv6 and gets connection refused — force IPv4 loopback.
-fn localhost_to_ipv4_loopback(url: &str) -> String {
-    url.replace("localhost", "127.0.0.1")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Tiny username probe — avoids pulling in `whoami` for the CLI by reading
-/// $USER/$USERNAME with a "user" fallback. Liaison uses the real `whoami`
-/// crate when it stamps the canonical `local:<user>` identity.
-fn whoami_username() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "user".to_string())
+    #[test]
+    fn control_task_uses_the_current_authenticated_identity() {
+        let task = build_control_task(
+            "session",
+            "user-alice",
+            "validated-token",
+            r#"{"session_end":true,"user_id":"forged","session_token":"forged-token"}"#,
+        );
+        let context: serde_json::Value =
+            serde_json::from_str(&task.context_json).expect("control task context");
+
+        assert_eq!(context["user_id"], "user-alice");
+        assert_eq!(context["session_token"], "validated-token");
+        assert_eq!(context["session_end"], true);
+    }
 }

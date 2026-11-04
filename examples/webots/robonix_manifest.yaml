@@ -17,6 +17,11 @@ system:
   atlas:
     listen: 0.0.0.0:50051
     log: info
+  keystone:
+    listen: 0.0.0.0:50095
+    log: info
+    database: ${HOME}/.robonix/data/keystone.db
+    bootstrap_credentials_file: ${HOME}/.robonix/data/keystone-bootstrap-admin.txt
   soma:
     # Empty when boot is invoked directly, so rbnx falls back to ./soma.yaml.
     # examples/webots/boot.sh sets this to soma.full.yaml for the full model.
@@ -37,6 +42,12 @@ system:
     # robonix-client polls Executor for authoritative active RTDL plans.
     # Bind externally on trusted LAN/Tailscale deployments.
     listen: 0.0.0.0:50061
+    # Sentinel management remains local to the robot host.
+    sentinel_listen: 127.0.0.1:50062
+    # Active rules belong to this robot and survive source-tree rebuilds.
+    sentinel_rules: ${HOME}/.robonix/data/sentinel-rules.json
+    # The checked-in baseline is copied only when active rules are absent.
+    sentinel_rules_seed: sentinel-rules.v1.json
     # verifier.
     verification:
       overlap: true
@@ -47,6 +58,7 @@ system:
           verifier_args:
             scene_provider_id: scene
             check_yaw: true
+    require_keystone: true
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071
@@ -54,12 +66,15 @@ system:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
+    require_keystone: true
   # health monitoring layer
   vitals:
     listen: 127.0.0.1:50093
     log: info
   liaison:
     listen: 0.0.0.0:50081
+    require_keystone: true
+    keystone_endpoint: 127.0.0.1:50095
 
 # after booted all the system components, start the devices (primitives)
 # the robonix boot "device tree"

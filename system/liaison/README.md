@@ -32,7 +32,7 @@ User
         ├─ robonix/primitive/audio/mic_stream
         │    ▲ robonix/system/liaison/voice/finish ends capture early
         ├─ robonix/service/speech/asr_stream
-        ├─ robonix/service/voiceprint/identify
+        ├─ optional robonix/service/voiceprint/identify
         ├─ voice access gate before Pilot/TTS/action
         ├─ build pilot::Task with text + context_json.user_id/access
         ├─ Pilot SubmitTask
@@ -70,6 +70,10 @@ dropping the `StartVoiceSession` stream is what discards a turn. Calling it
 for a session that already ended returns `ok=false`, which callers should
 treat as a benign race rather than an error.
 
+When `require_keystone` is enabled, `voice/finish` requires a live Keystone
+session. As with other controls, the authenticated account does not have to
+match the account that started the Pilot session.
+
 Clients should discover `voice/finish` through Atlas before offering a
 finish-capture control: a Liaison older than this contract simply never
 registers it, and the control belongs hidden rather than failing with
@@ -80,10 +84,28 @@ registers it, and the control belongs hidden rather than failing with
 Pilot `Task` does not have a top-level `user_id` field. Liaison stores the
 normalised identity in `Task.context_json.user_id`:
 
-- text/API path: defaults to `local:<os_user>` when absent,
-- voice path: uses `voice:<speaker_id>` from voiceprint when available.
+- when Keystone is required, both paths use the canonical Keystone account;
+- otherwise, text/API defaults to `local:<os_user>` and voice uses
+  `voice:<speaker_id>` from Voiceprint when available.
 
-When `ROBONIX_LIAISON_ACCESS_ENABLED=1`:
+When `require_keystone` is enabled, text/API tasks require
+`context_json.session_token`; voice and hands-free requests use their
+`session_token` field. Both hands-free enable and disable require a valid
+session. Hands-free starts disabled until a client enables it. Liaison forwards
+the authenticated account and token to Pilot. If the account enables voice
+guard, Voiceprint must identify that same account.
+
+Liaison, Pilot, and Executor configure `require_keystone` independently.
+Liaison's `keystone_endpoint` is only a connection fallback; Atlas discovery is
+tried first. When Liaison does not require Keystone, it forwards a supplied
+token without validating it so Pilot and Executor can apply their own settings.
+
+Keystone does not bind a Pilot `session_id` to one account. An authenticated
+user with an existing id may continue or control that session. The local
+Liaison access policy applies when Liaison does not require Keystone.
+
+When Liaison does not require Keystone and
+`ROBONIX_LIAISON_ACCESS_ENABLED=1`:
 
 - text/API tasks must carry, or be normalised to, a user id listed in
   `ROBONIX_LIAISON_ALLOWED_USERS`;
@@ -114,6 +136,9 @@ robonix-liaison
 |------|--------|------|
 | `ROBONIX_ATLAS` | `127.0.0.1:50051` | Atlas address |
 | `ROBONIX_PILOT_ENDPOINT` | `127.0.0.1:50071` | Pilot address |
+| `ROBONIX_LIAISON_REQUIRE_KEYSTONE` | `false` | Require a live login session for external text, control, push-to-talk voice, and hands-free requests |
+| `ROBONIX_KEYSTONE_ENDPOINT` | (unset) | Optional Keystone connection fallback; it does not enable authentication |
+| `ROBONIX_SESSION_TOKEN` | (unset) | Keystone login token attached to text, control, and push-to-talk voice requests by `rbnx chat` and `rbnx ask` |
 | `ROBONIX_LIAISON_PORT` | `50081` | Liaison listen port |
 | `ROBONIX_LIAISON_VOICE_MOCK` | (unset) | Set to `1` to skip real mic+ASR and use preset text |
 | `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `Hello, please introduce yourself.` | Text used in mock mode |

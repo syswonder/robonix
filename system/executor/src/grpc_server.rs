@@ -18,6 +18,7 @@ use crate::pb::module_health::{
 use crate::pb::pilot::Plan;
 use crate::plan_input::PlanInput;
 use crate::plan_scheduler::PlanScheduler;
+use crate::sentinel_runtime::{SentinelIdentity, SentinelRuntime, resolve_session_identity};
 use crate::verification::VerificationPolicy;
 use robonix_atlas::client::AtlasClient;
 use std::sync::Arc;
@@ -45,6 +46,10 @@ pub struct ExecutorServiceImpl {
     pub(crate) provider_id: String,
     /// Shared plan progress and cancellation state used by all RPC handlers.
     pub(crate) runtime: PlanRuntime,
+    /// Active robot-local policy checked before every capability dispatch.
+    pub(crate) sentinel: SentinelRuntime,
+    /// Whether missing Keystone sessions are rejected instead of treated as local.
+    pub(crate) require_keystone: bool,
     /// Immutable verification timing and routing rules applied to submitted plans.
     pub(crate) verification: Arc<VerificationPolicy>,
 }
@@ -54,14 +59,29 @@ impl ExecutorServiceImpl {
     pub fn new(
         atlas: AtlasClient,
         provider_id: String,
+        sentinel: SentinelRuntime,
+        require_keystone: bool,
         verification: Arc<VerificationPolicy>,
     ) -> Self {
         Self {
             atlas,
             provider_id,
             runtime: PlanRuntime::default(),
+            sentinel,
+            require_keystone,
             verification,
         }
+    }
+
+    /// Resolve a request credential while allowing anonymous local execution only when configured.
+    async fn authenticate_session(&self, token: &str) -> Result<SentinelIdentity, Status> {
+        if !self.require_keystone {
+            return Ok(SentinelIdentity::default());
+        }
+        if token.is_empty() {
+            return Err(Status::unauthenticated("login session is required"));
+        }
+        resolve_session_identity(&self.atlas, &self.provider_id, token).await
     }
 }
 
@@ -74,12 +94,17 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
         &self,
         request: Request<Plan>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        let input = PlanInput::from_plan(request.into_inner()).map_err(Status::invalid_argument)?;
+        let mut plan = request.into_inner();
+        let token = std::mem::take(&mut plan.auth_session_token);
+        let identity = self.authenticate_session(&token).await?;
+        let input = PlanInput::from_plan(plan).map_err(Status::invalid_argument)?;
         Ok(Response::new(
             PlanScheduler::start(
                 self.atlas.clone(),
                 self.provider_id.clone(),
                 self.runtime.clone(),
+                self.sentinel.clone(),
+                identity,
                 self.verification.clone(),
                 input,
                 tokio_stream::empty(),
@@ -103,6 +128,10 @@ impl RobonixSystemExecutorExecuteStream for ExecutorServiceImpl {
             .message()
             .await?
             .ok_or_else(|| Status::invalid_argument("missing START"))?;
+        let token = first.auth_session_token.clone();
+        let identity = self.authenticate_session(&token).await?;
+        let mut first = first;
+        first.auth_session_token.clear();
         let mut input = PlanInput::default();
         input.accept(first).map_err(Status::invalid_argument)?;
         Ok(Response::new(
@@ -110,6 +139,8 @@ impl RobonixSystemExecutorExecuteStream for ExecutorServiceImpl {
                 self.atlas.clone(),
                 self.provider_id.clone(),
                 self.runtime.clone(),
+                self.sentinel.clone(),
+                identity,
                 self.verification.clone(),
                 input,
                 stream,
@@ -124,8 +155,10 @@ impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
     /// Cancel active plans and return whether they finished within the default wait.
     async fn cancel_all(
         &self,
-        _request: Request<crate::pb::executor::CancelAllRequest>,
+        request: Request<crate::pb::executor::CancelAllRequest>,
     ) -> Result<Response<CancelAllResponse>, Status> {
+        self.authenticate_session(&request.into_inner().session_token)
+            .await?;
         let mut atlas = self.atlas.clone();
         let success = self
             .runtime
@@ -158,6 +191,7 @@ impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
         request: Request<crate::pb::executor::ControlPlanRequest>,
     ) -> Result<Response<ControlPlanResponse>, Status> {
         let request = request.into_inner();
+        self.authenticate_session(&request.session_token).await?;
         let mut atlas = self.atlas.clone();
         let response = match request.action.as_str() {
             "cancel" => {

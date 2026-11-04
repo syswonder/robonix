@@ -1,0 +1,10 @@
+[contract]
+id = "robonix/system/keystone/replace_voiceprint"
+version = "1"
+kind = "service"
+llm_callable = false
+idl = "keystone/srv/ReplaceVoiceprint.srv"
+description = "Replace the current account's enrolled voiceprint using a new sample."
+
+[mode]
+type = "rpc"

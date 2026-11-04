@@ -26,7 +26,14 @@ pub async fn collect(
         .find(|(_, capability)| capability.contract_id == SCENE_CONTEXT)
         .map(|(provider_id, _)| provider_id.clone());
     let scene = match scene_target {
-        Some(provider_id) => query_scene(executor.graph.clone(), provider_id).await,
+        Some(provider_id) => {
+            query_scene(
+                executor.graph.clone(),
+                provider_id,
+                &executor.auth_session_token,
+            )
+            .await
+        }
         None => json!({"available": false, "error": "Scene context contract is not registered"}),
     };
     let providers = match atlas
@@ -72,6 +79,7 @@ pub async fn collect(
 async fn query_scene(
     mut graph: RobonixSystemExecutorExecuteClient<Channel>,
     provider_id: String,
+    auth_session_token: &str,
 ) -> Value {
     let plan_id = format!("state-prefetch-{}", Uuid::new_v4());
     let plan = Plan {
@@ -91,6 +99,7 @@ async fn query_scene(
             description: "Read Scene spatial context before planning".into(),
         }],
         root_index: 0,
+        auth_session_token: auth_session_token.to_owned(),
     };
     let query = async {
         let mut stream = graph

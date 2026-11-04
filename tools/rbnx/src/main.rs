@@ -236,6 +236,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn login_accepts_an_optional_username() {
+        let cli =
+            Cli::try_parse_from(["rbnx", "login", "alice"]).expect("login username should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Login {
+                username: Some(ref username),
+                ..
+            } if username == "alice"
+        ));
+        let cli = Cli::try_parse_from(["rbnx", "login"]).expect("login prompt should parse");
+        assert!(matches!(
+            cli.command,
+            cmd::Commands::Login { username: None, .. }
+        ));
+    }
+
     /// Keep boot help aligned with the supported built-in system components.
     #[test]
     fn boot_help_lists_vitals() {

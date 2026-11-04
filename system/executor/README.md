@@ -17,17 +17,35 @@ cargo build -p robonix-executor
 |---|---|---|
 | `--atlas` | `ROBONIX_ATLAS_ENDPOINT` | Atlas at `127.0.0.1:50051` |
 | `--listen` | `ROBONIX_EXECUTOR_LISTEN` | gRPC on `127.0.0.1:50061` |
+| `--sentinel-listen` | `ROBONIX_SENTINEL_LISTEN` | Loopback-only Sentinel management gRPC; port defaults to Executor's port plus one |
+| `--sentinel-rules` | `ROBONIX_SENTINEL_RULES` | Active Sentinel rules; defaults to `$ROBONIX_DATA_DIR/sentinel-rules.json` |
+| `--sentinel-rules-seed` | `ROBONIX_SENTINEL_RULES_SEED` | Optional policy copied only when the active rule file is absent |
+| `--require-keystone` | `ROBONIX_EXECUTOR_REQUIRE_KEYSTONE` | Require a live Keystone session for execution and plan control |
 | `--id` | `ROBONIX_EXECUTOR_PROVIDER_ID` | Provider id `executor` |
-| `--config` | `ROBONIX_CONFIG_PATH` | Optional YAML: `atlas_endpoint`, `listen`, `id`, `verification` |
+| `--config` | `ROBONIX_CONFIG_PATH` | Optional YAML with a subset of the same settings |
 | `--config-json` | — | `system.executor` manifest block passed by `rbnx` |
 
-Connection settings use CLI > flag environment variable > YAML > default.
-`ROBONIX_ATLAS` is an additional fallback before YAML. Manifest verification
-settings override YAML verification settings.
+Connection settings use CLI > flag environment variable > manifest > YAML >
+default. `ROBONIX_ATLAS` is an additional fallback before YAML. Manifest
+verification settings override YAML verification settings.
 
 Logging uses Scribe: `system.executor.log` (via `--config-json`) overrides
 `SCRIBE_FILE_LEVEL` (default `info`); `SCRIBE_CONSOLE_LEVEL` defaults to `warn`.
-The standalone `--log` flag is accepted but currently not applied.
+
+## Keystone and Sentinel
+
+When `require_keystone` is on, complete plans, incremental streams,
+`control_plan`, and `cancel_all_plans` require a live session. When it is off,
+those entry points accept anonymous requests without contacting Keystone and
+leave any forwarded credential uninterpreted. `list_active_plans` remains a
+read-only unauthenticated query in either mode.
+
+Every `do` call is checked against the active Sentinel policy before dispatch.
+Denied and indeterminate decisions fail the node without calling its provider.
+Administrators list or replace rules through
+`robonix/system/sentinel/list_rules` and
+`robonix/system/sentinel/replace_rules` on the loopback-only management
+endpoint. Replacements are validated and persisted before becoming active.
 
 ## Execution and control
 

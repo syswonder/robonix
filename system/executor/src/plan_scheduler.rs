@@ -6,6 +6,7 @@ use crate::pb::executor::{ExecuteStreamInput, RtdlEvent};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum as State;
 use crate::plan_input::{EXECUTE_STREAM_NODE, PlanInput};
 use crate::rtdl_events;
+use crate::sentinel_runtime::{SentinelIdentity, SentinelRuntime};
 use crate::verification::VerificationPolicy;
 use robonix_atlas::client::AtlasClient;
 use std::sync::Arc;
@@ -47,6 +48,10 @@ pub(crate) struct PlanScheduler {
     provider_id: String,
     /// Shared active-plan state used to publish progress and observe cancellation.
     runtime: PlanRuntime,
+    /// Active policy evaluated before each capability dispatch.
+    sentinel: SentinelRuntime,
+    /// Canonical Keystone identity attached to every call in this plan.
+    identity: SentinelIdentity,
     /// Rules and timing policy for verification of successful capability results.
     verification: Arc<VerificationPolicy>,
     /// Sends execution events or a terminal error to the requesting RPC stream.
@@ -61,10 +66,13 @@ pub(crate) struct PlanScheduler {
 
 impl PlanScheduler {
     /// Reserve active state before returning headers and own all work until cleanup finishes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start(
         atlas: AtlasClient,
         provider_id: String,
         runtime: PlanRuntime,
+        sentinel: SentinelRuntime,
+        identity: SentinelIdentity,
         verification: Arc<VerificationPolicy>,
         input: PlanInput,
         stream: impl Stream<Item = Result<ExecuteStreamInput, Status>> + Unpin + Send + 'static,
@@ -82,6 +90,8 @@ impl PlanScheduler {
             atlas,
             provider_id,
             runtime,
+            sentinel,
+            identity,
             verification,
             tx,
             tasks: JoinSet::new(),
@@ -183,6 +193,8 @@ impl PlanScheduler {
                 let atlas = self.atlas.clone();
                 let provider_id = self.provider_id.clone();
                 let runtime = self.runtime.clone();
+                let sentinel = self.sentinel.clone();
+                let identity = self.identity.clone();
                 let verification = self.verification.clone();
                 let tx = self.tx.clone();
                 self.tasks.spawn(async move {
@@ -214,6 +226,8 @@ impl PlanScheduler {
                         atlas,
                         provider_id,
                         runtime,
+                        sentinel,
+                        identity,
                         verification,
                     )
                     .await;
@@ -419,6 +433,7 @@ mod scheduling_tests {
     use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
     use crate::pb::pilot::{CapabilityCall, RtdlNode};
     use crate::plan_input::{EXECUTE_STREAM_CLOSE, EXECUTE_STREAM_END, EXECUTE_STREAM_START};
+    use crate::sentinel_runtime::SentinelRuntime;
     use crate::verification::VerificationPolicy;
     use robonix_atlas::{
         client::AtlasClient,
@@ -433,6 +448,14 @@ mod scheduling_tests {
     fn reserve_address() -> SocketAddr {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
         listener.local_addr().expect("reserved address")
+    }
+
+    fn sentinel_runtime() -> SentinelRuntime {
+        SentinelRuntime::load(std::env::temp_dir().join(format!(
+            "executor-scheduler-sentinel-{}.json",
+            uuid::Uuid::new_v4()
+        )))
+        .expect("empty Sentinel policy")
     }
 
     /// Both RPCs preserve sequence advancement and final failures in either verification mode.
@@ -456,6 +479,8 @@ mod scheduling_tests {
             let svc = ExecutorServiceImpl::new(
                 atlas,
                 "executor".into(),
+                sentinel_runtime(),
+                false,
                 Arc::new(VerificationPolicy::new(
                     overlap,
                     vec![VerificationRule {
@@ -629,6 +654,8 @@ mod scheduling_tests {
         let service = ExecutorServiceImpl::new(
             atlas,
             "executor".into(),
+            sentinel_runtime(),
+            false,
             Arc::new(VerificationPolicy::new(
                 true,
                 vec![VerificationRule {
@@ -643,6 +670,7 @@ mod scheduling_tests {
             plan_id: "overlap-plan".into(),
             session_id: "test".into(),
             round: 0,
+            auth_session_token: String::new(),
             nodes: vec![
                 RtdlNode {
                     node_kind: RTDL_SEQUENCE,

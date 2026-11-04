@@ -51,6 +51,8 @@ pub struct ExecutorConn {
     pub control: RobonixSystemExecutorControlPlanClient<Channel>,
     /// Reads active plan state for the next planning request.
     pub active: RobonixSystemExecutorListActivePlansClient<Channel>,
+    /// Keystone session used to authenticate execution and control requests.
+    pub auth_session_token: String,
 }
 
 pub(crate) type CapabilityTarget = (String, String);
@@ -640,6 +642,7 @@ async fn cancel_forest_plans(executor: &mut ExecutorConn, forest: &HashMap<Strin
         let cancel = executor
             .control
             .control_plan(Request::new(ControlPlanRequest {
+                session_token: executor.auth_session_token.clone(),
                 action: "cancel".to_string(),
                 plan_id: target.clone(),
                 wait_ms: 5_000,
@@ -726,11 +729,13 @@ pub(crate) fn parse_meta_plan_op(rtdl: &serde_json::Value) -> Result<Option<Meta
 async fn execute_meta_plan_op(executor: &mut ExecutorConn, op: &MetaPlanOp) -> Result<String> {
     let request = match op {
         MetaPlanOp::Cancel { plan_id, wait_ms } => ControlPlanRequest {
+            session_token: executor.auth_session_token.clone(),
             action: "cancel".to_string(),
             plan_id: plan_id.clone(),
             wait_ms: *wait_ms,
         },
         MetaPlanOp::CancelAll { wait_ms } => ControlPlanRequest {
+            session_token: executor.auth_session_token.clone(),
             action: "cancel_all".to_string(),
             plan_id: String::new(),
             wait_ms: *wait_ms,
@@ -933,10 +938,16 @@ async fn fetch_executor_active_snapshot(executor: &mut ExecutorConn) -> (String,
 /// running. Draining is non-blocking; returns whether anything was pulled so
 /// the caller knows to re-plan. The model decides for itself whether the steer
 /// requires a root plan-control meta op.
-fn append_steer(task: Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
+fn append_steer(
+    task: Task,
+    history: &mut Vec<Message>,
+    tasks: &mut TaskTable,
+    auth_session_token: &mut String,
+) -> bool {
     let pulled = receive_user_message(&task, history, tasks);
     if pulled {
         info!("[pilot/steer] mid-task input: {}", task.text.trim());
+        auth_session_token.clone_from(&task.auth_session_token);
     }
     pulled
 }
@@ -945,10 +956,11 @@ fn drain_steers(
     steer_rx: &mut mpsc::Receiver<Task>,
     history: &mut Vec<Message>,
     tasks: &mut TaskTable,
+    auth_session_token: &mut String,
 ) -> bool {
     let mut pulled = false;
     while let Ok(task) = steer_rx.try_recv() {
-        pulled |= append_steer(task, history, tasks);
+        pulled |= append_steer(task, history, tasks, auth_session_token);
     }
     pulled
 }
@@ -1212,6 +1224,9 @@ pub async fn run_turn(
     transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
+    executor
+        .auth_session_token
+        .clone_from(&task.auth_session_token);
 
     macro_rules! return_interrupted {
         ($forest:expr) => {{
@@ -1371,7 +1386,12 @@ pub async fn run_turn(
                     steer = steer_rx.recv() => {
                         match steer {
                             Some(task) => {
-                                if append_steer(task, history, tasks) {
+                                if append_steer(
+                                    task,
+                                    history,
+                                    tasks,
+                                    &mut executor.auth_session_token,
+                                ) {
                                     should_plan = true;
                                 }
                             }
@@ -1390,7 +1410,12 @@ pub async fn run_turn(
                 }
                 steer = steer_rx.recv() => {
                     if let Some(task) = steer
-                        && append_steer(task, history, tasks)
+                        && append_steer(
+                            task,
+                            history,
+                            tasks,
+                            &mut executor.auth_session_token,
+                        )
                     {
                         // Re-plan now so the model can react (and decide
                         // whether to cancel any in-flight tree).
@@ -1414,7 +1439,12 @@ pub async fn run_turn(
 
         // Pull any steers that landed while we were busy (e.g. during the
         // previous VLM stream) so this round plans with the latest user input.
-        drain_steers(&mut steer_rx, history, tasks);
+        drain_steers(
+            &mut steer_rx,
+            history,
+            tasks,
+            &mut executor.auth_session_token,
+        );
         transcript.record(history, tasks);
 
         // Re-discover capabilities from atlas every round so providers that
@@ -1598,18 +1628,35 @@ pub async fn run_turn(
                 biased;
                 _ = term_signal.changed() => {
                     drop(stream);
-                    if let Err(error) = live.cancel(&mut executor.control).await { warn!("[pilot/stream] abort cleanup: {error:#}"); }
+                    if let Err(error) = live
+                        .cancel(&mut executor.control, &executor.auth_session_token)
+                        .await
+                    {
+                        warn!("[pilot/stream] abort cleanup: {error:#}");
+                    }
                     publish_stream(live, forest, history, tx, &session_id).await;
                     return_interrupted!(&forest.trees);
                 }
                 steer = steer_rx.recv(), if !steer_rx.is_closed() => {
                     if let Some(task) = steer {
                         drop(stream);
-                        let cleanup = live.cancel(&mut executor.control).await;
+                        let cleanup = live
+                            .cancel(&mut executor.control, &executor.auth_session_token)
+                            .await;
                         publish_stream(live, forest, history, tx, &session_id).await;
-                        append_steer(task, history, tasks);
+                        append_steer(
+                            task,
+                            history,
+                            tasks,
+                            &mut executor.auth_session_token,
+                        );
                         cleanup?;
-                        drain_steers(&mut steer_rx, history, tasks);
+                        drain_steers(
+                            &mut steer_rx,
+                            history,
+                            tasks,
+                            &mut executor.auth_session_token,
+                        );
                         should_plan = true;
                         continue 'supervisor;
                     }
@@ -1631,7 +1678,14 @@ pub async fn run_turn(
                             if let Err(error) = parser.push(&delta) { invalid_output = true; stream_error = Some(error); break; }
                             // Submission checks execution feedback and revision;
                             // this loop handles steer and abort after the batch returns.
-                            let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
+                            let mut messages = parser.take_messages();
+                            for message in &mut messages {
+                                if message.message_kind == crate::rtdl_stream::EXECUTE_STREAM_START {
+                                    message.auth_session_token =
+                                        executor.auth_session_token.clone();
+                                }
+                            }
+                            let submission = live.submit(messages, crate::stream_execution::SubmissionGuard {
                                 client: &mut executor.streaming, forbidden: &forbidden,
                                 revision: &forest.revision, expected_revision: planning_revision,
                             }).await;
@@ -1651,7 +1705,11 @@ pub async fn run_turn(
                                 }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
                                     drop(stream);
-                                    live.cancel(&mut executor.control).await?;
+                                    live.cancel(
+                                        &mut executor.control,
+                                        &executor.auth_session_token,
+                                    )
+                                    .await?;
                                     should_plan = false;
                                     continue 'supervisor;
                                 }
@@ -1699,7 +1757,9 @@ pub async fn run_turn(
         let (envelope, meta_op) = match generated {
             Ok(parsed) => parsed,
             Err(error) => {
-                let cleanup = live.cancel(&mut executor.control).await;
+                let cleanup = live
+                    .cancel(&mut executor.control, &executor.auth_session_token)
+                    .await;
                 let retry = invalid_output
                     && cleanup.is_ok()
                     && (live.plan.plan_id.is_empty() || (live.complete && !live.transport_failed))
@@ -3020,6 +3080,7 @@ mod tests {
     fn a_steer_is_filed_under_the_open_task_and_enters_history_once_with_its_id() {
         let mut tasks = TaskTable::default();
         let mut history = Vec::new();
+        let mut auth_session_token = String::new();
         assert!(append_steer(
             Task {
                 text: "perform step A, then step B".into(),
@@ -3027,19 +3088,23 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            &mut auth_session_token,
         ));
         tasks.answered();
         assert!(append_steer(
             Task {
                 text: "change of plan: stop after step A".into(),
+                auth_session_token: "steer-token".into(),
                 ..Default::default()
             },
             &mut history,
             &mut tasks,
+            &mut auth_session_token,
         ));
         assert_eq!(tasks.tasks.len(), 1);
         assert_eq!(tasks.message_ids("T1"), ["m1", "m2"]);
         assert_eq!(history.len(), 2);
+        assert_eq!(auth_session_token, "steer-token");
         assert_eq!(
             history[1].content.as_deref(),
             Some(
@@ -3053,6 +3118,7 @@ mod tests {
     fn steer_targets_one_plan_without_discarding_independent_work() {
         let mut tasks = TaskTable::default();
         let mut history = Vec::new();
+        let mut auth_session_token = String::new();
         tasks.receive("go to the meeting room");
         tasks.answered();
 
@@ -3083,6 +3149,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            &mut auth_session_token,
         ));
         assert_eq!(tasks.message_ids("T1"), ["m1", "m2"]);
         tasks.attach_tree("T1", "11", "navigate to the meeting room");
@@ -3249,6 +3316,7 @@ mod tests {
             audio_data: Vec::new(),
             context_json: ctx.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         }
     }
 
@@ -3289,6 +3357,7 @@ mod tests {
             session_id: "s".into(),
             round: 0,
             root_index: 0,
+            auth_session_token: String::new(),
             nodes: vec![RtdlNode {
                 node_kind: RTDL_DO,
                 children: vec![],

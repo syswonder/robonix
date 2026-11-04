@@ -9,6 +9,9 @@ uint32 END=3
 string plan_id
 string session_id
 uint32 round
+# Internal-only Keystone credential. Executor validates it before admitting the
+# plan and never copies it into execution events.
+string auth_session_token
 
 # NODE indices start at zero and increase by one. Only node zero has no parent.
 # Parents must already exist and be open sequence/parallel nodes.

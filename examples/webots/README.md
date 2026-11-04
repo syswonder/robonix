@@ -14,6 +14,8 @@ examples/webots/
 ├── boot.sh                    Variant-aware wrapper around rbnx boot.
 ├── soma.yaml                  TIAGo Lite body description (default).
 ├── soma.full.yaml             Full single-arm TIAGo body description.
+├── sentinel-rules.v1.json     First-boot Sentinel policy.
+├── SENTINEL_DEMO.md           Sentinel policy setup.
 ├── primitives/                One device = one package.
 │   ├── tiago_chassis/         /amcl_pose + /cmd_vel  → chassis/{state, move}
 │   ├── tiago_camera/          /head_front_camera/*   → camera/{snapshot, depth_snapshot}

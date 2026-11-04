@@ -73,6 +73,7 @@ const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 // exceed 90s on a cold self-hosted runner.
 const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
+const DEFAULT_EXECUTOR_LISTEN: &str = "127.0.0.1:50061";
 
 pub(super) use robonix_cli::manifest::is_builtin_system;
 
@@ -279,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
+    fn boot_prerequisites_build_scene_but_skip_builtin_system_components() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -290,6 +291,7 @@ mod tests {
         ));
         let scene = temp.join("system/scene");
         std::fs::create_dir_all(&scene).expect("scene package directory");
+        std::fs::create_dir_all(temp.join("system/keystone")).expect("keystone builtin directory");
         std::fs::create_dir_all(temp.join("system/vitals")).expect("vitals builtin directory");
         std::fs::write(
             scene.join("package_manifest.yaml"),
@@ -309,6 +311,7 @@ stop: "true"
         let deploy = DeployManifest {
             system: HashMap::from([
                 ("scene".to_string(), serde_yaml::Value::Null),
+                ("keystone".to_string(), serde_yaml::Value::Null),
                 ("vitals".to_string(), serde_yaml::Value::Null),
             ]),
             ..Default::default()
@@ -378,6 +381,232 @@ soma_endpoint: 127.0.0.1:50091
                 args
             );
         }
+    }
+
+    #[test]
+    fn liaison_receives_the_keystone_endpoint_from_the_manifest() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 0.0.0.0:50081
+keystone_endpoint: 127.0.0.1:50095
+"#,
+        )
+        .expect("liaison config");
+
+        let args = system_cli_args("liaison", Some(&cfg), Some("0.0.0.0:50051"));
+        let endpoint = args
+            .windows(2)
+            .find(|pair| pair[0] == "--keystone-endpoint")
+            .map(|pair| pair[1].as_str());
+
+        assert_eq!(endpoint, Some("127.0.0.1:50095"));
+    }
+
+    #[test]
+    fn keystone_requirement_is_passed_independently_in_each_config_json() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("require_keystone: false").expect("component config");
+
+        for name in ["executor", "pilot", "liaison"] {
+            let args = system_cli_args(name, Some(&cfg), Some("127.0.0.1:50051"));
+            let json = args
+                .windows(2)
+                .find(|pair| pair[0] == "--config-json")
+                .map(|pair| pair[1].as_str())
+                .expect("config-json");
+            let config: serde_json::Value = serde_json::from_str(json).expect("JSON config");
+
+            assert_eq!(config["require_keystone"], false);
+            assert!(!args.iter().any(|arg| arg == "--require-keystone"));
+        }
+    }
+
+    #[test]
+    fn keystone_inherits_the_atlas_endpoint_from_the_manifest() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 127.0.0.1:50095
+"#,
+        )
+        .expect("keystone config");
+
+        let args = system_cli_args("keystone", Some(&cfg), Some("127.0.0.1:51051"));
+
+        for expected in [
+            ["--listen", "127.0.0.1:50095"],
+            ["--atlas", "127.0.0.1:51051"],
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == expected[0] && pair[1] == expected[1]),
+                "missing {:?} in {:?}",
+                expected,
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn executor_rule_paths_resolve_from_the_manifest_directory() {
+        let manifest_dir = PathBuf::from("/tmp/robonix-deployment");
+        let mut system = HashMap::from([(
+            "executor".to_string(),
+            serde_yaml::from_str(
+                r#"
+sentinel_rules: data/sentinel-rules.json
+sentinel_rules_seed: sentinel-rules.v1.json
+"#,
+            )
+            .expect("executor config"),
+        )]);
+
+        resolve_executor_rule_paths(&mut system, &manifest_dir);
+        let args = system_cli_args("executor", system.get("executor"), None);
+        let config_json = args
+            .windows(2)
+            .find(|pair| pair[0] == "--config-json")
+            .map(|pair| pair[1].as_str())
+            .expect("--config-json");
+        let forwarded: serde_json::Value =
+            serde_json::from_str(config_json).expect("Executor config JSON");
+
+        assert_eq!(
+            forwarded["sentinel_rules"].as_str(),
+            Some(
+                manifest_dir
+                    .join("data/sentinel-rules.json")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            forwarded["sentinel_rules_seed"].as_str(),
+            Some(
+                manifest_dir
+                    .join("sentinel-rules.v1.json")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[test]
+    fn executor_preflight_includes_explicit_sentinel_listen() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 127.0.0.1:50061
+sentinel_listen: 127.0.0.1:50062
+"#,
+        )
+        .expect("executor config");
+
+        let listens = system_listens("executor", Some(&cfg)).expect("Executor listen plan");
+
+        assert_eq!(
+            listens
+                .into_iter()
+                .map(|listen| (listen.field, listen.address))
+                .collect::<Vec<_>>(),
+            [
+                ("listen", "127.0.0.1:50061".to_owned()),
+                ("sentinel_listen", "127.0.0.1:50062".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn executor_preflight_rejects_external_sentinel_listen() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("sentinel_listen: 0.0.0.0:50062").expect("executor config");
+
+        let error = system_listens("executor", Some(&cfg)).expect_err("external Sentinel listen");
+
+        assert!(error.to_string().contains("must listen on 127.0.0.1"));
+    }
+
+    #[test]
+    fn executor_preflight_includes_derived_sentinel_listen() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("listen: 127.0.0.1:51061").expect("executor config");
+
+        let listens = system_listens("executor", Some(&cfg)).expect("Executor listen plan");
+
+        assert_eq!(listens[0].field, "listen");
+        assert_eq!(listens[0].address, "127.0.0.1:51061");
+        assert_eq!(listens[1].field, "sentinel_listen (derived)");
+        assert_eq!(listens[1].address, "127.0.0.1:51062");
+    }
+
+    #[test]
+    fn executor_preflight_rejects_adjacent_port_overflow() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("listen: 127.0.0.1:65535").expect("executor config");
+
+        let error = system_listens("executor", Some(&cfg)).expect_err("port overflow");
+        assert!(error.to_string().contains("port 65535"), "{error:#}");
+    }
+
+    #[test]
+    fn executor_preflight_rejects_explicit_listen_collision() {
+        let executor: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 0.0.0.0:50061
+sentinel_listen: 127.0.0.1:50061
+"#,
+        )
+        .expect("executor config");
+        let deploy = DeployManifest {
+            system: HashMap::from([("executor".to_owned(), executor)]),
+            ..Default::default()
+        };
+
+        let error = validate_system_listen_plan(&deploy).expect_err("explicit collision");
+        assert!(error.to_string().contains("sentinel_listen"), "{error:#}");
+        assert!(error.to_string().contains("conflicts"), "{error:#}");
+    }
+
+    #[test]
+    fn executor_preflight_rejects_exact_duplicate_listens() {
+        let executor: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+listen: 127.0.0.1:50061
+sentinel_listen: 127.0.0.1:50061
+"#,
+        )
+        .expect("executor config");
+        let deploy = DeployManifest {
+            system: HashMap::from([("executor".to_owned(), executor)]),
+            ..Default::default()
+        };
+
+        let error = validate_system_listen_plan(&deploy).expect_err("duplicate listen");
+        assert!(error.to_string().contains("sentinel_listen"), "{error:#}");
+        assert!(error.to_string().contains("127.0.0.1:50061"), "{error:#}");
+    }
+
+    #[test]
+    fn executor_preflight_rejects_derived_cross_system_collision() {
+        let atlas: serde_yaml::Value =
+            serde_yaml::from_str("listen: 0.0.0.0:50062").expect("atlas config");
+        let executor: serde_yaml::Value =
+            serde_yaml::from_str("listen: 127.0.0.1:50061").expect("executor config");
+        let deploy = DeployManifest {
+            system: HashMap::from([
+                ("atlas".to_owned(), atlas),
+                ("executor".to_owned(), executor),
+            ]),
+            ..Default::default()
+        };
+
+        let error = validate_system_listen_plan(&deploy).expect_err("derived collision");
+        assert!(
+            error.to_string().contains("sentinel_listen (derived)"),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("system/atlas.listen"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -863,6 +1092,36 @@ fn ensure_soma_defaults(
         }
         let joined = manifest_dir.join(p);
         *v = Value::String(joined.to_string_lossy().into_owned());
+    }
+}
+
+fn resolve_executor_rule_paths(
+    system: &mut HashMap<String, serde_yaml::Value>,
+    manifest_dir: &Path,
+) {
+    let Some(executor) = system
+        .get_mut("executor")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    for key in ["sentinel_rules", "sentinel_rules_seed"] {
+        let yaml_key = serde_yaml::Value::String(key.to_owned());
+        let Some(path) = executor
+            .get(&yaml_key)
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        if path.is_relative() {
+            executor.insert(
+                yaml_key,
+                serde_yaml::Value::String(manifest_dir.join(path).to_string_lossy().into_owned()),
+            );
+        }
     }
 }
 
@@ -1406,6 +1665,10 @@ pub async fn execute(
     if (soma_declared || soma_implied) && !skip_system {
         ensure_soma_defaults(&mut deploy.system, &manifest_dir, &manifest_path);
     }
+    if !skip_system {
+        resolve_executor_rule_paths(&mut deploy.system, &manifest_dir);
+        validate_system_listen_plan(&deploy).context("invalid system listen plan")?;
+    }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
     // Session state (Pilot transcripts) outlives the logs: boot clears old
@@ -1578,6 +1841,7 @@ pub async fn execute(
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
+                ("keystone", "robonix-keystone"),
                 ("soma", "robonix-soma"),
                 ("vitals", "robonix-vitals"),
                 ("pilot", "robonix-pilot"),
@@ -1610,21 +1874,24 @@ pub async fn execute(
                 // run). The fallout is mysterious: register_capability hits an
                 // atlas that doesn't have your takeover/state-push fixes,
                 // endpoints route to dead orphan gRPC servers, …
-                if let Some(listen) = system_listen(name, deploy.system.get(*name))
-                    && let Err(e) = port_is_free(&listen)
-                {
-                    output::boot_fail(
-                        name,
-                        &format!(
-                            "listen address '{listen}' is taken: {e:#}. \
-                                  Stop the running process (try `bash sim/stop.sh` \
-                                  or `pkill -f robonix-{name}`) and retry."
-                        ),
-                    );
-                    anyhow::bail!(
-                        "system/{name}: listen address '{listen}' is already in use; \
-                         refusing to spawn (would shadow the existing process)"
-                    );
+                for listen in system_listens(name, deploy.system.get(*name))? {
+                    if let Err(e) = port_is_free(&listen.address) {
+                        output::boot_fail(
+                            name,
+                            &format!(
+                                "listen address '{}' is taken: {e:#}. \
+                                      Stop the running process (try `bash sim/stop.sh` \
+                                      or `pkill -f robonix-{name}`) and retry.",
+                                listen.address
+                            ),
+                        );
+                        anyhow::bail!(
+                            "system/{name}.{}: listen address '{}' is already in use; \
+                             refusing to spawn (would shadow the existing process)",
+                            listen.field,
+                            listen.address,
+                        );
+                    }
                 }
 
                 // Required-arg validation before spawn. Without this, an empty
@@ -1655,7 +1922,7 @@ pub async fn execute(
                     started_at_ms,
                     &children,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                tokio::time::sleep(Duration::from_millis(1500)).await;
                 if *name == "soma" {
                     if !deploy.primitive.is_empty() {
                         output::boot_section("primitive");
@@ -2178,20 +2445,133 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
 /// elsewhere). Consumers that don't carry their own `atlas:` field inherit
 /// from this so the manifest doesn't have to repeat the address. An
 /// explicit per-block `atlas:` still wins.
-/// Extract the `host:port` string each system binary will try to bind.
-/// Used by the pre-spawn port-availability check. Returns None for
-/// services we don't gate on (or whose listen field is absent — caller
-/// then doesn't pre-check).
-fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> {
-    let map = cfg?.as_mapping()?;
-    let s = map
-        .get(serde_yaml::Value::String("listen".into()))?
-        .as_str()?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() || !is_builtin_system(name) {
-        return None;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemListen {
+    field: &'static str,
+    address: String,
+}
+
+/// Extract every effective `host:port` a system binary will try to bind.
+/// Executor owns both its execution and Sentinel management endpoints; when
+/// `sentinel_listen` is omitted, Executor derives a loopback address one port
+/// above `listen`.
+fn system_listens(name: &str, cfg: Option<&serde_yaml::Value>) -> Result<Vec<SystemListen>> {
+    if !is_builtin_system(name) {
+        return Ok(Vec::new());
     }
-    Some(trimmed.to_string())
+    let map = cfg.and_then(serde_yaml::Value::as_mapping);
+    let mut listens = Vec::new();
+    let configured_primary = map
+        .and_then(|map| map.get(serde_yaml::Value::String("listen".into())))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let effective_primary = if name == "executor" {
+        Some(configured_primary.unwrap_or(DEFAULT_EXECUTOR_LISTEN))
+    } else {
+        configured_primary
+    };
+    if let Some(primary) = effective_primary {
+        listens.push(SystemListen {
+            field: "listen",
+            address: primary.to_owned(),
+        });
+    }
+
+    if name == "executor" {
+        let configured_sentinel = map
+            .and_then(|map| map.get(serde_yaml::Value::String("sentinel_listen".into())))
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (field, address) = match configured_sentinel {
+            Some(sentinel) => ("sentinel_listen", sentinel.to_owned()),
+            None => (
+                "sentinel_listen (derived)",
+                adjacent_executor_listen(
+                    effective_primary.expect("Executor always has an effective listen"),
+                )?,
+            ),
+        };
+        let sentinel_address: std::net::SocketAddr = address
+            .parse()
+            .with_context(|| format!("invalid Executor {field} address '{address}'"))?;
+        if sentinel_address.ip() != std::net::Ipv4Addr::LOCALHOST {
+            anyhow::bail!("system/executor.{field} must listen on 127.0.0.1, got '{address}'");
+        }
+        listens.push(SystemListen { field, address });
+    }
+    Ok(listens)
+}
+
+fn adjacent_executor_listen(listen: &str) -> Result<String> {
+    let address: std::net::SocketAddr = listen
+        .parse()
+        .with_context(|| format!("invalid Executor listen address '{listen}'"))?;
+    let port = address.port().checked_add(1).with_context(|| {
+        format!(
+            "cannot derive sentinel_listen from listen port {}",
+            address.port()
+        )
+    })?;
+    Ok(format!("127.0.0.1:{port}"))
+}
+
+/// Validate the whole built-in system listen plan before spawning anything.
+/// Checking ports one component at a time cannot catch two currently-free
+/// addresses that overlap each other, especially Executor's derived endpoint.
+fn validate_system_listen_plan(deploy: &DeployManifest) -> Result<()> {
+    const BUILTIN_ORDER: [&str; 7] = [
+        "atlas", "executor", "keystone", "soma", "vitals", "pilot", "liaison",
+    ];
+    let mut planned: Vec<(&str, SystemListen)> = Vec::new();
+    for component in BUILTIN_ORDER {
+        if !deploy.system.contains_key(component) {
+            continue;
+        }
+        for candidate in system_listens(component, deploy.system.get(component))? {
+            for (existing_component, existing) in &planned {
+                if listen_addresses_conflict(&existing.address, &candidate.address)? {
+                    anyhow::bail!(
+                        "system/{}.{} listen address '{}' conflicts with system/{}.{} '{}'",
+                        component,
+                        candidate.field,
+                        candidate.address,
+                        existing_component,
+                        existing.field,
+                        existing.address,
+                    );
+                }
+            }
+            planned.push((component, candidate));
+        }
+    }
+    Ok(())
+}
+
+fn listen_addresses_conflict(left: &str, right: &str) -> Result<bool> {
+    use std::net::ToSocketAddrs;
+
+    let resolve = |listen: &str| -> Result<Vec<std::net::SocketAddr>> {
+        let addresses = listen
+            .to_socket_addrs()
+            .with_context(|| format!("parse listen address '{listen}'"))?
+            .collect::<Vec<_>>();
+        if addresses.is_empty() {
+            anyhow::bail!("listen address '{listen}' resolved to no socket addresses");
+        }
+        Ok(addresses)
+    };
+    let left = resolve(left)?;
+    let right = resolve(right)?;
+    Ok(left.iter().any(|left| {
+        right.iter().any(|right| {
+            left.port() == right.port()
+                && (left.ip() == right.ip()
+                    || left.ip().is_unspecified()
+                    || right.ip().is_unspecified())
+        })
+    }))
 }
 
 /// Probe a host:port. Returns `Ok(())` when nothing is listening (we can
@@ -2277,6 +2657,16 @@ fn system_cli_args(
             // even when manifests don't mention atlas at all).
             push_pair(&mut out, "--capabilities", s("capabilities"));
         }
+        "keystone" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas_endpoint")
+                    .or_else(|| s("atlas"))
+                    .or_else(|| atlas_listen.map(str::to_string)),
+            );
+        }
         "executor" => {
             push_pair(&mut out, "--listen", s("listen"));
             push_pair(
@@ -2313,6 +2703,7 @@ fn system_cli_args(
                 s("atlas").or_else(|| atlas_listen.map(str::to_string)),
             );
             push_pair(&mut out, "--pilot-endpoint", s("pilot_endpoint"));
+            push_pair(&mut out, "--keystone-endpoint", s("keystone_endpoint"));
             push_pair(&mut out, "--log", s("log"));
         }
         "soma" => {

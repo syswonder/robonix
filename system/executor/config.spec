@@ -6,6 +6,9 @@
 # in the manifest has `$VAR` / `${VAR}` expanded first, and an unset variable
 # becomes an empty string.
 #
+# Executor also reads `require_keystone` and `verification` from the JSON.
+# A wrong type for either stops Executor at startup.
+#
 # `status: enabled | disabled` is read by rbnx, not by Executor. Executor
 # cannot be disabled; `status: disabled` stops the boot.
 #
@@ -28,6 +31,30 @@ properties:
       name is rejected at startup). An unspecified IPv4 address (0.0.0.0) is
       advertised to Atlas as 127.0.0.1 on the same port. When absent, Executor
       reads ROBONIX_EXECUTOR_LISTEN, then binds 127.0.0.1:50061.
+
+  sentinel_listen:
+    type: string
+    default: 127.0.0.1:50062
+    description: >-
+      Loopback socket address the Sentinel rule-management services bind to.
+      The address must use 127.0.0.1. When absent, Executor uses its own port
+      incremented by one. ROBONIX_SENTINEL_LISTEN overrides this value.
+
+  sentinel_rules:
+    type: string
+    default: rbnx-boot/data/sentinel-rules.json
+    description: >-
+      Robot-local Sentinel rule file. When absent, Executor uses
+      $ROBONIX_DATA_DIR/sentinel-rules.json, or
+      rbnx-boot/data/sentinel-rules.json when that environment variable is
+      unset. ROBONIX_SENTINEL_RULES overrides this value.
+
+  sentinel_rules_seed:
+    type: string
+    description: >-
+      Optional initial Sentinel rule file. Executor validates and copies it to
+      sentinel_rules only when the active rule file does not exist.
+      ROBONIX_SENTINEL_RULES_SEED overrides this value.
 
   atlas:
     type: string
@@ -108,3 +135,12 @@ properties:
                 the target call's provider, contract, node description,
                 arguments and output. Any other JSON type stops Executor at
                 startup.
+
+  require_keystone:
+    type: boolean
+    default: false
+    description: >-
+      Require a live Keystone session on plan execution and plan-control
+      requests. This setting is independent of Liaison and Pilot.
+      --require-keystone or ROBONIX_EXECUTOR_REQUIRE_KEYSTONE overrides the
+      manifest value.

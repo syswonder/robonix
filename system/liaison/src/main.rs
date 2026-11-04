@@ -8,13 +8,14 @@
 // `robonix/system/liaison`, which exposes:
 //
 //   * SubmitTask(Task) → stream PilotEvent
-//       For text / API / pre-built tasks. Liaison normalises `Task.user_id`
-//       (defaulting to `local:<os_user>` when empty) and forwards to Pilot.
+//       For text / API / pre-built tasks. Liaison resolves a configured
+//       Keystone session or normalises `context_json.user_id`, then forwards
+//       to Pilot.
 //
 //   * StartVoiceSession(...) → stream VoiceEvent
-//       For push-to-talk voice. Liaison drives mic → ASR → voiceprint →
-//       Pilot → optional TTS → speaker, wrapping every stage as a
-//       VoiceEvent. See `voice.rs`.
+//       For push-to-talk voice. Liaison resolves a configured Keystone session,
+//       then drives mic → ASR → optional voiceprint → Pilot → optional TTS →
+//       speaker, wrapping every stage as a VoiceEvent. See `voice.rs`.
 //
 // Liaison itself does NOT contain ASR / TTS / voiceprint logic. Each is an
 // Atlas-registered system capability (robonix/service/speech/asr,
@@ -23,6 +24,7 @@
 
 mod access;
 mod handsfree;
+mod keystone_gateway;
 mod pb;
 mod voice;
 
@@ -52,6 +54,7 @@ use pb::contracts::{
     },
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
+use pb::keystone::User;
 use pb::liaison::{
     FinishVoiceCaptureRequest, FinishVoiceCaptureResponse, GetHandsfreeStatusRequest,
     GetHandsfreeStatusResponse, SetHandsfreeRequest, SetHandsfreeResponse,
@@ -63,6 +66,7 @@ use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info, warn};
+use serde::Deserialize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -257,6 +261,8 @@ pub struct LiaisonPipeline {
     pilot_endpoint_default: String,
     atlas: Arc<Mutex<AtlasClient>>,
     access: Arc<AccessControlConfig>,
+    keystone: Arc<keystone_gateway::KeystoneGateway>,
+    require_keystone: bool,
 }
 
 impl LiaisonPipeline {
@@ -267,11 +273,15 @@ impl LiaisonPipeline {
         pilot_endpoint_default: impl Into<String>,
         atlas: Arc<Mutex<AtlasClient>>,
         access: Arc<AccessControlConfig>,
+        keystone: Arc<keystone_gateway::KeystoneGateway>,
+        require_keystone: bool,
     ) -> Self {
         Self {
             pilot_endpoint_default: pilot_endpoint_default.into(),
             atlas,
             access,
+            keystone,
+            require_keystone,
         }
     }
 
@@ -279,25 +289,42 @@ impl LiaisonPipeline {
     pub async fn handle_intent(
         &self,
         mut task: Task,
-    ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>> {
+    ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>, Status> {
+        if self.require_keystone {
+            authenticate_task(&self.keystone, &mut task).await?;
+        } else {
+            forward_session_token(&mut task)?;
+        }
         ensure_user_id(&mut task);
-        let user_id = task_user_id(&task);
-        match self.access.authorize_user(&user_id) {
-            AccessDecision::Allow {
-                user_id,
-                method,
-                reason,
-                ..
-            } => {
-                info!("[liaison/access] text allow user={user_id} via {method:?}: {reason}");
-            }
-            AccessDecision::Deny {
-                user_id, reason, ..
-            } => {
-                warn!("[liaison/access] text deny user={user_id}: {reason}");
-                return Err(anyhow!("access denied for user '{user_id}': {reason}"));
+        if !self.require_keystone {
+            let user_id = task_user_id(&task);
+            match self.access.authorize_user(&user_id) {
+                AccessDecision::Allow {
+                    user_id,
+                    method,
+                    reason,
+                    ..
+                } => {
+                    info!("[liaison/access] text allow user={user_id} via {method:?}: {reason}");
+                }
+                AccessDecision::Deny {
+                    user_id, reason, ..
+                } => {
+                    warn!("[liaison/access] text deny user={user_id}: {reason}");
+                    return Err(Status::permission_denied(format!(
+                        "access denied for user '{user_id}': {reason}"
+                    )));
+                }
             }
         }
+        self.forward_to_pilot(task).await
+    }
+
+    /// Forward a `Task` to Pilot. Returns a channel that yields `PilotEvent`s.
+    async fn forward_to_pilot(
+        &self,
+        task: Task,
+    ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>, Status> {
         let (tx, rx) = mpsc::channel(64);
 
         let pilot_ep = match resolve_pilot_endpoint(&self.atlas).await {
@@ -307,11 +334,15 @@ impl LiaisonPipeline {
 
         let mut client = RobonixSystemPilotClient::connect(pilot_ep.clone())
             .await
-            .with_context(|| format!("connect Pilot at {pilot_ep}"))?;
+            .map_err(|error| {
+                Status::unavailable(format!("connect Pilot at {pilot_ep}: {error}"))
+            })?;
         let response = client
             .submit_task(Request::new(task))
             .await
-            .with_context(|| format!("Pilot SubmitTask at {pilot_ep}"))?;
+            .map_err(|error| {
+                Status::unavailable(format!("Pilot SubmitTask at {pilot_ep}: {error}"))
+            })?;
         let mut grpc = response.into_inner();
         tokio::spawn(async move {
             while let Some(item) = grpc.next().await {
@@ -326,6 +357,68 @@ impl LiaisonPipeline {
         });
         Ok(rx)
     }
+}
+
+/// Move a public-contract token to Pilot's typed credential field without
+/// interpreting it when Liaison does not perform the authentication check.
+fn forward_session_token(task: &mut Task) -> Result<(), Status> {
+    let Ok(mut context) = serde_json::from_str::<serde_json::Value>(&task.context_json) else {
+        return Ok(());
+    };
+    let Some(object) = context.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(token) = object
+        .remove("session_token")
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|value| !value.is_empty())
+    {
+        task.auth_session_token = token;
+    }
+    task.context_json =
+        serde_json::to_string(&context).map_err(|error| Status::internal(error.to_string()))?;
+    Ok(())
+}
+
+/// Resolve the login token and install Keystone's canonical identity.
+async fn authenticate_task(
+    keystone: &keystone_gateway::KeystoneGateway,
+    task: &mut Task,
+) -> Result<(), Status> {
+    let mut context = serde_json::from_str::<serde_json::Value>(&task.context_json)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let object = context
+        .as_object_mut()
+        .ok_or_else(|| Status::invalid_argument("Task.context_json must be a JSON object"))?;
+    let token = object
+        .remove("session_token")
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Status::unauthenticated("login session is required"))?;
+    let user = keystone.resolve_session(&token).await?;
+    install_authenticated_identity(task, context, token, user)
+}
+
+fn install_authenticated_identity(
+    task: &mut Task,
+    mut context: serde_json::Value,
+    token: String,
+    user: User,
+) -> Result<(), Status> {
+    let object = context
+        .as_object_mut()
+        .ok_or_else(|| Status::invalid_argument("Task.context_json must be a JSON object"))?;
+    object.insert("user_id".to_string(), serde_json::json!(user.user_id));
+    object.insert("username".to_string(), serde_json::json!(user.username));
+    object.insert(
+        "display_name".to_string(),
+        serde_json::json!(user.display_name),
+    );
+    object.insert("roles".to_string(), serde_json::json!(user.roles));
+    task.context_json =
+        serde_json::to_string(&context).map_err(|error| Status::internal(error.to_string()))?;
+    task.auth_session_token = token;
+    Ok(())
 }
 
 async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<String> {
@@ -425,11 +518,7 @@ impl RobonixSystemLiaisonSubmit for LiaisonServiceImpl {
         request: Request<Task>,
     ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let task = request.into_inner();
-        let rx = self
-            .pipeline
-            .handle_intent(task)
-            .await
-            .map_err(|e| Status::unavailable(format!("Pilot unreachable: {e:#}")))?;
+        let rx = self.pipeline.handle_intent(task).await?;
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
@@ -454,9 +543,16 @@ impl RobonixSystemLiaisonVoiceFinish for LiaisonServiceImpl {
         request: Request<FinishVoiceCaptureRequest>,
     ) -> Result<Response<FinishVoiceCaptureResponse>, Status> {
         let req = request.into_inner();
+        let keystone = self
+            .pipeline
+            .require_keystone
+            .then(|| Arc::clone(&self.pipeline.keystone));
         let session_id = req.session_id.trim().to_string();
         if session_id.is_empty() {
             return Err(Status::invalid_argument("session_id is required"));
+        }
+        if let Some(keystone) = keystone {
+            keystone.resolve_session(&req.session_token).await?;
         }
         let accepted = voice::finish_capture(&session_id);
         let detail = if accepted {
@@ -485,11 +581,16 @@ impl RobonixSystemLiaisonVoice for LiaisonServiceImpl {
     ) -> Result<Response<Self::StartVoiceSessionStream>, Status> {
         let req = request.into_inner();
         self.handsfree.suspend_capture().await;
+        let keystone = self
+            .pipeline
+            .require_keystone
+            .then(|| Arc::clone(&self.pipeline.keystone));
         let stream = match voice::start_voice_session(
             req,
             Arc::clone(&self.atlas),
             self.pilot_endpoint_default.clone(),
             Arc::clone(&self.access),
+            keystone,
         )
         .await
         {
@@ -533,12 +634,19 @@ impl RobonixSystemLiaisonHandsfreeSetEnabled for LiaisonServiceImpl {
         request: Request<SetHandsfreeRequest>,
     ) -> Result<Response<SetHandsfreeResponse>, Status> {
         let request = request.into_inner();
+        if self.pipeline.require_keystone {
+            self.pipeline
+                .keystone
+                .resolve_session(&request.session_token)
+                .await?;
+        }
         let status = self
             .handsfree
             .set_enabled(
                 request.enabled,
                 request.mic_provider_id,
                 request.speaker_provider_id,
+                request.session_token,
             )
             .await
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -576,7 +684,7 @@ impl RobonixSystemLiaisonHandsfreeEvents for LiaisonServiceImpl {
 // ── Stdin text loop (headless fallback) ─────────────────────────────────────
 
 async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
-    let task = Task {
+    let mut task = Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         source: INTENT_SOURCE_TEXT,
@@ -584,8 +692,10 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
         audio_data: vec![],
         context_json: r#"{"session_end":true}"#.to_string(),
         timestamp_ms: now_ms(),
+        auth_session_token: String::new(),
     };
-    match pipeline.handle_intent(task).await {
+    ensure_user_id(&mut task);
+    match pipeline.forward_to_pilot(task).await {
         Ok(rx) => {
             let mut stream = ReceiverStream::new(rx);
             while stream.next().await.is_some() {}
@@ -624,6 +734,7 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
             audio_data: vec![],
             context_json: String::new(),
             timestamp_ms: now_ms(),
+            auth_session_token: String::new(),
         };
 
         match pipeline.handle_intent(task).await {
@@ -722,6 +833,14 @@ struct Args {
     #[arg(long = "pilot-endpoint")]
     pilot_endpoint: Option<String>,
 
+    /// Require a live Keystone session for external Liaison requests.
+    #[arg(long = "require-keystone", env = "ROBONIX_LIAISON_REQUIRE_KEYSTONE")]
+    require_keystone: Option<bool>,
+
+    /// Optional Keystone fallback endpoint; this does not enable authentication.
+    #[arg(long = "keystone-endpoint", env = "ROBONIX_KEYSTONE_ENDPOINT")]
+    keystone_endpoint: Option<String>,
+
     /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
     /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
     /// Normally arrives inside `--config-json`, not as a standalone flag.
@@ -736,6 +855,14 @@ struct Args {
     config_json: Option<String>,
 }
 
+/// Liaison settings decoded from the `system.liaison` manifest block.
+#[derive(Default, Deserialize)]
+struct ManifestConfig {
+    /// Whether Liaison requires Keystone before forwarding external requests.
+    #[serde(default)]
+    require_keystone: Option<bool>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -743,6 +870,17 @@ async fn main() -> Result<()> {
     // --config-json) to scribe's file sink before the first log line.
     robonix_scribe::init_from_config("liaison", args.config_json.as_deref());
     info!("robonix-liaison starting");
+    let manifest_cfg: ManifestConfig = args
+        .config_json
+        .as_deref()
+        .map(serde_json::from_str::<ManifestConfig>)
+        .transpose()
+        .context("parse liaison config")?
+        .unwrap_or_default();
+    let require_keystone = args
+        .require_keystone
+        .or(manifest_cfg.require_keystone)
+        .unwrap_or(false);
 
     let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
         env_first(
@@ -768,6 +906,10 @@ async fn main() -> Result<()> {
         };
         raw.replace("localhost", "127.0.0.1")
     };
+    let keystone_endpoint = args
+        .keystone_endpoint
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1:50095".to_string());
 
     // --listen accepts host:port. If the manifest passes just a port (or
     // the user sets ROBONIX_LIAISON_PORT), bind 0.0.0.0:<port>.
@@ -899,6 +1041,10 @@ async fn main() -> Result<()> {
     let mut heartbeat_atlas = atlas.clone();
     let atlas = Arc::new(Mutex::new(atlas));
     let access = Arc::new(AccessControlConfig::from_env());
+    let keystone = Arc::new(keystone_gateway::KeystoneGateway::new(
+        keystone_endpoint,
+        Arc::clone(&atlas),
+    ));
     info!(
         "access gate enabled={} allowed_users={} voice_threshold={:.2}",
         access.enabled,
@@ -909,6 +1055,8 @@ async fn main() -> Result<()> {
         pilot_http.clone(),
         Arc::clone(&atlas),
         Arc::clone(&access),
+        Arc::clone(&keystone),
+        require_keystone,
     ));
     let handsfree_config = args
         .config_json
@@ -922,6 +1070,7 @@ async fn main() -> Result<()> {
         Arc::clone(&atlas),
         pilot_http.clone(),
         Arc::clone(&access),
+        require_keystone.then(|| Arc::clone(&keystone)),
     );
     handsfree.spawn();
 
@@ -1186,6 +1335,63 @@ mod tests {
         atlas_server.abort();
     }
 
+    #[tokio::test]
+    async fn handsfree_disable_requires_keystone_session() {
+        let atlas_addr = reserve_address();
+        let registry = Arc::new(AtlasRegistry::default());
+        let atlas_server = tokio::spawn(serve_atlas(registry, atlas_addr));
+        let atlas = AtlasClient::connect_with_retry(
+            format!("http://{atlas_addr}"),
+            50,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("connect test Atlas");
+        let atlas = Arc::new(Mutex::new(atlas));
+        let access = Arc::new(AccessControlConfig::from_env());
+        let keystone = Arc::new(keystone_gateway::KeystoneGateway::new(
+            "127.0.0.1:0",
+            Arc::clone(&atlas),
+        ));
+        let handsfree = handsfree::HandsfreeController::new(
+            handsfree::HandsfreeConfig::default(),
+            Arc::clone(&atlas),
+            String::new(),
+            Arc::clone(&access),
+            Some(Arc::clone(&keystone)),
+        );
+        handsfree
+            .set_enabled(true, "mic".into(), "speaker".into(), "valid".into())
+            .await
+            .expect("prepare enabled hands-free mode");
+        let service = LiaisonServiceImpl {
+            pipeline: Arc::new(LiaisonPipeline::new(
+                String::new(),
+                Arc::clone(&atlas),
+                Arc::clone(&access),
+                keystone,
+                true,
+            )),
+            atlas,
+            pilot_endpoint_default: String::new(),
+            access,
+            handsfree,
+        };
+
+        assert!(
+            service
+                .set_handsfree(Request::new(SetHandsfreeRequest {
+                    enabled: false,
+                    session_token: String::new(),
+                    ..Default::default()
+                }))
+                .await
+                .is_err()
+        );
+        assert!(service.handsfree.snapshot().await.enabled);
+        atlas_server.abort();
+    }
+
     #[test]
     fn ensure_user_id_fills_default_for_text() {
         let mut t = Task {
@@ -1196,12 +1402,29 @@ mod tests {
             audio_data: vec![],
             context_json: String::new(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         };
         ensure_user_id(&mut t);
         let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
         let user_id = v["user_id"].as_str().unwrap();
         assert!(user_id.starts_with("local:"));
         assert_eq!(v["modality"], "text");
+    }
+
+    #[test]
+    fn unchecked_forwarding_preserves_the_caller_token() {
+        let mut task = Task {
+            context_json: r#"{"foo":"bar","session_token":"caller-token"}"#.into(),
+            auth_session_token: String::new(),
+            ..Default::default()
+        };
+
+        forward_session_token(&mut task).unwrap();
+
+        let context: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
+        assert_eq!(task.auth_session_token, "caller-token");
+        assert_eq!(context["foo"], "bar");
+        assert!(context.get("session_token").is_none());
     }
 
     #[test]
@@ -1214,6 +1437,7 @@ mod tests {
             audio_data: vec![],
             context_json: r#"{"foo":"bar","user_id":"voice:alice"}"#.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         };
         ensure_user_id(&mut t);
         let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
@@ -1232,7 +1456,33 @@ mod tests {
             audio_data: vec![],
             context_json: r#"{"user_id":"local:alice"}"#.into(),
             timestamp_ms: 0,
+            auth_session_token: String::new(),
         };
         assert_eq!(task_user_id(&t), "local:alice");
+    }
+
+    #[test]
+    fn authenticated_identity_overwrites_caller_claims_and_typed_secret() {
+        let mut task = Task {
+            context_json: r#"{"user_id":"forged","roles":["admin"]}"#.into(),
+            auth_session_token: "caller-supplied-secret".into(),
+            ..Default::default()
+        };
+        let context: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
+        let user = User {
+            user_id: "canonical-user".into(),
+            username: "canonical".into(),
+            display_name: "Canonical User".into(),
+            roles: vec!["user".into()],
+            ..Default::default()
+        };
+
+        install_authenticated_identity(&mut task, context, "validated-session".into(), user)
+            .unwrap();
+
+        let context: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
+        assert_eq!(context["user_id"], "canonical-user");
+        assert_eq!(context["roles"], serde_json::json!(["user"]));
+        assert_eq!(task.auth_session_token, "validated-session");
     }
 }

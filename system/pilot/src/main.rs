@@ -312,7 +312,13 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
 
-    let svc = PilotServiceImpl::new(atlas.clone(), cfg.id.clone(), vlm, history_budget);
+    let svc = PilotServiceImpl::new(
+        atlas.clone(),
+        cfg.id.clone(),
+        cfg.require_keystone,
+        vlm,
+        history_budget,
+    );
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
     let mut server_task = tokio::spawn(async move {

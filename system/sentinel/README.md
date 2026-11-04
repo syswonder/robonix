@@ -1,35 +1,31 @@
-# Sentinel - safety supervision
+# Sentinel - capability-call policy
 
-Sentinel is the planned Robonix safety-supervision component. Its job is to
-decide whether a requested capability call is allowed under the current robot
-state, operator identity, scene context, and policy.
+Sentinel provides the transport-independent rule model and policy evaluation
+for capability calls. Executor evaluates the active rules immediately before
+dispatching each RTDL `do` node.
 
-## Current status
+Rules can match a contract wildcard, exact Keystone users or roles, local-time
+windows, typed call arguments, and typed robot context. The highest-priority
+matching rule wins. Calls are allowed when no rule applies, while a candidate
+rule with unavailable or wrongly typed trusted data fails closed.
 
-Sentinel is not implemented on `dev` yet. There is no `robonix-sentinel`
-binary, no `system/executor/src/dispatch/sentinel.rs`, and no `sentinel.yaml`
-rule loader in Executor.
+See [the Webots demo](../../examples/webots/SENTINEL_DEMO.md) for policy setup.
 
-Executor currently dispatches validated RTDL `do` nodes directly through Atlas
-to the selected primitive, service, or skill provider. The only safety-related
-controls in the current path are local to the components that already exist,
-for example:
+Executor serves the `list_rules` and `replace_rules` capability contracts from
+the Sentinel management endpoint. Replacements are validated and persisted
+before they become active.
 
-- Executor plan cancellation (`cancel_plan`, `cancel_all_plans`).
-- Liaison access control for text/API users and voiceprint-verified speakers
-  before work enters Pilot/TTS.
-- Provider-side validation in individual primitives and services.
+Run the policy tests from the repository root:
 
-Do not rely on this directory for runtime enforcement today.
+```bash
+cargo test -p robonix-sentinel
+```
 
-## Intended role
+For the local Keystone-to-Executor test, including Liaison, Pilot, and `rbnx`,
+build the binaries and run:
 
-When Sentinel lands, it should sit on the capability-call path before Executor
-dispatches side-effecting work. The policy decision should be based on:
+```bash
+scripts/test_sentinel_keystone.sh
+```
 
-- the requested contract and arguments,
-- the operator identity and permissions from [keystone](../keystone/),
-- current robot/body health from [vitals](../vitals/),
-- current environment state from [scene](../scene/),
-- explicit safety policy such as allow/deny lists, rate limits, workspace
-  limits, stop windows, and emergency-stop state.
+The script needs Python with `grpcio` and `grpcio-tools`.

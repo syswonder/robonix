@@ -1,0 +1,4 @@
+string session_token
+bool signup_enabled
+---
+bool signup_enabled

@@ -30,12 +30,13 @@ Common configuration:
 - `--atlas` / `ROBONIX_ATLAS_ENDPOINT`: Atlas endpoint. Defaults to `127.0.0.1:50051`.
 - `--listen` / `ROBONIX_PILOT_LISTEN`: Pilot gRPC listen address. Defaults to `127.0.0.1:50071`.
 - `--id` / `ROBONIX_PILOT_PROVIDER_ID`: Pilot provider id registered with Atlas. Defaults to `pilot`.
+- `--require-keystone` / `ROBONIX_PILOT_REQUIRE_KEYSTONE`: validate every direct `SubmitTask` session through Keystone. Defaults to `false` and is independent of Liaison and Executor. CLI/environment overrides `system.pilot.require_keystone`.
 - `--vlm-upstream` / `ROBONIX_VLM_UPSTREAM`: OpenAI-compatible API base URL.
 - `--vlm-api-key` / `ROBONIX_VLM_API_KEY`: VLM API key.
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
-- `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
+- `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file; `require_keystone` uses the same field name.
 - `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
@@ -167,6 +168,8 @@ MVP RTDL supports only:
 - `do`: one capability call, where `cap` is the `capability_name` shown in the prompt, `<provider_id>.<area>_<name>` (for example `tiago_camera.camera_snapshot` for `robonix/primitive/camera/snapshot`), and `args` is a JSON object.
 
 Pilot parses RTDL incrementally and submits complete nodes to Executor through `execute_stream`, so execution can begin before the model finishes its response. User-visible text waits for the complete response to validate. Invalid model output, including malformed or truncated JSON, unknown capabilities, and invalid RTDL, triggers up to two correction requests per planning round. Pilot first cancels this attempt's submitted plan and records observed execution results, then sends the error and a short cancellation notice back to the model through the existing planning loop. Each correction refreshes runtime context and counts toward `ROBONIX_PILOT_MAX_TOOL_ROUNDS`.
+
+Pilot copies Liaison's internal `Task.auth_session_token` into the Executor-bound `Plan`. It clears the field from the `Plan` event sent to clients. A steer replaces the credential used by later plans with the credential from that steer.
 
 Pilot forwards `VERIFYING` node states for live visibility but does not put them in LLM history or `BatchResult`. Once verification finishes, the final leaf result is written to history exactly once; a final failure triggers replanning immediately. `BatchResult` contains only the latest final state for each node.
 

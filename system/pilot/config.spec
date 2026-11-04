@@ -1,12 +1,9 @@
 # Configuration of the `system.pilot:` block in robonix_manifest.yaml.
 #
-# rbnx boot passes the whole block to robonix-pilot as `--config-json`, from
-# which Pilot reads only `log`. Every other key reaches Pilot as a flag rbnx
-# derives from the block: `--listen`, `--atlas`, `--log` and the `--vlm-*`
-# flags. Only string values become flags, except `vlm.context_window_tokens`,
-# which must be an integer; a key of another type is dropped silently. Every
-# string in the manifest has `$VAR` / `${VAR}` expanded first, and an unset
-# variable becomes an empty string.
+# rbnx boot passes the whole block to robonix-pilot as `--config-json` and
+# translates the remaining keys into `--listen`, `--atlas`, `--log` and
+# `--vlm-*` flags. Pilot reads `require_keystone` from `--config-json`, with
+# CLI/environment overrides applied before the manifest value.
 #
 # `status: enabled | disabled` is read by rbnx, not by Pilot. Pilot may be
 # disabled; a disabled block is removed before boot.
@@ -113,3 +110,11 @@ properties:
         # Must be a literal YAML integer. `${VAR}` expands to a string, which
         # rbnx drops; set ROBONIX_VLM_CONTEXT_WINDOW_TOKENS in the environment
         # instead.
+
+  require_keystone:
+    type: boolean
+    default: false
+    description: >-
+      Require a live Keystone session for direct SubmitTask calls. This setting
+      is independent of Liaison and Executor. --require-keystone or
+      ROBONIX_PILOT_REQUIRE_KEYSTONE overrides the manifest value.
