@@ -1242,44 +1242,20 @@ jobs:
           exit "$status"
 
       - name: Drive a fixed mapping loop
-        # Chassis motion is a gRPC contract and the executor only dispatches
-        # MCP, so this drives cmd_vel directly. A scripted rectangle returns to
-        # its start, which makes the saved map comparable between runs and
-        # forces the SLAM graph to close a loop.
+        # Start from a cleared square, since the preceding scenario may leave
+        # the robot beside a wall. Navigation closes four >=1.5 m legs and the
+        # simulator's collision counter must remain unchanged.
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: |
-          set -uo pipefail
-          docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS'
-          source /opt/ros/humble/setup.bash
-          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
-          python3 - <<'PY'
-          import math, time
-          import rclpy
-          from geometry_msgs.msg import Twist
-          rclpy.init()
-          node = rclpy.create_node("ci_mapping_loop")
-          pub = node.create_publisher(Twist, "/cmd_vel", 10)
-          time.sleep(2.0)
-
-          def drive(lin, ang, seconds):
-              msg = Twist()
-              msg.linear.x, msg.angular.z = lin, ang
-              end = time.time() + seconds
-              while time.time() < end:
-                  pub.publish(msg)
-                  rclpy.spin_once(node, timeout_sec=0.05)
-              pub.publish(Twist())
-              for _ in range(5):
-                  rclpy.spin_once(node, timeout_sec=0.02)
-
-          for corner in range(4):
-              drive(0.25, 0.0, 6.0)          # 1.5 m leg
-              drive(0.0, 0.5, math.pi / 1.0) # 90 deg turn
-              print(f"corner {corner + 1}/4 done", flush=True)
-          node.destroy_node(); rclpy.shutdown()
-          PY
-          EOS
+          set -euo pipefail
+          docker cp "$GITHUB_WORKSPACE/testing/nav_stress.py" "$ROBONIX_NAV2_CONTAINER:/tmp/nav_stress.py"
+          docker cp "$GITHUB_WORKSPACE/testing/drive_mapping_loop.py" "$ROBONIX_NAV2_CONTAINER:/tmp/drive_mapping_loop.py"
+          docker exec "$ROBONIX_NAV2_CONTAINER" bash -c '
+            source /opt/ros/humble/setup.bash
+            export $(tr "\0" "\n" < /proc/1/environ | grep -E "^PYTHONPATH=")
+            export ZENOH_SESSION_CONFIG_URI=/tmp/robonix_zenoh_session.json5
+            timeout --signal=TERM --kill-after=15 900 python3 -u /tmp/drive_mapping_loop.py
+          ' | tee "$RUNNER_TEMP/sim-logs/mapping-loop.txt"
 
       - name: Verify scene map persistence
         # A failed suite is exactly when the saved map matters most, so this
