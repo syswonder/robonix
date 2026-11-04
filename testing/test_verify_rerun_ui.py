@@ -19,8 +19,26 @@ from verify_rerun_ui import (api_body, bound_evidence, expected_outage_error, re
 
 
 class RerunUITests(unittest.TestCase):
+    def test_repeated_expected_outage_retains_counts_and_full_log(self):
+        from verify_rerun_ui import retain_expected_outage
+        audit, expected, stream = {}, [], io.StringIO()
+        text = 'Failed to load resource: net::ERR_CONNECTION_REFUSED'
+        for timestamp in range(417):
+            write_event(stream, {'kind': 'console', 'level': 'error', 'text': text}, audit)
+            retain_expected_outage(expected, text, timestamp, audit)
+        self.assertEqual(expected, [{'text': text, 'count': 417,
+                                     'first_time': 0, 'last_time': 416}])
+        self.assertEqual(audit['collection_counts']['expected_outage_errors'], 417)
+        self.assertEqual(len(stream.getvalue().splitlines()), 417)
+        self.assertFalse(audit.get('capacity_exhausted', False))
+        for index in range(256):
+            retain_expected_outage(expected, f'distinct-{index}', index, audit)
+        self.assertEqual(len(expected), 256)
+        self.assertTrue(audit['capacity_exhausted'])
+        self.assertEqual(audit['omitted_items'], 1)
+
     def test_finalization_failures_cannot_turn_successful_proof_into_a_pass(self):
-        async def check(failure):
+        async def check(failure, outage_repeats=0):
             handlers = {}
             page_handlers = {}
             locator = SimpleNamespace(wait_for=AsyncMock(),
@@ -58,6 +76,14 @@ class RerunUITests(unittest.TestCase):
 
             async def lifecycle(command, timeout, probe, summary):
                 summary['outage_seen'] = True
+                for _ in range(outage_repeats):
+                    handlers['console'](SimpleNamespace(type='error',
+                        text='Failed to load resource: net::ERR_CONNECTION_REFUSED',
+                        location={'url': 'http://127.0.0.1/proxy'}))
+                if failure == 'unexpected-console':
+                    handlers['console'](SimpleNamespace(type='error',
+                        text='unexpected viewer failure',
+                        location={'url': 'http://127.0.0.1/proxy'}))
                 return 0
 
             with tempfile.TemporaryDirectory() as directory:
@@ -78,10 +104,13 @@ class RerunUITests(unittest.TestCase):
                     self.assertIn('close failure', summary['error'])
                 elif failure == 'late-pageerror':
                     self.assertIn('late page failure', summary['browser_errors'])
+                elif failure == 'unexpected-console':
+                    self.assertIn('unexpected viewer failure', summary['browser_errors'])
 
-        for failure in (None, 'close', 'late-pageerror'):
+        for failure in (None, 'close', 'late-pageerror', 'unexpected-console'):
             with self.subTest(failure=failure):
                 asyncio.run(check(failure))
+        asyncio.run(check(None, outage_repeats=417))
 
     def test_nested_evidence_has_one_total_capacity_budget(self):
         audit = {}

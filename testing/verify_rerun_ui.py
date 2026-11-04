@@ -62,6 +62,19 @@ def retain_evidence(collection: list, value, audit: dict, name: str, *, limit=25
     collection.append(bound_evidence(value, audit))
 
 
+def retain_expected_outage(collection: list, text: str, timestamp: float, audit: dict):
+    for entry in collection:
+        if entry["text"] == text:
+            counts = audit["collection_counts"]
+            counts["expected_outage_errors"] += 1
+            entry["count"] += 1
+            entry["last_time"] = timestamp
+            return
+    retain_evidence(collection, {"text": text, "count": 1,
+                                "first_time": timestamp, "last_time": timestamp},
+                    audit, "expected_outage_errors")
+
+
 def write_event(stream, event: dict, audit: dict, *, limit=64 * 1024 * 1024):
     before = audit.get("truncated_strings", 0)
     event = bound_evidence(event, audit)
@@ -426,7 +439,7 @@ async def run(args) -> int:
             expected = expected_outage_error(message.text, phase, "rerun+" + args.base_url + "/proxy",
                                              message.location.get("url", ""))
             if expected:
-                retain_evidence(expected_errors, message.text, audit, "expected_outage_errors")
+                retain_expected_outage(expected_errors, message.text, time.time(), audit)
             else:
                 retain_evidence(errors, message.text, audit, "browser_errors")
 
