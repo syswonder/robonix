@@ -111,10 +111,23 @@ pub(crate) async fn execute_call(
         )
         .await;
 
-    let async_group = if call.provider_id == provider_id {
-        Ok(None)
-    } else {
-        async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id).await
+    let before = verification::capture_before(
+        verification.as_ref(),
+        call,
+        &node,
+        &provider_id,
+        &mut atlas,
+        &runtime,
+    )
+    .await;
+    let async_group = match before {
+        Err(error) => Err(format!("result verification unavailable: {error}")),
+        Ok(()) if runtime.is_cancelled(&node.plan_id).await => Err("plan canceled".to_string()),
+        Ok(()) if call.provider_id == provider_id => Ok(None),
+        Ok(()) => {
+            async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id)
+                .await
+        }
     };
 
     let (mut result, mut state) = match async_group {
@@ -361,6 +374,7 @@ mod tests {
         assert!(execution.verifier.is_none());
         let terminal = rx.recv().await.unwrap().unwrap().node_state.unwrap();
         assert_eq!(terminal.state, RtdlNodeStateEnum::Failed as u32);
+        assert!(!terminal.leaf_result.unwrap().output.is_empty());
         assert!(rx.try_recv().is_err());
         atlas_server.abort();
     }

@@ -170,6 +170,8 @@ Pilot parses RTDL incrementally and submits complete nodes to Executor through `
 
 Pilot forwards `VERIFYING` node states for live visibility but does not put them in LLM history or `BatchResult`. Once verification finishes, the final leaf result is written to history exactly once; a final failure triggers replanning immediately. `BatchResult` contains only the latest final state for each node.
 
+A failed leaf requests recovery once: its parent failures and the tree's completion do not request the same recovery again. A later successful sibling still requests a planning round at completion, and requested cancellation completion still triggers its follow-up.
+
 Parallel example:
 
 ```json

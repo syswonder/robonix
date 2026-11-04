@@ -7,6 +7,8 @@
 //! steady readings remain independent of reference-clock health.
 
 mod config;
+#[cfg(feature = "python")]
+mod python;
 mod reference;
 mod virtual_clock;
 

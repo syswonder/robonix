@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import tempfile
 import unittest
@@ -49,6 +50,8 @@ class ModelBenchTest(unittest.TestCase):
                     "output": json.dumps({"_bench_execution_id": r["execution_id"]}) if r["ok"] else "",
                     "error": "" if r["ok"] else f"timeout [bench_execution_id={r['execution_id']}]"}}
                    for r in records if r["call_id"]]
+        turns = [[{"final_text": "done", **e} if e.get("event_kind") == 4 else e for e in turn]
+                 for turn in turns]
         turns = [turn + [{"batch_result": {"results": results}}] for turn in turns]
         with patch.object(bench, "ask"), patch.object(
             bench, "events_of", side_effect=turns
@@ -138,12 +141,12 @@ class ModelBenchTest(unittest.TestCase):
     def test_each_submitted_turn_requires_a_final_event_even_with_empty_text(self):
         unfinished = [{"final_text": "not a final event"}]
         finished = [{"event_kind": 4, "final_text": ""}]
-        for turns, steer, expected in [
-            ([unfinished], False, False),
-            ([finished], False, True),
-            ([finished, unfinished], True, False),
-            ([unfinished, finished], True, False),
-            ([finished, finished], True, True),
+        for turns, steer, expected, fails in [
+            ([unfinished], False, False, ["Pilot did not finish every submitted turn"]),
+            ([finished], False, True, ["no final answer"]),
+            ([finished, unfinished], True, False, ["Pilot did not finish every submitted turn"]),
+            ([unfinished, finished], True, False, ["Pilot did not finish every submitted turn"]),
+            ([finished, finished], True, True, ["no final answer"]),
         ]:
             with self.subTest(steer=steer, turns=turns):
                 case = {"task": "start"}
@@ -151,8 +154,49 @@ class ModelBenchTest(unittest.TestCase):
                     case["world"] = {"steer": {"after_s": 0, "task": "stop"}}
                 run = self.run_case(case, turns)
                 self.assertEqual(run["finished"], expected)
-                self.assertEqual(bench.check(case, run), [] if expected else
-                                 ["Pilot did not finish every submitted turn"])
+                self.assertEqual(bench.check(case, run), fails)
+
+    def test_completion_required_even_without_answered_expectation(self):
+        for fields, fails in [
+            ({"final": ""}, ["no final answer"]),
+            ({"final": " \n\t "}, ["no final answer"]),
+            ({"failed": True}, ["Pilot reported the task FAILED"]),
+            ({"finished": False}, ["Pilot did not finish every submitted turn"]),
+            ({}, []),
+            ({"finished": True}, []),
+        ]:
+            with self.subTest(fields=fields):
+                run = {"calls": [], "final": "done", "failed": False, **fields}
+                self.assertEqual(bench.check({"expect": {"no_calls_at_all": True}}, run), fails)
+
+    def test_judge_summary_rechecks_saved_completion_without_new_judge_calls(self):
+        with patch.dict("sys.modules", {"bench": bench}):
+            judge = importlib.import_module("testing.model_bench.judge")
+        spec = {"judge": {}, "cases": [{"id": "case", "judge": {"assert": ["done"]}}]}
+        key = judge.judge_key(spec, "judge", spec["cases"][0])
+        rows = [{"id": "case", "final": "done", "pilot_failed": False,
+                 "fails": [], "verdicts": [{"met": True}], "judge_key": key, **fields}
+                for fields in [
+                    {"final": ""}, {"final": " \n\t "}, {"pilot_failed": True},
+                    {"finished": False}, {}, {"finished": True},
+                    {"fails": ["forbidden call"]}, {"verdicts": [{"met": False}]},
+                ]]
+        result = self.world / "saved.json"
+        original = {"meta": {}, "results": rows}
+        result.write_text(json.dumps(original))
+        cases = self.world / "judge-cases.json"
+        cases.write_text(json.dumps(spec))
+        env = self.world / "judge.env"
+        env.write_text("")
+        argv = ["judge.py", "--env-file", str(env), "--model", "judge",
+                "--cases", str(cases), str(result)]
+        output = io.StringIO()
+        with patch("sys.argv", argv), patch("sys.stdout", output), \
+                patch.object(judge, "ask_judge") as ask:
+            judge.main()
+        ask.assert_not_called()
+        self.assertIn("saved.json: 2/8 cases pass", output.getvalue())
+        self.assertEqual(json.loads(result.read_text()), original)
 
     def test_failed_provider_calls_count_but_legacy_unexecuted_rows_do_not(self):
         run = self.run_case({"task": "photo"},

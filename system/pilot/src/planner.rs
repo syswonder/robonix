@@ -364,6 +364,8 @@ enum TreeInterrupt {
         plan_id: String,
         results: Vec<RtdlNodeState>,
         any_failed: bool,
+        /// False when the latest leaf failure already requested recovery.
+        replan: bool,
         /// True when this tree ended because it was canceled (a node reached
         /// CANCELED), as opposed to running to natural success/failure. A
         /// cancellation fulfils a prior decision and carries no new info, so the
@@ -457,13 +459,14 @@ async fn handle_interrupt(
                     .unwrap_or("unknown tree");
                 feed_results_into_history(history, &plan_id, description, std::slice::from_ref(r));
             }
-            // Any non-success terminal outcome escalates to the VLM at once
+            // A non-success terminal leaf escalates to the VLM at once
             // rather than waiting for the whole tree to finish: the result is
             // already in context above, so the model can recover or abort
             // without blocking on still-running sibling branches. Successes
             // still batch at tree completion, which avoids per-node re-plan
             // storms.
-            let replan = is_terminal_executor_state(ns.state)
+            let terminal_leaf = is_terminal_executor_state(ns.state) && ns.leaf_result.is_some();
+            let replan = terminal_leaf
                 && ns.state != RtdlNodeStateEnum::Succeeded as u32
                 && !forest.kill_pending.contains(&plan_id)
                 && tasks.any_open();
@@ -481,6 +484,7 @@ async fn handle_interrupt(
             plan_id,
             results,
             any_failed,
+            replan,
             canceled,
         } => {
             forest.trees.remove(&plan_id);
@@ -526,12 +530,13 @@ async fn handle_interrupt(
             // cancellation Pilot asked for is fulfilled. Unsolicited canceled
             // events stay quiet, preventing a self-feeding cancel storm across
             // unrelated sibling trees.
-            should_replan_after_plan_done(
-                canceled,
-                requested_cancellation,
-                forest.kill_pending.is_empty(),
-                tasks.any_open(),
-            )
+            (replan || requested_cancellation)
+                && should_replan_after_plan_done(
+                    canceled,
+                    requested_cancellation,
+                    forest.kill_pending.is_empty(),
+                    tasks.any_open(),
+                )
         }
     }
 }
@@ -550,6 +555,7 @@ async fn drive_plan(
     let mut any_failed = execution.transport_failed;
     let mut canceled = false;
     let mut completed = false;
+    let mut replan_on_completion = true;
     loop {
         let next = if let Some(event) = execution.events.pop_front() {
             Ok(Some(event))
@@ -580,6 +586,9 @@ async fn drive_plan(
                     // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
                         forest_revision.fetch_add(1, Ordering::Release);
+                        if ns.leaf_result.is_some() {
+                            replan_on_completion = ns.state == RtdlNodeStateEnum::Succeeded as u32;
+                        }
                         if ns.state == RtdlNodeStateEnum::Canceled as u32 {
                             // Cancellation is not a failure to recover from — it
                             // is the model's own stop request taking effect. Flag
@@ -605,11 +614,13 @@ async fn drive_plan(
         }
     }
 
+    let replan = replan_on_completion || canceled || !completed || execution.transport_failed;
     forest_revision.fetch_add(1, Ordering::Release);
     let _ = interrupt_tx.send(TreeInterrupt::Completion {
         plan_id,
         results,
         any_failed,
+        replan,
         canceled,
     });
 }
@@ -1652,7 +1663,7 @@ pub async fn run_turn(
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
                                     drop(stream);
                                     live.cancel(&mut executor.control).await?;
-                                    should_plan = false;
+                                    should_plan = true;
                                     continue 'supervisor;
                                 }
                                 Ok(None) => {},
@@ -1737,7 +1748,7 @@ pub async fn run_turn(
         if live.plan.nodes.is_empty()
             && forest.revision.load(Ordering::Acquire) != planning_revision
         {
-            should_plan = false;
+            should_plan = true;
             continue 'supervisor;
         }
         let assistant_content = envelope.content;
@@ -2356,7 +2367,6 @@ fn log_plan_complete(plan_id: &str, results: &[RtdlNodeState], any_failed: bool)
         line.push_str(&non_success.join(", "));
         line.push(']');
     }
-    line.push_str("; replanning");
     info!("{line}");
 }
 
@@ -3161,6 +3171,124 @@ mod tests {
         assert!(scope.contains("plan_id=9"));
         assert!(scope.contains("start greet watch"));
         assert!(scope.contains("does not cancel or invalidate other in-flight trees"));
+    }
+
+    #[tokio::test]
+    async fn failed_tree_completion_does_not_restart_recovery() {
+        use crate::pb::executor::{RtdlEvent, RtdlPlanComplete};
+        for (later_success, requested_cancellation) in
+            [(false, false), (true, false), (false, true)]
+        {
+            let mut execution = crate::stream_execution::StreamExecution::default();
+            execution.plan.plan_id = "failed".into();
+            for (node_index, success, leaf) in
+                [(1, false, true), (0, false, false), (2, true, true)]
+            {
+                if success && !later_success {
+                    continue;
+                }
+                execution.events.push_back(RtdlEvent {
+                    event_kind: super::RtdlEventEnum::NodeState as u32,
+                    node_state: Some(RtdlNodeState {
+                        node_index,
+                        state: if success {
+                            RtdlNodeStateEnum::Succeeded
+                        } else {
+                            RtdlNodeStateEnum::Failed
+                        } as u32,
+                        leaf_result: leaf.then(|| CapabilityCallResult {
+                            call_id: format!("failed:{node_index}"),
+                            success,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+            execution.events.push_back(RtdlEvent {
+                event_kind: super::RtdlEventEnum::PlanComplete as u32,
+                plan_complete: Some(RtdlPlanComplete {
+                    any_failed: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let mut forest = super::SessionForest::default();
+            super::drive_plan(
+                execution,
+                forest.interrupt_tx.clone(),
+                forest.revision.clone(),
+            )
+            .await;
+            assert_eq!(
+                forest.revision.load(super::Ordering::Acquire),
+                if later_success { 4 } else { 3 }
+            );
+            let meta = || TreeMeta {
+                description: "save memory".into(),
+                control_only: false,
+                call_signatures: HashSet::new(),
+                steps: Vec::new(),
+            };
+            forest.trees.insert("failed".into(), meta());
+            let mut tasks = TaskTable::default();
+            tasks.receive("save memory, recovering from failure");
+            tasks.attach_tree("T1", "failed", "save memory");
+            let mut history = Vec::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let event = forest.interrupt_rx.try_recv().unwrap();
+            assert!(
+                super::handle_interrupt(
+                    event,
+                    &mut forest,
+                    &mut history,
+                    &mut tasks,
+                    0,
+                    "session",
+                    &tx
+                )
+                .await
+            );
+
+            // Recovery dispatch precedes the old tree's parent failure and completion.
+            forest.trees.insert("retry".into(), meta());
+            tasks.attach_tree("T1", "retry", "save corrected memory");
+            if requested_cancellation {
+                forest.kill_pending.insert("failed".into());
+            }
+            let mut completion_seen = false;
+            while let Ok(event) = forest.interrupt_rx.try_recv() {
+                let completion = matches!(event, super::TreeInterrupt::Completion { .. });
+                let replan = super::handle_interrupt(
+                    event,
+                    &mut forest,
+                    &mut history,
+                    &mut tasks,
+                    1,
+                    "session",
+                    &tx,
+                )
+                .await;
+                assert_eq!(
+                    replan,
+                    completion && (later_success || requested_cancellation)
+                );
+                completion_seen |= completion;
+            }
+            assert!(completion_seen);
+            assert!(!forest.trees.contains_key("failed"));
+            assert!(forest.trees.contains_key("retry"));
+            assert!(tasks.any_open());
+            let mut batch_seen = false;
+            while let Ok(event) = rx.try_recv() {
+                batch_seen |= event
+                    .unwrap()
+                    .batch_result
+                    .is_some_and(|batch| batch.any_failed);
+            }
+            assert!(batch_seen, "failure evidence must still reach the client");
+        }
     }
 
     #[test]

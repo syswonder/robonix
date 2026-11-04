@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from bench import HERE, OUT_OF_CREDIT, read_env
+from bench import HERE, OUT_OF_CREDIT, completion_fails, read_env
 
 
 def judge_key(spec: dict, model: str, case: dict) -> str:
@@ -95,7 +95,8 @@ def main() -> None:
             data["meta"]["judge_model"] = a.model
             f.write_text(json.dumps(data, ensure_ascii=False, indent=1))
         rs = data["results"]
-        passed = sum(not r["fails"] and all(v["met"] for v in r.get("verdicts") or []) for r in rs)
+        passed = sum(not completion_fails(r["final"], r.get("pilot_failed", False), r.get("finished", True))
+                     and not r["fails"] and all(v["met"] for v in r.get("verdicts") or []) for r in rs)
         print(f"{f.name}: {passed}/{len(rs)} cases pass", flush=True)
     print(f"judge {a.model}: {used['calls']} calls, {used['prompt_tokens']} prompt + {used['completion_tokens']} completion tokens")
     # What is uploaded to Robonix Hub: the judged files, as one archive.

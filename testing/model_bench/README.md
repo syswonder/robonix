@@ -21,7 +21,7 @@ The camera returns the case's image: COCO val2017, fetched at run time into `.im
 
 ## Checking a case
 
-A case passes when Pilot did not report the task failed, Pilot got a valid plan from the model (its answer is not its own "I couldn't produce a valid robot plan"), every `expect` check holds, and every `judge` assertion holds.
+A case passes when Pilot gave a non-whitespace final answer, did not report the task failed, and finished every submitted turn. Pilot must also get a valid plan from the model (its answer is not its own "I couldn't produce a valid robot plan"), every `expect` check must hold, and every `judge` assertion must hold. The same completion checks apply to `judge.py`'s summary of saved results; older files without `finished` remain eligible.
 
 `expect` is checked against plan leaves matched to the mock providers' execution log, ordered by their actual start times. Each mock response carries an opaque `_bench_execution_id`; an injected failure includes the same identifier in its error. The executor's leaf result links that invocation to its plan call, so Pilot's own context reads cannot be mistaken for planned executions. Executor builtin leaf results establish an attempt without mock-provider timing; they cannot satisfy ordering or overlap checks. Unexecuted plan leaves do not count. Provider calls that returned an error still count as attempts, so failure-handling cases can check them. Each submitted turn must reach Pilot's final-text event, including a turn with an empty answer.
 
@@ -32,7 +32,7 @@ A case passes when Pilot did not report the task failed, Pilot got a valid plan 
 | `orders` | these contracts started in this order; others may come between |
 | `overlap` | these calls ran side by side in the world (their run times overlap) |
 | `args`, `args_seq`, `args_not` | some call, the i-th call, no call of a contract has these argument values (`approx` with `tol`, `contains`, `one_of`, or exact) |
-| `answered` | Pilot gave a final answer |
+| `answered` | Pilot gave a final answer (required for every case) |
 
 `judge` covers what the answer says, which no keyword list checks reliably. As in tau2-bench's `nl_assertions`, the case gives the ground truth (`facts`: what the scene, the camera frame or an injected failure really was) and yes/no statements about the answer (`assert`). `judge.py` asks a fixed judge model, at temperature 0, to decide each statement from the task, the facts and Pilot's answer. The judge model is recorded with the results.
 

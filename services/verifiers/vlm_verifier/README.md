@@ -3,7 +3,7 @@
 A generic visual result verification service. Provider ID: `vlm_verifier`.
 MCP contract: `robonix/service/verifier/verify`.
 
-The service takes the latest RGB image from the camera selected by an Executor
+The service takes the latest RGB images before and after a capability through an Executor
 verification rule and asks a vision model whether the intended result is visible.
 It has no robot-specific grasp logic and does not move the robot.
 
@@ -33,7 +33,7 @@ system:
           target_provider_id: pick
           verifier_provider_id: vlm_verifier
           verifier_args:
-            camera_provider_id: orbbec_wrist_camera
+            camera_provider_ids: [orbbec_wrist_camera, head_camera]
 ```
 
 | Field | Meaning |
@@ -46,12 +46,16 @@ system:
 | `target_contract_id` | Completed capability to verify. Required. |
 | `target_provider_id` | Optional exact target provider filter. An exact rule takes precedence over a contract-only rule. |
 | `verifier_provider_id` | Exact verifier provider to invoke. Required. |
-| `verifier_args.camera_provider_id` | Exact RGB camera provider for this rule. Required by VLM Verifier. |
+| `verifier_args.camera_provider_ids` | Nonempty ordered list of distinct exact RGB camera providers for this rule. |
+| `verifier_args.camera_provider_id` | Existing single-camera configuration, still supported. Supply exactly one of the two camera fields. |
 
 The camera belongs in each Executor rule, not in the verifier service config.
 Different rules can use different cameras while sharing the same VLM Verifier.
 The service resolves the camera's ROS topic through Atlas; do not supply a topic
-name in `camera_provider_id`.
+name in either camera field. Whitespace is trimmed; duplicate or empty IDs are rejected.
+Every configured camera is required. A missing camera makes verification unavailable;
+the service does not silently drop a view. Cameras retain independent latest-frame
+caches, so the views are not guaranteed to be synchronized.
 
 Credentials can be supplied through the deployment's existing environment:
 
@@ -73,22 +77,41 @@ profile enables only `pick`, not `put_down`.
 
 ## Runtime flow
 
-1. Executor waits for the target capability to finish. A failed target returns
+1. For provider ID `vlm_verifier`, Executor first invokes this interface with
+   `phase: "before"` and waits for capture acknowledgement before running the cap.
+   Executor then waits for the target capability to finish. A failed target returns
    its original failure without invoking a verifier.
 2. After a successful target call, Executor matches a verification rule and
-   invokes the configured verifier over MCP before emitting the final node state.
+   invokes the configured verifier over MCP with `phase: "after"` before emitting the final node state.
 3. The verifier parses the action description, arguments, output, and camera
    provider from the request.
-4. It queries Atlas for that exact provider's
+4. It queries Atlas for each exact provider's
    `robonix/primitive/camera/rgb` capability on first use, keeps one shared ROS 2
    subscription per camera provider, and reads its latest cached frame. There is
    no snapshot RPC, default-topic fallback, or camera substitution.
-5. It converts the image into JPEG, saves the exact JPEG with private file
+5. It captures the configured cameras concurrently within the shared observation
+   deadline, converts each image into JPEG, and saves the exact JPEG with private file
    permissions under `$SCRIBE_LOG_DIR/vlm_verifier-frames/`, and sends those
-   same bytes with the action context to the configured
+   saved before and after images as separate images labelled by camera provider
+   and execution phase, with the action context, to the configured
    `<base_url>/chat/completions` endpoint.
-6. It accepts only a JSON object containing exactly a boolean `passed` and a
-   nonempty string `detail`. Executor then reports one final result.
+6. The model must return exactly `observable` (boolean), `passed` (boolean),
+   and a nonempty `detail`. A result with `observable=true` becomes the existing
+   two-field Verify response. `observable=false` requires `passed=false` and
+   raises a verifier error with the fixed reason `insufficient visual evidence`.
+   The raw model explanation is not included in this error.
+
+The existing `overlap` controls only the after request. When enabled, later
+actions may affect the cached image read by after and can execute before a
+rejection. Camera capture keeps its original latest-frame behavior.
+
+Pending before images are limited to 64 calls and 64 MiB of JPEG data. Each
+capture removes entries older than one hour. A duplicate pending `call_id` is
+rejected without replacing its images. When either capacity limit is reached,
+the oldest entries are evicted; a single camera set larger than 64 MiB is
+rejected. An after request whose before images expired or were evicted makes
+verification unavailable. These limits also bound images left by failed or
+cancelled calls that never issue after; they do not change camera sampling.
 
 A passing response looks like this:
 
@@ -101,17 +124,23 @@ A passing response looks like this:
 
 The image must provide clear evidence. For picking, the specified object must
 visibly be held, not just touched or nearby. For placement, it must visibly be
-at the intended destination. An invisible target, wrong object, or ambiguous
-evidence returns `passed=false`. The original capability's success flag is
+at the intended destination. Clear evidence of a wrong object, empty grasp, or
+wrong destination returns `passed=false`. An invisible target or insufficient
+evidence in all relevant after views makes verification unavailable. One occluded
+view does not invalidate sufficient evidence in another. Before images are
+context only and may show another view or no target. The intended result is
+defined jointly by `target_contract_id`, `target_description`, and `target_args`.
+The original capability's success flag is
 not visual proof. For a wrist-mounted camera, two opposing jaw tips visibly
 flanking or contacting the target can establish a grasp without the complete
-gripper body being in frame. A single image cannot establish continuing grip
+gripper body being in frame. Two snapshots cannot establish continuing grip
 stability.
 
 | Outcome | Executor result |
 | --- | --- |
 | `passed=true` | Success, preserving the original capability output. |
 | `passed=false` | Failure with `result verification failed: <detail>`. |
+| Model reports `observable=false` | Failure with `result verification unavailable: ... insufficient visual evidence ...`, preserving the original output. |
 | Camera, network, timeout, or model-format error | Failure with `result verification unavailable: ...`. |
 
 Concurrent requests share the latest image cached for their selected camera.
@@ -138,6 +167,7 @@ The decoded `args_json` envelope is:
 
 ```json
 {
+  "phase": "after",
   "target_provider_id": "pick",
   "target_contract_id": "robonix/skill/pick/pick",
   "target_description": "Pick up the red bottle",
@@ -147,6 +177,7 @@ The decoded `args_json` envelope is:
 }
 ```
 
+`phase` must be `before` or `after`; before uses null for `target_output`.
 The description and provider/contract IDs must be nonempty strings.
 `target_args` and `target_output` are required and retain Executor's parsed JSON
 values or original strings.
@@ -165,19 +196,23 @@ values or original strings.
 - Fixed deadlines: 50 seconds overall, 5 seconds for observation, and 40 seconds
   for VLM evaluation, below Executor's 60-second verification timeout.
   These are implementation constants, not configurable YAML fields.
-- One image and one model request per verification. No retries or multiple-view voting.
+- Two ordered images per configured camera and one model request per completed
+  verification, with `temperature: 0`. The model endpoint must support that setting.
+  No retries or multiple-view voting.
 
 ## Build and start
 
 Initialize the IDL submodules from the Robonix checkout:
 
 ```bash
+# Initialize the interface submodules used by the package build.
 git submodule update --init capabilities/lib/common_interfaces capabilities/lib/rcl_interfaces capabilities/lib/unique_identifier_msgs
 ```
 
 With `uv`, `rbnx`, and `robonix-codegen` on PATH, run from this package:
 
 ```bash
+# Build the verifier environment and generate its interface types.
 bash scripts/build.sh
 ```
 
@@ -195,6 +230,7 @@ a profile-local `ROBONIX_HOME`, and uses that checkout's debug Executor.
 Build it once from the repository root with:
 
 ```bash
+# Build the Executor used by the deployment and integration test.
 cargo build -p robonix-executor
 ```
 
@@ -207,22 +243,29 @@ Its existing `start-arm-grasp.sh` starts the robot stack, including hardware.
 From this package directory:
 
 ```bash
+# Load the installed ROS environment.
 source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
+# Make package sources and generated interface types importable.
 export PYTHONPATH="$PWD:$PWD/rbnx-build/codegen/proto_gen:$PWD/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+# Run package-local unit tests without an external model.
 rbnx-build/venv/bin/python -m unittest discover -s tests -v
+# Exercise real ROS and MCP with a local simulated model endpoint.
 rbnx-build/venv/bin/python tests/smoke_mcp.py
 ```
 
 To include a real Atlas and the built Executor:
 
 ```bash
+# Include the built Executor and real Atlas in the simulated integration test.
 VLM_TEST_EXECUTOR_BIN="$PWD/../../../target/debug/robonix-executor" \
   rbnx-build/venv/bin/python tests/smoke_mcp.py
 ```
 
 The smoke tests use a synthetic ROS camera, real MCP HTTP, and a simulated VLM
-HTTP endpoint. The Executor checks assert pass, rejection, unavailable results,
-one terminal state, and preserved original output. Test processes are cleaned up;
+HTTP endpoint. The Executor checks cover single and multiple cameras, synchronous
+and overlap verification, pass, rejection, insufficient evidence, malformed model
+results, and missing cameras. They assert one terminal state and preserved
+original output. Test processes are cleaned up;
 these tests do not control the physical arm.
 
 Physical acceptance remains operator-owned: test a correct grasp, an empty grasp,
