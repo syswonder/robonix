@@ -350,7 +350,7 @@ class DualMapDetector(ConceptGraphsDetector):
                 self._gm.process_observations(promoted)
                 self._promoted += len(promoted)
             self._keyframes += 1
-            if self._merge_every > 0 and self._keyframes % self._merge_every == 0:
+            if self._merge_every > 0 and self._keyframes % self._merge_every == 0 and self._lm.local_map:
                 before = list(self._lm.local_map)
                 self._lm.merge_local_map()
                 self._keep_merged_uids(before)

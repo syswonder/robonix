@@ -59,6 +59,47 @@ def test_to_map_object_shapes_local_objects():
     print("  [PASS] test_to_map_object_shapes_local_objects")
 
 
+def test_periodic_merge_preserves_empty_map_publication(monkeypatch):
+    import numpy as np
+    from scene_service.ingest import perception_dualmap
+
+    monkeypatch.setattr(perception_dualmap, "_image_msg_to_bgr", lambda _: np.zeros((2, 2, 3), dtype=np.uint8))
+    monkeypatch.setattr(perception_dualmap, "_depth_msg_to_metres", lambda _: np.ones((2, 2), dtype=np.float32))
+    for populated, keyframes, expected_merges in ((False, 19, 0), (True, 19, 1), (True, 18, 0)):
+        detector = _detector()
+        detector._world_frame_fn = lambda: "map"
+        detector._map_frame = "map"
+        detector._rgb_msg = detector._depth_msg = lambda: object()
+        detector._cam_info = lambda: types.SimpleNamespace(fx=1., fy=1., cx=0., cy=0.)
+        detector._build_camera_to_map_transform = lambda **_: np.eye(4)
+        detector._is_keyframe = lambda *_: True
+        detector._dm_data_input = lambda **_: None
+        detector._dm = types.SimpleNamespace(
+            set_data_input=lambda _: None, process_detections=lambda: None,
+            calculate_observations=lambda: None, get_curr_observations=lambda: [],
+            update_state=lambda: None, update_data=lambda: None,
+        )
+        merges, publications = [], []
+        tracks = [_obj("track", 0, n=3)] if populated else []
+        def merge():
+            if not tracks:
+                raise RuntimeError("stack expects a non-empty TensorList")
+            merges.append(True)
+        detector._lm = types.SimpleNamespace(
+            local_map=tracks, set_curr_idx=lambda _: None,
+            process_observations=lambda _: None, get_global_observations=lambda: [],
+            clear_global_observations=lambda: None, merge_local_map=merge,
+        )
+        detector._gm = None
+        detector._dm_names = ["chair"]
+        detector._keyframes = keyframes
+        detector._project_to_registry = lambda: publications.append(True)
+        detector._tick_locked()
+        assert detector._consecutive_failures == 0
+        assert len(merges) == expected_merges
+        assert publications == [True]
+
+
 def test_classes_file_from_manifest():
     d = _detector(classes=["chair", " table ", ""])
     path = d._write_classes_file()
