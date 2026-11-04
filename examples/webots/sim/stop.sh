@@ -51,9 +51,7 @@ echo "[sim/stop] killing host-side python service zombies (speech / memsearch / 
 # Host-side packages spawn long-lived Python processes in their own
 # rbnx-build/venv. `rbnx shutdown` SIGTERMs the rbnx-cli wrapper, but if
 # the wrapper dies first (or boot races), the Python child outlives it
-# and keeps its GPU memory + gRPC port. Speech_service is the worst
-# offender: every leaked instance pins ~1 GiB of CUDA on the FunASR
-# model and a stale TCP port that the next boot can't rebind.
+# and keeps model memory and TCP ports alive across the next boot.
 kill_ours "speech_service\\.service"
 kill_ours "memsearch_service\\.service"
 kill_ours "scene_service\\.service"

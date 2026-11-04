@@ -1,0 +1,12 @@
+# Versions validated by the Scene ONNX exporter and model adapters.
+numpy==1.26.4
+ultralytics==8.4.149
+clip-anytorch==2.6.0
+open_clip_torch==3.3.0
+open3d==0.20.0
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+onnx==1.23.2
+onnxscript==0.7.2
+cuda-bindings==12.9.4
+cuda-pathfinder==1.4.0

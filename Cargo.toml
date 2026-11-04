@@ -14,7 +14,6 @@
 members = [
     "system/atlas",
     "system/chronos/clock",
-    "system/chronos",
     "system/executor",
     "system/liaison",
     "system/pilot",
@@ -81,6 +80,5 @@ ratatui = "0.30.0"
 crossterm = "0.29.0"
 
 # Internal crates
-robonix-chronos-clock = { path = "system/chronos/clock" }
 robonix-codegen = { path = "tools/codegen" }
 robonix-scribe = { path = "system/scribe" }

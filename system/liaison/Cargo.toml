@@ -22,7 +22,6 @@ name = "mock_audio"
 path = "examples/mock_audio.rs"
 
 [dependencies]
-robonix-chronos-clock.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1"
 tonic.workspace = true
@@ -43,6 +42,3 @@ robonix-codegen.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
 protoc-bin-vendored.workspace = true
-
-[dev-dependencies]
-tempfile = "3"

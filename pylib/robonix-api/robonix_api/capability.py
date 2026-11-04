@@ -39,7 +39,6 @@ from .atlas import ATLAS
 from .atlas_types import (
     Capability,
     CapabilityProvider,
-    CapabilityTimeDescriptor,
     Channel,
     GrpcParams,
     Kind,
@@ -294,7 +293,6 @@ class _ProviderBase:
         transport: Transport | str | int,
         params: GrpcParams | Ros2Params | McpParams | None = None,
         description: str = "",
-        time_descriptor: CapabilityTimeDescriptor | None = None,
     ) -> str:
         """Declare a Capability for `contract_id` on this CapabilityProvider.
         `description` is the instance-specific natural-language string
@@ -326,7 +324,6 @@ class _ProviderBase:
             endpoint=endpoint,
             params=params,
             description=description,
-            time_descriptor=time_descriptor,
         )
 
     # -- Layer 1 conveniences (per-transport declare helpers) --------------
@@ -338,7 +335,6 @@ class _ProviderBase:
         *,
         qos: str = "best_effort",
         description: str = "",
-        time_descriptor: CapabilityTimeDescriptor | None = None,
     ) -> str:
         """Declare a ROS 2 topic endpoint for a topic_in / topic_out contract."""
         return self.declare_capability(
@@ -347,7 +343,6 @@ class _ProviderBase:
             transport=Transport.ROS2,
             params=Ros2Params(qos_profile=qos),
             description=description,
-            time_descriptor=time_descriptor,
         )
 
     def declare_ros2_service(
@@ -510,13 +505,7 @@ class _ProviderBase:
         qos: str | int = "best_effort",
         declare: bool = True,
         description: str = "",
-        time_descriptor: CapabilityTimeDescriptor | None = None,
     ):
-        """Create a ROS publisher and optionally declare its static timing binding.
-
-        The descriptor describes payload acquisition semantics; it does not
-        rewrite stamps, ingest samples or establish clock synchronization.
-        """
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
         pub = RosBackend.get().create_publisher(cls, topic, qos)
         self._publishers[contract_id] = pub
@@ -529,7 +518,6 @@ class _ProviderBase:
                     qos_profile=qos if isinstance(qos, str) else "reliable"
                 ),
                 description=description,
-                time_descriptor=time_descriptor,
             )
         return pub
 

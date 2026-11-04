@@ -578,12 +578,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             )
             .await;
             // Every exit, including errors and interrupts, archives the turn.
-            let archive_result = transcript.record(&history, &tasks);
-            if let Err(error) = &archive_result {
-                error!("[pilot] final archive failed for session '{session_id}': {error}");
-                forest.cancel_running(&mut executor).await;
-            }
-            let result = result.and_then(|()| archive_result.map_err(anyhow::Error::from));
+            transcript.record(&history, &tasks);
             if let Err(e) = result {
                 error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;

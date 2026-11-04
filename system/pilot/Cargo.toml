@@ -10,7 +10,6 @@ name = "robonix-pilot"
 path = "src/main.rs"
 
 [dependencies]
-robonix-chronos-clock.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1"
 tonic.workspace = true

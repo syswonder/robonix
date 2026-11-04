@@ -44,7 +44,6 @@ from .atlas import ATLAS
 from .atlas_types import (
     Capability,
     CapabilityProvider,
-    CapabilityTimeDescriptor,
     Channel,
     ContractDescriptor,
     GrpcParams,
@@ -101,7 +100,7 @@ __all__ = [
     # Lifecycle handler return type.
     "Ok", "Err", "Deferred", "Result",
     # Atlas dataclass mirrors.
-    "Capability", "CapabilityProvider", "CapabilityTimeDescriptor", "Channel", "ContractDescriptor",
+    "Capability", "CapabilityProvider", "Channel", "ContractDescriptor",
     "GrpcParams", "Ros2Params", "McpParams",
     "Kind", "LifecycleState", "Transport",
     # MCP decorator (standalone; `@provider.provides_mcp` is sugar over this).

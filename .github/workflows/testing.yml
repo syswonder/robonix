@@ -362,10 +362,10 @@ jobs:
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
-      # CI should not depend on external Tencent/FunASR credentials or quota.
+      # CI should not depend on external Tencent credentials or quota.
       SPEECH_BACKEND: "mock"
-      # Keep build-time ECAPA verification off the GPU reserved for Webots and Scene.
-      VOICEPRINT_DEVICE: "cpu"
+      # Keep speaker embeddings on CPU; reserve the GPU for Webots and Scene.
+      VOICEPRINT_PROVIDER: "cpu"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
       ROBONIX_SIM_NETWORK: "bridge"
@@ -492,18 +492,17 @@ jobs:
           if dmesg 2>/dev/null | grep -qi 'NVRM: Xid'; then
             echo "::warning::Xid in dmesg — GPU may be degraded"; fi
 
-      - name: Remove containers left by an interrupted run
+      - name: Remove leftovers owned by this run
         run: |
           set -euo pipefail
-          # A runner killed mid-job never reaches its own cleanup, and its
-          # containers keep the GPU, so the next run fails the capacity check.
-          # This runner takes one job at a time and this step runs before this
-          # job starts anything, so every ci-* resource here belongs to a job
-          # that is no longer running.
-          docker ps -aq --filter "name=^ci-" | xargs -r docker rm -f
-          docker images --format '{{.Repository}}:{{.Tag}}' | grep '^ci-' | xargs -r docker rmi || true
-          docker volume ls -q | grep '^ci-' | xargs -r docker volume rm || true
-          docker network ls --format '{{.Name}}' | grep '^ci-' | xargs -r docker network rm || true
+          [[ "$RUN_KEY" =~ ^[0-9]+-[0-9]+-(cg|dm)$ ]] || exit 1
+          # Other GPU groups or users may still own ci-* resources. Leave
+          # their containers and shared image tags intact; capacity failure
+          # is safer than deleting another run's state.
+          owned="^ci-${RUN_KEY}([-_]|$)"
+          docker ps -aq --filter "name=$owned" | xargs -r docker rm -f
+          docker volume ls -q | grep -E "$owned" | xargs -r docker volume rm || true
+          docker network ls --format '{{.Name}}' | grep -E "$owned" | xargs -r docker network rm || true
 
       - name: Wait for runner GPU capacity
         run: |
@@ -596,6 +595,13 @@ jobs:
           set -euo pipefail
           git submodule sync --recursive
           git submodule update --init --recursive
+
+      - name: Record exact tested source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/sim-logs/tested-source-sha.txt"
+          git show -s --format='%H%nparents: %P%n%s' HEAD > "$RUNNER_TEMP/sim-logs/tested-source.txt"
 
       - name: Configure run isolation
         run: |
@@ -762,6 +768,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 testing/simulate_ci.py
+
+      - name: Install Rerun browser acceptance tools
+        run: |
+          set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$ROBONIX_CI_RUNTIME_DIR/playwright-browsers"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+          python3 -m pip install -r testing/requirements-browser.txt
+          # Keep browser binaries per run. Missing host libraries fail this
+          # gate; do not mutate the shared host with an apt dependency install.
+          python3 -m playwright install chromium
 
       - name: Build Webots deployment
         working-directory: examples/webots
@@ -1283,7 +1299,7 @@ jobs:
             --delete-after \
             --timeout 420 | tee "$RUNNER_TEMP/sim-logs/scene-map-persistence.txt"
 
-      - name: Validate boot/shutdown lifecycle
+      - name: Validate boot/shutdown lifecycle and Rerun WebUI
         # boot → shutdown → re-boot. Proves the runtime keeps
         # state under <manifest-dir>/rbnx-boot/ (not ~/.robonix/), that
         # Soma package children are stopped cleanly, and that the stack
@@ -1302,7 +1318,11 @@ jobs:
           # passes. Mapping and scene data are deliberately preserved because
           # they are runtime state whose reboot recovery this test exercises.
           export ROBONIX_LIFECYCLE_RESET_PATHS="${AGENT_MEMORY_DIR}:${AGENT_MILVUS_URI}:${milvus_lock}"
-          python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
+          python3 "$GITHUB_WORKSPACE/testing/verify_rerun_ui.py" \
+            --base-url "http://127.0.0.1:${SCENE_WEB_PORT}" \
+            --output-dir "$RUNNER_TEMP/sim-logs/rerun-ui" \
+            --timeout 180 --lifecycle-timeout 1800 -- \
+            python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
             --rbnx rbnx \
             --manifest robonix_manifest.ci.generated.yaml \
             --server "$ROBONIX_CI_ATLAS" \
@@ -1531,6 +1551,41 @@ jobs:
           # Capture the sim/webots container stdout and the in-container ROS
           # logs so a failure leaves a full trace alongside the scribe logs.
           mkdir -p "$RUNNER_TEMP/sim-logs"
+          # Sample raw grids before shutdown; this later interval is not the failed planner tick.
+          diagnostic_status=0
+          if [ -n "${ROBONIX_NAV2_CONTAINER:-}" ]; then
+            timeout --signal=TERM --kill-after=5s 15s docker cp \
+              "$GITHUB_WORKSPACE/testing/capture_nav_diagnostics.py" \
+              "$ROBONIX_NAV2_CONTAINER:/tmp/capture_nav_diagnostics.py" \
+              >"$RUNNER_TEMP/sim-logs/nav-diagnostics-copy.log" 2>&1 || diagnostic_status=$?
+            if [ "$diagnostic_status" -eq 0 ]; then
+              timeout --signal=TERM --kill-after=5s 65s \
+                docker exec "$ROBONIX_NAV2_CONTAINER" bash -c '
+                  source /opt/ros/humble/setup.bash
+                  while IFS= read -r -d "" entry; do
+                    case "$entry" in PYTHONPATH=*) export "$entry" ;; esac
+                  done < /proc/1/environ
+                  export ZENOH_SESSION_CONFIG_URI=/tmp/robonix_zenoh_session.json5
+                  exec timeout --signal=TERM --kill-after=5s 45s python3 -u \
+                    /tmp/capture_nav_diagnostics.py --duration 15 \
+                    --map-topic /map --global-costmap-topic /global_costmap/costmap \
+                    --pose-topic /robonix/map/pose \
+                    --tf-topic /tf --tf-static-topic /tf_static --clock-topic /clock \
+                    --out /tmp/robonix-nav-diagnostics
+                ' >"$RUNNER_TEMP/sim-logs/nav-diagnostics.log" 2>&1 || diagnostic_status=$?
+              timeout --signal=TERM --kill-after=5s 15s docker cp \
+                "$ROBONIX_NAV2_CONTAINER:/tmp/robonix-nav-diagnostics" \
+                "$RUNNER_TEMP/sim-logs/nav-diagnostics" \
+                >>"$RUNNER_TEMP/sim-logs/nav-diagnostics-copy.log" 2>&1 || diagnostic_status=$?
+            fi
+          else
+            diagnostic_status=1
+            echo "owned Nav2 container unavailable" >"$RUNNER_TEMP/sim-logs/nav-diagnostics.log"
+          fi
+          printf '%s\n' "$diagnostic_status" >"$RUNNER_TEMP/sim-logs/nav-diagnostics.exit.txt"
+          if [ "$diagnostic_status" -ne 0 ]; then
+            echo "::warning::raw navigation diagnostic capture incomplete (status $diagnostic_status)"
+          fi
           docker logs "$ROBONIX_SIM_CONTAINER" >"$RUNNER_TEMP/sim-logs/webots.stdout.log" 2>&1 || true
           for name in \
             "${ROBONIX_MAPPING_CONTAINER:-ci-${RUN_KEY}-mapping}" \

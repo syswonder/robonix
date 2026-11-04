@@ -1,0 +1,13 @@
+# ── TRT engine perception runtime ──────────────────────────────
+# The torch-free engine path (ingest/perception_engines.py): TRT engines for
+# YOLO-World/SAM/CLIP-visual plus CPU onnxruntime for the text towers.
+# TensorRT comes from the JetPack
+# stack (pip index pypi.jetson-ai-lab.dev or the apt l4t packages); verify
+# with `python3 -c "import tensorrt"` instead of pip-installing it here.
+onnxruntime>=1.17
+cuda-bindings>=12
+cuda-pathfinder>=0.3
+# Vendored CLIP tokenizer: regex compiles the \p{L}/\p{N} pattern that stdlib
+# re cannot; ftfy fixes mojibake and is skipped when absent.
+regex
+ftfy>=6

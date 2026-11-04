@@ -52,20 +52,6 @@ robonix-api and Atlas emit a visible warning unless the contract TOML marks it
 as `cross_namespace = true`. The warning is diagnostic and never blocks boot,
 discovery, or calls.
 
-`CapabilityTimeDescriptor` is optional on `declare_capability`,
-`declare_ros2_topic` and `create_publisher`. It binds a sensor capability to
-its existing clock domain and describes acquisition semantics and pipeline
-uncertainty. Rebuild package stubs and Atlas together before declaring time
-metadata; a declaration fails explicitly if the local schema lacks the field.
-Query and Connect with older response bindings expose `time_descriptor=None`,
-which means the metadata is unavailable to that client. Regenerate bindings to
-consume metadata stored by Atlas.
-
-Duplicate declarations carrying metadata raise `AlreadyExists`. Omitting
-`time_descriptor` on a repeat retains the legacy success behaviour and keeps
-the stored descriptor; it does not clear metadata. Unregister and register the
-provider again to replace its declarations.
-
 Contract descriptors also expose `llm_callable`. It defaults to `true`; a
 contract may set it to `false` to keep its implementations out of Pilot's
 model-facing catalog without changing registration, discovery, or calls.

@@ -123,7 +123,8 @@ class SceneLifecycleRuntime:
         self,
         logger: logging.Logger,
         *,
-        activate_timeout_s: float = 85.0,
+        # Bound engine/session loading independently of target-side compilation.
+        activate_timeout_s: float = 240.0,
         shutdown_timeout_s: float = 15.0,
     ) -> None:
         self.log = logger

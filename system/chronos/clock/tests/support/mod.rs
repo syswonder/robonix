@@ -4,23 +4,14 @@ use std::process::Command;
 
 /// Run clock fault injection in an isolated test process without changing host time.
 pub fn run_case(name: &str, exercise: fn()) -> Option<std::process::Output> {
-    run_case_with_env(name, &[], exercise)
-}
-
-/// Configure each child before its process-local logging or clock state initializes.
-pub fn run_case_with_env(
-    name: &str,
-    environment: &[(&str, &std::ffi::OsStr)],
-    exercise: fn(),
-) -> Option<std::process::Output> {
     if std::env::var("ROBONIX_CLOCK_TEST_CHILD").as_deref() == Ok(name) {
         exercise();
         return None;
     }
     let directory = tempfile::tempdir().unwrap();
     let library = directory.path().join("clock_failure.so");
-    let source = directory.path().join("clock_failure.c");
-    std::fs::write(&source, include_str!("clock_failure.c")).unwrap();
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/clock_failure.c");
     let output = Command::new("cc")
         .args([
             "-shared", "-fPIC", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -40,7 +31,6 @@ pub fn run_case_with_env(
         .args(["--exact", name, "--nocapture"])
         .env("LD_PRELOAD", library)
         .env("ROBONIX_CLOCK_TEST_CHILD", name)
-        .envs(environment.iter().copied())
         .output()
         .unwrap();
     assert!(

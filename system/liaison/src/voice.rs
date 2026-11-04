@@ -290,7 +290,7 @@ pub async fn start_voice_session(
                     &language
                 },
             ),
-        )?))
+        )))
         .await;
 
     let session_id_for_task = session_id.clone();
@@ -310,17 +310,16 @@ pub async fn start_voice_session(
         match outcome {
             Ok(()) => {
                 let _ = tx
-                    .send(event_status(
+                    .send(Ok(event_status(
                         KIND_SESSION_DONE,
                         &session_id_for_task,
                         "voice session done",
-                    ))
+                    )))
                     .await;
             }
             Err(e) => {
-                warn!("[liaison/voice] session '{session_id_for_task}' failed: {e:#}");
                 let _ = tx
-                    .send(event_error(&session_id_for_task, &format!("{e:#}")))
+                    .send(Ok(event_error(&session_id_for_task, &format!("{e:#}"))))
                     .await;
             }
         }
@@ -345,7 +344,7 @@ async fn run_session(
 ) -> Result<()> {
     let mock = is_mock_mode();
     // `record_seconds` is now a hard-stop ceiling on streaming capture
-    // (FunASR's VAD ends the turn under most conditions; this just
+    // (the silence detector ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
     // 30 s default. Whisper's old "record-then-recognize" pattern is
     // gone; voice goes through `asr_stream` end-to-end.
@@ -363,23 +362,23 @@ async fn run_session(
                 KIND_RECORDING_STARTED,
                 &session_id,
                 "mock mode — skipping mic capture",
-            )?))
+            )))
             .await;
         let _ = tx
             .send(Ok(event_status(
                 KIND_RECORDING_DONE,
                 &session_id,
                 &format!("mock transcript ready ({} bytes)", canned.len()),
-            )?))
+            )))
             .await;
         let _ = tx
-            .send(Ok(event_text(KIND_ASR_FINAL, &session_id, &canned, 1.0)?))
+            .send(Ok(event_text(KIND_ASR_FINAL, &session_id, &canned, 1.0)))
             .await;
         (Vec::new(), canned)
     } else {
         // Mic → AsrAudioChunk pump + asr_stream.RecognizeStream both
         // run inside `stream_capture_and_recognize`. It returns once
-        // FunASR emits is_final, the user hits max_seconds, or the
+        // ASR emits is_final, the user hits max_seconds, or the
         // mic stream drops. Voiceprint still gets the accumulated PCM
         // for downstream identification (currently fallback-only).
         stream_capture_and_recognize(
@@ -426,7 +425,7 @@ async fn run_session(
         &session_id,
         &tx,
     )
-    .await?;
+    .await;
     let decision = access.authorize_voice(&req.client_user_id, identity.response.as_ref());
     let (user_id, access_context) = match decision {
         access::AccessDecision::Allow {
@@ -445,7 +444,7 @@ async fn run_session(
                     &user_id,
                     confidence,
                     &format!("access allowed: {reason}"),
-                )?))
+                )))
                 .await;
             (
                 user_id,
@@ -480,7 +479,7 @@ async fn run_session(
         &access_context,
         &audio_pcm,
         &req.context_json,
-    )?;
+    );
 
     let mut accumulated_text = String::new();
     // Track whether we've already spoken at least one per-plan answer, so the
@@ -550,7 +549,7 @@ async fn run_session(
                                 pilot: Some(ev),
                                 error: String::new(),
                                 status_message: String::new(),
-                                timestamp_ms: now_ms()?,
+                                timestamp_ms: now_ms(),
                             }))
                             .await;
                         if let Some(s) = say {
@@ -573,7 +572,7 @@ async fn run_session(
                                         KIND_TTS_DONE,
                                         &session_id,
                                         &format!("tts skipped: {e:#}"),
-                                    )?))
+                                    )))
                                     .await;
                             }
                             info!(
@@ -629,7 +628,7 @@ async fn run_session(
                 KIND_TTS_DONE,
                 &session_id,
                 &format!("tts skipped: {e:#}"),
-            )?))
+            )))
             .await;
     }
 
@@ -638,13 +637,13 @@ async fn run_session(
 
 // ── Mic capture + streaming ASR ─────────────────────────────────────────────
 //
-// Open the mic primitive AND `robonix/service/speech/asr_stream` (FunASR
-// paraformer-zh-streaming bidi) at the same time. Mic AudioChunks get
+// Open the mic primitive and `robonix/service/speech/asr_stream` together.
+// Mic AudioChunks get
 // wrapped as AsrAudioChunk and pumped up the request side; the response
 // side yields RecognizeStreamEvents (PARTIAL → … → FINAL). On FINAL,
 // stop both streams and return `(accumulated_pcm, final_text)`.
 //
-// `max_seconds` is a hard ceiling — FunASR's VAD usually ends the turn
+// `max_seconds` is a hard ceiling — the silence detector usually ends the turn
 // well before that, but we don't want to hang on a stuck mic.
 
 #[allow(clippy::too_many_arguments)]
@@ -681,7 +680,7 @@ async fn stream_capture_and_recognize(
             KIND_RECORDING_STARTED,
             session_id,
             &format!("streaming mic {mic_endpoint} → asr_stream {asr_endpoint}"),
-        )?))
+        )))
         .await;
 
     let mut mic_request = Request::new(());
@@ -805,7 +804,7 @@ async fn stream_capture_and_recognize(
                     }
                     if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
                         // Drops asr_req_tx → server sees stream EOF →
-                        // FunASR emits its is_final flush → outer loop
+                        // ASR emits its final transcript → outer loop
                         // collects the final transcript and breaks.
                         break;
                     }
@@ -827,31 +826,15 @@ async fn stream_capture_and_recognize(
     });
     let _pump_abort_guard = AbortOnDrop(pump_handle.abort_handle());
 
-    // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
-    // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
-    // request metadata, not the per-chunk message. Tonic-codegen
-    // doesn't surface a separate header field here, so we just rely on
-    // FunASR's auto-detection — paraformer-zh-streaming is zh-only so
-    // this is fine. If a multi-lingual backend is ever wired in, the
-    // contract needs an extra preamble message.
+    // Audio chunks use the contract defaults: 16 kHz mono PCM s16le.
     let asr_resp = asr_client
         .recognize_stream(Request::new(asr_req_stream))
         .await
         .map_err(|e| anyhow::anyhow!("asr_stream rpc failed: {e}"))?;
     let mut asr_events = asr_resp.into_inner();
 
-    // FunASR's paraformer-zh-streaming emits *incremental* partials —
-    // each event carries only the words decoded from the most recent
-    // chunk window, not a cumulative transcript. The is_final flush
-    // (`recognize_chunk(b"", is_final=True)`) emits the residual
-    // window's text the same way (sometimes empty).
-    //
-    // Strategy: append every non-empty event text into `accumulated`,
-    // and use the accumulator as the final transcript. The server's
-    // is_final flag only tells us when to stop the loop — it does
-    // NOT mean "this event's text is the whole utterance"; treating
-    // it that way drops every prior partial and leaves the user with
-    // just the last syllable.
+    // Partials carry deltas; the final transcript replaces them, including
+    // revisions of words already displayed to the user.
     let mut accumulated = String::new();
     let mut last_confidence = 0.0_f32;
     while let Some(ev_or_err) = asr_events.next().await {
@@ -860,20 +843,20 @@ async fn stream_capture_and_recognize(
             anyhow::bail!("asr error: {}", ev.error);
         }
         let is_final = ev.is_final || ev.event_type == 1;
-        let text = ev.text.clone();
-        if !text.is_empty() {
-            accumulated.push_str(&text);
+        let text = ev.text;
+        accumulate_asr_text(&mut accumulated, &text, is_final);
+        if is_final {
             last_confidence = ev.confidence;
-            if !is_final {
-                let _ = tx
-                    .send(Ok(event_text(
-                        KIND_ASR_PARTIAL,
-                        session_id,
-                        &text,
-                        ev.confidence,
-                    )?))
-                    .await;
-            }
+        } else if !text.is_empty() {
+            last_confidence = ev.confidence;
+            let _ = tx
+                .send(Ok(event_text(
+                    KIND_ASR_PARTIAL,
+                    session_id,
+                    &text,
+                    ev.confidence,
+                )))
+                .await;
         }
         if is_final {
             break;
@@ -887,7 +870,7 @@ async fn stream_capture_and_recognize(
                 session_id,
                 &transcript,
                 last_confidence,
-            )?))
+            )))
             .await;
     }
 
@@ -917,7 +900,7 @@ async fn stream_capture_and_recognize(
                     sample_rate,
                     transcript,
                 ),
-            )?))
+            )))
             .await;
     } else {
         let _ = tx
@@ -931,7 +914,7 @@ async fn stream_capture_and_recognize(
                     sample_rate,
                     transcript,
                 ),
-            )?))
+            )))
             .await;
     }
     Ok((pcm, transcript))
@@ -949,7 +932,6 @@ struct AccessContext {
     reason: String,
 }
 
-/// Resolve speaker identity and propagate timestamp failures before publishing events.
 async fn identify_user(
     atlas: &Arc<Mutex<AtlasClient>>,
     pin_provider_id: &str,
@@ -957,7 +939,7 @@ async fn identify_user(
     fallback_hint: &str,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-) -> Result<VoiceIdentity> {
+) -> VoiceIdentity {
     let fallback = if fallback_hint.is_empty() {
         "voice:unknown".to_string()
     } else if fallback_hint.starts_with("voice:") || fallback_hint.starts_with("local:") {
@@ -983,9 +965,9 @@ async fn identify_user(
                     &fallback,
                     0.0,
                     "voiceprint provider unavailable",
-                )?))
+                )))
                 .await;
-            return Ok(VoiceIdentity { response: None });
+            return VoiceIdentity { response: None };
         }
     };
 
@@ -1000,9 +982,9 @@ async fn identify_user(
                     &fallback,
                     0.0,
                     "voiceprint connect failed",
-                )?))
+                )))
                 .await;
-            return Ok(VoiceIdentity { response: None });
+            return VoiceIdentity { response: None };
         }
     };
 
@@ -1034,11 +1016,11 @@ async fn identify_user(
                     &user,
                     resp.confidence,
                     detail,
-                )?))
+                )))
                 .await;
-            Ok(VoiceIdentity {
+            VoiceIdentity {
                 response: Some(resp),
-            })
+            }
         }
         Err(e) => {
             warn!("[voice] voiceprint RPC failed: {e}; using hint {fallback}");
@@ -1049,9 +1031,9 @@ async fn identify_user(
                     &fallback,
                     0.0,
                     "voiceprint rpc failed",
-                )?))
+                )))
                 .await;
-            Ok(VoiceIdentity { response: None })
+            VoiceIdentity { response: None }
         }
     }
 }
@@ -1082,7 +1064,7 @@ async fn synthesize_and_play(
                 "synthesising {} chars via {tts_endpoint}",
                 text.chars().count()
             ),
-        )?))
+        )))
         .await;
 
     let mut tts_client = RobonixServiceSpeechTtsClient::connect(tts_endpoint.clone())
@@ -1113,15 +1095,13 @@ async fn synthesize_and_play(
         .audio_data
         .chunks(SLICE)
         .enumerate()
-        .map(|(i, slice)| {
-            Ok(AudioChunk {
-                timestamp_ns: now_ns()?,
-                data: slice.to_vec(),
-                sequence: i as u32,
-                duration_s: 0.0,
-            })
+        .map(|(i, slice)| AudioChunk {
+            timestamp_ns: now_ns(),
+            data: slice.to_vec(),
+            sequence: i as u32,
+            duration_s: 0.0,
         })
-        .collect::<Result<Vec<_>, Status>>()?;
+        .collect();
     let stream = futures::stream::iter(chunks);
     speaker_client
         .speaker(Request::new(stream))
@@ -1136,7 +1116,7 @@ async fn synthesize_and_play(
                 "played {} bytes via {speaker_endpoint}",
                 resp.audio_data.len()
             ),
-        )?))
+        )))
         .await;
     Ok(())
 }
@@ -1155,7 +1135,6 @@ pub(crate) async fn play_prompt(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Attach voice identity and a Chronos timestamp before submitting a task.
 fn build_task(
     session_id: &str,
     transcript: &str,
@@ -1163,7 +1142,7 @@ fn build_task(
     access: &AccessContext,
     audio_pcm: &[u8],
     extra_context_json: &str,
-) -> Result<Task> {
+) -> Task {
     let mut ctx: serde_json::Value = if extra_context_json.trim().is_empty() {
         serde_json::json!({})
     } else {
@@ -1186,15 +1165,15 @@ fn build_task(
             }),
         );
     }
-    Ok(Task {
+    Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         source: crate::INTENT_SOURCE_AUDIO,
         text: transcript.to_string(),
         audio_data: audio_pcm.to_vec(),
         context_json: ctx.to_string(),
-        timestamp_ms: now_ms()?,
-    })
+        timestamp_ms: now_ms(),
+    }
 }
 
 fn context_flag(raw: &str, key: &str) -> bool {
@@ -1233,8 +1212,8 @@ fn is_narration_boundary(kind: u32) -> bool {
     matches!(kind, 1..=4)
 }
 
-fn event_status(kind: u32, session_id: &str, message: &str) -> Result<VoiceEvent, Status> {
-    Ok(VoiceEvent {
+fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
+    VoiceEvent {
         event_kind: kind,
         session_id: session_id.to_string(),
         text: String::new(),
@@ -1243,17 +1222,12 @@ fn event_status(kind: u32, session_id: &str, message: &str) -> Result<VoiceEvent
         pilot: None,
         error: String::new(),
         status_message: message.to_string(),
-        timestamp_ms: now_ms()?,
-    })
+        timestamp_ms: now_ms(),
+    }
 }
 
-fn event_text(
-    kind: u32,
-    session_id: &str,
-    text: &str,
-    confidence: f32,
-) -> Result<VoiceEvent, Status> {
-    Ok(VoiceEvent {
+fn event_text(kind: u32, session_id: &str, text: &str, confidence: f32) -> VoiceEvent {
+    VoiceEvent {
         event_kind: kind,
         session_id: session_id.to_string(),
         text: text.to_string(),
@@ -1262,8 +1236,8 @@ fn event_text(
         pilot: None,
         error: String::new(),
         status_message: String::new(),
-        timestamp_ms: now_ms()?,
-    })
+        timestamp_ms: now_ms(),
+    }
 }
 
 fn event_user(
@@ -1272,8 +1246,8 @@ fn event_user(
     user_id: &str,
     confidence: f32,
     status_message: &str,
-) -> Result<VoiceEvent, Status> {
-    Ok(VoiceEvent {
+) -> VoiceEvent {
+    VoiceEvent {
         event_kind: kind,
         session_id: session_id.to_string(),
         text: String::new(),
@@ -1282,15 +1256,12 @@ fn event_user(
         pilot: None,
         error: String::new(),
         status_message: status_message.to_string(),
-        timestamp_ms: now_ms()?,
-    })
+        timestamp_ms: now_ms(),
+    }
 }
 
-/// Preserve the original failure when its event cannot be timestamped.
-pub(crate) fn event_error(session_id: &str, error: &str) -> Result<VoiceEvent, Status> {
-    let timestamp_ms = now_ms()
-        .map_err(|clock| Status::new(clock.code(), format!("{error}; {}", clock.message())))?;
-    Ok(VoiceEvent {
+fn event_error(session_id: &str, error: &str) -> VoiceEvent {
+    VoiceEvent {
         event_kind: KIND_ERROR,
         session_id: session_id.to_string(),
         text: String::new(),
@@ -1299,8 +1270,8 @@ pub(crate) fn event_error(session_id: &str, error: &str) -> Result<VoiceEvent, S
         pilot: None,
         error: error.to_string(),
         status_message: String::new(),
-        timestamp_ms,
-    })
+        timestamp_ms: now_ms(),
+    }
 }
 
 fn is_mock_mode() -> bool {
@@ -1315,16 +1286,20 @@ fn mock_transcript() -> String {
         .unwrap_or_else(|_| "Hello, please introduce yourself.".to_string())
 }
 
-pub(crate) fn now_ms() -> Result<u64, Status> {
-    Ok(now_ns()? / 1_000_000)
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
-fn now_ns() -> Result<u64, Status> {
-    robonix_chronos_clock::reference_timestamp_ns()
-        .map_err(|error| Status::unavailable(format!("Chronos time read failed: {error}")))
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
 }
 
-// Diagnostic recording must not fail a voice turn when its clock is unavailable.
 fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Option<PathBuf> {
     let dump_dir = std::env::var("ROBONIX_LIAISON_VOICE_SAVE_DIR")
         .ok()
@@ -1334,23 +1309,7 @@ fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Optio
     if fs::create_dir_all(dir).is_err() {
         return None;
     }
-    let ts = match now_ms() {
-        Ok(timestamp) => timestamp,
-        Err(error) => {
-            warn!("[liaison/voice] skipping recording: {error}");
-            return None;
-        }
-    };
-    let session_id: String = session_id
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
-                char::from(byte).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect();
+    let ts = now_ms();
     let file_name = format!("voice_{}_{}.wav", session_id, ts);
     let path = dir.join(file_name);
     if write_wav(&path, pcm, sample_rate).is_ok() {
@@ -1361,7 +1320,6 @@ fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Optio
 }
 
 fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::Error> {
-    use std::io::Write;
     const CHANNELS: u16 = 1;
     const BITS_PER_SAMPLE: u16 = 16;
     let data_size = pcm.len() as u32;
@@ -1385,15 +1343,19 @@ fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::E
     buf.extend_from_slice(&data_size.to_le_bytes());
     buf.extend_from_slice(pcm);
 
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?
-        .write_all(&buf)
+    fs::write(path, buf)
 }
 
-/// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
-/// silence-VAD in the mic pump. Returns 0.0 on empty / odd-length input.
+/// Apply a partial delta or replace it with the complete final transcript.
+fn accumulate_asr_text(accumulated: &mut String, text: &str, is_final: bool) {
+    if is_final {
+        accumulated.clear();
+    }
+    accumulated.push_str(text);
+}
+
+/// RMS amplitude used by the silence detector; ignores an incomplete trailing
+/// sample and returns 0.0 when there are no complete samples.
 fn pcm_rms_s16le(data: &[u8]) -> f32 {
     let n = data.len() / 2;
     if n == 0 {
@@ -1410,96 +1372,17 @@ fn pcm_rms_s16le(data: &[u8]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    mod clock_faults {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../chronos/clock/tests/support/mod.rs"
-        ));
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    /// Event and audio timestamps reject clock faults, including error-event timestamps.
-    fn clock_errors_return_status_without_events() {
-        clock_faults::run_case(
-            "voice::tests::clock_errors_return_status_without_events",
-            || {
-                for mode in [1, 2, 4] {
-                    clock_faults::mode(mode);
-                    assert_eq!(
-                        event_status(KIND_SESSION_STARTED, "s", "start")
-                            .unwrap_err()
-                            .code(),
-                        tonic::Code::Unavailable
-                    );
-                    let error = event_error("s", "voice error").unwrap_err();
-                    assert_eq!(error.code(), tonic::Code::Unavailable);
-                    assert!(error.message().contains("voice error"));
-                    assert!(error.message().contains("Chronos time read failed"));
-                    assert!(save_voice_recording("s", &[], 16_000).is_none());
-                    assert!(now_ns().is_err());
-                    clock_faults::mode(0);
-                    assert!(
-                        event_status(KIND_SESSION_STARTED, "s", "start")
-                            .unwrap()
-                            .timestamp_ms
-                            > 0
-                    );
-                }
-            },
-        );
-    }
-
     use super::*;
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn recording_ids_remain_in_save_directory() {
-        let directory = tempfile::tempdir().unwrap();
-        let dump = directory.path().join("dump");
-        clock_faults::run_case_with_env(
-            "voice::tests::recording_ids_remain_in_save_directory",
-            &[("ROBONIX_LIAISON_VOICE_SAVE_DIR", dump.as_os_str())],
-            || {
-                let dump =
-                    PathBuf::from(std::env::var_os("ROBONIX_LIAISON_VOICE_SAVE_DIR").unwrap());
-                fs::create_dir_all(dump.join("voice_probe")).unwrap();
-                for session in [
-                    "probe/../../escaped",
-                    "/tmp/escaped",
-                    "a\\b",
-                    "a%2Fb",
-                    "plain-id",
-                ] {
-                    let path = save_voice_recording(session, &[0, 0], 16_000).unwrap();
-                    assert_eq!(path.parent(), Some(dump.as_path()));
-                    assert!(
-                        path.file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .starts_with("voice_")
-                    );
-                    let bytes = fs::read(&path).unwrap();
-                    assert!(bytes.starts_with(b"RIFF"));
-                    assert!(write_wav(&path, &[1, 2], 16_000).is_err());
-                    assert_eq!(fs::read(&path).unwrap(), bytes);
-                }
-                assert!(!fs::read_dir(dump.parent().unwrap()).unwrap().any(|entry| {
-                    entry
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("escaped_")
-                }));
-                let outside = dump.parent().unwrap().join("outside.wav");
-                fs::write(&outside, b"keep").unwrap();
-                let link = dump.join("linked.wav");
-                std::os::unix::fs::symlink(&outside, &link).unwrap();
-                assert!(write_wav(&link, &[0, 0], 16_000).is_err());
-                assert_eq!(fs::read(&outside).unwrap(), b"keep");
-            },
-        );
+    fn final_asr_replaces_partial_words_and_can_clear_them() {
+        let mut transcript = String::new();
+        accumulate_asr_text(&mut transcript, "open the ", false);
+        accumulate_asr_text(&mut transcript, "kitchen", false);
+        accumulate_asr_text(&mut transcript, "open the bedroom", true);
+        assert_eq!(transcript, "open the bedroom");
+        accumulate_asr_text(&mut transcript, "", true);
+        assert!(transcript.is_empty());
     }
 
     #[test]
@@ -1528,8 +1411,7 @@ mod tests {
             },
             &[],
             r#"{"foo":"bar"}"#,
-        )
-        .unwrap();
+        );
         let v: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
         assert_eq!(v["user_id"], "voice:alice");
         assert_eq!(v["voice_session"], true);

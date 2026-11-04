@@ -10,7 +10,6 @@ name = "robonix_scribe"
 path = "src/lib.rs"
 
 [dependencies]
-robonix-chronos-clock.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 [target.'cfg(unix)'.dependencies]

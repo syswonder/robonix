@@ -1,15 +1,19 @@
-# Chronos
+# Chronos — unified time
 
-`robonix-chronos` provides `ChronosCore`: a deterministic device-to-reference clock model library. Register a clock domain and policy, submit paired `ClockObservation` values, then query status, model coefficients or conversions. It does not read host clocks or run a process.
+One of the 12 Robonix system components. Provides a single monotonic
+time source plus PTP / IEEE-1588 alignment between hardware (lidar,
+camera, IMU, chassis odometry) and the runtime.
 
-The core bounds its observation window, checks integer conversion overflow, tracks reference/device generations, and handles wrap, outliers, holdover and reset. Model updates support step and bounded slew.
+**Status — v0.1 stub.** Not yet implemented.
 
-Fitted rates outside the signed coefficient range are rejected, including a floating-point rate that rounds to the exclusive upper boundary.
+For now, components read system wall time / per-sensor timestamps
+directly. Scene / mapping fuse multimodal data on their own. Chronos
+will absorb that responsibility in v0.2.
 
-Refreshing a new generation preserves retained models from earlier generations; their freshness cannot be computed from the new observations.
+When implemented, Chronos will:
 
-A strictly newer reference generation clears `Fault` to `Reset` and replaces its diagnostic reason. A retained model becomes `Unsynced` with its old generation identity until refitting. Equal-generation updates are idempotent, and reference availability recovery preserves `Fault`.
-
-Outlier checks include the configured drift allowance over steady time since the last accepted observation, so permitted rate changes and observations within holdover uncertainty can update the model. Larger residuals remain rejected.
-
-Run `cargo test -p robonix-chronos --test core`.
+- expose a single `time/now` capability returning a monotonic, machine-
+  global time stamp consistent with sensor headers,
+- run a PTP master/slave loop (1588v2) to discipline NIC clocks across
+  the body's compute units,
+- emit drift / sync-quality metrics to [vitals](../vitals/).
