@@ -127,20 +127,9 @@ for i in range(len(r_conf)):
         used.add(bj)
         conf_err.append(abs(r_conf[i] - mine[bj, 4]))
         ious.append(best)
-# multi-label double-fire: near-synonym vocab classes (plant/potted plant…)
-# fire a second class on an already-matched box.  The old torch path kept them
-# too when the letterbox-context confidence crossed the gate; downstream
-# concept-graph visual merging absorbs same-box duplicates either way.
-extra = [int(mine[j, 5]) for j in range(mine.shape[0]) if j not in used
-         and max((_iou(mine[j, :4], r_xyxy[i]) for i in range(len(r_conf))), default=0) > 0.9]
-for j in range(mine.shape[0]):
-    if j not in used and int(mine[j, 5]) in extra:
-        used.add(j)
-        print(f"  double-fire: cls={classes[int(mine[j, 5])]} conf={mine[j, 4]:.3f} "
-              "(same box as a matched det)")
 ok("YOLO detections matched", len(r_conf) > 0 and matched == len(r_conf) and len(used) == mine.shape[0],
    f"{matched}/{len(r_conf)} vs engine {mine.shape[0]}, iou_min={min(ious) if ious else 0:.4f}, "
-   f"conf_maxabs={max(conf_err) if conf_err else 0:.4f}, double-fire={len(extra)}")
+   f"conf_maxabs={max(conf_err) if conf_err else 0:.4f}")
 del yw, tm, res
 gc.collect()
 

@@ -269,6 +269,53 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    #[tokio::test]
+    async fn identical_active_call_is_rejected_before_dispatch() {
+        let call = crate::pb::pilot::CapabilityCall {
+            provider_id: "navigation".into(),
+            contract_id: "navigate".into(),
+            args_json: r#"{"x":1}"#.into(),
+            ..Default::default()
+        };
+        let forbidden = HashSet::from([crate::planner::call_signature(&call)]);
+        let (input, mut rx) = mpsc::channel(8);
+        let mut live = StreamExecution {
+            input: Some(input),
+            ..Default::default()
+        };
+        let mut client = RobonixSystemExecutorExecuteStreamClient::new(
+            Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+        );
+        let message = ExecuteStreamInput {
+            message_kind: EXECUTE_STREAM_NODE,
+            node: Some(crate::pb::pilot::RtdlNode {
+                node_kind: 2,
+                call: Some(crate::pb::pilot::CapabilityCall {
+                    call_id: "different-plan:0".into(),
+                    args_json: r#"{ "x": 1 }"#.into(),
+                    ..call
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = live
+            .send(message.clone(), &mut client, &forbidden)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "capability call is already in flight");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(live.plan.nodes.is_empty());
+        live.send(message, &mut client, &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap().message_kind, EXECUTE_STREAM_NODE);
+        assert_eq!(live.plan.nodes.len(), 1);
+    }
+
     /// Control endpoint that verifies input stays open until cancellation arrives.
     struct CancelControl {
         /// Input receiver used to detect premature CLOSE, END, or EOF.

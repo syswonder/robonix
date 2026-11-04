@@ -1866,6 +1866,7 @@ class ConceptGraphsDetector:
         if not hasattr(self, "_uuid_to_oid"):
             self._uuid_to_oid = {}
         self._reconcile_side_tables()
+        snapshot_frame = getattr(self, "_map_frame", "") or self._world_frame_fn()
         snapshots = []
         for obj in self._map_objects:
             try:
@@ -1923,19 +1924,27 @@ class ConceptGraphsDetector:
         # serializes with the snapshot reader (same asyncio.Lock).
         try:
             asyncio.run_coroutine_threadsafe(
-                self._apply_snapshot(snapshots), self._asyncio_loop,
+                self._apply_snapshot(
+                    snapshots, frozenset(getattr(self, "_held_uuids", ())),
+                    expected_world_frame=snapshot_frame,
+                ),
+                self._asyncio_loop,
             )
         except Exception as e:  # noqa: BLE001
             log.debug("schedule registry update failed: %s", e)
 
-    async def _apply_snapshot(self, snapshots: list[dict]) -> None:
+    async def _apply_snapshot(
+        self, snapshots: list[dict], held: frozenset = frozenset(), *,
+        expected_world_frame: Optional[str] = None,
+    ) -> None:
         """Reconcile concept-graphs MapObjectList state into the registry
-        **incrementally**."""
+        **incrementally**. ``held`` are uuids the backend gated out before the
+        snapshot; like a rejected snapshot they stay live."""
         now = time.time()
         # A rejected snapshot below is not evidence that its object is gone:
         # visible absence decides that. Its uuid stays live, so a registered
         # object is neither updated nor evicted while the gate rejects it.
-        live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")}
+        live_uuids = {s["uuid"] for s in snapshots if s.get("uuid")} | held
         # The same occupancy gate the DualMap backend applies, on the object's
         # own points: an object standing on ground the map has never observed
         # cannot have been seen there.
@@ -1958,6 +1967,9 @@ class ConceptGraphsDetector:
                     "withholding ConceptGraphs snapshot because the world frame "
                     "is unknown"
                 )
+                return
+            # Localization can change frames while this worker snapshot is queued.
+            if expected_world_frame is not None and wf != expected_world_frame:
                 return
             # oids touched this tick (bound / adopted / inserted).
             adopted_oids: set[str] = set()

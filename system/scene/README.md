@@ -591,6 +591,12 @@ rejects missing or mismatched frame ids instead of composing incompatible
 frames. Deployments with a complete URDF and TF tree should not publish a
 second transform with the opposite direction.
 
+When localization replaces an odometry frame, DualMap discards its old-frame
+tracks, clears its local/global maps and keyframe cache, and withholds those
+registry objects until they are seen again in the new frame. It does not
+relabel old coordinates or bypass the goal frame check. Both metric backends
+reject a queued registry snapshot if localization has changed its frame.
+
 For robots whose body frame is not `base_link`, set `base_frame` under
 `system.scene.config` (or `SCENE_BASE_FRAME`). This is an assertion about the
 body represented by the fallback pose and the required parent of camera
@@ -723,6 +729,12 @@ meaningful in the `map` frame of the SLAM map it was observed on, so restore
 loads exactly the current map's objects and never mixes two maps. The same
 `object_id` may exist on different maps without colliding.
 
+Saving a named map under another id writes a snapshot without changing
+the active map binding. Its annotations and object photos are copied to the
+snapshot; the live partitions remain available. Load the saved map to activate
+it before deleting the original. Same-map updates and the first save of an
+ephemeral session retain their existing behavior.
+
 The binding itself (`scene_service/map_binding.py`) is learned at startup with
 this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
 (`{map_id, mode, generation}` — the authoritative map identity, probed for
@@ -732,11 +744,10 @@ this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
 by the container entrypoint or Native start script); Native builds the overlay
 with its selected Python interpreter and checks ROS message type support.
 Without the overlay, Scene falls back to static binding
-with a warning. At runtime scene only WATCHES the broadcast: if mapping's
-identity or `generation` (bumped when the map origin may have changed: reset /
-mapping-mode session start) drifts from the startup binding, scene logs a
-warning and keeps its binding — reacting (flush + re-anchor) is the planned
-lifecycle linkage (P3).
+with a warning. At runtime the lifecycle watcher clears derived objects after
+a map-frame epoch change and marks annotations stale. If mapping switches to
+a different named map outside Scene, it clears mis-anchored objects and blocks
+Save until an explicit Load restores a coherent binding.
 
 ## User annotations (rooms / POIs)
 
@@ -821,6 +832,10 @@ curl -s http://127.0.0.1:<mcp-port>/mcp/ -H "Content-Type: application/json" \
 * `/api/annotations` — user annotation CRUD (see "User annotations" above)
 
 The 3D viz draws the OccupancyGrid as a translucent floor plane at z = -0.01 (so you can read room geometry under the point clouds), each detected object as a coloured pcd + yaw-rotated wireframe bbox + class label sprite, and the robot from the live Soma footprint exposed by `/api/state`. Until Soma geometry is available, the robot mesh, heading arrow, and label remain hidden.
+
+After Scene stops and returns, an open map page reopens its Rerun frame when
+the state connection recovers. The surrounding object pane stays open while
+the new process republishes the scene into a new recording.
 
 The cam panel shows the same RGB + depth frames the perception pipeline consumes. If detections look wrong, compare them to this feed. Depth is shown as a per-frame normalised grayscale (near = bright). Each tile shows the encoding + age of the latest sample; the meta line turns red once a stream has been silent for >2 s.
 

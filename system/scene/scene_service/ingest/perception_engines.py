@@ -499,20 +499,22 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thres: float) -> np.ndarray:
 
 def yolo_nms(boxes_xywh: np.ndarray, scores: np.ndarray, conf: float,
              iou: float = NMS_IOU, max_det: int = NMS_MAX_DET) -> np.ndarray:
-    """ultralytics 8.4 non_max_suppression, multi-label path (nc > 1).
+    """Ultralytics 8.4 predict NMS with one best class per anchor.
 
     boxes_xywh (N,4) decoded center-format pixels; scores (nc,N) post-sigmoid.
     Returns (n,6) rows [x1, y1, x2, y2, conf, cls], descending confidence."""
-    si, sj = np.where(scores > conf)  # (anchor, class) pairs, row-major like torch.where
+    classes = np.argmax(scores, axis=0)
+    confs = scores[classes, np.arange(scores.shape[1])]
+    sj = np.flatnonzero(confs > conf)
+    si = classes[sj]
     if si.size == 0:
         return np.zeros((0, 6), dtype=np.float32)
-    confs = scores[si, sj]
+    confs = confs[sj]
     if confs.size > NMS_MAX_NMS:
         top = np.argsort(-confs, kind="stable")[:NMS_MAX_NMS]
         si, sj, confs = si[top], sj[top], confs[top]
 
-    # si walks the class rows, sj the anchor columns: boxes follow sj, the
-    # class id (and the batched-NMS offset) follows si.
+    # Offsets keep overlapping boxes from different classes independent.
     x = boxes_xywh[sj]
     xyxy = np.empty_like(x)
     xyxy[:, 0] = x[:, 0] - x[:, 2] / 2  # xywh -> xyxy

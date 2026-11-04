@@ -11,6 +11,16 @@ import pytest
 from scene_service.ingest import perception_engines as pe
 
 
+def test_yolo_nms_keeps_only_the_best_class_per_anchor():
+    boxes = np.array([[10, 10, 4, 4], [30, 30, 4, 4]], np.float32)
+    scores = np.array([[0.9, 0.1], [0.8, 0.7]], np.float32)
+    detections = pe.yolo_nms(boxes, scores, conf=0.25, max_det=2)
+    np.testing.assert_allclose(detections, [
+        [8, 8, 12, 12, 0.9, 0],
+        [28, 28, 32, 32, 0.7, 1],
+    ])
+
+
 def test_device_buffers_reused_grown_and_released(monkeypatch):
     allocations = []
 

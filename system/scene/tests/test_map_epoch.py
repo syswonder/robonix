@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scene_service.annotations import AnnotationStore  # noqa: E402
 from scene_service.map_meta import MapMetaStore, make_meta  # noqa: E402
+from scene_service.object_views import ObjectViewStore  # noqa: E402
 
 try:  # the state package needs scipy — absent on a bare mac checkout
     from scene_service.state.object_registry import (
@@ -123,7 +124,7 @@ _KEEP = object()  # sentinel: "build the real MapMetaStore"
 
 
 def _make_env(tmp, *, binding, objs=(), anno_map_id=".live",
-              lifecycle=None, map_meta=_KEEP):
+              lifecycle=None, map_meta=_KEEP, object_views=None):
     """(web_mod, app, pieces) or (None, None, None) when deps can't import."""
     err = _IMPORT_ERR
     web_mod = None
@@ -148,6 +149,7 @@ def _make_env(tmp, *, binding, objs=(), anno_map_id=".live",
     app = web_mod.make_app(
         registry=registry, hub=hub, anno_store=anno,
         object_store=store, map_meta=meta, map_binding=bind,
+        object_views=object_views,
     )
     return web_mod, app, SimpleNamespace(
         registry=registry, anno=anno, meta=meta, store=store, hub=hub,
@@ -218,6 +220,127 @@ def _rpc_ok(op, payload=None, timeout_s=None):
 
 
 # ── Save ────────────────────────────────────────────────────────────────────
+
+def _views_with_picture(tmp, partition):
+    views = ObjectViewStore(os.path.join(tmp, "views"))
+    picture = views.root / partition / "o1" / "view_0.jpg"
+    picture.parent.mkdir(parents=True)
+    picture.write_bytes(b"original photo")
+    return views, picture
+
+
+def test_save_as_snapshots_named_map_without_moving_live_state():
+    for mode, source in [("localization", "ui_load"), ("mapping", "lifecycle")]:
+        with tempfile.TemporaryDirectory() as tmp:
+            views, picture = _views_with_picture(tmp, "loaded_a")
+            binding = {"map_id": "loaded_a", "mode": mode,
+                       "generation": 7, "source": source}
+            lifecycle = SimpleNamespace(map_id="loaded_a", generation=7, mode=mode)
+            web, app, env = _make_env(
+                tmp, binding=binding, anno_map_id="loaded_a", objs=[_obj("o1")],
+                lifecycle=lifecycle, object_views=views,
+            )
+            env.anno.create(kind="region", name="office", points=ROOM_PTS)
+            original_annotations = env.anno.path.read_bytes()
+            with _patched(web, rpc=_rpc_ok, maps=_spatial("loaded_a")):
+                status, body = _call(app, "POST", "/api/maps/save", {"map_id": "snapshot_b"})
+            assert status == 200 and body["ok"], body
+            assert env.binding == binding
+            assert env.anno.map_id == "loaded_a"
+            assert env.anno.path.read_bytes() == original_annotations
+            saved = json.loads((env.anno.path.parent / "snapshot_b.json").read_text())
+            assert saved["map_id"] == "snapshot_b"
+            assert saved["annotations"][0]["name"] == "office"
+            assert body["validation"]["paths"]["scene_annotations"].endswith("snapshot_b.json")
+            assert set(env.store.rows[body["snapshot_partition"]]) == {"o1"}
+            assert picture.read_bytes() == b"original photo"
+            copied = views.root / "snapshot_b" / "o1" / "view_0.jpg"
+            assert copied.read_bytes() == b"original photo"
+            copied.write_bytes(b"snapshot edit")
+            assert picture.read_bytes() == b"original photo"
+
+
+def test_failed_save_as_keeps_live_binding_annotations_and_photos():
+    with tempfile.TemporaryDirectory() as tmp:
+        views, picture = _views_with_picture(tmp, "loaded_a")
+        binding = {"map_id": "loaded_a", "mode": "localization",
+                   "generation": 7, "source": "ui_load"}
+        web, app, env = _make_env(
+            tmp, binding=binding, anno_map_id="loaded_a", objs=[_obj("o1")],
+            object_views=views,
+        )
+        env.anno.create(kind="region", name="office", points=ROOM_PTS)
+        original_annotations = env.anno.path.read_bytes()
+        env.store.persist = lambda *args, **kwargs: 0
+        with _patched(web, rpc=_rpc_ok, maps=_spatial("loaded_a")):
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "snapshot_b"})
+        assert status == 502 and not body["ok"], body
+        assert env.binding == binding
+        assert env.anno.map_id == "loaded_a"
+        assert env.anno.path.read_bytes() == original_annotations
+        assert picture.read_bytes() == b"original photo"
+        assert env.meta.read("snapshot_b") is None
+
+
+def _check_save_as_without_current_lifecycle(source, generation=None):
+    with tempfile.TemporaryDirectory() as tmp:
+        views, picture = _views_with_picture(tmp, "loaded_a")
+        binding = {"map_id": "loaded_a", "mode": "", "generation": generation,
+                   "source": source}
+        web, app, env = _make_env(
+            tmp, binding=binding, anno_map_id="loaded_a", objs=[_obj("o1")],
+            object_views=views,
+        )
+        env.anno.create(kind="region", name="office", points=ROOM_PTS)
+        original_annotations = env.anno.path.read_bytes()
+        with _patched(web, rpc=_rpc_ok, maps=_spatial("loaded_a")):
+            status, body = _call(app, "POST", "/api/maps/save", {"map_id": "snapshot_b"})
+        assert status == 200 and body["ok"], body
+        assert env.binding == binding
+        assert env.anno.map_id == "loaded_a"
+        assert env.anno.path.read_bytes() == original_annotations
+        assert picture.read_bytes() == b"original photo"
+        assert (views.root / "snapshot_b" / "o1" / "view_0.jpg").read_bytes() == b"original photo"
+        assert env.anno.read_saved("snapshot_b")[0]["name"] == "office"
+        assert set(env.store.rows[body["snapshot_partition"]]) == {"o1"}
+
+
+def test_save_as_preserves_config_binding_without_lifecycle_sample():
+    _check_save_as_without_current_lifecycle("config")
+
+
+def test_save_as_preserves_env_binding_without_lifecycle_sample():
+    _check_save_as_without_current_lifecycle("env")
+
+
+def test_save_as_preserves_prior_generation_without_current_sample():
+    _check_save_as_without_current_lifecycle("lifecycle", generation=7)
+
+
+def test_same_map_and_ephemeral_save_keep_existing_binding_behavior():
+    for same_map in (True, False):
+        with tempfile.TemporaryDirectory() as tmp:
+            partition = "labx" if same_map else "session"
+            views, picture = _views_with_picture(tmp, partition)
+            binding = ({"map_id": "labx", "mode": "localization", "generation": 7,
+                        "source": "ui_load"} if same_map else
+                       {"map_id": "default", "mode": "", "generation": None,
+                        "source": "default"})
+            lifecycle = SimpleNamespace(map_id="labx" if same_map else "",
+                                        generation=7, mode="localization" if same_map else "mapping")
+            web, app, env = _make_env(
+                tmp, binding=binding, anno_map_id="labx" if same_map else ".live",
+                objs=[_obj("o1")], lifecycle=lifecycle, object_views=views,
+            )
+            with _patched(web, rpc=_rpc_ok, maps=_spatial("labx") if same_map else _spatial()):
+                status, body = _call(app, "POST", "/api/maps/save", {"map_id": "labx"})
+            assert status == 200 and body["ok"], body
+            assert env.binding["map_id"] == "labx"
+            assert env.binding["source"] == "ui_save"
+            assert env.binding["mode"] == ("localization" if same_map else "mapping")
+            assert env.anno.map_id == "labx"
+            assert (views.root / "labx" / "o1" / "view_0.jpg").read_bytes() == b"original photo"
+            assert picture.exists() == same_map
 
 def test_save_commits_fresh_partition_sidecar_then_purges():
     if _unavailable():
