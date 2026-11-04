@@ -877,6 +877,16 @@ class ConceptGraphsDetector:
         depth = _depth_msg_to_metres(depth_msg)
         self._tick_boxes = {}
         if rgb is None or depth is None:
+            if self._tick_idx % 25 == 0:
+                log.warning(
+                    "[scene-cg] empty frame: decode; rgb=%sx%s encoding=%s decoded=%s; "
+                    "depth=%sx%s encoding=%s decoded=%s",
+                    getattr(rgb_msg, "width", 0), getattr(rgb_msg, "height", 0),
+                    str(getattr(rgb_msg, "encoding", ""))[:32], rgb is not None,
+                    getattr(depth_msg, "width", 0), getattr(depth_msg, "height", 0),
+                    str(getattr(depth_msg, "encoding", ""))[:32], depth is not None,
+                )
+            self._tick_idx += 1
             return
         # CLIP crops are taken from true RGB; the engines get BGR and flip
         # channels internally, exactly like the ultralytics predictors did.
@@ -891,6 +901,9 @@ class ConceptGraphsDetector:
         self._stage_s["yolo"] = time.monotonic() - t_stage
         t_stage = time.monotonic()
         if dets.shape[0] == 0:
+            if self._tick_idx % 25 == 0:
+                log.info("[scene-cg] empty frame: no detections; rgb=%s depth=%s",
+                         rgb.shape, depth.shape)
             self._finish_tick()
             return
 
@@ -921,6 +934,9 @@ class ConceptGraphsDetector:
             for cidx in cls_idx
         ], dtype=bool)
         if not keep.any():
+            if self._tick_idx % 25 == 0:
+                log.info("[scene-cg] empty frame: ignored classes; rgb=%s depth=%s boxes=%d",
+                         rgb.shape, depth.shape, len(keep))
             self._finish_tick()
             return
         xyxy = xyxy[keep]

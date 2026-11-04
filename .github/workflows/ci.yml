@@ -60,6 +60,7 @@ jobs:
           system/scene/tests/test_annotations.py
           system/scene/tests/test_identity.py
           system/scene/tests/test_perception_dualmap.py
+          system/scene/tests/test_perception_concept_graphs.py
           system/scene/tests/test_perception_engines.py::test_yolo_nms_keeps_only_the_best_class_per_anchor
 
       - name: Test Scene map save and load facade

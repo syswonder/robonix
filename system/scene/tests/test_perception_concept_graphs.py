@@ -216,3 +216,32 @@ def test_missing_torch_models_preserve_geometric_service(monkeypatch, caplog):
     monkeypatch.setattr(perception_torch, 'TorchPerception', missing)
     assert cg._load_engine_bundle() == (None, 'cpu')
     assert 'perception disabled' in caplog.text
+
+
+@pytest.mark.parametrize("reason", ["decode", "no detections", "ignored classes"])
+def test_empty_frame_diagnostics_are_bounded(reason, caplog):
+    rgb = SimpleNamespace(encoding="unsupported" if reason == "decode" else "bgr8",
+                          width=2, height=2, data=bytes(12))
+    depth = SimpleNamespace(encoding="32FC1", width=2, height=2,
+                            data=np.ones((2, 2), np.float32).tobytes())
+    calls = []
+    def detect(image, confidence):
+        calls.append((image.shape, confidence))
+        return (np.array([[0., 0., 1., 1., .9, 0.]]) if reason == "ignored classes"
+                else np.empty((0, 6)))
+    detector = cg.ConceptGraphsDetector(
+        rgb_fetcher_msg=lambda: rgb, depth_fetcher_msg=lambda: depth,
+        camera_info_fetcher=lambda: SimpleNamespace(fx=1., fy=1.),
+        on_detections=None, registry=None)
+    detector._engines = SimpleNamespace(detect=detect)
+    detector._map_objects = []
+    detector._classes = ["person"]
+    with caplog.at_level("INFO"):
+        for _ in range(51):
+            detector._tick_locked()
+    evidence = [r.message for r in caplog.records if f"empty frame: {reason}" in r.message]
+    assert len(evidence) == 3
+    assert detector._tick_idx == 51
+    assert len(calls) == (0 if reason == "decode" else 51)
+    assert all("rgb=" in line and "depth=" in line for line in evidence)
+    assert detector._map_objects == []
