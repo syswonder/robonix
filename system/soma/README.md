@@ -122,6 +122,18 @@ Top-level `HealthState` power fields are attached to the component whose
 `type` is `battery`. Hardware topology comes only from `robot.components`;
 Soma does not infer deployment-specific joints or devices.
 
+Declared components without a health reading remain `UNKNOWN`; an explicit
+offline or fault reading produces `ERROR`. Runtime-state fallback includes
+unobserved declared components rather than treating them as healthy. Health
+provider discovery continues after startup, and disconnected primitive streams
+are retried so late registration and provider restarts can recover.
+
+When adapting primitive health frames, actuator control metrics use the existing
+names `torque_enabled`, `communication_ok`, and `vendor_error_code`. An absent
+metric value means that control was not reported in this frame; defaulted typed
+flags must not be used as recovery evidence. Explicit zero error readings produce
+an inactive `device_fault` record.
+
 An empty request `robot_id` selects `default_robot`. If no `default_robot` is
 configured and exactly one robot is loaded, Soma selects that only robot.
 

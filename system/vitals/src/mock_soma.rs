@@ -41,7 +41,6 @@ use tonic::{Request, Response, Status};
 const SCHEMA_VERSION: u32 = 1;
 const QUALITY_VALID: u32 = 0;
 const HEALTH_OK: u32 = 0;
-const HEALTH_UNKNOWN: u32 = 4;
 const KIND_BODY: u32 = 1;
 const KIND_ARM: u32 = 2;
 const KIND_JOINT: u32 = 4;
@@ -711,12 +710,12 @@ pub fn generate_snapshot(
 
     // ── Faults ─────────────────────────────────────────────────────────
     let mut faults = Vec::new();
-    if fault_enabled && seq % 8 >= 4 {
+    if fault_enabled {
         faults.push(FaultState {
             component_id: "body/arm/joint_3".to_string(),
             fault_id: "overcurrent".to_string(),
             severity: FAULT_ERROR,
-            active: true,
+            active: seq % 8 >= 4,
             clearable: true,
             onset_ts_ns: now_i64,
             vendor_code: 0x04,
@@ -726,12 +725,12 @@ pub fn generate_snapshot(
             vendor_raw_json: "{\"foc_status\":4}".to_string(),
         });
     }
-    if ramp_enabled && seq % 30 >= 22 {
+    if ramp_enabled {
         faults.push(FaultState {
             component_id: "body/arm/joint_1".to_string(),
             fault_id: "motor_overheat".to_string(),
             severity: FAULT_WARN,
-            active: true,
+            active: seq % 30 >= 22,
             clearable: false,
             onset_ts_ns: now_i64,
             vendor_code: 0x02,
@@ -746,40 +745,36 @@ pub fn generate_snapshot(
     match arm_data {
         Some(ArmData::Piper(pd)) => {
             for pj in &pd.components {
-                if pj.error_code != 0 {
-                    faults.push(FaultState {
-                        component_id: format!("body/arm/{}", pj.name),
-                        fault_id: "piper_foc_fault".to_string(),
-                        severity: FAULT_ERROR,
-                        active: true,
-                        clearable: true,
-                        onset_ts_ns: now_i64,
-                        vendor_code: pj.error_code,
-                        vendor_code_text: format!("0x{:02X}", pj.error_code),
-                        message: format!("{} foc_status=0x{:02X}", pj.name, pj.error_code),
-                        attributes: vec![],
-                        vendor_raw_json: String::new(),
-                    });
-                }
+                faults.push(FaultState {
+                    component_id: format!("body/arm/{}", pj.name),
+                    fault_id: "piper_foc_fault".to_string(),
+                    severity: FAULT_ERROR,
+                    active: pj.error_code != 0,
+                    clearable: true,
+                    onset_ts_ns: now_i64,
+                    vendor_code: pj.error_code,
+                    vendor_code_text: format!("0x{:02X}", pj.error_code),
+                    message: format!("{} foc_status=0x{:02X}", pj.name, pj.error_code),
+                    attributes: vec![],
+                    vendor_raw_json: String::new(),
+                });
             }
         }
         Some(ArmData::Koch(kd)) => {
             for kj in &kd.components {
-                if kj.error_code != 0 {
-                    faults.push(FaultState {
-                        component_id: format!("body/arm/{}", kj.name),
-                        fault_id: "koch_hw_fault".to_string(),
-                        severity: FAULT_ERROR,
-                        active: true,
-                        clearable: true,
-                        onset_ts_ns: now_i64,
-                        vendor_code: kj.error_code,
-                        vendor_code_text: format!("0x{:02X}", kj.error_code),
-                        message: format!("{} hw_error=0x{:02X}", kj.name, kj.error_code),
-                        attributes: vec![],
-                        vendor_raw_json: String::new(),
-                    });
-                }
+                faults.push(FaultState {
+                    component_id: format!("body/arm/{}", kj.name),
+                    fault_id: "koch_hw_fault".to_string(),
+                    severity: FAULT_ERROR,
+                    active: kj.error_code != 0,
+                    clearable: true,
+                    onset_ts_ns: now_i64,
+                    vendor_code: kj.error_code,
+                    vendor_code_text: format!("0x{:02X}", kj.error_code),
+                    message: format!("{} hw_error=0x{:02X}", kj.name, kj.error_code),
+                    attributes: vec![],
+                    vendor_raw_json: String::new(),
+                });
             }
         }
         None => {}
@@ -869,6 +864,7 @@ pub fn generate_snapshot(
     }
 }
 
+/// Build an observed mock component; scenarios add explicit faults separately.
 fn component(
     id: &str,
     parent_id: &str,
@@ -885,7 +881,7 @@ fn component(
         frame_id: frame_id.to_string(),
         model: model.to_string(),
         serial: String::new(),
-        health: HEALTH_UNKNOWN,
+        health: HEALTH_OK,
         operational_state: OP_ACTIVE,
         present: true,
         online: true,
@@ -1306,6 +1302,6 @@ mod tests {
 
         // Seq 2: no faults, no toggle, ramp at early stage.
         let s2 = generate_snapshot(MockScenario::Mixed, 2, None);
-        assert!(s2.faults.is_empty());
+        assert!(s2.faults.iter().all(|fault| !fault.active));
     }
 }

@@ -102,12 +102,14 @@ impl SomaService {
     async fn to_health_snapshot(&self, seq: u64) -> SomaHealthSnapshot {
         const HEALTH_OK: u32 = 0;
         const HEALTH_STALE: u32 = 3;
+        const HEALTH_UNKNOWN: u32 = 4;
         const KIND_BODY: u32 = 1;
         const KIND_ARM: u32 = 2;
         const KIND_JOINT: u32 = 4;
         const KIND_GRIPPER: u32 = 6;
         const KIND_WHEEL: u32 = 5;
         const OP_IDLE: u32 = 3;
+        const OP_UNKNOWN: u32 = 0;
         const OP_ACTIVE: u32 = 4;
         const QUALITY_VALID: u32 = 0;
         const QUALITY_STALE: u32 = 1;
@@ -244,6 +246,24 @@ impl SomaService {
                     quality,
                 ),
             ]);
+        }
+        for described in &self.body.components {
+            if components.iter().any(|known| known.id == described.id) {
+                continue;
+            }
+            let name = described.id.rsplit('/').next().unwrap_or(&described.id);
+            let mut status = component(
+                &described.id,
+                &described.parent_id,
+                crate::health::component_kind(&described.component_type),
+                name,
+                HEALTH_UNKNOWN,
+                OP_UNKNOWN,
+                "no health report in the current runtime snapshot",
+            );
+            status.frame_id = described.frame_id.clone();
+            status.online = false;
+            components.push(status);
         }
         let timestamp_ns = (runtime.observed_at_unix * 1_000_000_000.0) as i64;
         SomaHealthSnapshot {
@@ -462,6 +482,14 @@ mod tests {
         Arc::new(SomaBody::load(&yaml_path).expect("load fixture body"))
     }
 
+    /// Load the declared TIAGo topology for runtime fallback tests.
+    fn tiago_body() -> Arc<SomaBody> {
+        let yaml_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/webots/soma.yaml");
+        Arc::new(SomaBody::load(&yaml_path).expect("load Webots TIAGo body"))
+    }
+
     #[tokio::test]
     async fn get_yaml_returns_raw_text() {
         let service = SomaService::new(fixture_body());
@@ -525,6 +553,22 @@ mod tests {
             .expect("body component");
         assert!(body.parent_id.is_empty());
         assert!(body.detail.contains("no chassis odometry sample"));
+    }
+
+    #[tokio::test]
+    /// Runtime fallback keeps declared devices unknown until health is observed.
+    async fn runtime_fallback_marks_declared_components_unknown_without_health_reports() {
+        let service = SomaService::new(tiago_body());
+        let snapshot = service.to_health_snapshot(1).await;
+        let camera = snapshot
+            .components
+            .iter()
+            .find(|component| component.id == "body/head_camera")
+            .expect("declared camera");
+
+        assert_eq!(camera.health, 4);
+        assert!(!camera.online);
+        assert!(camera.detail.contains("no health report"));
     }
 
     /// Primitive data suppresses fallback only for the advertised lease.
