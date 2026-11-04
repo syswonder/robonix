@@ -174,45 +174,10 @@ export HF_ENDPOINT
 
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
-    MODEL_NAME=sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
-    MODEL_DIR="$BUILD/models/$MODEL_NAME"
-    ARCHIVE="$BUILD/models/$MODEL_NAME.tar.bz2"
-    OFFICIAL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$MODEL_NAME.tar.bz2"
-    # RBNX_GH_MIRROR is the GitHub mirror prefix rbnx uses; empty skips it.
-    GH_MIRROR="${RBNX_GH_MIRROR-https://ghfast.top/}"
-    MIRROR_URL="${GH_MIRROR:+${GH_MIRROR%/}/}$OFFICIAL_URL"
-    mkdir -p "$BUILD/models"
-    if [[ ! -f "$MODEL_DIR/tokens.txt" ]]; then
-        echo "[build] downloading Speech wake-word model ($MODEL_NAME)"
-        rm -f "$ARCHIVE"
-        if ! curl -fL --retry 3 --connect-timeout 15 -o "$ARCHIVE" \
-            "${SHERPA_KWS_MODEL_URL:-$MIRROR_URL}"; then
-            rm -f "$ARCHIVE"
-            curl -fL --retry 3 --connect-timeout 15 -o "$ARCHIVE" "$OFFICIAL_URL"
-        fi
-        bzip2 -t "$ARCHIVE"
-        tar -xjf "$ARCHIVE" -C "$BUILD/models"
-        rm -f "$ARCHIVE"
-    fi
+    "$PY" "$PKG/scripts/download_models.py" "$BUILD/models" kws
     "$PY" -c 'import sherpa_onnx; print("[build] sherpa-onnx", sherpa_onnx.__version__)'
     if [[ "$BACKEND" == "local" ]]; then
-        ASR_NAME=sherpa-onnx-streaming-paraformer-bilingual-zh-en
-        ASR_DIR="$BUILD/models/$ASR_NAME"
-        ASR_ARCHIVE="$BUILD/models/$ASR_NAME.tar.bz2"
-        ASR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$ASR_NAME.tar.bz2"
-        if [[ ! -f "$ASR_DIR/tokens.txt" ]]; then
-            echo "[build] downloading streaming ASR model ($ASR_NAME)"
-            rm -f "$ASR_ARCHIVE"
-            if ! curl -fL --retry 3 --connect-timeout 15 -o "$ASR_ARCHIVE" "${GH_MIRROR:+${GH_MIRROR%/}/}$ASR_URL"; then
-                rm -f "$ASR_ARCHIVE"
-                curl -fL --retry 3 --connect-timeout 15 -o "$ASR_ARCHIVE" "$ASR_URL"
-            fi
-            bzip2 -t "$ASR_ARCHIVE"
-            tar -xjf "$ASR_ARCHIVE" -C "$BUILD/models"
-            rm -f "$ASR_ARCHIVE"
-        fi
-        # Only the int8 encoder/decoder are used at runtime.
-        rm -f "$ASR_DIR/encoder.onnx" "$ASR_DIR/decoder.onnx"
+        "$PY" "$PKG/scripts/download_models.py" "$BUILD/models" asr
     fi
 else
     echo "[build] skipping wake-word model download (SKIP_MODEL_DOWNLOAD=1)."

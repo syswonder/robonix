@@ -21,13 +21,12 @@ if name == "uv" and args[0] == "venv":
     (target / "python").symlink_to(os.environ["STUB"])
 elif name == "python" and args[:1] == ["-c"] and "sysconfig" in args[1]:
     print(pathlib.Path.cwd() / "site-packages")
-elif name == "curl":
-    pathlib.Path(args[args.index("-o") + 1]).touch()
-elif name == "tar":
-    archive = pathlib.Path(args[args.index("-xjf") + 1])
-    dest = pathlib.Path(args[args.index("-C") + 1]) / archive.name.removesuffix(".tar.bz2")
+elif name == "python" and args and args[0].endswith("download_models.py"):
+    root, kind = pathlib.Path(args[1]), args[2]
+    model = "sherpa-onnx-streaming-paraformer-bilingual-zh-en" if kind == "asr" else "kws-model"
+    dest = root / model
     dest.mkdir(parents=True)
-    for file in ["tokens.txt", "encoder.int8.onnx", "decoder.int8.onnx", "encoder.onnx", "decoder.onnx"]:
+    for file in ("tokens.txt", "encoder.int8.onnx", "decoder.int8.onnx"):
         (dest / file).touch()
 '''
 
@@ -41,7 +40,7 @@ class BuildModelsTest(unittest.TestCase):
             stub = tools / "python"
             stub.write_text(STUB)
             stub.chmod(0o755)
-            for command in ("uv", "rbnx", "curl", "tar", "bzip2"):
+            for command in ("uv", "rbnx"):
                 (tools / command).symlink_to(stub)
             calls = root / "calls.jsonl"
             env = {
@@ -61,15 +60,15 @@ class BuildModelsTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             records = [json.loads(line) for line in calls.read_text().splitlines()]
-            urls = [args[-1] for name, *args in records if name == "curl"]
+            urls = [args[-1] for name, *args in records
+                    if name == "python" and args and args[0].endswith("download_models.py")]
             asr = root / "rbnx-build/models/sherpa-onnx-streaming-paraformer-bilingual-zh-en"
             return urls, (asr / "encoder.int8.onnx").exists(), (asr / "encoder.onnx").exists()
 
     def test_local_downloads_both_models_and_keeps_only_int8_asr(self):
         urls, int8, fp32 = self._build("local")
         self.assertEqual(len(urls), 2)
-        self.assertTrue(any("/kws-models/" in url for url in urls))
-        self.assertTrue(any("/asr-models/" in url for url in urls))
+        self.assertEqual(urls, ["kws", "asr"])
         self.assertTrue(int8)
         self.assertFalse(fp32)
 
@@ -78,7 +77,7 @@ class BuildModelsTest(unittest.TestCase):
             with self.subTest(backend=backend):
                 urls, int8, _ = self._build(backend)
                 self.assertEqual(len(urls), 1)
-                self.assertIn("/kws-models/", urls[0])
+                self.assertEqual(urls[0], "kws")
                 self.assertFalse(int8)
 
     def test_skip_download_applies_to_both_models(self):
