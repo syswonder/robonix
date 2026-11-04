@@ -23,7 +23,7 @@ dependencies = [
     "numpy>=1.24,<2",
     "soundfile>=0.12",
     # CPU ONNX Runtime speaker embedding; the aarch64 wheel ships on PyPI.
-    "sherpa-onnx>=1.12",
+    "sherpa-onnx==1.13.4",
 ]
 
 [tool.uv]

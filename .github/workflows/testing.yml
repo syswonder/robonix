@@ -362,10 +362,10 @@ jobs:
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
-      # CI should not depend on external Tencent/FunASR credentials or quota.
+      # CI should not depend on external Tencent credentials or quota.
       SPEECH_BACKEND: "mock"
-      # Keep build-time ECAPA verification off the GPU reserved for Webots and Scene.
-      VOICEPRINT_DEVICE: "cpu"
+      # Keep speaker embeddings on CPU; reserve the GPU for Webots and Scene.
+      VOICEPRINT_PROVIDER: "cpu"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
       ROBONIX_SIM_NETWORK: "bridge"

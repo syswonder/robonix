@@ -3856,7 +3856,7 @@ requires-dist = [
     { name = "robonix-api", editable = "pylib/robonix-api" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "sentencepiece", specifier = ">=0.2" },
-    { name = "sherpa-onnx", specifier = ">=1.13.2,<1.14" },
+    { name = "sherpa-onnx", specifier = "==1.13.4" },
     { name = "torch", marker = "platform_machine != 'aarch64' and extra == 'local'", specifier = ">=2.0" },
     { name = "torchaudio", marker = "platform_machine != 'aarch64' and extra == 'local'", specifier = ">=2.0" },
     { name = "transformers", marker = "extra == 'local'", specifier = ">=4.30" },
@@ -3885,7 +3885,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "protobuf", specifier = "==6.33.6" },
     { name = "robonix-api", editable = "pylib/robonix-api" },
-    { name = "sherpa-onnx", specifier = ">=1.12" },
+    { name = "sherpa-onnx", specifier = "==1.13.4" },
     { name = "soundfile", specifier = ">=0.12" },
 ]
 
