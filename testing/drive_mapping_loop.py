@@ -10,7 +10,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from nav_stress import Tools, World, candidates, endpoint, goal_pose, wait_terminal
+from nav_stress import TERMINAL, Tools, World, activate, candidates, endpoint, goal_pose, wait_terminal
 
 
 def mapping_square(grid, side_m: float = 1.5) -> list[tuple[float, float, float]]:
@@ -97,7 +97,33 @@ def main() -> None:
             if time.monotonic() >= deadline:
                 raise RuntimeError("Navigation costmap or collision counter did not become ready")
             time.sleep(.2)
-        waypoints = mapping_square(world.costmap)
+        try:
+            waypoints = mapping_square(world.costmap)
+        except RuntimeError:
+            # A partial scan can expose too little known space to close the square.
+            before = read_collision_count(world)
+            events_before = len(world.collisions)
+            provider, url = endpoint("robonix/skill/explore/explore", "mcp")
+            activate(provider)
+            explore = Tools(url)
+            result = explore("explore", area_hint="", timeout_s=120., max_speed_m_s=0.)
+            if not result.get("accepted") or not result.get("run_id"):
+                raise RuntimeError(f"mapping preparation rejected: {result}")
+            completed = False
+            try:
+                end = wait_terminal(lambda **args: explore("status", **args), result["run_id"], 180.)
+                completed = end.get("state") in TERMINAL
+                if not completed:
+                    raise RuntimeError(f"mapping preparation did not terminate: {end}")
+                if end.get("state") not in ("SUCCEEDED", "TIMEOUT"):
+                    raise RuntimeError(f"mapping preparation failed: {end}")
+                print(f"mapping preparation ended: {end.get('state')} {str(end.get('detail', ''))[:200]}", flush=True)
+            finally:
+                if not completed:
+                    explore("cancel", run_id=result["run_id"])
+            if read_collision_count(world) != before or len(world.collisions) != events_before:
+                raise RuntimeError("simulator reported a collision during mapping preparation")
+            waypoints = mapping_square(world.costmap)
         _, url = endpoint("robonix/service/navigation/navigate", "mcp")
         drive_square(world, Tools(url), waypoints)
     finally:

@@ -3,9 +3,9 @@
 import math
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from drive_mapping_loop import drive_square, mapping_square
+from drive_mapping_loop import drive_square, main, mapping_square
 
 
 def grid(size=60):
@@ -70,6 +70,51 @@ class MappingLoopTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "collision.*4"):
                 drive_square(world, nav, mapping_square(grid()))
         self.assertEqual(world.count, 0)
+
+    def test_preparation_requires_clear_space_and_no_collision(self):
+        for outcome in ("expanded", "budget", "uncleared", "collision", "timeout", "failure"):
+            with self.subTest(outcome=outcome):
+                world = SimpleNamespace(costmap=grid(30), count=0, collisions=[], close=Mock())
+                preparation, navigation = [], []
+                def explore(tool, **args):
+                    preparation.append((tool, args))
+                    if tool == "explore":
+                        return {"accepted": True, "run_id": "prepare"}
+                    if tool == "status":
+                        if outcome in ("expanded", "budget", "collision", "failure"):
+                            world.costmap = grid()
+                        if outcome == "collision":
+                            world.count = 1
+                    return {"state": "TIMEOUT" if outcome == "budget" else "FAILED" if outcome == "failure" else "SUCCEEDED"}
+                def nav(tool, **args):
+                    if tool == "navigate":
+                        navigation.append(args["goal"])
+                        return {"accepted": True, "run_id": "navigate"}
+                    return {"state": "SUCCEEDED"}
+                def terminal(status, run_id, timeout_s):
+                    if outcome == "timeout" and run_id == "prepare":
+                        return {"state": "TIMEOUT_LOCAL"}
+                    return status(run_id=run_id)
+                with patch("drive_mapping_loop.World", return_value=world), \
+                        patch("drive_mapping_loop.signal.signal"), \
+                        patch("drive_mapping_loop.endpoint", side_effect=lambda contract, _: ("provider", contract)), \
+                        patch("drive_mapping_loop.activate"), \
+                        patch("drive_mapping_loop.Tools", side_effect=lambda url: explore if "/explore/" in url else nav), \
+                        patch("drive_mapping_loop.read_collision_count", side_effect=lambda _: world.count), \
+                        patch("drive_mapping_loop.wait_terminal", side_effect=terminal):
+                    if outcome in ("expanded", "budget"):
+                        main()
+                        self.assertEqual(len(navigation), 5)
+                        self.assertEqual(navigation[0], navigation[-1])
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            main()
+                        self.assertEqual(navigation, [])
+                self.assertTrue(preparation)
+                self.assertEqual(preparation[0][1]["timeout_s"], 120.)
+                if outcome == "timeout":
+                    self.assertEqual(preparation[-1][0], "cancel")
+                world.close.assert_called_once()
 
 
 if __name__ == "__main__":
