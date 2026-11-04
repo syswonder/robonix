@@ -1600,6 +1600,7 @@ pub async fn run_turn(
             .flat_map(|tree| tree.call_signatures.values().cloned())
             .collect();
         let mut stream_error: Option<anyhow::Error> = None;
+        let mut execution_failed = false;
         let mut invalid_output = false;
         let mut reasoning_bytes = 0_usize;
         let idle = tokio::time::sleep(vlm_idle_timeout());
@@ -1631,7 +1632,7 @@ pub async fn run_turn(
                 event = live.next(), if live.output.is_some() => {
                     match event {
                         Ok(Some(event)) => {
-                            if live.remember(event) { stream_error = Some(anyhow::anyhow!("Executor node failed during generation")); break; }
+                            if live.remember(event) { execution_failed = true; break; }
                         }
                         Ok(None) => { live.transport_failed = true; stream_error = Some(anyhow::anyhow!("Executor EOF during generation")); break; }
                         Err(error) => { live.transport_failed = true; stream_error = Some(error.into()); break; }
@@ -1661,7 +1662,7 @@ pub async fn run_turn(
                             match submission {
                                 Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
-                                    stream_error = Some(anyhow::anyhow!("Executor node failed during submission")); break;
+                                    execution_failed = true; break;
                                 }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
                                     drop(stream);
@@ -1686,6 +1687,33 @@ pub async fn run_turn(
             }
         }
         drop(stream);
+        if execution_failed {
+            let failed_plan_id = live.plan.plan_id.clone();
+            let cleanup = live.cancel(&mut executor.control).await;
+            let transport_failed = live.transport_failed;
+            publish_stream(live, forest, history, tx, &session_id).await;
+            cleanup?;
+            anyhow::ensure!(
+                !transport_failed,
+                "Executor transport failed while retaining execution feedback"
+            );
+            // A canceled sibling may still be finishing; consume the retained failure before replanning.
+            loop {
+                let event = forest
+                    .interrupt_rx
+                    .recv()
+                    .await
+                    .context("execution feedback channel closed")?;
+                let failure_seen = matches!(&event, TreeInterrupt::NodeState { plan_id, node_state }
+                    if plan_id == &failed_plan_id && matches!(node_state.state, 3..=5));
+                handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await;
+                if failure_seen {
+                    break;
+                }
+            }
+            should_plan = true;
+            continue 'supervisor;
+        }
         if reasoning_bytes > 0 {
             debug!(
                 "[pilot/vlm] round={round} model thought for {reasoning_bytes} byte(s) before replying"
@@ -3178,6 +3206,233 @@ mod tests {
         assert!(scope.contains("plan_id=9"));
         assert!(scope.contains("start greet watch"));
         assert!(scope.contains("does not cancel or invalidate other in-flight trees"));
+    }
+
+    type ExecutorEventSender =
+        tokio::sync::mpsc::Sender<Result<crate::pb::executor::RtdlEvent, tonic::Status>>;
+
+    /// Stream transport that executes accepted leaves before model output ends.
+    #[derive(Clone, Default)]
+    struct FastLeafExecutor {
+        /// Submitted leaf arguments, proving completed work is never redispatched.
+        calls: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        /// Output receiving cancellation's terminal event.
+        output: std::sync::Arc<tokio::sync::Mutex<Option<ExecutorEventSender>>>,
+        /// Exact plan admitted by the incremental input stream.
+        plan_id: std::sync::Arc<tokio::sync::Mutex<String>>,
+    }
+
+    #[tonic::async_trait]
+    impl crate::pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStream for FastLeafExecutor {
+        type ExecuteStreamStream = tokio_stream::wrappers::ReceiverStream<Result<crate::pb::executor::RtdlEvent, tonic::Status>>;
+        async fn execute_stream(&self, request: tonic::Request<tonic::Streaming<crate::pb::executor::ExecuteStreamInput>>) -> Result<tonic::Response<Self::ExecuteStreamStream>, tonic::Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            *self.output.lock().await = Some(tx.clone());
+            let mut input = request.into_inner();
+            let state = self.clone();
+            tokio::spawn(async move {
+                while let Some(message) = input.message().await.unwrap() {
+                    if message.message_kind == crate::rtdl_stream::EXECUTE_STREAM_START {
+                        *state.plan_id.lock().await = message.plan_id;
+                    }
+                    if let Some(call) = message.node.and_then(|node| node.call) {
+                        state.calls.lock().await.push(call.args_json.clone());
+                        let failed = call.args_json.contains("missing");
+                        tx.send(Ok(crate::pb::executor::RtdlEvent {
+                            event_kind: super::RtdlEventEnum::NodeState as u32,
+                            node_state: Some(RtdlNodeState {
+                                node_index: message.node_index,
+                                state: if failed { RtdlNodeStateEnum::Failed } else { RtdlNodeStateEnum::Succeeded } as u32,
+                                leaf_result: Some(CapabilityCallResult {
+                                    call_id: call.call_id, contract_id: call.contract_id,
+                                    success: !failed, output: if failed { "" } else { "completed action" }.into(),
+                                    error: if failed { "No such file or directory" } else { "" }.into(),
+                                    ..Default::default()
+                                }), ..Default::default()
+                            }), ..Default::default()
+                        })).await.unwrap();
+                    }
+                }
+            });
+            Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlan for FastLeafExecutor {
+        async fn control_plan(&self, request: tonic::Request<crate::pb::executor::ControlPlanRequest>) -> Result<tonic::Response<crate::pb::executor::ControlPlanResponse>, tonic::Status> {
+            let request = request.into_inner();
+            assert_eq!(request.action, "cancel");
+            assert_eq!(request.plan_id, *self.plan_id.lock().await);
+            self.output.lock().await.as_ref().unwrap().send(Ok(crate::pb::executor::RtdlEvent {
+                event_kind: super::RtdlEventEnum::PlanComplete as u32,
+                plan_complete: Some(crate::pb::executor::RtdlPlanComplete { plan_id: request.plan_id, any_failed: true }),
+                ..Default::default()
+            })).await.unwrap();
+            Ok(tonic::Response::new(crate::pb::executor::ControlPlanResponse { success: true, completed: true, ..Default::default() }))
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_business_failure_during_generation_replans_with_real_results() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let registry = std::sync::Arc::new(robonix_atlas::service::AtlasRegistry::default());
+        registry
+            .register(
+                "executor",
+                atlas_pb::Kind::Service,
+                "robonix/system/executor",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .declare(
+                "executor",
+                "robonix/system/executor/builtin/read_file",
+                atlas_pb::Transport::Mcp,
+                "http://127.0.0.1:1/mcp",
+                atlas_pb::TransportParams {
+                    kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
+                        input_schema_json:
+                            r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+                    })),
+                },
+                "Read a file",
+            )
+            .await
+            .unwrap();
+        let execution = FastLeafExecutor::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures_util::stream::unfold(listener, |listener| async {
+            let stream = listener.accept().await.map(|(stream, _)| stream);
+            Some((stream, listener))
+        });
+        let grpc = tokio::spawn(tonic::transport::Server::builder()
+            .add_service(atlas_pb::atlas_server::AtlasServer::new(robonix_atlas::service::AtlasService::new(registry)))
+            .add_service(crate::pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStreamServer::new(execution.clone()))
+            .add_service(crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer::new(execution.clone()))
+            .serve_with_incoming(incoming));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let model_address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let received = requests.clone();
+        let http = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let received = received.clone();
+                handlers.spawn(async move {
+                    let mut raw = Vec::new(); let mut bytes = [0; 4096];
+                    loop {
+                        let count = socket.read(&mut bytes).await.unwrap(); assert!(count > 0);
+                        raw.extend_from_slice(&bytes[..count]);
+                        if let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                            let headers = std::str::from_utf8(&raw[..end]).unwrap();
+                            let length: usize = headers.lines().find_map(|line| {
+                                let (name,value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                            }).unwrap();
+                            if raw.len() >= end + 4 + length { received.lock().await.push(String::from_utf8(raw[end+4..].to_vec()).unwrap()); break; }
+                        }
+                    }
+                    let content = if index == 0 {
+                        r#"{"content":"","rtdl_description":"recover file access","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"op":"sequence","description":"recover file access","children":[{"op":"do","cap":"executor.builtin_read_file","args":{"path":"completed"}},{"op":"do","cap":"executor.builtin_read_file","args":{"path":"missing"}}"#.to_string()
+                    } else {
+                        json!({"content":"failure observed; recovered", "rtdl_description":"done", "rtdl":{"op":"sequence","children":[]},"message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[{"task_id":"T1","status":"done"}]}).to_string()
+                    };
+                    let event = format!("data: {}\n\n", json!({"choices":[{"delta":{"content":content}}]}));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                    socket.write_all(format!("{:x}\r\n{}\r\n",event.len(),event).as_bytes()).await.unwrap();
+                    if index == 0 { std::future::pending::<()>().await; }
+                    let end = "data: [DONE]\n\n";
+                    socket.write_all(format!("{:x}\r\n{}\r\n0\r\n\r\n",end.len(),end).as_bytes()).await.unwrap();
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut executor = super::ExecutorConn {
+            streaming: super::RobonixSystemExecutorExecuteStreamClient::new(channel.clone()),
+            graph: super::RobonixSystemExecutorExecuteClient::new(channel.clone()),
+            control: super::RobonixSystemExecutorControlPlanClient::new(channel.clone()),
+            active: super::RobonixSystemExecutorListActivePlansClient::new(channel),
+        };
+        let vlm = crate::vlm::VlmClient::new(&crate::config::VlmConfig {
+            upstream: format!("http://{model_address}"),
+            api_key: String::new(),
+            model: "test".into(),
+            context_window_tokens: None,
+            api_format: "openai".into(),
+        });
+        let task = Task {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            text: "recover a missing file".into(),
+            ..Default::default()
+        };
+        let mut history = Vec::new();
+        let mut tasks = TaskTable::default();
+        let mut forest = super::SessionForest::default();
+        let mut transcript = crate::transcript::Transcript::new(&task.session_id, &history, &tasks);
+        let (_term, term) = tokio::sync::watch::channel(false);
+        let (_steer, steer) = tokio::sync::mpsc::channel(4);
+        let (tx, mut events) = tokio::sync::mpsc::channel(128);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::run_turn(
+                &task,
+                &mut history,
+                &mut tasks,
+                &mut forest,
+                &vlm,
+                &mut executor,
+                &mut robonix_atlas::client::AtlasClient::connect(format!("http://{address}"))
+                    .await
+                    .unwrap(),
+                "pilot",
+                &tx,
+                term,
+                steer,
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                &HistoryBudget::new(None, "test"),
+                &mut transcript,
+            ),
+        )
+        .await;
+        http.abort();
+        grpc.abort();
+        let result = result.expect("generation must finish within its test bound");
+        assert!(
+            result.is_ok(),
+            "business failure must reach replanning, not turn Internal error: {result:?}"
+        );
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("No such file or directory"));
+        assert!(requests[1].contains("completed action"));
+        assert_eq!(
+            execution.calls.lock().await.len(),
+            2,
+            "completed or failed leaves must not be redispatched"
+        );
+        let mut failed_leaf = false;
+        while let Ok(event) = events.try_recv() {
+            let event = event.unwrap();
+            failed_leaf |= event.batch_result.is_some_and(|batch| {
+                batch.results.iter().any(|node| {
+                    node.leaf_result.as_ref().is_some_and(|result| {
+                        !result.success && result.error.contains("No such file")
+                    })
+                })
+            });
+        }
+        assert!(failed_leaf, "client retains exact failed leaf feedback");
     }
 
     #[tokio::test]
