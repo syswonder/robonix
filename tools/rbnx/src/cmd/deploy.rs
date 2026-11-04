@@ -30,6 +30,7 @@
 // Out of scope: crash-restart, health checks beyond Driver(INIT).
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
@@ -38,6 +39,8 @@ use robonix_cli::launch::{
     snapshot_provider_ids, terminate_process_group,
 };
 use robonix_cli::output;
+use robonix_llm_catalog::ModelCatalog;
+use robonix_pilot::config::{Args as PilotArgs, PilotConfig, VlmConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -91,6 +94,11 @@ fn driver_init_timeout() -> Duration {
 struct DeployManifest {
     #[serde(default)]
     name: String,
+    /// Optional path to the model catalog for this deployment. Overrides the
+    /// user-level `~/.robonix/models.yaml`; `ROBONIX_LLM_CATALOG` overrides
+    /// both.
+    #[serde(default)]
+    model_catalog: Option<String>,
     #[serde(default)]
     system: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
@@ -178,6 +186,7 @@ fn resolve_entry_path(
 mod tests {
 
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")
@@ -447,6 +456,7 @@ soma_endpoint: 127.0.0.1:50091
 
     #[test]
     fn pilot_context_preflight_allows_learning_unknown_and_marks_manual_override() {
+        let _env = catalog_env("legacy", PILOT_CATALOG);
         let known = vec![
             "--vlm-upstream".into(),
             "https://api.example/v1".into(),
@@ -455,14 +465,274 @@ soma_endpoint: 127.0.0.1:50091
             "--vlm-model".into(),
             "gpt-4o".into(),
         ];
-        assert!(require_system_args("pilot", &known).is_ok());
+        assert!(require_system_args("pilot", &known, false).is_ok());
 
         let mut unknown = known.clone();
         unknown[5] = "private-local-planner".into();
-        assert!(require_system_args("pilot", &unknown).is_ok());
+        assert!(require_system_args("pilot", &unknown, false).is_ok());
         unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
-        assert!(require_system_args("pilot", &unknown).is_ok());
-        assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
+        assert!(require_system_args("pilot", &unknown, false).is_ok());
+        assert!(system_boot_detail("pilot", &unknown, None).contains("context=32768 (manual)"));
+    }
+
+    #[test]
+    fn pilot_preflight_allows_missing_vlm_args_when_catalog_is_enabled() {
+        let env = catalog_env("preflight", PILOT_CATALOG);
+        let empty: Vec<String> = Vec::new();
+        assert!(require_system_args("pilot", &empty, true).is_ok());
+        assert!(require_system_args("pilot", &empty, false).is_err());
+        let catalog = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("valid catalog");
+        assert!(
+            system_boot_detail("pilot", &empty, Some(&catalog))
+                .contains("catalog=catalog/model source=manifest")
+        );
+    }
+
+    static CATALOG_ENV_LOCK: Mutex<()> = Mutex::new(());
+    const PILOT_CATALOG: &str = r#"{"models":[{"id":"catalog/model","provider":"test",
+        "base_url":"http://catalog.example/v1","model":"catalog-model",
+        "api_key_env":"CAT_KEY","features":{"vision":true,"tools":true,"stream":true}}]}"#;
+    const CATALOG_ENV_NAMES: &[&str] = &[
+        "ROBONIX_LLM_CATALOG",
+        "ROBONIX_LLM_KEY_ENVS",
+        "CAT_KEY",
+        "ROBONIX_LLM_FEATURES",
+        "ROBONIX_VLM_UPSTREAM",
+        "ROBONIX_VLM_MODEL",
+        "ROBONIX_VLM_API_KEY",
+        "ROBONIX_VLM_FORMAT",
+        "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS",
+        "ROBONIX_CONFIG_PATH",
+        "RBNX_BOOT_ID",
+        "UNUSED_PROVIDER_API_KEY",
+        "UNRELATED_CREDENTIAL",
+    ];
+
+    /// Restores process settings after a serialized preflight test.
+    struct CatalogEnv {
+        /// Serializes tests that change model configuration.
+        _lock: MutexGuard<'static, ()>,
+        /// Catalog file owned by this test.
+        path: PathBuf,
+        /// Environment values to restore when the test finishes.
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl Drop for CatalogEnv {
+        fn drop(&mut self) {
+            unsafe {
+                for (name, value) in &self.saved {
+                    if let Some(value) = value {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn catalog_env(name: &str, body: &str) -> CatalogEnv {
+        let lock = CATALOG_ENV_LOCK.lock().expect("catalog env lock");
+        let path =
+            std::env::temp_dir().join(format!("rbnx-catalog-{}-{name}.json", std::process::id()));
+        std::fs::write(&path, body).expect("write catalog");
+        let saved = CATALOG_ENV_NAMES
+            .iter()
+            .map(|&name| (name, std::env::var_os(name)))
+            .collect();
+        unsafe {
+            for name in CATALOG_ENV_NAMES {
+                std::env::remove_var(name);
+            }
+            std::env::set_var("CAT_KEY", "secret");
+        }
+        CatalogEnv {
+            _lock: lock,
+            path,
+            saved,
+        }
+    }
+
+    #[test]
+    fn pilot_child_receives_only_catalog_keys_and_selected_overrides() {
+        let env = catalog_env("child-env", PILOT_CATALOG);
+        unsafe {
+            std::env::set_var("UNUSED_PROVIDER_API_KEY", "unused");
+            std::env::set_var("UNRELATED_CREDENTIAL", "unused");
+            std::env::set_var("RBNX_BOOT_ID", "test-boot");
+        }
+        for (explicit_key, config, expected_key) in [
+            (None, "{}", ""),
+            (Some("override"), "{}", "override"),
+            (
+                Some("unused"),
+                "{vlm: {model: catalog/model, api_key: selected}}",
+                "",
+            ),
+        ] {
+            if let Some(key) = explicit_key {
+                unsafe { std::env::set_var("ROBONIX_VLM_API_KEY", key) };
+            }
+            let catalog =
+                validate_model_catalog(&env.path, "manifest", &pilot_system(config), true)
+                    .expect("valid catalog");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(concat!(
+                "test \"$CAT_KEY\" = secret && ",
+                "test \"$RBNX_BOOT_ID\" = test-boot && ",
+                "test \"$ROBONIX_LLM_KEY_ENVS\" = CAT_KEY && ",
+                "test -n \"$ROBONIX_LLM_CATALOG\" && test -n \"$PATH\" && ",
+                "test \"${UNUSED_PROVIDER_API_KEY+x}\" != x && ",
+                "test \"${UNRELATED_CREDENTIAL+x}\" != x && ",
+                "test \"${ROBONIX_VLM_API_KEY-}\" = \"$1\""
+            ));
+            cmd.arg("probe").arg(expected_key);
+            apply_pilot_catalog_env(&mut cmd, &catalog);
+            let output = cmd.as_std_mut().output().expect("run environment probe");
+            assert!(output.status.success(), "explicit key: {explicit_key:?}");
+        }
+    }
+
+    fn pilot_system(vlm: &str) -> HashMap<String, serde_yaml::Value> {
+        let mut system = HashMap::new();
+        system.insert(
+            "pilot".into(),
+            serde_yaml::from_str(vlm).expect("pilot block"),
+        );
+        system
+    }
+
+    #[test]
+    fn model_catalog_path_prefers_env_then_manifest() {
+        let _env = catalog_env("path", r#"{"models":[]}"#);
+        unsafe { std::env::set_var("ROBONIX_LLM_CATALOG", "/tmp/env-catalog.json") };
+        let (_, source) = resolve_model_catalog(Some("models.yaml"), Path::new("/tmp/deploy"))
+            .expect("env catalog");
+        assert_eq!(source, "env");
+
+        unsafe { std::env::remove_var("ROBONIX_LLM_CATALOG") };
+        let (path, source) = resolve_model_catalog(Some("models.yaml"), Path::new("/tmp/deploy"))
+            .expect("manifest catalog");
+        assert_eq!(path, PathBuf::from("/tmp/deploy/models.yaml"));
+        assert_eq!(source, "manifest");
+    }
+
+    #[test]
+    fn catalog_validation_resolves_the_pilot_target() {
+        let env = catalog_env("valid", PILOT_CATALOG);
+        let catalog = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("valid catalog");
+        assert_eq!(
+            catalog.pilot.unwrap().catalog_id.as_deref(),
+            Some("catalog/model")
+        );
+        assert_eq!(
+            std::env::var("ROBONIX_LLM_KEY_ENVS").as_deref(),
+            Ok("CAT_KEY")
+        );
+    }
+
+    #[test]
+    fn catalog_validation_rejects_an_unresolvable_pilot_catalog() {
+        let env = catalog_env(
+            "no-match",
+            r#"{"models":[{"id":"text/model","provider":"test",
+            "base_url":"http://text.example/v1","model":"text",
+            "features":{"tools":true}}]}"#,
+        );
+        let error = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect_err("no pilot target");
+        assert!(format!("{error:#}").contains("satisfies"), "{error:#}");
+    }
+
+    #[test]
+    fn catalog_validation_accepts_keyless_local_targets() {
+        let env = catalog_env(
+            "keyless",
+            r#"{"models":[{"id":"local/keyless","provider":"vllm",
+            "base_url":"http://127.0.0.1:8000/v1","model":"local",
+            "features":{"vision":true,"tools":true,"stream":true}}]}"#,
+        );
+        let catalog = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("keyless catalog");
+        assert_eq!(
+            catalog.pilot.unwrap().catalog_id.as_deref(),
+            Some("local/keyless")
+        );
+        assert_eq!(std::env::var("ROBONIX_LLM_KEY_ENVS").as_deref(), Ok(""));
+    }
+
+    #[test]
+    fn catalog_validation_leaves_explicit_pilot_config_alone() {
+        let env = catalog_env(
+            "explicit",
+            r#"{"models":[{"id":"text/model","provider":"test",
+            "base_url":"http://text.example/v1","model":"text",
+            "features":{"tools":true}}]}"#,
+        );
+        let system = pilot_system(
+            "vlm: {upstream: http://explicit.example/v1, model: explicit-model, api_key: explicit-key}",
+        );
+        let catalog =
+            validate_model_catalog(&env.path, "manifest", &system, true).expect("explicit pilot");
+        let pilot = catalog.pilot.expect("explicit model");
+        assert!(pilot.catalog_id.is_none());
+        assert_eq!(pilot.model, "explicit-model");
+    }
+
+    #[test]
+    fn catalog_preflight_accepts_an_explicit_key_override() {
+        let env = catalog_env("key-override", PILOT_CATALOG);
+        unsafe { std::env::remove_var("CAT_KEY") };
+        let system = pilot_system("vlm: {model: catalog/model, api_key: explicit-key}");
+        let info = validate_model_catalog(&env.path, "manifest", &system, true)
+            .expect("explicit key must satisfy preflight");
+        assert_eq!(info.pilot.unwrap().api_key, "explicit-key");
+    }
+
+    #[test]
+    fn catalog_preflight_honors_pilot_environment_settings() {
+        let env = catalog_env("env-override", PILOT_CATALOG);
+        unsafe {
+            std::env::set_var("ROBONIX_VLM_UPSTREAM", "http://explicit.example/v1");
+            std::env::set_var("ROBONIX_VLM_MODEL", "env-model");
+            std::env::set_var("ROBONIX_VLM_API_KEY", "env-key");
+            std::env::remove_var("CAT_KEY");
+        }
+        let info = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("explicit env must satisfy preflight");
+        let pilot = info.pilot.unwrap();
+        assert_eq!(pilot.model, "env-model");
+        assert!(pilot.catalog_id.is_none());
+    }
+
+    #[test]
+    fn catalog_preflight_rejects_unsupported_protocols() {
+        let mut data: serde_json::Value = serde_json::from_str(PILOT_CATALOG).unwrap();
+        data["models"][0]["protocol"] = "unsupported".into();
+        let env = catalog_env("protocol", &data.to_string());
+        let error = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect_err("unsupported protocol");
+        assert!(format!("{error:#}").contains("only speaks openai-chat"));
+    }
+
+    #[test]
+    fn catalog_boot_detail_shows_the_actual_model_and_redacts_the_endpoint() {
+        let mut data: serde_json::Value = serde_json::from_str(PILOT_CATALOG).unwrap();
+        data["models"][0]["base_url"] =
+            "https://user:password@provider.example/v1?token=private".into();
+        let env = catalog_env("boot-detail", &data.to_string());
+        let info = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true).unwrap();
+        let detail = system_boot_detail("pilot", &[], Some(&info));
+        assert!(detail.contains("vlm=catalog-model"));
+        assert!(detail.contains("endpoint=https://provider.example/v1"));
+        assert!(detail.contains("catalog=catalog/model source=manifest"));
+        for value in ["password", "private", "secret"] {
+            assert!(!detail.contains(value));
+        }
     }
 }
 
@@ -898,12 +1168,39 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
     log_dir.join(format!("{name}.log"))
 }
 
+fn apply_pilot_catalog_env(cmd: &mut Command, catalog: &CatalogInfo) {
+    let key_envs = std::env::var("ROBONIX_LLM_KEY_ENVS").unwrap_or_default();
+    let mut allowed: HashSet<&str> =
+        include_str!("../../../../pylib/robonix-api/robonix_api/llm/runtime_env.txt")
+            .split_whitespace()
+            .chain(key_envs.split(',').filter(|name| !name.is_empty()))
+            .collect();
+    // An explicit Pilot key can override a catalog entry's credential.
+    if std::env::var("ROBONIX_VLM_API_KEY")
+        .ok()
+        .is_some_and(|key| {
+            !key.is_empty()
+                && catalog
+                    .pilot
+                    .as_ref()
+                    .is_some_and(|pilot| pilot.api_key == key)
+        })
+    {
+        allowed.insert("ROBONIX_VLM_API_KEY");
+    }
+    cmd.env_clear().envs(
+        std::env::vars_os()
+            .filter(|(name, _)| name.to_str().is_some_and(|name| allowed.contains(name))),
+    );
+}
+
 async fn spawn_system_binary(
     log_dir: &Path,
     session_dir: &Path,
     name: &str,
     bin: &str,
     args: &[String],
+    catalog: Option<&CatalogInfo>,
 ) -> Result<Spawned> {
     // Run the installed binary directly.  Stdout / stderr are piped
     // through Scribe (tag = binary name, e.g. "executor") so nothing
@@ -912,6 +1209,11 @@ async fn spawn_system_binary(
     let mut cmd = Command::new(bin);
     for a in args {
         cmd.arg(a);
+    }
+    if name == "pilot"
+        && let Some(catalog) = catalog
+    {
+        apply_pilot_catalog_env(&mut cmd, catalog);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -955,7 +1257,7 @@ async fn spawn_system_binary(
     // (--capabilities path lists, --vlm-api-key, …). Full args are
     // available in the log file; the boot line stays terse so users
     // can scan the bring-up sequence at a glance.
-    let detail = system_boot_detail(name, args);
+    let detail = system_boot_detail(name, args, catalog);
     output::boot_ok(name, &detail);
     Ok(Spawned {
         name: name.to_string(),
@@ -1103,7 +1405,7 @@ async fn spawn_soma_binary(
         }
     });
 
-    let detail = system_boot_detail(name, args);
+    let detail = system_boot_detail(name, args, None);
     output::boot_ok(name, &detail);
     Ok((
         Spawned {
@@ -1372,6 +1674,29 @@ pub async fn execute(
         super::check_remotes::report_outdated(&manifest_path);
     }
 
+    // Resolve and validate the model catalog before any component is spawned.
+    // A broken catalog must fail here, not print `[ OK ]` and then take Pilot
+    // down during config load.
+    let catalog = if let Some((path, source)) =
+        resolve_model_catalog(deploy.model_catalog.as_deref(), &manifest_dir)
+    {
+        Some(
+            validate_model_catalog(
+                &path,
+                source,
+                &deploy.system,
+                !skip_system && deploy.system.contains_key("pilot"),
+            )
+            .map_err(|error| {
+                output::boot_fail("pilot", &format!("{error:#}"));
+                error
+            })?,
+        )
+    } else {
+        None
+    };
+    let pilot_preflighted = catalog.as_ref().is_some_and(|info| info.pilot.is_some());
+
     // soma owns primitive + skill bring-up (see
     // docs/docs/architecture/deployment-and-startup.md). If the manifest
     // declares ANY primitive or skill, we MUST start a soma — otherwise those
@@ -1633,7 +1958,7 @@ pub async fn execute(
                 // required field 'vlm.upstream'`. Boot still printed `[ OK ]`
                 // because we never re-checked. Fail fast at spawn time and tell
                 // the user exactly what's missing.
-                if let Err(e) = require_system_args(name, &args) {
+                if let Err(e) = require_system_args(name, &args, pilot_preflighted) {
                     output::boot_fail(name, &e);
                     anyhow::bail!("system/{name}: {e}");
                 }
@@ -1645,7 +1970,8 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args).await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args, catalog.as_ref())
+                        .await?
                 };
                 children.push(sp);
                 persist_state(
@@ -2070,104 +2396,135 @@ fn persist_state(
     }
 }
 
-/// Render a one-line "what is this binary doing" string for the boot
-/// log. Pulls out the high-signal flags (port, vlm model+host) and
-/// drops noisy ones (--capabilities, --log, raw API keys).
-/// Per-binary required-arg sanity check, run before spawning.
-///
-/// Pilot needs all three VLM fields non-empty. The manifest renders
-/// `${VLM_BASE_URL}` etc. literally when the env var isn't set, which
-/// produces `--vlm-upstream ""` — pilot then registers briefly, dies
-/// with `missing required field 'vlm.upstream'`, and boot reports
-/// `[ OK ]` because the failure happens after spawn-and-register. Catch
-/// it here so the user sees a `[FAIL]` line naming the bad keys.
-fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), String> {
-    if name != "pilot" {
-        return Ok(());
-    }
-    let need = [
-        ("--vlm-upstream", "vlm.upstream / VLM_BASE_URL"),
-        ("--vlm-api-key", "vlm.api_key / VLM_API_KEY"),
-        ("--vlm-model", "vlm.model / VLM_MODEL"),
-    ];
-    let mut missing: Vec<&str> = Vec::new();
-    for (flag, label) in need {
-        let val = args
-            .iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1));
-        match val {
-            Some(v) if !v.is_empty() => {}
-            _ => missing.push(label),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "missing required pilot config: {}. Set in manifest under \
-             system: pilot: vlm: {{...}} or via env (source your .zshrc / \
-             inline-prepend VLM_BASE_URL=… VLM_API_KEY=… VLM_MODEL=…)",
-            missing.join(", "),
-        ));
-    }
-
-    Ok(())
+/// Use Pilot's parser so preflight honors the same CLI, env and file settings.
+fn resolve_pilot_config(args: &[String]) -> Result<VlmConfig> {
+    let argv = std::iter::once("robonix-pilot").chain(args.iter().map(String::as_str));
+    let args = PilotArgs::try_parse_from(argv).context("parse Pilot arguments")?;
+    Ok(PilotConfig::resolve(args)?.vlm)
 }
 
-fn system_boot_detail(name: &str, args: &[String]) -> String {
-    let mut listen: Option<&str> = None;
-    let mut vlm_upstream: Option<&str> = None;
-    let mut vlm_model: Option<&str> = None;
-    let mut context_window_tokens: Option<&str> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        let next = args.get(i + 1).map(|s| s.as_str());
-        match (a, next) {
-            ("--listen", Some(v)) => {
-                listen = Some(v);
-                i += 2;
-            }
-            ("--vlm-upstream", Some(v)) => {
-                vlm_upstream = Some(v);
-                i += 2;
-            }
-            ("--vlm-model", Some(v)) => {
-                vlm_model = Some(v);
-                i += 2;
-            }
-            ("--vlm-context-window-tokens", Some(v)) => {
-                context_window_tokens = Some(v);
-                i += 2;
-            }
-            _ => {
-                i += 1;
-            }
+fn require_system_args(
+    name: &str,
+    args: &[String],
+    pilot_preflighted: bool,
+) -> std::result::Result<(), String> {
+    if name != "pilot" || pilot_preflighted {
+        return Ok(());
+    }
+    resolve_pilot_config(args)
+        .map(|_| ())
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Model catalog selected for this deployment.
+#[derive(Debug, Clone)]
+struct CatalogInfo {
+    /// Where the path came from: `env`, `manifest`, or `user`.
+    source: &'static str,
+    /// Pilot's validated model configuration, when the deployment starts Pilot.
+    pilot: Option<VlmConfig>,
+}
+
+/// Resolve the catalog path: `ROBONIX_LLM_CATALOG`, then manifest
+/// `model_catalog:`, then `~/.robonix/models.yaml`.
+fn resolve_model_catalog(
+    manifest_catalog: Option<&str>,
+    manifest_dir: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    if let Ok(value) = std::env::var("ROBONIX_LLM_CATALOG") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some((PathBuf::from(value), "env"));
         }
     }
-    let port = listen
-        .and_then(|s| s.rsplit(':').next())
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default();
-    if name == "pilot" {
-        let host = vlm_upstream
-            .and_then(|u| {
-                u.trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split('/')
-                    .next()
-            })
-            .unwrap_or("?");
-        let model = vlm_model.unwrap_or("?");
-        let capacity = if let Some(tokens) = context_window_tokens {
-            format!("context={tokens} (manual)")
-        } else {
-            "context=auto (Pilot resolves provider metadata; inspect Pilot's context_budget log)"
-                .to_string()
-        };
-        format!("{port}  vlm={model}@{host}  {capacity}")
-    } else {
-        port
+    if let Some(value) = manifest_catalog {
+        let value = value.trim();
+        if !value.is_empty() {
+            let path = Path::new(value);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                manifest_dir.join(path)
+            };
+            return Some((path, "manifest"));
+        }
     }
+    let user = dirs::home_dir()?.join(".robonix").join("models.yaml");
+    user.is_file().then_some((user, "user"))
+}
+
+/// Load and validate a catalog before any system component is spawned, and
+/// export the path plus the exact `api_key_env` names for consumers.
+fn validate_model_catalog(
+    path: &Path,
+    source: &'static str,
+    system: &HashMap<String, serde_yaml::Value>,
+    validate_pilot: bool,
+) -> Result<CatalogInfo> {
+    let catalog = ModelCatalog::load(path)
+        .with_context(|| format!("load model catalog {}", path.display()))?;
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut key_envs: Vec<String> = catalog
+        .models
+        .iter()
+        .filter_map(|model| model.api_key_env.clone())
+        .collect();
+    key_envs.sort();
+    key_envs.dedup();
+    unsafe {
+        std::env::set_var("ROBONIX_LLM_CATALOG", &absolute);
+        std::env::set_var("ROBONIX_LLM_KEY_ENVS", key_envs.join(","));
+    }
+
+    let pilot = if validate_pilot {
+        let args = system_cli_args("pilot", system.get("pilot"), None);
+        Some(resolve_pilot_config(&args).context("resolve Pilot configuration")?)
+    } else {
+        None
+    };
+
+    Ok(CatalogInfo { source, pilot })
+}
+
+fn system_boot_detail(name: &str, args: &[String], catalog: Option<&CatalogInfo>) -> String {
+    let port = args
+        .windows(2)
+        .find(|pair| pair[0] == "--listen")
+        .and_then(|pair| pair[1].rsplit(':').next())
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    if name != "pilot" {
+        return port;
+    }
+    let resolved = catalog
+        .and_then(|info| info.pilot.clone())
+        .map(Ok)
+        .unwrap_or_else(|| resolve_pilot_config(args));
+    let vlm = match resolved {
+        Ok(vlm) => vlm,
+        Err(error) => return format!("{port}  invalid VLM configuration: {error:#}"),
+    };
+    let id = vlm
+        .catalog_id
+        .as_ref()
+        .map(|id| format!(" catalog={id}"))
+        .unwrap_or_default();
+    let source = if vlm.catalog_id.is_some() {
+        catalog.map_or("env", |info| info.source)
+    } else {
+        "explicit"
+    };
+    let capacity = vlm
+        .context_window_tokens
+        .map(|tokens| format!("context={tokens} (manual)"))
+        .unwrap_or_else(|| "context=auto".into());
+    format!(
+        "{port}  vlm={} endpoint={}{} source={}  {capacity}",
+        vlm.model,
+        vlm.endpoint_for_log(),
+        id,
+        source
+    )
 }
 
 /// Translate a `system.<name>:` block into CLI args for the corresponding

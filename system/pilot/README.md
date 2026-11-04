@@ -36,11 +36,22 @@ Common configuration:
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.
+- `ROBONIX_LLM_CATALOG`: optional model-catalog path. A complete `vlm` block always wins; if `vlm.model` names a catalog id, the endpoint and key come from that entry; with no `vlm` block Pilot resolves by `ROBONIX_LLM_FEATURES`.
+- `ROBONIX_LLM_FEATURES`: required model features when Pilot resolves from the catalog; defaults to `vision,tools,stream`. All listed features must be supported; schema refusal is handled by the request client.
+- `ROBONIX_LLM_INPUT_TOKENS` / `ROBONIX_LLM_MAX_OUTPUT_TOKENS`: optional token estimate used to reject catalog entries whose `context` is too small; default `0`.
+
+The crate exposes `config` so `rbnx` preflight uses Pilot's own CLI, environment
+and file precedence, including explicit key overrides and protocol validation.
 - `log`: Scribe log-file level (`debug`/`info`/`warn`/`error`), read from the `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but not applied.
 - `ROBONIX_PILOT_SOUL`: optional path to a SOUL markdown file. If unset, Pilot tries `~/.robonix/SOUL.md`.
 - `ROBONIX_PILOT_MAX_TOOL_ROUNDS`: maximum RTDL execution rounds per turn. Defaults to `64`.
 - `ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS`: maximum time without a VLM stream event before ending the turn and canceling its submitted plan. Defaults to `30` seconds and is clamped to `5..=300`. Non-empty `reasoning_content` deltas refresh this timer but are not appended to the assistant JSON.
 - `ROBONIX_SESSION_DIR`: where session transcripts are kept (see Session transcripts). `rbnx boot` sets it; defaults to `./sessions`.
+
+With a model catalog configured, `rbnx boot` restricts Pilot's inherited
+environment to the shared [runtime settings](../../pylib/robonix-api/robonix_api/llm/runtime_env.txt)
+and catalog key names. An explicit `ROBONIX_VLM_API_KEY` is retained when
+Pilot selects it. CLI and file configuration keep their precedence.
 
 ## Context capacity: automatic, visible, and overrideable
 

@@ -39,6 +39,10 @@ catalog:
 
 name: {name}
 
+# Optional model catalog override. rbnx validates it and exports its key
+# variables; omit the pilot vlm block below to let Pilot resolve from it.
+# model_catalog: ./models.yaml
+
 env:
   LOG: "INFO"
 

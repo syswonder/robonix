@@ -16,6 +16,9 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use robonix_llm_catalog::{
+    ModelSpec, Requirements, api_key_for, catalog_from_env, resolve_from_env,
+};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -34,11 +37,14 @@ pub struct PilotConfig {
     pub vlm: VlmConfig,
 }
 
+/// Connection settings used by Pilot's model client.
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
+    /// Selected catalog id; `None` means an explicit endpoint was configured.
+    pub catalog_id: Option<String>,
     /// Context limit declared by the deployment. This wins over provider
     /// metadata and the built-in registry because a proxy may expose a logical
     /// model name while routing to a smaller physical context window.
@@ -184,41 +190,98 @@ impl PilotConfig {
             bail!("vlm api_format='{api_format}' not supported (only 'openai')");
         }
 
-        let upstream = args
+        let explicit_upstream = args
             .vlm_upstream
             .or(file_vlm.upstream)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream")
-            })?;
-        let api_key = args
-            .vlm_api_key
-            .or(file_vlm.api_key)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| missing_field("vlm.api_key", "ROBONIX_VLM_API_KEY", "--vlm-api-key"))?;
-        let model = args
+            .filter(|value| !value.trim().is_empty());
+        let explicit_model = args
             .vlm_model
             .or(file_vlm.model)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
-        let context_window_tokens = args
+            .filter(|value| !value.trim().is_empty());
+        let explicit_key = args
+            .vlm_api_key
+            .or(file_vlm.api_key)
+            .filter(|value| !value.trim().is_empty());
+        let explicit_context = args
             .vlm_context_window_tokens
             .or(file_vlm.context_window_tokens)
             .filter(|tokens| *tokens > 0);
 
+        let vlm = if let Some(upstream) = explicit_upstream {
+            let model = explicit_model
+                .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
+            let api_key = explicit_key.ok_or_else(|| {
+                missing_field("vlm.api_key", "ROBONIX_VLM_API_KEY", "--vlm-api-key")
+            })?;
+            VlmConfig {
+                upstream,
+                api_key,
+                model,
+                catalog_id: None,
+                context_window_tokens: explicit_context,
+                api_format,
+            }
+        } else {
+            let target = if let Some(model_id) = explicit_model {
+                let catalog = catalog_from_env()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "vlm.model {model_id:?} names a catalog id, but ROBONIX_LLM_CATALOG is unset"
+                    )
+                })?;
+                catalog
+                    .model(&model_id)
+                    .with_context(|| format!("vlm.model {model_id:?} is not a catalog id"))?
+                    .clone()
+            } else {
+                // Pilot handles schema refusal at request time.
+                let requirements = Requirements::from_env("vision,tools,stream");
+                resolve_from_env(&requirements)?.ok_or_else(|| {
+                    missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream")
+                })?
+            };
+            vlm_from_catalog(&target, explicit_key, explicit_context, api_format)?
+        };
         Ok(Self {
             atlas_endpoint,
             listen,
             id,
-            vlm: VlmConfig {
-                upstream,
-                api_key,
-                model,
-                context_window_tokens,
-                api_format,
-            },
+            vlm,
         })
     }
+}
+
+/// Build Pilot's VLM config from a catalog entry. The explicit key, when
+/// present, wins over the catalog's `api_key_env`; a keyless entry needs none.
+fn vlm_from_catalog(
+    target: &ModelSpec,
+    explicit_key: Option<String>,
+    context_override: Option<usize>,
+    api_format: String,
+) -> Result<VlmConfig> {
+    if target.protocol != "openai-chat" {
+        bail!(
+            "catalog target {} uses protocol {}; pilot only speaks openai-chat",
+            target.id,
+            target.protocol
+        );
+    }
+    let api_key = explicit_key.unwrap_or_else(|| api_key_for(target));
+    if target.api_key_env.is_some() && api_key.is_empty() {
+        bail!(
+            "missing {} for catalog target {}",
+            target.api_key_env.as_deref().unwrap_or(""),
+            target.id
+        );
+    }
+    let context_window_tokens = context_override.or(target.context.map(|tokens| tokens as usize));
+    Ok(VlmConfig {
+        upstream: target.base_url.clone(),
+        api_key,
+        model: target.model.clone(),
+        catalog_id: Some(target.id.clone()),
+        context_window_tokens,
+        api_format,
+    })
 }
 
 /// Read the `ROBONIX_ATLAS` env var as an atlas-endpoint alias.
@@ -248,4 +311,187 @@ fn missing_field(yaml_path: &str, env_var: &str, flag: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "missing required field '{yaml_path}': set it in --config YAML, env {env_var}, or pass {flag}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        path: Option<PathBuf>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for name in ["ROBONIX_LLM_CATALOG", "CAT_KEY", "ROBONIX_LLM_FEATURES"] {
+                    std::env::remove_var(name);
+                }
+            }
+            if let Some(path) = &self.path {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    fn catalog_env(name: &str, body: &str) -> EnvGuard {
+        let lock = ENV_LOCK.lock().expect("env lock");
+        let path = std::env::temp_dir().join(format!(
+            "robonix-pilot-config-{}-{name}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, body).expect("write catalog");
+        unsafe {
+            std::env::set_var("ROBONIX_LLM_CATALOG", &path);
+            std::env::set_var("CAT_KEY", "secret");
+            std::env::remove_var("ROBONIX_LLM_FEATURES");
+        }
+        EnvGuard {
+            _lock: lock,
+            path: Some(path),
+        }
+    }
+
+    fn base_args() -> Args {
+        Args {
+            atlas: Some("127.0.0.1:1".into()),
+            listen: Some("127.0.0.1:0".into()),
+            id: Some("pilot".into()),
+            vlm_upstream: None,
+            vlm_api_key: None,
+            vlm_model: None,
+            vlm_context_window_tokens: None,
+            vlm_format: Some("openai".into()),
+            config: None,
+            log: None,
+            config_json: None,
+        }
+    }
+
+    fn catalog_body(features: &str, key_env: Option<&str>) -> String {
+        let key = key_env
+            .map(|name| format!(r#""api_key_env": "{name}","#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"models":[{{"id":"catalog/model","provider":"test",
+            "base_url":"http://catalog.example/v1","model":"catalog-model",
+            {key}"features":{{{features}}},"context":8192}}]}}"#
+        )
+    }
+
+    #[test]
+    fn explicit_vlm_block_does_not_consult_the_catalog() {
+        let _env = catalog_env(
+            "explicit",
+            r#"{"models":[{"id":"text/model","provider":"test",
+            "base_url":"http://text.example/v1","model":"text",
+            "features":{"tools":true}}]}"#,
+        );
+        let mut args = base_args();
+        args.vlm_upstream = Some("http://explicit.example/v1".into());
+        args.vlm_api_key = Some("explicit-key".into());
+        args.vlm_model = Some("explicit-model".into());
+        args.vlm_context_window_tokens = Some(4096);
+        let config = PilotConfig::resolve(args).expect("explicit config");
+        assert_eq!(config.vlm.upstream, "http://explicit.example/v1");
+        assert_eq!(config.vlm.api_key, "explicit-key");
+        assert_eq!(config.vlm.model, "explicit-model");
+        assert_eq!(config.vlm.context_window_tokens, Some(4096));
+    }
+
+    #[test]
+    fn model_id_selects_a_catalog_entry() {
+        let _env = catalog_env(
+            "model-id",
+            &catalog_body(
+                r#""vision":true,"tools":true,"stream":true"#,
+                Some("CAT_KEY"),
+            ),
+        );
+        let mut args = base_args();
+        args.vlm_model = Some("catalog/model".into());
+        let config = PilotConfig::resolve(args).expect("catalog id");
+        assert_eq!(config.vlm.upstream, "http://catalog.example/v1");
+        assert_eq!(config.vlm.api_key, "secret");
+        assert_eq!(config.vlm.model, "catalog-model");
+        assert_eq!(config.vlm.context_window_tokens, Some(8192));
+    }
+
+    #[test]
+    fn no_vlm_block_resolves_by_requirements() {
+        let _env = catalog_env(
+            "default",
+            &catalog_body(
+                r#""vision":true,"tools":true,"stream":true"#,
+                Some("CAT_KEY"),
+            ),
+        );
+        let config = PilotConfig::resolve(base_args()).expect("catalog default");
+        assert_eq!(config.vlm.model, "catalog-model");
+    }
+
+    #[test]
+    fn partial_explicit_block_is_an_error() {
+        let _env = catalog_env(
+            "partial",
+            &catalog_body(
+                r#""vision":true,"tools":true,"stream":true"#,
+                Some("CAT_KEY"),
+            ),
+        );
+        let mut args = base_args();
+        args.vlm_upstream = Some("http://explicit.example/v1".into());
+        let error = PilotConfig::resolve(args).expect_err("partial vlm");
+        assert!(format!("{error:#}").contains("vlm.model"), "{error:#}");
+    }
+
+    #[test]
+    fn unknown_catalog_id_is_an_error() {
+        let _env = catalog_env(
+            "unknown",
+            &catalog_body(
+                r#""vision":true,"tools":true,"stream":true"#,
+                Some("CAT_KEY"),
+            ),
+        );
+        let mut args = base_args();
+        args.vlm_model = Some("missing/model".into());
+        let error = PilotConfig::resolve(args).expect_err("unknown catalog id");
+        assert!(
+            format!("{error:#}").contains("not a catalog id"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn keyless_catalog_entry_needs_no_key() {
+        let _env = catalog_env(
+            "keyless",
+            &catalog_body(r#""vision":true,"tools":true,"stream":true"#, None),
+        );
+        let mut args = base_args();
+        args.vlm_model = Some("catalog/model".into());
+        let config = PilotConfig::resolve(args).expect("keyless catalog");
+        assert_eq!(config.vlm.api_key, "");
+    }
+
+    #[test]
+    fn explicit_key_wins_over_catalog_key() {
+        let _env = catalog_env(
+            "explicit-key",
+            &catalog_body(
+                r#""vision":true,"tools":true,"stream":true"#,
+                Some("CAT_KEY"),
+            ),
+        );
+        let mut args = base_args();
+        args.vlm_model = Some("catalog/model".into());
+        args.vlm_api_key = Some("explicit-key".into());
+        let config = PilotConfig::resolve(args).expect("explicit key");
+        assert_eq!(config.vlm.api_key, "explicit-key");
+    }
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -13,6 +14,8 @@ from unittest.mock import patch
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_PATH = PACKAGE_ROOT / "memsearch_service" / "service.py"
+sys.path.insert(0, str(PACKAGE_ROOT.parents[1] / "pylib" / "robonix-api"))
+import robonix_api.llm
 
 
 class _Ok:
@@ -67,6 +70,9 @@ def _load_service():
         observed_threads.append(os.environ.get("MEMSEARCH_ONNX_THREADS"))
 
     robonix_api = types.ModuleType("robonix_api")
+    robonix_api.__path__ = [
+        str(PACKAGE_ROOT.parents[1] / "pylib" / "robonix-api" / "robonix_api")
+    ]
     robonix_api.Service = _Service
     robonix_api.Ok = _Ok
     robonix_api.Err = _Err
@@ -246,10 +252,105 @@ class MemoryLifecycleTest(unittest.TestCase):
             self.assertIn("database is not writable", result.message)
             self.assertIsNone(module.mem)
 
+    def test_catalog_errors_fail_before_backend_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = root / "models.json"
+            missing_key = json.dumps({"models": [{
+                "id": "keyed", "provider": "test", "model": "local",
+                "base_url": "http://127.0.0.1:8000/v1", "api_key_env": "COMPACT_TEST_KEY",
+            }]})
+            for body, expected in ((None, "FileNotFoundError"),
+                                   ("{", "JSONDecodeError"), (missing_key, "COMPACT_TEST_KEY")):
+                if body is not None:
+                    catalog.write_text(body, encoding="utf-8")
+                with self.subTest(body=body), patch.dict(os.environ, {
+                    "ROBONIX_LLM_CATALOG": str(catalog),
+                    "COMPACT_TEST_KEY": "",
+                }):
+                    module, _ = _load_service()
+                    result = _run_init(module, _WorkingMemSearch, {
+                        "memory_dir": str(root / "memory"),
+                        "milvus_uri": str(root / "memory.db"),
+                    })
+                    self.assertIsInstance(result, _Err)
+                    self.assertIn(expected, result.message)
+                    self.assertIsNone(module.mem)
+                    self.assertEqual(_WorkingMemSearch.instances, [])
+
     def test_start_hook_does_not_kill_database_holders(self) -> None:
         manifest = (PACKAGE_ROOT / "package_manifest.yaml").read_text(encoding="utf-8")
         self.assertNotIn("fuser", manifest)
         self.assertNotIn("stale milvus lock", manifest)
+
+
+_ENV_KEYS = (
+    "ROBONIX_LLM_CATALOG",
+    "VLM_BASE_URL",
+    "VLM_API_KEY",
+    "VLM_MODEL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+)
+
+
+class CompactConfigTests(unittest.TestCase):
+
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/summarizer", "provider": "vllm", "model": "test-summarizer",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"json_object": True},
+            "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path), "TEST_KEY": "secret"})
+    def setUp(self):
+        self.config = _load_service()[0]._compact_config
+        for key in _ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key in _ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def test_legacy_vlm_env(self):
+        os.environ["VLM_BASE_URL"] = "https://legacy.example.com/v1"
+        os.environ["VLM_API_KEY"] = "legacy"
+        os.environ["VLM_MODEL"] = "legacy-model"
+        self.assertEqual(
+            self.config(),
+            {
+                "base_url": "https://legacy.example.com/v1",
+                "api_key": "legacy",
+                "model": "legacy-model",
+                "requires_key": True,
+            },
+        )
+
+    def test_keyless_catalog_is_usable(self):
+        with self._catalog(id="local/keyless", model="local", features={}):
+            config = self.config()
+        self.assertFalse(config["requires_key"])
+        self.assertEqual(config["api_key"], "")
+
+    def test_catalog_load_error_is_not_hidden(self):
+        os.environ["ROBONIX_LLM_CATALOG"] = "/nonexistent/catalog.yaml"
+        with self.assertRaises(FileNotFoundError):
+            self.config()
+
+    def test_catalog_overrides_legacy_env(self):
+        with self._catalog(api_key_env="TEST_KEY"), patch.dict(os.environ, {
+            "VLM_BASE_URL": "https://legacy.invalid/v1", "VLM_API_KEY": "legacy",
+        }):
+            config = self.config()
+        self.assertEqual(config, {
+            "base_url": "http://127.0.0.1:9999/v1", "api_key": "secret",
+            "model": "test-summarizer", "requires_key": True,
+        })
 
 
 if __name__ == "__main__":

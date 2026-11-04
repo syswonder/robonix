@@ -107,6 +107,10 @@ RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user 
 ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
 ```
 
+With `ROBONIX_LLM_CATALOG` configured, native startup uses the
+[catalog launcher](../../pylib/robonix-api/robonix_api/llm/README.md#deployment)
+to pass only declared model keys and supported runtime settings to Scene.
+
 > Native scene uses the same ROS 2 RMW configuration as the host process. Set
 > `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
 > the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set

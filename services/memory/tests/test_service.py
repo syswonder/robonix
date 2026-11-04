@@ -8,22 +8,60 @@ Demo 2: Task History Backtracking — "what did I ask you to do before?"
 """
 
 import sys, os, tempfile, shutil, asyncio, logging
+import json
+import subprocess
+from pathlib import Path
+from unittest import TestCase
+from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from memory_service.core.types import (
     LogRecord, SpatialContext, ObjectCoord, TagFilter, NodeType,
 )
-from memory_service.service import MemoryService
+with patch("http.server.HTTPServer", side_effect=OSError("disabled in unit tests")):
+    from memory_service.service import MemoryService
 
 
 class TestMemoryService:
     def setup_method(self):
+        self.model_env = patch.dict(os.environ, {name: "" for name in (
+            "ROBONIX_LLM_CATALOG", "MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY",
+            "VLM_BASE_URL", "VLM_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
+        )})
+        self.model_env.start()
         self.tmp = tempfile.mkdtemp()
         self.svc = MemoryService(data_dir=self.tmp)
         asyncio.run(self.svc.init())
 
     def teardown_method(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+        self.model_env.stop()
+
+    def test_init_rejects_a_missing_catalog(self):
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(Path(self.tmp) / "missing.json"),
+        }), TestCase().assertRaises(FileNotFoundError):
+            asyncio.run(self.svc.init())
+
+    def test_bad_catalog_fails_before_the_http_hook_opens(self):
+        for features in ({"vision": True}, {"json_object": True}):
+            path = Path(self.tmp) / (next(iter(features)) + ".json")
+            path.write_text(json.dumps({"models": [{
+                "id": "local", "provider": "test", "model": "local",
+                "base_url": "http://127.0.0.1:8000/v1", "features": features,
+            }]}), encoding="utf-8")
+            env = {**os.environ, "ROBONIX_LLM_CATALOG": str(path),
+                   "AGENT_MEMORY_DIR": self.tmp, "SCRIBE_LOG_DIR": self.tmp,
+                   "MEMGRAPH_KEEP_DATA": "1",
+                   "PYTHONPATH": os.pathsep.join(str(Path(p).resolve()) for p in sys.path if p)}
+            result = subprocess.run([sys.executable, "-c", """
+from unittest.mock import patch
+with patch('http.server.HTTPServer', side_effect=AssertionError('hook opened')):
+    import memory_service.service
+"""], env=env, cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
+            assert result.returncode != 0
+            assert "satisfies" in result.stderr
+            assert "hook opened" not in result.stderr
 
     # ── End-to-end: remember → search round-trip ──────────────────────
 

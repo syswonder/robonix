@@ -632,7 +632,11 @@ impl VlmClient {
     }
 
     async fn get_model_metadata(&self, url: reqwest::Url) -> Option<Value> {
-        match self.inner.get(url).bearer_auth(&self.api_key).send().await {
+        let mut request = self.inner.get(url);
+        if !self.api_key.is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
+        match request.send().await {
             Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
             Ok(_) | Err(_) => None,
         }
@@ -693,10 +697,11 @@ impl VlmClient {
         // need a second step (see downgrade_response_format).
         let mut compatibility_fallbacks = 0_u8;
         let response = loop {
-            let response = self
-                .inner
-                .post(&url)
-                .bearer_auth(&self.api_key)
+            let mut request = self.inner.post(&url);
+            if !self.api_key.is_empty() {
+                request = request.bearer_auth(&self.api_key);
+            }
+            let response = request
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .json(&request_body)

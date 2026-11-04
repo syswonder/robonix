@@ -13,6 +13,12 @@ Add the service entry and verification rule to your deployment manifest.
 Merge these entries into the existing `service` list and `system.executor`
 mapping; do not create duplicate YAML keys or replace other providers.
 
+With `ROBONIX_LLM_CATALOG` set, omit `vlm` to select a vision model, or set
+only `vlm.model` to a catalog id. A complete explicit `vlm` block takes
+precedence. The package hook uses the
+[catalog launcher](../../../pylib/robonix-api/robonix_api/llm/README.md#deployment)
+to restrict inherited environment variables.
+
 ```yaml
 service:
   - name: vlm_verifier

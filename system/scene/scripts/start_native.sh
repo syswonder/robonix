@@ -73,4 +73,4 @@ export SCENE_WEB_HOST="${SCENE_WEB_HOST-127.0.0.1}"
 export SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}"
 
 echo "[scene/native] python=$PY ros=$ROS_DISTRO rmw=${RMW_IMPLEMENTATION:-<default>} web=$SCENE_WEB_HOST:$SCENE_WEB_PORT"
-exec "$PY" -m scene_service.service
+exec "$PY" -m robonix_api.llm scene_service.service

@@ -129,6 +129,42 @@ mkdir -p "$SCENE_HOST_DATA_DIR"
 # start.sh was dying there before it could launch the service container, which
 # is why the runtime-protobuf contract test only ever saw the codegen run.
 declare -a EXTRA_MOUNTS=()
+# The model catalog is a deployment file outside the image. Mount it at
+# the same absolute path so ROBONIX_LLM_CATALOG means the same thing inside.
+if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
+    if [[ ! -f "${ROBONIX_LLM_CATALOG}" ]]; then
+        echo "[scene/start] ROBONIX_LLM_CATALOG=${ROBONIX_LLM_CATALOG} is not a file" >&2
+        exit 2
+    fi
+    ROBONIX_LLM_CATALOG="$(realpath "${ROBONIX_LLM_CATALOG}")"
+    export ROBONIX_LLM_CATALOG
+    EXTRA_MOUNTS+=(-v "${ROBONIX_LLM_CATALOG}:${ROBONIX_LLM_CATALOG}:ro")
+fi
+declare -a KEY_ARGS=()
+if [[ -n "${ROBONIX_LLM_CATALOG:-}" ]]; then
+    if [[ -z "${ROBONIX_LLM_KEY_ENVS+x}" ]]; then
+        # Standalone launches have no key list from rbnx boot.
+        ROBONIX_LLM_KEY_ENVS="$(
+            PYTHONPATH="$(rbnx path robonix-api)${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+from robonix_api.llm import catalog_from_env
+print(",".join(sorted({m.api_key_env for m in catalog_from_env().models if m.api_key_env})))
+'
+        )"
+    fi
+    IFS=',' read -r -a ROBONIX_LLM_KEY_NAMES <<< "${ROBONIX_LLM_KEY_ENVS}"
+else
+    ROBONIX_LLM_KEY_NAMES=(VLM_API_KEY OPENAI_API_KEY)
+fi
+for key_name in ${ROBONIX_LLM_KEY_NAMES[@]+"${ROBONIX_LLM_KEY_NAMES[@]}"}; do
+    [[ -z "$key_name" ]] && continue
+    if [[ ! "$key_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        echo "[scene/start] invalid catalog key environment variable name" >&2
+        exit 2
+    fi
+    if [[ -n "${!key_name:-}" ]]; then
+        KEY_ARGS+=(-e "$key_name")
+    fi
+done
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
 fi
@@ -264,9 +300,11 @@ exec docker run --rm \
     -e SCENE_PERCEPTION_WAIT_S="${SCENE_PERCEPTION_WAIT_S:-30}" \
     -e SCENE_OPEN_VOCAB_CLASSES="${SCENE_OPEN_VOCAB_CLASSES:-}" \
     -e VLM_BASE_URL="${VLM_BASE_URL:-}" \
-    -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e VLM_REASONING_EFFORT="${VLM_REASONING_EFFORT:-}" \
+    -e SCENE_VLM_MAX_TOKENS="${SCENE_VLM_MAX_TOKENS:-}" \
+    -e ROBONIX_LLM_CATALOG="${ROBONIX_LLM_CATALOG:-}" \
+    ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
     -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \

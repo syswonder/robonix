@@ -1,10 +1,12 @@
 """Tests for VLM helpers — template summary, VLM config, image QA."""
 
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _HERE = Path(__file__).resolve().parent
 _SVC = _HERE.parent
@@ -40,9 +42,22 @@ class TestTemplateSummary(unittest.TestCase):
 
 
 class TestVLMConfig(unittest.TestCase):
+
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/vision", "provider": "vllm", "model": "test-vl",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"vision": True},
+            "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return path
     def _clear_env(self):
         for k in ("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL",
-                  "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"):
+                  "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+                  "ROBONIX_LLM_CATALOG"):
             os.environ.pop(k, None)
 
     def test_no_creds_vlm_unavailable(self):
@@ -67,6 +82,38 @@ class TestVLMConfig(unittest.TestCase):
         os.environ["VLM_API_KEY"] = "sk"
         cfg = _vlm_config()
         assert cfg["model"] == "gpt-4.1"
+
+    def test_keyless_catalog_is_available(self):
+        self._clear_env()
+        path = self._catalog(id="local/keyless", model="local")
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path)}):
+            assert _vlm_available() is True
+            cfg = _vlm_config()
+        assert cfg["requires_key"] is False
+        assert cfg["api_key"] == ""
+
+    def test_catalog_load_error_is_not_hidden(self):
+        self._clear_env()
+        with patch.dict(
+            os.environ,
+            {"ROBONIX_LLM_CATALOG": "/nonexistent/catalog.yaml"},
+            clear=False,
+        ):
+            with self.assertRaises(FileNotFoundError):
+                _vlm_config()
+
+    def test_catalog_overrides_legacy_config(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
+            "VLM_API_KEY": "legacy",
+        }):
+            cfg = _vlm_config()
+        assert cfg == {
+            "base_url": "http://127.0.0.1:9999/v1", "api_key": "secret",
+            "model": "test-vl", "requires_key": True,
+        }
 
 
 if __name__ == "__main__":

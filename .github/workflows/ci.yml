@@ -93,6 +93,36 @@ jobs:
       - name: Test Python bindings
         run: python -m unittest discover -s system/chronos/clock/tests -p test_python.py
 
+  model-catalog:
+    name: Model catalog and consumer configuration tests
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONPATH: pylib/robonix-api:services/verifiers/vlm_verifier:services/verifiers/vlm_verifier/tests
+      MEMGRAPH_KEEP_DATA: "1"
+      AGENT_MEMORY_DIR: /tmp/model-catalog-memory
+      SCRIBE_LOG_DIR: /tmp/model-catalog-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install focused test dependencies
+        run: python3 -m pip install pytest "numpy>=1.26,<2" "scipy>=1.11" httpx Pillow PyYAML
+      - name: Test the shared catalog contract
+        run: python3 -m unittest discover -s pylib/robonix-api/tests -p 'test_llm_*.py'
+      - name: Test Memsearch lifecycle without preloaded consumers
+        run: python3 -m unittest discover -s services/memsearch/tests -p 'test_lifecycle.py'
+      - name: Test consumer configuration and Scene startup
+        run: >-
+          python3 -m pytest -q
+          services/memory/tests/test_llm_search.py
+          services/memory/tests/test_observe.py
+          services/memory/tests/test_service.py
+          system/scene/tests/test_llm_catalog.py
+          system/scene/tests/test_runtime_protobuf_contract.py
+      - name: Test verifier configuration and requests
+        run: python3 -m unittest test_verifier.ParsingTests test_verifier.RequestTests
+
   check:
     name: Rust (fmt + clippy + build + tests)
     runs-on: ubuntu-22.04

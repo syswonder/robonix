@@ -25,7 +25,7 @@ start: |
   export AGENT_MEMORY_DIR="${AGENT_MEMORY_DIR:-$(pwd)/memory}"
   mkdir -p "$AGENT_MEMORY_DIR"
 
-  exec rbnx-build/venv/bin/python -m memory_service.service \
+  exec rbnx-build/venv/bin/python -m robonix_api.llm memory_service.service \
        > rbnx-build/data/memory.log 2>&1
 
 capabilities:
