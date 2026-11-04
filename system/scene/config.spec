@@ -233,8 +233,12 @@ properties:
         default: lite
         description: >-
           lite is the small model set, about 4 GB of video memory. full is the
-          paper-tier set (SAM-L and CLIP ViT-H-14) from SCENE_MODELS_DIR,
-          mounted at /opt/models/full. annotate turns recognition off, leaving
+          paper-tier set (SAM-L and CLIP ViT-H-14). The build downloads missing
+          weights; SCENE_MODELS_DIR overrides their directory. Containers use
+          /opt/models/full. TensorRT exports and engines must be prepared for
+          the selected set; Full passed native TensorRT checks on Orin NX 16 GB /
+          L4T 36.4.3, but has not passed on the tested Orin Nano 8 GB / L4T 39.2.1.
+          annotate turns recognition off, leaving
           manual regions and geometric queries. Matched case-insensitively;
           an unknown name fails activation. Environment fallback:
           SCENE_PROFILE.

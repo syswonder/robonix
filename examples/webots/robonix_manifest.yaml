@@ -139,7 +139,7 @@ service:
   # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
   # liaison's voice loop connects to. The selected audio provider is supplied
   # by the client for F2, voice steer, and hands-free turns.
-  # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
+  # disable_whisper => sherpa-onnx streaming ASR without one-shot Whisper.
   - name: speech
     path: ${ROBONIX_SOURCE_PATH}/services/speech
     config:
@@ -147,17 +147,16 @@ service:
       # tencent before build+boot for the lightweight cloud path.
       speech_backend: ${SPEECH_BACKEND}
       disable_whisper: true
-      funasr_device: cuda
       tts_voice: zh-CN-XiaoxiaoNeural
       default_speaker_provider_id: audio_driver
       tencent_asr_appid: ${TENCENT_ASR_APPID}
       tencent_tts_voice_type: 502003
 
-  # voiceprint — ECAPA-TDNN speaker identification. Provides
+  # voiceprint — CAM++ speaker identification. Provides
   # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
   # stamps each Task with the identified user_id, and `rbnx chat`'s user
-  # modal enrolls/lists speakers. Config is env-driven (port 50092,
-  # threshold 0.25, device auto) so the manifest block stays empty.
+  # modal enrolls/lists speakers. Default threshold is 0.55; deployment
+  # configuration can override it.
   - name: voiceprint
     path: ${ROBONIX_SOURCE_PATH}/services/voiceprint
     config: {}

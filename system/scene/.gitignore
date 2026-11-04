@@ -17,3 +17,6 @@ docker/_weights/
 
 # Local working notes; not part of the repository.
 NOTES-*.md
+
+# Staged immutable container application and protocol sources.
+docker/_build/

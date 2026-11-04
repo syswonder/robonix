@@ -18,7 +18,7 @@
 #                                                 the bench gives Pilot Chinese
 #                                                 tasks and judges Chinese answers
 #   - binary/rendering assets                    png/gif/svg/jpg/pdf/ico/dae/stl/
-#                                                tar.gz/fonts
+#                                                gzip archives/fonts
 #   - any line containing 'i18n-ok'              documented encoding/i18n test fixture
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -31,7 +31,7 @@ mapfile -t files < <(git ls-files \
   | grep -vEi '(^|/)LICENSE$' \
   | grep -vE '(-zh|_zh)\.[A-Za-z0-9]+$' \
   | grep -vEi '\.(png|gif|svg|jpe?g|pdf|ico|dae|stl|woff2?|ttf|eot)$' \
-  | grep -vE '\.tar\.gz$')
+  | grep -vE '\.gz$')
 
 python3 - "${files[@]}" <<'PY'
 import sys

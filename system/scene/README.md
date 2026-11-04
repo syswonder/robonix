@@ -2,7 +2,7 @@
 
 Robonix system service that maintains the **current best estimate** of what's in the robot's environment: per-`Object` records (stable id, fused pose, class, confidence, last_seen, point cloud), pairwise `Relation`s (`on` / `inside` / `near` / `reachable_by`), and a projected 2D occupancy grid from the mapping service. Exposes MCP tools that Pilot calls during RTDL planning/execution: queries (objects, regions, relations, robot context, navigation goals) and object edits (relabel, adjust geometry, delete, flush), and a self-contained 2D + 3D web viewer.
 
-This service is **NOT** a memory store (long-term recall belongs to memory services) and **NOT** a hardware controller. Current-state only. Reads observations; never writes back to the robot.
+Scene maintains current environment state from observations. Memory services handle long-term recall; hardware services control the robot. Scene does not send robot commands.
 
 ## What's inside
 
@@ -45,13 +45,92 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the live RGB frame. Class list is a 55-entry indoor-office vocabulary; override at runtime via `SCENE_OPEN_VOCAB_CLASSES=cup,chair,...`.
 2. **Segment.** MobileSAM, prompted with each YOLO bbox, produces a per-detection mask.
 3. **Lift to 3D.** Mask-aware depth backprojection through pinhole intrinsics gives a per-detection point cloud in camera-optical frame. The intrinsics `K` come **only** from the atlas-resolved `primitive/camera/intrinsics` contract — the real per-deployment camera. There is no hardcoded-default fallback: guessing `K` scales every point by `fx/fy` and silently misplaces objects, so when no usable intrinsics are wired the detector *waits* (logs `waiting for camera intrinsics`) instead. The world transform comes from the robot's TF tree first: Scene asks for `T(world ← selected_camera_optical)` so the full URDF/static chain and SLAM's `map → odom` correction stay intact. Only when that TF lookup is unavailable does the compatibility path compose `T(world ← body)` from `service/map/pose` (or odom) with `T(body ← camera_optical)` from `primitive/camera/extrinsics`. The selected pose source determines `body`; the extrinsics parent must match that same frame. The world frame name is whatever `header.frame_id` the localizer publishes — never a hardcoded `"map"` once a sample exists.
-4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image feature + 3D-AABB IoU drives the concept-graphs merge pipeline: `compute_spatial_similarities` + `compute_visual_similarities` + `aggregate_similarities` + `merge_detections_to_objects`. Three hard gates filter the agg_sim matrix:
+4. **Match + merge.** The default `association=voxel_vote` scores shared voxel observations and label text similarity. With `association=cg`, visual features and voxel overlap feed the aggregate score instead. The `cg` path applies these gates:
    * **Distance gate** — centroid > 1.5 m apart → never merge (kills "9 × 5 m bbox spanning the room" failure).
-   * **Same-class gate** — different YOLO class names → never merge (kills "potted_plant on cabinet collapses to one record").
+   * **Class gate** — reject different class groups beyond `cross_class_centroid_max_m`; configured confusable classes share one group.
    * **Threshold** — agg_sim < 0.85 (`merge_threshold`) → spawn new object instead.
 5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
-Periodic cleanup (every 10 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
+Native environments link to the resolved host Python executable so pruning old
+environments preserves later builds and backend switches.
+
+ConceptGraphs uses Torch FP32 by default. Fixed YOLO class features are cached;
+the temporary text encoder is released before camera inference. The previous CLIP fp16 override is
+removed; Torch does not read SCENE_CLIP_FP32 or SCENE_CG_CLIP_FP32. Set `SCENE_CG_INFERENCE=tensorrt` before
+building and starting to use FP32 TensorRT for YOLO, SAM and CLIP visual,
+with CPU ONNX Runtime for text. Both implementations share point-cloud fusion
+and object retention. Lite and Full use the same TensorRT export, build and
+runtime path. The selected SAM and CLIP models supply preprocessing, feature
+dimensions and tokenizer context length through export metadata. Selecting TensorRT also selects
+ConceptGraphs when no mapper is configured; an explicit DualMap setting is
+rejected.
+
+Full selects SAM-L and CLIP ViT-H-14. Build and start with `SCENE_PROFILE=full`.
+The build downloads missing Full weights into `docker/_weights/full`, or into
+`SCENE_MODELS_DIR` when set, using the same mirror fallback, cache and resumable
+downloads as Lite. Existing checkpoints are reused. Explicit weight paths must
+name existing local files; they are never replaced with a different checkpoint.
+Containers use `/opt/models/full`. The Jetson Dockerfile build stages the selected
+weights and exports them inside the image. Full needs more memory than Lite;
+support in the code does not establish that it fits every Jetson.
+
+Exports include `model-config.json` and ONNX external weight files (`.onnx.data`).
+Copy them together with the graphs and numerical references. Preparation and
+engine caches distinguish model selections and external weights. Startup rejects
+exports for a different profile or CLIP model; rebuild before switching. Legacy
+exports without metadata remain usable only as Lite/ViT-B-32. The shared pipeline
+has real-weight export and ONNX Runtime parity checks for SAM-L and ViT-H-14.
+On Orin Nano Super 8 GB / L4T 39.2.1, Full preparation failed GPU allocations
+while compiling the SAM-L encoder and CLIP visual tower, including isolated
+build attempts. Full TensorRT has not passed deployment acceptance on that
+board. Lite remains the accepted TensorRT model set there. Full passed native
+preparation, real-image inference and service lifecycle tests on Orin NX 16 GB /
+L4T 36.4.3 / CUDA 12.6 / TensorRT 10.7. Live-camera mapping was not tested.
+
+## Switching inference implementations
+
+From `system/scene`, use the same environment for build and boot:
+
+```bash
+export SCENE_CG_INFERENCE=tensorrt  # default: torch
+RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
+ROBONIX_SCENE_FORCE=native bash scripts/start.sh
+```
+
+The build downloads source weights using the normal model cache, installs
+export/runtime dependencies, exports ONNX locally using the installed Torch,
+and builds and numerically verifies engines on the GPU. No second machine is
+needed. Export runs in separate processes per model to release preparation
+memory. Torch remains installed; the TensorRT service process does not import
+it. Native deployment still requires the host JetPack Torch/CUDA stack below.
+
+The first TensorRT build can take several minutes and requires extra disk and
+memory for conversion. Later builds reuse exports fingerprinted by source
+weights, exporter and package versions. Engines are fingerprinted by ONNX,
+TensorRT version, GPU architecture and build settings. A failed preparation
+leaves the previously published export selection intact and does not stop a
+running service. Startup only checks caches; it never exports or compiles and
+never falls back silently to Torch. Rebuild after changing the selection or
+models. Live switching inside an already running service is not supported.
+
+To return to Torch, set `SCENE_CG_INFERENCE=torch` and build/boot normally.
+TensorRT caches are retained. `SCENE_ONNX_DIR` and `SCENE_ENGINE_CACHE_DIR`
+can override the native export and engine locations; their defaults are
+`docker/_weights/onnx` and `~/.cache/robonix/scene-engines`. The export cache
+keeps the current and previous published model sets.
+
+For Docker targets, use the same option with the existing manifests. The
+image adds conversion and TensorRT dependencies only when selected. After
+image construction, a temporary GPU container prepares models in a host cache:
+`rbnx-build/docker-models` for packaged Jetson images, or `rbnx-build/tensorrt`
+for x86 images. The service mounts the selected cache read-only. This requires
+the NVIDIA container runtime on the target. Torch remains the default for
+both x86 and Jetson Docker images.
+
+Advanced/offline setups may still stage ONNX/NPZ files directly and use
+`scripts/build_engines.py --models-dir DIR --verify`. The cost page's
+`gpu_engine_mb` reports TensorRT execution-context memory, excluding weights,
+I/O buffers and driver overhead; Torch reports its allocator statistics.
 
 ## Deployment targets (x86 / Jetson)
 
@@ -65,52 +144,115 @@ One repo covers three targets, picked by the per-target package manifest
 |---|---|---|---|
 | **x86-docker** (default) | `package_manifest.yaml` | cu128 x86 wheels baked into `docker/Dockerfile` | `docker run --gpus all` |
 | **jetson-docker** | `package_manifest.jetson-docker.yaml` | NVIDIA jetson-ai-lab wheels in `docker/Dockerfile.jetson` | `docker run --runtime nvidia` |
-| **jetson-native** | `package_manifest.jetson-native.yaml` | **host JetPack torch** (no image) | host `python3 -m scene_service.service` |
+| **jetson-native** | `package_manifest.jetson-native.yaml` | validated host Torch or pinned ARM wheels (no image) | host `python3 -m scene_service.service` |
 
 `scripts/build.sh` branches on `RBNX_BUILD_TARGET`; `scripts/start.sh` branches
 on `ROBONIX_SCENE_FORCE` (`native`/`docker`, or auto from
-`ROBONIX_SCENE_PLATFORM=jetson_orin`). On most Jetsons **jetson-native is the
-recommended path** — it reuses the JetPack CUDA stack instead of building a
-multi-GB L4T image.
+`ROBONIX_SCENE_PLATFORM=jetson_orin`). Use jetson-docker for repeatable deployment with application code, ROS and
+GPU libraries in one image. Native deployment reuses the host environment
+and remains useful for development or systems without Docker GPU support.
 
-### Jetson native prerequisites (install the JetPack CUDA stack)
+### Automatic Jetson Docker preparation
 
-`jetson-native` does **not** install torch — it expects a CUDA-capable host
-python already has it, and only pip-installs scene's light pure-python deps
-(`pip install --user`) on top. On a fresh Jetson (JetPack 6 / L4T r36 /
-CUDA 12.6) install the GPU stack first:
-
-```bash
-# 1. ROS 2 Humble on the host (apt, from the ROS 2 repo) — scene needs it
-#    for tf2 + the message types. (Skip if already installed.)
-
-# 2. JetPack CUDA-enabled torch / torchvision from NVIDIA's Jetson index.
-#    The index tag matches your JetPack: jp6/cu126 here; use jp6/cu128 etc.
-#    if your JetPack ships a different CUDA. (apt install nvidia-jetpack
-#    provides the CUDA toolkit these wheels link against.)
-pip install --user --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 \
-    torch torchvision
-
-# 3. perception extras that have native aarch64 wheels
-pip install --user ultralytics open3d
-
-# verify CUDA is live before building scene
-python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-#   → e.g.  2.10.0 True
-```
-
-Then build + run scene native (what `rbnx build`/`rbnx boot` do via the
-jetson-native manifest):
+The Docker target selects a pinned base image, ROS distribution and ARM Torch
+wheels from `scripts/docker_profiles.json`. Supported profiles cover Orin on
+L4T 36.4.x / Ubuntu 22.04 and L4T 39.2.x / Ubuntu 24.04. The host needs Docker,
+NVIDIA Container Toolkit and the Robonix build tools. Host Torch and ROS are
+not required. Unrecognized platform combinations stop before image construction.
 
 ```bash
-RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user the light deps
-ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
+python3 scripts/prepare_docker.py --plan
+RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+
+# Switch the same deployment to TensorRT.
+SCENE_CG_INFERENCE=tensorrt RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+SCENE_CG_INFERENCE=tensorrt ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
 ```
 
-> Native scene uses the same ROS 2 RMW configuration as the host process. Set
-> `RMW_IMPLEMENTATION` explicitly when debugging transport differences, or use
-> the repository default (`rmw_zenoh_cpp`) for normal Robonix deployments. Set
-> `ROBONIX_FORCE_CPU=1` to skip CUDA.
+The build validates CUDA convolution, torchvision NMS and Scene perception in
+an isolated candidate container before selecting the local image for startup.
+TensorRT builds
+also export models and verify engines on the target GPU. Model caches are
+separated by GPU hardware and the image's frozen SDK dependencies. Code-only
+rebuilds can reuse compatible engines.
+
+The launcher uses the verified image ID and baked application code, API,
+protobuf stubs and ROS map messages. It mounts persistent Scene data and a
+read-only model cache. Source changes, backend changes and unsupported TensorRT launch options are
+rejected before replacing the service container. A failed build preserves
+the previous verified image and model cache. Model-cache cleanup retains the
+current and previous generations; superseded images use normal Docker cleanup.
+
+Jetson packaged images support the ConceptGraphs backend. The build stages the
+selected Lite or Full weights into the image. `SCENE_MODELS_DIR` can select a
+local Full model directory; missing default files are downloaded there. Build
+proxy arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
+
+### Local Dockerfile deployment
+
+Scene maintains Dockerfiles and build profiles. Each deployment builds its own
+local image; there is no Scene prebuilt-image distribution or registry release
+workflow. The build may pull the upstream NVIDIA/ROS base image and download
+package dependencies.
+
+```bash
+# Torch is the default; set this only for TensorRT.
+export SCENE_CG_INFERENCE=tensorrt
+RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+```
+
+The TensorRT Dockerfile exports ONNX models and numerical references while
+building the local image. After construction, the target GPU compiles and
+validates engines under `rbnx-build/docker-models`. Later starts check and reuse
+the cache without compiling. Models, SDK and hardware fingerprints separate
+incompatible caches. Source changes require a local rebuild before startup.
+
+### Automatic Jetson native preparation
+
+Native preparation checks the actual host environment without a board-profile
+allowlist. It reuses working Torch/torchvision after convolution and NMS tests.
+When needed, it tries binary packages from the official PyTorch index in an
+isolated candidate environment. CUDA candidates come from the published indexes,
+filtered by the driver-reported CUDA API version; GPU tests decide whether the
+wheel actually supports this device. At most two CUDA indexes are tried, each
+in a fresh candidate environment. Failures report the installation or GPU-test
+error and leave the published environment unchanged.
+
+```bash
+# Inspect the host without installing anything.
+python3 scripts/prepare_native.py --plan
+RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
+ROBONIX_SCENE_FORCE=native bash scripts/start.sh
+```
+
+Native preparation does not install another CUDA/cuDNN stack, change GPU drivers
+or add NVIDIA repositories. Pip may install private GPU runtime dependencies
+inside the candidate venv. Existing ROS installations are preferred. Missing
+ROS components and TensorRT Python bindings are attempted through the configured
+OS repositories; configure those repositories first if packages are unavailable.
+Unknown OS versions need an existing ROS installation or an explicit ROS_DISTRO.
+System package installation requires root or existing noninteractive sudo.
+
+Scene dependencies live under `rbnx-build/native`, with access to host packages.
+GPU version constraints protect the selected stack during application installs.
+TensorRT preparation selects CUDA Python bindings for a working host CUDA
+runtime and verifies GPU allocation and release before publishing the environment.
+After preparation and GPU, ROS and database checks pass, one atomic pointer
+publishes the environment. Startup checks recorded versions without importing
+Torch. Current and previous generations are retained, including a
+`requirements.lock` package-version record. `SCENE_NATIVE_PYTHON` selects the
+base interpreter. A new device passing these checks is not automatically a
+fully tested hardware support claim.
+
+Fixed SDK combinations belong to Docker profiles. `scripts/native_profiles.json`
+is retained as a deprecated alias for `docker_profiles.json`; Native does not
+use it to select packages or reject hosts.
+
+Native Scene inherits the host ROS 2 transport configuration. Set
+`RMW_IMPLEMENTATION` explicitly when the rest of the deployment uses a
+non-default transport.
 
 ## Perception profiles and backends
 
@@ -119,7 +261,7 @@ Scene spends and which mapper does the work:
 
 | key | values | meaning |
 |---|---|---|
-| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the small set (~4 GB of video memory), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, mounted from `SCENE_MODELS_DIR`), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
+| `profile` | `lite` (default), `full`, `annotate` | model set / compute budget. `lite` is the small set (~4 GB of video memory), `full` the paper-tier set (SAM-L + CLIP ViT-H-14, downloaded during build; `SCENE_MODELS_DIR` overrides the directory), `annotate` turns object recognition off and keeps only manual regions and geometric queries. Env fallback `SCENE_PROFILE`. |
 | `backend` | `concept_graphs` (default), `dualmap` | which open-vocabulary mapper runs on the RGB-D stream. Env fallback `SCENE_PERCEPTION_BACKEND`. |
 
 Both backends take the same inputs (RGB, depth, intrinsics, camera→map transform)
@@ -521,9 +663,10 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_CG_FORCE_CPU` | `` | set to `1` to force CPU mode (~3× slower) |
 | `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera providers before falling back |
 | `SCENE_POSE_MAX_AGE_S` | `2.0` | maximum receipt age in seconds for pose/odometry used in camera-to-world projection; stale samples withhold detections |
+| `SCENE_CG_INFERENCE` | `torch` | ConceptGraphs inference: `torch` or `tensorrt`; use the same value for build and boot |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
-| `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
-| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / staged `open_clip_pytorch_model.bin` | Local checkpoint; build.sh downloads it before Docker/native build. |
+| `SCENE_MOBILE_SAM_WEIGHTS` | Lite: `mobile_sam.pt`; Full: `full/sam_l.pt` | Relative defaults are under `/opt/models` in containers or `docker/_weights` on Native. Explicit paths override the profile. |
+| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | Lite: `ViT-B-32` / `open_clip_pytorch_model.bin`; Full: `ViT-H-14` / `full/open_clip_vit_h14_laion2b_s32b_b79k.bin` | Lite and Full weights are downloaded during build; `SCENE_MODELS_DIR` overrides the Full checkpoint directory. |
 | `SCENE_CG_MERGE_THRESHOLD` | `0.85` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_CG_OBJ_MIN_POINTS` | `20` | periodic-cleanup cull gate; raise to drop sparse/thin objects, lower to keep them (thin objects like keyboards backproject to sparse clouds) |
@@ -567,8 +710,10 @@ when the operator **saves a map** in the map UI, which snapshots the live
 registry together with the spatial artifact, and come back only when that map
 is **loaded** (see "Map library" below for the epoch rules). Each row carries
 a caption vector embedded with the open_clip text encoder already loaded for
-perception (512-d, shared with the per-object image features), so a future
-object-search layer can reuse the table. The DB is scene-owned — a separate
+perception when it matches the collection dimension. Incompatible dimensions
+or non-finite vectors use a placeholder, preserving object geometry and labels.
+These persisted vectors are not used by current mapping or object lookup.
+Future vector search must validate the embedding model and dimension first. The DB is scene-owned — a separate
 file/process from `services/memsearch`'s DB — and lives under the
 host-mounted `/data/robonix`, which also makes the scene-graph JSON caches
 survive boots.
@@ -584,7 +729,9 @@ this precedence: mapping's latched `robonix/service/map/lifecycle` broadcast
 `SCENE_MAP_BINDING_WAIT_S`) → manifest `config.map_id` → `SCENE_MAP_ID` env →
 `"default"`. The broadcast needs the generated `map` interface package
 (`rbnx codegen --ros2` → colcon overlay, built by `scripts/build.sh`, sourced
-by the container entrypoint); without it scene falls back to static binding
+by the container entrypoint or Native start script); Native builds the overlay
+with its selected Python interpreter and checks ROS message type support.
+Without the overlay, Scene falls back to static binding
 with a warning. At runtime scene only WATCHES the broadcast: if mapping's
 identity or `generation` (bumped when the map origin may have changed: reset /
 mapping-mode session start) drifts from the startup binding, scene logs a

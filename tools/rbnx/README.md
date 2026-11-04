@@ -16,6 +16,8 @@ make install
 This builds the Cargo workspace and copies `rbnx` (plus the other system
 binaries) into `~/.cargo/bin`, then runs `rbnx setup` to register this
 clone as the Robonix source tree (`~/.robonix/config.yaml`).
+`CARGO_HOME` overrides the Cargo installation root; `ROBONIX_HOME` overrides
+the Robonix configuration directory.
 
 You can also install just `rbnx`:
 
@@ -72,6 +74,9 @@ them `pilot-hidden`, because they remain registered and callable by system
 consumers.
 
 ### What a boot leaves behind
+
+When boot prepares an unbuilt system package, it uses the deployment's
+`manifest:` selector, including Jetson Native and Docker variants.
 
 During boot, `rbnx` compares package manifest transport declarations with Atlas
 registrations, including Soma-managed primitives and skills. It warns once per

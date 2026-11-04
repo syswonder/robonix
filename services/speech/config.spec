@@ -19,7 +19,7 @@ properties:
   speech_backend:
     type: string
     description: >-
-      ASR/TTS backend family: local (Whisper, FunASR, Edge TTS), tencent
+      ASR/TTS backend family: local (Whisper, sherpa-onnx, Edge TTS), tencent
       (Tencent Cloud ASR and TTS) or custom (classes named by the Custom
       backend keys). Environment fallback: SPEECH_BACKEND.
     enum: [local, tencent, custom]
@@ -43,7 +43,7 @@ properties:
     type: boolean
     description: >-
       Skip one-shot Whisper initialization in the local backend; the asr
-      contract then returns UNAVAILABLE while streaming FunASR and TTS remain
+      contract then returns UNAVAILABLE while streaming ASR and TTS remain
       available. Environment fallback: SPEECH_DISABLE_WHISPER (1, true or
       yes).
     default: false
@@ -141,33 +141,28 @@ properties:
     default: 4
     minimum: 1
 
-  funasr_model:
+  sherpa_asr_dir:
     type: string
     x-group: Local backend
     description: >-
-      FunASR model for streaming recognition. Loaded with local files only.
-      Environment fallback: FUNASR_MODEL.
-    default: paraformer-zh-streaming
+      Streaming Paraformer model directory. Omit to use the model staged
+      by the build. Environment fallback: SHERPA_ASR_DIR.
 
-  funasr_device:
+  sherpa_asr_threads:
+    type: integer
+    x-group: Local backend
+    description: >-
+      Streaming ASR inference threads. Environment fallback: SHERPA_ASR_THREADS.
+    default: 2
+    minimum: 1
+
+  sherpa_asr_provider:
     type: string
     x-group: Local backend
     description: >-
-      FunASR device. auto tries CUDA when available and falls back to CPU if
-      loading fails; any other value, such as cpu or cuda, is the only device
-      tried. Environment fallback: FUNASR_DEVICE.
-    default: auto
-
-  funasr_chunk_size:
-    type: array
-    items:
-      type: integer
-    x-group: Local backend
-    description: >-
-      FunASR streaming chunk configuration [left, current, right] in the
-      model's native format. An environment value that is not valid JSON
-      falls back to the default. Environment fallback: FUNASR_CHUNK_SIZE.
-    default: [0, 10, 5]
+      sherpa-onnx execution provider. Non-CPU providers require a matching
+      runtime installation. Environment fallback: SHERPA_ASR_PROVIDER.
+    default: cpu
 
   tts_voice:
     type: string

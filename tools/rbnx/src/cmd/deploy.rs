@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
+    fn boot_prerequisites_build_scene_with_its_selected_manifest() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -299,14 +299,14 @@ package:
   version: 0.1.0
   description: test system package
   license: MulanPSL-2.0
-build: mkdir -p rbnx-build && touch rbnx-build/proof
+build: mkdir -p rbnx-build && echo default > rbnx-build/proof
 start: "true"
 stop: "true"
 "#,
         )
         .expect("test package manifest");
 
-        let deploy = DeployManifest {
+        let mut deploy = DeployManifest {
             system: HashMap::from([
                 ("scene".to_string(), serde_yaml::Value::Null),
                 ("vitals".to_string(), serde_yaml::Value::Null),
@@ -322,6 +322,25 @@ stop: "true"
 
         assert!(scene.join("rbnx-build/proof").is_file());
         assert!(scene.join("rbnx-build/.rbnx-built").is_file());
+        std::fs::remove_dir_all(scene.join("rbnx-build")).expect("reset build state");
+        let selected = "package_manifest.jetson-native.yaml";
+        let native = std::fs::read_to_string(scene.join("package_manifest.yaml"))
+            .expect("default manifest")
+            .replace("echo default", "echo native");
+        std::fs::write(scene.join(selected), native).expect("native manifest");
+        deploy.system.insert(
+            "scene".to_string(),
+            serde_yaml::from_str(&format!("manifest: {selected}\nconfig: {{}}"))
+                .expect("system package selector"),
+        );
+        check_prerequisites(&deploy, &cache_root, &manifest_dir, Some(&temp))
+            .expect("selected system-package prerequisite build");
+        assert_eq!(
+            std::fs::read_to_string(scene.join("rbnx-build/proof"))
+                .expect("selected build proof")
+                .trim(),
+            "native"
+        );
         std::fs::remove_dir_all(temp).expect("remove test directory");
     }
 
@@ -533,7 +552,7 @@ fn check_prerequisites(
     // downloads are a common example).
 
     if let Some(source_root) = robonix_source_path {
-        for name in deploy.system.keys() {
+        for (name, value) in &deploy.system {
             if is_builtin_system(name.as_str()) {
                 continue;
             }
@@ -543,7 +562,10 @@ fn check_prerequisites(
             }
             let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
             if !stamp.exists() {
-                needs_build.insert(name.clone(), (pkg_path, None));
+                let (manifest_override, _) =
+                    robonix_cli::manifest::split_system_package_config(value)
+                        .with_context(|| format!("parse system/{name} package selector"))?;
+                needs_build.insert(name.clone(), (pkg_path, manifest_override));
             }
         }
     }

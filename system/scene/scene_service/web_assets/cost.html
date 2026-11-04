@@ -35,7 +35,7 @@
   <div id="charts">
     <div class="chart"><span class="lbl">CPU %</span><span class="cur" id="c-cpu"></span><canvas id="k-cpu"></canvas></div>
     <div class="chart"><span class="lbl">RSS MB</span><span class="cur" id="c-mem"></span><canvas id="k-mem"></canvas></div>
-    <div class="chart"><span class="lbl">GPU MB (this process)</span><span class="cur" id="c-gpu"></span><canvas id="k-gpu"></canvas></div>
+    <div class="chart"><span class="lbl" id="gpu-label">GPU context MB</span><span class="cur" id="c-gpu"></span><canvas id="k-gpu"></canvas></div>
     <div class="chart"><span class="lbl">tick s</span><span class="cur" id="c-tick"></span><canvas id="k-tick"></canvas></div>
   </div>
   <div id="err"></div>
@@ -86,15 +86,18 @@ async function poll() {
     document.getElementById('err').textContent = '';
     document.getElementById('backend').textContent = d.backend || 'none';
     push('cpu', d.cpu_pct); push('mem', d.mem_mb);
-    push('gpu', d.gpu_reserved_mb); push('tick', d.tick_s);
+    const gpuMb = d.gpu_engine_mb ?? d.gpu_reserved_mb;
+    const engineContext = d.gpu_engine_mb !== undefined;
+    document.getElementById('gpu-label').textContent = engineContext ? 'GPU context MB' : 'GPU reserved MB';
+    push('gpu', gpuMb); push('tick', d.tick_s);
     document.getElementById('c-cpu').textContent = fmt(d.cpu_pct) + ' %';
     document.getElementById('c-mem').textContent = fmt(d.mem_mb, 0) + ' MB';
-    document.getElementById('c-gpu').textContent = fmt(d.gpu_reserved_mb, 0) + ' MB';
+    document.getElementById('c-gpu').textContent = fmt(gpuMb, 0) + ' MB';
     document.getElementById('c-tick').textContent = fmt(d.tick_s, 2) + ' s';
     let html = '';
     html += cell('container RSS', fmt(d.mem_mb, 0), 'MB' + (d.mem_limit_mb ? ' / ' + fmt(d.mem_limit_mb, 0) : ''));
     html += cell('container CPU', fmt(d.cpu_pct), '%');
-    html += cell('GPU this process', fmt(d.gpu_reserved_mb, 0), 'MB reserved');
+    html += cell(engineContext ? 'GPU execution context' : 'GPU this process', fmt(gpuMb, 0), engineContext ? 'MB declared' : 'MB reserved');
     html += cell('GPU card', fmt(d.gpu_card_used_mb, 0), 'MB' + (d.gpu_card_total_mb ? ' / ' + fmt(d.gpu_card_total_mb, 0) : '') + (d.gpu_util_pct !== undefined ? ' · ' + d.gpu_util_pct + '% util' : ''));
     html += cell('perception tick', fmt(d.tick_s, 2), 's · ' + (d.ticks !== undefined ? d.ticks + ' ticks' : ''));
     html += cell('objects', d.objects !== undefined ? d.objects : '—', d.frames_skipped !== undefined ? d.frames_skipped + ' frames skipped' : '');
