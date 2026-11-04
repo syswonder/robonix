@@ -124,6 +124,8 @@ Streaming waits for complete `message_updates` and `rtdl_parent_task_id` before 
 
 A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 
+Pilot rejects identical capability calls while their earlier nodes are unfinished, including during verification. A terminal node releases its call for recovery before its parent tree completes; identical unfinished siblings remain protected.
+
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
 Atlas discovery still runs before every planning round. Pilot omits contracts whose `[contract]` metadata sets `llm_callable = false` from the model-facing catalog and target map, while leaving them available to Executor and other Atlas consumers. An omitted field, including metadata from an older Atlas, defaults to visible. When the remaining provider, contract, description, and schema fields are unchanged, Pilot reuses the rendered capability catalog. The startup-cached Soma YAML is serialized as compact JSON while the authoritative URDF remains unchanged.

@@ -330,11 +330,9 @@ struct TreeMeta {
     /// cancellable in-flight work — a cancel is not itself a task tree, and
     /// listing it makes the model cancel its own term_signals in a loop.
     control_only: bool,
-    /// Canonical provider/contract/args signatures for calls in this tree.
-    /// The harness rejects a second tree containing an identical call while
-    /// the first is still in flight; execution latency must not duplicate a
-    /// physical or external command.
-    call_signatures: HashSet<String>,
+    /// Canonical provider/contract/args signatures of unfinished calls, keyed
+    /// by node index so identical sibling calls remain independently protected.
+    call_signatures: HashMap<u32, String>,
     /// Ordered executable leaves from the original RTDL graph. Keeping these
     /// visible lets the model target any semantic boundary in one control call
     /// instead of querying live state first or guessing what "current" means.
@@ -446,6 +444,11 @@ async fn handle_interrupt(
             // be explicit so the live view always correlates with the Plan
             // already sent).
             ns.plan_id = plan_id.clone();
+            if is_terminal_executor_state(ns.state)
+                && let Some(tree) = forest.trees.get_mut(&plan_id)
+            {
+                tree.call_signatures.remove(&ns.node_index);
+            }
             // VERIFYING is deliberately non-terminal. Feed only a leaf's
             // post-verification final state so history never contains an
             // optimistic result that must be corrected.
@@ -1608,7 +1611,7 @@ pub async fn run_turn(
         let forbidden: HashSet<String> = forest
             .trees
             .values()
-            .flat_map(|tree| tree.call_signatures.iter().cloned())
+            .flat_map(|tree| tree.call_signatures.values().cloned())
             .collect();
         let mut stream_error: Option<anyhow::Error> = None;
         let mut invalid_output = false;
@@ -2063,11 +2066,15 @@ fn plan_call_count(plan: &Plan) -> usize {
         .count()
 }
 
-fn plan_call_signatures(plan: &Plan) -> HashSet<String> {
+fn plan_call_signatures(plan: &Plan) -> HashMap<u32, String> {
     plan.nodes
         .iter()
-        .filter_map(|node| node.call.as_ref())
-        .map(call_signature)
+        .enumerate()
+        .filter_map(|(index, node)| {
+            node.call
+                .as_ref()
+                .map(|call| (index as u32, call_signature(call)))
+        })
         .collect()
 }
 
@@ -2650,7 +2657,7 @@ mod tests {
                                 TreeMeta {
                                     description: "active work".into(),
                                     control_only: false,
-                                    call_signatures: HashSet::new(),
+                                    call_signatures: HashMap::new(),
                                     steps: Vec::new(),
                                 },
                             );
@@ -3243,7 +3250,7 @@ mod tests {
                 TreeMeta {
                     description: description.into(),
                     control_only: false,
-                    call_signatures: HashSet::new(),
+                    call_signatures: HashMap::new(),
                     steps: vec![TreeStep {
                         op_id: format!("op-{plan_id}"),
                         description: description.into(),
@@ -3298,7 +3305,7 @@ mod tests {
             TreeMeta {
                 description: "ordered multi-step task".into(),
                 control_only: false,
-                call_signatures: HashSet::new(),
+                call_signatures: HashMap::new(),
                 steps: vec![
                     TreeStep {
                         op_id: "op-restaurant".into(),
@@ -3338,6 +3345,89 @@ mod tests {
         assert!(scope.contains("plan_id=9"));
         assert!(scope.contains("start greet watch"));
         assert!(scope.contains("does not cancel or invalidate other in-flight trees"));
+    }
+
+    #[tokio::test]
+    async fn terminal_leaf_releases_its_signature_before_tree_completion() {
+        for terminal in [RtdlNodeStateEnum::Succeeded, RtdlNodeStateEnum::Failed] {
+            let call = CapabilityCall {
+                provider_id: "navigation".into(),
+                contract_id: "navigate".into(),
+                args_json: r#"{"x":1}"#.into(),
+                ..Default::default()
+            };
+            let plan = Plan {
+                nodes: vec![
+                    RtdlNode {
+                        node_kind: RTDL_PARALLEL,
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: RTDL_DO,
+                        call: Some(call.clone()),
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: RTDL_DO,
+                        call: Some(call.clone()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut forest = super::SessionForest::default();
+            forest.trees.insert(
+                "old".into(),
+                TreeMeta {
+                    description: "navigate".into(),
+                    control_only: false,
+                    call_signatures: super::plan_call_signatures(&plan),
+                    steps: Vec::new(),
+                },
+            );
+            let signature = super::call_signature(&call);
+            let mut tasks = TaskTable::default();
+            tasks.receive("navigate, retrying if verification fails");
+            let mut history = Vec::new();
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            // VERIFYING must still reserve the call, even after its RPC returns.
+            for (node_index, state, remaining) in [
+                (1, RtdlNodeStateEnum::Verifying, 2),
+                (1, terminal, 1),
+                (2, terminal, 0),
+            ] {
+                super::handle_interrupt(
+                    super::TreeInterrupt::NodeState {
+                        plan_id: "old".into(),
+                        node_state: Box::new(RtdlNodeState {
+                            node_index,
+                            state: state as u32,
+                            leaf_result: Some(CapabilityCallResult {
+                                call_id: format!("old:{node_index}"),
+                                success: state == RtdlNodeStateEnum::Succeeded,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                    },
+                    &mut forest,
+                    &mut history,
+                    &mut tasks,
+                    0,
+                    "session",
+                    &tx,
+                )
+                .await;
+                // The parent has not terminated and Completion has not arrived.
+                let tree = forest.trees.get("old").unwrap();
+                let forbidden: HashSet<_> = tree.call_signatures.values().cloned().collect();
+                assert_eq!(
+                    forbidden.contains(&signature),
+                    remaining > 0,
+                    "only the last identical terminal leaf releases the signature"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3395,7 +3485,7 @@ mod tests {
             let meta = || TreeMeta {
                 description: "save memory".into(),
                 control_only: false,
-                call_signatures: HashSet::new(),
+                call_signatures: HashMap::new(),
                 steps: Vec::new(),
             };
             forest.trees.insert("failed".into(), meta());
@@ -3519,7 +3609,7 @@ mod tests {
             TreeMeta {
                 description: "drive".into(),
                 control_only: false,
-                call_signatures: HashSet::new(),
+                call_signatures: HashMap::new(),
                 steps: Vec::new(),
             },
         );
