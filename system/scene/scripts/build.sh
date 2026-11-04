@@ -87,7 +87,11 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     # Serialize dependency installation through model preparation/publication.
     exec 9>"$BUILD/.native-build.lock"
     flock 9
-    "${SCENE_NATIVE_PYTHON:-/usr/bin/python3}" "$PKG/scripts/prepare_native.py" --setup
+    SETUP_PYTHON="${SCENE_NATIVE_PYTHON:-/usr/bin/python3}"
+    if [[ ! -x "$SETUP_PYTHON" && "$SETUP_PYTHON" == "$PKG/$BUILD/native/"* ]]; then
+        SETUP_PYTHON=/usr/bin/python3
+    fi
+    "$SETUP_PYTHON" "$PKG/scripts/prepare_native.py" --setup
     source "$BUILD/native-candidate.sh"
     export PATH="$(dirname "$SCENE_NATIVE_PYTHON"):$PATH"
     export RBNX_CODEGEN_PYTHON="$SCENE_NATIVE_PYTHON"

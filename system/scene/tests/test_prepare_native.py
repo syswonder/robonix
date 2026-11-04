@@ -24,6 +24,45 @@ def host(l4t='39.2.1', ubuntu='24.04', python='3.12'):
                 arch='aarch64', model='NVIDIA Jetson Orin Nano')
 
 
+def test_new_environment_survives_pruning_interpreter_link_generations(tmp_path, monkeypatch):
+    root = tmp_path / 'native'
+    first, previous, candidate = (root / (digit * 64) for digit in 'abc')
+    for directory, target in ((first, Path(sys._base_executable).resolve()),
+                              (previous, first / 'bin/python')):
+        (directory / 'bin').mkdir(parents=True)
+        (directory / 'bin/python').symlink_to(target)
+    monkeypatch.setattr(sys, '_base_executable', str(previous / 'bin/python'))
+    prepare = module()
+    monkeypatch.setattr(prepare, 'BUILD', tmp_path)
+    monkeypatch.setattr(prepare, 'run', lambda command: subprocess.run(
+        [*command[:-1], '--without-pip', command[-1]], check=True))
+    prepare.create_environment(candidate)
+    prepare.prune_environments((candidate.name,))
+    result = subprocess.run([str(candidate / 'bin/python'), '-c', 'print("ok")'],
+                            check=True, capture_output=True, text=True)
+    assert result.stdout.strip() == 'ok'
+    assert not first.exists() and not previous.exists()
+
+
+@pytest.mark.parametrize('managed', [True, False])
+def test_build_recovers_only_a_missing_managed_bootstrap_interpreter(tmp_path, monkeypatch, managed):
+    package = tmp_path / 'system/scene'
+    (package / 'scripts').mkdir(parents=True)
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts/docker_base_image.sh').touch()
+    (package / 'scripts/prepare_native.py').write_text('print("bootstrap-ready"); raise SystemExit(37)\n')
+    missing = package / ('rbnx-build/native/old/bin/python' if managed else 'custom/bin/python')
+    monkeypatch.setenv('RBNX_PACKAGE_ROOT', str(package))
+    monkeypatch.setenv('RBNX_BUILD_TARGET', 'jetson-native')
+    monkeypatch.setenv('SCENE_NATIVE_PYTHON', str(missing))
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'torch')
+    monkeypatch.delenv('RBNX_BUILD_CLEAN', raising=False)
+    script = Path(__file__).resolve().parents[1] / 'scripts/build.sh'
+    result = subprocess.run(['bash', str(script)], capture_output=True, text=True)
+    assert result.returncode == (37 if managed else 127)
+    assert ('bootstrap-ready' in result.stdout) == managed
+
+
 def test_setup_reuses_working_torch_without_installing_packages(tmp_path, monkeypatch):
     prepare = module()
     monkeypatch.setattr(prepare, 'BUILD', tmp_path)

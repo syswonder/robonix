@@ -20,6 +20,8 @@ import uuid
 
 PKG = Path(__file__).resolve().parents[1]
 BUILD = PKG / 'rbnx-build'
+# Resolve before pruning generations that may own the launching interpreter's links.
+BASE_PYTHON = str(Path(sys._base_executable).resolve(strict=True))
 sys.path.insert(0, str(PKG))
 from scene_service.inference_config import inference_backend, validate_tensorrt_config  # noqa: E402
 
@@ -262,10 +264,10 @@ def install_environment() -> dict:
 
 def create_environment(directory: Path) -> None:
     try:
-        run([sys._base_executable, '-m', 'venv', '--system-site-packages', str(directory)])
+        run([BASE_PYTHON, '-m', 'venv', '--system-site-packages', str(directory)])
     except subprocess.CalledProcessError:
         apt_install([f'python{sys.version_info.major}.{sys.version_info.minor}-venv'])
-        run([sys._base_executable, '-m', 'venv', '--system-site-packages', str(directory)])
+        run([BASE_PYTHON, '-m', 'venv', '--system-site-packages', str(directory)])
     prefix = Path(sys.prefix)
     if sys.prefix != sys.base_prefix and not prefix.resolve().is_relative_to((BUILD / 'native').resolve()):
         version = f'{sys.version_info.major}.{sys.version_info.minor}'
