@@ -81,7 +81,7 @@ mine_tok = pe.SimpleTokenizer()(classes)
 ok(f"tokenizer ids for {len(classes)} classes", np.array_equal(ref_tok, mine_tok),
    f"mismatched rows={int((ref_tok != mine_tok).any(axis=1).sum())}")
 # a few queries with punctuation/case too
-queries = ["a photo of a red mug!", "Where IS the Laptop?", "左边的椅子"]
+queries = ["a photo of a red mug!", "Where IS the Laptop?", "左边的椅子"]  # i18n-ok: tokenizer parity fixture
 q_ref = tm.tokenize(queries).cpu().numpy().astype(np.int64)
 q_mine = pe.SimpleTokenizer()(queries)
 ok("tokenizer ids for free-form queries", np.array_equal(q_ref, q_mine),
