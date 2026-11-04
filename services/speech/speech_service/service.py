@@ -301,7 +301,7 @@ class MockASRBackend:
 # -- ASR Backend (sherpa-onnx streaming) -------------------------------------
 
 class SherpaStreamingBackend:
-    """Paraformer with incremental partials and a final tail event."""
+    """Paraformer with incremental partials and a complete final transcript."""
 
     def __init__(self):
         import numpy as np
@@ -352,23 +352,16 @@ class SherpaStreamingBackend:
                 }
                 emitted = text
 
+        # Flush Paraformer's lookahead before finalizing a stopped recording.
+        stream.accept_waveform(16000, np.zeros(int(0.66 * 16000), dtype=np.float32))
         stream.input_finished()
         while recognizer.is_ready(stream):
             recognizer.decode_stream(stream)
         text = recognizer.get_result(stream)
         if not text and not emitted:
             return
-        if emitted and not text.startswith(emitted):
-            # A revised transcript requires the complete final text.
-            yield {"event_type": 1, "text": text, "confidence": 0.9, "is_final": True}
-        else:
-            # Consumers still need a terminal event when the tail is empty.
-            yield {
-                "event_type": 1,
-                "text": text[len(emitted):],
-                "confidence": 0.9,
-                "is_final": True,
-            }
+        yield {"event_type": 1, "text": text, "confidence": 0.9, "is_final": True}
+
 
 
 class MockASRStreamingBackend:
@@ -1294,6 +1287,9 @@ _CFG_ENV_MAP = {
     "asr_device":        "ASR_DEVICE",
     "asr_chunk_length":  "ASR_CHUNK_LENGTH",
     "asr_batch_size":    "ASR_BATCH_SIZE",
+    "sherpa_asr_dir":    "SHERPA_ASR_DIR",
+    "sherpa_asr_threads": "SHERPA_ASR_THREADS",
+    "sherpa_asr_provider": "SHERPA_ASR_PROVIDER",
     "tts_voice":         "TTS_VOICE",
     "default_speaker_provider_id": "SPEECH_DEFAULT_SPEAKER_PROVIDER_ID",
     "tencent_asr_appid": "TENCENT_ASR_APPID",

@@ -172,3 +172,28 @@ Streaming ASR yields event dictionaries; one-shot ASR returns a dictionary with
 
 The backend may call any implementation internally: a local model, a cloud API,
 or an existing gRPC stub. Do not change Liaison for algorithm swaps.
+
+## Streaming configuration and events
+
+Manifest `sherpa_asr_dir`, `sherpa_asr_threads` (default 2), and
+`sherpa_asr_provider` (default cpu) override SHERPA_ASR_DIR,
+SHERPA_ASR_THREADS, and SHERPA_ASR_PROVIDER. The build installs the same
+sherpa-onnx 1.13.4 wheel family as Voiceprint. GPU providers require a
+compatible runtime; the requested provider alone does not prove GPU execution.
+
+Streaming partial events carry text deltas. The final event carries the full
+transcript and replaces all earlier partials, including recognition revisions.
+Custom streaming backends must follow this rule. Upgrade Liaison and Speech
+together; older Liaison versions append final text and can duplicate words.
+
+Model downloads honor RBNX_GH_MIRROR (empty selects GitHub directly).
+KWS and ASR release archives have pinned SHA256 checksums; only required
+runtime files are extracted into a staging directory. A failed transfer,
+checksum or extraction leaves the previous model directory intact. Verified
+cache files are checked again before reuse. ASR retains the int8 encoder and
+decoder; unused FP32 graphs are not extracted.
+
+At end of input, Paraformer receives lookahead padding before final decoding,
+following the [upstream streaming example](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.4/python-api-examples/online-decode-files.py).
+This flushes words near the end of a recording; it does not wait for additional
+microphone audio.

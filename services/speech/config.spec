@@ -141,6 +141,29 @@ properties:
     default: 4
     minimum: 1
 
+  sherpa_asr_dir:
+    type: string
+    x-group: Local backend
+    description: >-
+      Streaming Paraformer model directory. Omit to use the model staged
+      by the build. Environment fallback: SHERPA_ASR_DIR.
+
+  sherpa_asr_threads:
+    type: integer
+    x-group: Local backend
+    description: >-
+      Streaming ASR inference threads. Environment fallback: SHERPA_ASR_THREADS.
+    default: 2
+    minimum: 1
+
+  sherpa_asr_provider:
+    type: string
+    x-group: Local backend
+    description: >-
+      sherpa-onnx execution provider. Non-CPU providers require a matching
+      runtime installation. Environment fallback: SHERPA_ASR_PROVIDER.
+    default: cpu
+
   tts_voice:
     type: string
     x-group: Local backend

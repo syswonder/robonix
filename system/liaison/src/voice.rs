@@ -344,7 +344,7 @@ async fn run_session(
 ) -> Result<()> {
     let mock = is_mock_mode();
     // `record_seconds` is now a hard-stop ceiling on streaming capture
-    // (FunASR's VAD ends the turn under most conditions; this just
+    // (the silence detector ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
     // 30 s default. Whisper's old "record-then-recognize" pattern is
     // gone; voice goes through `asr_stream` end-to-end.
@@ -378,7 +378,7 @@ async fn run_session(
     } else {
         // Mic → AsrAudioChunk pump + asr_stream.RecognizeStream both
         // run inside `stream_capture_and_recognize`. It returns once
-        // FunASR emits is_final, the user hits max_seconds, or the
+        // ASR emits is_final, the user hits max_seconds, or the
         // mic stream drops. Voiceprint still gets the accumulated PCM
         // for downstream identification (currently fallback-only).
         stream_capture_and_recognize(
@@ -637,13 +637,13 @@ async fn run_session(
 
 // ── Mic capture + streaming ASR ─────────────────────────────────────────────
 //
-// Open the mic primitive AND `robonix/service/speech/asr_stream` (FunASR
-// paraformer-zh-streaming bidi) at the same time. Mic AudioChunks get
+// Open the mic primitive and `robonix/service/speech/asr_stream` together.
+// Mic AudioChunks get
 // wrapped as AsrAudioChunk and pumped up the request side; the response
 // side yields RecognizeStreamEvents (PARTIAL → … → FINAL). On FINAL,
 // stop both streams and return `(accumulated_pcm, final_text)`.
 //
-// `max_seconds` is a hard ceiling — FunASR's VAD usually ends the turn
+// `max_seconds` is a hard ceiling — the silence detector usually ends the turn
 // well before that, but we don't want to hang on a stuck mic.
 
 #[allow(clippy::too_many_arguments)]
@@ -804,7 +804,7 @@ async fn stream_capture_and_recognize(
                     }
                     if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
                         // Drops asr_req_tx → server sees stream EOF →
-                        // FunASR emits its is_final flush → outer loop
+                        // ASR emits its final transcript → outer loop
                         // collects the final transcript and breaks.
                         break;
                     }
@@ -826,31 +826,15 @@ async fn stream_capture_and_recognize(
     });
     let _pump_abort_guard = AbortOnDrop(pump_handle.abort_handle());
 
-    // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
-    // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
-    // request metadata, not the per-chunk message. Tonic-codegen
-    // doesn't surface a separate header field here, so we just rely on
-    // FunASR's auto-detection — paraformer-zh-streaming is zh-only so
-    // this is fine. If a multi-lingual backend is ever wired in, the
-    // contract needs an extra preamble message.
+    // Audio chunks use the contract defaults: 16 kHz mono PCM s16le.
     let asr_resp = asr_client
         .recognize_stream(Request::new(asr_req_stream))
         .await
         .map_err(|e| anyhow::anyhow!("asr_stream rpc failed: {e}"))?;
     let mut asr_events = asr_resp.into_inner();
 
-    // FunASR's paraformer-zh-streaming emits *incremental* partials —
-    // each event carries only the words decoded from the most recent
-    // chunk window, not a cumulative transcript. The is_final flush
-    // (`recognize_chunk(b"", is_final=True)`) emits the residual
-    // window's text the same way (sometimes empty).
-    //
-    // Strategy: append every non-empty event text into `accumulated`,
-    // and use the accumulator as the final transcript. The server's
-    // is_final flag only tells us when to stop the loop — it does
-    // NOT mean "this event's text is the whole utterance"; treating
-    // it that way drops every prior partial and leaves the user with
-    // just the last syllable.
+    // Partials carry deltas; the final transcript replaces them, including
+    // revisions of words already displayed to the user.
     let mut accumulated = String::new();
     let mut last_confidence = 0.0_f32;
     while let Some(ev_or_err) = asr_events.next().await {
@@ -859,20 +843,20 @@ async fn stream_capture_and_recognize(
             anyhow::bail!("asr error: {}", ev.error);
         }
         let is_final = ev.is_final || ev.event_type == 1;
-        let text = ev.text.clone();
-        if !text.is_empty() {
-            accumulated.push_str(&text);
+        let text = ev.text;
+        accumulate_asr_text(&mut accumulated, &text, is_final);
+        if is_final {
             last_confidence = ev.confidence;
-            if !is_final {
-                let _ = tx
-                    .send(Ok(event_text(
-                        KIND_ASR_PARTIAL,
-                        session_id,
-                        &text,
-                        ev.confidence,
-                    )))
-                    .await;
-            }
+        } else if !text.is_empty() {
+            last_confidence = ev.confidence;
+            let _ = tx
+                .send(Ok(event_text(
+                    KIND_ASR_PARTIAL,
+                    session_id,
+                    &text,
+                    ev.confidence,
+                )))
+                .await;
         }
         if is_final {
             break;
@@ -1362,8 +1346,16 @@ fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::E
     fs::write(path, buf)
 }
 
-/// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
-/// silence-VAD in the mic pump. Returns 0.0 on empty / odd-length input.
+/// Apply a partial delta or replace it with the complete final transcript.
+fn accumulate_asr_text(accumulated: &mut String, text: &str, is_final: bool) {
+    if is_final {
+        accumulated.clear();
+    }
+    accumulated.push_str(text);
+}
+
+/// RMS amplitude used by the silence detector; ignores an incomplete trailing
+/// sample and returns 0.0 when there are no complete samples.
 fn pcm_rms_s16le(data: &[u8]) -> f32 {
     let n = data.len() / 2;
     if n == 0 {
@@ -1381,6 +1373,17 @@ fn pcm_rms_s16le(data: &[u8]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_asr_replaces_partial_words_and_can_clear_them() {
+        let mut transcript = String::new();
+        accumulate_asr_text(&mut transcript, "open the ", false);
+        accumulate_asr_text(&mut transcript, "kitchen", false);
+        accumulate_asr_text(&mut transcript, "open the bedroom", true);
+        assert_eq!(transcript, "open the bedroom");
+        accumulate_asr_text(&mut transcript, "", true);
+        assert!(transcript.is_empty());
+    }
 
     #[test]
     fn fallback_user_id_normalises_hint() {
