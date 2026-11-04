@@ -490,3 +490,20 @@ def test_storage_verification_closes_store_on_query_failure(monkeypatch):
         persistence.verify_local_store()
     store.load_all.assert_called_once_with(strict=True)
     store.close.assert_called_once_with()
+
+
+def test_incompatible_caption_vectors_do_not_break_full_object_save():
+    import pytest
+    pytest.importorskip("pymilvus")
+    from scene_service.persistence import ObjectStore
+    with tempfile.TemporaryDirectory() as directory:
+        store = ObjectStore(os.path.join(directory, "objects.db"))
+        try:
+            store.set_embedder(lambda texts: [[1.0] * 1024 for _ in texts])
+            assert store.persist([(_make_obj("scene.object.full", "plant"), "plant")]) == 1
+            restored = store.load_all()
+            assert len(restored) == 1 and restored[0].label == "plant"
+            store.set_embedder(lambda texts: [[float("nan")] * 512 for _ in texts])
+            assert store.persist([(_make_obj("scene.object.nan", "chair"), "chair")]) == 1
+        finally:
+            store.close()

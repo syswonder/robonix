@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Torch adapter returns the same NumPy shapes consumed by fusion."""
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -45,3 +45,21 @@ def test_clip_batches_and_normalizes_images_and_text():
     text = bundle.embed_text(['chair', 'table'])
     assert text.shape == (2, 512)
     np.testing.assert_allclose(np.linalg.norm(text, axis=1), 1, atol=1e-6)
+
+
+def test_fixed_yolo_vocabulary_does_not_retain_its_text_encoder():
+    import open_clip
+    import ultralytics
+    yolo = Mock()
+    features = torch.ones((1, 2, 512))
+    yolo.model.txt_feats = features
+    yolo.model.clip_model = torch.nn.Linear(2, 2)
+    clip = Mock()
+    with patch.object(ultralytics, "YOLO", return_value=yolo), \
+         patch.object(ultralytics, "SAM"), \
+         patch.object(open_clip, "create_model_and_transforms", return_value=(clip, None, Mock())), \
+         patch.object(open_clip, "get_tokenizer"):
+        bundle = TorchPerception(["chair", "plant"], "yolo.pt", "sam.pt", "ViT-B-32", "clip.bin")
+    assert bundle.yolo.model.clip_model is None
+    assert bundle.yolo.model.txt_feats is features
+    yolo.set_classes.assert_called_once_with(["chair", "plant"])

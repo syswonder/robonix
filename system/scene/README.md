@@ -51,7 +51,12 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
    * **Threshold** — agg_sim < 0.85 (`merge_threshold`) → spawn new object instead.
 5. **Project to registry.** A persistent `MapObjectList.uuid → ObjectRegistry.object_id` cache keeps registry IDs stable across ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)` segfaults qhull on near-coplanar pcds), with 5–95 percentile extents to ignore depth-spike outliers.
 
-ConceptGraphs uses Torch by default. Set `SCENE_CG_INFERENCE=tensorrt` before
+Native environments link to the resolved host Python executable so pruning old
+environments preserves later builds and backend switches.
+
+ConceptGraphs uses Torch FP32 by default. Fixed YOLO class features are cached;
+the temporary text encoder is released before camera inference. The previous CLIP fp16 override is
+removed; Torch does not read SCENE_CLIP_FP32 or SCENE_CG_CLIP_FP32. Set `SCENE_CG_INFERENCE=tensorrt` before
 building and starting to use FP32 TensorRT for YOLO, SAM and CLIP visual,
 with CPU ONNX Runtime for text. Both implementations share point-cloud fusion
 and object retention. Lite and Full use the same TensorRT export, build and
@@ -705,8 +710,10 @@ when the operator **saves a map** in the map UI, which snapshots the live
 registry together with the spatial artifact, and come back only when that map
 is **loaded** (see "Map library" below for the epoch rules). Each row carries
 a caption vector embedded with the open_clip text encoder already loaded for
-perception (shared with the per-object image feature dimensions), so a future
-object-search layer can reuse the table. The DB is scene-owned — a separate
+perception when it matches the collection dimension. Incompatible dimensions
+or non-finite vectors use a placeholder, preserving object geometry and labels.
+These persisted vectors are not used by current mapping or object lookup.
+Future vector search must validate the embedding model and dimension first. The DB is scene-owned — a separate
 file/process from `services/memsearch`'s DB — and lives under the
 host-mounted `/data/robonix`, which also makes the scene-graph JSON caches
 survive boots.

@@ -20,9 +20,11 @@ class TorchPerception:
         ) else ("cuda" if torch.cuda.is_available() else "cpu")
         self.yolo = YOLO(yolo_path)
         self.yolo.set_classes(classes)
+        # Detection uses the fixed class features, not the cached text encoder.
+        self.yolo.model.clip_model = None
         self.sam = SAM(sam_path)
         self.clip, _, self.preprocess = open_clip.create_model_and_transforms(
-            clip_model, pretrained=clip_pretrained,
+            clip_model, pretrained=clip_pretrained, precision="fp32",
         )
         self.clip = self.clip.to(self.device).eval()
         self.tokenizer = open_clip.get_tokenizer(clip_model)
