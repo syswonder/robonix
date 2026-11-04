@@ -11,6 +11,8 @@ import os
 import sys
 import tempfile
 import time
+
+import pytest
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -317,6 +319,81 @@ def test_flush_failure_defers_epoch_advance():
         finally:
             loop.close()
     print("  [PASS] test_flush_failure_defers_epoch_advance")
+
+
+def _message(frame, x):
+    return SimpleNamespace(
+        header=SimpleNamespace(frame_id=frame), child_frame_id="base_link",
+        pose=SimpleNamespace(pose=SimpleNamespace(
+            position=SimpleNamespace(x=x, y=0., z=0.),
+            orientation=SimpleNamespace(x=0., y=0., z=0., w=1.))))
+
+
+@pytest.mark.parametrize("binding,odom_frame,expected,pose_frames", [
+    ({"map_id": "office", "source": "ui_load", "mode": "localization", "generation": 0}, "odom", [("office_world", 1.), ("office_world", 3.)], ("office_world", "office_world")),
+    ({"map_id": "office", "source": "lifecycle", "mode": "mapping", "generation": 2}, "odom", [("office_world", 1.), ("office_world", 3.)], ("office_world", "office_world")),
+    ({"map_id": "office", "source": "ui_load", "mode": "localization", "generation": 0}, "office_world", [("office_world", 1.), ("office_world", 2.), ("office_world", 3.)], ("office_world", "office_world")),
+    ({"map_id": "default", "source": "default", "generation": None}, "odom", [("office_world", 1.), ("odom", 2.), ("office_world", 3.)], ("office_world", "office_world")),
+    ({"map_id": "default", "source": "default", "generation": None}, "odom", [("odom", 2.), ("odom", 2.), ("office_world", 3.)], (None, "office_world")),
+    ({"map_id": "office", "source": "ui_load", "generation": 0}, "odom", [("office_world", 1.), ("new_world", 3.)], ("office_world", "new_world")),
+])
+def test_localization_gap_preserves_named_world(monkeypatch, binding, odom_frame, expected, pose_frames):
+    service = _service_mod()
+    index = [0]
+    updates = []
+    class Hub:
+        def has(self, kind):
+            return True
+        def latest(self, kind):
+            if kind == "pose":
+                frame = pose_frames[0] if index[0] == 0 else pose_frames[1]
+                return (_message(frame, 1. if index[0] == 0 else 3.) if frame else None), (90. if index[0] == 1 else 100.), 1
+            return _message(odom_frame, 2.), 100., 1
+    tracker = SimpleNamespace(world_frame_id="", robot_geometry=SimpleNamespace(
+        current=lambda: SimpleNamespace(base_frame="base_link")))
+    async def on_pose(x, y, z, yaw):
+        updates.append((tracker.world_frame_id, x))
+    tracker.on_pose = on_pose
+    async def sleep(_):
+        index[0] += 1
+        if index[0] == 3:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(service.time, "time", lambda: 100.)
+    monkeypatch.setattr(service.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(service._self_pose_loop(Hub(), tracker, pose_max_age_s=2., live_binding=binding))
+    assert updates == expected
+    assert tracker.world_frame_id == pose_frames[1]
+
+
+def test_incompatible_odometry_warns_once_per_pose_outage(monkeypatch, caplog):
+    service = _service_mod()
+    index = [0]
+    updates = []
+    class Hub:
+        def has(self, kind):
+            return True
+        def latest(self, kind):
+            stamp = 100. if kind == "odom" or index[0] in (0, 3) else 90.
+            return _message("odom" if kind == "odom" else "office_world", float(index[0])), stamp, 1
+    tracker = SimpleNamespace(world_frame_id="", robot_geometry=SimpleNamespace(
+        current=lambda: SimpleNamespace(base_frame="base_link")))
+    async def on_pose(*pose):
+        updates.append(pose)
+    tracker.on_pose = on_pose
+    async def sleep(_):
+        index[0] += 1
+        if index[0] == 5:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(service.time, "time", lambda: 100.)
+    monkeypatch.setattr(service.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(service._self_pose_loop(Hub(), tracker, pose_max_age_s=2., live_binding={
+            "map_id": "office", "source": "ui_load", "generation": 0}))
+    warnings = [record for record in caplog.records if "withholding odometry" in record.message]
+    assert len(warnings) == 2
+    assert all("odom" in record.message and "office_world" in record.message for record in warnings)
+    assert len(updates) == 2
 
 
 if __name__ == "__main__":

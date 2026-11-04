@@ -591,6 +591,11 @@ rejects missing or mismatched frame ids instead of composing incompatible
 frames. Deployments with a complete URDF and TF tree should not publish a
 second transform with the opposite direction.
 
+While a named map with a confirmed lifecycle generation is active, a temporary
+loss of corrected pose samples withholds odometry in a different frame. Scene
+keeps its selected world frame and waits for a fresh corrected pose. Odometry
+in that same frame and odometry-only startup remain supported.
+
 When localization replaces an odometry frame, DualMap discards its old-frame
 tracks, clears its local/global maps and keyframe cache, and withholds those
 registry objects until they are seen again in the new frame. It does not
