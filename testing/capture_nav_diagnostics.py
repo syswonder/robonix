@@ -16,6 +16,11 @@ from pathlib import Path
 import sys
 import time
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 MAX_CELLS = 1_000_000
 MAX_TRANSFORMS = 1024
 MAX_RECORD_BYTES = 8 * 1024 * 1024
@@ -42,6 +47,11 @@ def message_values(value, budget=None, depth=0):
         if len(value) > budget[0]:
             raise ValueError("message sequence exceeds field budget")
         return [message_values(item, budget, depth + 1) for item in value]
+    if np is not None and isinstance(value, np.ndarray):
+        # Generated ROS fixed-size arrays (including pose covariance) use NumPy.
+        if value.size > budget[0] or value.nbytes > MAX_RECORD_BYTES:
+            raise ValueError("message array exceeds field or byte budget")
+        return message_values(value.tolist(), budget, depth + 1)
     return {
         field: message_values(getattr(value, field), budget, depth + 1)
         for field in value.get_fields_and_field_types()

@@ -30,6 +30,31 @@ def grid(data=(-1, 0, 37, 100)):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_numpy_fixed_pose_covariance_is_captured_with_existing_bounds(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy is required for generated fixed-size ROS arrays")
+        covariance = np.arange(36, dtype=np.float64)
+        msg = Message(header=Message(frame_id="map", stamp=Message(sec=12, nanosec=34)),
+                      pose=Message(covariance=covariance))
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            stream = {"name": "pose", "received": 0, "rejected": 0, "samples": {}}
+            capture.write_sample(out, stream, msg, 123, 456)
+            self.assertEqual(stream["rejected"], 0)
+            saved = json.loads((out / "pose-first.json").read_text())
+            self.assertEqual(saved["message"]["pose"]["covariance"], covariance.tolist())
+            self.assertEqual(saved["message"]["header"]["frame_id"], "map")
+        with self.assertRaisesRegex(ValueError, "budget"):
+            capture.message_values(covariance, budget=[4])
+        with patch.object(capture, "MAX_RECORD_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "budget"):
+                capture.message_values(covariance)
+        covariance[0] = np.nan
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            capture.sample_record(msg, 123, 456)
+
     def test_interleaved_tf_retains_rare_map_edge_and_each_edges_first_latest(self):
         def transform(parent, child, stamp):
             return Message(header=Message(frame_id=parent, stamp=Message(sec=stamp, nanosec=0)),

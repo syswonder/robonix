@@ -67,7 +67,7 @@ jobs:
           PYTHONPATH: system/scene
         run: |
           python3 -c 'import scene_service.web'
-          python3 -m pytest -q system/scene/tests/test_map_epoch.py system/scene/tests/test_map_binding.py system/scene/tests/test_map_operation_ui.py
+          python3 -m pytest -q system/scene/tests/test_map_epoch.py system/scene/tests/test_map_binding.py system/scene/tests/test_map_operation_ui.py testing/test_capture_nav_diagnostics.py
 
       # The goal planner and the message-shape rule are pure and import neither
       # robonix_api nor the generated MCP types, so they run under the same
