@@ -19,6 +19,7 @@ class EmbeddingProviderTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {"sherpa_onnx": sherpa}):
             spec.loader.exec_module(module)
+        sherpa.SpeakerEmbeddingExtractor.return_value.dim = 192
         with tempfile.NamedTemporaryFile() as model:
             for provider in (None, "cpu", "cuda", "coreml"):
                 with self.subTest(provider=provider):

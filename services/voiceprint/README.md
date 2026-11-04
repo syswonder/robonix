@@ -66,7 +66,10 @@ providers or operators. Verify execution and recalibrate the similarity
 threshold before changing providers in a deployment.
 
 Existing ECAPA enrollment vectors are incompatible with CAM++. Re-enroll
-users after upgrading; the `enrolled.json` schema stays unchanged.
+users after upgrading. New `enrolled.json` records contain `"model": "campplus_zh"`.
+Legacy records without that marker or with another model are skipped with a
+warning on load; loading does not rewrite the file. Users can enroll again.
+Manifest `provider` overrides VOICEPRINT_PROVIDER, using cpu by default.
 
 ## Test
 

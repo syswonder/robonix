@@ -202,6 +202,36 @@ class RuntimeConfigTest(unittest.TestCase):
                 self.assertEqual(module._threshold_value, 0.55)
 
 
+class EnrollmentMigrationTest(unittest.TestCase):
+    def test_old_and_other_models_are_skipped_without_changing_disk(self):
+        module, _ = _load_service()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "enrolled.json"
+            records = {
+                "legacy": {"name": "old", "embedding": [1.0, 0.0]},
+                "other": {"name": "other", "embedding": [1.0, 0.0], "model": "ecapa"},
+                "current": {"name": "new", "embedding": [0.0, 1.0], "model": "campplus_zh"},
+            }
+            path.write_text(json.dumps(records))
+            db = module.EnrolledDB(path)
+            self.assertEqual(set(db.data), {"current"})
+            self.assertEqual(json.loads(path.read_text()), records)
+            self.assertFalse(db.identify(np.asarray([1.0, 0.0]), 0.55)[-1])
+            self.assertTrue(db.enroll_unique("legacy", "old", np.asarray([1.0, 0.0]), 0.55)[0])
+            reopened = module.EnrolledDB(path)
+            self.assertEqual(reopened.data["legacy"]["model"], "campplus_zh")
+            self.assertTrue(reopened.identify(np.asarray([1.0, 0.0]), 0.55)[-1])
+
+    def test_provider_configuration_is_immutable_after_init(self):
+        module, _ = _load_service()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"VOICEPRINT_PROVIDER": "cuda"}):
+            self.assertIsInstance(module.init({"data_dir": tmp, "provider": "cpu"}), _Ok)
+            self.assertEqual(os.environ["VOICEPRINT_PROVIDER"], "cpu")
+            result = module.init({"data_dir": tmp, "provider": "cuda"})
+            self.assertIsInstance(result, _Err)
+            self.assertEqual(os.environ["VOICEPRINT_PROVIDER"], "cpu")
+
+
 class EnrolledDBConcurrencyTest(unittest.TestCase):
     def test_concurrent_duplicate_id_enrollment_persists_only_one(self) -> None:
         module, _ = _load_service()

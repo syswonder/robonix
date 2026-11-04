@@ -28,9 +28,8 @@ Four Voiceprint RPCs land on the same listener under one Atlas Service:
   * robonix/service/voiceprint/delete    — DeleteEnrolled(...)
       Idempotently removes one enrolled speaker.
 
-State storage is unchanged: a single JSON file (`<data_dir>/enrolled.json`)
-mapping `user_id -> {"name": str, "embedding": [float, ...]}`. No schema
-migration needed from the previous version.
+Enrollment records include model="campplus_zh". Legacy or incompatible
+embeddings are skipped on load; those users must enroll again.
 
 Environment variables consumed at startup:
 
@@ -84,6 +83,7 @@ log = logging.getLogger("voiceprint_service")
 _PKG_DIR = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_DIR = _PKG_DIR / "rbnx-build" / "data"
 _DEFAULT_THRESHOLD = 0.55
+_EMBEDDING_MODEL = "campplus_zh"
 
 
 def _data_dir() -> Path:
@@ -125,7 +125,13 @@ class EnrolledDB:
         with self._lock:
             if self.path.is_file():
                 with self.path.open("r", encoding="utf-8") as fh:
-                    self.data = json.load(fh)
+                    records = json.load(fh)
+                self.data = {}
+                for uid, entry in records.items():
+                    if entry.get("model") != _EMBEDDING_MODEL:
+                        log.warning("Skipping incompatible enrollment %s; re-enroll this user", uid)
+                        continue
+                    self.data[uid] = entry
                 log.info("Loaded %d enrolled users from %s", len(self.data), self.path)
             else:
                 self.data = {}
@@ -157,6 +163,7 @@ class EnrolledDB:
             previous = self.data.get(user_id, missing)
             self.data[user_id] = {
                 "name": user_name,
+                "model": _EMBEDDING_MODEL,
                 "embedding": [float(x) for x in embedding.tolist()],
             }
             try:
@@ -220,6 +227,7 @@ class EnrolledDB:
 
             self.data[user_id] = {
                 "name": user_name,
+                "model": _EMBEDDING_MODEL,
                 "embedding": [float(x) for x in embedding.tolist()],
             }
             try:
@@ -272,7 +280,7 @@ class EnrolledDB:
 _engine: SpeakerEmbeddingEngine | None = None
 _db: EnrolledDB | None = None
 _threshold_value: float = _DEFAULT_THRESHOLD
-_applied_config: tuple[Path, float] | None = None
+_applied_config: tuple[Path, float, str] | None = None
 _runtime_lock = threading.RLock()
 
 
@@ -286,7 +294,10 @@ def _configure(cfg: dict) -> None:
     )
     threshold = _validate_threshold(threshold_raw)
     data_dir = Path(cfg.get("data_dir", str(_data_dir())))
-    resolved = (data_dir, threshold)
+    provider = str(cfg.get("provider", os.environ.get("VOICEPRINT_PROVIDER", "cpu"))).strip()
+    if not provider:
+        raise ValueError("provider must be a non-empty string")
+    resolved = (data_dir, threshold, provider)
 
     with _runtime_lock:
         if _db is not None:
@@ -300,6 +311,7 @@ def _configure(cfg: dict) -> None:
         _db = db
         _threshold_value = threshold
         _applied_config = resolved
+        os.environ["VOICEPRINT_PROVIDER"] = provider
         log.info(
             "voiceprint init complete: data_dir=%s threshold=%.2f enrolled=%d",
             data_dir,

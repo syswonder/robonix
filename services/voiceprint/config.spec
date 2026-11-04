@@ -1,6 +1,6 @@
 specVersion: 1
 description: >-
-  Enrollment storage and match threshold for the Voiceprint
+  Enrollment storage, match threshold and execution provider for the Voiceprint
   service. Each key takes priority over its environment fallback.
 
 # Configuration is applied once. A repeated Driver(CMD_INIT) with a different
@@ -26,3 +26,10 @@ properties:
     default: 0.55
     minimum: 0
     maximum: 1
+
+  provider:
+    type: string
+    description: >-
+      sherpa-onnx execution provider. Non-CPU providers require a matching
+      runtime installation. Environment fallback: VOICEPRINT_PROVIDER.
+    default: cpu
