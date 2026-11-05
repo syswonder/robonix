@@ -59,7 +59,7 @@ def test_to_map_object_shapes_local_objects():
     print("  [PASS] test_to_map_object_shapes_local_objects")
 
 
-def test_periodic_merge_preserves_empty_map_publication(monkeypatch):
+def test_keyframe_indices_and_periodic_merge_publication(monkeypatch):
     import numpy as np
     from scene_service.ingest import perception_dualmap
 
@@ -73,7 +73,8 @@ def test_periodic_merge_preserves_empty_map_publication(monkeypatch):
         detector._cam_info = lambda: types.SimpleNamespace(fx=1., fy=1., cx=0., cy=0.)
         detector._build_camera_to_map_transform = lambda **_: np.eye(4)
         detector._is_keyframe = lambda *_: True
-        detector._dm_data_input = lambda **_: None
+        indices = []
+        detector._dm_data_input = lambda **data: indices.append(data["idx"])
         detector._dm = types.SimpleNamespace(
             set_data_input=lambda _: None, process_detections=lambda: None,
             calculate_observations=lambda: None, get_curr_observations=lambda: [],
@@ -86,18 +87,21 @@ def test_periodic_merge_preserves_empty_map_publication(monkeypatch):
                 raise RuntimeError("stack expects a non-empty TensorList")
             merges.append(True)
         detector._lm = types.SimpleNamespace(
-            local_map=tracks, set_curr_idx=lambda _: None,
+            local_map=tracks, set_curr_idx=indices.append,
             process_observations=lambda _: None, get_global_observations=lambda: [],
             clear_global_observations=lambda: None, merge_local_map=merge,
         )
         detector._gm = None
         detector._dm_names = ["chair"]
         detector._keyframes = keyframes
+        # Skipped frames must not age tracks in DualMap's active window.
+        detector._tick_idx = keyframes * 8
         detector._project_to_registry = lambda: publications.append(True)
         detector._tick_locked()
         assert detector._consecutive_failures == 0
         assert len(merges) == expected_merges
         assert publications == [True]
+        assert indices == [keyframes, keyframes]
 
 
 def test_classes_file_from_manifest():

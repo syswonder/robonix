@@ -328,8 +328,9 @@ class DualMapDetector(ConceptGraphsDetector):
         if depth_m.ndim == 2:
             depth_m = depth_m[:, :, None]  # DualMap's DataInput carries depth as H x W x 1
         K33 = np.array([[K.fx, 0.0, K.cx], [0.0, K.fy, K.cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+        # DualMap ages tracks by processed frames, so skipped frames cannot count.
         data = self._dm_data_input(
-            idx=self._tick_idx, time_stamp=time.time(), color=rgb, depth=depth_m,
+            idx=self._keyframes, time_stamp=time.time(), color=rgb, depth=depth_m,
             color_name=f"tick{self._tick_idx:06d}", intrinsics=K33,
             pose=np.asarray(pose, dtype=np.float64),
         )
@@ -341,7 +342,7 @@ class DualMapDetector(ConceptGraphsDetector):
             obs = self._dm.get_curr_observations()
             self._dm.update_state()
             self._dm.update_data()
-            self._lm.set_curr_idx(self._tick_idx)
+            self._lm.set_curr_idx(self._keyframes)
             self._lm.process_observations(obs)
             # Stable local tracks are promoted to the global map, which merges across classes.
             promoted = self._lm.get_global_observations()

@@ -382,7 +382,7 @@ come from DualMap's own configuration and are sized for a dataset replay.
 |---|---|---|
 | **`classes`** | DualMap's 101-name domestic list | YOLO-World vocabulary. A detector can only answer with a name it was given: on the office world the domestic list cost 0.41 label accuracy against 0.82 with a 40-name office list. |
 | **`stable_num`** | 8 | observations before a track counts as stable. Sized for a replay that maps every frame; a robot at walking pace sees each object a handful of times, and at 8 one 180 s office run went from 65 tracks to 1. |
-| `active_window_size` | 10 | how many recent frames count as active. A track that leaves this window without becoming stable is dropped. |
+| `active_window_size` | 10 | how many processed keyframes count as active; skipped frames do not age tracks. A track that leaves this window without becoming stable is dropped. |
 | `max_pending_count` | 5 | rounds an unstable track survives outside that window. Raising it also delays promotion to the global map. |
 | **`keyframe_translation_m`** | 0.1 | map a frame only after this much travel |
 | **`keyframe_rotation_deg`** | 3.0 | …or this much turn |
