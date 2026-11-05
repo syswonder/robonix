@@ -234,6 +234,13 @@ def check(name: str, ok: bool, detail: str, results: list[CheckResult]) -> None:
     print(("PASS" if ok else "FAIL"), name, detail)
 
 
+def fresh_occupancy(occupancy: dict[str, Any]) -> bool:
+    return (int(occupancy.get("count") or 0) > 0
+            and float(occupancy.get("stamp_unix") or 0.0) > 0.0
+            and int(occupancy.get("width") or 0) > 0
+            and int(occupancy.get("height") or 0) > 0)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scene-url", default="http://127.0.0.1:50107")
@@ -319,10 +326,7 @@ def main() -> int:
         )
         check(
             "scene_load_reported_fresh_occupancy",
-            int(load_occupancy.get("count") or 0) > 0
-            and float(load_occupancy.get("stamp_unix") or 0.0) > 0.0
-            and int(load_occupancy.get("width") or 0) > 0
-            and int(load_occupancy.get("height") or 0) > 0,
+            fresh_occupancy(load_occupancy),
             str(load_occupancy),
             results,
         )
@@ -389,8 +393,7 @@ def main() -> int:
                   results)
 
     if args.delete_after:
-        # The map in use cannot be deleted. Saving the session under another
-        # name moves it off this one, which the runner's cleanup then removes.
+        # Save writes a snapshot; only Load activates its map identity.
         try:
             refused = http_json("POST", scene + "/api/maps/delete",
                                 {"map_id": args.map_id}, timeout=60.0)
@@ -401,6 +404,25 @@ def main() -> int:
         moved = http_json("POST", scene + "/api/maps/save",
                           {"map_id": args.map_id + "-after"}, timeout=args.timeout)
         check("save_elsewhere_ok", bool(moved.get("ok")), str(moved.get("detail", "")), results)
+        if not moved.get("ok"):
+            return 1
+        replacement_id = args.map_id + "-after"
+        activated = http_json("POST", scene + "/api/maps/load",
+                              {"map_id": replacement_id, "mode": "localization"},
+                              timeout=args.timeout)
+        print("replacement_load_response", json.dumps(activated, ensure_ascii=False, sort_keys=True))
+        check("replacement_load_ok", bool(activated.get("ok")), str(activated.get("detail", "")), results)
+        occupancy = activated.get("occupancy") if isinstance(activated.get("occupancy"), dict) else {}
+        fresh = fresh_occupancy(occupancy)
+        check("replacement_load_reported_fresh_occupancy", fresh, str(occupancy), results)
+        if not activated.get("ok") or not fresh:
+            return 1
+        state = http_json("GET", scene + "/api/state", timeout=60.0)
+        binding = state.get("map_binding") if isinstance(state.get("map_binding"), dict) else {}
+        bound = binding.get("map_id") == replacement_id and binding.get("mode") == "localization"
+        check("replacement_binding_matches", bound, str(binding), results)
+        if not bound:
+            return 1
         deleted = http_json("POST", scene + "/api/maps/delete",
                             {"map_id": args.map_id}, timeout=60.0)
         print("delete_response", json.dumps(deleted, ensure_ascii=False, sort_keys=True))

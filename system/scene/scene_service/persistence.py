@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -24,9 +25,6 @@ _COLLECTION = "scene_objects"
 
 # open_clip ViT-B-32 feature size.
 _DIM = 512
-
-# A unit vector, not zeros, so COSINE distance stays defined.
-_PLACEHOLDER_VEC = [1.0] + [0.0] * (_DIM - 1)
 
 EmbedFn = Callable[[list[str]], Optional[list[list[float]]]]
 
@@ -136,15 +134,22 @@ class ObjectStore:
         self._embed = embed_text
 
     def _embed_captions(self, captions: list[str]) -> list[list[float]]:
+        # Keep cosine distance defined without pretending to convert feature spaces.
+        placeholder = [1.0] + [0.0] * (self._dim - 1)
         if self._embed is None:
-            return [_PLACEHOLDER_VEC] * len(captions)
+            return [placeholder] * len(captions)
         try:
             vecs = self._embed(captions)
         except Exception as e:  # noqa: BLE001
             log.warning("[scene-persist] embed failed, using placeholder: %s", e)
             vecs = None
-        if not vecs or len(vecs) != len(captions):
-            return [_PLACEHOLDER_VEC] * len(captions)
+        if vecs is None or len(vecs) != len(captions):
+            return [placeholder] * len(captions)
+        if any(len(vector) != self._dim or not all(math.isfinite(x) for x in vector)
+               for vector in vecs):
+            log.warning("[scene-persist] incompatible caption embedding; keeping object geometry "
+                        "with placeholder vectors (collection dim=%d)", self._dim)
+            return [placeholder] * len(captions)
         return vecs
 
     # ── write ────────────────────────────────────────────────────────────
@@ -320,3 +325,16 @@ class ObjectStore:
             server_manager_instance.release_server(self._uri)
         except Exception:  # noqa: BLE001
             pass
+
+
+def verify_local_store() -> None:
+    """Verify embedded storage can create and query a temporary database."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="scene-storage-check-") as directory:
+        store = ObjectStore(str(Path(directory) / "objects.db"))
+        try:
+            if store.load_all(strict=True) != []:
+                raise RuntimeError("Temporary Scene database is not empty")
+        finally:
+            store.close()

@@ -69,13 +69,17 @@ logging.basicConfig(
 log = logging.getLogger("scene-service")
 # Scribe's bridge later resets the root logger's level and handlers, so this
 # logger keeps its own level and, in a container (whose console rbnx pipes to
-# scribe), its own console handler.
-log.setLevel(_LOG_LEVEL)
+# scribe), its own console handler. So do the "scene.*" loggers of the
+# perception backends and gates ("[scene-dualmap] tick ...").
+_backends = logging.getLogger("scene")
+for _logger in (log, _backends):
+    _logger.setLevel(_LOG_LEVEL)
 if Path("/.dockerenv").exists():
     _console = logging.StreamHandler()
     _console.setFormatter(
         logging.Formatter("[scene-service] %(levelname)s %(message)s"))
     log.addHandler(_console)
+    _backends.addHandler(_console)
 
 
 _lifecycle = SceneLifecycleRuntime(log)
@@ -670,6 +674,7 @@ async def _start_ros_ingest(
     registry: ObjectRegistry,
     self_tracker: "_SelfTracker",
     config: dict,
+    live_binding: dict,
 ) -> tuple[SubscribersHub, Optional[Any], list[asyncio.Task]]:
     """Start the rclpy hub and its consumers (self pose, perception), each
     its own task. Returns (hub, detector or None, background tasks).
@@ -730,6 +735,7 @@ async def _start_ros_ingest(
                 hub,
                 self_tracker,
                 pose_max_age_s=pose_max_age_s,
+                live_binding=live_binding,
             ),
             name="scene-self-pose",
         )
@@ -771,6 +777,10 @@ async def _start_ros_ingest(
             "recognised keys are %s",
             ", ".join(perception_cfg.ignored_keys), ", ".join(sorted(PERCEPTION_KEYS)),
         )
+    from .inference_config import inference_backend, validate_tensorrt_config
+
+    if inference_backend() == "tensorrt":
+        validate_tensorrt_config(profile=perception_cfg.profile, backend=perception_cfg.backend)
     profile = perception_cfg.profile
     plan = plan_perception(hub, profile, perception_cfg.backend)
     log.info("[scene] perception plan: %s", plan.summary())
@@ -1056,6 +1066,7 @@ async def _self_pose_loop(
     self_tracker: "_SelfTracker",
     *,
     pose_max_age_s: float,
+    live_binding: Optional[dict] = None,
 ) -> None:
     """Feed the tracker the robot's pose from the map pose contract, else
     odometry, in the frame the message names; frameless samples are dropped."""
@@ -1096,7 +1107,25 @@ async def _self_pose_loop(
                 and footprint is not None
                 and child_frame == footprint.base_frame
             ):
-                x, y, z, yaw, frame_id = read(msg)
+                binding = live_binding or {}
+                generation = binding.get("generation")
+                named_map = (
+                    binding.get("source") != "default"
+                    and str(binding.get("map_id") or "") not in ("", ".live")
+                    and isinstance(generation, int) and not isinstance(generation, bool)
+                    and generation >= 0
+                )
+                odom_frame = str(getattr(getattr(msg, "header", None), "frame_id", "") or "")
+                # A localization gap must not discard geometry in the active map frame.
+                if named_map and self_tracker.world_frame_id and odom_frame != self_tracker.world_frame_id:
+                    if not stale_warned:
+                        log.warning(
+                            "[scene] corrected pose unavailable; withholding odometry in frame %s "
+                            "while the active map uses %s", odom_frame, self_tracker.world_frame_id,
+                        )
+                        stale_warned = True
+                else:
+                    x, y, z, yaw, frame_id = read(msg)
 
         if x is not None and frame_id:
             self_tracker.world_frame_id = frame_id
@@ -1667,6 +1696,7 @@ async def _run_active(config: dict) -> None:
         registry=registry,
         self_tracker=self_tracker,
         config=config,
+        live_binding=live_binding,
     )
     mcp_tools.attach_state(  # again, now with the hub for goal_near
         registry=registry,

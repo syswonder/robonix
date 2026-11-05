@@ -996,6 +996,16 @@ def make_app(*, registry: ObjectRegistry,
         spatial_exists, existing_map = _map_exists_in_payload(before_payload, map_id)
         current_bound_id = str(map_binding.get("map_id") or "")
         current_mode = str(map_binding.get("mode") or "")
+        live_generation, _ = _latched_lifecycle(current_bound_id)
+        prior_generation = map_binding.get("generation")
+        has_prior_generation = (isinstance(prior_generation, int)
+                                and not isinstance(prior_generation, bool)
+                                and prior_generation >= 0)
+        preserve_live = (current_bound_id != map_id
+                         and (current_mode == "localization"
+                              or map_binding.get("source") in ("config", "env")
+                              or live_generation is not None or has_prior_generation))
+        annotation_path = str(anno_store.path) if anno_store is not None else "annotation store unavailable"
         if (anno_store is not None
                 and _sanitize_map_id(map_id) != anno_store.map_id
                 and anno_store.has_saved(map_id)):
@@ -1036,7 +1046,11 @@ def make_app(*, registry: ObjectRegistry,
         if out.get("ok"):
             gen, broadcast_mode = _latched_lifecycle(map_id)
             if anno_store is not None:
-                anno_store.rebind(map_id, generation=gen, carry_current=True)
+                if preserve_live:
+                    annotation_path = str(anno_store.snapshot(map_id, generation=gen))
+                else:
+                    anno_store.rebind(map_id, generation=gen, carry_current=True)
+                    annotation_path = str(anno_store.path)
             # Write a fresh partition, commit the sidecar only when complete,
             # then purge the previous one; a failure keeps the last snapshot.
             if map_meta is not None and object_store is not None:
@@ -1084,11 +1098,16 @@ def make_app(*, registry: ObjectRegistry,
                     log.warning("[scene-maps] no preview for %s: %s", map_id, error)
             mode_after_save = current_mode if spatial_exists and current_bound_id == map_id and current_mode else "mapping"
             photos_were = object_views.partition(map_binding) if object_views else None
-            _set_map_binding(map_id, mode_after_save, "ui_save", generation=gen)
-            if object_views is not None:
-                # A saved session's pictures follow it to the map id.
-                await asyncio.to_thread(object_views.adopt, photos_were,
-                                        object_views.partition(map_binding))
+            if preserve_live:
+                # Save does not re-key the mapping service's live identity.
+                if object_views is not None:
+                    await asyncio.to_thread(object_views.snapshot, photos_were, map_id)
+            else:
+                _set_map_binding(map_id, mode_after_save, "ui_save", generation=gen)
+                if object_views is not None:
+                    # An ephemeral session's pictures follow its first saved id.
+                    await asyncio.to_thread(object_views.adopt, photos_were,
+                                            object_views.partition(map_binding))
             if object_persist_error is not None:
                 # Save is geometry + regions + objects as one unit, so a
                 # missing snapshot fails it. After a mapping-session save the
@@ -1127,7 +1146,7 @@ def make_app(*, registry: ObjectRegistry,
                 "paths": {
                     "map_artifact": (saved_map or {}).get("artifact_path") or "not exposed by map provider",
                     "preview": (saved_map or {}).get("preview_path") or "not exposed by map provider",
-                    "scene_annotations": str(anno_store.path) if anno_store is not None else "annotation store unavailable",
+                    "scene_annotations": annotation_path,
                 },
                 "log": [
                     f"save_map returned ok={bool(out.get('ok'))}: {out.get('detail') or ''}",
@@ -1900,20 +1919,8 @@ def _cgroup_cpu_usec():
 
 
 def _gpu_sample():
-    """GPU memory this process reserved, and the card's utilisation.
-
-    Torch knows what this process holds, which is the honest number for "what
-    does this backend cost"; the card's total and utilisation come from NVML
-    when it is available and are shared with whatever else runs on the GPU.
-    """
+    """Card-wide memory and utilization from NVML."""
     out = {}
-    try:
-        import torch
-        if torch.cuda.is_available():
-            out["gpu_reserved_mb"] = torch.cuda.memory_reserved() / 1e6
-            out["gpu_allocated_mb"] = torch.cuda.memory_allocated() / 1e6
-    except Exception:  # noqa: BLE001
-        pass
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -1936,6 +1943,16 @@ def _cost_sample(detector):
     if backend is None and detector is not None:
         backend = type(detector).__name__
     sample["backend"] = backend or "none"
+
+    engines = getattr(detector, "_engines", None)
+    if engines is not None and hasattr(engines, "device_memory_bytes"):
+        sample["gpu_engine_mb"] = engines.device_memory_bytes / 1e6
+
+    elif engines is not None and getattr(engines, "device", "cpu") == "cuda":
+        import torch
+
+        sample["gpu_allocated_mb"] = torch.cuda.memory_allocated() / 1e6
+        sample["gpu_reserved_mb"] = torch.cuda.memory_reserved() / 1e6
 
     mem = _read_first("/sys/fs/cgroup/memory.current")
     if mem is None:

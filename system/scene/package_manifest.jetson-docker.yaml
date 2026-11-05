@@ -1,13 +1,6 @@
-# Scene MCP server — Jetson + DOCKER deployment target.
-#
-#   build → RBNX_BUILD_TARGET=jetson-docker scripts/build.sh: docker build
-#           with docker/Dockerfile.jetson (NVIDIA L4T PyTorch base, so torch +
-#           CUDA come from the image instead of host-cu128 x86 wheels).
-#   start → ROBONIX_SCENE_FORCE=docker scripts/start.sh: docker run with the
-#           NVIDIA container runtime for GPU passthrough.
-#
-# Use this on a Jetson when you want a self-contained image (no host ROS /
-# torch needed). Heavier first build than jetson-native; see the scene README.
+# Scene deployment with application code, ROS and GPU libraries in one image.
+# The build selects a Jetson profile and validates the candidate on the GPU.
+# The host needs Docker with NVIDIA Container Toolkit; see README.md.
 manifestVersion: 1
 
 package:

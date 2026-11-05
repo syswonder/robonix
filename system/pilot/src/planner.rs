@@ -333,11 +333,9 @@ struct TreeMeta {
     /// cancellable in-flight work — a cancel is not itself a task tree, and
     /// listing it makes the model cancel its own term_signals in a loop.
     control_only: bool,
-    /// Canonical provider/contract/args signatures for calls in this tree.
-    /// The harness rejects a second tree containing an identical call while
-    /// the first is still in flight; execution latency must not duplicate a
-    /// physical or external command.
-    call_signatures: HashSet<String>,
+    /// Canonical provider/contract/args signatures of unfinished calls, keyed
+    /// by node index so identical sibling calls remain independently protected.
+    call_signatures: HashMap<u32, String>,
     /// Ordered executable leaves from the original RTDL graph. Keeping these
     /// visible lets the model target any semantic boundary in one control call
     /// instead of querying live state first or guessing what "current" means.
@@ -369,6 +367,8 @@ enum TreeInterrupt {
         plan_id: String,
         results: Vec<RtdlNodeState>,
         any_failed: bool,
+        /// False when the latest leaf failure already requested recovery.
+        replan: bool,
         /// True when this tree ended because it was canceled (a node reached
         /// CANCELED), as opposed to running to natural success/failure. A
         /// cancellation fulfils a prior decision and carries no new info, so the
@@ -449,6 +449,11 @@ async fn handle_interrupt(
             // be explicit so the live view always correlates with the Plan
             // already sent).
             ns.plan_id = plan_id.clone();
+            if is_terminal_executor_state(ns.state)
+                && let Some(tree) = forest.trees.get_mut(&plan_id)
+            {
+                tree.call_signatures.remove(&ns.node_index);
+            }
             // VERIFYING is deliberately non-terminal. Feed only a leaf's
             // post-verification final state so history never contains an
             // optimistic result that must be corrected.
@@ -473,7 +478,8 @@ async fn handle_interrupt(
             // without blocking on still-running sibling branches. Successes
             // still batch at tree completion, which avoids per-node re-plan
             // storms.
-            let replan = is_terminal_executor_state(ns.state)
+            let terminal_leaf = is_terminal_executor_state(ns.state) && ns.leaf_result.is_some();
+            let replan = terminal_leaf
                 && ns.state != RtdlNodeStateEnum::Succeeded as u32
                 && !forest.kill_pending.contains(&plan_id)
                 && tasks.any_open();
@@ -491,6 +497,7 @@ async fn handle_interrupt(
             plan_id,
             results,
             any_failed,
+            replan,
             canceled,
         } => {
             forest.trees.remove(&plan_id);
@@ -536,12 +543,13 @@ async fn handle_interrupt(
             // cancellation Pilot asked for is fulfilled. Unsolicited canceled
             // events stay quiet, preventing a self-feeding cancel storm across
             // unrelated sibling trees.
-            should_replan_after_plan_done(
-                canceled,
-                requested_cancellation,
-                forest.kill_pending.is_empty(),
-                tasks.any_open(),
-            )
+            (replan || requested_cancellation)
+                && should_replan_after_plan_done(
+                    canceled,
+                    requested_cancellation,
+                    forest.kill_pending.is_empty(),
+                    tasks.any_open(),
+                )
         }
     }
 }
@@ -560,6 +568,7 @@ async fn drive_plan(
     let mut any_failed = execution.transport_failed;
     let mut canceled = false;
     let mut completed = false;
+    let mut replan_on_completion = true;
     loop {
         let next = if let Some(event) = execution.events.pop_front() {
             Ok(Some(event))
@@ -590,6 +599,9 @@ async fn drive_plan(
                     // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
                         forest_revision.fetch_add(1, Ordering::Release);
+                        if ns.leaf_result.is_some() {
+                            replan_on_completion = ns.state == RtdlNodeStateEnum::Succeeded as u32;
+                        }
                         if ns.state == RtdlNodeStateEnum::Canceled as u32 {
                             // Cancellation is not a failure to recover from — it
                             // is the model's own stop request taking effect. Flag
@@ -615,11 +627,13 @@ async fn drive_plan(
         }
     }
 
+    let replan = replan_on_completion || canceled || !completed || execution.transport_failed;
     forest_revision.fetch_add(1, Ordering::Release);
     let _ = interrupt_tx.send(TreeInterrupt::Completion {
         plan_id,
         results,
         any_failed,
+        replan,
         canceled,
     });
 }
@@ -1624,9 +1638,10 @@ pub async fn run_turn(
         let forbidden: HashSet<String> = forest
             .trees
             .values()
-            .flat_map(|tree| tree.call_signatures.iter().cloned())
+            .flat_map(|tree| tree.call_signatures.values().cloned())
             .collect();
         let mut stream_error: Option<anyhow::Error> = None;
+        let mut execution_failed = false;
         let mut invalid_output = false;
         let mut reasoning_bytes = 0_usize;
         let idle = tokio::time::sleep(vlm_idle_timeout());
@@ -1658,7 +1673,7 @@ pub async fn run_turn(
                 event = live.next(), if live.output.is_some() => {
                     match event {
                         Ok(Some(event)) => {
-                            if live.remember(event) { stream_error = Some(anyhow::anyhow!("Executor node failed during generation")); break; }
+                            if live.remember(event) { execution_failed = true; break; }
                         }
                         Ok(None) => { live.transport_failed = true; stream_error = Some(anyhow::anyhow!("Executor EOF during generation")); break; }
                         Err(error) => { live.transport_failed = true; stream_error = Some(error.into()); break; }
@@ -1688,12 +1703,12 @@ pub async fn run_turn(
                             match submission {
                                 Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
-                                    stream_error = Some(anyhow::anyhow!("Executor node failed during submission")); break;
+                                    execution_failed = true; break;
                                 }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
                                     drop(stream);
                                     live.cancel(&mut executor.control).await?;
-                                    should_plan = false;
+                                    should_plan = true;
                                     continue 'supervisor;
                                 }
                                 Ok(None) => {},
@@ -1713,6 +1728,33 @@ pub async fn run_turn(
             }
         }
         drop(stream);
+        if execution_failed {
+            let failed_plan_id = live.plan.plan_id.clone();
+            let cleanup = live.cancel(&mut executor.control).await;
+            let transport_failed = live.transport_failed;
+            publish_stream(live, forest, history, tx, &session_id).await;
+            cleanup?;
+            anyhow::ensure!(
+                !transport_failed,
+                "Executor transport failed while retaining execution feedback"
+            );
+            // A canceled sibling may still be finishing; consume the retained failure before replanning.
+            loop {
+                let event = forest
+                    .interrupt_rx
+                    .recv()
+                    .await
+                    .context("execution feedback channel closed")?;
+                let failure_seen = matches!(&event, TreeInterrupt::NodeState { plan_id, node_state }
+                    if plan_id == &failed_plan_id && matches!(node_state.state, 3..=5));
+                handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await;
+                if failure_seen {
+                    break;
+                }
+            }
+            should_plan = true;
+            continue 'supervisor;
+        }
         if reasoning_bytes > 0 {
             debug!(
                 "[pilot/vlm] round={round} model thought for {reasoning_bytes} byte(s) before replying"
@@ -1778,7 +1820,7 @@ pub async fn run_turn(
         if live.plan.nodes.is_empty()
             && forest.revision.load(Ordering::Acquire) != planning_revision
         {
-            should_plan = false;
+            should_plan = true;
             continue 'supervisor;
         }
         let assistant_content = envelope.content;
@@ -2056,7 +2098,7 @@ Tasks (ids from the status board):
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
-Copy each cap exactly from the current catalog. A dispatch record describes submitted RTDL nodes, not actual capability invocations. Use Executor leaf feedback to confirm calls that ran. A successful repeat result reports how many times its body ran, including zero. Do not repeat successful work.
+Copy each cap exactly from the current catalog. Scope feedback by plan_id/call_id. A dispatch record describes submitted RTDL nodes, not actual capability invocations. Use Executor leaf feedback to confirm calls that ran. A successful repeat result reports how many times its body ran, including zero. Do not repeat successful work.
 "#;
 
 /// One parsed RTDL envelope from the VLM.
@@ -2162,468 +2204,10 @@ fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
     })
 }
 
-/// Distinguish plan and node ids from those retained across Pilot restarts.
-pub(crate) static RUN_TAG: LazyLock<String> =
-    LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
-fn extract_json_object(raw: &str) -> Option<&str> {
-    let bytes = raw.as_bytes();
-    let start = bytes.iter().position(|&b| b == b'{')?;
-    let mut depth = 0usize;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&raw[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// The reply fields besides the task fields of `tasks::REPLY_FIELDS`.
-const REPLY_CORE_FIELDS: [&str; 3] = ["content", "rtdl_description", "rtdl"];
-
-/// Tolerates a prose preamble or trailing commentary around the JSON object
-/// (a common model habit, e.g. a narration line then the JSON on the next
-/// line) by extracting the first balanced `{...}` before parsing; the raw
-/// string is used unchanged when no object is found, so a genuinely
-/// JSON-less reply still surfaces the original parse error.
-///
-/// Fails if `raw` is not valid JSON, the root is not an object, a field is
-/// unknown or one of `content`, `rtdl_description`, `rtdl` is missing,
-/// `content` / `rtdl_description` are not strings, `rtdl` is not an object, or
-/// a task field is malformed (`tasks::parse_task_fields`).
-fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
-    let candidate = extract_json_object(raw).unwrap_or(raw);
-    let v: serde_json::Value = serde_json::from_str(candidate)?;
-    let obj = v
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("assistant response must be a JSON object"))?;
-    if let Some(key) = obj.keys().find(|key| {
-        !REPLY_CORE_FIELDS.contains(&key.as_str()) && !tasks::REPLY_FIELDS.contains(&key.as_str())
-    }) {
-        anyhow::bail!("assistant response has an unknown field `{key}`");
-    }
-    if let Some(key) = REPLY_CORE_FIELDS
-        .iter()
-        .find(|key| !obj.contains_key(**key))
-    {
-        anyhow::bail!(
-            "assistant response must contain `content`, `rtdl_description` and `rtdl`; `{key}` is missing"
-        );
-    }
-    let content = obj
-        .get("content")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!("assistant `content` must be a string"))?
-        .to_string();
-    let rtdl_description = obj
-        .get("rtdl_description")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!("assistant `rtdl_description` must be a string"))?
-        .to_string();
-    let rtdl = obj
-        .get("rtdl")
-        .filter(|x| x.is_object())
-        .ok_or_else(|| anyhow::anyhow!("assistant `rtdl` must be an object"))?
-        .clone();
-    Ok(RtdlEnvelope {
-        content,
-        rtdl_description,
-        rtdl,
-        task_fields: tasks::parse_task_fields(obj)?,
-    })
-}
-
-fn raw_preview(raw: &str) -> String {
-    if raw.is_empty() {
-        return "assistant content was empty".to_string();
-    }
-    let preview: String = raw.chars().take(240).collect();
-    let ellipsis = if raw.chars().count() > 240 { "..." } else { "" };
-    format!("assistant content preview: {preview:?}{ellipsis}")
-}
-
-// ── RTDL recovery (merged from dev #88) ────────────────────────────────────────
-// When the VLM emits an RTDL that fails to parse or expand, feed the error back
-// once and let it self-correct; a second failure ends the turn gracefully.
-
-/// Corrective prompt appended to the next VLM round after a rejected reply — a
-/// parse or expand failure, plan control that cannot apply, or an empty dispatch
-/// that contradicts the task state.
-fn build_rtdl_retry_prompt(
-    err: &anyhow::Error,
-    raw_content: &str,
-    display_caps: &[DisplayCapability<'_>],
-) -> String {
-    let mut p = format!(
-        "Your previous RTDL response was rejected by Pilot.\n\
-         Error: {err:#}\n\
-         Previous response preview: {}\n\n\
-         Fix the RTDL error and retry the same user request exactly once. If the error \
-         mentions an unknown capability, do not repeat that capability. Return ONLY a JSON object \
-         with `content`, `message_updates`, `rtdl_parent_task_id`, `rtdl_description`, `rtdl` and `task_updates`. The reply MUST begin \
-         with `{{` and end with `}}`: no prose, narration, or markdown fences before or after it (put \
-         any user-facing text inside `content`). Use only \
-         capability_name values from this list; do not invent provider names, method names, or \
-         aliases:\n",
-        raw_preview(raw_content)
-    );
-    for cap in display_caps {
-        p.push_str("- ");
-        p.push_str(&cap.display_name);
-        p.push('\n');
-    }
-    // A truncated reply and a malformed one read the same to a parser, but the
-    // model can only act on the first if it is told which it was. deepseek-v3.2
-    // copied the task text back into its reply every round, hit the
-    // output ceiling and had its JSON cut mid-string; "fix the RTDL error" gave
-    // it nothing to change, and it repeated the same reply.
-    let truncated = format!("{err:#}").contains("EOF while parsing");
-    if truncated {
-        p.push_str(
-            "\nYour reply was cut off because it ran past the output limit. Do not \
-             restate the user's messages, the action catalogue, or any other prompt \
-             text; refer to messages and tasks by id. Keep the whole reply short.\n",
-        );
-    }
-    p.push_str(
-        "\nIf no further capability call is needed, use \
-         {\"op\":\"sequence\",\"children\":[]} as `rtdl` with `rtdl_parent_task_id: null`, and close a \
-         finished task in `task_updates`. If the user's requested action cannot be performed \
-         using the listed capabilities, explain the missing capability in `content`, return an \
-         empty RTDL sequence and close that task as `failed`, instead of inventing a capability.\n",
-    );
-    p
-}
-
-/// A reply that calls no capability while declaring the task in progress and
-/// leaving nothing running: nothing will advance the task, so the turn cannot
-/// either.
-///
-/// Idleness needs both signals. `forest` covers this turn's dispatches,
-/// including one Executor has not registered yet; `executor_active_plans` is the
-/// count from the snapshot fetched before this round's request — the plan table
-/// as the model was shown it, covering earlier turns and other sessions — so a
-/// plan registered while the model was thinking is not in it, and a listed plan
-/// may be cancelled or verifying rather than running. A failed query reports
-/// `None`, which is not proof of idleness.
-fn empty_dispatch_problem(
-    plan: &Plan,
-    fields: &TaskFields,
-    in_flight: bool,
-    executor_active_plans: Option<usize>,
-) -> Option<String> {
-    let keeps_open = fields
-        .updates
-        .iter()
-        .any(|update| update.status.as_deref() == Some(tasks::IN_PROGRESS));
-    if !keeps_open || plan_call_count(plan) > 0 || in_flight {
-        return None;
-    }
-    if executor_active_plans != Some(0) {
-        return None;
-    }
-    Some(
-        "`rtdl` calls no capability while a task update keeps a task `in_progress` and nothing \
-         is in flight: dispatch its next step, ask in `content` for what you need (and leave \
-         `task_updates` empty), or close the task when its success criterion holds."
-            .to_string(),
-    )
-}
-
-/// End a turn whose reply was rejected: an empty no-op plan, no meta op, and
-/// what the model said as the answer to show — the recovery text when it said
-/// nothing.
-fn end_turn_after_rejection(
-    assistant_content: String,
-    session_id: &str,
-    round: u32,
-) -> (
-    String,
-    String,
-    Option<Plan>,
-    Option<MetaPlanOp>,
-    String,
-    TaskFields,
-    bool,
-) {
-    let plan_id = String::new();
-    let graph = empty_sequence_plan(plan_id.clone(), session_id.to_string(), round);
-    let reply = if assistant_content.trim().is_empty() {
-        rtdl_recovery_final_text()
-    } else {
-        assistant_content
-    };
-    (
-        reply,
-        String::new(),
-        Some(graph),
-        None,
-        plan_id,
-        TaskFields::default(),
-        true,
-    )
-}
-
-/// A single empty-sequence root plan, used as the no-op plan when a turn ends in
-/// RTDL recovery. Carries non-empty `op_id`/`description` so executor's
-/// `validate_plan` accepts it.
-fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan {
-    Plan {
-        plan_id,
-        session_id,
-        round,
-        nodes: vec![RtdlNode {
-            node_kind: RTDL_SEQUENCE,
-            children: Vec::new(),
-            call: None,
-            op_id: "recovery".to_string(),
-            description: "recovery: no valid plan produced".to_string(),
-            condition_json: "".to_string(),
-            bind: "".to_string(),
-            repeat_count: 0,
-            max_iterations: 0,
-        }],
-        root_index: 0,
-    }
-}
-
-/// User-facing message when RTDL recovery gives up — never leaks the internal error.
-fn rtdl_recovery_final_text() -> String {
-    "I couldn't produce a valid robot plan after retrying once. Please try again or rephrase the request."
-        .to_string()
-}
-
-/// Process-wide monotonic source of node `op_id`s. The LLM-emitted RTDL does
-/// not carry a usable op_id (it defaults to 0), so pilot assigns one itself
-/// while parsing: a globally-unique, auto-incrementing id starting at 1.
-/// "Global" = across every plan/round in this pilot process, so each node in
-/// the live task-graph forest is uniquely addressable for steering and result
-/// correlation — not merely unique within one plan.
-static OP_ID_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Four hex characters naming this Pilot process. Both counters restart at 0
-/// on every start, while a session restored from its transcript still refers
-/// to the ids of the run that wrote it, and a surviving Executor still holds
-/// the plans that run dispatched. The tag keeps them apart with nothing to
-/// seed or persist. Four characters because components restart on their own
-/// after a failure, so two adjacent runs must not draw the same tag; short
-/// because the model copies these ids by hand out of the In-flight trees block.
+/// Distinguishes this Pilot process's ids from ids restored with earlier sessions.
 pub static RUN_TAG: LazyLock<String> =
     LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
 
-/// Allocate the next global op_id (`a7c3-1`, `a7c3-2`, …).
-fn next_op_id() -> String {
-    format!(
-        "{}-{}",
-        *RUN_TAG,
-        OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1
-    )
-}
-
-fn expand_rtdl_to_plan(
-    rtdl: &serde_json::Value,
-    target_map: &CapabilityTargetMap,
-    plan_id: String,
-    session_id: String,
-    round: u32,
-    root_description: &str,
-) -> Result<Plan> {
-    let mut nodes = Vec::new();
-    let mut next_call = 0usize;
-    let root_index = expand_rtdl_node(
-        rtdl,
-        "$",
-        target_map,
-        plan_id.as_str(),
-        root_description,
-        &mut next_call,
-        &mut nodes,
-    )?;
-    Ok(Plan {
-        plan_id,
-        session_id,
-        round,
-        nodes,
-        root_index,
-    })
-}
-
-/// Pick a node's `description`, in priority order:
-/// 1. the LLM's own per-node `description` field when present and non-empty;
-/// 2. the LLM's tree label (`rtdl_description`) for an otherwise-unlabelled root;
-/// 3. a synthesized fallback (e.g. `call camera_snapshot`).
-///
-/// The model is asked to author a node-level `description` for every node (see
-/// `RTDL_PROTOCOL_REMINDER`); the fallbacks keep a sloppy or older reply from failing
-/// the turn, since executor's `validate_plan` requires a non-empty description.
-fn pick_description(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    path: &str,
-    root_description: &str,
-    synthesized: String,
-) -> String {
-    if let Some(d) = obj.get("description").and_then(|x| x.as_str()) {
-        let d = d.trim();
-        if !d.is_empty() {
-            return d.to_string();
-        }
-    }
-    if path == "$" && !root_description.is_empty() {
-        return root_description.to_string();
-    }
-    synthesized
-}
-
-/// Reject node fields outside the allowed set and require the structural ones.
-///
-/// `required` lists the keys an operator must carry beyond `op` (e.g.
-/// `children` for sequence/parallel; `cap` + `args` for do). `op_id` and
-/// `description` are always optional — the model emits them (op_id defaults to
-/// 0, which pilot ignores and reassigns), but a reply that omits them still
-/// parses. Any other key (`out`, `id`, `plan_id`, …) is an error.
-fn reject_unknown_node_keys(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    path: &str,
-    op: &str,
-    required: &[&str],
-) -> Result<()> {
-    const OPTIONAL: [&str; 2] = ["op_id", "description"];
-    for key in obj.keys() {
-        let known =
-            key == "op" || required.contains(&key.as_str()) || OPTIONAL.contains(&key.as_str());
-        if !known {
-            anyhow::bail!("{path}: {op} node has unexpected field `{key}`");
-        }
-    }
-    for req in required {
-        if !obj.contains_key(*req) {
-            anyhow::bail!("{path}: {op} node must contain `{req}`");
-        }
-    }
-    Ok(())
-}
-
-fn expand_rtdl_node(
-    node: &serde_json::Value,
-    path: &str,
-    target_map: &CapabilityTargetMap,
-    plan_id: &str,
-    root_description: &str,
-    next_call: &mut usize,
-    nodes: &mut Vec<RtdlNode>,
-) -> Result<u32> {
-    let obj = node
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("{path}: RTDL node must be an object"))?;
-    let op = obj
-        .get("op")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!("{path}.op must be a string"))?;
-
-    match op {
-        "sequence" | "parallel" => {
-            reject_unknown_node_keys(obj, path, op, &["children"])?;
-            let children = obj
-                .get("children")
-                .and_then(|x| x.as_array())
-                .ok_or_else(|| anyhow::anyhow!("{path}.children must be an array"))?;
-            let node_index = nodes.len() as u32;
-            let node_kind = if op == "sequence" {
-                RTDL_SEQUENCE
-            } else {
-                RTDL_PARALLEL
-            };
-            let description = pick_description(
-                obj,
-                path,
-                root_description,
-                format!("{op} of {} step(s)", children.len()),
-            );
-            nodes.push(RtdlNode {
-                node_kind,
-                children: Vec::new(),
-                call: None,
-                op_id: next_op_id(),
-                description,
-                condition_json: "".to_string(),
-                bind: "".to_string(),
-                repeat_count: 0,
-                max_iterations: 0,
-            });
-            let mut child_indices = Vec::with_capacity(children.len());
-            for (idx, child) in children.iter().enumerate() {
-                let child_index = expand_rtdl_node(
-                    child,
-                    &format!("{path}.children[{idx}]"),
-                    target_map,
-                    plan_id,
-                    root_description,
-                    next_call,
-                    nodes,
-                )?;
-                child_indices.push(child_index);
-            }
-            nodes[node_index as usize].children = child_indices;
-            Ok(node_index)
-        }
-        "do" => {
-            reject_unknown_node_keys(obj, path, op, &["cap", "args"])?;
-            let cap = obj
-                .get("cap")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| anyhow::anyhow!("{path}.cap must be a string"))?;
-            let args = obj
-                .get("args")
-                .filter(|x| x.is_object())
-                .ok_or_else(|| anyhow::anyhow!("{path}.args must be an object"))?;
-            let (provider_id, contract_id) = target_map
-                .get(cap)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("{path}.cap unknown capability `{cap}`"))?;
-            let call_index = *next_call;
-            *next_call += 1;
-            let node_index = nodes.len() as u32;
-            let description = pick_description(obj, path, root_description, format!("call {cap}"));
-            nodes.push(RtdlNode {
-                node_kind: RTDL_DO,
-                children: Vec::new(),
-                call: Some(CapabilityCall {
-                    call_id: format!("{plan_id}:{call_index}"),
-                    provider_id,
-                    contract_id,
-                    args_json: serde_json::to_string(args)?,
-                }),
-                op_id: next_op_id(),
-                description,
-                condition_json: "".to_string(),
-                bind: "".to_string(),
-                repeat_count: 0,
-                max_iterations: 0,
-            });
-            Ok(node_index)
-        }
-        other => anyhow::bail!("{path}.op unknown operator `{other}`"),
-    }
-}
 fn plan_call_count(plan: &Plan) -> usize {
     plan.nodes
         .iter()
@@ -2631,11 +2215,15 @@ fn plan_call_count(plan: &Plan) -> usize {
         .count()
 }
 
-fn plan_call_signatures(plan: &Plan) -> HashSet<String> {
+fn plan_call_signatures(plan: &Plan) -> HashMap<u32, String> {
     plan.nodes
         .iter()
-        .filter_map(|node| node.call.as_ref())
-        .map(call_signature)
+        .enumerate()
+        .filter_map(|(index, node)| {
+            node.call
+                .as_ref()
+                .map(|call| (index as u32, call_signature(call)))
+        })
         .collect()
 }
 
@@ -2968,7 +2556,6 @@ fn log_plan_complete(plan_id: &str, results: &[RtdlNodeState], any_failed: bool)
         line.push_str(&non_success.join(", "));
         line.push(']');
     }
-    line.push_str("; replanning");
     info!("{line}");
 }
 
@@ -3678,7 +3265,7 @@ mod tests {
                 TreeMeta {
                     description: description.into(),
                     control_only: false,
-                    call_signatures: HashSet::new(),
+                    call_signatures: HashMap::new(),
                     steps: vec![TreeStep {
                         op_id: format!("op-{plan_id}"),
                         description: description.into(),
@@ -3734,7 +3321,7 @@ mod tests {
             TreeMeta {
                 description: "ordered multi-step task".into(),
                 control_only: false,
-                call_signatures: HashSet::new(),
+                call_signatures: HashMap::new(),
                 steps: vec![
                     TreeStep {
                         op_id: "op-restaurant".into(),
@@ -3775,6 +3362,436 @@ mod tests {
         assert!(scope.contains("plan_id=9"));
         assert!(scope.contains("start greet watch"));
         assert!(scope.contains("does not cancel or invalidate other in-flight trees"));
+    }
+
+    type ExecutorEventSender =
+        tokio::sync::mpsc::Sender<Result<crate::pb::executor::RtdlEvent, tonic::Status>>;
+
+    /// Stream transport that executes accepted leaves before model output ends.
+    #[derive(Clone, Default)]
+    struct FastLeafExecutor {
+        /// Submitted leaf arguments, proving completed work is never redispatched.
+        calls: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        /// Output receiving cancellation's terminal event.
+        output: std::sync::Arc<tokio::sync::Mutex<Option<ExecutorEventSender>>>,
+        /// Exact plan admitted by the incremental input stream.
+        plan_id: std::sync::Arc<tokio::sync::Mutex<String>>,
+    }
+
+    #[tonic::async_trait]
+    impl crate::pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStream for FastLeafExecutor {
+        type ExecuteStreamStream = tokio_stream::wrappers::ReceiverStream<Result<crate::pb::executor::RtdlEvent, tonic::Status>>;
+        async fn execute_stream(&self, request: tonic::Request<tonic::Streaming<crate::pb::executor::ExecuteStreamInput>>) -> Result<tonic::Response<Self::ExecuteStreamStream>, tonic::Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            *self.output.lock().await = Some(tx.clone());
+            let mut input = request.into_inner();
+            let state = self.clone();
+            tokio::spawn(async move {
+                while let Some(message) = input.message().await.unwrap() {
+                    if message.message_kind == crate::rtdl_stream::EXECUTE_STREAM_START {
+                        *state.plan_id.lock().await = message.plan_id;
+                    }
+                    if let Some(call) = message.node.and_then(|node| node.call) {
+                        state.calls.lock().await.push(call.args_json.clone());
+                        let failed = call.args_json.contains("missing");
+                        tx.send(Ok(crate::pb::executor::RtdlEvent {
+                            event_kind: super::RtdlEventEnum::NodeState as u32,
+                            node_state: Some(RtdlNodeState {
+                                node_index: message.node_index,
+                                state: if failed { RtdlNodeStateEnum::Failed } else { RtdlNodeStateEnum::Succeeded } as u32,
+                                leaf_result: Some(CapabilityCallResult {
+                                    call_id: call.call_id, contract_id: call.contract_id,
+                                    success: !failed, output: if failed { "" } else { "completed action" }.into(),
+                                    error: if failed { "No such file or directory" } else { "" }.into(),
+                                    ..Default::default()
+                                }), ..Default::default()
+                            }), ..Default::default()
+                        })).await.unwrap();
+                    }
+                }
+            });
+            Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlan for FastLeafExecutor {
+        async fn control_plan(&self, request: tonic::Request<crate::pb::executor::ControlPlanRequest>) -> Result<tonic::Response<crate::pb::executor::ControlPlanResponse>, tonic::Status> {
+            let request = request.into_inner();
+            assert_eq!(request.action, "cancel");
+            assert_eq!(request.plan_id, *self.plan_id.lock().await);
+            self.output.lock().await.as_ref().unwrap().send(Ok(crate::pb::executor::RtdlEvent {
+                event_kind: super::RtdlEventEnum::PlanComplete as u32,
+                plan_complete: Some(crate::pb::executor::RtdlPlanComplete { plan_id: request.plan_id, any_failed: true }),
+                ..Default::default()
+            })).await.unwrap();
+            Ok(tonic::Response::new(crate::pb::executor::ControlPlanResponse { success: true, completed: true, ..Default::default() }))
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_business_failure_during_generation_replans_with_real_results() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let registry = std::sync::Arc::new(robonix_atlas::service::AtlasRegistry::default());
+        registry
+            .register(
+                "executor",
+                atlas_pb::Kind::Service,
+                "robonix/system/executor",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .declare(
+                "executor",
+                "robonix/system/executor/builtin/read_file",
+                atlas_pb::Transport::Mcp,
+                "http://127.0.0.1:1/mcp",
+                atlas_pb::TransportParams {
+                    kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
+                        input_schema_json:
+                            r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+                    })),
+                },
+                "Read a file",
+            )
+            .await
+            .unwrap();
+        let execution = FastLeafExecutor::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures_util::stream::unfold(listener, |listener| async {
+            let stream = listener.accept().await.map(|(stream, _)| stream);
+            Some((stream, listener))
+        });
+        let grpc = tokio::spawn(tonic::transport::Server::builder()
+            .add_service(atlas_pb::atlas_server::AtlasServer::new(robonix_atlas::service::AtlasService::new(registry)))
+            .add_service(crate::pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStreamServer::new(execution.clone()))
+            .add_service(crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer::new(execution.clone()))
+            .serve_with_incoming(incoming));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let model_address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let received = requests.clone();
+        let http = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let received = received.clone();
+                handlers.spawn(async move {
+                    let mut raw = Vec::new(); let mut bytes = [0; 4096];
+                    loop {
+                        let count = socket.read(&mut bytes).await.unwrap(); assert!(count > 0);
+                        raw.extend_from_slice(&bytes[..count]);
+                        if let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                            let headers = std::str::from_utf8(&raw[..end]).unwrap();
+                            let length: usize = headers.lines().find_map(|line| {
+                                let (name,value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                            }).unwrap();
+                            if raw.len() >= end + 4 + length { received.lock().await.push(String::from_utf8(raw[end+4..].to_vec()).unwrap()); break; }
+                        }
+                    }
+                    let content = if index == 0 {
+                        r#"{"content":"","rtdl_description":"recover file access","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"op":"sequence","description":"recover file access","children":[{"op":"do","cap":"executor.builtin_read_file","args":{"path":"completed"}},{"op":"do","cap":"executor.builtin_read_file","args":{"path":"missing"}}"#.to_string()
+                    } else {
+                        json!({"content":"failure observed; recovered", "rtdl_description":"done", "rtdl":{"op":"sequence","children":[]},"message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[{"task_id":"T1","status":"done"}]}).to_string()
+                    };
+                    let event = format!("data: {}\n\n", json!({"choices":[{"delta":{"content":content}}]}));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                    socket.write_all(format!("{:x}\r\n{}\r\n",event.len(),event).as_bytes()).await.unwrap();
+                    if index == 0 { std::future::pending::<()>().await; }
+                    let end = "data: [DONE]\n\n";
+                    socket.write_all(format!("{:x}\r\n{}\r\n0\r\n\r\n",end.len(),end).as_bytes()).await.unwrap();
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut executor = super::ExecutorConn {
+            streaming: super::RobonixSystemExecutorExecuteStreamClient::new(channel.clone()),
+            graph: super::RobonixSystemExecutorExecuteClient::new(channel.clone()),
+            control: super::RobonixSystemExecutorControlPlanClient::new(channel.clone()),
+            active: super::RobonixSystemExecutorListActivePlansClient::new(channel),
+        };
+        let vlm = crate::vlm::VlmClient::new(&crate::config::VlmConfig {
+            upstream: format!("http://{model_address}"),
+            api_key: String::new(),
+            model: "test".into(),
+            context_window_tokens: None,
+            api_format: "openai".into(),
+        });
+        let task = Task {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            text: "recover a missing file".into(),
+            ..Default::default()
+        };
+        let mut history = Vec::new();
+        let mut tasks = TaskTable::default();
+        let mut forest = super::SessionForest::default();
+        let mut transcript = crate::transcript::Transcript::new(&task.session_id, &history, &tasks);
+        let (_term, term) = tokio::sync::watch::channel(false);
+        let (_steer, steer) = tokio::sync::mpsc::channel(4);
+        let (tx, mut events) = tokio::sync::mpsc::channel(128);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::run_turn(
+                &task,
+                &mut history,
+                &mut tasks,
+                &mut forest,
+                &vlm,
+                &mut executor,
+                &mut robonix_atlas::client::AtlasClient::connect(format!("http://{address}"))
+                    .await
+                    .unwrap(),
+                "pilot",
+                &tx,
+                term,
+                steer,
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                &HistoryBudget::new(None, "test"),
+                &mut transcript,
+            ),
+        )
+        .await;
+        http.abort();
+        grpc.abort();
+        let result = result.expect("generation must finish within its test bound");
+        assert!(
+            result.is_ok(),
+            "business failure must reach replanning, not turn Internal error: {result:?}"
+        );
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("No such file or directory"));
+        assert!(requests[1].contains("completed action"));
+        assert_eq!(
+            execution.calls.lock().await.len(),
+            2,
+            "completed or failed leaves must not be redispatched"
+        );
+        let mut failed_leaf = false;
+        while let Ok(event) = events.try_recv() {
+            let event = event.unwrap();
+            failed_leaf |= event.batch_result.is_some_and(|batch| {
+                batch.results.iter().any(|node| {
+                    node.leaf_result.as_ref().is_some_and(|result| {
+                        !result.success && result.error.contains("No such file")
+                    })
+                })
+            });
+        }
+        assert!(failed_leaf, "client retains exact failed leaf feedback");
+    }
+
+    #[tokio::test]
+    async fn terminal_leaf_releases_its_signature_before_tree_completion() {
+        for terminal in [RtdlNodeStateEnum::Succeeded, RtdlNodeStateEnum::Failed] {
+            let call = CapabilityCall {
+                provider_id: "navigation".into(),
+                contract_id: "navigate".into(),
+                args_json: r#"{"x":1}"#.into(),
+                ..Default::default()
+            };
+            let plan = Plan {
+                nodes: vec![
+                    RtdlNode {
+                        node_kind: RTDL_PARALLEL,
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: RTDL_DO,
+                        call: Some(call.clone()),
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: RTDL_DO,
+                        call: Some(call.clone()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut forest = super::SessionForest::default();
+            forest.trees.insert(
+                "old".into(),
+                TreeMeta {
+                    description: "navigate".into(),
+                    control_only: false,
+                    call_signatures: super::plan_call_signatures(&plan),
+                    steps: Vec::new(),
+                    repeat_counts: HashMap::new(),
+                },
+            );
+            let signature = super::call_signature(&call);
+            let mut tasks = TaskTable::default();
+            tasks.receive("navigate, retrying if verification fails");
+            let mut history = Vec::new();
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            // VERIFYING must still reserve the call, even after its RPC returns.
+            for (node_index, state, remaining) in [
+                (1, RtdlNodeStateEnum::Verifying, 2),
+                (1, terminal, 1),
+                (2, terminal, 0),
+            ] {
+                super::handle_interrupt(
+                    super::TreeInterrupt::NodeState {
+                        plan_id: "old".into(),
+                        node_state: Box::new(RtdlNodeState {
+                            node_index,
+                            state: state as u32,
+                            leaf_result: Some(CapabilityCallResult {
+                                call_id: format!("old:{node_index}"),
+                                success: state == RtdlNodeStateEnum::Succeeded,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                    },
+                    &mut forest,
+                    &mut history,
+                    &mut tasks,
+                    0,
+                    "session",
+                    &tx,
+                )
+                .await;
+                // The parent has not terminated and Completion has not arrived.
+                let tree = forest.trees.get("old").unwrap();
+                let forbidden: HashSet<_> = tree.call_signatures.values().cloned().collect();
+                assert_eq!(
+                    forbidden.contains(&signature),
+                    remaining > 0,
+                    "only the last identical terminal leaf releases the signature"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_tree_completion_does_not_restart_recovery() {
+        use crate::pb::executor::{RtdlEvent, RtdlPlanComplete};
+        for (later_success, requested_cancellation) in
+            [(false, false), (true, false), (false, true)]
+        {
+            let mut execution = crate::stream_execution::StreamExecution::default();
+            execution.plan.plan_id = "failed".into();
+            for (node_index, success, leaf) in
+                [(1, false, true), (0, false, false), (2, true, true)]
+            {
+                if success && !later_success {
+                    continue;
+                }
+                execution.events.push_back(RtdlEvent {
+                    event_kind: super::RtdlEventEnum::NodeState as u32,
+                    node_state: Some(RtdlNodeState {
+                        node_index,
+                        state: if success {
+                            RtdlNodeStateEnum::Succeeded
+                        } else {
+                            RtdlNodeStateEnum::Failed
+                        } as u32,
+                        leaf_result: leaf.then(|| CapabilityCallResult {
+                            call_id: format!("failed:{node_index}"),
+                            success,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+            execution.events.push_back(RtdlEvent {
+                event_kind: super::RtdlEventEnum::PlanComplete as u32,
+                plan_complete: Some(RtdlPlanComplete {
+                    any_failed: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let mut forest = super::SessionForest::default();
+            super::drive_plan(
+                execution,
+                forest.interrupt_tx.clone(),
+                forest.revision.clone(),
+            )
+            .await;
+            assert_eq!(
+                forest.revision.load(super::Ordering::Acquire),
+                if later_success { 4 } else { 3 }
+            );
+            let meta = || TreeMeta {
+                description: "save memory".into(),
+                control_only: false,
+                call_signatures: HashMap::new(),
+                steps: Vec::new(),
+                repeat_counts: HashMap::new(),
+            };
+            forest.trees.insert("failed".into(), meta());
+            let mut tasks = TaskTable::default();
+            tasks.receive("save memory, recovering from failure");
+            tasks.attach_tree("T1", "failed", "save memory");
+            let mut history = Vec::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let event = forest.interrupt_rx.try_recv().unwrap();
+            assert!(
+                super::handle_interrupt(
+                    event,
+                    &mut forest,
+                    &mut history,
+                    &mut tasks,
+                    0,
+                    "session",
+                    &tx
+                )
+                .await
+            );
+
+            // Recovery dispatch precedes the old tree's parent failure and completion.
+            forest.trees.insert("retry".into(), meta());
+            tasks.attach_tree("T1", "retry", "save corrected memory");
+            if requested_cancellation {
+                forest.kill_pending.insert("failed".into());
+            }
+            let mut completion_seen = false;
+            while let Ok(event) = forest.interrupt_rx.try_recv() {
+                let completion = matches!(event, super::TreeInterrupt::Completion { .. });
+                let replan = super::handle_interrupt(
+                    event,
+                    &mut forest,
+                    &mut history,
+                    &mut tasks,
+                    1,
+                    "session",
+                    &tx,
+                )
+                .await;
+                assert_eq!(
+                    replan,
+                    completion && (later_success || requested_cancellation)
+                );
+                completion_seen |= completion;
+            }
+            assert!(completion_seen);
+            assert!(!forest.trees.contains_key("failed"));
+            assert!(forest.trees.contains_key("retry"));
+            assert!(tasks.any_open());
+            let mut batch_seen = false;
+            while let Ok(event) = rx.try_recv() {
+                batch_seen |= event
+                    .unwrap()
+                    .batch_result
+                    .is_some_and(|batch| batch.any_failed);
+            }
+            assert!(batch_seen, "failure evidence must still reach the client");
+        }
     }
 
     #[test]
@@ -3886,7 +3903,7 @@ mod tests {
             TreeMeta {
                 description: "drive".into(),
                 control_only: false,
-                call_signatures: HashSet::new(),
+                call_signatures: HashMap::new(),
                 steps: Vec::new(),
                 repeat_counts: HashMap::new(),
             },

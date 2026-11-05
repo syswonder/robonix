@@ -289,6 +289,14 @@ class ObjectViewStore:
         shutil.rmtree(dst, ignore_errors=True)
         src.rename(dst)
 
+    def snapshot(self, old: str, new: str) -> None:
+        """Copy pictures to a snapshot while keeping the live partition."""
+        src, dst = self.root / _segment(old), self.root / _segment(new)
+        if src == dst or not src.is_dir():
+            return
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+
     def forget_map(self, map_id: str) -> None:
         shutil.rmtree(self.root / _segment(map_id), ignore_errors=True)
 

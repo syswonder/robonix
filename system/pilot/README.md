@@ -114,6 +114,8 @@ A turn waits while a tree of an open task runs and replans when a tree ends; it 
 
 Pilot preserves each `do.bind` name when expanding RTDL into a Plan. Executor stores the successful result in that tree's execution context; later arguments and conditions can reference it with `{"var":"name","path":["field"]}`.
 
+Pilot rejects identical capability calls while their earlier nodes are unfinished, including during verification. A terminal node releases its call for recovery before its parent tree completes; identical unfinished siblings remain protected.
+
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
 
 Atlas discovery still runs before every planning round. Pilot omits contracts whose `[contract]` metadata sets `llm_callable = false` from the model-facing catalog and target map, while leaving them available to Executor and other Atlas consumers. An omitted field, including metadata from an older Atlas, defaults to visible. When the remaining provider, contract, description, and schema fields are unchanged, Pilot reuses the rendered capability catalog. The startup-cached Soma YAML is serialized as compact JSON while the authoritative URDF remains unchanged.
@@ -176,6 +178,8 @@ The dispatch record in planning history lists RTDL node definitions, including
 `do` nodes under a `repeat` whose count is zero. It is not evidence that those
 capabilities ran. Pilot records each successful `repeat` operator's completed
 iteration count separately; use leaf feedback to identify calls that ran.
+
+A failed leaf requests recovery once: its parent failures and the tree's completion do not request the same recovery again. If a leaf fails while the model is still generating or submitting nodes, Pilot cancels that unfinished attempt, retains its execution results, and replans from the failure feedback. A later successful sibling still requests a planning round at completion, and requested cancellation completion still triggers its follow-up.
 
 Parallel example:
 

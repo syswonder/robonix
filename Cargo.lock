@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-atlas"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-chronos-clock"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "libc",
  "pyo3",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-cli"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3232,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-codegen"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-executor"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-liaison"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3294,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-pilot"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -3322,7 +3322,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-scribe"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "libc",
  "serde",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-soma"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "robonix-vitals"
-version = "1.1.0-beta.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",

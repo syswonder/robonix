@@ -76,8 +76,13 @@ export ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
 export ROBONIX_TIAGO_VARIANT="${ROBONIX_TIAGO_VARIANT:-lite}"
 export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-}"
 
+DETACH=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --detach)
+      DETACH=1
+      shift
+      ;;
     --world|-w)
       [[ $# -ge 2 ]] || { echo "[sim/start] --world requires a value" >&2; exit 2; }
       export ROBONIX_WEBOTS_WORLD="$2"
@@ -94,12 +99,12 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]"
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf] [--detach]"
       exit 0
       ;;
     *)
       echo "[sim/start] unknown argument: $1" >&2
-      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]" >&2
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf] [--detach]" >&2
       exit 1
       ;;
   esac
@@ -339,4 +344,7 @@ echo "[sim/start] rviz2 log: $RVIZ_LOG"
 # Stay foreground tailing logs. Ctrl-C stops the log follower; run stop.sh to
 # tear down this simulator instance. Robonix components remain owned by
 # `rbnx shutdown` and are never touched here.
+if [[ "$DETACH" == "1" ]]; then
+    exit 0
+fi
 exec "${DC[@]}" logs -f

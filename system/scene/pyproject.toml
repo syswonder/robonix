@@ -22,7 +22,7 @@
 #                     from codegen-typed handlers, mirrors memory).
 [project]
 name = "robonix-system-scene"
-version = "1.1.0b1"
+version = "1.1.0"
 description = "Scene MCP server — semantic + geometric live map of the robot's environment."
 requires-python = ">=3.10"
 dependencies = [
@@ -49,8 +49,17 @@ dependencies = [
     # objects.db; same DB tech as system/memory but a separate file/process.
     # 2.6.10 excluded (broken upsert); system/memory pulls pymilvus
     # transitively (via memsearch), without an explicit pin.
-    "pymilvus!=2.6.10,>=2.5.0",
+    "pymilvus!=2.6.10,>=2.5.0,<3",
     "robonix-api",
+]
+
+[project.optional-dependencies]
+tensorrt = [
+    "onnxruntime>=1.17",
+    "cuda-bindings>=12",
+    "cuda-pathfinder>=0.3",
+    "regex",
+    "ftfy>=6",
 ]
 
 # This package is the service itself; `uv sync` only needs to install
