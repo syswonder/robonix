@@ -103,7 +103,7 @@ ${r?button('toggle-block',blocked.includes(r.id)?'unblockRoad':'blockRoad'):''}<
    <label>${esc(tr('destination'))}<select id="od-place"><option value="">—</option>${(state.places||[]).map((p,i)=>`<option value="${i}" ${p.enabled?'':'disabled'}>${esc(p.name)}</option>`).join('')}</select></label>
    <label>${esc(tr('offroadCost'))}: <b id="od-cost-value">${offroadCost}</b><input id="od-cost" type="range" min="1" max="99" value="${offroadCost}" style="width:100%"></label>
    <div class="od-row">${button('select-start','chooseStart',!state.is_active)}${button('current','usePosition',!state.is_active)}</div>
-   ${button('plan','preview',!goal||!state.is_active)}<div class="od-row">${button('execute','execute',!route||!nav.ready||busy)}${button('cancel-task','cancelTask',!active)}</div>
+   ${button('plan','preview',!goal||!state.is_active)}<div class="od-row">${button('execute','execute',!route||!nav.ready)}${button('cancel-task','cancelTask',!active)}</div>
    <div id="od-route-note">${route&&!route.gait_annotations_available?esc(tr('unmarkedGait')):''}</div>
    ${route&&(route.low_accuracy||route.intervals.some(i=>i.gait==='unknown'))?`<div class="od-box od-warning">${esc(tr('routeWarning'))}</div>`:''}
    <div class="od-box">${esc(tr(nav.ready?'navigationReady':'navigationWaiting'))}${task?'<br>'+esc(tr('taskState'))+': '+esc(task.state):''}${nav.not_ready_reasons?.length?'<br>'+esc(nav.not_ready_reasons.join(', ')):''}${nav.detail?'<br>'+esc(nav.detail):''}</div>
