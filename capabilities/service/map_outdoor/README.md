@@ -5,13 +5,13 @@ These six RPC capabilities share `outdoor_map/srv/*.srv`. gRPC and MCP use the g
 | RPC | Request object | Result |
 |---|---|---|
 | `get_map` | `{}` for the active map; `{"draft":true}` for the draft; `{"map_id":"id"}` for a saved artifact | Snapshot below |
-| `capture` | `{"action":"start","new_map":true}`; omit new_map to supplement. Other actions: pause, resume, stop, discard. Recover: `{"action":"recover","session_id":"id"}` | Recording status |
+| `capture` | `{"action":"start","new_map":true}`; omit new_map to supplement. Other actions: pause, resume, stop, cancel, discard. Recover: `{"action":"recover","session_id":"id"}` | Recording status |
 | `status` | `{}` | Input freshness, recording state, active map identity, live trajectory and valid GNSS position |
 | `preview_merge` | `{}` after recording finishes | `preview_id`, `base_version`, `draft_version`, combined network, candidates and overlaps |
 | `apply_merge` | `{"preview_id":"...","decisions":{"join-0":"connect"},"choices":{"overlap-0":"old"}}` | Reviewed draft snapshot |
 | `plan_route` | `{"map_id":"id","version":"hash","start":{"x":0,"y":0},"goal":{"x":2,"y":0},"blocked_road_ids":[]}` | Reference path and ordered gait/quality intervals |
 
-All connection candidates require a `connect` or `separate` decision. All overlaps require an `old` or `new` gait-record choice, including equal-gait overlaps for provenance review. Invalid or stale preview IDs are refused. Separating roads preserves their topology; overlap geometry follows the old measurement. Recording, pause/resume and raw recovery never issue robot commands.
+All connection candidates require a `connect` or `separate` decision. All overlaps require an `old` or `new` gait-record choice, including equal-gait overlaps for provenance review. Invalid or stale preview IDs are refused. Separating roads preserves their topology; overlap geometry follows the old measurement. Cancel closes an open recording, marks it interrupted and retains its raw events without building a draft. Recording, pause/resume, cancellation and raw recovery never issue robot commands.
 
 A snapshot contains `schema_version`, `map_type="outdoor"`, immutable `map_id`, `version` (content hash), `parent_map_id`, `frame_id="map"`, `units="meters"`, fixed `origin_wgs84={latitude,longitude}`, `network`, `recordings`, filtered tracks and processing report. Synthetic snapshots set `example_data=true`.
 

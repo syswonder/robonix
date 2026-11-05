@@ -222,5 +222,8 @@
   "maps.parent": "Parent map",
   "maps.recordings": "Recordings",
   "outdoor.receiverQuality": "Receiver quality code",
-  "outdoor.invalidPosition": "Position is unusable for mapping. Fresh input streams do not guarantee a usable fix."
+  "outdoor.invalidPosition": "Position is unusable for mapping. Fresh input streams do not guarantee a usable fix.",
+  "outdoor.cancelRecording": "Cancel recording (keep raw data)",
+  "outdoor.confirmCancelRecording": "Cancel this recording? Raw data will be kept; no map will be generated.",
+  "outdoor.interrupted": "Interrupted"
 }

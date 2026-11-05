@@ -215,20 +215,45 @@ def test_live_view_inline_javascript_is_valid(html_name):
     subprocess.run([node, "--check"], input=script, text=True, check=True)
 
 
-def test_every_navigation_target_is_a_page_with_the_sidebar():
-    """The sidebar links must all resolve, and each page must carry it back."""
+def test_every_navigation_target_preserves_its_map_type():
+    from html.parser import HTMLParser
     from starlette.testclient import TestClient
 
+    class Navigation(HTMLParser):
+        def __init__(self, page):
+            super().__init__()
+            self.inside = False
+            self.links = []
+            self.feed(page)
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "nav":
+                self.inside = True
+            if tag == "a" and self.inside:
+                values = dict(attrs)
+                if "id" not in values:
+                    self.links.append(values["href"])
+
+        def handle_endtag(self, tag):
+            if tag == "nav":
+                self.inside = False
+
     web = _web_module()
-    app = web.make_app(registry=_registry_with_no_objects(), hub=None)
-    client = TestClient(app)
-    for href, label, _key in web._NAV_LINKS:
+    client = TestClient(web.make_app(registry=_registry_with_no_objects(), hub=None))
+    expected_outdoor = {"/outdoor", "/maps?map_type=outdoor", "/regions?map_type=outdoor",
+                        "/cam?map_type=outdoor", "/logs?map_type=outdoor"}
+    for href, _label, _key in web._NAV_LINKS:
         response = client.get(href)
-        assert response.status_code == 200, href
-        assert label in response.text, href
-        # Every link is present on every page, so any page reaches any other.
-        for other_href, _label, _k in web._NAV_LINKS:
-            assert f'href="{other_href}"' in response.text, (href, other_href)
+        assert response.status_code == 200
+        links = set(Navigation(response.text).links)
+        if href == "/outdoor":
+            assert links == expected_outdoor
+        else:
+            assert links == {entry[0] for entry in web._NAV_LINKS}
+    for target in expected_outdoor:
+        response = client.get(target)
+        assert response.status_code == 200
+        assert set(Navigation(response.text).links) == expected_outdoor
 
 
 def test_the_viewer_endpoint_says_why_there_is_no_viewer():
@@ -351,3 +376,55 @@ def test_renamed_routes_and_fields_remain_as_deprecated_aliases():
     assert client.get("/3d", follow_redirects=False).headers["location"] == "/"
     obj = client.get("/api/state").json()["objects"][0]
     assert obj["cls"] == obj["label"]
+
+
+def test_camera_viewer_uses_scene_origin_and_limits_forwarded_operations():
+    import json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from starlette.testclient import TestClient
+
+    calls = []
+
+    class CameraViewer(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            calls.append((self.command, self.path))
+            payload = b'camera-preview' if self.path.startswith('/frame') else b'{"cameras":{"front":{"available":true}}}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg' if self.path.startswith('/frame') else 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self):
+            calls.append((self.command,self.path))
+            payload = self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(200)
+            self.send_header('Content-Type','application/json')
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), CameraViewer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    web = _web_module()
+    try:
+        client = TestClient(web.make_app(registry=_registry_with_no_objects(),camera_viewer_port=server.server_port))
+        response = client.get('/camera-viewer/api/cameras')
+        assert response.json()['cameras']['front']['available']
+        frame = client.get('/camera-viewer/frame?cam=front&t=1')
+        assert frame.content == b'camera-preview' and frame.headers['content-type'] == 'image/jpeg'
+        settings = client.post('/camera-viewer/api/settings',json={'level':55})
+        assert settings.json() == {'level':55}
+        assert client.post('/camera-viewer/frame',json={}).status_code == 404
+        assert client.get('/camera-viewer/admin').status_code == 404
+        assert client.post('/camera-viewer/api/settings',json={'x':'x'*4096}).status_code == 413
+        assert calls == [('GET','/api/cameras'),('GET','/frame?cam=front&t=1'),('POST','/api/settings')]
+        disabled = TestClient(web.make_app(registry=_registry_with_no_objects()))
+        assert disabled.get('/camera-viewer/api/cameras').status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

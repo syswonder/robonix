@@ -571,6 +571,17 @@ properties:
       other machines. Environment fallback: SCENE_WEB_HOST. Activation fails
       on a blank value, a URL, a path, whitespace, or a malformed IP address.
 
+  camera_viewer_port:
+    type: integer
+    default: 0
+    minimum: 0
+    maximum: 65535
+    x-group: Web interface
+    description: >-
+      Optional existing camera viewer on 127.0.0.1. Camera embeds it through
+      Scene's own port, including four-camera selection and image settings.
+      Zero uses the existing Atlas/ROS RGB-D preview. No camera driver is started.
+
   web_viewer:
     type: string
     enum: [rerun, "off"]

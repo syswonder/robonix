@@ -222,5 +222,8 @@
   "maps.parent": "父版本地图",
   "maps.recordings": "采集来源",
   "outdoor.receiverQuality": "接收机定位质量码",
-  "outdoor.invalidPosition": "当前定位不能用于建图。接口有数据，不代表定位有效；到室外后等待固定解、浮点解或差分解。"
+  "outdoor.invalidPosition": "当前定位不能用于建图。接口有数据，不代表定位有效；到室外后等待固定解、浮点解或差分解。",
+  "outdoor.cancelRecording": "取消录制（保留原始数据）",
+  "outdoor.confirmCancelRecording": "取消本次录制？保留原始数据，不生成地图。",
+  "outdoor.interrupted": "已中断"
 }

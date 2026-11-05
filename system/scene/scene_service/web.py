@@ -486,7 +486,7 @@ def _read_log_slice(path: Path, offset: Optional[int]) -> tuple[list[dict], int]
     return out, consumed
 
 
-def _nav(active: str) -> str:
+def _nav(active: str, map_type: str = "indoor") -> str:
     """The sidebar every page shares."""
     by_href = {href: (label, key) for href, label, key in _NAV_LINKS}
 
@@ -494,15 +494,17 @@ def _nav(active: str) -> str:
         label, key = by_href[href]
         current = ' class="on"' if href == active else ""
         icon = _NAV_ICONS.get(href, "")
-        return (f'<a href="{href}"{current}>{icon}'
+        target = href + "?map_type=outdoor" if map_type == "outdoor" and href != "/outdoor" else href
+        return (f'<a href="{target}"{current}>{icon}'
                 f'<span data-i18n="{key}">{label}</span></a>')
 
     items = ['<div class="nav-group"><div class="nav-head" '
              'data-i18n="nav.group.live">current map</div>']
-    items += [link(href) for href in _NAV_LIVE_MAP]
+    live_links = ("/outdoor", "/regions") if map_type == "outdoor" else _NAV_LIVE_MAP
+    items += [link(href) for href in live_links]
     items.append("</div>")
     items += [link(href) for href, _, _ in _NAV_LINKS
-              if href not in _NAV_LIVE_MAP]
+              if href not in live_links and (map_type == "indoor" or href not in ("/", "/2d"))]
     return "".join(items)
 
 
@@ -665,19 +667,15 @@ _STATUS_BAR = """
 
 
 def _shell_page(active: str, body: str, title: str,
-                info_panel: bool = False) -> str:
+                info_panel: bool = False, map_type: Optional[str] = None) -> str:
     """Wrap page content in the shared sidebar; `info_panel` docks the
     object panel beside it."""
+    map_type = map_type or ("outdoor" if active == "/outdoor" else "indoor")
     css = _CONTROLS_CSS + _SHELL_CSS + (_DOCK_CSS if info_panel else "")
     dock = _dock_html() if info_panel else ""
     script = "<script>" + _i18n_js() + """
     applyLang(langGet());
-    const outdoorView = location.pathname === '/outdoor' || new URLSearchParams(location.search).get('map_type') === 'outdoor';
-    sessionStorage.setItem('sceneMapType', outdoorView ? 'outdoor' : 'indoor');
-    document.getElementById(outdoorView ? 'scene-outdoor' : 'scene-indoor').classList.add('on');
-    if (outdoorView) {
-      document.querySelectorAll('nav a[href="/maps"], nav a[href="/regions"]').forEach(a => a.href += '?map_type=outdoor');
-    }
+    document.getElementById('__SCENE_TAB__').classList.add('on');
     document.getElementById('lang-switch').addEventListener('click', () => {
       langSet(langGet() === 'zh' ? 'en' : 'zh');
     });
@@ -687,6 +685,7 @@ def _shell_page(active: str, body: str, title: str,
         catch (_) {}
       }));
     </script>"""
+    script = script.replace("__SCENE_TAB__", "scene-" + map_type)
     script += f"<script>{_DOCK_JS}</script>" if info_panel else ""
     return (
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
@@ -694,7 +693,7 @@ def _shell_page(active: str, body: str, title: str,
         f'<div class="wrap"><nav><div class="brand">scene</div>'
         '<div class="scene-types"><a id="scene-indoor" href="/" data-i18n="nav.indoor">Indoor</a>'
         '<a id="scene-outdoor" href="/outdoor" data-i18n="nav.outdoor">Outdoor</a></div>'
-        f'{_nav(active)}'
+        f'{_nav(active, map_type)}'
         '<div class="spacer"></div>'
         '<button class="lang" id="lang-switch"'
         ' data-i18n-other="nav.lang.self"'
@@ -703,10 +702,15 @@ def _shell_page(active: str, body: str, title: str,
     )
 
 
-def _framed(path: str, title: str) -> str:
-    """A standalone page embedded in the shell; `?bare=1` is the page itself."""
-    return _shell_page(
-        path, f'<iframe src="{path}?bare=1" title="{title}"></iframe>', title)
+def _framed(path: str, title: str, map_type: str = "indoor") -> str:
+    """Preserve the selected map type in both the shell and its editor frame."""
+    source = path + "?bare=1" + ("&amp;map_type=outdoor" if map_type == "outdoor" else "")
+    return _shell_page(path, f'<iframe src="{source}" title="{title}"></iframe>', title,
+                       map_type=map_type)
+
+
+def _page_map_type(request) -> str:
+    return "outdoor" if request.query_params.get("map_type") == "outdoor" else "indoor"
 
 
 def _bare(request) -> bool:
@@ -724,7 +728,8 @@ def make_app(*, registry: ObjectRegistry,
              object_mutations: Any = None,
              object_views: Any = None,
              rerun_sink: Any = None,
-             map_providers: Optional[dict] = None) -> Starlette:
+             map_providers: Optional[dict] = None,
+             camera_viewer_port: int = 0) -> Starlette:
     """The Scene web app: the pages, /api/state, region CRUD and the map
     library façade over robonix/service/map.
 
@@ -739,6 +744,8 @@ def make_app(*, registry: ObjectRegistry,
     `object_store` + `map_meta` hold each saved map's object snapshot; without
     `map_meta`, Save/Load cover regions only.
     """
+    if isinstance(camera_viewer_port, bool) or not isinstance(camera_viewer_port, int) or not 0 <= camera_viewer_port <= 65535:
+        raise ValueError("camera_viewer_port must be 0 (disabled) or a local TCP port")
     if map_binding is None:
         map_binding = {}
     if ops_lock is None:
@@ -1445,8 +1452,8 @@ def make_app(*, registry: ObjectRegistry,
     _PROXY_SKIP = {"host", "content-length", "connection", "keep-alive",
                    "transfer-encoding", "upgrade"}
 
-    async def _proxy(request, port: int, path: str):
-        """Stream one request to a local rerun server and back."""
+    async def _proxy(request, port: int, path: str, *, timeout_s=None, label="rerun viewer"):
+        """Keep local viewer traffic on Scene's browser origin."""
         import httpx
 
         url = f"http://127.0.0.1:{port}/{path.lstrip('/')}"
@@ -1455,7 +1462,7 @@ def make_app(*, registry: ObjectRegistry,
         headers = {k: v for k, v in request.headers.items()
                    if k.lower() not in _PROXY_SKIP}
         # Loopback: an HTTP_PROXY from the environment must not apply.
-        client = httpx.AsyncClient(timeout=None, trust_env=False)
+        client = httpx.AsyncClient(timeout=timeout_s, trust_env=False)
         try:
             body = await request.body()
             upstream = client.build_request(
@@ -1464,7 +1471,7 @@ def make_app(*, registry: ObjectRegistry,
         except Exception as error:  # noqa: BLE001
             await client.aclose()
             return PlainTextResponse(
-                f"the rerun viewer is not reachable on 127.0.0.1:{port}: "
+                f"the {label} is not reachable on 127.0.0.1:{port}: "
                 f"{error}", status_code=502)
 
         async def stream():
@@ -1519,15 +1526,30 @@ def make_app(*, registry: ObjectRegistry,
     async def cam(request) -> HTMLResponse:
         if _bare(request):
             return HTMLResponse(_INDEX_CAM_HTML)
-        return HTMLResponse(_framed("/cam", "scene — camera"))
+        kind = _page_map_type(request)
+        if camera_viewer_port:
+            return HTMLResponse(_shell_page("/cam", '<iframe src="/camera-viewer/" title="camera"></iframe>',
+                                             "scene — camera", map_type=kind))
+        return HTMLResponse(_framed("/cam", "scene — camera", kind))
+
+    async def camera_viewer(request):
+        if not camera_viewer_port:
+            return PlainTextResponse("No local camera viewer configured", status_code=404)
+        path = request.path_params["path"]
+        allowed = ("", "index.html", "api/cameras", "api/battery", "api/settings", "frame")
+        if path not in allowed or (request.method == "POST" and path != "api/settings"):
+            return PlainTextResponse("Unknown camera viewer operation", status_code=404)
+        if request.method == "POST" and len(await request.body()) > 4096:
+            return PlainTextResponse("Camera settings are too large", status_code=413)
+        return await _proxy(request, camera_viewer_port, path, timeout_s=10., label="camera viewer")
 
     async def regions_page(request) -> HTMLResponse:
-        requested_type = request.query_params.get("map_type", "indoor")
+        requested_type = _page_map_type(request)
         if requested_type != map_binding.get("map_type", "indoor"):
-            return HTMLResponse(_shell_page("/regions", '<div class="msg">Load a map of the selected type before editing regions.</div>', "scene — regions"))
+            return HTMLResponse(_shell_page("/regions", '<div class="msg">Load a map of the selected type before editing regions.</div>', "scene — regions", map_type=requested_type))
         if _bare(request):
             return HTMLResponse(_regions_html())
-        return HTMLResponse(_framed("/regions", "scene — regions").replace("/regions?bare=1", "/regions?bare=1&amp;map_type=" + requested_type))
+        return HTMLResponse(_framed("/regions", "scene — regions", requested_type))
 
     async def _correct(request, apply, reply):
         """One correction through the mutation coordinator.
@@ -1775,10 +1797,10 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse(await asyncio.to_thread(collect))
 
     async def logs_page(request) -> HTMLResponse:
-        return HTMLResponse(_shell_page("/logs", _LOGS_BODY, "scene — logs"))
+        return HTMLResponse(_shell_page("/logs", _LOGS_BODY, "scene — logs", map_type=_page_map_type(request)))
 
     async def maps_page(request) -> HTMLResponse:
-        return HTMLResponse(_shell_page("/maps", _MAPS_BODY, "scene — maps"))
+        return HTMLResponse(_shell_page("/maps", _MAPS_BODY, "scene — maps", map_type=_page_map_type(request)))
 
     async def camera_state(_request) -> JSONResponse:
         """Return a rate-limited, single-flight preview off the event loop."""
@@ -1859,6 +1881,7 @@ def make_app(*, registry: ObjectRegistry,
         Route("/2d", index2d, methods=["GET"]),
         Route("/rerun", rerun_host, methods=["GET"]),
         Route("/cam", cam, methods=["GET"]),
+        Route("/camera-viewer/{path:path}", camera_viewer, methods=["GET", "POST"]),
         Route("/maps", maps_page, methods=["GET"]),
         Route("/logs", logs_page, methods=["GET"]),
         Route("/api/logs", logs_api, methods=["GET"]),
