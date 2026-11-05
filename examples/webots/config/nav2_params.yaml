@@ -195,6 +195,7 @@ local_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+        footprint_clearing_enabled: true
         map_topic: "__ROBONIX_MAP_TOPIC__"
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -299,6 +300,9 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+        # SLAM updates can leave occupied cells under the robot; remove them
+        # within its footprint before inflating the static layer.
+        footprint_clearing_enabled: true
       depth_layer:
         # The head camera's depth, for what the lidar's plane misses: table tops,
         # shelves, anything overhanging the floor. Heights are in the map frame,
