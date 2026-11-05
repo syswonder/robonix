@@ -1,0 +1,141 @@
+manifestVersion: 1
+name: robonix-webots-aibox-deploy
+
+# Full-stack split deployment: the AIBOX board runs Atlas, the core, and the
+# services/skills; the four TIAGo primitives run on the Ubuntu sim host
+# through the SSH-wrapped packages in primitives/. The Webots sim itself
+# stays outside boot — start it on the sim host with
+# examples/webots/sim/start.sh first, then from this directory:
+#
+#   . ./boot.env
+#   rbnx build -f robonix_manifest.yaml
+#   rbnx boot -f robonix_manifest.yaml --no-update-check -v
+#
+# `rbnx shutdown` tears the stack down (the primitive stop hooks sweep
+# leftover remote wrappers/drivers). Cross-machine facts (ssh alias, sim
+# host checkout, Atlas endpoint) live in remote.env — copy
+# remote.env.example and fill in your machines' values; board-side env
+# comes from boot.env.
+
+system:
+  # registry
+  atlas:
+    listen: 0.0.0.0:50051
+  soma:
+    listen: 0.0.0.0:50091
+    robot_yaml: /root/robonix/examples/webots/soma.full.yaml
+  # execution layer
+  executor:
+    listen: 0.0.0.0:50061
+  # interaction layer
+  pilot:
+    listen: 0.0.0.0:50071
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+  liaison:
+    listen: 0.0.0.0:50081
+  # health monitoring layer
+  vitals:
+    listen: 0.0.0.0:50093
+    soma_endpoint: 172.17.0.1:50091
+
+# Soma stage 1 spawns these through the SSH wrappers; the provider ids equal
+# the drivers' hard-coded Primitive ids. Config reaches each driver via
+# Driver(CMD_INIT) — the wrapper scripts carry no --set values.
+primitive:
+  - name: tiago_chassis
+    path: ./primitives/tiago_chassis
+    config:
+      odom_topic: /odom
+      twist_in_topic: /cmd_vel
+  - name: tiago_camera
+    path: ./primitives/tiago_camera
+    config:
+      width: 640
+      height: 480
+      # Webots Tiago head camera calibration for the intrinsics contract.
+      # The simulator does not publish CameraInfo, so the camera primitive
+      # publishes this deployment-provided K on /tiago/camera/intrinsics.
+      fx: 554.0
+      fy: 554.0
+      cx: 320.0
+      cy: 240.0
+      # First-RGB-frame wait at INIT. Webots under a CPU-starved boot can
+      # take well over a minute to deliver the first frame.
+      sentinel_timeout_s: 150
+  - name: tiago_lidar
+    path: ./primitives/tiago_lidar
+    config:
+      update_rate: 10
+      frame_id: lidar
+      sentinel_timeout_s: 150
+  # Deterministic simulated hardware telemetry consumed by Soma and Vitals.
+  - name: tiago_health
+    path: ./primitives/tiago_health
+    config:
+      variant: lite
+      scenario: normal
+      interval_s: 0.5
+      battery_percent: 82.0
+      voltage: 24.8
+      remaining_s: 10800
+
+service:
+  # Mapping publishes the occupancy/pose contracts Navigation consumes.
+  # Runs native on the board (no docker); the jetson-native manifest name
+  # only means "arm64 host, no container".
+  - name: mapping
+    url: https://github.com/syswonder/service-map-rbnx
+    branch: main
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      algo: slam_toolbox
+      use_sim_time: true
+      sensor_providers:
+        lidar2d: tiago_lidar
+        odom: tiago_chassis
+  # Nav2 wraps the standard navigation stack; listed after mapping (its
+  # /map provider); on_init returns Deferred until mapping is up.
+  - name: nav2
+    url: https://github.com/syswonder/service-navigation-rbnx
+    branch: main
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      # Deployment-owned Nav2 parameters (config/nav2_params.yaml) — this
+      # split deployment raises default_server_timeout to 200 ms for the
+      # cross-machine rmw_zenoh goal acks; do not reuse the shared webots
+      # file, whose 20 ms assumes a same-host loopback.
+      params_file: config/nav2_params.yaml
+      use_sim_time: true
+      action_wait_s: 240.0
+      provider_ids:
+        map: mapping
+        odom: tiago_chassis
+        scan: tiago_lidar
+        depth: tiago_camera
+      dynamic_speed:
+        max_linear_speed_mps: 0.26
+        default_percentage: 100
+        step_percentage: 20
+        min_percentage: 20
+      guard_terminal_xy_m: 0.2
+      depth_obstacles:
+        stride: 8
+        rate_hz: 2
+skill:
+  # Frontier-based autonomous exploration; registered after services and
+  # left INACTIVE until a task calls it.
+  - name: explore
+    url: https://github.com/syswonder/skill-explore-rbnx
+    branch: main
+    config:
+      strategy: mrtsp
+      mrtsp:
+        wd: 1.0
+        ws: 1.0
+        sensor_range_m: 2.0
+        min_frontier_m: 0.5
+        vmax_m_s: 0.26
+        wmax_rad_s: 0.6
