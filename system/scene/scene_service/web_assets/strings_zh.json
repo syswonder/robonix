@@ -232,11 +232,20 @@
   "outdoor.navigationReady": "导航已就绪",
   "outdoor.navigationWaiting": "导航未就绪",
   "outdoor.taskState": "任务状态",
-  "outdoor.gaitRetry": "步态未确认，持续重试",
+  "outdoor.gaitRetry": "步态切换中，已停车等待确认",
   "outdoor.unmarkedGait": "此地图没有步态标注，保持人工选定步态。",
   "outdoor.destination": "原有地点",
   "outdoor.blockRoad": "封闭此道路",
   "outdoor.unblockRoad": "恢复此道路",
   "outdoor.repreview": "代价已变化，请重新预览。",
-  "outdoor.confirmExecute": "确认场地安全并执行此路线？"
+  "outdoor.confirmExecute": "确认场地安全并执行此路线？",
+  "outdoor.gaitFailed": "步态切换失败，保持停车",
+  "outdoor.measuredPlanning": "沿已确认的采集路网规划，终点贴合道路，不跨越未连接路段。",
+  "outdoor.stairsAvoidancePaused": "楼梯区段：局部避障已暂停，离开后恢复。急停、定位与反馈保护仍生效。",
+  "outdoor.gait_switch_timeout": "切换超时，请检查底盘反馈后重新发起导航",
+  "outdoor.stopping_before_gait_switch": "正在等待停稳",
+  "outdoor.waiting_for_eligible_state": "底盘状态未满足切换条件",
+  "outdoor.gait_feedback_stale": "步态反馈过期",
+  "outdoor.gait_not_confirmed_retrying": "等待实际步态反馈",
+  "outdoor.unknown_route_gait": "路线步态未知，请检查地图"
 }

@@ -758,8 +758,9 @@ properties:
     default: null
     x-group: Outdoor navigation
     description: >-
-      Optional deployed SceneNavigation consumer config. bundle, places and run_dir
-      are deployment-owned absolute paths. execution_enabled defaults false; only a
+      Optional outdoor_nav.scene.SceneNavigation consumer config. run_dir is a
+      deployment-owned absolute path. localization_config_path
+      selects the localization runtime configuration for loaded-map Driver binding. execution_enabled defaults false; only a
       motion-authorized deployment profile enables it. The deployment supplies the
-      outdoor_scene Python module and consumed navigation contract bindings.
+      navigation service Python package and consumed navigation/localization bindings.
 

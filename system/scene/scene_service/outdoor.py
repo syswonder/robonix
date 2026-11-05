@@ -5,7 +5,7 @@ from collections import OrderedDict
 import time
 import uuid
 
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 
@@ -20,14 +20,17 @@ class OutdoorScene:
         state = await asyncio.to_thread(self.clients.outdoor, "status")
         if not state.get("ok"):
             raise ValueError("Cannot confirm outdoor recording state: " + state.get("detail", "unavailable"))
+        await self.navigation_idle()
+        session = state.get("session") or {}
+        if session.get("state") in ("recording", "paused"):
+            raise ValueError("Finish outdoor recording before changing maps")
+
+    async def navigation_idle(self):
         if self.navigation and self.navigation.execution_enabled:
             nav = await asyncio.to_thread(self.navigation.status)
             task = nav.get("task") or {}
             if task.get("state") in ("accepted","planning","navigating","replanning","canceling"):
                 raise ValueError("Cancel navigation and confirm stop before changing maps")
-        session = state.get("session") or {}
-        if session.get("state") in ("recording", "paused"):
-            raise ValueError("Finish outdoor recording before changing maps")
 
     async def synchronize(self):
         if self.binding.get("map_type") != "outdoor":
@@ -60,6 +63,8 @@ class OutdoorScene:
                 self.hold["reason"] = str(error)
 
     async def bind(self, snapshot, status):
+        if self.navigation:
+            await asyncio.to_thread(self.navigation.bind_map, snapshot)
         previous = self.meta.read_routes(snapshot["map_id"]) if self.meta else None
         if self.meta and self.meta.read(snapshot["map_id"]):
             raise ValueError("This map ID already owns indoor Scene data")
@@ -118,7 +123,8 @@ class OutdoorScene:
         return JSONResponse(dict(ok=status.get("ok", False), status=status, map=snapshot,
             draft=draft, capture_pose=capture_pose, is_active=matches, binding=dict(self.binding),
             navigation=navigation,
-            places=self.navigation.places.snapshot()["places"] if self.navigation and snapshot.get("legacy_bundle_sha256")==self.navigation.version else [],
+            places=[dict(name=a["name"],x=a["points"][0][0],y=a["points"][0][1],enabled=not a.get("stale"))
+                    for a in (self.annotations.list_json() if matches and self.annotations else []) if a["kind"]=="poi"],
             annotations=self.annotations.list_json() if matches and self.annotations else []))
 
     async def operation(self, request):
@@ -137,6 +143,8 @@ class OutdoorScene:
                         raise ValueError("Outdoor execution is not configured")
                     result = {"ok":True,"task":await asyncio.to_thread(self.navigation.cancel,body.get("run_id"))}
                 else:
+                    if op == "capture" and body.get("action") in ("start", "resume"):
+                        await self.navigation_idle()
                     if op == "plan_route" and self.navigation and not body.get("start"):
                         try:
                             nav = await asyncio.to_thread(self.navigation.status)
@@ -180,14 +188,9 @@ class OutdoorScene:
         if not route.get("ok"):
             raise ValueError(route.get("detail","Planning failed"))
         source = {"preview_id":token,"map_id":planned["map_id"],"version":planned["version"],
-                  "goal":planned["goal"],"road_offroad_cost":planned.get("road_offroad_cost")}
+                  "goal":planned["goal"]}
         accepted = await asyncio.to_thread(self.navigation.submit_reference,route,body.get("request_id"),source)
         return {"ok":True,**accepted,"route":{**route,**accepted,"preview_id":token}}
-
-    async def background(self, request):
-        if not self.navigation:
-            return JSONResponse({"ok":False},status_code=404)
-        return FileResponse(self.navigation.bundle_path.parent/"basemap.svg",media_type="image/svg+xml")
 
     async def save(self, map_id, body):
         await self.idle()
@@ -240,5 +243,4 @@ class OutdoorScene:
             return HTMLResponse(page())
         return [Route("/outdoor", outdoor_page, methods=["GET"]),
                 Route("/api/outdoor/state", self.state, methods=["GET"]),
-                Route("/api/outdoor/background", self.background, methods=["GET"]),
                 Route("/api/outdoor/{op}", self.operation, methods=["POST"])]
