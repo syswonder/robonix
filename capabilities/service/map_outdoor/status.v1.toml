@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/map_outdoor/status"
+version = "1"
+kind = "service"
+idl = "outdoor_map/srv/Status.srv"
+description = "Read input freshness, recording state and live GNSS position."
+
+[mode]
+type = "rpc"

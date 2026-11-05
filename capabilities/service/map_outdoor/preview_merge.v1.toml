@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/map_outdoor/preview_merge"
+version = "1"
+kind = "service"
+idl = "outdoor_map/srv/PreviewMerge.srv"
+description = "Preview candidate road connections and gait conflicts."
+
+[mode]
+type = "rpc"

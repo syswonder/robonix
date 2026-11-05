@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/map_outdoor/apply_merge"
+version = "1"
+kind = "service"
+idl = "outdoor_map/srv/ApplyMerge.srv"
+description = "Apply explicitly reviewed connections to a draft route map."
+
+[mode]
+type = "rpc"
